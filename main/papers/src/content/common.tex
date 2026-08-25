@@ -17,9 +17,9 @@
 \usepackage{tabularray}   
 \UseTblrLibrary{booktabs, varwidth} 
 
-\usepackage{todonotes}
-\setuptodonotes{inline}
 \usepackage{tcolorbox}
+\tcbuselibrary{skins}
+\usepackage{fontawesome5}
 \usepackage{pdftexcmds}
 \usepackage{robust-externalize}
 \ExplSyntaxOn
@@ -53,6 +53,166 @@
 \usepackage{amssymb}
 \usepackage{amsmath}
 \usepackage{stmaryrd}
+
+% ---------------------------------------------------------------------------
+% Source-code references and authoring notices
+% ---------------------------------------------------------------------------
+
+\definecolor{BioseqCodeRefIcon}{HTML}{24292F}
+\definecolor{BioseqCodeRefTitle}{HTML}{0969DA}
+\definecolor{BioseqCodeRefDetail}{HTML}{57606A}
+
+% Repository aliases keep source references concise and make adding another
+% upstream a single declaration.  Source links intentionally target `main`.
+\ExplSyntaxOn
+\prop_new:N \g__bioseq_code_repositories_prop
+\seq_new:N \l__bioseq_coderef_parts_seq
+\tl_new:N \l__bioseq_coderef_repo_tl
+\tl_new:N \l__bioseq_coderef_path_tl
+\tl_new:N \l__bioseq_coderef_base_tl
+\tl_new:N \l__bioseq_coderef_url_tl
+\tl_new:N \l__bioseq_coderef_description_tl
+\tl_new:N \l__bioseq_coderef_location_tl
+
+\NewDocumentCommand{\DeclareCodeRepository}{m m}
+  { \prop_gput:Nnn \g__bioseq_code_repositories_prop {#1} {#2} }
+
+\DeclareCodeRepository{minimap2}{https://github.com/lh3/minimap2}
+\DeclareCodeRepository{g3sa}{https://github.com/sunwookim028/G3SA}
+\DeclareCodeRepository{sneakysnake}{https://github.com/CMU-SAFARI/SneakySnake}
+\DeclareCodeRepository{blockaligner}{https://github.com/Daniel-Liu-c0deb0t/block-aligner}
+\DeclareCodeRepository{block-aligner}{https://github.com/Daniel-Liu-c0deb0t/block-aligner}
+\DeclareCodeRepository{block_aligner}{https://github.com/Daniel-Liu-c0deb0t/block-aligner}
+\DeclareCodeRepository{postgres}{https://github.com/postgres/postgres}
+\DeclareCodeRepository{postgresql}{https://github.com/postgres/postgres}
+
+\cs_generate_variant:Nn \prop_get:NnNTF { NVN }
+
+\cs_new_protected:Npn \__bioseq_coderef_link:n #1
+  {
+    \href{#1}{%
+      \mbox{%
+        \textcolor{BioseqCodeRefIcon}{\fontsize{17}{17}\selectfont\faGithub}%
+        \hspace{.55em}%
+        \begin{tabular}[c]{@{}l@{}}
+          \sffamily\small\bfseries
+          \textcolor{BioseqCodeRefTitle}{\tl_use:N \l__bioseq_coderef_description_tl}
+          \\[-.35ex]
+          \ttfamily\scriptsize
+          \textcolor{BioseqCodeRefDetail}{\tl_use:N \l__bioseq_coderef_location_tl}
+        \end{tabular}%
+      }%
+    }%
+  }
+
+\NewDocumentCommand{\coderef}{m m m m g}
+  {
+    \par\noindent
+    \group_begin:
+      \seq_set_split:Nnn \l__bioseq_coderef_parts_seq {/} {#1}
+      \seq_pop_left:NN \l__bioseq_coderef_parts_seq \l__bioseq_coderef_repo_tl
+      \tl_set:Nx \l__bioseq_coderef_path_tl
+        { \seq_use:Nn \l__bioseq_coderef_parts_seq {/} }
+      \prop_get:NVNTF
+        \g__bioseq_code_repositories_prop
+        \l__bioseq_coderef_repo_tl
+        \l__bioseq_coderef_base_tl
+        { }
+        {
+          \PackageError{bioseq-common}
+            {Unknown~code~repository~alias~'\tl_to_str:V \l__bioseq_coderef_repo_tl'}
+            {Declare~it~with~\string\DeclareCodeRepository\{alias\}\{URL\}.}
+        }
+      \tl_if_empty:NT \l__bioseq_coderef_path_tl
+        {
+          \PackageError{bioseq-common}
+            {A~code~reference~requires~alias/path}
+            {Pass~the~repository~alias,~a~slash,~and~the~path~inside~the~repository.}
+        }
+      \tl_set:Nx \l__bioseq_coderef_url_tl
+        {
+          \tl_use:N \l__bioseq_coderef_base_tl
+          /blob/main/\tl_use:N \l__bioseq_coderef_path_tl
+          \c_hash_str L\tl_to_str:n {#4}
+        }
+      \tl_set:Nn \l__bioseq_coderef_description_tl {#2}
+      \tl_set:Nx \l__bioseq_coderef_location_tl
+        { \tl_to_str:n {#3} \c_space_tl \tl_to_str:n {#4} }
+      \IfNoValueF{#5}
+        { \tl_put_right:Nx \l__bioseq_coderef_location_tl { :\tl_to_str:n {#5} } }
+      \exp_args:NV \__bioseq_coderef_link:n \l__bioseq_coderef_url_tl
+    \group_end:
+    \par\smallskip
+  }
+\ExplSyntaxOff
+
+\definecolor{BioseqTodoBackground}{HTML}{FFF8C5}
+\definecolor{BioseqTodoFrame}{HTML}{9A6700}
+\definecolor{BioseqWarningBackground}{HTML}{FFF4CE}
+\definecolor{BioseqWarningFrame}{HTML}{9A6700}
+\definecolor{BioseqInfoBackground}{HTML}{DDF4FF}
+\definecolor{BioseqInfoFrame}{HTML}{0969DA}
+
+% Use tcbox's explicit argument form: body-capturing tcolorbox environments
+% cannot be hidden inside a command because their end delimiter is then lost.
+\NewDocumentCommand{\todo}{m}{%
+  \par\addvspace{.55\baselineskip}%
+  \begingroup
+  \let\tikzpicture\oldtikzpicture
+  \let\endtikzpicture\oldendtikzpicture
+  \noindent\tcbox[
+    enhanced,nobeforeafter,width=\linewidth,tcbox width=auto limited,
+    colback=BioseqTodoBackground,colframe=BioseqTodoFrame,
+    colbacktitle=BioseqTodoBackground,coltitle=BioseqTodoFrame,
+    boxrule=.55pt,arc=1.5mm,
+    left=7pt,right=7pt,top=5pt,bottom=5pt,
+    title={\faStickyNote\hspace{.5em}TODO},
+    fonttitle=\sffamily\bfseries
+  ]{#1}%
+  \endgroup
+  \par\addvspace{.55\baselineskip}%
+}
+
+\NewDocumentCommand{\warn}{m m}{%
+  \par\addvspace{.65\baselineskip}%
+  \begingroup
+  \let\tikzpicture\oldtikzpicture
+  \let\endtikzpicture\oldendtikzpicture
+  \noindent\tcbox[
+    enhanced,nobeforeafter,width=\linewidth,tcbox width=auto limited,
+    colback=BioseqWarningBackground,colframe=BioseqWarningFrame,
+    colbacktitle=BioseqWarningBackground,coltitle=BioseqWarningFrame,
+    borderline west={2.2pt}{0pt}{BioseqWarningFrame},
+    boxrule=.45pt,arc=1.5mm,
+    left=8pt,right=8pt,top=6pt,bottom=6pt,
+    title={\faExclamationTriangle\hspace{.55em}#1},
+    fonttitle=\sffamily\bfseries
+  ]{#2}%
+  \endgroup
+  \par\addvspace{.65\baselineskip}%
+}
+
+\NewDocumentCommand{\info}{m m}{%
+  \par\addvspace{.65\baselineskip}%
+  \begingroup
+  \let\tikzpicture\oldtikzpicture
+  \let\endtikzpicture\oldendtikzpicture
+  \noindent\tcbox[
+    enhanced,nobeforeafter,width=\linewidth,tcbox width=auto limited,
+    colback=BioseqInfoBackground,colframe=BioseqInfoFrame,
+    colbacktitle=BioseqInfoBackground,coltitle=BioseqInfoFrame,
+    borderline west={2.2pt}{0pt}{BioseqInfoFrame},
+    boxrule=.45pt,arc=1.5mm,
+    left=8pt,right=8pt,top=6pt,bottom=6pt,
+    title={\faInfoCircle\hspace{.55em}#1},
+    fonttitle=\sffamily\bfseries
+  ]{#2}%
+  \endgroup
+  \par\addvspace{.65\baselineskip}%
+}
+
+% Author notes are deliberately visible in the PDF.  TeX comments such as
+% `% TODO: ...` are discarded by TeX and therefore cannot serve this purpose.
 
 \usepackage{smartdiagram}
 \usesmartdiagramlibrary {core.definitions}
