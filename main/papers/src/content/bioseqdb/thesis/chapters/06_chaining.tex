@@ -229,11 +229,35 @@ P(j,i)=
 \label{eq:chaining-penalty}
 \end{equation}
 The function \(\operatorname{mglog}_{2}\) is minimap2's polynomial
-approximation of \(\log_2\). So far in the abstract definition of scoring we didn't mention diagonal, but nonnegative coefficient \(\lambda_g\) can be viewd as diagonal-gap penalty (further away from diagonal we penalize more), where the nonnegative coefficient \(\lambda_s\) is the penalty for distance. The value \(\ell_j\) is the
+approximation of \(\log_2\). So far in the abstract definition of scoring we didn't mention diagonal, but nonnegative coefficient \(\lambda_g\) can be viewed as diagonal-gap penalty (further away from diagonal we penalize more), where the nonnegative coefficient \(\lambda_s\) is the penalty for distance. The value \(\ell_j\) is the
 query span of predecessor \(j\). (In our example above we used $k$ for all k-mers sizes, but as mentioned before minimap2 with specific settings can compress regions of same repeating symbols so we just replace $k$ with kmer span $\ell_j$. All the logic stays the same) \coderef{minimap2/lchain.c}
 {Minimap2 chaining link score}{comput_sc}{113}
 
 \info{Score units}{In this definition we view scoring function as expressed in number of matched symbols (not some arbitrary large numbers), so the coefficients must be set accordingly so the values are scaled correctly. In the dynamic programming formulation we then can take maximum of $E$ value and $\ell_i$ to make sure that in the worst case scenario we assume that we at least matched the length of the minimizer. There are no formal limitations on this normalization, but it makes reasoning about the scores easier.}
+
+It's worth noting that defined scoring is also symmetrical in terms of coordinates i.e the score doesn't take $r_i, q_i$ positions as parameters so reversing coordinate systems doesn't change the outcome.
+However, in dynamic programming we often want to use the locally close predecessor as the best one. 
+Consider for example situation in which we have two possible candidates for some anchor $i$: one is very close to our position while offering lower cummulative score for the chain, while the other one is very far away but offers high cummulative score. This scenario can happen if we have very good chain with narrow gaps and slightly worse chain with larger gaps, but the two are very far away from current position.
+We can have selection function that not only takes the best score, but also adds function dependent on current anchor position to make sure to formally express that preference:
+\begin{equation}
+\begin{aligned}
+  f_j = \max_{i < j}\{f_i+E(j,i)\}, \\
+  \text{Selection}(i) &= f_j + \phi(r_i, q_i)
+\end{aligned}
+\end{equation}
+
+There shouldn't be any difference in behaviour for query and reference so $\phi$ should be symmetric. Additionally $\phi$ should be monotonic to express the fact that we prefer closer predecessors: $\phi(r_i, q_i) \leq \phi(r_i+1, q_i), \phi(r_i, q_i+1) \leq \phi(r_i+1, q_i+1)$.
+Please note that the difference here is that it's not a cummulative chain score. It's only used to select the best predeccesor for current anchor (if we tried to sum this score up we would get total score having $O(n^2)$ terms, which would severly alter the scoring behaviour discussed earlier).
+
+In the later chapters we discuss selection function that uses artithmetical average of positions:
+\begin{equation}
+\begin{aligned}
+  \Selection(j) = f_j+\phi(r_i, q_i) \\
+  \phi(r_i, q_i) = \frac{r_i + q_i}{2}
+\end{aligned}
+\end{equation}
+
+\info{Selection}{Adding the term with the coordinate's average can be interpretes as requirement that the chain score should increase linearly with the distance between the current anchor and the selected predecessor. If some chain is twice far away than other then it should offer at least twice better score. There are many otehr functions that could be placed here as $\phi$, but simple average is the simplest one}
 
 \section{B1: ordered predecessor-scan dynamic programming}
 \label{sec:chaining-b1}
@@ -258,129 +282,368 @@ We will call iteration over $\mathcal{C}_i$ a scan. Minimap2 does this scan by v
 
 %%%WTFSTART
 
-A predecessor is replaced only by a strictly larger score, so the newest candidate remains selected when
-later candidates produce the same score. After examining candidate \(j\),
-minimap2 marks \(p_j\), the predecessor previously selected by \(j\), for the
-current target \(i\). If a later candidate already has that mark and leaves
-\(f_i\) unchanged, the skip counter increases. A score increase decreases a
-positive counter by one. The scan ends when the counter exceeds
-\texttt{max\_skip}. Figure~\ref{fig:chaining-b1-scan} separates the geometric
-window from this ordered control.
+After sorting, minimap2 numbers the anchors \(0,1,\ldots,n-1\). When it
+reaches anchor \(i\), the scores \(f_0,\ldots,f_{i-1}\) and predecessor
+indices \(p_0,\ldots,p_{i-1}\) have already been calculated. It starts a new
+chain at \(i\) with
+\[
+  f_i=\ell_i \qquad\text{and}\qquad p_i=-1,
+\]
+then tests earlier anchors in the order \(j=i-1,i-2,\ldots\). Thus a larger
+index is tested first. For every pair that passes the distance checks, it
+calculates
+\[
+  c_j=f_j+E(j,i).
+\]
+If \(c_j>f_i\), anchor \(j\) becomes the new predecessor:
+\(f_i\gets c_j\) and \(p_i\gets j\). Equality is not enough. Consequently,
+once a candidate has strictly beaten the base score, an older candidate with
+the same score cannot replace it. A candidate whose score merely equals
+\(\ell_i\) is not selected, so \(p_i\) remains \(-1\).
 
-Minimap2 also keeps a cached predecessor index \(m\). After the bounded scan,
-it replaces \(m\) when the cached anchor has left the active reference window.
-The replacement is the newest maximum-score anchor among the newest
-\texttt{max\_iter} candidates. The new \(m\) can remain cached after it becomes
-older than that candidate set. Because \(m\) is selected from saved scores
-alone, it may still fail the complete pair-validity test. Minimap2 therefore
-calls the full pair scorer before using it.
-Minimap2 also scores cached predecessor \(m\) when it exists and the main scan
-does not reach it. Algorithm~\ref{alg:chaining-b1} expresses this condition as
-\(m\geq0\) and \(m<e\).
+Trying every earlier anchor would make this dynamic program expensive.
+Minimap2 limits the work in three separate ways. \texttt{max\_iter} places a
+hard bound on the main loop. \texttt{max\_skip} may end that loop sooner.
+Afterward, one saved anchor with a large \(f\) score may be tested
+as an extra candidate.
+
+For the ordinary one-segment, non-cDNA mode, candidate \(j\) reaches this
+score calculation only when it is on the same reference and strand as \(i\),
+and
+\begin{equation}
+  0<d_r(j,i)\leq D_x,\qquad
+  0<d_q(j,i)\leq\min(D_x,D_y),\qquad
+  \delta(j,i)\leq B,
+  \label{eq:chaining-b1-pair-checks}
+\end{equation}
+where \(B=\texttt{bw}\) and, for this ordinary non-cDNA case,
+\[
+  D_x=\max(\texttt{max\_dist\_x},B),\qquad
+  D_y=\max(\texttt{max\_dist\_y},B).
+\]
+Minimap2 raises a smaller configured distance limit to the bandwidth before
+the scan starts. The last inequality in
+Equation~\ref{eq:chaining-b1-pair-checks} is the diagonal band shown in
+Figure~\ref{fig:chaining-b1-scan}(a). Minimap2 skips a rejected pair before
+its score is calculated. It changes no score, skip counter, or mark.
+
+The source contains separate rules for multi-segment and cDNA input. Anchors
+from different query segments bypass checks that are guarded by
+\(g_i=g_j\). Multi-segment non-cDNA input adds \(d_r\leq D_y\) for a link
+within one segment. cDNA input does not force \(D_y\geq B\), and its link
+penalty also differs. A link between different segments uses that special
+penalty branch too; when \(d_r=0\), this branch adds one point. These modes
+use the same scan, mark, skip-counter, and saved-anchor control described
+below. To keep those controls visible, the pseudocode and worked example use
+the ordinary one-segment, non-cDNA case.
+
+Two limits control how much of the earlier anchor list is examined:
+\begin{itemize}
+  \item \texttt{max\_iter} is a hard bound. After removing anchors on a
+        different reference or strand, or farther than \(D_x\) on the
+        reference, minimap2 keeps at most the
+        \texttt{max\_iter} highest-numbered array positions before \(i\).
+        The main loop cannot go beyond this set.
+  \item \texttt{max\_skip} may end that loop sooner. The current anchor \(i\)
+        has one local counter \(s\). It starts at zero for every new \(i\).
+        Anchors do not have separate skip counters.
+\end{itemize}
+
+The skip counter does not count every failed candidate. After a valid
+candidate \(j\) is scored, minimap2 normally marks its saved predecessor
+\(p_j\):
+\[
+  t_{p_j}\gets i \qquad\text{when }p_j\geq0.
+\]
+The one exception is the candidate that raises \(s\) above
+\texttt{max\_skip}: the loop stops before this mark is written.
+Later in the same backward scan, \(t_x=i\) means that an already tested
+candidate with a larger anchor number pointed to \(x\). If marked anchor \(x\)
+fails to improve \(f_i\), then \(s\) increases by one. A failed unmarked
+anchor leaves \(s\) unchanged. An improvement subtracts one from a positive
+\(s\). It does not necessarily reset the counter to zero. The loop stops only when
+\(s>\texttt{max\_skip}\). The current anchor number \(i\) is used as the mark value
+so that minimap2 need not clear all of \(t\) before every scan: values written
+for a previous scan are unequal to the current \(i\) and are ignored.
+
+The marks make the stopping idea concrete. If \(p_j=x\), the best chain ending
+at \(j\) already passes through \(x\). After \(j\) has been tested, minimap2
+marks \(x\). Repeated failures at such marked, lower-numbered anchors suggest
+that continuing farther along already represented chains is unlikely to
+improve the answer. This is a stopping heuristic, not a proof that every
+omitted anchor would fail.
+
+When the main loop ends, minimap2 keeps the loop index in \(e\). If the skip
+test stopped the loop while it was processing \(j\), then \(e=j\). If every
+permitted position was processed and the loop finished without a
+\texttt{max\_skip} stop, then \(e=st-1\), where \(st\) was the smallest anchor
+number permitted by the reference-distance and \texttt{max\_iter} limits.
+
+Finally, minimap2 saves one more index \(m\), which we call the
+\emph{saved high-score anchor}. This name is deliberate: \(m\) is only a
+candidate, not an already accepted predecessor of \(i\). The saved value is
+an anchor index whose previously calculated \(f_m\) is large. Minimap2 does
+not save \(E(m,i)\), and it does not assume that \((m,i)\) passes the distance
+checks. If \(m\) is absent or has left the reference-distance window,
+minimap2 first rebuilds it by finding the largest \(f_j\) in the current
+\texttt{max\_iter} set. The index can then remain saved after
+\(m<i-\texttt{max\_iter}\). If this resulting \(m\) satisfies \(m<e\),
+minimap2 runs at most one additional pair-score call. When the pair is valid,
+it calculates \(f_m+E(m,i)\). This gives one older anchor with a large saved
+\(f\) score a chance after \texttt{max\_iter} bounded the scan or
+\texttt{max\_skip} terminated it.
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[scale=.82,transform shape,x=1cm,y=1cm,
-  font=\footnotesize,>=Latex]
-  \node[anchor=west,font=\bfseries,align=left,text width=5.30cm] at (.15,6.65)
-    {(a) Geometrically admissible\\predecessors};
-  \draw[->] (.65,.65)--(6.25,.65) node[right] {reference \(r\)};
-  \draw[->] (.65,.65)--(.65,5.75) node[above] {query \(q\)};
+\begin{tikzpicture}[x=.86cm,y=.78cm,font=\footnotesize,>=Latex,
+  scan anchor/.style={circle,draw=black!70,very thick,minimum size=.62cm,
+    inner sep=0pt,font=\bfseries},
+  scan improve/.style={scan anchor,draw=chainOrange!95!black,
+    fill=chainOrange!22},
+  scan marked/.style={scan anchor,draw=chainBlue!95!black,
+    fill=chainBlue!19},
+  scan plain/.style={scan anchor,draw=chainGray!90!black,
+    fill=chainGray!16},
+  scan cache/.style={scan anchor,draw=chainGreen!85!black,
+    fill=chainGreen!18},
+  skip badge/.style={draw=black!65,fill=white,minimum width=.72cm,
+    minimum height=.34cm,inner sep=1pt,font=\scriptsize},
+  pred link/.style={-{Latex[length=1.6mm]},very thick,
+    draw=chainOrange!90!black},
+  square note/.style={draw=black!65,fill=gray!5,align=left,
+    rounded corners=0pt,inner sep=4pt}]
+  \node[anchor=west,font=\bfseries] at (.15,12.95)
+    {(a) Which earlier anchors can be scored};
+  \draw[->] (.65,6.65)--(6.25,6.65) node[right] {reference \(r\)};
+  \draw[->] (.65,6.65)--(.65,11.75) node[above] {query \(q\)};
   \draw[draw=chainBlue!65,dashed,fill=chainBlue!5]
-    (1.20,1.05) rectangle (5.35,5.15);
-  \draw[dashed,chainOrange!85!black] (1.10,.95)--(5.55,5.40);
-  \draw[dashed,chainOrange!85!black] (1.10,1.65)--(4.85,5.40);
-  \node[chain point,label=below left:\(a_0\)] at (1.55,1.55) {};
-  \node[chain point,label=below:\(a_1\)] at (2.55,2.55) {};
-  \node[chain point,label=below right:\(a_2\)] at (3.70,3.10) {};
-  \node[chain current,label=above right:\(a_i\)] at (5.35,5.15) {};
+    (1.20,7.05) rectangle (5.35,11.15);
+  \draw[dashed,chainOrange!85!black] (1.10,6.95)--(5.55,11.40);
+  \draw[dashed,chainOrange!85!black] (1.10,7.65)--(4.85,11.40);
+  \node[chain point,label=below left:\(a_0\)] at (1.55,7.55) {};
+  \node[chain point,label=below:\(a_1\)] at (2.55,8.55) {};
+  \node[chain point,label=below right:\(a_2\)] at (3.70,9.10) {};
+  \node[chain current,label=above right:\(a_i\)] at (5.35,11.15) {};
   \node[circle,draw=chainGray!90,fill=chainGray!15,minimum size=.35cm,
     inner sep=0pt,label={[align=right]left:{outside\\reference window}}]
-    at (.88,1.02) {};
+    at (.88,7.02) {};
   \draw[chainOrange!90!black,very thick]
-    (4.03,1.72)--(4.31,2.00) (4.03,2.00)--(4.31,1.72);
-  \node[anchor=west,text=chainOrange!90!black] at (4.38,1.86)
+    (4.03,7.72)--(4.31,8.00) (4.03,8.00)--(4.31,7.72);
+  \node[anchor=west,text=chainOrange!90!black] at (4.38,7.86)
     {outside band};
-  \node[anchor=west,text=chainBlue!85!black] at (1.25,5.45)
-    {active reference/query window};
+  \node[anchor=west,text=chainBlue!85!black] at (1.25,11.45)
+    {distance limits};
 
-  \node[anchor=west,font=\bfseries,align=left,text width=5.30cm] at (7.20,6.65)
-    {(b) Newest-to-oldest\\decision order};
-  \node[chain orange,minimum width=3.65cm,text width=3.35cm] (c2) at (9.15,5.45)
-    {first: \(j=i-1\)\\score improves\\\(p_i\gets j\)};
-  \node[chain blue,minimum width=3.65cm,text width=3.35cm] (c1) at (9.15,3.80)
-    {next valid \(j\)\\score does not improve\\keep saved predecessor};
-  \node[chain muted,minimum width=3.65cm,text width=3.35cm] (c0) at (9.15,2.15)
-    {marked candidate\\score unchanged\\increment counter};
-  \draw[chain flow] (c2)--(c1);
-  \draw[chain flow] (c1)--(c0);
-  \node[chain green,minimum width=3.45cm,text width=3.05cm]
-    (bestcheck) at (13.15,3.80)
-    {score cached predecessor \(m\)\\if the main scan did not reach it};
-  \draw[chain soft flow] (c0.east)-|(bestcheck.south);
-  \node[anchor=west,text width=3.35cm] at (11.45,1.15)
-    {The cache can hold an anchor older than the newest
-     \texttt{max\_iter} candidates.};
+  \node[square note,text width=5.45cm,anchor=west] at (7.35,9.35)
+    {For one query segment, score \(j\) only if\\[2pt]
+     \(a_j,a_i\) use the same reference and strand,\\
+     \(0<d_r\leq D_x\),\\
+     \(0<d_q\leq\min(D_x,D_y)\), and\\
+     \(\lvert d_r-d_q\rvert\leq B\).};
+
+  \node[anchor=west,font=\bfseries] at (.15,6.15)
+    {(b) One complete backward scan with concrete counter values};
+  \node[square note,text width=1.35cm,align=center] at (.85,2.75)
+    {current \(i=8\)\\start \(f_8=8\)\\\(p_8=-1\)};
+  \draw[decorate,decoration={brace,amplitude=3pt}]
+    (1.72,5.25)--(11.40,5.25)
+    node[midway,above=4pt]
+      {main loop: positions 7 through 1
+       (\texttt{max\_iter}\(=7\))};
+
+  \node[scan improve] (s7) at (2.10,3.72) {7};
+  \node[scan plain]   (s6) at (3.60,1.78) {6};
+  \node[scan marked]  (s5) at (5.10,3.72) {5};
+  \node[scan marked]  (s4) at (6.60,1.78) {4};
+  \node[scan improve] (s3) at (8.10,3.72) {3};
+  \node[scan marked]  (s2) at (9.60,1.78) {2};
+  \node[scan marked]  (s1) at (11.10,3.72) {1};
+  \node[scan cache]   (s0) at (12.60,1.78) {0};
+
+  \draw[pred link] (s7.east)--node[midway,above,font=\scriptsize]
+    {\(p_7=5\)} (s5.west);
+  \draw[pred link] (s5.east)--node[midway,above,font=\scriptsize]
+    {\(p_5=3\)} (s3.west);
+  \draw[pred link] (s3.east)--node[midway,above,font=\scriptsize]
+    {\(p_3=1\)} (s1.west);
+  \draw[pred link] (s6.east)--node[midway,below,font=\scriptsize]
+    {\(p_6=4\)} (s4.west);
+  \draw[pred link] (s4.east)--node[midway,below,font=\scriptsize]
+    {\(p_4=2\)} (s2.west);
+  \draw[pred link] (s2.east)--node[midway,below,font=\scriptsize]
+    {\(p_2=0\)} (s0.west);
+
+  \node[align=center,font=\scriptsize] at (2.10,4.52)
+    {step 1\\\(c_7=14>8\)};
+  \node[align=center,font=\scriptsize] at (5.10,4.52)
+    {step 3\\\(c_5=12<14\)};
+  \node[align=center,font=\scriptsize] at (8.10,4.52)
+    {step 5\\\(c_3=16>14\)};
+  \node[align=center,font=\scriptsize] at (11.10,4.52)
+    {step 7\\\(c_1=14<16\): stop};
+
+  \node[align=center,font=\scriptsize] at (3.60,.62)
+    {step 2\\\(c_6=13<14\)};
+  \node[align=center,font=\scriptsize] at (6.60,.62)
+    {step 4\\\(c_4=11<14\)};
+  \node[align=center,font=\scriptsize] at (9.60,.62)
+    {step 6\\\(c_2=15<16\)};
+  \node[align=center,font=\scriptsize,text=chainGreen!60!black] at (12.60,.62)
+    {saved \(m=0\)\\\(c_0=17>16\)};
+
+  \node[skip badge] at (2.47,3.34) {\(s=0\)};
+  \node[skip badge] at (3.97,2.16) {\(s=0\)};
+  \node[skip badge] at (5.47,3.34) {\(s=1\)};
+  \node[skip badge] at (6.97,2.16) {\(s=2\)};
+  \node[skip badge] at (8.47,3.34) {\(s=1\)};
+  \node[skip badge] at (9.97,2.16) {\(s=2\)};
+  \node[skip badge] at (11.47,3.34) {\(s=3\)};
+
+  \node[square note,draw=chainGreen!75!black,fill=chainGreen!8,
+    text width=1.55cm,align=center] (cacheout) at (14.38,2.72)
+    {after checking \((0,8)\)\\\(f_8=17\)\\\(p_8=0\)};
+  \draw[-{Latex[length=1.7mm]},very thick,draw=chainGreen!75!black]
+    (s0.east)--(cacheout.west);
+
+  \node[scan improve,minimum size=.38cm] at (1.05,-.38) {};
+  \node[anchor=west,font=\scriptsize] at (1.30,-.38) {improves};
+  \node[scan marked,minimum size=.38cm] at (3.25,-.38) {};
+  \node[anchor=west,font=\scriptsize] at (3.50,-.38) {marked failure};
+  \node[scan plain,minimum size=.38cm] at (6.25,-.38) {};
+  \node[anchor=west,font=\scriptsize] at (6.50,-.38) {unmarked failure};
+  \node[scan cache,minimum size=.38cm] at (9.65,-.38) {};
+  \node[anchor=west,font=\scriptsize] at (9.90,-.38)
+    {saved high-score anchor};
 \end{tikzpicture}
-\caption{The blue rectangle and orange diagonal band show which predecessors
-are allowed. Minimap2 visits them from newest to oldest and replaces the saved
-predecessor only when the score increases. After scoring candidate \(j\) for
-target \(i\), it marks \(p_j\), the predecessor saved for \(j\). If a
-subsequently visited candidate is already marked and does not increase
-\(f_i\), the skip counter increases. Minimap2 also scores cached predecessor
-\(m\) if the main scan did not reach it.}
+\caption{Distance checks and stopping decisions in minimap2 chaining.
+(a) The reference and query limits and diagonal band decide whether a pair can be
+scored. (b) The numbers inside the circles are anchor indices. The orange
+arrow from \(j\) to \(p_j\) shows the predecessor previously saved for anchor
+\(j\). After \(j\) is scored without stopping, the arrow's destination
+receives the current mark \(i=8\). The numbered steps visit anchors
+\(7,6,\ldots,1\). The small \(s\) boxes show the single skip counter for
+current anchor 8. Step 5 improves the score and changes \(s=2\) to \(s=1\).
+Anchor 0 is already outside the main loop because
+\(\texttt{max\_iter}=7\). Step 7 stops with \(e=1\), so saved \(m=0\)
+satisfies \(m<e\) and is checked once. Its illustrative score 17 wins.}
 \label{fig:chaining-b1-scan}
 \end{figure}
 
+Figure~\ref{fig:chaining-b1-scan}(b) also shows why the mark and the counter
+must not be treated as the same object. The mark is attached to an anchor and
+answers one yes/no question: whether an already tested, higher-numbered
+candidate pointed to this anchor during the current scan. The integer \(s\)
+belongs to current anchor 8
+and changes as the scan proceeds. At step 5, anchor 3 is marked, but it
+improves the score; the improvement rule is used first and \(s\) falls from 2
+to 1. At step 7, a marked failure raises \(s\) from 2 to 3, which is the first
+value greater than the chosen limit 2.
+
+The saved anchor \(m=0\) in the example is outside the seven array positions
+admitted by \texttt{max\_iter}. It stores no score for the pair \((0,8)\).
+Step 7 stops the main loop with \(e=1\). Thus \(m<e\), and minimap2 checks
+the pair and calculates \(f_0+E(0,8)=17\). If the pair were invalid, or if
+this value were at most 16, it would be ignored. Without the early stop, the
+loop would finish with \(e=0\), so this exact implementation would not test
+\(m=0\).
+
 \begin{algorithm}[H]
-\caption{B1 with minimap2's ordered stopping rule}
+\caption{Minimap2's ordered predecessor scan for one query segment}
 \label{alg:chaining-b1}
 \small
 \begin{algorithmic}[1]
-  \Require anchors \(a_0,\ldots,a_{n-1}\) in canonical order
-  \Require distance, bandwidth, \texttt{max\_iter}, and
-           \texttt{max\_skip} limits
-  \Ensure scores \(f_i\) and predecessors \(p_i\)
-  \State initialize temporary generation marks \(t_j\gets0\) for every anchor
-         \(j\)
-  \State \(m\gets-1\) \Comment{cached high-score predecessor}
+  \Require sorted anchors \(a_0,\ldots,a_{n-1}\); ordinary non-cDNA mode;
+           configured distance limits, \(B=\texttt{bw}\),
+           \texttt{max\_iter}, and \texttt{max\_skip}
+  \Ensure chain scores \(f_i\) and predecessor indices \(p_i\)
+  \State \(D_x\gets\max(\texttt{max\_dist\_x},B)\)
+  \State \(D_y\gets\max(\texttt{max\_dist\_y},B)\)
+  \Function{CanScore}{\(j,i\)}
+    \State \(d_q\gets q_i-q_j,\quad d_r\gets r_i-r_j\)
+    \If{\(a_j,a_i\) use different references or strands}
+      \State \Return false
+    \EndIf
+    \If{\(d_r\leq0\) \textbf{or} \(d_r>D_x\)}
+      \State \Return false
+    \EndIf
+    \If{\(d_q\leq0\) \textbf{or} \(d_q>D_x\) \textbf{or} \(d_q>D_y\)}
+      \State \Return false
+    \EndIf
+    \If{\(\lvert d_r-d_q\rvert>B\)}
+      \State \Return false
+    \EndIf
+    \State \Return true
+  \EndFunction
+  \State \(t_j\gets0\) for every \(j\); \(m\gets-1\); \(st\gets0\)
+        \Comment{\(m\) is one saved anchor index}
   \For{\(i\gets0\) \textbf{to} \(n-1\)}
-    \State \(R\gets\) all earlier anchors in the active reference window
-    \State \(W\gets\) the newest at most \texttt{max\_iter} anchors in \(R\)
-    \State \(f_i\gets\ell_i,\quad p_i\gets-1,\quad s\gets0\)
-    \State \(e\gets\) one less than the smallest index in \(W\), or \(i-1\)
-           if \(W\) is empty
-    \For{\(j\) in \(W\), from newest to oldest}
-      \If{\((j,i)\) is not an allowed pair}
-        \State continue with the next \(j\)
-      \EndIf
-      \State \(c\gets f_j+E(j,i)\)
-      \If{\(c>f_i\)}
-        \State \(f_i\gets c,\quad p_i\gets j,\quad s\gets\max(0,s-1)\)
-      \ElsIf{generation mark \(t_j=i\)}
-        \State \(s\gets s+1\)
-        \If{\(s>\texttt{max\_skip}\)}
-          \State \(e\gets j\)
-          \State stop the predecessor loop
+    \While{\(st<i\) and
+      (\(a_{st}\) has a different reference or strand from \(a_i\), or
+       \(r_i-r_{st}>D_x\))}
+      \State \(st\gets st+1\)
+    \EndWhile
+    \State \(st\gets\max(st,i-\texttt{max\_iter})\)
+          \Comment{hard lower bound for the main scan}
+    \State \(f_i\gets\ell_i,\quad p_i\gets-1,\quad s\gets0,\quad
+            e\gets st-1\)
+    \For{\(j\gets i-1\) \textbf{down to} \(st\)}
+      \If{\Call{CanScore}{\(j,i\)}}
+        \State \(c\gets f_j+E(j,i)\)
+        \If{\(c>f_i\)}
+          \State \(f_i\gets c,\quad p_i\gets j\)
+          \If{\(s>0\)}
+            \State \(s\gets s-1\)
+          \EndIf
+        \ElsIf{\(t_j=i\)}
+          \State \(s\gets s+1\)
+          \If{\(s>\texttt{max\_skip}\)}
+            \State \(e\gets j\)
+            \State \textbf{break}
+          \EndIf
+        \EndIf
+        \If{\(p_j\geq0\)}
+          \State \(t_{p_j}\gets i\)
+              \Comment{mark one older anchor for this scan}
         \EndIf
       \EndIf
-      \If{\(p_j\geq0\)}
-        \State \(t_{p_j}\gets i\)
-      \EndIf
     \EndFor
-    \If{\(m\notin R\)}
-      \State \(m\gets\) the newest index with maximum \(f_j\) in \(W\), or
-             \(-1\) if \(W\) is empty
+    \If{\(m<0\), or \(a_m\) has a different reference or strand from \(a_i\),
+          or \(r_i-r_m>D_x\)}
+      \State \(m\gets-1\)
+      \For{\(j\gets i-1\) \textbf{down to} \(st\)}
+        \If{\(m<0\) \textbf{or} \(f_j>f_m\)}
+          \State \(m\gets j\)
+        \EndIf
+      \EndFor
     \EndIf
     \If{\(m\geq0\) and \(m<e\)}
-      \State calculate its full pair score and accept only a strict improvement
+      \If{\Call{CanScore}{\(m,i\)}}
+        \State \(c\gets f_m+E(m,i)\)
+        \If{\(c>f_i\)}
+          \State \(f_i\gets c,\quad p_i\gets m\)
+        \EndIf
+      \EndIf
     \EndIf
-    \If{\(m<0\) or \(\bigl((m\in R)\land(f_i>f_m)\bigr)\)}
+    \If{\(m<0\), or (\(a_m,a_i\) use the same reference and strand,
+          \(r_i-r_m\leq D_x\), and \(f_i>f_m\))}
       \State \(m\gets i\)
     \EndIf
   \EndFor
 \end{algorithmic}
 \end{algorithm}
+
+The variable \(e\) in Algorithm~\ref{alg:chaining-b1} records where the main
+loop ended. If \texttt{max\_skip} stops the loop while processing \(j\), then
+\(e=j\). If the loop completes normally after processing its hard lower
+bound, \(e=st-1\). The source uses the exact test \(m<e\): the saved anchor is
+tested as the extra candidate only when its anchor number is smaller than
+\(e\). This detail also means that an \(m\) exactly equal to \(st-1\) is not
+tested after a normally completed loop. The extra check does not change
+either limit.
+\texttt{max\_iter} still bounds the main loop, and \texttt{max\_skip} can
+still end it early. For \(m\), at most one additional
+\(\operatorname{CanScore}(m,i)\) test and one \(f_m+E(m,i)\) calculation are
+made.
 
 %%%WTFEND
 
