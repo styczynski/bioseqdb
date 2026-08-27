@@ -191,7 +191,7 @@ For that reason we will use function $\left\lfloor\text{Penalty}(\delta, g)\righ
   \item For large $g$ and $\delta$ our penalty function should be asymptotically the same for both $\delta$ and $g$. This is equivalent of saying that if we encounter very large gaps, then it doesn't matter if we increase the matching region between two fragments or increase the gap as both fragments are very dissimilar: $O_{\delta}(\text{Penalty}(\delta, g = \text{const})) = O_{g}(\text{Penalty}(\delta = \text{const}, g))$
 \end{itemize}
 
-\info{Symmetry}{Using $g$ and $\delta$ as only parameters for penalty function guarantees that scoring is symmetric}
+\info{Symmetry}{Using $g$ and $\delta$ as only parameters for penalty function guarantees that scoring is symmetric. Symmetry makes sure that gap costs are the same for both query and reference. We can however abandon this property}
 
 Our final score is then something of the following structure:
 \begin{equation}
