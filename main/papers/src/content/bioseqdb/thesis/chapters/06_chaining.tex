@@ -69,7 +69,7 @@ collinear path so we can get closer to the final result. Base-level alignment (l
 \label{fig:chaining-dotplot}
 \end{figure}
 
-\info{Why we seek colinear anchors?}{In the perfect scenario without gaps \(r_i-q_i\) is constant. An increasing diagonal coordinate indicates that in reference we matched more symbols than in the query (meaning insertion/deletion has occured). Chaining needs to specify costs for abandoning the main diagonal too much (intuitevely we don't want the case in which we introduce very large gap in the reference sequence just to match one or two symbols in the query, because it's improbable that some very large fragment was replaced during evolutionary processes by just a few bases)}
+\info{Why we look for anchors that are colinear?}{In the perfect scenario without gaps \(r_i-q_i\) is constant. An increasing diagonal coordinate indicates that in reference we matched more symbols than in the query (meaning insertion/deletion has occured). Chaining needs to specify costs for abandoning the main diagonal too much (intuitevely we don't want the case in which we introduce very large gap in the reference sequence just to match one or two symbols in the query, because it's improbable that some very large fragment was replaced during evolutionary processes by just a few bases)}
 
 As we would like to have some well defined order of anchors, we sort them by strand and reference coordinate first, then by the additional metadata:
 \begin{equation}
@@ -85,24 +85,7 @@ As we would like to have some well defined order of anchors, we sort them by str
 \label{eq:chaining-order}
 \end{equation}
 
-Comparison is lexicographic in \(K_r\), \(K_q\), and the full \(q_i\). The
-final comparison resolves equal packed low words. The reference ordering
-reserves its high bit for strand, so canonical reference positions must be
-below \(2^{63}\). The query projection is a compatibility order rather than a
-globally increasing full-width order once query coordinates exceed \(2^{32}\).
-Ordinary per-query mapping remains well below this boundary.
-
-The first and last anchor endpoints are converted to half-open mapping
-coordinates after chaining. On the forward strand,
-\[
- q_{\mathrm{start}}=q_{\mathrm{first}}+1-\ell_{\mathrm{first}},
- \qquad
- q_{\mathrm{end}}=q_{\mathrm{last}}+1.
-\]
-For a reverse-strand query of length \(L\), the normalized interval is mapped
-back to \([L-q_{\mathrm{end}},L-q_{\mathrm{start}})\).
-
-%%% CHANGES GO BELOW HERE %%%
+Comparison is lexicographic in \(K_r\), \(K_q\), and the full \(q_i\). The hashing doesn't need full 64 bits for query position i.e if query coordinates $q_i$ exceed \(2^{32}\) we still have correct order as the leftmostpart is still the fragment number $g_i$ (fragments won't be larger than $2^{32}$). Fragmentation of sequences is discussed later in the storage chapter.
 
 \raggedbottom
 
@@ -125,21 +108,14 @@ back to \([L-q_{\mathrm{end}},L-q_{\mathrm{start}})\).
     fill=chainOrange!20,minimum size=.48cm,inner sep=0pt}
 }
 
-\section{Chaining algorithm families}
+\section{Chaining algorithms}
 \label{sec:chaining-algorithm-families}
 
-For each target anchor, a predecessor candidate is an earlier anchor that
-satisfies the coordinate and distance limits. The implementations differ in
-how they examine these candidates, update saved scores, and decide when to
-stop. We call two implementations different high-level algorithms when their
-intended candidate selection, score recurrence, or stopping rule differs.
-Instruction sets, workgroup sizes, memory layouts, numeric types, and kernel
-boundary details remain implementation choices within one algorithm. RMQ means
-range-minimum query.
+Similar to the minimizer chapter here we will discuss different approaches to chaining. The algorithm itself is based on dynamic programming scoring, but the details differ.
 
 \begin{table}[H]
 \centering
-\caption{High-level chaining algorithms used in minimap2, G3SA, and BioSeqDB.}
+\caption{Comparison of different chaining algorithms}
 \label{tab:chaining-algorithm-taxonomy}
 \footnotesize
 \setlength{\tabcolsep}{3.2pt}
@@ -195,7 +171,36 @@ Section~\ref{sec:chaining-bioseqdb}.
 
 \subsection{Shared pair score}
 
-For minimap2's standard single-segment scoring mode, let
+Let's say we have two anchors with coordinates $q_j, q_i$ and $r_j, r_i$ on the query and reference.
+Let's assume the minimizer span is always $k$. We now can say that after incorporating $(r_j, r_i)$ anchor we will cover $q_i-q_j$ symbols on the query and $r_i-r_j$ symbols on the reference, however those two jumps can be interpreted as
+taking some symbols from query and assuming they form replacement and the rest forms a gap. For example let's say $q_i-q_j > r_i-r_j$. This means that we match more symbols in query than in reference, so indicates some deletion in the reference.
+So we can say $r_i-r_j$ symbols are replaced (or stay the same) while the leftover $(q_i-q_j)-(r_i-r_j)$ symbols form this deletion. This thinking is symmetrical so we just only need to use minimum and absolute value to make it more generic.
+
+Now we introduced $\delta(j,i)$ (length of this induced replacement region) and $g(j,i)$ (length of the induced deletion either in reference or query).
+As k-mers represent hashed fragment of length $k$ we can assume that in our match we have exactly $\min\{q_i-q_j, r_i-r_j, k\}$ new symbols that matched.
+Hence we now define our first primitive score as $\min\{q_i-q_j, r_i-r_j, k\} = \min\{g(j,i), k\}$.
+
+This scoring has some problems with the most important one being that it doesn't penalize the case when we have a large gap in the reference sequence just to match one or two symbols in the query. This is improbable that some very large fragment was replaced during evolutionary processes by just a few bases.
+For that reason we will use function $\left\lfloor\text{Penalty}(\delta, g)\right\rfloor$. The penalty function should satisfy the following properties:
+\begin{itemize}
+  \item There's no penalty for doing nothing at all: $\text{Penalty}(0, 0) = 0$
+  \item For $g \leq k \land \delta = 0$ there's no gap so there's shouldn't be any penalty: $\text{Penalty}(0, g) = 0$
+  \item Penalty should be monotonically increasing with respect to $\delta$: $\text{Penalty}(\delta, g) \leq \text{Penalty}(\delta+1, g)$
+  \item Penalty should be increasing slower than linearly with respect to $g$: $\text{Penalty}(\delta, g+1) < \text{Penalty}(\delta, g) + 1$. This guarantees that increasing $g$ without touching $\delta$ benefits overall score (we prefer replacement region over gap region)
+  \item For small $g$ and $\delta$ our penalty function should prefer increase in $g$ rather than $\delta$. This is equivalent of saying that we want to stay close to the diagonal and reduce the gap size introduced: $\text{Penalty}(\delta+1, g) \geq \text{Penalty}(\delta, g+1)$
+  \item For large $g$ and $\delta$ our penalty function should be asymptotically the same for both $\delta$ and $g$. This is equivalent of saying that if we encounter very large gaps, then it doesn't matter if we increase the matching region between two fragments or increase the gap as both fragments are very dissimilar: $O_{\delta}(\text{Penalty}(\delta, g = \text{const})) = O_{g}(\text{Penalty}(\delta = \text{const}, g))$
+\end{itemize}
+
+\info{Symmetry}{Using $g$ and $\delta$ as only parameters for penalty function guarantees that scoring is symmetric}
+
+Our final score is then something of the following structure:
+\begin{equation}
+\text{Score}(j,i) = \min\{g(j,i), k\} - \left\lfloor\text{Penalty}(\delta(j,i), g(j,i))\right\rfloor \\
+= \min\{g(j,i), k\} - \left\lfloor \alpha * g(j,i) + \beta * \delta(j,i) + \gamma * f(\delta(j,i)) \right\rfloor \\
+1 \leq \alpha, \beta, \gamma \geq 0
+\end{equation}
+
+The minimap2 scoring definition $E$ looks exactly as what we have just specified:
 \begin{equation}
 \begin{aligned}
  d_q(j,i) &= q_i-q_j, & d_r(j,i) &= r_i-r_j,\\
@@ -204,7 +209,7 @@ For minimap2's standard single-segment scoring mode, let
 \end{aligned}
 \label{eq:chaining-distances}
 \end{equation}
-The contribution of an admissible predecessor \(j\) to target \(i\) is
+
 \begin{equation}
  E(j,i)=\min\{\ell_j,g(j,i)\}-P(j,i),
 \label{eq:chaining-link-score}
@@ -224,21 +229,16 @@ P(j,i)=
 \label{eq:chaining-penalty}
 \end{equation}
 The function \(\operatorname{mglog}_{2}\) is minimap2's polynomial
-approximation of \(\log_2\). The nonnegative coefficient \(\lambda_g\) scales
-the diagonal-gap penalty, and the nonnegative coefficient \(\lambda_s\) scales
-the distance penalty. The value \(\ell_j\) is the
-query span of predecessor \(j\). A predecessor is allowed only when both
-coordinates advance, both distances remain within their configured limits,
-and \(\delta(j,i)\) does not exceed the chaining bandwidth. Minimap2 has
-additional branches for complementary DNA (cDNA) and multi-segment input. Those
-branches change pair validity and gap penalties while retaining the B1 scan
-order. \coderef{minimap2/lchain.c}
+approximation of \(\log_2\). So far in the abstract definition of scoring we didn't mention diagonal, but nonnegative coefficient \(\lambda_g\) can be viewd as diagonal-gap penalty (further away from diagonal we penalize more), where the nonnegative coefficient \(\lambda_s\) is the penalty for distance. The value \(\ell_j\) is the
+query span of predecessor \(j\). (In our example above we used $k$ for all k-mers sizes, but as mentioned before minimap2 with specific settings can compress regions of same repeating symbols so we just replace $k$ with kmer span $\ell_j$. All the logic stays the same) \coderef{minimap2/lchain.c}
 {Minimap2 chaining link score}{comput_sc}{113}
+
+\info{Score units}{In this definition we view scoring function as expressed in number of matched symbols (not some arbitrary large numbers), so the coefficients must be set accordingly so the values are scaled correctly. In the dynamic programming formulation we then can take maximum of $E$ value and $\ell_i$ to make sure that in the worst case scenario we assume that we at least matched the length of the minimizer. There are no formal limitations on this normalization, but it makes reasoning about the scores easier.}
 
 \section{B1: ordered predecessor-scan dynamic programming}
 \label{sec:chaining-b1}
 
-B1 assigns each anchor a best score ending at that anchor and a predecessor:
+As our scoring model $E(i,j)$ depends only on two anchors we can define recursive equations for dynamic programming:
 \begin{equation}
  f_i=\max\!\left(
    \ell_i,
@@ -248,16 +248,17 @@ B1 assigns each anchor a best score ending at that anchor and a predecessor:
  p_i=\operatorname*{arg\,max}_{j\in\mathcal{C}_i}\{f_j+E(j,i)\}.
 \label{eq:chaining-b1-recurrence}
 \end{equation}
-If no predecessor strictly improves the baseline \(\ell_i\), then
-\(p_i=-1\). Equation~\ref{eq:chaining-b1-recurrence} states the conceptual
-recurrence. In B1, \(\mathcal{C}_i\) contains the geometrically valid
-predecessors reached by the ordered scan and the optional cached predecessor
-described below. Among equal totals above the baseline, \(p_i\) is the largest
-predecessor index because that candidate is visited first and equal scores do
-not replace it.
+Where $\mathcal{C}_i$ is the set of valid predecessors (selected by being close to diagonal - this is form of specifying cutoff condition so we don't need to check all possible predecessors all the time).
+Maximum function is used here to make sure that in worst case if our definition of $E(i,j)$ yield very low score we can say that we matched at least length of the minimizer span.
 
-Minimap2 visits candidates from newest to oldest. A predecessor is replaced
-only by a strictly larger score, so the newest candidate remains selected when
+If no predecessor improves the base value of score \(\ell_i\), then
+\(p_i=-1\).
+
+We will call iteration over $\mathcal{C}_i$ a scan. Minimap2 does this scan by visiting anchors in order from newest to oldest.
+
+%%%WTFSTART
+
+A predecessor is replaced only by a strictly larger score, so the newest candidate remains selected when
 later candidates produce the same score. After examining candidate \(j\),
 minimap2 marks \(p_j\), the predecessor previously selected by \(j\), for the
 current target \(i\). If a later candidate already has that mark and leaves
@@ -380,6 +381,8 @@ subsequently visited candidate is already marked and does not increase
   \EndFor
 \end{algorithmic}
 \end{algorithm}
+
+%%%WTFEND
 
 \section{B2: G3SA source-to-target dynamic programming}
 \label{sec:chaining-b2}
