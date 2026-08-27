@@ -710,6 +710,103 @@ satisfies \(m<e\) and is checked once. The score of $m=0$ equal to 17 wins, but 
 \end{algorithmic}
 \end{algorithm}
 
+\info{Algorithm details}{We check if \(a_{st}\) has a different reference or strand from \(a_i\), because anchors in minimap2 can originate from different refences. In BioseqDB this won't happen, but we still need to check for strand direction. Also please note that formally we use different values for marking $t_{p_j} \gets i$, but it's main goal is just to detect visited anchors for the same scan pass (like in binary map, but assigning $i$ just means that we don't have to clear it.)}
+
+
+\section{B1: BioseqDB SIMD dynamic programming}
+\label{sec:chaining-b5}
+
+BioseqDB naive SIMD implementation divides candidates evaluated into SIMD vectors. 
+Let \(L\) be the number of SIMD lanes and
+let \(S\) be the configured skip value. BioseqDB SIMD chaing requires \(S>0\) and a positive
+\texttt{max\_chain\_iter}. BioSeqDB
+uses
+\begin{equation}
+ U=\max\!\left\{1,\left\lfloor\frac{S}{L}\right\rfloor+1\right\}
+\label{eq:chaining-batch-limit}
+\end{equation}
+as the stopping threshold. The threshold \(U\) counts consecutive batches that
+leave every element score unchanged. Any element-score increase resets the
+counter. When the counter reaches \(U\), algorithm stops without scoring older
+candidates.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=.98,transform shape,x=1cm,y=1cm,
+  font=\footnotesize,>=Latex]
+  \node[anchor=west,font=\bfseries] at (.30,4.95)
+    {The algorithm is the same as in B1 but candidates are split into batches (SIMD vectors of size $L$)};
+  \node[chain orange,minimum width=2.35cm] (b0) at (1.65,3.55)
+    {batch 0\\changes an element};
+  \node[chain blue,minimum width=2.35cm,text width=2.05cm] (b1) at (4.45,3.55)
+    {batch 1\\no element score\\changes};
+  \node[chain blue,minimum width=2.35cm,text width=2.05cm] (b2) at (7.25,3.55)
+    {batch 2\\no element score\\changes};
+  \node[chain muted,dashed,minimum width=2.35cm] (b3) at (10.05,3.55)
+    {batch 3\\left unscored};
+  \node[chain muted,dashed,minimum width=2.35cm] (b4) at (12.85,3.55)
+    {older valid\\candidates};
+  \draw[chain flow] (b0)--(b1);
+  \draw[chain flow] (b1)--(b2);
+  \draw[chain soft flow,dashed] (b2)--(b3);
+  \draw[chain soft flow,dashed] (b3)--(b4);
+  \draw[very thick,chainOrange!90!black]
+    (8.62,2.85)--(8.62,4.25);
+  \node[anchor=north,align=center,text=chainOrange!90!black] at (8.62,2.78)
+    {stop after batch 2\\when \(U=2\)};
+  \node[chain green,minimum width=3.35cm] (cache) at (3.70,1.35)
+    {cached maximum-score anchor in\\the current predecessor window};
+  \node[chain orange,minimum width=3.55cm] (probe) at (10.85,1.35)
+    {one full score calculation\\if it lies among omitted candidates};
+  \draw[chain soft flow] (cache)--(probe);
+  \draw[chain soft flow] (b4.south)|-(probe.east);
+\end{tikzpicture}
+\caption{BioseqDB naive SIMD keeps one running score for each vector element. In this example,
+two consecutive batches leave every element unchanged, so the scan stops
+before the gray candidates. A change to any element resets the counter even
+when another element already holds a larger score.}
+\label{fig:chaining-b5-batches}
+\end{figure}
+
+\begin{algorithm}[H]
+\caption{B1: BioseqDB implementation}
+\label{alg:chaining-b5}
+\small
+\begin{algorithmic}[1]
+  \Require target \(i\), B1 geometric window, batch width \(L\), batch limit
+           \(U\), skip value \(S>0\), and positive
+           \texttt{max\_chain\_iter}
+  \Ensure \(f_i,p_i\)
+  \State initialize every element score to \(\ell_i\) and every element
+         predecessor to \(-1\)
+  \State \(u\gets0\)
+  \For{candidate batches from newest to oldest, including one final partial
+       batch whose unused vector elements are ignored}
+    \State calculate \(f_j+E(j,i)\) for all active elements in parallel
+    \State update an element only on a strict increase
+    \State keep its newer predecessor when an older candidate has an equal score
+    \If{any element's running score changed}
+      \State \(u\gets0\)
+    \Else
+      \State \(u\gets u+1\)
+    \EndIf
+    \If{\(u=U\) and older candidates remain}
+      \State record the unscored interval for diagnostics and stop
+    \EndIf
+  \EndFor
+  \State \(f_i\gets\) the largest element score
+  \If{\(f_i=\ell_i\)}
+    \State \(p_i\gets-1\)
+  \Else
+    \State \(p_i\gets\) the largest predecessor index among elements tied at
+           \(f_i\)
+  \EndIf
+  \If{the cached maximum-score anchor in the current predecessor window was
+      omitted}
+    \State calculate its full score and accept only an improvement
+  \EndIf
+\end{algorithmic}
+\end{algorithm}
 
 \section{B2: G3SA source-to-target dynamic programming}
 \label{sec:chaining-b2}
@@ -1138,109 +1235,6 @@ scores therefore need not select the same predecessor as B1.
 {Augmented-tree RMQ chaining}{mg_lchain_rmq}{250}
 \coderef{minimap2/krmq.h}{Augmented range-minimum query}{__KRMQ_RMQ}{110}
 
-\section{B5: CPU per-element batch-limited dynamic programming}
-\label{sec:chaining-b5}
-
-B5 retains the B1 pair score but changes when predecessor search stops. Let
-\(L\) be the number of candidates evaluated together in one SIMD batch, and
-let \(S\) be the configured skip value. B5 requires \(S>0\) and a positive
-\texttt{max\_chain\_iter}. Vector element \(k\) keeps one running
-score for predecessor positions separated by the vector width \(L\). BioSeqDB
-uses
-\begin{equation}
- U=\max\!\left\{1,\left\lfloor\frac{S}{L}\right\rfloor+1\right\}
-\label{eq:chaining-batch-limit}
-\end{equation}
-as the stopping threshold. The threshold \(U\) counts consecutive batches that
-leave every element score unchanged. Any element-score increase resets the
-counter. When the counter reaches \(U\), B5 stops without scoring older
-candidates. An omitted candidate can still be optimal, so B5 can produce a
-different predecessor and mapping from B1. In this section, the current
-predecessor window contains at most the newest \texttt{max\_chain\_iter}
-anchors that remain in the same strand partition and reference-distance
-window. Query-distance and bandwidth validity are checked for each candidate.
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[scale=.98,transform shape,x=1cm,y=1cm,
-  font=\footnotesize,>=Latex]
-  \node[anchor=west,font=\bfseries] at (.30,4.95)
-    {scan direction: newest predecessors \(\longrightarrow\) oldest predecessors};
-  \node[chain orange,minimum width=2.35cm] (b0) at (1.65,3.55)
-    {batch 0\\changes an element};
-  \node[chain blue,minimum width=2.35cm,text width=2.05cm] (b1) at (4.45,3.55)
-    {batch 1\\no element score\\changes};
-  \node[chain blue,minimum width=2.35cm,text width=2.05cm] (b2) at (7.25,3.55)
-    {batch 2\\no element score\\changes};
-  \node[chain muted,dashed,minimum width=2.35cm] (b3) at (10.05,3.55)
-    {batch 3\\left unscored};
-  \node[chain muted,dashed,minimum width=2.35cm] (b4) at (12.85,3.55)
-    {older valid\\candidates};
-  \draw[chain flow] (b0)--(b1);
-  \draw[chain flow] (b1)--(b2);
-  \draw[chain soft flow,dashed] (b2)--(b3);
-  \draw[chain soft flow,dashed] (b3)--(b4);
-  \draw[very thick,chainOrange!90!black]
-    (8.62,2.85)--(8.62,4.25);
-  \node[anchor=north,align=center,text=chainOrange!90!black] at (8.62,2.78)
-    {stop after batch 2\\when \(U=2\)};
-  \node[chain green,minimum width=3.35cm] (cache) at (3.70,1.35)
-    {cached maximum-score anchor in\\the current predecessor window};
-  \node[chain orange,minimum width=3.55cm] (probe) at (10.85,1.35)
-    {one full score calculation\\if it lies among omitted candidates};
-  \draw[chain soft flow] (cache)--(probe);
-  \draw[chain soft flow] (b4.south)|-(probe.east);
-\end{tikzpicture}
-\caption{B5 keeps one running score for each vector element. In this example,
-two consecutive batches leave every element unchanged, so the scan stops
-before the gray candidates. A change to any element resets the counter even
-when another element already holds a larger score. The CPU implementation can
-still calculate the full score for the cached maximum-score anchor in the
-current \texttt{max\_chain\_iter}-limited predecessor window when it lies among the
-omitted candidates. Here \(L\) is the batch width, so each vector element
-follows predecessor positions \(L\) indices apart.}
-\label{fig:chaining-b5-batches}
-\end{figure}
-
-\begin{algorithm}[H]
-\caption{B5 CPU per-element batch-limited predecessor search}
-\label{alg:chaining-b5}
-\small
-\begin{algorithmic}[1]
-  \Require target \(i\), B1 geometric window, batch width \(L\), batch limit
-           \(U\), skip value \(S>0\), and positive
-           \texttt{max\_chain\_iter}
-  \Ensure \(f_i,p_i\)
-  \State initialize every element score to \(\ell_i\) and every element
-         predecessor to \(-1\)
-  \State \(u\gets0\)
-  \For{candidate batches from newest to oldest, including one final partial
-       batch whose unused vector elements are ignored}
-    \State calculate \(f_j+E(j,i)\) for all active elements in parallel
-    \State update an element only on a strict increase
-    \State keep its newer predecessor when an older candidate has an equal score
-    \If{any element's running score changed}
-      \State \(u\gets0\)
-    \Else
-      \State \(u\gets u+1\)
-    \EndIf
-    \If{\(u=U\) and older candidates remain}
-      \State record the unscored interval for diagnostics and stop
-    \EndIf
-  \EndFor
-  \State \(f_i\gets\) the largest element score
-  \If{\(f_i=\ell_i\)}
-    \State \(p_i\gets-1\)
-  \Else
-    \State \(p_i\gets\) the largest predecessor index among elements tied at
-           \(f_i\)
-  \EndIf
-  \If{the cached maximum-score anchor in the current predecessor window was
-      omitted}
-    \State calculate its full score and accept only an improvement
-  \EndIf
-\end{algorithmic}
-\end{algorithm}
 
 \section{B6: Vulkan per-target batch-limited dynamic programming}
 \label{sec:chaining-b6}
