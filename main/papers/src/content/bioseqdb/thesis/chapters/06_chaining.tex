@@ -713,100 +713,485 @@ satisfies \(m<e\) and is checked once. The score of $m=0$ equal to 17 wins, but 
 \info{Algorithm details}{We check if \(a_{st}\) has a different reference or strand from \(a_i\), because anchors in minimap2 can originate from different refences. In BioseqDB this won't happen, but we still need to check for strand direction. Also please note that formally we use different values for marking $t_{p_j} \gets i$, but it's main goal is just to detect visited anchors for the same scan pass (like in binary map, but assigning $i$ just means that we don't have to clear it.)}
 
 
-\section{B1: BioseqDB SIMD dynamic programming}
-\label{sec:chaining-b5}
+\section{BioseqDB SIMD dynamic programming: exact B1 and bounded B5}
+\label{sec:chaining-simd-forward}
 
-BioseqDB naive SIMD implementation divides candidates evaluated into SIMD vectors. 
-Let \(L\) be the number of SIMD lanes and
-let \(S\) be the configured skip value. BioseqDB SIMD chaing requires \(S>0\) and a positive
-\texttt{max\_chain\_iter}. BioSeqDB
-uses
+The forward pass in \texttt{chaining\_simd\_forward.cppm} contains two
+different algorithms.  The \texttt{exact\_visited} policy is the SIMD
+implementation of B1.  It produces the same score, predecessor, and stop
+position as the scalar loop.  It uses the same marked-anchor rule; SIMD may
+write extra marks below the stop position, but those marks are never read.  The
+\texttt{bounded\_batch\_}\allowbreak\texttt{approximate} policy is B5.  It
+removes the marked-anchor logic and keeps one temporary winner per SIMD lane.
+These policies share the vector calculation of \(E(j,i)\), but they do not
+share a stopping rule.
+
+Both policies still calculate targets in the order
+\(i=0,1,\ldots,n-1\).  This outer loop cannot be run as independent SIMD lanes
+because \(f_i\) reads scores calculated for earlier anchors.  SIMD is used
+inside one target: the current anchor \(a_i\) is copied to every lane and each
+lane receives a different predecessor \(a_j\).
+
+\begin{table}[H]
+\centering
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{.18\linewidth}XXX@{}}
+\toprule
+ & Scalar B1 & Exact SIMD B1 & Bounded SIMD B5 \\
+\midrule
+Score calculation
+  & one candidate \(j\)
+  & up to \(L\) candidates together
+  & up to \(L\) candidates together \\
+State for target \(i\)
+  & one \((F,P,s)\)
+  & the same one \((F,P,s)\)
+  & lane winners \((H_\lambda,P_\lambda)\) and one batch counter \(u\) \\
+Stopping test
+  & marked failures change \(s\)
+  & the same marked-failure rule and stop position
+  & \(U\) whole batches without a lane improvement \\
+When a batch may improve
+  & not applicable
+  & read that batch's SIMD scores one by one from newest to oldest
+  & update all lane winners with masks \\
+Result
+  & B1 result
+  & the same \(f_i,p_i\) as scalar B1
+  & approximate: its different stopping rule may score fewer or more
+    candidates than B1 \\
+\bottomrule
+\end{tabularx}
+\caption{The important differences between the scalar loop and the two SIMD
+policies.  Exact B1 changes how pair scores are calculated, but not how B1
+decides when to stop.  B5 changes both.}
+\label{tab:chaining-simd-policy-differences}
+\end{table}
+
+\subsection{Placing predecessor candidates in SIMD lanes}
+
+Let \(st_i\) be the lower end of the predecessor window after applying the
+strand and reference-distance window and \texttt{max\_chain\_iter}.  Let \(L\)
+be the number of 32-bit Highway lanes.  Batch \(b=0\) is the newest batch.  For
+every batch define
+\begin{equation}
+  e_b=i-bL,
+  \qquad
+  s_b=\max(st_i,e_b-L),
+  \qquad
+  a_b=e_b-s_b,
+  \qquad
+  j_{b,\lambda}=s_b+\lambda .
+  \label{eq:chaining-simd-batch-map}
+\end{equation}
+Only lanes \(0\leq\lambda<a_b\) are active.  A full batch has \(a_b=L\).
+Only the oldest batch can be partial.  Inside a vector, lane zero contains the
+oldest candidate and lane \(a_b-1\) contains the newest candidate.  Therefore,
+whenever exact B1 must reproduce the scalar order, it reads the lanes in the
+order \(a_b-1,a_b-2,\ldots,0\).
+
+For an active lane, the SIMD scorer calculates
+\begin{equation}
+  C_{b,\lambda}=
+  \begin{cases}
+    f_{j_{b,\lambda}}+E(j_{b,\lambda},i),
+      & \text{if \Call{CanScore}{\(j_{b,\lambda},i\)}},\\
+    -\infty, & \text{otherwise.}
+  \end{cases}
+  \label{eq:chaining-simd-candidate-vector}
+\end{equation}
+An inactive lane also receives \(-\infty\).  This value prevents rejected and
+unused lanes from changing a score, a predecessor, or a counter.
+
+\subsection{Exact SIMD B1}
+
+Exact SIMD B1 starts a target with the same scalar state
+\((F,P,s)=(\ell_i,-1,0)\).  It does not keep one \(F\) per lane.  After
+calculating \(\mathbf C_b\), it builds two masks:
+\begin{align}
+  X_{b,\lambda}
+    &= [C_{b,\lambda}>F],
+    \label{eq:chaining-simd-can-improve}\\
+  V_{b,\lambda}
+    &= [C_{b,\lambda}\neq-\infty]\land[t_{j_{b,\lambda}}=i].
+    \label{eq:chaining-simd-visited-hit}
+\end{align}
+Here \(X\) says that a candidate can beat the target score at the start of the
+batch.  The mask \(V\) says that a valid candidate is marked by a newer
+candidate's saved predecessor.  Before reading \(V\), the SIMD code writes
+\(t_{p_j}\gets i\) for every valid lane with \(p_j\geq0\).  A predecessor
+always has a smaller index than its anchor.  The writes can therefore be made
+for the whole batch before the decisions without changing which marks the
+newest-to-oldest scan observes.
+
+If every element of \(\mathbf X_b\) is false, no candidate in the batch can
+change \(F\).  Exact SIMD counts the true elements of \(\mathbf V_b\) at once.
+If that count would make \(s\) exceed \texttt{max\_skip}, it reads only the
+bits needed to locate the exact candidate where scalar B1 would stop.
+
+If any element of \(\mathbf X_b\) is true, the code copies the pair scores
+\(\boldsymbol\epsilon_b=[E(j_{b,\lambda},i)]_\lambda\) and \(\mathbf V_b\) to
+small lane arrays.  It then reads those values from the newest lane to the
+oldest lane, forms \(C_{b,\lambda}=f_{j_{b,\lambda}}+epsilon_{b,\lambda}\),
+and applies the scalar rules:
+\begin{equation}
+  \begin{aligned}
+  C_{b,\lambda}>F
+    &\;\Longrightarrow\;
+      (F,P,s)\gets
+      (C_{b,\lambda},j_{b,\lambda},\max(0,s-1)),\\
+  C_{b,\lambda}\leq F\ \land\ V_{b,\lambda}
+    &\;\Longrightarrow\; s\gets s+1.
+  \end{aligned}
+  \label{eq:chaining-simd-exact-control}
+\end{equation}
+This second step is a one-by-one control pass over SIMD-produced scores.  It
+does not call the scalar pair-scoring function.  Strict comparison keeps the
+newest predecessor when two candidates give the same total score.  The saved
+high-score anchor \(m\), its possible extra score calculation, and its strict
+cache update are the same as in scalar B1.  The extra calculation uses the SIMD
+scorer with one active lane.
+
+\subsection{Bounded SIMD B5}
+
+B5 replaces \((F,P,s)\) with vectors of lane winners.  Initially,
+\(H^{(-1)}_\lambda=\ell_i\) and \(P^{(-1)}_\lambda=-1\).  For batch \(b\),
+\begin{align}
+  I_{b,\lambda}
+    &= [C_{b,\lambda}>H^{(b-1)}_\lambda],
+    \label{eq:chaining-b5-improve-mask}\\
+  H^{(b)}_\lambda
+    &=\begin{cases}
+       C_{b,\lambda},&I_{b,\lambda},\\
+       H^{(b-1)}_\lambda,&\text{otherwise,}
+      \end{cases}
+  &
+  P^{(b)}_\lambda
+    &=\begin{cases}
+       j_{b,\lambda},&I_{b,\lambda},\\
+       P^{(b-1)}_\lambda,&\text{otherwise.}
+      \end{cases}
+  \label{eq:chaining-b5-lane-update}
+\end{align}
+Thus lane \(\lambda\) compares candidates separated by \(L\) array positions
+across successive full batches.  The oldest partial batch starts exactly at
+\(st_i\), so its final jump can be smaller than \(L\).  An older equal score
+does not replace its newer lane winner.
+
+Let \(S=\texttt{max\_chain\_skip}\).  B5 requires \(S>0\) and positive
+\texttt{max\_chain\_iter}.  It uses
 \begin{equation}
  U=\max\!\left\{1,\left\lfloor\frac{S}{L}\right\rfloor+1\right\}
 \label{eq:chaining-batch-limit}
 \end{equation}
-as the stopping threshold. The threshold \(U\) counts consecutive batches that
-leave every element score unchanged. Any element-score increase resets the
-counter. When the counter reaches \(U\), algorithm stops without scoring older
-candidates.
+and updates one shared counter as
+\begin{equation}
+ u_b=
+ \begin{cases}
+   0,&\text{if any }I_{b,\lambda}\text{ is true},\\
+   u_{b-1}+1,&\text{otherwise.}
+ \end{cases}
+ \label{eq:chaining-b5-counter}
+\end{equation}
+When \(u_b\geq U\) and older candidates remain, B5 stops and records the
+omitted interval \([st_i,s_b)\).  This interval is used by the saved-anchor
+test.  It is not only diagnostic information.  For \(S>0\), the chosen limit
+satisfies \(S<LU\leq S+L\).  These are candidate positions grouped into
+whole SIMD batches; they are not the marked failures counted by scalar B1.
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[scale=.98,transform shape,x=1cm,y=1cm,
-  font=\footnotesize,>=Latex]
-  \node[anchor=west,font=\bfseries] at (.30,4.95)
-    {The algorithm is the same as in B1 but candidates are split into batches (SIMD vectors of size $L$)};
-  \node[chain orange,minimum width=2.35cm] (b0) at (1.65,3.55)
-    {batch 0\\changes an element};
-  \node[chain blue,minimum width=2.35cm,text width=2.05cm] (b1) at (4.45,3.55)
-    {batch 1\\no element score\\changes};
-  \node[chain blue,minimum width=2.35cm,text width=2.05cm] (b2) at (7.25,3.55)
-    {batch 2\\no element score\\changes};
-  \node[chain muted,dashed,minimum width=2.35cm] (b3) at (10.05,3.55)
-    {batch 3\\left unscored};
-  \node[chain muted,dashed,minimum width=2.35cm] (b4) at (12.85,3.55)
-    {older valid\\candidates};
-  \draw[chain flow] (b0)--(b1);
-  \draw[chain flow] (b1)--(b2);
-  \draw[chain soft flow,dashed] (b2)--(b3);
-  \draw[chain soft flow,dashed] (b3)--(b4);
-  \draw[very thick,chainOrange!90!black]
-    (8.62,2.85)--(8.62,4.25);
-  \node[anchor=north,align=center,text=chainOrange!90!black] at (8.62,2.78)
-    {stop after batch 2\\when \(U=2\)};
-  \node[chain green,minimum width=3.35cm] (cache) at (3.70,1.35)
-    {cached maximum-score anchor in\\the current predecessor window};
-  \node[chain orange,minimum width=3.55cm] (probe) at (10.85,1.35)
-    {one full score calculation\\if it lies among omitted candidates};
-  \draw[chain soft flow] (cache)--(probe);
-  \draw[chain soft flow] (b4.south)|-(probe.east);
+\begin{tikzpicture}[
+  x=.68cm,y=.68cm,font=\footnotesize,>=Latex,
+  vec/.style={draw=black!70,fill=white,minimum width=.62cm,
+              minimum height=.48cm,inner sep=0pt},
+  improve/.style={vec,draw=chainOrange!95!black,very thick,
+                  fill=chainOrange!18},
+  keep/.style={vec,draw=chainBlue!85!black,fill=chainBlue!12},
+  winner/.style={vec,draw=chainGreen!80!black,very thick,
+                 fill=chainGreen!17},
+  omitted/.style={vec,draw=chainGray!80!black,dashed,
+                  fill=chainGray!15,text=chainGray!90!black},
+  note/.style={draw=black!65,fill=gray!5,align=center,inner sep=3pt},
+  state/.style={note,minimum width=2.25cm,minimum height=.62cm}]
+
+  \node[anchor=west,font=\bfseries] at (.10,12.70)
+    {(a) Exact B1: score four candidates together, keep one scalar state};
+  \node[anchor=west] at (.10,12.05)
+    {target \(i=16\), \(L=4\), start \(F=\ell_i=8\)};
+  \node[anchor=east,font=\scriptsize] at (4.55,11.42) {lane};
+  \foreach \x/\lab in {5.25/0,6.25/1,7.25/2,8.25/3}
+    \node[font=\scriptsize] at (\x,11.42) {\(\lab\)};
+  \node[anchor=east] at (4.55,10.72) {candidate \(j\)};
+  \foreach \x/\v in {5.25/12,6.25/13,7.25/14,8.25/15}
+    \node[vec] at (\x,10.72) {\(\v\)};
+  \node[anchor=east] at (4.55,10.00) {total \(C_j\)};
+  \foreach \x/\v in {5.25/12,6.25/16,7.25/11,8.25/15}
+    \node[improve] at (\x,10.00) {\(\v\)};
+  \node[anchor=east,font=\scriptsize] at (4.55,9.28)
+    {read newest first};
+  \draw[->,very thick,draw=chainOrange!90!black]
+    (8.60,9.28)--(5.00,9.28);
+
+  \node[state] (a0) at (2.10,8.10) {start\\\((F,P)=(8,-1)\)};
+  \node[state] (a1) at (6.05,8.10) {read \(j=15\)\\\((F,P)=(15,15)\)};
+  \node[state] (a2) at (10.00,8.10) {read \(j=14\)\\\((F,P)=(15,15)\)};
+  \node[state] (a3) at (13.95,8.10) {read \(j=13\)\\\((F,P)=(16,13)\)};
+  \node[state] (a4) at (17.90,8.10) {read \(j=12\)\\\((F,P)=(16,13)\)};
+  \draw[->,thick] (a0)--(a1);
+  \draw[->,thick] (a1)--(a2);
+  \draw[->,thick] (a2)--(a3);
+  \draw[->,thick] (a3)--(a4);
+
+  \draw[black!35] (.10,7.20)--(20.00,7.20);
+  \node[anchor=west,font=\bfseries] at (.10,6.65)
+    {(b) Bounded B5: persistent lane winners and one shared counter};
+  \node[anchor=west] at (.10,6.02)
+    {same target, \(st_i=0\), \(S=3\), \(U=\lfloor3/4\rfloor+1=1\)};
+  \node at (.80,5.34) {batch};
+  \node at (3.55,5.34) {candidate indices \(\mathbf j_b\)};
+  \node at (7.45,5.34) {totals \(\mathbf C_b\)};
+  \node at (11.35,5.34) {lane winners \(\mathbf H^{(b)}\)};
+  \node at (14.75,5.34) {\(\mathbf I_b\)};
+  \node at (17.15,5.34) {\(u_b\)};
+
+  \node at (.80,4.57) {0};
+  \foreach \x/\v in {2.05/12,3.05/13,4.05/14,5.05/15}
+    \node[vec] at (\x,4.57) {\(\v\)};
+  \foreach \x/\v in {5.95/12,6.95/16,7.95/11,8.95/15}
+    \node[improve] at (\x,4.57) {\(\v\)};
+  \foreach \x/\v in {9.85/12,10.85/16,11.85/11,12.85/15}
+    \node[vec] at (\x,4.57) {\(\v\)};
+  \node at (14.75,4.57) {\([1,1,1,1]\)};
+  \node at (17.15,4.57) {0};
+
+  \node at (.80,3.77) {1};
+  \foreach \x/\v in {2.05/8,3.05/9,4.05/10,5.05/11}
+    \node[vec] at (\x,3.77) {\(\v\)};
+  \node[improve] at (5.95,3.77) {\(13\)};
+  \foreach \x/\v in {6.95/14,7.95/10,8.95/15}
+    \node[keep] at (\x,3.77) {\(\v\)};
+  \foreach \x/\v in {9.85/13,10.85/16,11.85/11,12.85/15}
+    \node[vec] at (\x,3.77) {\(\v\)};
+  \node at (14.75,3.77) {\([1,0,0,0]\)};
+  \node[improve] at (17.15,3.77) {0};
+
+  \node at (.80,2.97) {2};
+  \foreach \x/\v in {2.05/4,3.05/5,4.05/6,5.05/7}
+    \node[vec] at (\x,2.97) {\(\v\)};
+  \foreach \x/\v in {5.95/12,6.95/15,7.95/9,8.95/14}
+    \node[keep] at (\x,2.97) {\(\v\)};
+  \foreach \x/\v in {9.85/13,10.85/16,11.85/11,12.85/15}
+    \node[vec] at (\x,2.97) {\(\v\)};
+  \node at (14.75,2.97) {\([0,0,0,0]\)};
+  \node[winner] at (17.15,2.97) {1};
+
+  \node[anchor=east,align=right] at (1.55,1.75) {omitted by\\batch loop};
+  \foreach \x/\v in {2.05/0,3.05/1,4.05/2,5.05/3}
+    \node[omitted] at (\x,1.75) {\(\v\)};
+  \node[anchor=west] at (5.65,1.75)
+    {because batch 2 gives \(u=1=U\)};
+
+  \node[state] (b0) at (3.05,.45)
+    {horizontal maximum\\\((F,P)=(16,13)\)};
+  \node[state] (b1) at (10.00,.45)
+    {score the saved anchor \(m=2\) once\\\(C_m=17\)};
+  \node[winner,minimum width=2.45cm,minimum height=.62cm] (b2) at (16.95,.45)
+    {final \((F,P)=(17,2)\)};
+  \draw[->,thick] (b0)--(b1);
+  \draw[->,thick] (b1)--(b2);
 \end{tikzpicture}
-\caption{BioseqDB naive SIMD keeps one running score for each vector element. In this example,
-two consecutive batches leave every element unchanged, so the scan stops
-before the gray candidates. A change to any element resets the counter even
-when another element already holds a larger score.}
+\caption{Two uses of the same four-lane score vector.  (a) Exact B1 calculates
+four totals together, then applies state changes in the scalar order whenever
+some lane can improve.  (b) B5 keeps four independent lane winners.  In batch
+1, score 13 improves lane zero from 12 to 13, although the best score across
+all lanes remains 16.  That lane alone keeps the shared counter at zero.  Batch 2 has
+no lane improvement, so \(U=1\) omits candidates 0 through 3 from the batch
+loop.  The horizontal maximum first selects \((16,13)\).  The example then
+assumes that the saved
+high-score anchor is \(m=2\).  Its one-lane score 17 replaces the result.}
 \label{fig:chaining-b5-batches}
 \end{figure}
 
+After the last scored batch, B5 first calculates
+\begin{equation}
+ f_i=\max_\lambda H_\lambda,
+ \qquad
+ p_i=\max\{P_\lambda:H_\lambda=f_i\}.
+ \label{eq:chaining-b5-horizontal-reduction}
+\end{equation}
+The second maximum chooses the largest, and therefore newest, predecessor
+index on a tie.  If \(f_i=\ell_i\), B5 sets \(p_i=-1\).  If the saved
+largest-score anchor \(m\) lies in the omitted interval, B5 scores that one
+candidate with one active SIMD lane and accepts it only when it strictly
+improves \(f_i\).  One saved candidate cannot recover every possible winner
+from the omitted interval.
+
+The saved anchor also differs between the two policies.  Exact B1, like the
+scalar algorithm, does not discard \(m\) merely because
+\texttt{max\_chain\_iter} moved \(st_i\) past it.  If \(m\) is still in the
+same strand and reference-distance window, exact B1 may score it once outside
+the main interval \([st_i,i)\).  B5 recomputes \(m\) whenever \(m<st_i\), so
+its one-lane check never reaches beyond the \texttt{max\_chain\_iter} window.
+
 \begin{algorithm}[H]
-\caption{B1: BioseqDB implementation}
+\caption{Bounded SIMD B5 for one target anchor}
 \label{alg:chaining-b5}
 \small
 \begin{algorithmic}[1]
-  \Require target \(i\), B1 geometric window, batch width \(L\), batch limit
-           \(U\), skip value \(S>0\), and positive
-           \texttt{max\_chain\_iter}
+  \Require target \(i\), window \([st_i,i)\), SIMD width \(L\),
+           \(S=\texttt{max\_chain\_skip}>0\),
+           \(\texttt{max\_chain\_iter}>0\), saved index \(m\)
   \Ensure \(f_i,p_i\)
-  \State initialize every element score to \(\ell_i\) and every element
-         predecessor to \(-1\)
-  \State \(u\gets0\)
-  \For{candidate batches from newest to oldest, including one final partial
-       batch whose unused vector elements are ignored}
-    \State calculate \(f_j+E(j,i)\) for all active elements in parallel
-    \State update an element only on a strict increase
-    \State keep its newer predecessor when an older candidate has an equal score
-    \If{any element's running score changed}
+  \State \(U\gets\max\{1,\lfloor S/L\rfloor+1\}\)
+        \Comment{whole-batch stopping limit}
+  \State \(\mathbf H\gets[\ell_i]^L,\quad
+         \mathbf P\gets[-1]^L,\quad u\gets0\)
+        \Comment{one temporary winner per lane}
+  \State \(o\gets st_i\)
+        \Comment{no omitted interval yet: \([st_i,o)\) is empty}
+  \For{\(b\gets0,1,\ldots\) while \(e_b>st_i\)}
+    \State calculate \(s_b,e_b,a_b,\mathbf j_b\) using
+           Equation~\ref{eq:chaining-simd-batch-map}
+    \State \(\mathbf A\gets[\lambda<a_b]_{\lambda=0}^{L-1}\)
+          \Comment{mask unused lanes in the oldest partial batch}
+    \State \(\boldsymbol\epsilon\gets
+           \Call{PairScoreBatch}{\mathbf j_b,i,\mathbf A}\)
+          \Comment{\(E(j,i)\), or \(-\infty\) for a rejected pair}
+    \State \(\mathbf C\gets
+           \Call{Select}{\boldsymbol\epsilon\neq-\infty,
+             \mathbf f[\mathbf j_b]+\boldsymbol\epsilon,-\infty}\)
+          \Comment{total candidate scores}
+    \State \(\mathbf I\gets(\mathbf C>\mathbf H)\)
+          \Comment{strict lane-wise improvements}
+    \State \(\mathbf H\gets\Call{Select}{\mathbf I,\mathbf C,\mathbf H}\)
+    \State \(\mathbf P\gets\Call{Select}{\mathbf I,\mathbf j_b,\mathbf P}\)
+          \Comment{equal older candidates do not replace}
+    \If{\(\Call{Any}{\mathbf I}\)}
       \State \(u\gets0\)
     \Else
       \State \(u\gets u+1\)
     \EndIf
-    \If{\(u=U\) and older candidates remain}
-      \State record the unscored interval for diagnostics and stop
+    \If{\(u\geq U\) and \(s_b>st_i\)}
+      \State \(o\gets s_b\)
+            \Comment{batch loop omits \([st_i,o)\)}
+      \State \textbf{break}
     \EndIf
   \EndFor
-  \State \(f_i\gets\) the largest element score
+  \State \(f_i\gets\Call{HorizontalMax}{\mathbf H}\)
+  \State \(\mathbf T\gets\Call{Select}{\mathbf H=f_i,\mathbf P,-1}\)
+  \State \(p_i\gets\Call{HorizontalMax}{\mathbf T}\)
+        \Comment{largest predecessor index wins a score tie}
   \If{\(f_i=\ell_i\)}
     \State \(p_i\gets-1\)
-  \Else
-    \State \(p_i\gets\) the largest predecessor index among elements tied at
-           \(f_i\)
   \EndIf
-  \If{the cached maximum-score anchor in the current predecessor window was
-      omitted}
-    \State calculate its full score and accept only an improvement
+  \If{\(m<st_i\) or \(m\) is outside the current reference and strand window}
+    \State \(m\gets\operatorname*{arg\,max}_{st_i\leq j<i}(f_j,j)\)
+          \Comment{compare score first, then index}
+  \EndIf
+  \If{\(st_i\leq m<o\)}
+    \State \(\epsilon_m\gets\Call{PairScoreOneSIMDLane}{m,i}\)
+          \Comment{\(-\infty\) when the pair is rejected}
+    \If{\(\epsilon_m\neq-\infty\)}
+      \State \(c\gets f_m+\epsilon_m\)
+      \If{\(c>f_i\)}
+        \State \(f_i\gets c,\quad p_i\gets m\)
+      \EndIf
+    \EndIf
+  \EndIf
+  \If{\(m<0\) or \(f_i\geq f_m\)}
+    \State \(m\gets i\)
+          \Comment{B5 moves the cache to the newer anchor on a tie}
   \EndIf
 \end{algorithmic}
 \end{algorithm}
+
+\subsection{Where the SIMD work is lost}
+
+SIMD calculates up to \(L\) pair scores with vector instructions.  It does not
+make all other work independent between lanes.  The connection to the naive
+SIMD minimizer rescan is one simple pattern: an event in one lane can select
+extra work or a decision for the whole batch.  In the minimizer algorithm,
+lanes hold different sequence chunks.  Here, lanes hold different predecessor
+candidates for one target anchor.
+
+\begin{enumerate}
+  \item In exact B1, one lane with \(C_{b,\lambda}>F\) makes the code copy the
+        batch results to lane arrays and start a newest-to-oldest control
+        replay.  The skip limit may stop this replay partway through.  An older
+        candidate processed later may no longer improve after a newer candidate
+        raises \(F\), but the batch has already taken the replay path.
+  \item The pair scorer has a cheap path for a batch in which no lane needs a
+        gap penalty.  If one lane needs the penalty, the vector executes the
+        diagonal-gap calculation and approximate logarithm for the batch.
+        Masks protect the answers, but do not remove those vector instructions
+        for the other lanes.  When \texttt{skip\_penalty} is nonzero, the
+        scorer also converts the gap length and multiplies it by that value.
+        B5 selects a zero-skip-penalty specialization before the target loop
+        when \texttt{skip\_penalty} is zero.  This removes only that conversion
+        and multiplication; it does not remove the diagonal-gap penalty or
+        logarithm.
+  \item In B5, one lane improvement resets \(u\) for every lane.  The example
+        in Figure~\ref{fig:chaining-b5-batches} shows the important case: the
+        lane improves its own saved value, but does not improve the maximum
+        across lanes.  B5 still keeps scanning older batches.
+  \item Exact B1 gathers \(f_j\), \(p_j\), and \(t_j\) for lanes whose candidate
+        index is active even when the pair scorer has already rejected that
+        lane by its distance or band tests.  The validity mask prevents a
+        rejected lane from changing the result, but the memory reads still
+        happen.
+  \item Exact B1 writes the marks \(t_{p_j}\gets i\).  It can use one contiguous
+        vector store only when every active lane is valid and every saved
+        predecessor is \(p_j=j-1\).  One invalid or irregular lane makes the
+        batch use indexed stores instead.
+\end{enumerate}
+
+For a full batch, suppose a per-lane event has the same probability \(p\) in
+every lane and treat the lanes as independent only for a simple model.  The
+probability that at least one lane selects the shared path is
+\begin{equation}
+  1-(1-p)^L.
+  \label{eq:chaining-simd-shared-path-probability}
+\end{equation}
+For a partial batch, \(L\) is replaced by the active-lane count \(a_b\).
+This model applies separately to ``a lane needs a penalty'', ``a lane can
+improve exact B1'', and ``a lane improves its B5 lane winner''.  Nearby anchors
+are not independent in real data, so
+Equation~\ref{eq:chaining-simd-shared-path-probability} only shows why one lane
+can make a shared path common; it does not predict a measured rate.
+
+There are two smaller sources of unused lanes.  The oldest partial batch masks
+at most \(L-1\) lanes.  A saved-anchor calculation uses one lane and masks the
+remaining \(L-1\).  Exact B1 can also score past the scalar stopping point
+inside the batch where \texttt{max\_skip} is exceeded.  Let \(x_i\) be the
+number of candidate positions examined by scalar B1's main predecessor loop
+for target \(i\), and let \(y_i\) be the number scored by exact SIMD's main
+batch loop.  The separate saved-anchor check is excluded from both counts.
+Then
+\begin{equation}
+  x_i\leq y_i\leq x_i+L-1.
+  \label{eq:chaining-simd-extra-stop-work}
+\end{equation}
+The extra scores are ignored.  Their temporary generation marks cannot affect
+a later target because the next target uses a different mark value.  The
+saved-anchor check can add one further vector call with only one active lane;
+it can also repeat a pair score that was calculated speculatively in the stop
+batch.
+
+Pair-score arithmetic in the main loop uses
+\(\lceil y_i/L\rceil\) vector batches for target \(i\), plus at most one
+one-lane saved-anchor call.  Exact B1 may nevertheless perform
+\(\Theta(y_i)\) scalar control steps when many batches enter the ordered replay.
+If \(M=\texttt{max\_chain\_iter}\), the complete forward pass therefore still
+has an \(O(n(1+M))\) worst-case bound for fixed hardware width \(L\).  Writing
+\(O(nM/L)\) would not give a different asymptotic class when \(L\) is fixed;
+the practical point is that an \(L\)-fold speedup is not guaranteed.
+
+B5 removes the ordered replay, but one lane can keep resetting the shared
+counter until the loop has covered all \(M\) candidate positions.  Its stopping
+rule can inspect fewer or more candidates than exact B1, and it can therefore
+select a different predecessor.  B5 is a speed and accuracy trade-off, not an
+exact SIMD spelling of scalar B1.
 
 \section{B2: G3SA source-to-target dynamic programming}
 \label{sec:chaining-b2}
