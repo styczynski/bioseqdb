@@ -87,6 +87,64 @@ As we would like to have some well defined order of anchors, we sort them by str
 
 Comparison is lexicographic in \(K_r\), \(K_q\), and the full \(q_i\). The hashing doesn't need full 64 bits for query position i.e if query coordinates $q_i$ exceed \(2^{32}\) we still have correct order as the leftmostpart is still the fragment number $g_i$ (fragments won't be larger than $2^{32}$). Fragmentation of sequences is discussed later in the storage chapter.
 
+The ordering is required, because the chaining wants to process anchors in sequential order (increasing query positions), while we build chains of anchors using reference positions.
+
+\section{Chaining components}
+
+We defined the anchors that are input to chaining pipeline stage, however chaining itself isn't a monolith. It can be viewed as composition of several steps. 
+
+\info{Chaining pipeline}{Although chaining can be decomposed into several steps that are dispatched to differrent functions, in BioseqDB this is an internal implementation detail and we don't allow users to alter for example which backtracking backend is used (although we could expose parts of chaining as composable components in the future)}
+
+Forward chaining (which is the core component) produces the score array \(f\) and predecessor array \(p\). Second most important step is backtracking (as typically in case of DP algorithms which fill some state matrices) reads the sorted anchors, \(f\), and \(p\). The backtracking writes theflat output
+anchor array supplied by the caller, denoted by \(A\) ($A$ can be viewed as type \texttt{anchor A\[\]}).
+
+The chaining can be fully decomposed into the following steps:
+\begin{enumerate}
+  \item \textbf{Forward chaining} reads the sorted anchors and writes the
+    temporary \(f\) and \(p\) arrays.
+  \item \textbf{Backtracking} reads these inputs and writes the accepted chain
+    records plus full anchor copies in \(A\).
+  \item \textbf{Region generation} converts each chain record into one
+    alignment region while retaining \(A\).
+  \item \textbf{Region selection} filters the regions while
+    retaining \(A\).
+  \item \textbf{Base-level alignment} reads the selected regions, their slices
+    of \(A\), the query and target sequences, and the alignment parameters. It
+    fills the base-level fields in the regions supplying exact start/end coordinates, match qualities etc.
+\end{enumerate}
+
+BioseqDB represents every chain record with the following structure:
+\begin{BioseqCppSnippet}
+  struct chain {
+    int32_t score        = 0;    (*@\BioseqCodeNote{Accepted-chain score}@*)
+    int32_t anchor_count = 0;    (*@\BioseqCodeNote{Anchors in the chain}@*)
+    int32_t anchor_start = 0;    (*@\BioseqCodeNote{Start of the chain slice in A}@*)
+  };
+\end{BioseqCppSnippet}
+Where \texttt{anchor\_start} is the index of the first anchor in the chain in the array \(A\).
+
+For a non-empty
+record \(c\), its anchors occupy consecutive positions in forward order:
+\[
+  A[c.\texttt{anchor\_start}],\ldots,
+  A[c.\texttt{anchor\_start}+c.\texttt{anchor\_count}-1].
+\]
+
+The array \(A\) is constructed using $f$ and $p$ arrays. For every anchor \(i\), the two stored values mean:
+\begin{description}
+  \item[\(f_i\)] the score of the best chain that the selected forward
+    algorithm found with anchor \(i\) at its end.
+  \item[\(p_i\)] the index of the anchor immediately before \(i\) in that
+    chain. The value is \(-1\) when the best chain found for \(i\) starts at
+    \(i\)
+\end{description}
+For example,
+\[
+  p_7=5,\qquad p_5=2,\qquad p_2=-1
+  \quad\Longrightarrow\quad
+  7\to5\to2\to-1.
+\]
+
 \raggedbottom
 
 \definecolor{chainGray}{HTML}{A0A0A0}
@@ -1208,14 +1266,14 @@ The algorithm is described in detail in Algorithm~\ref{alg:chaining-b5}.
 \subsection{SIMD backtracking}
 
 Exact SIMD B1 and bounded SIMD B1 call the same SIMD backtracker.
-Only the forward calculation of \(f\) and \(p\) differs.
 
 The caller supplies a minimum chain score and a minimum number of new
 anchors. Ends are processed by decreasing \(f_i\), with the higher index first
 on a tie. From an end \(i\), the code follows \(p\) until \(-1\) or a marked
-anchor \(t\). The new-chain score is \(f_i\) at \(-1\) and \(f_i-f_t\) at
-\(t\). A chain is written only if its score and new-anchor count reach the two
-limits. Its traced anchors remain marked even when the chain is rejected.
+anchor \(t\) already visited by an earlier trace. The new-chain score is
+\(f_i\) at \(-1\) and \(f_i-f_t\) at \(t\). A chain is written only if its
+score and new-anchor count reach the two limits. Its traced anchors remain
+marked even when the chain is rejected.
 
 The first path is handled alone, while no anchor is marked. A run with
 \(p_j=j-1\) is checked \(L\) links at once and marked with contiguous SIMD
