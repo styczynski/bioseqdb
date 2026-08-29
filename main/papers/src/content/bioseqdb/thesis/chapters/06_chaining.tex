@@ -1263,44 +1263,419 @@ The algorithm is described in detail in Algorithm~\ref{alg:chaining-b5}.
 \end{algorithmic}
 \end{algorithm}
 
-\subsection{SIMD backtracking}
+\subsection{Reverse chaining (backtracking)}
 
-Exact SIMD B1 and bounded SIMD B1 call the same SIMD backtracker.
+The forward pass has already produced one score \(f_i\) and one predecessor
+\(p_i\) for every anchor. Backtracking follows the predecessor links and turns
+them into the chain records and flat anchor array \(A\) defined at the start of
+this chapter.
 
-The caller supplies a minimum chain score and a minimum number of new
-anchors. Ends are processed by decreasing \(f_i\), with the higher index first
-on a tie. From an end \(i\), the code follows \(p\) until \(-1\) or a marked
-anchor \(t\) already visited by an earlier trace. The new-chain score is
-\(f_i\) at \(-1\) and \(f_i-f_t\) at \(t\). A chain is written only if its
-score and new-anchor count reach the two limits. Its traced anchors remain
-marked even when the chain is rejected.
+\subsubsection{Formal definition for backtracking}
 
-The first path is handled alone, while no anchor is marked. A run with
-\(p_j=j-1\) is checked \(L\) links at once and marked with contiguous SIMD
-stores. On an irregular part of this path, only lane \(0\) is active. A masked
-scatter marks the current anchor and a masked gather loads its predecessor.
+Anchors have their score assigned: \(f_i\). We would like to start by considering the highest scores as they are the best chains according to our score function. 
+We sort the anchors in descending order of their scores: \(f_{a_0} \geq f_{a_1} \geq \ldots \geq f_{a_{n-1}}\).
 
-Let \(n\) be the number of anchors and \(L\) the SIMD width. Later ends are
-taken in batches of at most \(L\), with one path per lane. A masked gather
-advances all active lanes. The lanes cannot mark anchors during this walk
-because two paths may meet. The path with the higher score, or the higher end
-index on a tie, must receive the shared anchors. Each lane therefore stores
-its visited indices in one \(n\)-entry buffer row. The rows are then processed
-one at a time in score-and-index order. SIMD lanes check up to \(L\) successive
-indices from one row, stop at its first marked anchor, and mark its new prefix.
-If every batch start is already marked and either minimum is positive,
-the zero-length batch is rejected immediately. An accepted prefix is scanned
-once more while its anchors are appended. The buffer holds \(nL\) 32-bit
-indices, or \(4nL\) bytes.
+Now each anchor is the chain end so we need to find its start. We will traverse anchors according to $p_i$ i.e $i \rightarrow p_i \rightarrow p_{p_i} \rightarrow \ldots \rightarrow -1$.
+This traversal doesn't have to go till the end of the chain. Usually there will be some part of the chain that is too low quality (not contributing to the score significantly).
 
-Figure~\ref{fig:chaining-simd-backtracking} shows the change in lane meaning.
+We define function $\Delta_e(b)$ as the score assigned to the anchors followed from $e$ up to, but not including, $b$:
+\begin{equation}
+  \Delta_e(b)=
+  \begin{cases}
+    f_e, & b=-1,\\
+    f_e-f_b, & b\geq0.
+  \end{cases}
+  \label{eq:chaining-backtrack-contribution}
+\end{equation}
+
+The value of $\Delta_e(b)$ will be used to determine the best cut point for each anchor:
+\begin{equation}
+  \text{Cut}(\[\Delta_e(e), \Delta_e(p_e), \Delta_e(p_{p_e}), \ldots, \Delta_e(-1)\]) \in \[e, p_e, p_{p_e}, \ldots, -1\]
+\end{equation}
+
+The backtracking is then defined as:
+\begin{equation}
+  \text{Backtrack}(e) = \{c = (a_i, p_{a_i}, \ldots \text{Cut}(a_i)) | a_i \in \[a_0, a_1, \ldots, a_{n-1}\]\ \land f_{a_i} \geq F_{\text{min}}\ \land |c| \geq C_{\text{min}}\}
+\end{equation}
+The backtracking function finds best cutoff point and filters anchors for minimal score $F_{\text{min}}$ and minimal chain length $C_{\text{min}}$.
+
+\subsection{Minimap2 backtracking}
+
+Minimap2 uses two types of markings. 
+The array \(t\) (similar to forward chaining), records which anchors have already been marked:
+\begin{enumerate}
+  \item 0 means unmarked: we didn't visited this anchor yet
+  \item 1 means permanently marked: we won't consider this anchor as end of the chain, because it's already part of some found best chain. However anchors marked as 1 still can be part of the chain. This marking prevents a situation in which we would find chain, then it's exact subchain etc.
+  \item 2 means temporarily marked while one path is tested: this marking is used for $\text{Cut}$ function and cleared after the path is tested. It purpose was to detect cycles (see cycle note below)
+\end{enumerate}
+
+\info{$t=2$}{Minimap2's implementation could remove usage of $t=2$ markings, because under usual conditions there will be never a cycle of chains (anchor will always point to other anchor will lower position due to how forward chaining works). In listings below I provide the pseudocode corresponding to the actual current implementation, not some optimized one.}
+
+Minimap2 cut function marks visited anchors with $t=2$ and stops on any anchor with non-zero $t$ mark.
+We remember the best cut with the largest value of \(\Delta_e\). If a later cut is worse than the
+best cut by more than \texttt{max\_drop}, the search stops and returns the best
+cut seen so far. After everything we clean the $t=2$ temporary markings.
+
+Figure~\ref{fig:chaining-minimap2-backtracking} shows three interations of the main loop: we detect cuts for three anchors $a_{11}, a_{10}, a_9$. The example uses
+\(\texttt{min\_sc}=40\) (this is minimap's minimum score $F_{\text{min}}$), \(\texttt{min\_cnt}=2\) (this is minimap's minimum chain length $C_{\text{min}}$), and
+\(\texttt{max\_drop}=5\) (maimum allowed score drop between best cut and current anchor in the chain). A \(\Delta\) value inside anchor \(a_b\) is the
+score that would result if \(a_b\) was the selected cut. 
+Orange boxes are anchors where either cut happens or we stop the search for the cut. Additionally I added "marked" label to $a_5$ to depict the fact that $a_5$ was marked by first $e=11$ chain, so it cannot be end of the chain (it's still selected for $e=10$, because it's start of the chain)
+Green boxes are anchors that are copied into the resulting array (everything excluding the cut anchor itself). 
+
+The minimap2 backtracking uses the same technique as BioseqDB Vulkan minimizer seeding: in the first pass we only count the number of copied anchors, while in the second pass we store them in the resulting array. This $\mathrm{phase}\in\langle\mathrm{count},\mathrm{write}\rangle$ iteration is depicted in (c) panel.
+The last step of minimap2's backtracking depicted in panel (d) is reversing the chains (so the start is on the left rather than on the right side) and sorting by reference coordinates of the chain's starts, so the chains are in natural left-to-right order.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\footnotesize,>=Latex,
+  bt cell/.style={
+    draw=chainBlue!90!black,fill=chainBlue!10,
+    minimum width=1.42cm,minimum height=.72cm,
+    align=center,inner sep=2pt,rounded corners=0pt},
+  bt end/.style={
+    bt cell,draw=chainOrange!95!black,fill=chainOrange!18,very thick},
+  bt kept/.style={
+    bt cell,draw=chainGreen!80!black,fill=chainGreen!15,very thick},
+  bt cut/.style={
+    bt cell,draw=chainOrange!95!black,fill=chainOrange!12,very thick},
+  bt small/.style={
+    draw=black!65,fill=chainGray!6,minimum width=.75cm,
+    minimum height=.52cm,align=center,inner sep=1.5pt,
+    rounded corners=0pt,font=\scriptsize},
+  bt result/.style={
+    draw=chainGreen!80!black,fill=chainGreen!9,
+    minimum width=2.72cm,minimum height=.72cm,
+    align=center,inner sep=3pt,rounded corners=0pt},
+  bt arrow/.style={-{Latex[length=1.6mm]},thick},
+  bt stop/.style={-{Latex[length=1.6mm]},thick,
+    draw=chainOrange!95!black}
+]
+  % Ranked ends.
+  \node[anchor=west,font=\bfseries] at (.10,11.85)
+    {(a) Candidate ends: larger \(f_e\) first};
+  \node[anchor=east] at (2.05,11.18) {end:};
+  \foreach \x/\idx/\score in {
+      2.75/11/120,4.10/10/112,5.45/9/100,6.80/8/90,
+      8.15/7/82,9.50/6/70,10.85/5/56}
+    \node[bt small,minimum width=1.08cm] at (\x,11.18)
+      {\(a_{\idx}\)\\\(f=\score\)};
+  \draw[bt arrow] (11.48,11.18)--(12.45,11.18);
+  \node[anchor=west] at (12.55,11.18) {later};
+
+  \draw[black!35] (.10,10.58)--(13.90,10.58);
+
+  % Three concrete traces.
+  \node[anchor=west,font=\bfseries] at (.10,10.20)
+    {(b) First pass: choose cuts, count anchors, and mark them};
+
+  \node[anchor=east] at (.76,9.35) {\(e=11\)};
+  \node[bt kept] (m11) at (1.60,9.35) {\(a_{11}\)\\end};
+  \node[bt kept] (m8)  at (3.35,9.35) {\(a_8\)\\\(\Delta=30\)};
+  \node[bt kept] (m5)  at (5.10,9.35) {\(a_5\)\\\(\Delta=64\)};
+  \node[bt kept] (m2)  at (6.85,9.35) {\(a_2\)\\\(\Delta=100\)};
+  \node[bt cut]  (mn1) at (8.60,9.35) {\(-1\)\\\(\Delta=120\)};
+  \draw[bt arrow] (m11)--(m8);
+  \draw[bt arrow] (m8)--(m5);
+  \draw[bt arrow] (m5)--(m2);
+  \draw[bt arrow] (m2)--(mn1);
+  \node[bt result] at (11.75,9.35)
+    {keep 4 anchors\\score \(120\)};
+
+  \node[anchor=east] at (.76,8.20) {\(e=10\)};
+  \node[bt kept] (m10) at (1.60,8.20) {\(a_{10}\)\\end};
+  \node[bt kept] (m7)  at (3.35,8.20) {\(a_7\)\\\(\Delta=30\)};
+  \node[bt cut,font=\scriptsize] (m5b) at (5.10,8.20)
+    {\(a_5\), marked\\\(f_5=56\)};
+  \draw[bt arrow] (m10)--(m7);
+  \draw[bt arrow] (m7)--(m5b);
+  \node[anchor=west,font=\scriptsize] at (6.05,8.20)
+    {\(\Delta_{10}(a_5)=56\)};
+  \node[bt result] at (11.75,8.20)
+    {keep 2 anchors\\score \(\Delta_{10}(a_5)=56\)};
+
+  \node[anchor=east] at (.76,6.90) {\(e=9\)};
+  \node[bt kept] (m9) at (1.60,6.90) {\(a_9\)\\end};
+  \node[bt kept] (m6) at (3.35,6.90) {\(a_6\)\\\(\Delta=30\)};
+  \node[bt cut,font=\scriptsize,minimum width=1.62cm] (m4) at (5.10,6.90)
+    {\(a_4\)\\\(f_4=30,\ \Delta=70\)};
+  \node[bt cut] (m1) at (7.05,6.90)
+    {\(a_1\)\\\(\Delta=64\)};
+  \draw[bt arrow] (m9)--(m6);
+  \draw[bt arrow] (m6)--(m4);
+  \draw[bt stop] (m4)--(m1);
+  \draw[bt stop]
+    (m1.south) -- ++(0,-.28) -| (m4.south);
+  \node[anchor=west,align=left,font=\scriptsize,
+        text=chainOrange!95!black] at (8.05,7.05)
+    {drop \(70-64=6>5\)\\return cut \(a_4\)};
+  \node[bt result] at (11.75,6.90)
+    {keep \(a_9,a_6\)\\score \(\Delta_9(a_4)=70\)};
+
+  \node[anchor=west] at (.78,5.98)
+    {green: copied and marked};
+  \node[anchor=west] at (6.15,5.98)
+    {orange: cut or stop};
+
+  \draw[black!35] (.10,5.58)--(13.90,5.58);
+
+  % The two complete passes.
+  \node[anchor=west,font=\bfseries] at (.10,5.20)
+    {(c) Clear the marks, repeat the same end list, and store indices};
+  \node[bt result,minimum width=4.15cm] (counted) at (2.45,4.42)
+    {pass 1: count 3 chains and 8 anchors};
+  \node[bt cut,minimum width=2.20cm] (clear) at (7.10,4.42)
+    {clear every \(t_i\)};
+  \node[bt result,minimum width=3.25cm] (stored) at (11.55,4.42)
+    {pass 2: repeat and store};
+  \draw[bt arrow] (counted)--(clear);
+  \draw[bt arrow] (clear)--(stored);
+
+  \node[anchor=east] at (1.12,3.55) {\(V=\)};
+  \foreach \x/\value in {
+      1.65/11,2.28/8,2.91/5,3.54/2,
+      4.45/10,5.08/7,5.99/9,6.62/6}
+    \node[bt small,minimum width=.50cm] at (\x,3.55) {\(\value\)};
+  \draw[very thick,chainOrange!95!black] (4.00,3.23)--(4.00,3.87);
+  \draw[very thick,chainOrange!95!black] (5.54,3.23)--(5.54,3.87);
+  \node[anchor=west] at (7.30,3.55)
+    {indices are stored end first};
+  \node[anchor=west] at (1.16,2.92)
+    {\(U=[(120,4),(56,2),(70,2)]\)};
+  \node[anchor=west] at (7.30,2.92)
+    {each pair is \((\text{score},\text{count})\)};
+
+  \draw[black!35] (.10,2.42)--(13.90,2.42);
+
+  % Compaction and final order.
+  \node[anchor=west,font=\bfseries] at (.10,2.04)
+    {(d) Reverse every chain, then sort by its first reference coordinate};
+  \node[anchor=east] at (1.00,1.30) {before sort:};
+  \node[bt small,minimum width=2.42cm] at (2.40,1.30)
+    {\(a_2,a_5,a_8,a_{11}\)\\first \(r=30\)};
+  \node[bt small,minimum width=1.48cm] at (4.65,1.30)
+    {\(a_7,a_{10}\)\\first \(r=80\)};
+  \node[bt small,minimum width=1.48cm] at (6.55,1.30)
+    {\(a_6,a_9\)\\first \(r=70\)};
+  \draw[bt arrow] (7.55,1.30)--(8.52,1.30);
+  \node[anchor=west] at (8.68,1.30) {sort \(30<70<80\)};
+
+  \node[anchor=east] at (1.00,.43) {\(A=\)};
+  \node[bt small,minimum width=2.42cm] at (2.40,.43)
+    {\(a_2,a_5,a_8,a_{11}\)};
+  \node[bt small,minimum width=1.48cm] at (4.65,.43)
+    {\(a_6,a_9\)};
+  \node[bt small,minimum width=1.48cm] at (6.55,.43)
+    {\(a_7,a_{10}\)};
+  \node[bt result,minimum width=5.55cm] at (10.70,.43)
+    {returned \(U=[(120,4),(70,2),(56,2)]\)\\
+     derived starts in \(A\): \(0,4,6\)};
+\end{tikzpicture}
+\caption{Minimap2 scalar backtracking on three anchors. Panel (b)
+shows that the anchor that triggers \texttt{max\_drop} doesn't have to be the cut that is returned. Panel (c) shows the separate count and write passes. Panel (d)
+shows the final forward anchor order.}
+\label{fig:chaining-minimap2-backtracking}
+\end{figure}
+
+Algorithm~\ref{alg:chaining-minimap2-boundary} shows the code for the cut search loop.
+
+\begin{algorithm}[H]
+\caption{Minimap2 cut selection function for anchor $e$}
+\label{alg:chaining-minimap2-boundary}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require unmarked end \(e\), scores \(f\), predecessors \(p\), marks \(t\)
+  \Require drop limit \(D=\texttt{max\_drop}\)
+  \Ensure cut \(b\), which is excluded from the new chain
+  \Function{ChooseCut}{\(e,f,p,t,D\)}
+  \State \(i\gets e,\quad b\gets e,\quad \delta_{\mathrm{best}}\gets0\)
+  \Repeat
+    \State \(t_i\gets2\) \Comment{temporary mark}
+    \State \(i\gets p_i\)
+    \If{\(i<0\)}
+      \State \(\delta\gets f_e\)
+    \Else
+      \State \(\delta\gets f_e-f_i\)
+    \EndIf
+    \If{\(\delta>\delta_{\mathrm{best}}\)}
+      \State \(\delta_{\mathrm{best}}\gets\delta,\quad b\gets i\)
+    \ElsIf{\(\delta_{\mathrm{best}}-\delta>D\)}
+      \State \textbf{break}
+    \EndIf
+  \Until{\(i<0\ \lor\ (i\geq0\ \land\ t_i\neq0)\)}
+  \State \(h\gets i,\quad j\gets e\)
+        \Comment{\(h\) is where this search stopped}
+  \While{\(j\geq0\) and \(j\neq h\)}
+    \State \(t_j\gets0,\quad j\gets p_j\)
+        \Comment{clear only temporary marks}
+  \EndWhile
+  \State \Return \(b\)
+  \EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:chaining-minimap2-backtrack} shows also how two passes for count/write are integrated. Minimap2 uses first pass to count all anchors i.e $N_C$ (this value is used to allocate array $U$). Array $U$ holds anchor count for a chain in lower 32 bits and score in higher 32 bits (this packing is defined by $\text{Pack}$ function).
+$U$ is then chain-reversed into $B_\gamma$ array, which undergoes sorting by reference coordinates $\text{ReferencePos}(B_\gamma[0])$
+The final array $A$ contains all anchors, while output array $U$ contains packed \texttt{uint\_64t} metadata for chain (count and score).
+
+\begin{algorithm}[H]
+\caption{Minimap2 scalar backtracking and final chain order}
+\label{alg:chaining-minimap2-backtrack}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require input anchors \(a_0,\ldots,a_{n-1}\), scores \(f\), predecessors \(p\)
+  \Require limits \(S=\texttt{min\_sc}\),
+           \(K=\texttt{min\_cnt}\), and \(D=\texttt{max\_drop}\)
+  \Ensure packed minimap2 records \(U\) and forward-order anchor array \(A\)
+  \State define
+        \(\Call{Pack}{s,c}=(\operatorname{uint64}(s)\ll32)\mathbin{\vert}c\)
+  \State \(Z\gets[(f_i,i)\mid 0\leq i<n\text{ and }f_i\geq S]\)
+  \State sort \(Z\) by increasing score only
+        \Comment{read it backward below}
+  \State use temporary array \(V[0\ldots n)\)
+        \Comment{reuse an existing \(n\)-entry array}
+  \For{\(\mathrm{phase}\in
+        \langle\mathrm{count},\mathrm{write}\rangle\)}
+    \State \(t[0\ldots n)\gets0,\quad N_C\gets0,\quad N_V\gets0\)
+          \Comment{accepted records and retained indices}
+    \For{\(k\gets |Z|-1\) \textbf{down to} \(0\)}
+      \State \(e\gets Z_k.\mathrm{index}\)
+      \If{\(t_e=0\)}
+        \State \(b\gets\Call{ChooseCut}{e,f,p,t,D}\)
+        \State \(N_V^{\mathrm{start}}\gets N_V,\quad i\gets e\)
+              \Comment{cursor before tracing this end}
+        \While{\(i\neq b\)}
+          \If{\(\mathrm{phase}=\mathrm{write}\)}
+            \State \(V[N_V]\gets i\)
+          \EndIf
+          \State \(N_V\gets N_V+1,\quad t_i\gets1,\quad i\gets p_i\)
+        \EndWhile
+        \State \(c\gets N_V-N_V^{\mathrm{start}}\)
+        \If{\(b<0\)}
+          \State \(s\gets f_e\)
+        \Else
+          \State \(s\gets f_e-f_b\)
+        \EndIf
+        \If{\(s\geq S\) and \(c>0\) and \(c\geq K\)}
+          \If{\(\mathrm{phase}=\mathrm{write}\)}
+            \State \(U[N_C]\gets\Call{Pack}{s,c}\)
+          \EndIf
+          \State \(N_C\gets N_C+1\)
+        \Else
+          \State \(N_V\gets N_V^{\mathrm{start}}\)
+                \Comment{discard indices but keep the marks}
+        \EndIf
+      \EndIf
+    \EndFor
+    \If{\(\mathrm{phase}=\mathrm{count}\)}
+      \State allocate \(U[0\ldots N_C)\)
+    \EndIf
+  \EndFor
+  \State \(o\gets0\)
+  \For{\(\gamma\gets0\) \textbf{to} \(N_C-1\)}
+    \State \(c_\gamma\gets\operatorname{uint32}(U[\gamma])\)
+          \Comment{low 32 bits store the anchor count}
+    \State \(B_\gamma\gets
+          [a_{V[o+c_\gamma-1]},\ldots,a_{V[o]}]\)
+          \Comment{reverse one chain}
+    \State \(o\gets o+c_\gamma\)
+  \EndFor
+  \State \(\pi\gets
+        \operatorname*{argsort}_{0\leq\gamma<N_C}\text{ReferencePos}(B_\gamma[0])\)
+        \Comment{increasing \(\text{ReferencePos}\)}
+  \State \(U_{\mathrm{old}}\gets U,\quad U\gets[\ ],\quad A\gets[\ ]\)
+  \For{\(m\gets0\) \textbf{to} \(N_C-1\)}
+    \State \(\gamma\gets\pi_m\)
+    \State append \(U_{\mathrm{old}}[\gamma]\) to \(U\)
+    \State append every anchor in \(B_\gamma\) to \(A\)
+  \EndFor
+  \State \Return \((U,A)\)
+\end{algorithmic}
+\end{algorithm}
+
+\info{Start positions}{Minimap2 stores only the score and anchor count, but it does not store an anchor start. The start of a chain is the sum of the counts of all earlier entries in \(U\) and later code uses that sum. I were initially very suprised and confused by summing coordinates, but this is the explanation.}
+
+\subsubsection{BioseqDB SIMD backtracking}
+
+Exact SIMD B1 and bounded SIMD B1 call the same SIMD backtracking function.
+Its main differences from minimap2 are the following. A larger pair
+\((f_e,e)\) means a larger score, then a larger end index when scores tie.
+
+\begin{enumerate}
+  \item Minimap2 follows and marks one end at a time. BioseqDB handles the end
+        with largest \((f_e,e)\) alone, then collects up to \(L\) later paths
+        together.
+  \item Minimap2 can cut a path with \texttt{max\_drop}. BioseqDB follows a
+        path until \(-1\) or an anchor that is already marked.
+  \item Minimap2 repeats the complete backtracking pass so it can count chains
+        before allocating \(U\). BioseqDB runs one pass and appends accepted
+        chains to output arrays that grow as needed.
+  \item Minimap2 does not specify an anchor order for equal scores.
+        BioseqDB tries the higher end position first on a score tie.
+  \item Minimap2 finally sorts complete chains by $\text{ReferencePos}$ of their first
+        anchor.
+        BioseqDB leaves accepted chains in the order in which it processes
+        their ends.
+\end{enumerate}
+
+In Bioseq chaining we consider 3 different steps:
+\begin{enumerate}
+  \item First cut lookup doesn't need to mark anything. As microoptimisation this case is handled separately.
+  \item Path collection loads $L$ top-scoring anchors and then follow one chain per lane.
+  \item Ordered marking works on transposed matrix, where each of $L$ lanes contains consecutive indices for one chain.
+\end{enumerate}
+
+%%% NEEDS TO BE REWRITTEN: START
+
+BioseqDB makes the end list from
+\(f_i\geq\texttt{min\_chain\_score}\), sorts by
+\((f_i,i)\), and reads the list backward. The end with the largest
+\((f_i,i)\) is handled alone while every mark is zero. When
+\(p_j=j-1,p_{j-1}=j-2,\ldots,p_{j-L+1}=j-L\), one SIMD vector checks and marks
+these \(L\) anchors together. It can mark them immediately because no earlier
+path has set a mark. Otherwise, lane zero advances one predecessor link at a
+time.
+
+Later ends are handled in batches of at most \(L\). The meaning of a lane
+changes between two steps:
+
+\begin{enumerate}
+  \item During \emph{path collection}, lane \(\lambda\) follows predecessor
+        links from one end until \(-1\) or an anchor marked before this batch.
+        It stores the collected anchor indices from the end toward the start in
+        row \(\lambda\). No lane marks anchors yet, because two rows may contain
+        the same unmarked anchor. The next step decides which row receives it.
+  \item During \emph{ordered marking}, rows are checked one at a time from
+        larger \((f_e,e)\) to smaller. The SIMD lanes hold successive indices
+        from one row. The first already marked index stops that row. Only the
+        entries before that stop are marked, so the row with larger
+        \((f_e,e)\) receives a shared anchor.
+\end{enumerate}
+
+The temporary matrix has \(L\) rows of \(n\) 32-bit indices, so it occupies
+\(4nL\) bytes. After ordered marking, the stop \(b\) is either the marked
+anchor found during collection or a row entry just marked by an earlier row.
+If there is no such anchor and the path reached \(-1\), the score is \(f_e\).
+Otherwise, the score is \(f_e-f_b\). The code tests this score and the number
+of newly marked anchors. The new marks remain even if the chain is rejected.
+For an accepted row, the code copies the newly marked part in the opposite
+order, so its anchors enter \(A\) in forward order.
+
+Figure~\ref{fig:chaining-simd-backtracking} shows both lane meanings for
+\(L=4\). The example uses
+\[
+  \texttt{min\_chain\_score}=30,
+  \qquad \texttt{min\_seed\_count}=2.
+\]
+Here, \(f_{19}=100\), \(f_9=40\), \(f_{11}=55\), and \(f_{10}=50\).
 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
   % First path.
   \node[anchor=west,font=\bfseries] at (.10,9.65)
-    {(a) First path: mark it before collecting another batch};
+    {(a) First end \(19\): use SIMD lanes along one path};
 
   \node[font=\scriptsize] at (1.20,9.12) {lane 0};
   \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
@@ -1340,17 +1715,18 @@ Figure~\ref{fig:chaining-simd-backtracking} shows the change in lane meaning.
 
   \draw[fill=chainGreen!9,draw=chainGreen!80!black]
     (11.10,8.25) rectangle (13.95,9.05);
-  \node[align=center] at (12.53,8.65)
-    {all shown anchors\\are now marked};
+  \node[align=center,font=\scriptsize] at (12.53,8.65)
+    {mark and append 11 anchors\\forward order, score \(100\)};
 
   % Collection matrix.
   \node[anchor=west,font=\bfseries] at (.10,7.75)
     {(b) Collect: one predecessor path per SIMD lane};
   \node[anchor=east,font=\scriptsize] at (3.12,7.17)
     {lane: end (score)};
-  \foreach \x/\lab in {3.70/visit 0,4.65/visit 1,5.60/visit 2}
-    \node[font=\scriptsize] at (\x,7.17) {\lab};
-  \node[font=\scriptsize] at (7.05,7.17) {marked stop};
+  \foreach \x/\lab in {3.70/0,4.65/1,5.60/2}
+    \node[font=\scriptsize,inner sep=0pt] at (\x,7.10) {\lab};
+  \node[font=\scriptsize,inner sep=0pt] at (7.05,7.12)
+    {stop \(9,\ f_9=40\)};
 
   \foreach \y/\lab in {
       6.65/{0: \(18\ (90)\)},
@@ -1363,11 +1739,11 @@ Figure~\ref{fig:chaining-simd-backtracking} shows the change in lane meaning.
   \foreach \x/\v in {3.70/18,4.65/14}
     {
       \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-        (\x-.34,6.36) rectangle (\x+.34,6.94);
+        (\x-.34,6.39) rectangle (\x+.34,6.91);
       \node at (\x,6.65) {\v};
     }
   \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (5.26,6.36) rectangle (5.94,6.94);
+    (5.26,6.39) rectangle (5.94,6.91);
   \node at (5.60,6.65) {11};
   \draw[chain flow] (5.94,6.65)--(6.67,6.65);
 
@@ -1375,11 +1751,11 @@ Figure~\ref{fig:chaining-simd-backtracking} shows the change in lane meaning.
   \foreach \x/\v in {3.70/17,4.65/13}
     {
       \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-        (\x-.34,5.76) rectangle (\x+.34,6.34);
+        (\x-.34,5.79) rectangle (\x+.34,6.31);
       \node at (\x,6.05) {\v};
     }
   \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (5.26,5.76) rectangle (5.94,6.34);
+    (5.26,5.79) rectangle (5.94,6.31);
   \node at (5.60,6.05) {11};
   \draw[chain flow] (5.94,6.05)--(6.67,6.05);
 
@@ -1387,34 +1763,32 @@ Figure~\ref{fig:chaining-simd-backtracking} shows the change in lane meaning.
   \foreach \x/\v in {3.70/16,4.65/12}
     {
       \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-        (\x-.34,5.16) rectangle (\x+.34,5.74);
+        (\x-.34,5.19) rectangle (\x+.34,5.71);
       \node at (\x,5.45) {\v};
     }
   \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (5.26,5.16) rectangle (5.94,5.74);
+    (5.26,5.19) rectangle (5.94,5.71);
   \node at (5.60,5.45) {10};
   \draw[chain flow] (5.94,5.45)--(6.67,5.45);
 
   % Row 3: 15,10 -> marked 9.
   \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (3.36,4.56) rectangle (4.04,5.14);
+    (3.36,4.59) rectangle (4.04,5.11);
   \node at (3.70,4.85) {15};
   \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (4.31,4.56) rectangle (4.99,5.14);
+    (4.31,4.59) rectangle (4.99,5.11);
   \node at (4.65,4.85) {10};
   \draw[chain flow] (4.99,4.85)--(6.67,4.85);
 
   \foreach \y in {6.65,6.05,5.45,4.85}
     {
       \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-        (6.67,\y-.29) rectangle (7.43,\y+.29);
+        (6.67,\y-.26) rectangle (7.43,\y+.26);
       \node at (7.05,\y) {9};
     }
 
   \draw[dashed,draw=chainGray!85!black]
-    (3.25,4.45) rectangle (7.55,6.99);
-  \node[anchor=north,font=\scriptsize] at (5.40,4.42)
-    {temporary path rows};
+    (3.25,4.45) rectangle (6.08,6.99);
 
   \draw[fill=chainBlue!12,draw=chainBlue!90!black]
     (8.35,6.38) rectangle (8.85,6.88);
@@ -1424,7 +1798,7 @@ Figure~\ref{fig:chaining-simd-backtracking} shows the change in lane meaning.
   \node[anchor=west] at (9.03,5.93) {same anchor in two rows};
   \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
     (8.35,4.98) rectangle (8.85,5.48);
-  \node[anchor=west] at (9.03,5.23) {marked before this batch};
+  \node[anchor=west] at (9.03,5.23) {stop marked before batch};
   \draw[fill=chainGray!8,draw=chainGray!85!black]
     (8.25,4.42) rectangle (13.95,4.87);
   \node at (11.10,4.65) {collection does not mark anchors};
@@ -1433,108 +1807,118 @@ Figure~\ref{fig:chaining-simd-backtracking} shows the change in lane meaning.
   \draw[draw=chainGray!70] (6.70,4.15)--(13.95,4.15);
 
   % Ordered commit.
-  \node[anchor=west,font=\bfseries] at (.10,3.87)
-    {(c) Check rows in score order: one row fills the SIMD lanes};
+  \node[anchor=west,font=\bfseries] at (.10,3.98)
+    {(c) Mark and copy one row at a time};
+  \node[anchor=east,font=\scriptsize] at (3.12,3.46) {SIMD lane:};
   \foreach \x/\lab in {3.70/0,4.65/1,5.60/2,6.55/3}
-    \node[font=\scriptsize] at (\x,3.38) {lane \lab};
+    \node[font=\scriptsize,inner sep=0pt] at (\x,3.46) {\lab};
   \draw[chain flow,draw=chainOrange!95!black]
-    (1.25,3.08)--(1.25,.72);
+    (1.25,3.05)--(1.25,.38);
   \node[rotate=90,anchor=south,text=chainOrange!95!black]
-    at (1.42,1.90) {higher score first};
+    at (1.42,1.70) {higher end score first};
 
   \foreach \y/\lab in {
-      2.98/{row 0},
-      2.33/{row 1},
-      1.68/{row 2},
-      1.03/{row 3}}
+      2.95/{row 0},
+      2.20/{row 1},
+      1.45/{row 2},
+      .70/{row 3}}
     \node[anchor=east] at (3.12,\y) {\lab};
 
   % Row 0 commit: mark 18,14,11.
   \foreach \x/\v in {3.70/18,4.65/14,5.60/11}
     {
       \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-        (\x-.34,2.69) rectangle (\x+.34,3.27);
-      \node at (\x,2.98) {\v};
+        (\x-.34,2.66) rectangle (\x+.34,3.24);
+      \node at (\x,2.95) {\v};
     }
   \draw[fill=chainGray!8,draw=chainGray!80!black,dashed]
-    (6.21,2.69) rectangle (6.89,3.27);
-  \node at (6.55,2.98) {--};
-  \draw[chain flow] (6.89,2.98)--(7.82,2.98);
+    (6.21,2.66) rectangle (6.89,3.24);
+  \node at (6.55,2.95) {--};
+  \draw[chain flow] (6.89,2.95)--(7.82,2.95);
   \draw[fill=chainGreen!9,draw=chainGreen!80!black]
-    (7.82,2.68) rectangle (13.70,3.28);
-  \node at (10.76,2.98) {mark 18, 14, and 11};
+    (7.82,2.61) rectangle (13.70,3.29);
+  \node[align=center] at (10.76,2.95)
+    {mark \(18,14,11\), stop at \(9\)\\
+     append \(a_{11},a_{14},a_{18}\), score \(90-40=50\)};
 
   % Row 1 commit: 11 is already marked.
   \foreach \x/\v in {3.70/17,4.65/13}
     {
       \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-        (\x-.34,2.04) rectangle (\x+.34,2.62);
-      \node at (\x,2.33) {\v};
+        (\x-.34,1.91) rectangle (\x+.34,2.49);
+      \node at (\x,2.20) {\v};
     }
   \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (5.26,2.04) rectangle (5.94,2.62);
-  \node at (5.60,2.33) {11};
+    (5.26,1.91) rectangle (5.94,2.49);
+  \node at (5.60,2.20) {11};
   \draw[fill=chainGray!8,draw=chainGray!80!black,dashed]
-    (6.21,2.04) rectangle (6.89,2.62);
-  \node at (6.55,2.33) {--};
-  \draw[chain flow] (6.89,2.33)--(7.82,2.33);
-  \draw[fill=chainOrange!10,draw=chainOrange!95!black]
-    (7.82,2.03) rectangle (13.70,2.63);
-  \node at (10.76,2.33) {mark 17 and 13, then stop at 11};
+    (6.21,1.91) rectangle (6.89,2.49);
+  \node at (6.55,2.20) {--};
+  \draw[chain flow] (6.89,2.20)--(7.82,2.20);
+  \draw[fill=chainGreen!9,draw=chainGreen!80!black]
+    (7.82,1.86) rectangle (13.70,2.54);
+  \node[align=center] at (10.76,2.20)
+    {mark \(17,13\), stop at \(11\)\\
+     append \(a_{13},a_{17}\), score \(85-55=30\)};
 
   % Row 2 commit: mark 16,12,10.
   \foreach \x/\v in {3.70/16,4.65/12,5.60/10}
     {
       \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-        (\x-.34,1.39) rectangle (\x+.34,1.97);
-      \node at (\x,1.68) {\v};
+        (\x-.34,1.16) rectangle (\x+.34,1.74);
+      \node at (\x,1.45) {\v};
     }
   \draw[fill=chainGray!8,draw=chainGray!80!black,dashed]
-    (6.21,1.39) rectangle (6.89,1.97);
-  \node at (6.55,1.68) {--};
-  \draw[chain flow] (6.89,1.68)--(7.82,1.68);
+    (6.21,1.16) rectangle (6.89,1.74);
+  \node at (6.55,1.45) {--};
+  \draw[chain flow] (6.89,1.45)--(7.82,1.45);
   \draw[fill=chainGreen!9,draw=chainGreen!80!black]
-    (7.82,1.38) rectangle (13.70,1.98);
-  \node at (10.76,1.68) {mark 16, 12, and 10};
+    (7.82,1.11) rectangle (13.70,1.79);
+  \node[align=center] at (10.76,1.45)
+    {mark \(16,12,10\), stop at \(9\)\\
+     append \(a_{10},a_{12},a_{16}\), score \(80-40=40\)};
 
   % Row 3 commit: 10 is already marked.
   \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-    (3.36,.74) rectangle (4.04,1.32);
-  \node at (3.70,1.03) {15};
+    (3.36,.41) rectangle (4.04,.99);
+  \node at (3.70,.70) {15};
   \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (4.31,.74) rectangle (4.99,1.32);
-  \node at (4.65,1.03) {10};
+    (4.31,.41) rectangle (4.99,.99);
+  \node at (4.65,.70) {10};
   \foreach \x in {5.60,6.55}
     {
       \draw[fill=chainGray!8,draw=chainGray!80!black,dashed]
-        (\x-.34,.74) rectangle (\x+.34,1.32);
-      \node at (\x,1.03) {--};
+        (\x-.34,.41) rectangle (\x+.34,.99);
+      \node at (\x,.70) {--};
     }
-  \draw[chain flow] (6.89,1.03)--(7.82,1.03);
+  \draw[chain flow] (6.89,.70)--(7.82,.70);
   \draw[fill=chainOrange!10,draw=chainOrange!95!black]
-    (7.82,.73) rectangle (13.70,1.33);
-  \node at (10.76,1.03) {mark 15, then stop at 10};
+    (7.82,.36) rectangle (13.70,1.04);
+  \node[align=center] at (10.76,.70)
+    {mark \(15\), stop at \(10\)\\score \(75-50=25\), count \(1\): reject};
 \end{tikzpicture}
-\caption{Four-lane SIMD backtracking for a concrete predecessor array. The
-highest-scoring end 19 is traced and marked first. The next four paths are
-collected together without changing the mark array, so anchors 11 and 10
-remain in two buffer rows. Rows are then checked in endpoint-score order.
-During this step, lanes hold successive entries from one row. Row 1 stops at
-11 after row 0 has marked it, and row 3 stops at 10 after row 2 has marked it.
-The marked terminal is not part of the new prefix. The new-chain-score and
-new-anchor-count limits are tested after this cut.}
+\caption{Four-lane BioseqDB backtracking. Panel (a) uses several lanes for
+successive anchors of the first path. Panel (b) uses one lane per path and
+leaves the mark array unchanged. Panel (c) checks rows one at a time from
+larger \((f_e,e)\) to smaller, so the earlier row receives a shared anchor. The
+green stop anchor in panel (b) was marked before the batch. It is not stored in
+the row or copied into the new chain.}
 \label{fig:chaining-simd-backtracking}
 \end{figure}
 
-This result differs from upstream minimap2 backtracking. Minimap2 orders ends
-by score without BioseqDB's index tie-break and runs two phases. In each phase,
-it first walks a path to choose a stopping point. The search ends at \(-1\),
-at a marked anchor, or when the current chain-end contribution falls more than
-\texttt{max\_drop} below the best one seen. The first phase walks to the chosen
-point again to count anchors. After clearing the marks, the second phase
-repeats the stopping-point walk, then walks once more to store anchor indices.
-It finally sorts chains by the target position of their first anchor.
-BioseqDB omits the stopping-point rule and final sort.
+The accepted output from this example is
+\[
+\begin{aligned}
+ C={}&[(100,11,0),(50,3,11),(30,2,14),(40,3,16)],\\
+ A={}&[a_0,\ldots,a_9,a_{19}\mid a_{11},a_{14},a_{18}
+       \mid a_{13},a_{17}\mid a_{10},a_{12},a_{16}].
+\end{aligned}
+\]
+Each record in \(C\) is \((\text{score},\text{count},\text{start})\). Row 3
+marks \(a_{15}\), but its score and count are too small, so \(a_{15}\) is not
+copied into \(A\).
+
+%%% NEEDS TO BE REWRITTEN: END
 
 \subsection{BioseqDB SIMD performance comparison}
 
