@@ -142,6 +142,169 @@ windows, so adjacent deduplication emits its position once.}
 \label{fig:minimizer-walkthrough}
 \end{figure}
 
+\subsubsection{Minimizer stochastic properties}
+
+Minimizer density counts selected positions in one sequence. Let
+\(N=L-k+1\) be the number of candidate \(k\)-mer starts in a fragment and let
+\(M_L^{(1)}\) be the number of distinct positions selected when every window
+chooses its leftmost minimum. Every full window of \(w\) candidates selects one position.
+Therefore, for \(N\geq w\),
+\begin{equation}
+  \left\lfloor\frac{N}{w}\right\rfloor
+  \leq M_L^{(1)}\leq N-w+1.
+  \label{eq:minimizer-finite-density-bounds}
+\end{equation}
+The lower bound follows by partitioning the candidates into disjoint windows.
+The upper bound equals the number of full windows. A sequence of strictly
+decreasing ranks attains it. An implementation that emits every tied minimum
+uses a different count \(M_L^{(\mathrm{all})}\), whose upper bound is \(N\).
+
+Fix an ordering rule and break ties by choosing the leftmost minimum. For an
+infinite sequence whose bases are sampled independently and uniformly from
+alphabet \(\Sigma\), the stochastic density is
+\[
+  \rho=\lim_{L\to\infty}
+  \frac{\mathbb E[M_L^{(1)}]}{L-k+1}.
+\]
+The general bounds are
+\begin{equation}
+  \max\!\left\{\frac{1}{w},\frac{1}{|\Sigma|^k}\right\}
+  \leq \rho\leq1.
+  \label{eq:minimizer-stochastic-density-bounds}
+\end{equation}
+Under independent continuous scores at candidate positions, the density is
+\(2/(w+1)\). For a random fixed order on \(k\)-mer values, the density also
+depends on \(k\), \(w\), and overlap between adjacent \(k\)-mers
+\cite{shur_minimum_density_2025}. The value \(2/(w+1)\) is not a universal
+bound for a fixed order or sequence.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  x=.47cm,
+  y=.26cm,
+  font=\scriptsize,
+  density cell/.style={
+    draw=black!70,
+    fill=rewriteGray!14,
+    minimum width=.44cm,
+    minimum height=.42cm,
+    inner sep=0pt
+  },
+  density selected/.style={
+    density cell,
+    draw=rewriteOrange!90!black,
+    fill=rewriteOrange!18,
+    very thick
+  },
+  density window/.style={
+    draw=rewriteBlue!65,
+    line width=.45pt
+  },
+  density count/.style={
+    draw=rewriteGreen!75!black,
+    fill=rewriteGreen!10,
+    rounded corners=1.5pt,
+    align=center,
+    inner xsep=5pt,
+    inner ysep=2.5pt
+  }
+]
+  \begin{scope}
+    \node[font=\footnotesize\bfseries] at (5.5,2.0)
+      {Sparse local trace};
+    \node[anchor=east,text=black!70] at (-.65,0) {rank};
+
+    \foreach \i/\v in {
+      0/9,1/8,2/7,3/1,
+      4/9,5/8,6/7,7/1,
+      8/9,9/8,10/7,11/1
+    } {
+      \node[density cell] at (\i,0) {\v};
+      \node[font=\tiny,text=black!55] at (\i,-1.30) {\i};
+    }
+    \foreach \i in {3,7,11}
+      \node[density selected] at (\i,0) {1};
+
+    \foreach \j in {0,...,8} {
+      \pgfmathsetmacro{\wy}{-2.40-.82*\j}
+      \pgfmathtruncatemacro{\p}{4*int(\j/4)+3}
+      \draw[density window]
+        ({\j-.43},\wy) -- ({\j+3+.43},\wy);
+      \draw[density window]
+        ({\j-.43},{\wy-.18}) -- ({\j-.43},{\wy+.18});
+      \draw[density window]
+        ({\j+3+.43},{\wy-.18}) -- ({\j+3+.43},{\wy+.18});
+      \fill[rewriteOrange!95!black]
+        (\p,\wy) circle[radius=1.1pt];
+    }
+
+    \node[anchor=east,text=black!60] at (-.62,-2.40) {$W_0$};
+    \node[anchor=east,text=black!60]
+      at (-.62,{-2.40-.82*8}) {$W_8$};
+
+    \node[density count] at (5.5,-10.35)
+      {3 of 12 positions selected\\all 9 windows represented};
+  \end{scope}
+
+  \begin{scope}[xshift=7.0cm]
+    \node[font=\footnotesize\bfseries] at (5.5,2.0)
+      {Dense local trace};
+    \node[anchor=east,text=black!70] at (-.65,0) {rank};
+
+    \foreach \i/\v in {
+      0/12,1/11,2/10,3/9,4/8,5/7,
+      6/6,7/5,8/4,9/3,10/2,11/1
+    } {
+      \node[density cell] at (\i,0) {\v};
+      \node[font=\tiny,text=black!55] at (\i,-1.30) {\i};
+    }
+    \foreach \i/\v in {
+      3/9,4/8,5/7,6/6,7/5,8/4,9/3,10/2,11/1
+    }
+      \node[density selected] at (\i,0) {\v};
+
+    \foreach \j in {0,...,8} {
+      \pgfmathsetmacro{\wy}{-2.40-.82*\j}
+      \pgfmathtruncatemacro{\p}{\j+3}
+      \draw[density window]
+        ({\j-.43},\wy) -- ({\j+3+.43},\wy);
+      \draw[density window]
+        ({\j-.43},{\wy-.18}) -- ({\j-.43},{\wy+.18});
+      \draw[density window]
+        ({\j+3+.43},{\wy-.18}) -- ({\j+3+.43},{\wy+.18});
+      \fill[rewriteOrange!95!black]
+        (\p,\wy) circle[radius=1.1pt];
+    }
+
+    \node[anchor=east,text=black!60] at (-.62,-2.40) {$W_0$};
+    \node[anchor=east,text=black!60]
+      at (-.62,{-2.40-.82*8}) {$W_8$};
+
+    \node[density count] at (5.5,-10.35)
+      {9 of 12 positions selected\\all 9 windows represented};
+  \end{scope}
+\end{tikzpicture}
+\caption{Two minimizer traces for \(w=4\). Thin brackets mark candidate
+windows, and orange dots mark their selected minima. The left trace reuses
+positions 3 and 7. The right trace selects a new position after each slide.}
+\label{fig:minimizer-density-traces}
+\end{figure}
+
+Density alone does not determine the number of anchors. Let \(C_X(v)\) count
+the selected occurrences of canonical \(k\)-mer value \(v\) in fragment
+\(X\). The number of raw anchor pairs between fragments \(U\) and \(V\) is
+\begin{equation}
+  A(U,V)=\sum_v C_U(v)C_V(v).
+  \label{eq:minimizer-anchor-count}
+\end{equation}
+Two fragments can each contain \(\Theta(L)\) selected positions while their
+sets of selected values are disjoint. In that case they produce no anchors.
+Occurrence filters can only remove pairs from Equation~\ref{eq:minimizer-anchor-count}.
+\coderef{minimap2/sketch.c}{Minimap2 minimizer sketch}{mm_sketch}{77}
+
+\subsubsection{Anchor lookup and frequency filtering}
+
 Figure~\ref{fig:seed-hash-table} uses fixed four-base seeds on both sides. The
 symbols $h_1$, $h_2$, and $h_3$ are some computed hashes.
 
