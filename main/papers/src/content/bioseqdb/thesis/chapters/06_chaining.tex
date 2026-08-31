@@ -1290,12 +1290,12 @@ We define function $\Delta_e(b)$ as the score assigned to the anchors followed f
 
 The value of $\Delta_e(b)$ will be used to determine the best cut point for each anchor:
 \begin{equation}
-  \text{Cut}(\[\Delta_e(e), \Delta_e(p_e), \Delta_e(p_{p_e}), \ldots, \Delta_e(-1)\]) \in \[e, p_e, p_{p_e}, \ldots, -1\]
+  \text{Cut}([\Delta_e(e), \Delta_e(p_e), \Delta_e(p_{p_e}), \ldots, \Delta_e(-1)]) \in [e, p_e, p_{p_e}, \ldots, -1]
 \end{equation}
 
 The backtracking is then defined as:
 \begin{equation}
-  \text{Backtrack}(e) = \{c = (a_i, p_{a_i}, \ldots \text{Cut}(a_i)) | a_i \in \[a_0, a_1, \ldots, a_{n-1}\]\ \land f_{a_i} \geq F_{\text{min}}\ \land |c| \geq C_{\text{min}}\}
+  \text{Backtrack}(e) = \{c = (a_i, p_{a_i}, \ldots \text{Cut}(a_i)) | a_i \in [a_0, a_1, \ldots, a_{n-1}]\ \land f_{a_i} \geq F_{\text{min}} \land |c| \geq C_{\text{min}}\}
 \end{equation}
 The backtracking function finds best cutoff point and filters anchors for minimal score $F_{\text{min}}$ and minimal chain length $C_{\text{min}}$.
 
@@ -1596,6 +1596,409 @@ The final array $A$ contains all anchors, while output array $U$ contains packed
 
 \info{Start positions}{Minimap2 stores only the score and anchor count, but it does not store an anchor start. The start of a chain is the sum of the counts of all earlier entries in \(U\) and later code uses that sum. I were initially very suprised and confused by summing coordinates, but this is the explanation.}
 
+\subsubsection{Algorithm analysis}
+
+Permanent marks do not make scalar backtracking linear.  A permanent mark
+prevents a later output chain from using the same anchor.  However,
+\textsc{ChooseCut} does not permanently mark every anchor that it inspects.
+It clears temporary marks from anchors that the permanent-marking pass does
+not keep, so later searches can inspect those anchors again.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\footnotesize,>=Latex,
+  qa c/.style={draw=chainBlue!90!black,fill=chainBlue!11,
+    minimum width=.78cm,minimum height=.52cm,align=center,
+    inner sep=2pt,rounded corners=0pt},
+  qa r/.style={draw=chainOrange!95!black,fill=chainOrange!17,
+    minimum width=.78cm,minimum height=.52cm,align=center,
+    inner sep=2pt,very thick,rounded corners=0pt},
+  qa p/.style={draw=chainGreen!80!black,fill=chainGreen!12,
+    minimum width=.90cm,minimum height=.52cm,align=center,
+    inner sep=2pt,very thick,rounded corners=0pt},
+  qa g/.style={draw=black!55,fill=black!3,
+    minimum width=1.50cm,minimum height=.66cm,align=center,
+    inner sep=2pt,rounded corners=0pt},
+  qa note/.style={draw=black!50,fill=black!2,align=left,
+    inner sep=4pt,rounded corners=0pt},
+  qa result/.style={draw=chainGreen!80!black,fill=chainGreen!10,
+    minimum width=3.10cm,minimum height=1.18cm,align=left,
+    inner sep=4pt,rounded corners=0pt},
+  qa flow/.style={-{Latex[length=1.5mm]},thick},
+  qa pred/.style={-{Latex[length=1.5mm]},thick,draw=black!70},
+  qa match/.style={line width=.65pt,draw=chainBlue!75!black},
+  qa gapline/.style={line width=.55pt,draw=black!55},
+  qa tiny/.style={draw=chainBlue!85!black,fill=chainBlue!10,
+    minimum width=.58cm,minimum height=.38cm,align=center,
+    inner sep=1pt,rounded corners=0pt,font=\scriptsize}
+]
+  % Panel a: an abstract reference and query that produce the anchors.
+  \node[anchor=west,font=\bfseries] at (.10,13.82)
+    {(a) Sequence-design outline: reference and query construction};
+
+  \node[anchor=east,font=\scriptsize] at (.45,12.75) {reference};
+  \node[qa p,font=\scriptsize,minimum width=1.18cm,
+    minimum height=.74cm] (rp) at (1.15,12.75)
+    {\(P\)\\[-1pt]{\tiny 40 anchors}\\[-1pt]{\tiny 100 bp apart}};
+  \node[qa g,font=\scriptsize,minimum width=1.20cm,
+    minimum height=.74cm] (rgt) at (2.65,12.75)
+    {\(G_t\)\\[-1pt]{\tiny 11 anchors}\\[-1pt]{\tiny 1500 bp apart}};
+  \node[qa c] (rc0) at (4.15,12.75) {\(C_0\)};
+  \node[qa c] (rc1) at (5.55,12.75) {\(C_1\)};
+  \node[qa r,minimum width=1.08cm] (rr1) at (7.05,12.75)
+    {\(R_1\)\\\(\bullet\ \bullet\ \bullet\ \bullet\)};
+  \node[qa c] (rc2) at (8.55,12.75) {\(C_2\)};
+  \node[qa r,minimum width=1.08cm] (rr2) at (10.05,12.75)
+    {\(R_2\)\\\(\bullet\ \bullet\ \bullet\ \bullet\)};
+  \node[qa c] (rc3) at (11.55,12.75) {\(C_3\)};
+  \node at (12.45,12.75) {\(\cdots\)};
+
+  \node[anchor=east,font=\scriptsize] at (.45,11.26) {query};
+  \node[qa p,font=\scriptsize,minimum width=1.18cm,
+    minimum height=.74cm] (qp) at (1.15,11.26)
+    {\(P\)\\[-1pt]{\tiny 40 anchors}\\[-1pt]{\tiny 100 bp apart}};
+  \node[qa g,font=\scriptsize,minimum width=1.20cm,
+    minimum height=.74cm] (qgq) at (2.65,11.26)
+    {\(G_q\)\\[-1pt]{\tiny 11 anchors}\\[-1pt]{\tiny 1000 bp apart}};
+  \node[qa c] (qc0) at (4.15,11.26) {\(C_0\)};
+  \node[qa c] (qc1) at (5.55,11.26) {\(C_1\)};
+  \node[qa r,minimum width=1.08cm] (qr1) at (7.05,11.26)
+    {\(R_1\)\\\(\bullet\ \bullet\ \bullet\ \bullet\)};
+  \node[qa c] (qc2) at (8.55,11.26) {\(C_2\)};
+  \node[qa r,minimum width=1.08cm] (qr2) at (10.05,11.26)
+    {\(R_2\)\\\(\bullet\ \bullet\ \bullet\ \bullet\)};
+  \node[qa c] (qc3) at (11.55,11.26) {\(C_3\)};
+  \node at (12.45,11.26) {\(\cdots\)};
+
+  \draw[qa gapline] (rgt.east)--(rc0.west)
+    node[midway,above,font=\tiny] {1275};
+  \draw[qa gapline] (qgq.east)--(qc0.west)
+    node[midway,above,font=\tiny] {1000};
+  \draw[qa gapline] (rc0.east)--(rc1.west)
+    node[midway,above,font=\tiny] {3500};
+  \draw[qa gapline] (qc0.east)--(qc1.west)
+    node[midway,above,font=\tiny] {3400};
+  \draw[qa gapline] (rc1.east)--(rr1.west)
+    node[midway,above,font=\tiny] {1000};
+  \draw[qa gapline] (qc1.east)--(qr1.west)
+    node[midway,above,font=\tiny] {750};
+  \draw[qa gapline] (rr1.east)--(rc2.west)
+    node[midway,above,font=\tiny] {2200};
+  \draw[qa gapline] (qr1.east)--(qc2.west)
+    node[midway,above,font=\tiny] {2550};
+  \draw[qa gapline] (rc2.east)--(rr2.west)
+    node[midway,above,font=\tiny] {1000};
+  \draw[qa gapline] (qc2.east)--(qr2.west)
+    node[midway,above,font=\tiny] {1250};
+  \draw[qa gapline] (rr2.east)--(rc3.west)
+    node[midway,above,font=\tiny] {2200};
+  \draw[qa gapline] (qr2.east)--(qc3.west)
+    node[midway,above,font=\tiny] {1850};
+
+  \draw[chainGreen!80!black,thick] (rp.south)--(qp.north);
+  \draw[qa match] (rgt.south)--(qgq.north);
+  \draw[qa match]
+    (rc0.south)--(qc0.north)
+    (rc1.south)--(qc1.north)
+    (rc2.south)--(qc2.north)
+    (rc3.south)--(qc3.north);
+  \draw[chainOrange!95!black,dashed,thick]
+    (rr1.south)--(qr1.north)
+    (rr2.south)--(qr2.north);
+
+  \node[anchor=west,font=\scriptsize] at (.55,10.60)
+    {All blocks keep the same order. The four anchors inside each \(R_k\) are 100 bases apart.};
+
+  \draw[black!35] (.10,10.38)--(13.85,10.38);
+
+  % Panel b: scores and predecessor comb.
+  \node[anchor=west,font=\bfseries] at (.10,10.05)
+    {(b) Scores produced by forward chaining};
+
+  \node[qa p] (bh) at (.70,8.45) {\(h\)\\600};
+  \node[qa g,minimum width=.88cm] (bg1) at (2.05,8.45)
+    {\(g_1\)\\551};
+  \node at (3.15,8.45) {\(\cdots\)};
+  \node[qa g,minimum width=.88cm] (bg11) at (4.20,8.45)
+    {\(g_{11}\)\\61};
+  \node[qa c] (bc0) at (5.35,8.45) {\(c_0\)\\39};
+  \node[qa c] (bc1) at (6.50,8.45) {\(c_1\)\\39};
+  \node at (7.45,8.45) {\(\cdots\)};
+  \node[qa c] (bck) at (8.35,8.45) {\(c_k\)\\39};
+
+  \node[qa r] (br1) at (8.95,9.30) {\(r_{k,1}\)\\21};
+  \node[qa r] (br2) at (10.10,9.30) {\(r_{k,2}\)\\36};
+  \node[qa r] (br3) at (11.25,9.30) {\(r_{k,3}\)\\51};
+  \node[qa r] (be) at (12.40,9.30) {\(e_k\)\\66};
+
+  \draw[qa pred] (bg1.west)--(bh.east);
+  \draw[qa pred] (bg11.west)--(3.55,8.45);
+  \draw[qa pred] (2.82,8.45)--(bg1.east);
+  \draw[qa pred] (bc0.west)--(bg11.east);
+  \draw[qa pred] (bc1.west)--(bc0.east);
+  \draw[qa pred] (7.95,8.45)--(7.75,8.45);
+  \draw[qa pred] (7.15,8.45)--(bc1.east);
+  \draw[qa pred] (br1.south west)--(bck.north east);
+  \draw[qa pred] (br2.west)--(br1.east);
+  \draw[qa pred] (br3.west)--(br2.east);
+  \draw[qa pred] (be.west)--(br3.east);
+
+  \node[qa note,text width=8.25cm,font=\scriptsize] at (4.60,7.48) {
+    score added by each link:
+    \(P:+15\),\quad
+    \(G:-49\),\quad
+    \(g_{11}\!\to c_0:-22\),\quad
+    \(C\!\to C:0\),\quad
+    \(C\!\to r_{k,1}:-18\),\quad
+    \(R\!\to R:+15\)
+  };
+  \node[qa note,text width=3.55cm,font=\scriptsize] at (11.65,7.48) {
+    \(e_k\!\to c_{k+1}:66-31=35<39\)\\
+    successive \(R_k\): \(r-q\) differs by \(600>\texttt{bw}\)
+  };
+
+  \draw[black!35] (.10,6.68)--(13.85,6.68);
+
+  % Panel c: one temporary cut search.
+  \node[anchor=west,font=\bfseries] at (.10,6.35)
+    {(c) \textsc{ChooseCut} from \(e_k\), with
+      \(\Delta(x)=f(e_k)-f(x)\)};
+
+  \node[qa r] (ce) at (.55,5.15) {\(e_k\)\\66};
+  \node[qa r] (cr3) at (1.70,5.15) {\(r_{k,3}\)\\\(\Delta=15\)};
+  \node[qa r] (cr2) at (2.85,5.15) {\(r_{k,2}\)\\\(\Delta=30\)};
+  \node[qa r] (cr1) at (4.00,5.15) {\(r_{k,1}\)\\\(\Delta=45\)};
+  \node[qa c] (cck) at (5.15,5.15) {\(c_k\)\\\(\Delta=27\)};
+  \node at (6.05,5.15) {\(\cdots\)};
+  \node[qa c] (cc0) at (6.90,5.15) {\(c_0\)\\\(\Delta=27\)};
+  \node[qa g,minimum width=.88cm] (cg11) at (8.05,5.15)
+    {\(g_{11}\)\\\(\Delta=5\)};
+  \node at (9.02,5.15) {\(\cdots\)};
+  \node[qa g,minimum width=.88cm] (cg1) at (9.95,5.15)
+    {\(g_1\)\\\(\Delta=-485\)};
+
+  \draw[qa flow] (ce)--(cr3);
+  \draw[qa flow] (cr3)--(cr2);
+  \draw[qa flow] (cr2)--(cr1);
+  \draw[qa flow] (cr1)--(cck);
+  \draw[qa flow] (cck)--(5.72,5.15);
+  \draw[qa flow] (6.35,5.15)--(cc0);
+  \draw[qa flow] (cc0)--(cg11);
+  \draw[qa flow] (cg11)--(8.67,5.15);
+  \draw[qa flow,draw=chainOrange!95!black] (9.34,5.15)--(cg1);
+
+  \node[anchor=south,font=\scriptsize,text=chainOrange!95!black]
+    at (cr1.north) {maximum \(\Delta\)};
+  \node[anchor=south east,font=\scriptsize,
+    text=chainOrange!95!black] at (10.38,5.58)
+    {\(45-(-485)=530>500\)};
+
+  \node[qa result,text width=2.85cm,font=\scriptsize] at (12.15,5.18) {
+    return \(r_{k,1}\)\\
+    mark \(r_{k,2},r_{k,3},e_k\)\\
+    score \(66-21=45\)\\
+    count \(3\), so accept
+  };
+  \node[anchor=west,font=\scriptsize] at (.35,4.20) {
+    All \(c\)-anchors and \(r_{k,1}\) are cleared and can be inspected again.
+  };
+
+  \draw[black!35] (.10,3.72)--(13.85,3.72);
+
+  % Panel d: repeated shared work.
+  \node[anchor=west,font=\bfseries] at (.10,3.38)
+    {(d) Every branch repeats the shared walk};
+
+  \node[anchor=east] at (.75,2.78) {\(e_1\)};
+  \node[qa tiny] at (1.18,2.78) {\(c_1\)};
+  \node[qa tiny] at (1.82,2.78) {\(c_0\)};
+  \node[anchor=west,font=\scriptsize] at (2.20,2.78)
+    {\(1\) shared \(C\)-link plus \(15\) other iterations};
+
+  \node[anchor=east] at (.75,2.15) {\(e_2\)};
+  \node[qa tiny] at (1.18,2.15) {\(c_2\)};
+  \node[qa tiny] at (1.82,2.15) {\(c_1\)};
+  \node[qa tiny] at (2.46,2.15) {\(c_0\)};
+  \node[anchor=west,font=\scriptsize] at (2.84,2.15)
+    {\(2\) \(C\!\to C\) links \(+15\) fixed iterations};
+
+  \node[anchor=east] at (.75,1.52) {\(\vdots\)};
+  \node at (1.82,1.52) {\(\ddots\)};
+
+  \node[anchor=east] at (.75,.89) {\(e_m\)};
+  \node[qa tiny] at (1.18,.89) {\(c_m\)};
+  \node at (1.82,.89) {\(\cdots\)};
+  \node[qa tiny] at (2.46,.89) {\(c_1\)};
+  \node[qa tiny] at (3.10,.89) {\(c_0\)};
+  \node[anchor=west,font=\scriptsize] at (3.48,.89)
+    {\(m\) \(C\!\to C\) links, \(m+15\) iterations};
+
+  \node[qa note,text width=5.75cm,minimum height=2.25cm,
+    font=\scriptsize]
+    at (10.80,1.75) {
+    One pass:
+    \(\displaystyle
+      \sum_{k=1}^{m}(k+15)
+      =\frac{m(m+1)}{2}+15m
+    \)\\[2pt]
+    \(\displaystyle =\Theta(m^2)\)\\[4pt]
+    There are \(n=5m+52\) anchors.\\
+    Minimap2 runs the pass twice.\\
+    Therefore the backtracking time is \(\Theta(n^2)\).
+  };
+\end{tikzpicture}
+\caption{A quadratic anchor family for minimap2 scalar backtracking with
+ordinary \texttt{map-ont} settings. Panel~(a) shows the reference and query
+layout. Panel~(b) shows the scores and predecessors produced by forward
+chaining. Panel~(c) shows one temporary cut search. Panel~(d) counts the
+repeated work.}
+\label{fig:chaining-minimap2-backtracking-quadratic}
+\end{figure}
+
+The forward recurrence must produce the scores used in a counterexample.  The
+construction below uses the ordinary \texttt{map-ont} settings:
+\[
+  \begin{gathered}
+    q_{\mathrm{span}}=15,\qquad
+    \alpha=0.12,\qquad
+    \beta=0,\qquad
+    \texttt{bw}=\texttt{max\_drop}=500,\\
+    \texttt{min\_chain\_score}=40,\qquad
+    \texttt{min\_cnt}=3,\qquad
+    \texttt{max\_gap}=5000,\\
+    \texttt{max\_iter}=5000,\qquad
+    \texttt{max\_skip}=25.
+  \end{gathered}
+\]
+For \(d_g=\min(d_r,d_q)\geq15\), each predecessor link in ordinary forward
+chaining adds
+\[
+  15-
+  \left\lfloor
+    0.12\lvert d_r-d_q\rvert+
+    \frac{1}{2}\log_2\!\left(\lvert d_r-d_q\rvert+1\right)
+  \right\rfloor .
+\]
+Minimap2 uses a fast approximation to \(\log_2\).  The calculations below use
+the integer returned by that implementation.
+
+Figure~\ref{fig:chaining-minimap2-backtracking-quadratic} specifies the exact
+coordinate differences.  In \(P\), place 40 anchors at matching reference and
+query positions, with 100 bases between successive anchors.  Their scores are
+\(15,30,\ldots,600\).  Call the last anchor \(h\).  After \(h\), place eleven
+anchors so that each successive pair is separated by 1500 bases in the
+reference and 1000 bases in the query:
+\[
+  (d_r,d_q)=(1500,1000).
+\]
+Each predecessor link has \(\lvert d_r-d_q\rvert=500\) and adds \(-49\).  The
+last anchor \(g_{11}\) therefore has score
+\[
+  600-11\cdot49=61.
+\]
+Place \(c_0\) 1275 reference bases and 1000 query bases after \(g_{11}\).
+This link adds \(-22\), so \(f(c_0)=39\).
+
+For \(k\geq1\), let \(s_k=1\) for odd \(k\) and \(s_k=-1\) for even \(k\).
+Using the order (reference, query), define
+\[
+  c_k=c_{k-1}+(3500,3500-100s_k).
+\]
+The reference and query gaps differ by 100, so this link adds zero.  Hence
+\(f(c_k)=39\) and \(p(c_k)=c_{k-1}\).  Put four anchors in \(R_k\):
+\[
+  r_{k,\ell}
+  =
+  c_k+
+  \bigl(1000+100(\ell-1),
+        1000-250s_k+100(\ell-1)\bigr),
+  \qquad 1\leq\ell\leq4.
+\]
+The reference and query gaps for the first link differ by 250, so it adds
+\(-18\).  The remaining three links advance 100 bases in both sequences and
+add \(15\) each.  Their scores are therefore
+\[
+  21,\qquad36,\qquad51,\qquad66.
+\]
+Write \(e_k=r_{k,4}\).
+
+The displayed predecessor gives the maximum score among candidates that pass
+the distance and bandwidth checks.  If \(e_k\) were used as the predecessor
+of \(c_{k+1}\), the reference and query gaps would differ by 350.  This link
+adds \(-31\), giving the candidate score \(66-31=35<39\).  Successive \(R_k\)
+blocks differ by 600 in \(r-q\), so links between them lie outside the
+bandwidth.  Any anchor two or more groups earlier is over 5000 bases away in
+both coordinates. Every chosen predecessor lies among the five preceding
+anchors.  The default \texttt{max\_iter} and \texttt{max\_skip} limits
+therefore preserve the displayed predecessor array.
+
+The lower bound is proved for the anchor array supplied to chaining.  An exact
+FASTA realization would also require filler with no unintended shared
+canonical 15-mer and local contexts in which every intended word is selected
+as a minimizer.  If each intended word occurred once, the ordinary occurrence
+filters would retain it.  The four matches inside each \(R_k\) are 100 bases
+apart, so they do not overlap.  We have not constructed or run such a FASTA
+pair.  Figure~\ref{fig:chaining-minimap2-backtracking-quadratic} is therefore
+an exact anchor-level witness.  Panel~(a) is a sequence-design outline.
+
+Backtracking considers candidate ends in decreasing score order.  The end
+\(h\), with score 600, is processed first.  It accepts the \(P\) chain and
+permanently marks its 40 anchors.  The ends \(g_1,\ldots,g_{10}\) are examined
+before the \(e_k\) ends because their scores exceed 66.  Each search reaches
+the already marked \(h\).  For each \(g_i\), every earlier anchor \(x\) on its
+path satisfies \(f(g_i)-f(x)<0\).  Therefore \textsc{ChooseCut} returns
+\(g_i\) itself.  The permanent-marking loop then marks no \(g\)-anchor.  The
+shared \(g\)-path is therefore still unmarked when the \(e_k\) ends are
+examined.  The end \(g_{11}\) has score 61, so it is examined after the
+\(e_k\) ends.  The later candidate \(r_{k,3}\), with score 51, is skipped
+because the search from \(e_k\) has already permanently marked it.
+
+Panel~(c) follows the temporary search from \(e_k\).  The values of \(\Delta\)
+at \(r_{k,3}\), \(r_{k,2}\), and \(r_{k,1}\) are 15, 30, and 45.  The maximum
+is 45 at \(r_{k,1}\), so this anchor becomes the cut.  For every \(c\)-anchor,
+\(\Delta=27\).  At \(g_1\), \(\Delta=66-551=-485\).  The decrease from 45 is
+\[
+  45-(-485)=530>500,
+\]
+so \textsc{ChooseCut} returns \(r_{k,1}\).  The permanent-marking loop marks
+\(r_{k,2}\), \(r_{k,3}\), and \(e_k\).  The resulting chain has score 45 and
+contains three anchors, so it meets the default output limits.  The shared
+\(c\)-path remains unmarked.
+
+The search from \(e_k\) executes \(k+15\) \textsc{ChooseCut} iterations.
+Consequently, one pass performs
+\[
+  \sum_{k=1}^{m}(k+15)
+  =
+  \frac{m(m+1)}{2}+15m
+  =
+  \Theta(m^2).
+\]
+The construction contains
+\[
+  n=40+11+1+5m=5m+52
+\]
+anchors.  Thus one pass already takes \(\Theta(n^2)\) time.  Minimap2 runs
+backtracking twice, once to count the chains and once to write them.  This
+doubles the work but does not change the asymptotic bound.
+
+There are at most \(n\) candidate chain ends.  Each temporary search visits at
+most \(n\) predecessor links, and clearing its temporary marks also takes
+\(O(n)\) time.  At most \(n\) searches therefore take \(O(n^2)\) time.  The
+worst-case scalar backtracking cost is therefore
+\[
+  \underbrace{O(n)}_{\text{permanent marking and output}}
+  +
+  \underbrace{\Theta(n^2)}_{\text{temporary searches and clearing}}
+  =
+  \Theta(n^2).
+\]
+
+\texttt{max\_iter} and \texttt{max\_skip} apply when forward chaining chooses
+each predecessor.  They do not limit how many predecessor links
+\textsc{ChooseCut} follows during backtracking.
+
 \subsubsection{BioseqDB SIMD backtracking}
 
 Exact SIMD B1 and bounded SIMD B1 call the same SIMD backtracking function.
@@ -1626,287 +2029,249 @@ In Bioseq chaining we consider 3 different steps:
   \item Ordered marking works on transposed matrix, where each of $L$ lanes contains consecutive indices for one chain.
 \end{enumerate}
 
-%%% NEEDS TO BE REWRITTEN: START
+Two phrases in the short summary above need a precise meaning.  The first
+step is not a read-only cut lookup.  The highest-ranked end is followed while
+the mark array is empty, and every visited anchor is marked immediately.  The
+term \emph{transposed matrix} describes only the two views drawn below.  The
+current code does not transpose a matrix.  It scatters each collected lane
+directly into its final path row.
 
-BioseqDB makes the end list from
-\(f_i\geq\texttt{min\_chain\_score}\), sorts by
-\((f_i,i)\), and reads the list backward. The end with the largest
-\((f_i,i)\) is handled alone while every mark is zero. When
-\(p_j=j-1,p_{j-1}=j-2,\ldots,p_{j-L+1}=j-L\), one SIMD vector checks and marks
-these \(L\) anchors together. It can mark them immediately because no earlier
-path has set a mark. Otherwise, lane zero advances one predecessor link at a
-time.
-
-Later ends are handled in batches of at most \(L\). The meaning of a lane
-changes between two steps:
-
-\begin{enumerate}
-  \item During \emph{path collection}, lane \(\lambda\) follows predecessor
-        links from one end until \(-1\) or an anchor marked before this batch.
-        It stores the collected anchor indices from the end toward the start in
-        row \(\lambda\). No lane marks anchors yet, because two rows may contain
-        the same unmarked anchor. The next step decides which row receives it.
-  \item During \emph{ordered marking}, rows are checked one at a time from
-        larger \((f_e,e)\) to smaller. The SIMD lanes hold successive indices
-        from one row. The first already marked index stops that row. Only the
-        entries before that stop are marked, so the row with larger
-        \((f_e,e)\) receives a shared anchor.
-\end{enumerate}
-
-The temporary matrix has \(L\) rows of \(n\) 32-bit indices, so it occupies
-\(4nL\) bytes. After ordered marking, the stop \(b\) is either the marked
-anchor found during collection or a row entry just marked by an earlier row.
-If there is no such anchor and the path reached \(-1\), the score is \(f_e\).
-Otherwise, the score is \(f_e-f_b\). The code tests this score and the number
-of newly marked anchors. The new marks remain even if the chain is rejected.
-For an accepted row, the code copies the newly marked part in the opposite
-order, so its anchors enter \(A\) in forward order.
-
-Figure~\ref{fig:chaining-simd-backtracking} shows both lane meanings for
-\(L=4\). The example uses
+Let \(L\) be the number of 32-bit Highway lanes, \(S\) the minimum chain
+score, and \(K\) the minimum number of anchors.  BioseqDB makes the list
 \[
-  \texttt{min\_chain\_score}=30,
-  \qquad \texttt{min\_seed\_count}=2.
+  Z=[(f_i,i)\mid f_i\geq S]
 \]
-Here, \(f_{19}=100\), \(f_9=40\), \(f_{11}=55\), and \(f_{10}=50\).
+and processes it in decreasing \((f_i,i)\) order.  Thus a larger score is
+first.  If scores tie, the larger anchor index is first.  The mark array
+\(t\) is an array of 32-bit integers, not a bit set:
+\[
+  t_i=0\quad\text{means unclaimed},\qquad
+  t_i=1\quad\text{means claimed}.
+\]
+There is no temporary value \(2\).  A mark is never cleared, including when
+the marked prefix later fails the score or count test.
+
+The largest-ranked end is handled alone.  If \(L\) consecutive links satisfy
+\(p_j=j-1\), one vector comparison checks the \(L\) links.  Two vector stores
+then save and mark the \(L\) anchors.  Otherwise the same Highway loop uses
+only lane zero for that link.  This is a one-lane SIMD operation, not a call
+to the scalar backtracker.
+
+Each later batch contains at most \(L\) ends.  During collection, lane
+\(\lambda\) follows one end.  At depth \(d\), an indexed scatter writes that
+lane directly to
+\[
+  V_{\lambda,d}\quad\text{at address}\quad V+\lambda n+d.
+\]
+Consequently each path is already one contiguous row.  No second matrix and
+no later transpose pass are used.  The \(L\)-by-\(n\) path matrix itself uses
+\(4nL\) bytes.  The ranked ends and marks are separate temporary arrays.
+
+Figure~\ref{fig:chaining-simd-backtracking} follows the example with
+\(L=4\), \(S=30\), and \(K=2\).  The first path is
+\(19,9,8,\ldots,0\).  It marks these anchors before the next four ends are
+collected.  For the later ends, the relevant scores are
+\[
+  f_{19}=100,\quad f_{18}=90,\quad f_{17}=85,\quad f_{16}=80,\quad
+  f_{15}=75,\quad f_9=40,\quad f_{11}=55,\quad f_{10}=50.
+\]
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
-  % First path.
-  \node[anchor=west,font=\bfseries] at (.10,9.65)
-    {(a) First end \(19\): use SIMD lanes along one path};
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\footnotesize,>=Latex,
+  simd blue/.style={
+    draw=chainBlue!90!black,fill=chainBlue!12,
+    minimum width=.72cm,minimum height=.52cm,
+    align=center,inner sep=0pt,outer sep=0pt,rounded corners=0pt},
+  simd green/.style={
+    draw=chainGreen!80!black,fill=chainGreen!16,very thick,
+    minimum width=.72cm,minimum height=.52cm,
+    align=center,inner sep=0pt,outer sep=0pt,rounded corners=0pt},
+  simd orange/.style={
+    draw=chainOrange!95!black,fill=chainOrange!18,very thick,
+    minimum width=.72cm,minimum height=.52cm,
+    align=center,inner sep=0pt,outer sep=0pt,rounded corners=0pt},
+  simd gray/.style={
+    draw=chainGray!75!black,fill=chainGray!8,dashed,
+    minimum width=.72cm,minimum height=.52cm,
+    align=center,inner sep=0pt,outer sep=0pt,rounded corners=0pt},
+  simd result/.style={
+    draw=chainGreen!80!black,fill=chainGreen!9,
+    minimum width=3.35cm,minimum height=.62cm,
+    align=center,inner sep=2pt,rounded corners=0pt},
+  simd reject/.style={
+    draw=chainOrange!95!black,fill=chainOrange!9,
+    minimum width=3.35cm,minimum height=.62cm,
+    align=center,inner sep=2pt,rounded corners=0pt},
+  simd flow/.style={-{Latex[length=1.5mm]},thick},
+  simd soft/.style={-{Latex[length=1.5mm]},thick,draw=chainGray!80!black}
+]
+  % Highest-ranked path.
+  \node[anchor=west,font=\bfseries] at (.10,10.75)
+    {(a) Highest-ranked end: SIMD lanes hold positions in one path};
 
-  \node[font=\scriptsize] at (1.20,9.12) {lane 0};
-  \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-    (.86,8.35) rectangle (1.54,8.95);
-  \node at (1.20,8.65) {19};
-  \draw[chain flow] (1.54,8.65)--(1.96,8.65);
-  \node[font=\scriptsize,anchor=north] at (1.75,8.31) {
-    \(p_{19}=9\)};
+  \node[font=\scriptsize] at (.70,10.23) {lane 0};
+  \node[simd green] (sp19) at (.70,9.82) {19};
+  \draw[simd flow] (sp19.east)--(1.48,9.82);
+  \node[anchor=north,font=\scriptsize,inner sep=0pt]
+    at (1.27,9.50) {\(p_{19}=9\)};
 
-  \node[font=\scriptsize] at (3.43,9.12) {lanes 0--3};
-  \foreach \x/\v in {2.30/9,3.05/8,3.80/7,4.55/6}
-    {
-      \draw[fill=chainGreen!16,draw=chainGreen!80!black]
-        (\x-.34,8.35) rectangle (\x+.34,8.95);
-      \node at (\x,8.65) {\v};
-    }
-  \draw[chain flow] (4.89,8.65)--(5.26,8.65);
+  \foreach \x/\v in {1.90/9,2.62/8,3.34/7,4.06/6}
+    \node[simd green] at (\x,9.82) {\v};
+  \foreach \x/\v in {1.90/0,2.62/1,3.34/2,4.06/3}
+    \node[font=\scriptsize,anchor=south,inner sep=0pt]
+      at (\x,10.12) {\(\lambda=\v\)};
+  \draw[simd flow] (4.42,9.82)--(4.78,9.82);
 
-  \node[font=\scriptsize] at (6.73,9.12) {lanes 0--3};
-  \foreach \x/\v in {5.60/5,6.35/4,7.10/3,7.85/2}
-    {
-      \draw[fill=chainGreen!16,draw=chainGreen!80!black]
-        (\x-.34,8.35) rectangle (\x+.34,8.95);
-      \node at (\x,8.65) {\v};
-    }
-  \draw[chain flow] (8.19,8.65)--(8.56,8.65);
+  \foreach \x/\v in {5.20/5,5.92/4,6.64/3,7.36/2}
+    \node[simd green] at (\x,9.82) {\v};
+  \draw[simd flow] (7.72,9.82)--(8.10,9.82);
 
-  \node[font=\scriptsize] at (8.95,9.12) {lane 0};
-  \draw[fill=chainGreen!16,draw=chainGreen!80!black]
-    (8.61,8.35) rectangle (9.29,8.95);
-  \node at (8.95,8.65) {1};
-  \draw[chain flow] (9.29,8.65)--(9.71,8.65);
-  \node[font=\scriptsize] at (10.10,9.12) {lane 0};
-  \draw[fill=chainGreen!16,draw=chainGreen!80!black]
-    (9.76,8.35) rectangle (10.44,8.95);
-  \node at (10.10,8.65) {0};
+  \node[simd green] (sp1) at (8.52,9.82) {1};
+  \draw[simd flow] (sp1.east)--(9.28,9.82);
+  \node[simd green] (sp0) at (9.70,9.82) {0};
+  \node[simd result,minimum width=2.75cm] (primary_done)
+    at (12.05,9.82) {mark 11 anchors\\append in forward order};
+  \draw[simd flow] (sp0.east)--(primary_done.west);
 
-  \draw[fill=chainGreen!9,draw=chainGreen!80!black]
-    (11.10,8.25) rectangle (13.95,9.05);
-  \node[align=center,font=\scriptsize] at (12.53,8.65)
-    {mark and append 11 anchors\\forward order, score \(100\)};
+  \draw[black!35] (.10,9.20)--(13.75,9.20);
 
-  % Collection matrix.
-  \node[anchor=west,font=\bfseries] at (.10,7.75)
-    {(b) Collect: one predecessor path per SIMD lane};
-  \node[anchor=east,font=\scriptsize] at (3.12,7.17)
-    {lane: end (score)};
-  \foreach \x/\lab in {3.70/0,4.65/1,5.60/2}
-    \node[font=\scriptsize,inner sep=0pt] at (\x,7.10) {\lab};
-  \node[font=\scriptsize,inner sep=0pt] at (7.05,7.12)
-    {stop \(9,\ f_9=40\)};
+  % Collection and direct lane-to-row scatter.
+  \node[anchor=west,font=\bfseries] at (.10,8.87)
+    {(b) Collect: one path per lane, then scatter directly into path rows};
+  \node[font=\scriptsize] at (2.15,8.42)
+    {horizontal SIMD vectors};
+  \foreach \x/\v in {1.08/0,1.80/1,2.52/2,3.24/3}
+    \node[font=\scriptsize,anchor=south,inner sep=0pt]
+      at (\x,8.12) {\(\lambda=\v\)};
 
-  \foreach \y/\lab in {
-      6.65/{0: \(18\ (90)\)},
-      6.05/{1: \(17\ (85)\)},
-      5.45/{2: \(16\ (80)\)},
-      4.85/{3: \(15\ (75)\)}}
-    \node[anchor=east] at (3.12,\y) {\lab};
+  \node[anchor=east,font=\scriptsize] at (.63,7.73) {\(d=0\)};
+  \foreach \x/\v in {1.08/18,1.80/17,2.52/16,3.24/15}
+    \node[simd blue] at (\x,7.73) {\v};
+  \node[anchor=east,font=\scriptsize] at (.63,7.08) {\(d=1\)};
+  \foreach \x/\v in {1.08/14,1.80/13,2.52/12,3.24/10}
+    \node[simd blue] at (\x,7.08) {\v};
+  \node[anchor=east,font=\scriptsize] at (.63,6.43) {\(d=2\)};
+  \foreach \x/\v in {1.08/11,1.80/11,2.52/10}
+    \node[simd blue] at (\x,6.43) {\v};
+  \node[simd orange] at (3.24,6.43) {9};
+  \node[anchor=east,font=\scriptsize] at (.63,5.78) {\(d=3\)};
+  \foreach \x in {1.08,1.80,2.52}
+    \node[simd orange] at (\x,5.78) {9};
+  \node[simd gray] at (3.24,5.78) {--};
 
-  % Row 0: 18,14,11 -> marked 9.
-  \foreach \x/\v in {3.70/18,4.65/14}
-    {
-      \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-        (\x-.34,6.39) rectangle (\x+.34,6.91);
-      \node at (\x,6.65) {\v};
-    }
-  \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (5.26,6.39) rectangle (5.94,6.91);
-  \node at (5.60,6.65) {11};
-  \draw[chain flow] (5.94,6.65)--(6.67,6.65);
+  \draw[simd flow] (3.76,6.76)--(5.02,6.76)
+    node[pos=.28,above,font=\scriptsize,inner sep=1pt,fill=white] {scatter};
 
-  % Row 1: 17,13,11 -> marked 9.
-  \foreach \x/\v in {3.70/17,4.65/13}
-    {
-      \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-        (\x-.34,5.79) rectangle (\x+.34,6.31);
-      \node at (\x,6.05) {\v};
-    }
-  \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (5.26,5.79) rectangle (5.94,6.31);
-  \node at (5.60,6.05) {11};
-  \draw[chain flow] (5.94,6.05)--(6.67,6.05);
+  \node[font=\scriptsize] at (6.70,8.42)
+    {one contiguous row per path};
+  \foreach \x/\v in {5.65/0,6.37/1,7.09/2,7.81/3}
+    \node[font=\scriptsize,anchor=south,inner sep=0pt]
+      at (\x,8.12) {\(d=\v\)};
+  \node[font=\scriptsize,anchor=south,inner sep=0pt]
+    at (8.82,8.12) {stop};
 
-  % Row 2: 16,12,10 -> marked 9.
-  \foreach \x/\v in {3.70/16,4.65/12}
-    {
-      \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-        (\x-.34,5.19) rectangle (\x+.34,5.71);
-      \node at (\x,5.45) {\v};
-    }
-  \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (5.26,5.19) rectangle (5.94,5.71);
-  \node at (5.60,5.45) {10};
-  \draw[chain flow] (5.94,5.45)--(6.67,5.45);
+  \node[anchor=east,font=\scriptsize] at (5.14,7.73) {path 0};
+  \foreach \x/\v in {5.65/18,6.37/14,7.09/11}
+    \node[simd blue] at (\x,7.73) {\v};
+  \node[simd gray] at (7.81,7.73) {--};
+  \node[simd orange] at (8.82,7.73) {9};
 
-  % Row 3: 15,10 -> marked 9.
-  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (3.36,4.59) rectangle (4.04,5.11);
-  \node at (3.70,4.85) {15};
-  \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (4.31,4.59) rectangle (4.99,5.11);
-  \node at (4.65,4.85) {10};
-  \draw[chain flow] (4.99,4.85)--(6.67,4.85);
+  \node[anchor=east,font=\scriptsize] at (5.14,7.08) {path 1};
+  \foreach \x/\v in {5.65/17,6.37/13,7.09/11}
+    \node[simd blue] at (\x,7.08) {\v};
+  \node[simd gray] at (7.81,7.08) {--};
+  \node[simd orange] at (8.82,7.08) {9};
 
-  \foreach \y in {6.65,6.05,5.45,4.85}
-    {
-      \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-        (6.67,\y-.26) rectangle (7.43,\y+.26);
-      \node at (7.05,\y) {9};
-    }
+  \node[anchor=east,font=\scriptsize] at (5.14,6.43) {path 2};
+  \foreach \x/\v in {5.65/16,6.37/12,7.09/10}
+    \node[simd blue] at (\x,6.43) {\v};
+  \node[simd gray] at (7.81,6.43) {--};
+  \node[simd orange] at (8.82,6.43) {9};
 
-  \draw[dashed,draw=chainGray!85!black]
-    (3.25,4.45) rectangle (6.08,6.99);
+  \node[anchor=east,font=\scriptsize] at (5.14,5.78) {path 3};
+  \foreach \x/\v in {5.65/15,6.37/10}
+    \node[simd blue] at (\x,5.78) {\v};
+  \foreach \x in {7.09,7.81}
+    \node[simd gray] at (\x,5.78) {--};
+  \node[simd orange] at (8.82,5.78) {9};
 
-  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (8.35,6.38) rectangle (8.85,6.88);
-  \node[anchor=west] at (9.03,6.63) {stored path entry};
-  \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (8.35,5.68) rectangle (8.85,6.18);
-  \node[anchor=west] at (9.03,5.93) {same anchor in two rows};
-  \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-    (8.35,4.98) rectangle (8.85,5.48);
-  \node[anchor=west] at (9.03,5.23) {stop marked before batch};
-  \draw[fill=chainGray!8,draw=chainGray!85!black]
-    (8.25,4.42) rectangle (13.95,4.87);
-  \node at (11.10,4.65) {collection does not mark anchors};
+  \node[simd blue] at (10.05,7.55) {};
+  \node[anchor=west,font=\scriptsize] at (10.52,7.55) {stored entry};
+  \node[simd orange] at (10.05,6.73) {};
+  \node[anchor=west,font=\scriptsize] at (10.52,6.73) {marked stop};
+  \node[simd gray] at (10.05,5.91) {};
+  \node[anchor=west,font=\scriptsize] at (10.52,5.91) {inactive lane};
 
-  \draw[draw=chainGray!70] (.15,4.15)--(4.10,4.15);
-  \draw[draw=chainGray!70] (6.70,4.15)--(13.95,4.15);
+  \draw[black!35] (.10,5.18)--(13.75,5.18);
 
   % Ordered commit.
-  \node[anchor=west,font=\bfseries] at (.10,3.98)
-    {(c) Mark and copy one row at a time};
-  \node[anchor=east,font=\scriptsize] at (3.12,3.46) {SIMD lane:};
-  \foreach \x/\lab in {3.70/0,4.65/1,5.60/2,6.55/3}
-    \node[font=\scriptsize,inner sep=0pt] at (\x,3.46) {\lab};
-  \draw[chain flow,draw=chainOrange!95!black]
-    (1.25,3.05)--(1.25,.38);
-  \node[rotate=90,anchor=south,text=chainOrange!95!black]
-    at (1.42,1.70) {higher end score first};
+  \node[anchor=west,font=\bfseries] at (.10,4.85)
+    {(c) Larger \((f_e,e)\) first: mark a prefix and copy it if accepted};
+  \node[anchor=east,font=\scriptsize] at (1.50,4.39) {SIMD lane:};
+  \foreach \x/\v in {1.92/0,2.64/1,3.36/2,4.08/3}
+    \node[font=\scriptsize,anchor=south,inner sep=0pt]
+      at (\x,4.20) {\v};
+  \draw[simd flow,draw=chainOrange!95!black]
+    (.52,3.90)--(.52,1.12);
+  \node[rotate=90,anchor=south,font=\scriptsize,
+    text=chainOrange!95!black] at (.68,2.50) {larger \((f_e,e)\) first};
 
-  \foreach \y/\lab in {
-      2.95/{row 0},
-      2.20/{row 1},
-      1.45/{row 2},
-      .70/{row 3}}
-    \node[anchor=east] at (3.12,\y) {\lab};
+  \node[anchor=east,font=\scriptsize] at (1.50,3.86) {path 0};
+  \foreach \x/\v in {1.92/18,2.64/14,3.36/11}
+    \node[simd green] at (\x,3.86) {\v};
+  \node[simd gray] at (4.08,3.86) {--};
+  \draw[simd soft] (4.49,3.86)--(5.15,3.86);
+  \node[simd orange] at (5.57,3.86) {9};
+  \node[simd result] at (7.95,3.86)
+    {\(s=90-40=50,\quad c=3\)};
 
-  % Row 0 commit: mark 18,14,11.
-  \foreach \x/\v in {3.70/18,4.65/14,5.60/11}
-    {
-      \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-        (\x-.34,2.66) rectangle (\x+.34,3.24);
-      \node at (\x,2.95) {\v};
-    }
-  \draw[fill=chainGray!8,draw=chainGray!80!black,dashed]
-    (6.21,2.66) rectangle (6.89,3.24);
-  \node at (6.55,2.95) {--};
-  \draw[chain flow] (6.89,2.95)--(7.82,2.95);
-  \draw[fill=chainGreen!9,draw=chainGreen!80!black]
-    (7.82,2.61) rectangle (13.70,3.29);
-  \node[align=center] at (10.76,2.95)
-    {mark \(18,14,11\), stop at \(9\)\\
-     append \(a_{11},a_{14},a_{18}\), score \(90-40=50\)};
+  \node[anchor=east,font=\scriptsize] at (1.50,3.12) {path 1};
+  \node[simd green] at (1.92,3.12) {17};
+  \node[simd green] at (2.64,3.12) {13};
+  \node[simd orange] at (3.36,3.12) {11};
+  \node[simd gray] at (4.08,3.12) {--};
+  \node[simd result] at (7.95,3.12)
+    {\(s=85-55=30,\quad c=2\)};
 
-  % Row 1 commit: 11 is already marked.
-  \foreach \x/\v in {3.70/17,4.65/13}
-    {
-      \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-        (\x-.34,1.91) rectangle (\x+.34,2.49);
-      \node at (\x,2.20) {\v};
-    }
-  \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (5.26,1.91) rectangle (5.94,2.49);
-  \node at (5.60,2.20) {11};
-  \draw[fill=chainGray!8,draw=chainGray!80!black,dashed]
-    (6.21,1.91) rectangle (6.89,2.49);
-  \node at (6.55,2.20) {--};
-  \draw[chain flow] (6.89,2.20)--(7.82,2.20);
-  \draw[fill=chainGreen!9,draw=chainGreen!80!black]
-    (7.82,1.86) rectangle (13.70,2.54);
-  \node[align=center] at (10.76,2.20)
-    {mark \(17,13\), stop at \(11\)\\
-     append \(a_{13},a_{17}\), score \(85-55=30\)};
+  \node[anchor=east,font=\scriptsize] at (1.50,2.38) {path 2};
+  \foreach \x/\v in {1.92/16,2.64/12,3.36/10}
+    \node[simd green] at (\x,2.38) {\v};
+  \node[simd gray] at (4.08,2.38) {--};
+  \draw[simd soft] (4.49,2.38)--(5.15,2.38);
+  \node[simd orange] at (5.57,2.38) {9};
+  \node[simd result] at (7.95,2.38)
+    {\(s=80-40=40,\quad c=3\)};
 
-  % Row 2 commit: mark 16,12,10.
-  \foreach \x/\v in {3.70/16,4.65/12,5.60/10}
-    {
-      \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-        (\x-.34,1.16) rectangle (\x+.34,1.74);
-      \node at (\x,1.45) {\v};
-    }
-  \draw[fill=chainGray!8,draw=chainGray!80!black,dashed]
-    (6.21,1.16) rectangle (6.89,1.74);
-  \node at (6.55,1.45) {--};
-  \draw[chain flow] (6.89,1.45)--(7.82,1.45);
-  \draw[fill=chainGreen!9,draw=chainGreen!80!black]
-    (7.82,1.11) rectangle (13.70,1.79);
-  \node[align=center] at (10.76,1.45)
-    {mark \(16,12,10\), stop at \(9\)\\
-     append \(a_{10},a_{12},a_{16}\), score \(80-40=40\)};
+  \node[anchor=east,font=\scriptsize] at (1.50,1.64) {path 3};
+  \node[simd green] at (1.92,1.64) {15};
+  \node[simd orange] at (2.64,1.64) {10};
+  \foreach \x in {3.36,4.08}
+    \node[simd gray] at (\x,1.64) {--};
+  \node[simd reject] at (7.95,1.64)
+    {\(s=75-50=25,\quad c=1\): reject};
 
-  % Row 3 commit: 10 is already marked.
-  \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-    (3.36,.41) rectangle (4.04,.99);
-  \node at (3.70,.70) {15};
-  \draw[fill=chainOrange!18,draw=chainOrange!95!black,very thick]
-    (4.31,.41) rectangle (4.99,.99);
-  \node at (4.65,.70) {10};
-  \foreach \x in {5.60,6.55}
-    {
-      \draw[fill=chainGray!8,draw=chainGray!80!black,dashed]
-        (\x-.34,.41) rectangle (\x+.34,.99);
-      \node at (\x,.70) {--};
-    }
-  \draw[chain flow] (6.89,.70)--(7.82,.70);
-  \draw[fill=chainOrange!10,draw=chainOrange!95!black]
-    (7.82,.36) rectangle (13.70,1.04);
-  \node[align=center] at (10.76,.70)
-    {mark \(15\), stop at \(10\)\\score \(75-50=25\), count \(1\): reject};
+  \node[simd green] at (10.15,3.69) {};
+  \node[anchor=west,font=\scriptsize] at (10.62,3.69) {new mark};
+  \node[simd orange] at (10.15,2.87) {};
+  \node[anchor=west,font=\scriptsize] at (10.62,2.87)
+    {first marked entry: stop};
+  \node[simd gray] at (10.15,2.05) {};
+  \node[anchor=west,font=\scriptsize] at (10.62,2.05) {not examined};
+  \node[anchor=west,font=\scriptsize] at (10.05,1.30)
+    {the stop anchor is excluded};
 \end{tikzpicture}
-\caption{Four-lane BioseqDB backtracking. Panel (a) uses several lanes for
-successive anchors of the first path. Panel (b) uses one lane per path and
-leaves the mark array unchanged. Panel (c) checks rows one at a time from
-larger \((f_e,e)\) to smaller, so the earlier row receives a shared anchor. The
-green stop anchor in panel (b) was marked before the batch. It is not stored in
-the row or copied into the new chain.}
+\caption{BioseqDB SIMD backtracking with four lanes.  Every SIMD vector is a
+connected horizontal group.  Panel~(a) shows the special handling of the
+first path.  Panel~(b) shows horizontal collection vectors on the left and
+the path-row buffer on the right.  Indexed scatter creates this layout
+directly.  Panel~(c) reads one row at a time, so the path with the larger
+\((f_e,e)\) pair claims a shared anchor first.}
 \label{fig:chaining-simd-backtracking}
 \end{figure}
 
-The accepted output from this example is
+The accepted output in this example is
 \[
 \begin{aligned}
  C={}&[(100,11,0),(50,3,11),(30,2,14),(40,3,16)],\\
@@ -1914,11 +2279,148 @@ The accepted output from this example is
        \mid a_{13},a_{17}\mid a_{10},a_{12},a_{16}].
 \end{aligned}
 \]
-Each record in \(C\) is \((\text{score},\text{count},\text{start})\). Row 3
-marks \(a_{15}\), but its score and count are too small, so \(a_{15}\) is not
-copied into \(A\).
+Each record in \(C\) is \((\text{score},\text{count},\text{start})\).
+Path~3 marks \(a_{15}\) before testing its thresholds.  Its rejected anchor
+therefore remains claimed but is not copied into \(A\).
 
-%%% NEEDS TO BE REWRITTEN: END
+The following listing uses the same symbols as
+Algorithms~\ref{alg:chaining-minimap2-boundary} and
+\ref{alg:chaining-minimap2-backtrack}.  For one stored row, define
+\[
+  \operatorname{FirstMarked}(t,V_{\lambda},o,g)=
+  \min\bigl(\{u\mid 0\leq u<g\land
+    t_{V_{\lambda,o+u}}=1\}\cup\{g\}\bigr).
+\]
+It returns \(g\) when none of the \(g\) entries is marked.  The first-path
+vector run is used when
+\[
+  \operatorname{Run}_L(j,c)\iff
+  j\geq L-1\ \land\ c\leq n-L\ \land\
+  \bigwedge_{u=0}^{L-1}p_{j-u}=j-u-1.
+\]
+Here \(V_\lambda\) means row \(\lambda\) of \(V\).
+\(\ell_\lambda\) is the number of stored entries in that row,
+\(b_\lambda\) is its stop, and \(\alpha_\lambda\) says whether its collection
+lane is active.  During marking, \(o\) is the next unread row offset and \(g\)
+is the number of entries in the current vector.  Square brackets around a
+condition have value one when it is true and zero otherwise.
+Every equation indexed by \(\lambda\) below is evaluated for
+\(0\leq\lambda<q\) in one SIMD vector.  Indexed reads are made only in lanes
+whose stated condition is true.
+Algorithm~\ref{alg:chaining-simd-backtrack} then gives the complete procedure.
+The notation
+\(a_{V_{\lambda,c-1}},\ldots,a_{V_{\lambda,0}}\) denotes an empty
+sequence when \(c=0\).
+
+\begin{algorithm}[H]
+\caption{BioseqDB SIMD path collection and backtracking}
+\label{alg:chaining-simd-backtrack}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require anchors \(a[0\ldots n)\), scores \(f\), predecessors \(p\),
+    thresholds \(S,K\), width \(L\), and empty outputs \(C,A\)
+  \Function{ChooseCutsSIMD}{\(\mathbf e,p,t,V,n\)}
+    \State \(q\gets|\mathbf e|,\quad \mathbf j\gets\mathbf e,\quad
+      \boldsymbol\ell\gets\mathbf0,\quad \mathbf b\gets-\mathbf1,\quad
+      \boldsymbol\alpha\gets\mathbf1\)
+    \For{\(d\gets0,\ldots,n-1\) while
+          \(\sum_{\lambda=0}^{q-1}\alpha_\lambda\neq0\)}
+      \State \(h_\lambda\gets
+        [\alpha_\lambda=1\land t_{j_\lambda}=1],\quad
+        \eta_\lambda\gets\alpha_\lambda\land\neg h_\lambda\)
+      \State \(b_\lambda\gets j_\lambda\) if \(h_\lambda=1\), and
+        \((V_{\lambda,d},\ell_\lambda)\gets
+        (j_\lambda,\ell_\lambda+1)\) if \(\eta_\lambda=1\)
+        \Comment{scatter}
+      \State \(j_\lambda\gets
+        \begin{cases}p_{j_\lambda},&\eta_\lambda=1\\-1,&\text{otherwise}
+        \end{cases},\quad \alpha_\lambda\gets[j_\lambda\geq0]\)
+    \EndFor
+    \State \textbf{abort this call if }
+      \(\sum_{\lambda=0}^{q-1}\alpha_\lambda\neq0\)
+    \State \Return \((\boldsymbol\ell,\mathbf b)\)
+  \EndFunction
+
+  \Function{BacktrackSIMD}{\(a,f,p,S,K,L,C,A\)}
+    \State allocate \(V\in\operatorname{int32}^{L\times n}\), and set
+      \(t[0\ldots n)\gets0\)
+      \Comment{\(0\): unclaimed, \(1\): claimed}
+    \State \(Z\gets\operatorname{sort}_{\uparrow}
+      [(f_i,i)\mid0\leq i<n\land f_i\geq S],\quad k\gets|Z|-1\)
+    \If{\(k\geq0\)}
+      \State \(e\gets Z_k.\mathrm{index},\quad j\gets e,\quad c\gets0\)
+      \While{\(j\geq0\land c<n\)}
+        \State \(g\gets
+          \begin{cases}L,&\operatorname{Run}_L(j,c)\\
+          1,&\text{otherwise}\end{cases}\)
+        \State \((V_{0,c+u},t_{j-u})\gets(j-u,1)\) for \(0\leq u<g\),
+          then \((j,c)\gets(p_{j-g+1},c+g)\)
+      \EndWhile
+      \State \textbf{abort this call if } \(j\geq0\)
+      \State \textbf{if } \(f_e\geq S\land c\geq K\) \textbf{ then append }
+        \((f_e,c,|A|)\) to \(C\) and
+        \((a_{V_{0,c-1}},\ldots,a_{V_{0,0}})\) to \(A\)
+      \State \(k\gets k-1\)
+    \EndIf
+    \While{\(k\geq0\)}
+      \State \(q\gets\min(L,k+1),\quad
+        \mathbf e\gets(e_0,\ldots,e_{q-1}),\quad
+        e_\lambda\gets Z_{k-\lambda}.\mathrm{index}\)
+      \State \textbf{if } \((S>0\lor K>0)\land
+        \bigwedge_{\lambda=0}^{q-1}t_{e_\lambda}=1\) \textbf{ then }
+        \(k\gets k-q\) and \textbf{continue}
+      \State \((\boldsymbol\ell,\mathbf b)\gets
+        \Call{ChooseCutsSIMD}{\mathbf e,p,t,V,n}\)
+      \For{\(\lambda\gets0\) \textbf{to} \(q-1\)}
+        \State \(c\gets0,\quad o\gets0\)
+        \While{\(o<\ell_\lambda\)}
+          \State \(g\gets\min(L,\ell_\lambda-o),\quad
+            r\gets\operatorname{FirstMarked}(t,V_\lambda,o,g)\)
+          \State \(t_{V_{\lambda,o+u}}\gets1\) for \(0\leq u<r\), and
+            \(c\gets c+r\)
+          \State \textbf{if } \(r<g\) \textbf{ then }
+            \(b_\lambda\gets V_{\lambda,o+r}\) and \textbf{break},
+            \textbf{ otherwise } \(o\gets o+g\)
+        \EndWhile
+        \State \(s\gets
+          \begin{cases}f_{e_\lambda},&b_\lambda<0\\
+          f_{e_\lambda}-f_{b_\lambda},&b_\lambda\geq0\end{cases}\)
+        \State \textbf{if } \(s\geq S\land c\geq K\) \textbf{ then append }
+          \((s,c,|A|)\) to \(C\) and
+          \((a_{V_{\lambda,c-1}},\ldots,a_{V_{\lambda,0}})\) to \(A\)
+      \EndFor
+      \State \(k\gets k-q\)
+    \EndWhile
+    \State \Return \((C,A)\)
+  \EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+Collection does not modify \(t\).  This lets several lanes collect a shared
+suffix before any of them claims it.  The mark-and-copy step then handles rows
+with larger \((f_e,e)\) first.  It loads successive entries from one row into
+horizontal SIMD lanes, finds the first entry with \(t=1\), and permanently
+marks only the prefix before that entry.  The stop \(b_\lambda\) can therefore
+change from the stop found during collection to an anchor just marked by an
+earlier row in the same batch.
+
+If \(b_\lambda<0\), the row score is \(f_{e_\lambda}\).  Otherwise it is
+\(f_{e_\lambda}-f_{b_\lambda}\).  The boundary is excluded.  Only the newly
+marked prefix contributes to the count and to \(A\).  The output records stay
+in decreasing \((f_e,e)\) order, while anchors inside each record are copied
+in forward path order.  The backtracker does not apply
+\texttt{max\_drop}, does not repeat a count pass, and does not sort complete
+chains by coordinate.
+
+Two checks handle already marked ends and predecessor cycles.  If every start
+in a later batch is already marked and \(S>0\) or \(K>0\), the code skips the
+empty rows immediately.  When \(S=K=0\), this shortcut is disabled, and an
+already-marked end can produce a score-zero record with zero anchors.  If an
+unmarked path is still active after \(n\) links, the whole backtracking call
+reports a predecessor cycle before that batch marks or copies anchors.  Exact
+SIMD B1 and bounded SIMD B1 both call this same backtracking function.  Their
+difference lies in how the forward pass produces \(f\) and \(p\), not in the
+recovery step above.
 
 \subsection{BioseqDB SIMD performance comparison}
 
