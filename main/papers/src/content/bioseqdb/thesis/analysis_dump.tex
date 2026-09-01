@@ -1,0 +1,761 @@
+
+\section{Chaining theoretical analysis}
+\label{sec:chaining-analysis-two}
+
+We outlined the minimap2 algorithms for chaining, defined scores formally, but I would like to spend additional time on more formal analysis of chain properties.
+There is extensive literature on analysis of theoritcal and practical aligners performance, however I wanted to focus on exact minimap2 scoring and chaining model. It also serves as an additional resource for understanding pipeline steps presented so far.
+
+\paragraph{Point substitutions.}
+Set \(h=k+w-1\). A span of \(h\) bases contains one complete window of \(w\)
+candidate \(k\)-mers. For this bound, assume minimap2 uses
+non-homopolymer-compressed (non-HPC) minimizers and odd \(k\). Let's suppose aligned
+bases are changed independently with some 
+probability \(\varepsilon\), with no insertions or deletions. A changed base is
+replaced by one of the other three bases. Assume the fragment lies in an
+ambiguity-free record, so a stored window minimum eventually leaves the
+rolling window or is emitted at the end of the record. An unchanged span of
+\(h\) bases gives both sequences the same complete minimizer window. Let
+\(A_L^{\mathrm{raw}}\) count shared minimizers before occurrence filtering and
+masking of low-complexity sequence. Partitioning a homologous fragment of length \(L\)
+into disjoint spans gives
+\begin{equation}
+  \Pr\!\left(A_L^{\mathrm{raw}}=0\right)
+  \leq
+  \left[1-(1-\varepsilon)^h\right]^{\lfloor L/h\rfloor}.
+  \label{eq:chaining-no-anchor-substitution-bound}
+\end{equation}
+This bound does not treat overlapping minimizers as independent. The
+probability of observing no raw anchor decreases exponentially with
+\(\lfloor L/h\rfloor\) under this substitution model. Extending the bound to
+retained anchors requires a condition that ensures the shared minimizer passes
+the occurrence filters.
+
+\paragraph{Average-case anchor population.}
+Equation~\ref{eq:chaining-no-anchor-substitution-bound} concerns one fixed
+fragment. Shaw and Yu study the number of anchors in a random reference-query
+pair~\cite{shaw_yu_seed_chain_extend_2023}. Their reference contains
+\(n_R\) possible \(k\)-mer starts and is sampled uniformly and independently
+over the DNA alphabet. The query contains \(n_Q\leq n_R\) possible starts and
+is copied from a homologous reference substring. Each query base is then
+substituted independently with probability \(0\leq\varepsilon<1\). A
+substitution changes the base to one of the other three bases. The model has
+no insertions or deletions.
+
+Let \(N_{\mathrm{hom}}\) count exact \(k\)-mer matches at homologous starts and
+let \(N_{\mathrm{off}}\) count matches between all other pairs of starts. Set
+\begin{equation}
+  \begin{aligned}
+    q_k&=(1-\varepsilon)^k,
+    &s_k&=4^{-k},\\
+    \mathbb E[N_{\mathrm{hom}}]&=n_Qq_k,
+    &\mathbb E[N_{\mathrm{off}}]&=n_Q(n_R-1)s_k.
+  \end{aligned}
+  \label{eq:chaining-average-anchor-counts}
+\end{equation}
+The second line is Theorem~4 of Shaw and Yu for one forward
+orientation~\cite{shaw_yu_seed_chain_extend_2023}.
+The first term counts surviving homologous \(k\)-mers. The second term counts
+accidental exact matches away from the homologous coordinate. These
+expectations count all exact \(k\)-mer-match pairs before minimizer selection,
+masking, and occurrence filtering.
+
+Overlapping \(k\)-mers make neighbouring anchor indicators dependent. Set
+\(N=N_{\mathrm{hom}}+N_{\mathrm{off}}\) and
+\(\bar\mu=n_Qq_k+n_Qn_Rs_k\). Then
+\(\mathbb E[N]\leq\bar\mu\). Combining the three bounds in Lemma~3 and using
+\(n_R-1\leq n_R\) gives~\cite{shaw_yu_seed_chain_extend_2023}
+\begin{equation}
+  \mathbb E[N^2]\leq B_k,
+  \qquad
+  B_k=\bar\mu^2+2kn_Qq_k+8k(k+1)n_Qn_Rs_k.
+  \label{eq:chaining-average-anchor-second-moment}
+\end{equation}
+This bound retains the dependence between overlapping anchors.
+
+The same model also bounds long intervals without a homologous exact
+\(k\)-mer anchor. Set \(k=C\log_4n_R\), with \(C>0\), for input sizes where
+\(k\) is an integer, and let \(\xi=-\log_4(1-\varepsilon)\). If
+\(G_{\max}\) is the longest run of homologous \(k\)-mer starts without an
+anchor, Lemma~6 gives~\cite{shaw_yu_seed_chain_extend_2023}
+\begin{equation}
+  \begin{aligned}
+    g(n_R)&=\frac{50C}{8}\,
+      \log_4 n_R\,\ln n_R\,n_R^{C\xi},\\
+    \Pr\!\left(G_{\max}\leq g(n_R)\right)&\geq1-\frac{1}{n_R}.
+  \end{aligned}
+  \label{eq:chaining-average-largest-gap}
+\end{equation}
+The corresponding base interval is at most \(g(n_R)+k-1\) bases long.
+
+For the chaining and asymptotic-work conclusions below, impose the scaling
+assumptions \(0\leq\xi<1\),
+\(n_Q=\Omega(n_R^{2C\xi+\tau})\) for some \(\tau>0\), and
+\(C>1/(1-\xi)\). These assumptions require \(2C\xi+\tau\leq1\) to remain
+compatible with \(n_Q\leq n_R\).
+
+\paragraph{Consequences for minimap2 work.}
+Let \(M\) be the total number of retained anchors passed to one minimap2
+non-RMQ \texttt{mg\_lchain\_dp} call, including both canonical orientation
+channels. Write
+\(\mu_{\mathrm{mm}}=\mathbb E[M]\),
+\(\nu_{\mathrm{mm}}=\mathbb E[M^2]\), and
+\(I=\texttt{max\_iter}\geq0\). Inspection of the minimap2 loops and then
+taking expectations gives the following bounds for
+Algorithms~\ref{alg:chaining-b1} and~\ref{alg:chaining-minimap2-backtrack}:
+\begin{align}
+  W_{\mathrm{B1}}
+    &=O\!\left(M\bigl(1+\min\{I,M\}\bigr)\right),
+  &W_{\mathrm{bt}}&=O(M^2),\notag\\[-2pt]
+  \mathbb E[W_{\mathrm{B1}}]
+    &=O\!\left((I+1)\mu_{\mathrm{mm}}\right),
+  &\mathbb E[W_{\mathrm{bt}}]&=O(\nu_{\mathrm{mm}}).
+  \label{eq:chaining-minimap2-work-by-anchor-count}
+\end{align}
+For fixed \(I\), expected forward work is \(O(\mu_{\mathrm{mm}})\), and
+expected scalar backtracking is \(O(\nu_{\mathrm{mm}})\). No independence
+assumption is needed for either statement.
+
+The Shaw-Yu moment bounds apply to one part of \(M\). Let \(M_+\) count
+retained non-HPC minimizer anchors in the forward channel, where the reference
+and query canonical strand bits agree. With collision-free hashing, equal keys
+in this channel imply equal original \(k\)-mers, so \(M_+\leq N\) on every
+input. Minimizer selection, masking, and the occurrence threshold used by
+either collection pass can only remove pairs from the exact-match set counted
+by \(N\). Equations~\ref{eq:chaining-average-anchor-counts}
+and~\ref{eq:chaining-average-anchor-second-moment} therefore give
+\begin{equation}
+  \mathbb E[M_+]\leq\bar\mu,
+  \qquad
+  \mathbb E[M_+^2]\leq B_k.
+  \label{eq:chaining-average-minimap2-oriented-moments}
+\end{equation}
+Under these scaling assumptions,
+\(\mathbb E[M_+]=O(n_Qn_R^{-C\xi})\) and
+\(\mathbb E[M_+^2]=O(n_Q^2n_R^{-2C\xi})\).
+Minimap2 also passes opposite-orientation anchors to
+\texttt{mg\_lchain\_dp}. Shaw and Yu do not bound the first and second moments
+of that channel or its cross moment with \(M_+\). Thus, the \(M_+\) bounds in
+Equation~\ref{eq:chaining-average-minimap2-oriented-moments} do not bound
+\(\mu_{\mathrm{mm}}\) or \(\nu_{\mathrm{mm}}\).
+
+For comparison, Shaw and Yu analyse an exact optimal linear-gap chainer with
+per-instance time \(O(N\log N)\). Under those scaling assumptions, their
+Theorem~6~\cite{shaw_yu_seed_chain_extend_2023} proves
+\(\mathbb E[N\log N]=O(n_Qn_R^{-C\xi}\log n_Q)\). This
+upper-bounds the expected time of their chainer. It does not give the expected
+running time of minimap2's B1 score or its backtracking procedure.
+
+The transfer to \(M_+\) uses only Shaw and Yu's all-\(k\)-mer moment bounds.
+Their sketch-specific proof does not cover
+minimizers~\cite{shaw_yu_seed_chain_extend_2023}, and their optimal linear-gap
+chainer differs from minimap2's score and bounded predecessor search. The
+random model omits indels and structured genomic repeats. It also omits
+occurrence caps and the fixed \(k\) used by minimap2 in practice. The
+dense-filler construction below shows that scalar backtracking can still take
+time quadratic in the number of retained anchors.
+
+\paragraph{Dense fillers with no shared values.}
+Let \(U\) and \(V\) be independent uniform DNA fillers. They contain
+\(N_U=|U|-k+1\) and \(N_V=|V|-k+1\) candidate \(k\)-mers. For two independent
+canonical \(k\)-mers, the equality probability is
+\begin{equation}
+  p_k=
+  \begin{cases}
+    2\,4^{-k}, & k\text{ odd},\\[2pt]
+    2\,4^{-k}-4^{-3k/2}, & k\text{ even}.
+  \end{cases}
+  \label{eq:chaining-canonical-collision-probability}
+\end{equation}
+Let \(A^{\mathrm{raw}}(U,V)\) be the number of raw anchor pairs between the two
+fillers. For \(k=15\), minimap2's masked \texttt{hash64} is injective on the
+30-bit canonical encodings. Every raw minimizer anchor must therefore come
+from equal canonical \(k\)-mers. A union bound over all candidate pairs gives
+\begin{equation}
+  \Pr\!\left(A^{\mathrm{raw}}(U,V)>0\right)\leq N_UN_Vp_k.
+  \label{eq:chaining-unrelated-filler-bound}
+\end{equation}
+If \(N_UN_Vp_k\leq\eta\), the fillers have no shared value with probability at
+least \(1-\eta\). For the default non-HPC odd \(k=15\), start with a clean
+rolling buffer and follow the filler with \(w\) ambiguous bases. After
+excluding the final \(w\) candidate starts, filler \(U\) emits at least
+\(\max\{0,\lfloor(N_U-w)/w\rfloor\}\) selected positions. The same bound
+holds for \(V\).
+Equation~\ref{eq:chaining-unrelated-filler-bound} uses every candidate pair, so
+it does not require independent minimizer choices. Occurrence filtering can
+only remove anchors from this count.
+
+Put at least \(w\) ambiguous bases between consecutive fragments. Minimap2 restarts
+\(k\)-mer formation at the boundary, and the \(w\) invalid entries also clear
+its rolling minimizer buffer. No \(k\)-mer crosses the boundary. The restart
+affects \(O(k+w)\) bases, which is constant for fixed \(k\) and \(w\).
+
+\paragraph{One emitted value per conserved block.}
+To discard the final minimum without emitting it, append at least \(w\) ambiguous bases
+to each conserved block. The following construction applies to the default
+non-HPC parameters \(k=15\) and \(w=10\). Let \(s\) be an 11-base word and let
+\(B(s)\) be the first 25 bases of the periodic sequence \(ssss\cdots\). Its
+eleven candidate 15-mers are \(q_0,\ldots,q_{10}\).
+
+Choose \(G\) independent uniform 11-base words. Within one block, two
+different forward candidates are equal with probability \(4^{-10}\). A
+candidate cannot equal the reverse complement of another candidate. On an
+odd cycle, such an alignment would pair one base with its own complement.
+Across two independently chosen blocks, a pair of canonical candidates is
+equal with probability at most \(2\,4^{-11}\). A union bound gives
+\begin{equation}
+  \Pr(\mathcal E_D)\geq
+  1-G\binom{11}{2}4^{-10}
+  -G(G-1)11^2 4^{-11},
+  \label{eq:chaining-conserved-block-existence}
+\end{equation}
+where \(\mathcal E_D\) says that all \(11G\) canonical candidates are
+different. The right side is positive for \(G\leq185\). A suitable fixed set
+of blocks therefore exists.
+
+For each chosen block, rotate \(s\) until its smallest hash is \(q_{10}\).
+Let \(u\) be the smallest hash among \(q_0,\ldots,q_9\), and let
+\(v=q_{10}\). All hashes are different under \(\mathcal E_D\), so \(v<u\).
+The first complete window has the unique minimum \(u\). Candidate \(v\) then
+causes \texttt{mm\_sketch} to emit \(u\) and to store \(v\) as the new
+minimum. The next ten ambiguous bases overwrite the buffer after
+the valid-run length has been reset to zero. They discard \(v\) without
+emitting it, so the block emits
+exactly \(u\). Append the separator to the final block as well, which prevents
+the end-of-sequence step from emitting \(v\).
+
+Corresponding reference and query copies of a block emit the same value with
+the same canonical orientation. Values from different blocks are distinct.
+Each value occurs once in the target and passes an occurrence filter that
+retains singleton values, including the default \texttt{map-ont} filter. This
+assumes that the constructed target is the complete indexed target. With a
+background reference, the same values must also be absent from that reference.
+
+\paragraph{Long padding with no anchors.}
+The score-reducing path needs long coordinate gaps. If every gap base were
+sampled independently, the union-bound error term would grow with total gap
+length. Use periodic padding with \(r=k+1\). Choose one target period and one
+query period of length \(r\). Repeating a period to any length uses at most \(r\) canonical
+\(k\)-mer values. The periods can be chosen so that their value sets are
+disjoint from each other and from the conserved values in the opposite
+sequence. For independently sampled periods, a union bound gives
+\begin{equation}
+  \Pr(\mathcal E_P)\geq
+  1-\bar p_k\left(r^2+2rG\right),
+  \label{eq:chaining-periodic-padding-existence}
+\end{equation}
+Here, \(\mathcal E_P\) is the event that the target and query period value
+sets are disjoint from each other and from conserved values in the opposite
+sequence. Also, \(\bar p_k=2\,4^{-k}\). This bound is positive for \(k=15\),
+\(r=16\), and \(G\leq185\), so a fixed pair of periods exists. Long fragments
+made from these periods contain selected minimizers but create no target-query
+anchors. They provide the large coordinate gaps in the prefix and the
+score-reducing path.
+Periodic padding serves only to construct a finite worst-case instance. It
+does not model an independent random genome or the probability of observing
+this construction in biological data.
+
+After fixing the conserved blocks and periodic padding, sample every random
+filler independently. Let
+\(N_T^\circ,N_Q^\circ\) count candidate starts wholly inside the random
+target and query fillers. Let \(D_T,D_Q\) count the distinct fixed values
+that can be emitted by the conserved blocks and periodic padding. A union
+bound over every
+target-query candidate pair in the chaining group gives
+\begin{equation}
+\begin{aligned}
+  \Pr(\mathcal E_F)\geq 1
+  &-p_kN_T^\circ N_Q^\circ\\
+  &-\bar p_k\!\left(N_T^\circ D_Q+D_TN_Q^\circ\right),
+\end{aligned}
+\label{eq:chaining-complete-filler-event}
+\end{equation}
+where \(\mathcal E_F\) means that no random filler value creates an unintended
+anchor. The distinctness conditions exclude every fixed-value anchor except
+the constructed anchor pairs. This model covers all candidate pairs in the chaining group, including pairs that
+would later fail a geometric test.
+Choose fixed blocks and periods that satisfy \(\mathcal E_D\) and
+\(\mathcal E_P\) before sampling the fillers. If the right side of
+Equation~\ref{eq:chaining-complete-filler-event} is positive, at least one
+complete filler realization has only the intended anchors.
+
+For a concrete finite check, take \(\ell=3\) and three backbone groups. Use
+four random fillers per group, each with 20 candidate starts, and use the fixed
+periodic padding for every longer gap. Then
+\(N_T^\circ,N_Q^\circ\leq240\), \(G\leq77\), and
+\(D_T,D_Q\leq93\). With \(k=15\),
+Equation~\ref{eq:chaining-complete-filler-event} gives
+\(\Pr(\mathcal E_F)>0.9998\).
+For the same values, Equations~\ref{eq:chaining-conserved-block-existence}
+and~\ref{eq:chaining-periodic-padding-existence} give lower bounds greater
+than \(0.8271\) and \(0.99999\). Sampling blocks, periods, and short fillers in
+that order gives a joint lower bound greater than \(0.8269\) for this finite
+construction.
+\coderef{minimap2/sketch.c}{Minimap2 minimizer sketch}{mm_sketch}{77}
+
+Figure~\ref{fig:chaining-quadratic-sequence-template} shows the resulting
+reference and query layout.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  x=1cm,
+  y=1cm,
+  font=\footnotesize,
+  sequence block/.style={
+    draw=black!65,
+    rounded corners=1.3pt,
+    minimum height=.46cm,
+    inner xsep=4pt,
+    inner ysep=1.5pt
+  },
+  sequence prefix/.style={
+    sequence block,
+    draw=chainGreen!80!black,
+    fill=chainGreen!14
+  },
+  sequence backbone/.style={
+    sequence block,
+    draw=chainBlue!90!black,
+    fill=chainBlue!15
+  },
+  sequence branch/.style={
+    sequence block,
+    draw=chainOrange!95!black,
+    fill=chainOrange!17
+  },
+  sequence filler/.style={
+    sequence block,
+    draw=chainGray!85!black,
+    fill=chainGray!12,
+    text=black!72
+  },
+  sequence anchor/.style={line width=1.25pt},
+  minimizer tick/.style={draw=black!48,line width=.55pt}
+]
+  \node[anchor=east,font=\bfseries] at (.42,4.45) {reference};
+  \node[anchor=east,font=\bfseries] at (.42,2.85) {query};
+  \draw[black!40] (.55,4.45)--(13.10,4.45);
+  \draw[black!40] (.55,2.85)--(13.10,2.85);
+
+  \node[sequence prefix,minimum width=.88cm] (tp) at (1.05,4.45) {$P$};
+  \node[sequence prefix,minimum width=1.20cm,font=\scriptsize]
+    (tg) at (2.22,4.45) {$G_t:\alpha^*$};
+  \node[sequence backbone] (tcj) at (3.37,4.45) {$C_j$};
+  \node[sequence filler,minimum width=.78cm] (tuj) at (4.20,4.45) {$U_j$};
+  \node[sequence branch] (trj) at (5.02,4.45) {$R_j$};
+  \node[sequence filler,minimum width=.72cm] (tujb) at (5.83,4.45) {$U'_j$};
+  \node[sequence backbone] (tcjp) at (6.72,4.45) {$C_{j+1}$};
+  \node[sequence filler,minimum width=.72cm] (tujp) at (7.64,4.45) {$U_{j+1}$};
+  \node[sequence branch] (trjp) at (8.48,4.45) {$R_{j+1}$};
+  \node[sequence filler,minimum width=.70cm] at (9.30,4.45) {$U'_{j+1}$};
+  \node[text=black!55] at (10.07,4.45) {$\cdots$};
+  \node[sequence backbone] (tcm) at (10.86,4.45) {$C_m$};
+  \node[sequence filler,minimum width=.68cm] at (11.67,4.45) {$U_m$};
+  \node[sequence branch] (trm) at (12.48,4.45) {$R_m$};
+
+  \node[sequence prefix,minimum width=.88cm] (qp) at (1.05,2.85) {$P$};
+  \node[sequence prefix,minimum width=1.12cm,font=\scriptsize]
+    (qg) at (2.12,2.85) {$G_q:\beta^*$};
+  \node[sequence backbone] (qcj) at (3.23,2.85) {$C_j$};
+  \node[sequence filler,minimum width=.62cm] (qvj) at (3.93,2.85) {$V_j$};
+  \node[sequence branch] (qrj) at (4.65,2.85) {$R_j$};
+  \node[sequence filler,minimum width=1.02cm] (qvjb) at (5.65,2.85) {$V'_j$};
+  \node[sequence backbone] (qcjp) at (6.84,2.85) {$C_{j+1}$};
+  \node[sequence filler,minimum width=.86cm] (qvjp) at (7.83,2.85) {$V_{j+1}$};
+  \node[sequence branch] (qrjp) at (8.87,2.85) {$R_{j+1}$};
+  \node[sequence filler,minimum width=.66cm] at (9.72,2.85) {$V'_{j+1}$};
+  \node[text=black!55] at (10.35,2.85) {$\cdots$};
+  \node[sequence backbone] (qcm) at (11.05,2.85) {$C_m$};
+  \node[sequence filler,minimum width=.62cm] at (11.82,2.85) {$V_m$};
+  \node[sequence branch] (qrm) at (12.75,2.85) {$R_m$};
+
+  \draw[sequence anchor,chainGreen!80!black] (tp.south)--(qp.north);
+  \draw[sequence anchor,chainGreen!80!black] (tg.south)--(qg.north);
+  \draw[sequence anchor,chainBlue!90!black] (tcj.south)--(qcj.north);
+  \draw[sequence anchor,chainOrange!95!black] (trj.south)--(qrj.north);
+  \draw[sequence anchor,chainBlue!90!black] (tcjp.south)--(qcjp.north);
+  \draw[sequence anchor,chainOrange!95!black] (trjp.south)--(qrjp.north);
+  \draw[sequence anchor,chainBlue!90!black] (tcm.south)--(qcm.north);
+  \draw[sequence anchor,chainOrange!95!black] (trm.south)--(qrm.north);
+
+  \foreach \x in {3.96,4.15,4.34,5.64,5.83,6.02,7.45,7.64,7.83,
+                    9.12,9.30,9.48,11.52,11.67,11.82}
+    \draw[minimizer tick] (\x,4.72)--(\x,4.90);
+  \foreach \x in {3.78,3.93,4.08,5.30,5.55,5.80,6.05,7.60,7.83,8.06,
+                    9.57,9.72,9.87,11.70,11.82,11.94}
+    \draw[minimizer tick] (\x,3.12)--(\x,3.30);
+
+  \draw[chainBlue!90!black,line width=1.2pt] (.72,1.92)--(1.18,1.92);
+  \node[anchor=west,font=\scriptsize] at (1.27,1.92)
+    {identical backbone block};
+  \draw[chainOrange!95!black,line width=1.2pt] (4.75,1.92)--(5.21,1.92);
+  \node[anchor=west,font=\scriptsize] at (5.30,1.92)
+    {branch \(R_j\): \(\ell+1\) conserved blocks};
+  \draw[minimizer tick] (9.05,1.26)--(9.05,1.64);
+  \node[anchor=west,font=\scriptsize] at (9.20,1.45)
+    {selected filler minimizer};
+\end{tikzpicture}
+\caption{Finite reference and query sequences that produce the retained
+anchors used in the lower bound. \(P\) summarizes the high-scoring prefix.
+\(G_t\) and \(G_q\) summarize the target and query paths that reduce the score
+to \(F_C\). Their padding repeats fixed words \(\alpha\) and \(\beta\) whose
+canonical \(k\)-mer sets are disjoint. Each target-query pair labeled \(C_j\)
+produces backbone anchor \(c_j\). Each target-query pair labeled \(R_j\)
+produces branch anchors
+\(x_{j,0},\ldots,x_{j,\ell}=e_j\). Gray ticks mark filler minimizers, and
+colored connectors mark retained anchors. Each small gap contains at least
+\(w\) ambiguous bases. Unequal filler lengths change the diagonal between
+consecutive conserved blocks.}
+\label{fig:chaining-quadratic-sequence-template}
+\end{figure}
+
+Each \(C_j\) block supplies one retained anchor \(c_j\). Region \(R_j\)
+contains \(\ell+1\) conserved blocks \(R_{j,0},\ldots,R_{j,\ell}\).
+Equal-length target and query fillers separate consecutive blocks. These
+fillers contain minimizers but produce no anchors under \(\mathcal E_F\).
+The conserved blocks supply anchors
+\(x_{j,0},\ldots,x_{j,\ell}=e_j\) on one diagonal. Every conserved block in
+the backbone, branches, prefix, and score-reducing path uses a different
+retained value under \(\mathcal E_D\).
+Group \(j\) consists of backbone block \(C_j\), branch region \(R_j\), and
+their adjacent fillers.
+
+\paragraph{Symbolic score construction.}
+For the \texttt{map-ont} defaults, \(k=15\), the gap coefficient is
+\(0.008k=0.12\), and the distance coefficient is zero. Let
+\(g(j,i)=\min\{r_i-r_j,q_i-q_j\}\). When \(g(j,i)\geq k\), a diagonal
+change of \(x\) gives
+\begin{equation}
+  \Lambda(x)=k-
+  \left\lfloor
+    0.12x+\frac{1}{2}\operatorname{mglog}_{2}(x+1)
+  \right\rfloor.
+  \label{eq:chaining-map-ont-symbolic-link}
+\end{equation}
+Here, \(\operatorname{mglog}_{2}\) is minimap2's fast floating-point approximation to the
+base-two logarithm. The surrounding cast truncates the result to give an integer gap penalty.
+Let \(B=\texttt{bw}\), \(X=\texttt{max\_gap}\),
+\(D=\texttt{max\_drop}\), \(S=\texttt{min\_sc}\), and
+\(K=\texttt{min\_cnt}\). Scalar chaining sets \(D=B=500\) for these defaults.
+Choose positive diagonal changes \(d_1,d_2\) and a fixed branch length
+\(\ell\) such that
+\begin{equation}
+\begin{gathered}
+  d_1+d_2\leq B<d_1+2d_2,\qquad \Lambda(d_1)=0,\\
+  \Lambda(d_1+d_2)<\Lambda(d_2)<0,\\
+  0<\Lambda(d_2)+\ell k<-\Lambda(d_1+d_2).
+\end{gathered}
+\label{eq:chaining-quadratic-link-conditions}
+\end{equation}
+The default \texttt{map-ont} parameter values satisfy these conditions. For
+example,
+\(d_1=100\), \(d_2=250\), and \(\ell=3\) give link contributions
+\(0\), \(-18\), and \(-31\) for the three diagonal changes in
+Equation~\ref{eq:chaining-quadratic-link-conditions}. Taking \(F_C=39\)
+then gives \(F_X=21\) and \(F_E=66\), which satisfies the default
+\(S=40\) and \(K=3\) thresholds.
+
+For an anchor \(a\), let \(z(a)=r(a)-q(a)\), and let \(s_j=(-1)^j\). The
+blue backbone anchors \(c_j\) and the orange branch anchors
+\(x_{j,0},\ldots,x_{j,\ell}=e_j\) have
+\begin{equation}
+\begin{aligned}
+  z(c_{j+1}) &= z(c_j)-s_jd_1,\\
+  z(x_{j,t}) &= z(c_j)+s_jd_2
+  && (0\leq t\leq\ell).
+\end{aligned}
+\label{eq:chaining-quadratic-diagonals}
+\end{equation}
+Consecutive anchors inside one orange branch lie on the same diagonal. One
+conserved block and its separator occupy \(b_E=k+2w\) bases. A filler of
+\(b_F=k+2w-1\) valid bases followed by another \(w\)-base separator contains
+a complete window and emits at least one minimizer. The emitted value begins at one of positions
+\(0,\ldots,w-1\) in its block. Let \(h_0\) bound coordinate offsets within a
+group, let \(L\) be the spacing between backbone anchors, let \(T\) be the
+branch offset from \(c_j\), and let \(\tau\) be the spacing between branch
+anchors. Choose these values so that
+\[
+\begin{gathered}
+  d_1+2d_2<h_0,\qquad h_0+4d_1<X,\\
+  \tau\geq b_E+b_F+2w-1,\\
+  d_2+b_E+b_F+2w-1\leq T,\\
+  T+d_2+\ell\tau<h_0,\\
+  \frac{X+h_0}{2}+d_1<L<X-d_1.
+\end{gathered}
+\]
+If two emitted offsets differ, lengthen one separator by at most \(2(w-1)\)
+ambiguous bases to obtain the required coordinate difference. This does not
+change the random-filler counts.
+Choose the coordinates of \(c_1\) large enough that every constructed
+coordinate is nonnegative, and set
+\begin{equation}
+\begin{aligned}
+  r(c_{j+1}) &= r(c_j)+L,&
+  q(c_{j+1}) &= q(c_j)+L+s_jd_1,\\
+  r(x_{j,t}) &= r(c_j)+T+t\tau,&
+  q(x_{j,t}) &= q(c_j)+T-s_jd_2+t\tau.
+\end{aligned}
+\label{eq:chaining-quadratic-coordinate-witness}
+\end{equation}
+This places every branch before \(c_{j+1}\) in both coordinates and gives the
+diagonals in Equation~\ref{eq:chaining-quadratic-diagonals}. Both
+\(c_j\)-to-\(c_{j+1}\) advances are below \(X\). For every anchor in group
+\(j-2\) or earlier, the reference and query advances to group \(j\) exceed
+\(X\). Two consecutive orange branches differ by \(d_1+2d_2>B\). For the
+numerical example above, one valid coordinate choice is \(h_0=1000\),
+\(T=338\), \(\tau=88\), and \(L=4000\).
+
+Choose scores \(F_X,F_C,F_E,F_G\) with
+\begin{equation}
+\begin{gathered}
+  k<F_X=F_C+\Lambda(d_2)<F_C<S,\\
+  S\leq F_E=F_X+\ell k,\qquad
+  \ell\geq K,\qquad \ell k\geq S,\\
+  \ell\leq\texttt{max\_skip},\qquad
+  \ell+2\leq\texttt{max\_iter},\\
+  F_G-F_X>D.
+\end{gathered}
+\label{eq:chaining-quadratic-score-conditions}
+\end{equation}
+A prefix of 35 anchors on one diagonal has scores
+\(15,30,\ldots,525\), so set \(F_G=525\). Follow it with 27 links whose
+diagonal difference is \(d_2=250\). Each link contributes \(-18\), so these
+scores decrease to \(39=F_C\). Give every connecting-path link reference and
+query advances greater than \(X/2\) and at most \(X\). An anchor two links back
+is then outside the distance limit. Every connecting-path score is at least
+\(F_C\), and
+\[
+  F_G-F_X=525-21=504>D=500.
+\]
+
+The first score-reducing anchor can inspect several anchors in the high-scoring
+prefix. The final prefix anchor \(h^\star\) has the largest prefix score, and
+all of these candidates have the same diagonal penalty. Therefore
+\(h^\star\) is its predecessor. For later score-reducing links, the
+greater-than-\(X/2\) advances exclude every candidate except the immediate
+predecessor.
+
+The prefix end \(h^\star\) is the first backtracking candidate and marks the
+high-scoring prefix. A score-reducing anchor with score at least \(S\) can also
+enter the candidate list before an anchor \(e_j\). All of its predecessors on
+that path have larger scores. Its cut search therefore returns that
+score-reducing anchor, and
+the permanent loop marks no score-reducing anchor. The path remains available
+to every later branch search.
+
+The forward pass makes the choices shown in
+Figure~\ref{fig:chaining-quadratic-anchor-family}. For \(x_{j,0}\), candidate
+\(c_j\) gives
+\[
+  F_C+\Lambda(d_2)=F_X>k.
+\]
+If \(c_{j-1}\) is inside the distance limit, it gives
+\[
+  F_C+\Lambda(d_1+d_2)<F_X.
+\]
+Every anchor in the preceding orange branch is outside the bandwidth because
+its diagonal difference is \(d_1+2d_2>B\). Anchors from older groups are
+outside the distance limit. Thus \(p(x_{j,0})=c_j\).
+
+For \(t>0\), the immediate orange predecessor gives \(F_X+tk\). Every earlier
+anchor in that branch has a lower score. Candidates outside the branch are
+bounded as above, so each later branch anchor chooses its immediate
+predecessor.
+
+For \(c_{j+1}\), candidate \(c_j\) gives \(F_C\). The highest-scoring candidate
+in the current orange branch is \(e_j\), which gives
+\[
+  F_E+\Lambda(d_1+d_2)<F_C.
+\]
+Every candidate in group \(j-1\) or earlier is outside the distance limit. The
+scan reaches \(c_j\)
+because \(\ell\leq\texttt{max\_skip}\) and
+\(\ell+2\leq\texttt{max\_iter}\). Therefore \(p(c_{j+1})=c_j\), and every
+backbone score remains \(F_C\).
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  x=1cm,
+  y=1cm,
+  font=\footnotesize,
+  proof anchor/.style={
+    circle,
+    draw=black!70,
+    fill=white,
+    minimum size=.46cm,
+    inner sep=0pt
+  },
+  proof backbone/.style={
+    proof anchor,
+    draw=chainBlue!90!black,
+    fill=chainBlue!16
+  },
+  proof branch/.style={
+    proof anchor,
+    draw=chainOrange!95!black,
+    fill=chainOrange!18
+  },
+  proof prefix/.style={
+    proof anchor,
+    draw=chainGreen!80!black,
+    fill=chainGreen!15
+  },
+  predecessor/.style={-{Latex[length=1.7mm]},thick,draw=black!68},
+  proof note/.style={
+    draw=chainGray!75!black,
+    fill=chainGray!8,
+    rounded corners=2pt,
+    align=center,
+    inner sep=3pt
+  }
+]
+  \node[anchor=west,font=\bfseries] at (.35,5.35)
+    {(a) Predecessors produced by forward chaining};
+
+  \node[proof prefix] (hp) at (.85,3.20) {$h^\star$};
+  \node[proof anchor] (h2) at (1.62,3.20) {};
+  \node[proof anchor] (h1) at (2.34,3.20) {};
+  \node[proof backbone] (c1) at (3.25,3.20) {$c_1$};
+  \node[proof backbone] (c2) at (4.65,3.20) {$c_2$};
+  \node[text=black!55] at (5.62,3.20) {$\cdots$};
+  \node[proof backbone] (cj) at (6.65,3.20) {$c_j$};
+  \node[text=black!55] at (7.72,3.20) {$\cdots$};
+  \node[proof backbone] (cm) at (8.78,3.20) {$c_m$};
+
+  \draw[predecessor] (h1)--(h2);
+  \draw[predecessor] (h2)--(hp);
+  \draw[predecessor] (c1)--(h1);
+  \draw[predecessor,draw=chainBlue!85!black] (c2)--(c1);
+  \draw[predecessor,draw=chainBlue!85!black] (cj)--(c2);
+  \draw[predecessor,draw=chainBlue!85!black] (cm)--(cj);
+
+  \foreach \base/\idx in {3.25/1,4.65/2,6.65/j,8.78/m} {
+    \node[proof branch] (x\idx) at (\base,4.02) {$x_{\idx,0}$};
+    \node[proof branch] (e\idx) at (\base,4.82) {$e_{\idx}$};
+    \draw[predecessor,dashed,draw=chainOrange!90!black] (e\idx)--(x\idx);
+    \node[fill=white,inner sep=.5pt] at (\base,4.42) {$\vdots$};
+  }
+  \draw[predecessor,draw=chainOrange!90!black] (x1)--(c1);
+  \draw[predecessor,draw=chainOrange!90!black] (x2)--(c2);
+  \draw[predecessor,draw=chainOrange!90!black] (xj)--(cj);
+  \draw[predecessor,draw=chainOrange!90!black] (xm)--(cm);
+
+  \node[anchor=south,text=chainGreen!60!black] at (hp.north) {$F_G$};
+  \node[anchor=north,text=chainBlue!80!black] at (cj.south) {$F_C$};
+  \node[anchor=west,text=chainOrange!90!black] at (xj.east) {$F_X$};
+  \node[anchor=west,text=chainOrange!90!black] at (ej.east) {$F_E$};
+
+  \draw[decorate,decoration={brace,amplitude=4pt},chainOrange!90!black]
+    (9.25,4.00)--(9.25,4.84)
+    node[midway,right=4pt,text=black!75]
+      {$\ell$ marked anchors};
+  \node[proof note] at (11.45,3.48)
+    {$\operatorname{ChooseCut}(e_j)=x_{j,0}$\\
+     $c_j,\ldots,c_1$ are cleared};
+
+  \draw[black!18] (.35,2.45)--(12.85,2.45);
+  \node[anchor=west,font=\bfseries] at (.35,2.08)
+    {(b) Predecessor links revisited by searches from \(e_j\)};
+
+  \node[anchor=east,text=black!65] at (2.12,1.48) {$e_1$};
+  \node[anchor=east,text=black!65] at (2.12,.82) {$e_j$};
+  \node[anchor=east,text=black!65] at (2.12,.16) {$e_m$};
+  \node[font=\scriptsize,text=chainOrange!90!black] at (2.80,1.78)
+    {$\ell$ branch links};
+  \foreach \x in {2.55,3.05}
+    \fill[chainOrange!90!black] (\x,1.48) circle[radius=2.1pt];
+  \fill[chainBlue!85!black] (3.55,1.48) circle[radius=2.1pt];
+
+  \foreach \x in {2.55,3.05}
+    \fill[chainOrange!90!black] (\x,.82) circle[radius=2.1pt];
+  \foreach \x in {3.55,4.05,4.55,5.05,5.55}
+    \fill[chainBlue!85!black] (\x,.82) circle[radius=2.1pt];
+  \node[text=black!55] at (6.05,.82) {$\cdots$};
+  \fill[chainBlue!85!black] (6.55,.82) circle[radius=2.1pt];
+
+  \foreach \x in {2.55,3.05}
+    \fill[chainOrange!90!black] (\x,.16) circle[radius=2.1pt];
+  \foreach \x in {3.55,4.05,4.55,5.05,5.55,6.05,6.55,7.05,7.55}
+    \fill[chainBlue!85!black] (\x,.16) circle[radius=2.1pt];
+  \node[text=black!55] at (8.05,.16) {$\cdots$};
+  \fill[chainBlue!85!black] (8.55,.16) circle[radius=2.1pt];
+
+  \node[proof note,text width=3.55cm] at (10.82,.82) {
+    orange: links within one branch\\
+    blue: backbone links visited again
+  };
+\end{tikzpicture}
+\caption{Predecessor structure used in the lower bound. Arrows point from
+each anchor to its predecessor. Panel (a) shows the high-scoring prefix anchor
+\(h^\star\), backbone anchors \(c_j\), and branch anchors
+\(x_{j,0},\ldots,e_j\). A dashed orange segment abbreviates \(\ell\)
+predecessor links. Backtracking marks the \(\ell\) branch anchors after
+\(x_{j,0}\) and leaves \(x_{j,0}\) unmarked. Panel (b) shows that the search
+from \(e_j\) revisits the first \(j\) backbone anchors.}
+\label{fig:chaining-quadratic-anchor-family}
+\end{figure}
+
+For a search starting at \(e_j\), the predecessor walk is
+\[
+  e_j\to\cdots\to x_{j,0}\to c_j\to c_{j-1}\to\cdots\to c_1
+  \to\text{the fixed prefix path}.
+\]
+At \(x_{j,0}\), \textsc{ChooseCut} records the decrease
+\(F_E-F_X=\ell k\). Every backbone and connecting-path score is at least
+\(F_C>F_X\). No predecessor visited after \(x_{j,0}\) changes the recorded
+cut. When the walk reaches score
+\(F_G\), the decrease from the recorded maximum is
+\[
+  (F_E-F_X)-(F_E-F_G)=F_G-F_X>D.
+\]
+The walk stops and returns \(x_{j,0}\). The permanent pass marks exactly the
+\(\ell\) branch anchors after this cut. The temporary-mark cleanup inside
+\textsc{ChooseCut} clears the shared backbone, which allows every later branch
+search to visit it again. Anchors \(e_j\) with equal scores may be processed
+in either order, and \textsc{ChooseCut} still returns \(x_{j,0}\). If the
+high-scoring prefix has already been marked,
+the walk stops at that mark. The marked prefix score remains above \(F_X\), so
+the returned cut is unchanged.
+
+The candidate list contains every anchor whose score is at least \(S\). Some
+internal branch anchors can enter this list. Each has a lower score than
+\(e_j\). Processing \(e_j\) first marks every such internal candidate in its
+branch, so it is skipped later. The output from \(e_j\) contains exactly
+\(\ell\) anchors and has extracted score
+\[
+  F_E-F_X=\ell k.
+\]
+It is accepted because \(\ell\geq K\) and \(\ell k\geq S\). Branch \(j\)
+follows \(j+O(1)\) predecessor links.
+Consequently,
+\begin{equation}
+  \sum_{j=1}^{m}\bigl(j+O(1)\bigr)=\Theta(m^2),
+  \qquad
+  n=(\ell+2)m+O(1)=\Theta(m),
+  \label{eq:chaining-quadratic-retained-anchor-bound}
+\end{equation}
+and scalar backtracking takes \(\Theta(n^2)\) time in the worst case. Both
+scalar backtracking passes perform the same asymptotic number of predecessor
+link traversals, so the second pass changes only the constant factor.
+
+Equation~\ref{eq:chaining-conserved-block-existence} proves that enough fixed
+blocks exist for finite examples with at most 185 conserved blocks.
+Equation~\ref{eq:chaining-periodic-padding-existence} supplies long padding
+with selected minimizers and no anchors.
+Equation~\ref{eq:chaining-complete-filler-event} gives a probability bound for
+the remaining random fillers. Together, these equations establish the finite
+sequence template in Figure~\ref{fig:chaining-quadratic-sequence-template}.
+
+The asymptotic lower bound is deterministic. It depends on the retained
+anchors and the \(f\) and \(p\) arrays consumed by backtracking. This section
+does not claim an unbounded fixed-\(k\) FASTA family. Such a family would need
+more distinct retained \(k\)-mer values than the finite \(k\)-mer alphabet eventually
+provides. Allowing \(k\) to grow would also change the score function. The
+\(\Theta(n^2)\) result is therefore a worst-case theorem for the retained
+anchor, score, and predecessor arrays. Positive minimizer density does not
+prevent finite retained-anchor arrays that require quadratic backtracking.
+
+\coderef{minimap2/lchain.c}{Minimap2 chaining link score}{comput_sc}{113}
+\coderef{minimap2/lchain.c}{Minimap2 cut search}{mg_chain_bk_end}{9}
+\coderef{minimap2/lchain.c}{Minimap2 scalar backtracking}{mg_chain_backtrack}{27}
