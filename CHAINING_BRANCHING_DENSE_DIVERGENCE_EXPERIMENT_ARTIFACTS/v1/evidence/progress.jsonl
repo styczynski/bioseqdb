@@ -1,0 +1,494 @@
+{"event": "runner_start", "manifest_sha256": "ba60e4b6e82dd32547c854f6c3d90273050a519a777c327c2cce4d1829c8fbca", "minimap2_sha256": "6533837743e94e3ec22db01b874e75efbc8b2c6402f232cde0d5709924efd6c3", "pending_case_count": 246, "resource_policy": {"automatic_job_ceiling": 8, "cpu_count": 4, "estimated_memory_mib_per_job": 1024, "maximum_swap_used_mib_observed": 2615, "mem_available_mib_at_start": 10861, "minimum_free_memory_mib": 2048, "minimum_mem_available_mib_observed": 10861, "mode": "explicit", "requested": "2", "selected_jobs": 2, "swap_total_mib": 98303, "swap_used_mib_at_start": 2615}, "selected_case_count": 246, "timestamp_utc": "2026-09-02T16:35:57.532Z"}
+{"case_id": "mosaic_seed_01_d0", "event": "case_start", "timestamp_utc": "2026-09-02T16:35:57.537Z"}
+{"case_id": "mosaic_seed_01_d0p0025", "event": "case_start", "timestamp_utc": "2026-09-02T16:35:57.541Z"}
+{"case_id": "mosaic_seed_01_d0", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:00.440Z", "wall_seconds": 0.40244517498649657}
+{"case_id": "mosaic_seed_01_d0p005", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:00.450Z"}
+{"case_id": "mosaic_seed_01_d0p0025", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0025", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:00.467Z", "wall_seconds": 0.6043568500317633}
+{"case_id": "mosaic_seed_01_d0p0075", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:00.483Z"}
+{"case_id": "mosaic_seed_01_d0p0075", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0075", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:02.619Z", "wall_seconds": 0.4072646249551326}
+{"case_id": "mosaic_seed_01_d0p005", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p005", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:02.634Z", "wall_seconds": 0.4050237450283021}
+{"case_id": "mosaic_seed_01_d0p01", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:02.641Z"}
+{"case_id": "mosaic_seed_01_d0p0125", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:02.644Z"}
+{"case_id": "mosaic_seed_01_d0p0125", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0125", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:05.704Z", "wall_seconds": 0.4051091349683702}
+{"case_id": "mosaic_seed_01_d0p015", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:05.714Z"}
+{"case_id": "mosaic_seed_01_d0p01", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p01", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:05.734Z", "wall_seconds": 0.40293508279137313}
+{"case_id": "mosaic_seed_01_d0p0175", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:05.749Z"}
+{"case_id": "mosaic_seed_01_d0p015", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p015", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:07.958Z", "wall_seconds": 0.40453684609383345}
+{"case_id": "mosaic_seed_01_d0p02", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:07.967Z"}
+{"case_id": "mosaic_seed_01_d0p0175", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0175", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:07.989Z", "wall_seconds": 0.6187218909617513}
+{"case_id": "mosaic_seed_01_d0p0225", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:08.005Z"}
+{"case_id": "mosaic_seed_01_d0p02", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p02", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:10.651Z", "wall_seconds": 0.20115628791972995}
+{"case_id": "mosaic_seed_01_d0p025", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:10.679Z"}
+{"case_id": "mosaic_seed_01_d0p0225", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0225", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:10.885Z", "wall_seconds": 0.473896075040102}
+{"case_id": "mosaic_seed_01_d0p0275", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:10.896Z"}
+{"case_id": "mosaic_seed_01_d0p0275", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0275", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:13.185Z", "wall_seconds": 0.4629816971719265}
+{"case_id": "mosaic_seed_01_d0p03", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:13.194Z"}
+{"case_id": "mosaic_seed_01_d0p025", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p025", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:13.221Z", "wall_seconds": 0.4012283480260521}
+{"case_id": "mosaic_seed_01_d0p0325", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:13.234Z"}
+{"case_id": "mosaic_seed_01_d0p03", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p03", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:15.531Z", "wall_seconds": 0.40357951703481376}
+{"case_id": "mosaic_seed_01_d0p035", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:15.539Z"}
+{"case_id": "mosaic_seed_01_d0p0325", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0325", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:15.566Z", "wall_seconds": 0.6214465810917318}
+{"case_id": "mosaic_seed_01_d0p0375", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:15.584Z"}
+{"case_id": "mosaic_seed_01_d0p035", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p035", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:18.169Z", "wall_seconds": 0.4031673581339419}
+{"case_id": "mosaic_seed_01_d0p04", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:18.178Z"}
+{"case_id": "mosaic_seed_01_d0p0375", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0375", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:18.211Z", "wall_seconds": 0.40329956309869885}
+{"case_id": "mosaic_seed_01_d0p0425", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:18.221Z"}
+{"case_id": "mosaic_seed_01_d0p04", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p04", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:20.933Z", "wall_seconds": 0.40444483514875174}
+{"case_id": "mosaic_seed_01_d0p045", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:20.942Z"}
+{"case_id": "mosaic_seed_01_d0p0425", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0425", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:20.969Z", "wall_seconds": 0.8182629852090031}
+{"case_id": "mosaic_seed_01_d0p0475", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:20.978Z"}
+{"case_id": "mosaic_seed_01_d0p0475", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0475", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:23.814Z", "wall_seconds": 0.4094118301291019}
+{"case_id": "mosaic_seed_01_d0p05", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:23.837Z"}
+{"case_id": "mosaic_seed_01_d0p045", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p045", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:23.918Z", "wall_seconds": 0.4018919598311186}
+{"case_id": "mosaic_seed_01_d0p0525", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:23.934Z"}
+{"case_id": "mosaic_seed_01_d0p05", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p05", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:25.763Z", "wall_seconds": 0.6214723191224039}
+{"case_id": "mosaic_seed_01_d0p055", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:25.777Z"}
+{"case_id": "mosaic_seed_01_d0p0525", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0525", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:25.810Z", "wall_seconds": 0.4038517349399626}
+{"case_id": "mosaic_seed_01_d0p0575", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:25.820Z"}
+{"case_id": "mosaic_seed_01_d0p055", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p055", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:27.731Z", "wall_seconds": 0.40245278901420534}
+{"case_id": "mosaic_seed_01_d0p0575", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0575", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:27.758Z", "wall_seconds": 0.4110869038850069}
+{"case_id": "mosaic_seed_01_d0p06", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:27.767Z"}
+{"case_id": "mosaic_seed_01_d0p0625", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:27.771Z"}
+{"case_id": "mosaic_seed_01_d0p06", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p06", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:30.406Z", "wall_seconds": 0.20094812707975507}
+{"case_id": "mosaic_seed_01_d0p065", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:37.569Z"}
+{"case_id": "mosaic_seed_01_d0p0625", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0625", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:37.598Z", "wall_seconds": 0.46065021911635995}
+{"case_id": "mosaic_seed_01_d0p0675", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:37.607Z"}
+{"case_id": "mosaic_seed_01_d0p065", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p065", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:40.224Z", "wall_seconds": 0.40311667090281844}
+{"case_id": "mosaic_seed_01_d0p07", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:40.249Z"}
+{"case_id": "mosaic_seed_01_d0p0675", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0675", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:40.667Z", "wall_seconds": 0.5373556478880346}
+{"case_id": "mosaic_seed_01_d0p0725", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:40.683Z"}
+{"case_id": "mosaic_seed_01_d0p07", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p07", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:43.019Z", "wall_seconds": 0.6149770650081336}
+{"case_id": "mosaic_seed_01_d0p075", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:43.065Z"}
+{"case_id": "mosaic_seed_01_d0p0725", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0725", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:44.013Z", "wall_seconds": 0.6122304159216583}
+{"case_id": "mosaic_seed_01_d0p0775", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:44.027Z"}
+{"case_id": "mosaic_seed_01_d0p075", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p075", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:45.656Z", "wall_seconds": 0.63496995694004}
+{"case_id": "mosaic_seed_01_d0p08", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:45.679Z"}
+{"case_id": "mosaic_seed_01_d0p0775", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0775", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:46.919Z", "wall_seconds": 0.464256628183648}
+{"case_id": "mosaic_seed_01_d0p0825", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:46.949Z"}
+{"case_id": "mosaic_seed_01_d0p08", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p08", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:48.180Z", "wall_seconds": 0.4229455729946494}
+{"case_id": "mosaic_seed_01_d0p085", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:48.192Z"}
+{"case_id": "mosaic_seed_01_d0p0825", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0825", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:49.639Z", "wall_seconds": 0.42341105197556317}
+{"case_id": "mosaic_seed_01_d0p0875", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:49.657Z"}
+{"case_id": "mosaic_seed_01_d0p085", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p085", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:51.199Z", "wall_seconds": 0.6396946678869426}
+{"case_id": "mosaic_seed_01_d0p09", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:51.231Z"}
+{"case_id": "mosaic_seed_01_d0p0875", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0875", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:52.613Z", "wall_seconds": 0.6261120969429612}
+{"case_id": "mosaic_seed_01_d0p0925", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:52.643Z"}
+{"case_id": "mosaic_seed_01_d0p09", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p09", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:53.946Z", "wall_seconds": 0.42140696197748184}
+{"case_id": "mosaic_seed_01_d0p095", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:53.969Z"}
+{"case_id": "mosaic_seed_01_d0p0925", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0925", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:54.969Z", "wall_seconds": 0.6321734569501132}
+{"case_id": "mosaic_seed_01_d0p0975", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:54.984Z"}
+{"case_id": "mosaic_seed_01_d0p095", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p095", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:56.444Z", "wall_seconds": 0.6255650189705193}
+{"case_id": "mosaic_seed_01_d0p1", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:56.469Z"}
+{"case_id": "mosaic_seed_01_d0p0975", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p0975", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:57.480Z", "wall_seconds": 0.4267747721169144}
+{"case_id": "mosaic_seed_01_d0p1025", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:57.500Z"}
+{"case_id": "mosaic_seed_01_d0p1", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:58.809Z", "wall_seconds": 0.4304537489078939}
+{"case_id": "mosaic_seed_01_d0p105", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:58.816Z"}
+{"case_id": "mosaic_seed_01_d0p1025", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1025", "status": "accepted", "timestamp_utc": "2026-09-02T16:36:58.832Z", "wall_seconds": 0.21871774503961205}
+{"case_id": "mosaic_seed_01_d0p1075", "event": "case_start", "timestamp_utc": "2026-09-02T16:36:58.848Z"}
+{"case_id": "mosaic_seed_01_d0p105", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p105", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:00.336Z", "wall_seconds": 0.20105173182673752}
+{"case_id": "mosaic_seed_01_d0p11", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:00.343Z"}
+{"case_id": "mosaic_seed_01_d0p1075", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1075", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:00.361Z", "wall_seconds": 0.42337718699127436}
+{"case_id": "mosaic_seed_01_d0p1125", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:00.373Z"}
+{"case_id": "mosaic_seed_01_d0p11", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p11", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:02.613Z", "wall_seconds": 0.20179075514897704}
+{"case_id": "mosaic_seed_01_d0p115", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:02.622Z"}
+{"case_id": "mosaic_seed_01_d0p1125", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1125", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:02.648Z", "wall_seconds": 0.42058747890405357}
+{"case_id": "mosaic_seed_01_d0p1175", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:02.664Z"}
+{"case_id": "mosaic_seed_01_d0p115", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p115", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:04.565Z", "wall_seconds": 0.20394560298882425}
+{"case_id": "mosaic_seed_01_d0p12", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:04.587Z"}
+{"case_id": "mosaic_seed_01_d0p1175", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1175", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:04.914Z", "wall_seconds": 0.6180267829913646}
+{"case_id": "mosaic_seed_01_d0p1225", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:04.949Z"}
+{"case_id": "mosaic_seed_01_d0p12", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p12", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:06.928Z", "wall_seconds": 0.43542242608964443}
+{"case_id": "mosaic_seed_01_d0p125", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:06.944Z"}
+{"case_id": "mosaic_seed_01_d0p1225", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1225", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:06.972Z", "wall_seconds": 0.46695404197089374}
+{"case_id": "mosaic_seed_01_d0p1275", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:21.883Z"}
+{"case_id": "mosaic_seed_01_d0p125", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p125", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:21.895Z", "wall_seconds": 0.42002590792253613}
+{"case_id": "mosaic_seed_01_d0p13", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:21.903Z"}
+{"case_id": "mosaic_seed_01_d0p13", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p13", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:23.632Z", "wall_seconds": 0.40731194894760847}
+{"case_id": "mosaic_seed_01_d0p1325", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:23.640Z"}
+{"case_id": "mosaic_seed_01_d0p1275", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1275", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:23.659Z", "wall_seconds": 0.4036708560306579}
+{"case_id": "mosaic_seed_01_d0p135", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:23.669Z"}
+{"case_id": "mosaic_seed_01_d0p1325", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1325", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:25.569Z", "wall_seconds": 0.20176465483382344}
+{"case_id": "mosaic_seed_01_d0p1375", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:25.583Z"}
+{"case_id": "mosaic_seed_01_d0p135", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p135", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:25.609Z", "wall_seconds": 0.44262185599654913}
+{"case_id": "mosaic_seed_01_d0p14", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:25.624Z"}
+{"case_id": "mosaic_seed_01_d0p1375", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1375", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:27.781Z", "wall_seconds": 0.4076660228893161}
+{"case_id": "mosaic_seed_01_d0p1425", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:27.789Z"}
+{"case_id": "mosaic_seed_01_d0p14", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p14", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:27.819Z", "wall_seconds": 0.43067422811873257}
+{"case_id": "mosaic_seed_01_d0p145", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:27.834Z"}
+{"case_id": "mosaic_seed_01_d0p1425", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1425", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:29.443Z", "wall_seconds": 0.20161488000303507}
+{"case_id": "mosaic_seed_01_d0p1475", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:29.452Z"}
+{"case_id": "mosaic_seed_01_d0p145", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p145", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:29.469Z", "wall_seconds": 0.4355053920298815}
+{"case_id": "mosaic_seed_01_d0p15", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:29.484Z"}
+{"case_id": "mosaic_seed_01_d0p1475", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1475", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:30.967Z", "wall_seconds": 0.20101712411269546}
+{"case_id": "mosaic_seed_01_d0p1525", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:30.975Z"}
+{"case_id": "mosaic_seed_01_d0p15", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p15", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:30.994Z", "wall_seconds": 0.6225409160833806}
+{"case_id": "mosaic_seed_01_d0p155", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:31.022Z"}
+{"case_id": "mosaic_seed_01_d0p1525", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1525", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:33.393Z", "wall_seconds": 0.4029053268022835}
+{"case_id": "mosaic_seed_01_d0p1575", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:33.421Z"}
+{"case_id": "mosaic_seed_01_d0p155", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p155", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:33.478Z", "wall_seconds": 0.41469962196424603}
+{"case_id": "mosaic_seed_01_d0p16", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:33.488Z"}
+{"case_id": "mosaic_seed_01_d0p1575", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1575", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:35.142Z", "wall_seconds": 0.4103111820295453}
+{"case_id": "mosaic_seed_01_d0p1625", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:35.149Z"}
+{"case_id": "mosaic_seed_01_d0p16", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p16", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:35.162Z", "wall_seconds": 0.49020115681923926}
+{"case_id": "mosaic_seed_01_d0p165", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:35.173Z"}
+{"case_id": "mosaic_seed_01_d0p1625", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1625", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:36.559Z", "wall_seconds": 0.2029083629604429}
+{"case_id": "mosaic_seed_01_d0p1675", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:36.570Z"}
+{"case_id": "mosaic_seed_01_d0p165", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p165", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:36.620Z", "wall_seconds": 0.4113247590139508}
+{"case_id": "mosaic_seed_01_d0p17", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:36.632Z"}
+{"case_id": "mosaic_seed_01_d0p1675", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1675", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:38.119Z", "wall_seconds": 0.40248789405450225}
+{"case_id": "mosaic_seed_01_d0p1725", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:38.125Z"}
+{"case_id": "mosaic_seed_01_d0p17", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p17", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:38.137Z", "wall_seconds": 0.43672271398827434}
+{"case_id": "mosaic_seed_01_d0p175", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:38.147Z"}
+{"case_id": "mosaic_seed_01_d0p1725", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1725", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:39.641Z", "wall_seconds": 0.20215664897114038}
+{"case_id": "mosaic_seed_01_d0p1775", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:39.658Z"}
+{"case_id": "mosaic_seed_01_d0p175", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p175", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:39.684Z", "wall_seconds": 0.4407540571410209}
+{"case_id": "mosaic_seed_01_d0p18", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:39.697Z"}
+{"case_id": "mosaic_seed_01_d0p18", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p18", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:42.009Z", "wall_seconds": 0.4089431499596685}
+{"case_id": "mosaic_seed_01_d0p1775", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1775", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:42.021Z", "wall_seconds": 0.4014178579673171}
+{"case_id": "mosaic_seed_01_d0p1825", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:42.027Z"}
+{"case_id": "mosaic_seed_01_d0p185", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:42.028Z"}
+{"case_id": "mosaic_seed_01_d0p185", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p185", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:43.916Z", "wall_seconds": 0.5469094668515027}
+{"case_id": "mosaic_seed_01_d0p1875", "event": "case_start", "timestamp_utc": "2026-09-02T16:37:43.923Z"}
+{"case_id": "mosaic_seed_01_d0p1825", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1825", "status": "accepted", "timestamp_utc": "2026-09-02T16:37:43.932Z", "wall_seconds": 0.4024639509152621}
+{"case_id": "mosaic_seed_01_d0p19", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:03.992Z"}
+{"case_id": "mosaic_seed_01_d0p1875", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1875", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:04.001Z", "wall_seconds": 0.45685617811977863}
+{"case_id": "mosaic_seed_01_d0p1925", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:04.011Z"}
+{"case_id": "mosaic_seed_01_d0p19", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p19", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:05.623Z", "wall_seconds": 0.40870300121605396}
+{"case_id": "mosaic_seed_01_d0p195", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:05.631Z"}
+{"case_id": "mosaic_seed_01_d0p1925", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1925", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:05.643Z", "wall_seconds": 0.42593485303223133}
+{"case_id": "mosaic_seed_01_d0p1975", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:05.656Z"}
+{"case_id": "mosaic_seed_01_d0p1975", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p1975", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:07.053Z", "wall_seconds": 0.20159338903613389}
+{"case_id": "mosaic_seed_01_d0p2", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:07.060Z"}
+{"case_id": "mosaic_seed_01_d0p195", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p195", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:07.076Z", "wall_seconds": 0.4037571509834379}
+{"case_id": "mosaic_seed_01_independent", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:07.087Z"}
+{"case_id": "mosaic_seed_01_independent", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_independent", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:08.456Z", "wall_seconds": 0.20411084196530282}
+{"case_id": "mosaic_seed_02_d0", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:08.471Z"}
+{"case_id": "mosaic_seed_01_d0p2", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_01_d0p2", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:08.741Z", "wall_seconds": 0.20100508513860404}
+{"case_id": "mosaic_seed_02_d0p0025", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:08.753Z"}
+{"case_id": "mosaic_seed_02_d0", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:11.746Z", "wall_seconds": 0.40797216701321304}
+{"case_id": "mosaic_seed_02_d0p005", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:11.758Z"}
+{"case_id": "mosaic_seed_02_d0p0025", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0025", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:11.776Z", "wall_seconds": 0.6378511309158057}
+{"case_id": "mosaic_seed_02_d0p0075", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:11.788Z"}
+{"case_id": "mosaic_seed_02_d0p005", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p005", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:14.058Z", "wall_seconds": 0.40394988912157714}
+{"case_id": "mosaic_seed_02_d0p01", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:14.066Z"}
+{"case_id": "mosaic_seed_02_d0p0075", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0075", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:14.080Z", "wall_seconds": 0.5206680400297046}
+{"case_id": "mosaic_seed_02_d0p0125", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:14.086Z"}
+{"case_id": "mosaic_seed_02_d0p01", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p01", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:17.302Z", "wall_seconds": 0.4026477001607418}
+{"case_id": "mosaic_seed_02_d0p015", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:17.316Z"}
+{"case_id": "mosaic_seed_02_d0p0125", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0125", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:17.425Z", "wall_seconds": 0.8552282671444118}
+{"case_id": "mosaic_seed_02_d0p0175", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:17.446Z"}
+{"case_id": "mosaic_seed_02_d0p015", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p015", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:20.594Z", "wall_seconds": 0.6069616130553186}
+{"case_id": "mosaic_seed_02_d0p02", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:20.609Z"}
+{"case_id": "mosaic_seed_02_d0p0175", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0175", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:20.674Z", "wall_seconds": 0.41660034912638366}
+{"case_id": "mosaic_seed_02_d0p0225", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:20.702Z"}
+{"case_id": "mosaic_seed_02_d0p02", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p02", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:22.864Z", "wall_seconds": 0.4084084010683}
+{"case_id": "mosaic_seed_02_d0p025", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:22.873Z"}
+{"case_id": "mosaic_seed_02_d0p0225", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0225", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:22.904Z", "wall_seconds": 0.6045073769055307}
+{"case_id": "mosaic_seed_02_d0p0275", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:22.919Z"}
+{"case_id": "mosaic_seed_02_d0p025", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p025", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:25.173Z", "wall_seconds": 0.40219374489970505}
+{"case_id": "mosaic_seed_02_d0p03", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:25.181Z"}
+{"case_id": "mosaic_seed_02_d0p0275", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0275", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:25.207Z", "wall_seconds": 0.6067592210602015}
+{"case_id": "mosaic_seed_02_d0p0325", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:25.218Z"}
+{"case_id": "mosaic_seed_02_d0p03", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p03", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:27.889Z", "wall_seconds": 0.20172890415415168}
+{"case_id": "mosaic_seed_02_d0p035", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:27.900Z"}
+{"case_id": "mosaic_seed_02_d0p0325", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0325", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:27.937Z", "wall_seconds": 0.4454482120927423}
+{"case_id": "mosaic_seed_02_d0p0375", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:27.947Z"}
+{"case_id": "mosaic_seed_02_d0p035", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p035", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:30.859Z", "wall_seconds": 0.4015328830573708}
+{"case_id": "mosaic_seed_02_d0p04", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:30.869Z"}
+{"case_id": "mosaic_seed_02_d0p0375", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0375", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:30.901Z", "wall_seconds": 0.5849294210784137}
+{"case_id": "mosaic_seed_02_d0p0425", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:30.915Z"}
+{"case_id": "mosaic_seed_02_d0p04", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p04", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:33.609Z", "wall_seconds": 0.40297770593315363}
+{"case_id": "mosaic_seed_02_d0p045", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:33.618Z"}
+{"case_id": "mosaic_seed_02_d0p0425", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0425", "status": "accepted", "timestamp_utc": "2026-09-02T16:38:33.646Z", "wall_seconds": 0.5822219918482006}
+{"case_id": "mosaic_seed_02_d0p0475", "event": "case_start", "timestamp_utc": "2026-09-02T16:38:59.988Z"}
+{"case_id": "mosaic_seed_02_d0p045", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p045", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:00.017Z", "wall_seconds": 0.4119705760385841}
+{"case_id": "mosaic_seed_02_d0p05", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:00.028Z"}
+{"case_id": "mosaic_seed_02_d0p0475", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0475", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:02.823Z", "wall_seconds": 0.4022947989869863}
+{"case_id": "mosaic_seed_02_d0p0525", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:02.831Z"}
+{"case_id": "mosaic_seed_02_d0p05", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p05", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:02.856Z", "wall_seconds": 0.45887827314436436}
+{"case_id": "mosaic_seed_02_d0p055", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:02.867Z"}
+{"case_id": "mosaic_seed_02_d0p055", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p055", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:05.523Z", "wall_seconds": 0.210972819942981}
+{"case_id": "mosaic_seed_02_d0p0575", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:05.539Z"}
+{"case_id": "mosaic_seed_02_d0p0525", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0525", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:05.584Z", "wall_seconds": 0.4032317560631782}
+{"case_id": "mosaic_seed_02_d0p06", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:05.598Z"}
+{"case_id": "mosaic_seed_02_d0p06", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p06", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:07.684Z", "wall_seconds": 0.5493074350524694}
+{"case_id": "mosaic_seed_02_d0p0625", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:07.693Z"}
+{"case_id": "mosaic_seed_02_d0p0575", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0575", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:07.802Z", "wall_seconds": 0.4042737779673189}
+{"case_id": "mosaic_seed_02_d0p065", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:07.818Z"}
+{"case_id": "mosaic_seed_02_d0p065", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p065", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:10.204Z", "wall_seconds": 0.4808083779644221}
+{"case_id": "mosaic_seed_02_d0p0625", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0625", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:10.232Z", "wall_seconds": 0.4113137600943446}
+{"case_id": "mosaic_seed_02_d0p0675", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:10.241Z"}
+{"case_id": "mosaic_seed_02_d0p07", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:10.244Z"}
+{"case_id": "mosaic_seed_02_d0p0675", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0675", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:12.932Z", "wall_seconds": 0.4048986569978297}
+{"case_id": "mosaic_seed_02_d0p0725", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:12.944Z"}
+{"case_id": "mosaic_seed_02_d0p07", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p07", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:12.995Z", "wall_seconds": 0.5743808089755476}
+{"case_id": "mosaic_seed_02_d0p075", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:13.008Z"}
+{"case_id": "mosaic_seed_02_d0p0725", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0725", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:14.753Z", "wall_seconds": 0.4182555628940463}
+{"case_id": "mosaic_seed_02_d0p0775", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:14.767Z"}
+{"case_id": "mosaic_seed_02_d0p075", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p075", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:14.800Z", "wall_seconds": 0.4606580401305109}
+{"case_id": "mosaic_seed_02_d0p08", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:14.814Z"}
+{"case_id": "mosaic_seed_02_d0p0775", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0775", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:16.658Z", "wall_seconds": 0.4236924508586526}
+{"case_id": "mosaic_seed_02_d0p0825", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:16.725Z"}
+{"case_id": "mosaic_seed_02_d0p08", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p08", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:16.843Z", "wall_seconds": 0.8325094180181623}
+{"case_id": "mosaic_seed_02_d0p085", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:16.857Z"}
+{"case_id": "mosaic_seed_02_d0p0825", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0825", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:18.458Z", "wall_seconds": 0.40842557698488235}
+{"case_id": "mosaic_seed_02_d0p0875", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:18.467Z"}
+{"case_id": "mosaic_seed_02_d0p085", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p085", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:18.488Z", "wall_seconds": 0.4193510911427438}
+{"case_id": "mosaic_seed_02_d0p09", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:18.498Z"}
+{"case_id": "mosaic_seed_02_d0p0875", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0875", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:20.088Z", "wall_seconds": 0.20321308891288936}
+{"case_id": "mosaic_seed_02_d0p0925", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:20.096Z"}
+{"case_id": "mosaic_seed_02_d0p09", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p09", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:20.119Z", "wall_seconds": 0.4419657220132649}
+{"case_id": "mosaic_seed_02_d0p095", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:20.130Z"}
+{"case_id": "mosaic_seed_02_d0p095", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p095", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:22.465Z", "wall_seconds": 0.4196980260312557}
+{"case_id": "mosaic_seed_02_d0p0925", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0925", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:22.508Z", "wall_seconds": 0.2014029249548912}
+{"case_id": "mosaic_seed_02_d0p0975", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:22.518Z"}
+{"case_id": "mosaic_seed_02_d0p1", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:22.522Z"}
+{"case_id": "mosaic_seed_02_d0p0975", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p0975", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:24.909Z", "wall_seconds": 0.4027166850864887}
+{"case_id": "mosaic_seed_02_d0p1025", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:24.917Z"}
+{"case_id": "mosaic_seed_02_d0p1", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:24.940Z", "wall_seconds": 0.4939287528395653}
+{"case_id": "mosaic_seed_02_d0p105", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:24.956Z"}
+{"case_id": "mosaic_seed_02_d0p105", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p105", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:26.673Z", "wall_seconds": 0.20162705495022237}
+{"case_id": "mosaic_seed_02_d0p1075", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:26.727Z"}
+{"case_id": "mosaic_seed_02_d0p1025", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1025", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:26.816Z", "wall_seconds": 0.45664993301033974}
+{"case_id": "mosaic_seed_02_d0p11", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:58.156Z"}
+{"case_id": "mosaic_seed_02_d0p1075", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1075", "status": "accepted", "timestamp_utc": "2026-09-02T16:39:58.176Z", "wall_seconds": 0.42586592002771795}
+{"case_id": "mosaic_seed_02_d0p1125", "event": "case_start", "timestamp_utc": "2026-09-02T16:39:58.185Z"}
+{"case_id": "mosaic_seed_02_d0p11", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p11", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:00.624Z", "wall_seconds": 0.4077443741261959}
+{"case_id": "mosaic_seed_02_d0p115", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:00.634Z"}
+{"case_id": "mosaic_seed_02_d0p1125", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1125", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:00.658Z", "wall_seconds": 0.6609577899798751}
+{"case_id": "mosaic_seed_02_d0p1175", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:00.672Z"}
+{"case_id": "mosaic_seed_02_d0p1175", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1175", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:02.465Z", "wall_seconds": 0.5309459008276463}
+{"case_id": "mosaic_seed_02_d0p115", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p115", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:02.489Z", "wall_seconds": 0.4032130599953234}
+{"case_id": "mosaic_seed_02_d0p12", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:02.497Z"}
+{"case_id": "mosaic_seed_02_d0p1225", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:02.502Z"}
+{"case_id": "mosaic_seed_02_d0p12", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p12", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:04.537Z", "wall_seconds": 0.4014324371237308}
+{"case_id": "mosaic_seed_02_d0p125", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:04.545Z"}
+{"case_id": "mosaic_seed_02_d0p1225", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1225", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:04.567Z", "wall_seconds": 0.4369504770729691}
+{"case_id": "mosaic_seed_02_d0p1275", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:04.581Z"}
+{"case_id": "mosaic_seed_02_d0p125", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p125", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:06.866Z", "wall_seconds": 0.2015455449000001}
+{"case_id": "mosaic_seed_02_d0p13", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:06.876Z"}
+{"case_id": "mosaic_seed_02_d0p1275", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1275", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:06.904Z", "wall_seconds": 0.404013155028224}
+{"case_id": "mosaic_seed_02_d0p1325", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:06.919Z"}
+{"case_id": "mosaic_seed_02_d0p13", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p13", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:09.496Z", "wall_seconds": 0.40365691715851426}
+{"case_id": "mosaic_seed_02_d0p135", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:09.524Z"}
+{"case_id": "mosaic_seed_02_d0p1325", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1325", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:09.563Z", "wall_seconds": 0.40638083196245134}
+{"case_id": "mosaic_seed_02_d0p1375", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:09.572Z"}
+{"case_id": "mosaic_seed_02_d0p135", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p135", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:11.871Z", "wall_seconds": 0.4073029949795455}
+{"case_id": "mosaic_seed_02_d0p14", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:11.881Z"}
+{"case_id": "mosaic_seed_02_d0p1375", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1375", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:11.898Z", "wall_seconds": 0.43587995902635157}
+{"case_id": "mosaic_seed_02_d0p1425", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:11.908Z"}
+{"case_id": "mosaic_seed_02_d0p14", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p14", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:14.654Z", "wall_seconds": 0.4022625400684774}
+{"case_id": "mosaic_seed_02_d0p145", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:14.679Z"}
+{"case_id": "mosaic_seed_02_d0p1425", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1425", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:14.707Z", "wall_seconds": 0.405594282085076}
+{"case_id": "mosaic_seed_02_d0p1475", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:14.721Z"}
+{"case_id": "mosaic_seed_02_d0p1475", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1475", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:16.611Z", "wall_seconds": 0.4116248479112983}
+{"case_id": "mosaic_seed_02_d0p15", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:16.629Z"}
+{"case_id": "mosaic_seed_02_d0p145", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p145", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:16.649Z", "wall_seconds": 0.40441050310619175}
+{"case_id": "mosaic_seed_02_d0p1525", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:16.659Z"}
+{"case_id": "mosaic_seed_02_d0p1525", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1525", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:18.812Z", "wall_seconds": 0.20331510808318853}
+{"case_id": "mosaic_seed_02_d0p155", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:18.824Z"}
+{"case_id": "mosaic_seed_02_d0p15", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p15", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:18.849Z", "wall_seconds": 0.4090755151119083}
+{"case_id": "mosaic_seed_02_d0p1575", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:18.863Z"}
+{"case_id": "mosaic_seed_02_d0p155", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p155", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:21.201Z", "wall_seconds": 0.402619221014902}
+{"case_id": "mosaic_seed_02_d0p16", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:21.210Z"}
+{"case_id": "mosaic_seed_02_d0p1575", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1575", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:21.227Z", "wall_seconds": 0.4102255431935191}
+{"case_id": "mosaic_seed_02_d0p1625", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:21.243Z"}
+{"case_id": "mosaic_seed_02_d0p16", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p16", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:22.790Z", "wall_seconds": 0.40198295400477946}
+{"case_id": "mosaic_seed_02_d0p165", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:22.798Z"}
+{"case_id": "mosaic_seed_02_d0p1625", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1625", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:22.813Z", "wall_seconds": 0.20123569504357874}
+{"case_id": "mosaic_seed_02_d0p1675", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:22.824Z"}
+{"case_id": "mosaic_seed_02_d0p165", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p165", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:24.192Z", "wall_seconds": 0.20266082999296486}
+{"case_id": "mosaic_seed_02_d0p17", "event": "case_start", "timestamp_utc": "2026-09-02T16:40:24.202Z"}
+{"case_id": "mosaic_seed_02_d0p1675", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1675", "status": "accepted", "timestamp_utc": "2026-09-02T16:40:24.224Z", "wall_seconds": 0.41052810894325376}
+{"case_id": "mosaic_seed_02_d0p1725", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:09.238Z"}
+{"case_id": "mosaic_seed_02_d0p17", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p17", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:09.252Z", "wall_seconds": 0.44737624609842896}
+{"case_id": "mosaic_seed_02_d0p175", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:09.265Z"}
+{"case_id": "mosaic_seed_02_d0p1725", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1725", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:12.652Z", "wall_seconds": 0.6051794490776956}
+{"case_id": "mosaic_seed_02_d0p1775", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:12.663Z"}
+{"case_id": "mosaic_seed_02_d0p175", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p175", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:12.713Z", "wall_seconds": 0.6057670209556818}
+{"case_id": "mosaic_seed_02_d0p18", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:12.727Z"}
+{"case_id": "mosaic_seed_02_d0p18", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p18", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:14.549Z", "wall_seconds": 0.40838664304465055}
+{"case_id": "mosaic_seed_02_d0p1825", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:14.569Z"}
+{"case_id": "mosaic_seed_02_d0p1775", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1775", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:15.319Z", "wall_seconds": 0.8469626819714904}
+{"case_id": "mosaic_seed_02_d0p185", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:15.330Z"}
+{"case_id": "mosaic_seed_02_d0p1825", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1825", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:16.478Z", "wall_seconds": 0.21255439310334623}
+{"case_id": "mosaic_seed_02_d0p1875", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:16.491Z"}
+{"case_id": "mosaic_seed_02_d0p185", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p185", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:17.629Z", "wall_seconds": 0.4427080589812249}
+{"case_id": "mosaic_seed_02_d0p19", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:17.644Z"}
+{"case_id": "mosaic_seed_02_d0p1875", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1875", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:18.517Z", "wall_seconds": 0.415821430971846}
+{"case_id": "mosaic_seed_02_d0p1925", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:18.537Z"}
+{"case_id": "mosaic_seed_02_d0p19", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p19", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:20.709Z", "wall_seconds": 0.6476336389314383}
+{"case_id": "mosaic_seed_02_d0p195", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:20.734Z"}
+{"case_id": "mosaic_seed_02_d0p1925", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1925", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:20.904Z", "wall_seconds": 0.422814056975767}
+{"case_id": "mosaic_seed_02_d0p1975", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:20.914Z"}
+{"case_id": "mosaic_seed_02_d0p195", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p195", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:23.652Z", "wall_seconds": 0.40999621618539095}
+{"case_id": "mosaic_seed_02_d0p2", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:23.676Z"}
+{"case_id": "mosaic_seed_02_d0p1975", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p1975", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:23.758Z", "wall_seconds": 0.419303490081802}
+{"case_id": "mosaic_seed_02_independent", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:23.773Z"}
+{"case_id": "mosaic_seed_02_independent", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_independent", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:25.285Z", "wall_seconds": 0.4068307299166918}
+{"case_id": "mosaic_seed_03_d0", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:25.305Z"}
+{"case_id": "mosaic_seed_02_d0p2", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_02_d0p2", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:25.856Z", "wall_seconds": 0.6195354571100324}
+{"case_id": "mosaic_seed_03_d0p0025", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:25.866Z"}
+{"case_id": "mosaic_seed_03_d0", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:29.291Z", "wall_seconds": 0.822477427078411}
+{"case_id": "mosaic_seed_03_d0p005", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:29.338Z"}
+{"case_id": "mosaic_seed_03_d0p0025", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0025", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:30.391Z", "wall_seconds": 1.1264247968792915}
+{"case_id": "mosaic_seed_03_d0p0075", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:30.402Z"}
+{"case_id": "mosaic_seed_03_d0p005", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p005", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:32.709Z", "wall_seconds": 0.8301292981486768}
+{"case_id": "mosaic_seed_03_d0p01", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:32.732Z"}
+{"case_id": "mosaic_seed_03_d0p0075", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0075", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:33.840Z", "wall_seconds": 0.6245628709439188}
+{"case_id": "mosaic_seed_03_d0p0125", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:33.859Z"}
+{"case_id": "mosaic_seed_03_d0p01", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p01", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:35.567Z", "wall_seconds": 0.6493437488097697}
+{"case_id": "mosaic_seed_03_d0p015", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:35.583Z"}
+{"case_id": "mosaic_seed_03_d0p0125", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0125", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:38.248Z", "wall_seconds": 0.8675360260531306}
+{"case_id": "mosaic_seed_03_d0p0175", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:38.269Z"}
+{"case_id": "mosaic_seed_03_d0p015", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p015", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:38.894Z", "wall_seconds": 0.8370721170213073}
+{"case_id": "mosaic_seed_03_d0p02", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:38.908Z"}
+{"case_id": "mosaic_seed_03_d0p0175", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0175", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:41.643Z", "wall_seconds": 0.6208912199363112}
+{"case_id": "mosaic_seed_03_d0p0225", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:41.671Z"}
+{"case_id": "mosaic_seed_03_d0p02", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p02", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:42.122Z", "wall_seconds": 0.6268974270205945}
+{"case_id": "mosaic_seed_03_d0p025", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:42.146Z"}
+{"case_id": "mosaic_seed_03_d0p0225", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0225", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:44.890Z", "wall_seconds": 0.6427321841474622}
+{"case_id": "mosaic_seed_03_d0p0275", "event": "case_start", "timestamp_utc": "2026-09-02T16:41:44.946Z"}
+{"case_id": "mosaic_seed_03_d0p025", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p025", "status": "accepted", "timestamp_utc": "2026-09-02T16:41:45.245Z", "wall_seconds": 0.712799180066213}
+{"case_id": "mosaic_seed_03_d0p03", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:41.339Z"}
+{"case_id": "mosaic_seed_03_d0p0275", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0275", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:41.393Z", "wall_seconds": 0.6599574750289321}
+{"case_id": "mosaic_seed_03_d0p0325", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:41.409Z"}
+{"case_id": "mosaic_seed_03_d0p0325", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0325", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:44.816Z", "wall_seconds": 0.6061523058451712}
+{"case_id": "mosaic_seed_03_d0p035", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:44.826Z"}
+{"case_id": "mosaic_seed_03_d0p03", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p03", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:44.889Z", "wall_seconds": 0.8425788921304047}
+{"case_id": "mosaic_seed_03_d0p0375", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:44.899Z"}
+{"case_id": "mosaic_seed_03_d0p035", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p035", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:47.638Z", "wall_seconds": 0.40472671086899936}
+{"case_id": "mosaic_seed_03_d0p04", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:47.654Z"}
+{"case_id": "mosaic_seed_03_d0p0375", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0375", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:48.120Z", "wall_seconds": 0.6173563129268587}
+{"case_id": "mosaic_seed_03_d0p0425", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:48.130Z"}
+{"case_id": "mosaic_seed_03_d0p04", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p04", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:50.937Z", "wall_seconds": 0.8312178009655327}
+{"case_id": "mosaic_seed_03_d0p045", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:50.976Z"}
+{"case_id": "mosaic_seed_03_d0p0425", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0425", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:51.149Z", "wall_seconds": 0.6167718300130218}
+{"case_id": "mosaic_seed_03_d0p0475", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:51.165Z"}
+{"case_id": "mosaic_seed_03_d0p045", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p045", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:53.900Z", "wall_seconds": 0.41202159016393125}
+{"case_id": "mosaic_seed_03_d0p05", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:53.922Z"}
+{"case_id": "mosaic_seed_03_d0p0475", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0475", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:53.985Z", "wall_seconds": 0.5613505560904741}
+{"case_id": "mosaic_seed_03_d0p0525", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:54.015Z"}
+{"case_id": "mosaic_seed_03_d0p0525", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0525", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:56.635Z", "wall_seconds": 0.40805856604129076}
+{"case_id": "mosaic_seed_03_d0p055", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:56.677Z"}
+{"case_id": "mosaic_seed_03_d0p05", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p05", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:56.875Z", "wall_seconds": 0.4299975340254605}
+{"case_id": "mosaic_seed_03_d0p0575", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:56.884Z"}
+{"case_id": "mosaic_seed_03_d0p055", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p055", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:59.066Z", "wall_seconds": 0.40886259195394814}
+{"case_id": "mosaic_seed_03_d0p06", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:59.081Z"}
+{"case_id": "mosaic_seed_03_d0p0575", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0575", "status": "accepted", "timestamp_utc": "2026-09-02T16:42:59.112Z", "wall_seconds": 0.4552842560224235}
+{"case_id": "mosaic_seed_03_d0p0625", "event": "case_start", "timestamp_utc": "2026-09-02T16:42:59.142Z"}
+{"case_id": "mosaic_seed_03_d0p06", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p06", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:01.802Z", "wall_seconds": 0.6193362211342901}
+{"case_id": "mosaic_seed_03_d0p065", "event": "case_start", "timestamp_utc": "2026-09-02T16:43:01.813Z"}
+{"case_id": "mosaic_seed_03_d0p0625", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0625", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:01.864Z", "wall_seconds": 0.40269899601116776}
+{"case_id": "mosaic_seed_03_d0p0675", "event": "case_start", "timestamp_utc": "2026-09-02T16:43:01.875Z"}
+{"case_id": "mosaic_seed_03_d0p065", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p065", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:04.479Z", "wall_seconds": 0.401622116798535}
+{"case_id": "mosaic_seed_03_d0p07", "event": "case_start", "timestamp_utc": "2026-09-02T16:43:04.516Z"}
+{"case_id": "mosaic_seed_03_d0p0675", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0675", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:04.790Z", "wall_seconds": 0.6269334428943694}
+{"case_id": "mosaic_seed_03_d0p0725", "event": "case_start", "timestamp_utc": "2026-09-02T16:43:04.801Z"}
+{"case_id": "mosaic_seed_03_d0p07", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p07", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:07.162Z", "wall_seconds": 0.6174433450214565}
+{"case_id": "mosaic_seed_03_d0p075", "event": "case_start", "timestamp_utc": "2026-09-02T16:43:07.202Z"}
+{"case_id": "mosaic_seed_03_d0p0725", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0725", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:08.070Z", "wall_seconds": 0.6219295419286937}
+{"case_id": "mosaic_seed_03_d0p0775", "event": "case_start", "timestamp_utc": "2026-09-02T16:43:08.082Z"}
+{"case_id": "mosaic_seed_03_d0p075", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p075", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:09.206Z", "wall_seconds": 0.42681640782393515}
+{"case_id": "mosaic_seed_03_d0p08", "event": "case_start", "timestamp_utc": "2026-09-02T16:43:09.218Z"}
+{"case_id": "mosaic_seed_03_d0p0775", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0775", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:10.933Z", "wall_seconds": 0.6335779030341655}
+{"case_id": "mosaic_seed_03_d0p0825", "event": "case_start", "timestamp_utc": "2026-09-02T16:43:10.966Z"}
+{"case_id": "mosaic_seed_03_d0p08", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p08", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:11.820Z", "wall_seconds": 0.4607359569054097}
+{"case_id": "mosaic_seed_03_d0p085", "event": "case_start", "timestamp_utc": "2026-09-02T16:43:11.842Z"}
+{"case_id": "mosaic_seed_03_d0p0825", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0825", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:13.462Z", "wall_seconds": 0.6263509020209312}
+{"case_id": "mosaic_seed_03_d0p0875", "event": "case_start", "timestamp_utc": "2026-09-02T16:43:13.507Z"}
+{"case_id": "mosaic_seed_03_d0p085", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p085", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:14.586Z", "wall_seconds": 0.41339870099909604}
+{"case_id": "mosaic_seed_03_d0p09", "event": "case_start", "timestamp_utc": "2026-09-02T16:43:14.602Z"}
+{"case_id": "mosaic_seed_03_d0p0875", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0875", "status": "accepted", "timestamp_utc": "2026-09-02T16:43:16.092Z", "wall_seconds": 0.6311688451096416}
+{"case_id": "mosaic_seed_03_d0p0925", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:08.285Z"}
+{"case_id": "mosaic_seed_03_d0p09", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p09", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:08.308Z", "wall_seconds": 0.626227306202054}
+{"case_id": "mosaic_seed_03_d0p095", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:08.317Z"}
+{"case_id": "mosaic_seed_03_d0p0925", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0925", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:10.651Z", "wall_seconds": 0.4013381719123572}
+{"case_id": "mosaic_seed_03_d0p0975", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:10.658Z"}
+{"case_id": "mosaic_seed_03_d0p095", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p095", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:10.676Z", "wall_seconds": 0.4125290170777589}
+{"case_id": "mosaic_seed_03_d0p1", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:10.688Z"}
+{"case_id": "mosaic_seed_03_d0p0975", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p0975", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:13.167Z", "wall_seconds": 0.2021927700843662}
+{"case_id": "mosaic_seed_03_d0p1025", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:13.176Z"}
+{"case_id": "mosaic_seed_03_d0p1", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:13.211Z", "wall_seconds": 0.4253811619710177}
+{"case_id": "mosaic_seed_03_d0p105", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:13.225Z"}
+{"case_id": "mosaic_seed_03_d0p105", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p105", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:15.237Z", "wall_seconds": 0.40962691488675773}
+{"case_id": "mosaic_seed_03_d0p1075", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:15.245Z"}
+{"case_id": "mosaic_seed_03_d0p1025", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1025", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:15.268Z", "wall_seconds": 0.4102564309723675}
+{"case_id": "mosaic_seed_03_d0p11", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:15.280Z"}
+{"case_id": "mosaic_seed_03_d0p1075", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1075", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:16.759Z", "wall_seconds": 0.20189371006563306}
+{"case_id": "mosaic_seed_03_d0p1125", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:16.775Z"}
+{"case_id": "mosaic_seed_03_d0p11", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p11", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:16.813Z", "wall_seconds": 0.45171253592707217}
+{"case_id": "mosaic_seed_03_d0p115", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:16.822Z"}
+{"case_id": "mosaic_seed_03_d0p115", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p115", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:18.945Z", "wall_seconds": 0.533959959866479}
+{"case_id": "mosaic_seed_03_d0p1175", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:18.954Z"}
+{"case_id": "mosaic_seed_03_d0p1125", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1125", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:18.976Z", "wall_seconds": 0.4074205888900906}
+{"case_id": "mosaic_seed_03_d0p12", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:18.985Z"}
+{"case_id": "mosaic_seed_03_d0p1175", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1175", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:20.492Z", "wall_seconds": 0.20110471406951547}
+{"case_id": "mosaic_seed_03_d0p1225", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:20.501Z"}
+{"case_id": "mosaic_seed_03_d0p12", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p12", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:20.522Z", "wall_seconds": 0.4378754938952625}
+{"case_id": "mosaic_seed_03_d0p125", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:20.532Z"}
+{"case_id": "mosaic_seed_03_d0p125", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p125", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:22.971Z", "wall_seconds": 0.4189666158054024}
+{"case_id": "mosaic_seed_03_d0p1275", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:22.981Z"}
+{"case_id": "mosaic_seed_03_d0p1225", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1225", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:23.008Z", "wall_seconds": 0.20138974185101688}
+{"case_id": "mosaic_seed_03_d0p13", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:23.022Z"}
+{"case_id": "mosaic_seed_03_d0p1275", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1275", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:24.759Z", "wall_seconds": 0.20173744903877378}
+{"case_id": "mosaic_seed_03_d0p1325", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:24.786Z"}
+{"case_id": "mosaic_seed_03_d0p13", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p13", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:25.592Z", "wall_seconds": 0.6189286718145013}
+{"case_id": "mosaic_seed_03_d0p135", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:25.618Z"}
+{"case_id": "mosaic_seed_03_d0p1325", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1325", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:26.574Z", "wall_seconds": 0.4316724909003824}
+{"case_id": "mosaic_seed_03_d0p1375", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:26.590Z"}
+{"case_id": "mosaic_seed_03_d0p135", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p135", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:28.071Z", "wall_seconds": 0.6555416458286345}
+{"case_id": "mosaic_seed_03_d0p14", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:28.103Z"}
+{"case_id": "mosaic_seed_03_d0p1375", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1375", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:28.916Z", "wall_seconds": 0.6695916140452027}
+{"case_id": "mosaic_seed_03_d0p1425", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:28.952Z"}
+{"case_id": "mosaic_seed_03_d0p14", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p14", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:29.866Z", "wall_seconds": 0.22801627800799906}
+{"case_id": "mosaic_seed_03_d0p145", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:29.920Z"}
+{"case_id": "mosaic_seed_03_d0p1425", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1425", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:30.511Z", "wall_seconds": 0.4243267569690943}
+{"case_id": "mosaic_seed_03_d0p1475", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:30.521Z"}
+{"case_id": "mosaic_seed_03_d0p1475", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1475", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:32.684Z", "wall_seconds": 0.2496103160083294}
+{"case_id": "mosaic_seed_03_d0p15", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:32.696Z"}
+{"case_id": "mosaic_seed_03_d0p145", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p145", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:32.717Z", "wall_seconds": 0.4379931171424687}
+{"case_id": "mosaic_seed_03_d0p1525", "event": "case_start", "timestamp_utc": "2026-09-02T16:44:32.734Z"}
+{"case_id": "mosaic_seed_03_d0p1525", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1525", "status": "accepted", "timestamp_utc": "2026-09-02T16:44:34.580Z", "wall_seconds": 0.4211492461618036}
+{"case_id": "mosaic_seed_03_d0p155", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:27.340Z"}
+{"case_id": "mosaic_seed_03_d0p15", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p15", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:27.360Z", "wall_seconds": 0.4036143091507256}
+{"case_id": "mosaic_seed_03_d0p1575", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:27.375Z"}
+{"case_id": "mosaic_seed_03_d0p1575", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1575", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:29.190Z", "wall_seconds": 0.4658836869057268}
+{"case_id": "mosaic_seed_03_d0p16", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:29.201Z"}
+{"case_id": "mosaic_seed_03_d0p155", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p155", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:29.218Z", "wall_seconds": 0.402010845951736}
+{"case_id": "mosaic_seed_03_d0p1625", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:29.229Z"}
+{"case_id": "mosaic_seed_03_d0p16", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p16", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:31.628Z", "wall_seconds": 0.4025341470260173}
+{"case_id": "mosaic_seed_03_d0p165", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:31.646Z"}
+{"case_id": "mosaic_seed_03_d0p1625", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1625", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:31.666Z", "wall_seconds": 0.5477213989943266}
+{"case_id": "mosaic_seed_03_d0p1675", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:31.677Z"}
+{"case_id": "mosaic_seed_03_d0p165", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p165", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:33.605Z", "wall_seconds": 0.2041067979298532}
+{"case_id": "mosaic_seed_03_d0p17", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:33.654Z"}
+{"case_id": "mosaic_seed_03_d0p1675", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1675", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:33.833Z", "wall_seconds": 0.41603438509628177}
+{"case_id": "mosaic_seed_03_d0p1725", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:33.850Z"}
+{"case_id": "mosaic_seed_03_d0p17", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p17", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:36.023Z", "wall_seconds": 0.40855587483383715}
+{"case_id": "mosaic_seed_03_d0p175", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:36.042Z"}
+{"case_id": "mosaic_seed_03_d0p1725", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1725", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:36.088Z", "wall_seconds": 0.4034217291045934}
+{"case_id": "mosaic_seed_03_d0p1775", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:36.103Z"}
+{"case_id": "mosaic_seed_03_d0p175", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p175", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:37.738Z", "wall_seconds": 0.40804032888263464}
+{"case_id": "mosaic_seed_03_d0p18", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:37.747Z"}
+{"case_id": "mosaic_seed_03_d0p1775", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1775", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:37.762Z", "wall_seconds": 0.4445567249786109}
+{"case_id": "mosaic_seed_03_d0p1825", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:37.776Z"}
+{"case_id": "mosaic_seed_03_d0p18", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p18", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:39.448Z", "wall_seconds": 0.20344485598616302}
+{"case_id": "mosaic_seed_03_d0p185", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:39.490Z"}
+{"case_id": "mosaic_seed_03_d0p1825", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1825", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:39.615Z", "wall_seconds": 0.42355389799922705}
+{"case_id": "mosaic_seed_03_d0p1875", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:39.631Z"}
+{"case_id": "mosaic_seed_03_d0p1875", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1875", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:41.014Z", "wall_seconds": 0.41291490802541375}
+{"case_id": "mosaic_seed_03_d0p185", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p185", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:41.030Z", "wall_seconds": 0.4113331560511142}
+{"case_id": "mosaic_seed_03_d0p19", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:41.038Z"}
+{"case_id": "mosaic_seed_03_d0p1925", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:41.041Z"}
+{"case_id": "mosaic_seed_03_d0p1925", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1925", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:42.852Z", "wall_seconds": 0.4045402992051095}
+{"case_id": "mosaic_seed_03_d0p195", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:42.860Z"}
+{"case_id": "mosaic_seed_03_d0p19", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p19", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:42.875Z", "wall_seconds": 0.2018873910419643}
+{"case_id": "mosaic_seed_03_d0p1975", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:42.891Z"}
+{"case_id": "mosaic_seed_03_d0p195", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p195", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:44.587Z", "wall_seconds": 0.20443144789896905}
+{"case_id": "mosaic_seed_03_d0p2", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:44.609Z"}
+{"case_id": "mosaic_seed_03_d0p1975", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p1975", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:45.106Z", "wall_seconds": 0.48373014386743307}
+{"case_id": "mosaic_seed_03_independent", "event": "case_start", "timestamp_utc": "2026-09-02T16:45:45.119Z"}
+{"case_id": "mosaic_seed_03_independent", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_independent", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:46.582Z", "wall_seconds": 0.20542469411157072}
+{"case_id": "mosaic_seed_03_d0p2", "event": "case_complete", "raw_dir": "/home/ubuntu/bioseqdb/original-minimap2-code/dense_divergence_raw/mosaic_seed_03_d0p2", "status": "accepted", "timestamp_utc": "2026-09-02T16:45:46.623Z", "wall_seconds": 0.4409229380544275}
+{"completed_this_run": 246, "event": "runner_stop", "interrupted": false, "timestamp_utc": "2026-09-02T16:47:04.122Z"}
