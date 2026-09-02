@@ -1,0 +1,279 @@
+{
+  "schema_version": 1,
+  "primary": {
+    "name": "primary_1kb_hifi",
+    "reference_length": 10000000,
+    "source_length": 1000,
+    "query_length_after_edits": 1000,
+    "seed": 3219876,
+    "mutation_rng_seed": 3219876,
+    "cell_width": 2000,
+    "minimum_full_grid_copy_gap": 503,
+    "occurrence_counts": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      10,
+      20,
+      30,
+      40,
+      50,
+      100,
+      200,
+      300,
+      400,
+      500,
+      1000,
+      2000,
+      3000,
+      4000,
+      5000
+    ],
+    "reference_model": "iid_uniform_DNA4_from_SHAKE256_byte_stream",
+    "placement_model": "bounded_random_offset_per_fixed_cell_then_shuffled_once_and_nested_prefix",
+    "mutation_model": {
+      "orientation_applied_before_errors": true,
+      "substitution_rate": 0.001,
+      "insertion_event_rate": 0.0005,
+      "deletion_event_rate": 0.0005,
+      "insertion_length_mean": 1.0,
+      "insertion_length_stddev": 1.0,
+      "deletion_length_mean": 1.0,
+      "deletion_length_stddev": 1.0,
+      "reverse_complement_rate": 0.5,
+      "implementation_note": "SEAL/BioSeq-like parameters; Python RNG is deterministic but not byte-identical to BioSeq HybridTaus streams"
+    },
+    "realized_mutations": {
+      "reverse_complement": true,
+      "substitutions": 1,
+      "insertion_rolls": 0,
+      "insertion_events_with_positive_length": 0,
+      "inserted_bases": 0,
+      "deletion_rolls": 0,
+      "deletion_events_with_positive_length": 0,
+      "deleted_bases": 0
+    },
+    "query_path": "experiment_data/primary_1kb_hifi/query.fa",
+    "query_sha256": "1220ef1b2d17a0ab5f196c80c5c270054431955e8d5333fb1c6abebc5495adfd",
+    "placements_path": "experiment_data/primary_1kb_hifi/placements.tsv",
+    "placements_sha256": "3ffe115825016e0178d007ace0512a5a66c85e898c5e48ec72c7d0450f6284a0",
+    "references": {
+      "1": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N1.fa",
+        "sha256": "cdb6ddbbf3ce9cbcc78c770db837a5d8b3afae2f00ed4b305be6fa5c3b941eb2",
+        "intended_occurrences": 1,
+        "verified_exact_source_occurrences": 1,
+        "copy_coverage_fraction": 0.0001
+      },
+      "2": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N2.fa",
+        "sha256": "e05b86bd3e8a68b30339f4b2f6227d12c5bc0cb70a384e4447a6ba925f42c495",
+        "intended_occurrences": 2,
+        "verified_exact_source_occurrences": 2,
+        "copy_coverage_fraction": 0.0002
+      },
+      "3": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N3.fa",
+        "sha256": "d909ac05457f4f21241aed1e7ba6f190afd61912909fc18164060fce451142b1",
+        "intended_occurrences": 3,
+        "verified_exact_source_occurrences": 3,
+        "copy_coverage_fraction": 0.0003
+      },
+      "4": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N4.fa",
+        "sha256": "fc2092970c074d65f09edc985f87d9d85237b229d2932c181f6cbd989e6d8456",
+        "intended_occurrences": 4,
+        "verified_exact_source_occurrences": 4,
+        "copy_coverage_fraction": 0.0004
+      },
+      "5": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N5.fa",
+        "sha256": "34df54b93d6f053c41857f2a4a8d39d46986493129e2a5640c2b17048dc1b992",
+        "intended_occurrences": 5,
+        "verified_exact_source_occurrences": 5,
+        "copy_coverage_fraction": 0.0005
+      },
+      "10": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N10.fa",
+        "sha256": "76b317dd97206dac8e527f3d45356bed326014562cb3bd6c3631bad63cb5ac0b",
+        "intended_occurrences": 10,
+        "verified_exact_source_occurrences": 10,
+        "copy_coverage_fraction": 0.001
+      },
+      "20": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N20.fa",
+        "sha256": "87af51c264fe23b8270579724bbb385ba129762bc4fb476ce942a05d16ef0efb",
+        "intended_occurrences": 20,
+        "verified_exact_source_occurrences": 20,
+        "copy_coverage_fraction": 0.002
+      },
+      "30": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N30.fa",
+        "sha256": "1ec47e4eb33e4ebdec6201f7fd8f4e25797af7785fb6ea978f3da592b254c5a7",
+        "intended_occurrences": 30,
+        "verified_exact_source_occurrences": 30,
+        "copy_coverage_fraction": 0.003
+      },
+      "40": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N40.fa",
+        "sha256": "7ec707d1c4321e21960e920b196e2d0cb4ad5e72e19723013ad2c45cd6ceb885",
+        "intended_occurrences": 40,
+        "verified_exact_source_occurrences": 40,
+        "copy_coverage_fraction": 0.004
+      },
+      "50": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N50.fa",
+        "sha256": "7363a9dcf018ccc2d35f7856832caab290c8727bcf7674ab54ff6055121cc449",
+        "intended_occurrences": 50,
+        "verified_exact_source_occurrences": 50,
+        "copy_coverage_fraction": 0.005
+      },
+      "100": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N100.fa",
+        "sha256": "5091bf8c928c4745113b758c8dea9f5d099a5333dda4fdbd9cb4299371c09871",
+        "intended_occurrences": 100,
+        "verified_exact_source_occurrences": 100,
+        "copy_coverage_fraction": 0.01
+      },
+      "200": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N200.fa",
+        "sha256": "62b8e54f5e6616851e9b16d8d36a67dbe60ef238027db20aad7ab6efb888c257",
+        "intended_occurrences": 200,
+        "verified_exact_source_occurrences": 200,
+        "copy_coverage_fraction": 0.02
+      },
+      "300": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N300.fa",
+        "sha256": "35f24fd03729844db2e379a1f4fe68d2dc9cb13502c655f9538b42e11078fc75",
+        "intended_occurrences": 300,
+        "verified_exact_source_occurrences": 300,
+        "copy_coverage_fraction": 0.03
+      },
+      "400": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N400.fa",
+        "sha256": "186526f99ae432a69b44985a9efe7f4dabab40ad0893fbabfb6be4141b63b594",
+        "intended_occurrences": 400,
+        "verified_exact_source_occurrences": 400,
+        "copy_coverage_fraction": 0.04
+      },
+      "500": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N500.fa",
+        "sha256": "e06143f38029b9516c4118fc5f105e598f47f494d3e31ebeac565d90e1181cc7",
+        "intended_occurrences": 500,
+        "verified_exact_source_occurrences": 500,
+        "copy_coverage_fraction": 0.05
+      },
+      "1000": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N1000.fa",
+        "sha256": "52786b74ab78f938f6241a758c5023b6452d7624b90af11d63f6dc38ea468179",
+        "intended_occurrences": 1000,
+        "verified_exact_source_occurrences": 1000,
+        "copy_coverage_fraction": 0.1
+      },
+      "2000": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N2000.fa",
+        "sha256": "8711f4c09a037baa224f80394da5fb0b26063d0cbfd69771c5d07b7a5f6224a0",
+        "intended_occurrences": 2000,
+        "verified_exact_source_occurrences": 2000,
+        "copy_coverage_fraction": 0.2
+      },
+      "3000": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N3000.fa",
+        "sha256": "74e1f57c4849bb37981cac9897d60c581ef89017dd367b795bb9e26a76f4ee2b",
+        "intended_occurrences": 3000,
+        "verified_exact_source_occurrences": 3000,
+        "copy_coverage_fraction": 0.3
+      },
+      "4000": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N4000.fa",
+        "sha256": "ae63eb400256ecce4f9d4415ff166c6790b5e00c2b90b09e70088665a8f6e8ac",
+        "intended_occurrences": 4000,
+        "verified_exact_source_occurrences": 4000,
+        "copy_coverage_fraction": 0.4
+      },
+      "5000": {
+        "path": "experiment_data/primary_1kb_hifi/reference_N5000.fa",
+        "sha256": "b9dfe8693bf7d7c21e9d0f80fa6d861bdcfb20788569033e263421a83ae153fa",
+        "intended_occurrences": 5000,
+        "verified_exact_source_occurrences": 5000,
+        "copy_coverage_fraction": 0.5
+      }
+    }
+  },
+  "hifi_calibration": {
+    "name": "fast_long_500kb_hifi",
+    "reference_length": 10000000,
+    "source_length": 500000,
+    "query_length_after_edits": 500052,
+    "seed": 3219876,
+    "mutation_rng_seed": 3219876,
+    "cell_width": 1000000,
+    "minimum_full_grid_copy_gap": 371665,
+    "occurrence_counts": [
+      1,
+      2,
+      5,
+      10
+    ],
+    "reference_model": "iid_uniform_DNA4_from_SHAKE256_byte_stream",
+    "placement_model": "bounded_random_offset_per_fixed_cell_then_shuffled_once_and_nested_prefix",
+    "mutation_model": {
+      "orientation_applied_before_errors": true,
+      "substitution_rate": 0.001,
+      "insertion_event_rate": 0.0005,
+      "deletion_event_rate": 0.0005,
+      "insertion_length_mean": 1.0,
+      "insertion_length_stddev": 1.0,
+      "deletion_length_mean": 1.0,
+      "deletion_length_stddev": 1.0,
+      "reverse_complement_rate": 0.5,
+      "implementation_note": "SEAL/BioSeq-like parameters; Python RNG is deterministic but not byte-identical to BioSeq HybridTaus streams"
+    },
+    "realized_mutations": {
+      "reverse_complement": true,
+      "substitutions": 490,
+      "insertion_rolls": 262,
+      "insertion_events_with_positive_length": 192,
+      "inserted_bases": 299,
+      "deletion_rolls": 228,
+      "deletion_events_with_positive_length": 153,
+      "deleted_bases": 247
+    },
+    "query_path": "experiment_data/fast_long_500kb_hifi/query.fa",
+    "query_sha256": "64e0b1f0705bda6f959ac1af4a5db0cf36aa84060008bfd02ad2fe05f646d9a0",
+    "placements_path": "experiment_data/fast_long_500kb_hifi/placements.tsv",
+    "placements_sha256": "55bd1541e5f4d892014581b61b34dc8fb20989bb2828de0dc980aff73adfca4b",
+    "references": {
+      "1": {
+        "path": "experiment_data/fast_long_500kb_hifi/reference_N1.fa",
+        "sha256": "6953bd94483a97cb3e919aec4cb7043b69c0fc7a9e888bf375bfbefed8e1cd21",
+        "intended_occurrences": 1,
+        "verified_exact_source_occurrences": 1,
+        "copy_coverage_fraction": 0.05
+      },
+      "2": {
+        "path": "experiment_data/fast_long_500kb_hifi/reference_N2.fa",
+        "sha256": "e8c3f51f057821f29e1ec963119fe61f8cda9811e9caf03fecf54d273f76b648",
+        "intended_occurrences": 2,
+        "verified_exact_source_occurrences": 2,
+        "copy_coverage_fraction": 0.1
+      },
+      "5": {
+        "path": "experiment_data/fast_long_500kb_hifi/reference_N5.fa",
+        "sha256": "ed4b72da76e30dac5a8506a0bf81f4d990b4fbd54255cd74c534a81b7364b9af",
+        "intended_occurrences": 5,
+        "verified_exact_source_occurrences": 5,
+        "copy_coverage_fraction": 0.25
+      },
+      "10": {
+        "path": "experiment_data/fast_long_500kb_hifi/reference_N10.fa",
+        "sha256": "198bc7143a44616540dc691911649b80e85471fccd59eaceaabc9f1dbdf8d9a8",
+        "intended_occurrences": 10,
+        "verified_exact_source_occurrences": 10,
+        "copy_coverage_fraction": 0.5
+      }
+    }
+  }
+}
