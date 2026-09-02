@@ -2021,23 +2021,34 @@ Its main differences from minimap2 are the following.
         their ends.
 \end{enumerate}
 
-In Bioseq chaining we consider 3 different steps:
+In Bioseq chaining we consider 3 different operations:
 \begin{enumerate}
-  \item First cut have empty marks so as microoptimisation this case is handled separately.
-  \item Path collection loads $L$ top-scoring anchors and then follow one chain per lane.
-  \item Ordered marking works on transposed matrix, where each of $L$ lanes contains consecutive indices for one chain. (In reality we don't transpose any matrix, it's here only as illustration as in the code we put chains directly into final path rows)
+  \item Single-path: This is a special case for consequitive anchor indices. If anchor has a chain built from consecutive anchor indices, then we can follow only one path at the time (SIMD vector contains only fragment of one chain) and mark anchors in bulk.
+  \item Multi-path: This is expected case of SIMD-ified algorithm. In SIMD vector we store multiple anchors and follow each of the chains in parallel.
+  \item Multi-path marking: This is the step that we do after multi-path - we need to mark all anchors and we do that by transposing the matrix created in multi-path step, where now each of $L$ lanes contains consecutive indices for one chain. (In reality we don't transpose any matrix, it's here only as illustration as in the code we put chains directly into final path rows)
 \end{enumerate}
 
-In BioseqDB we only have binary marksL
+In BioseqDB we only have binary marks:
 \[
   t_i=0\quad\text{means unclaimed},\qquad
   t_i=1\quad\text{means claimed}.
 \]
-There is no temporary value \(2\), which was obsolete.  A mark is never cleared, including when
+There is no temporary value \(2\), which was obsolete as mentioned earlier.  A mark is never cleared, including when
 the marked prefix later fails the score or count test.
 
-The largest-ranked end is handled alone.  If \(L\) consecutive links satisfy
-\(p_j=j-1\), one vector comparison checks the \(L\) links.  Two vector stores
+If \(L\) consecutive links satisfy \(p_j=j-1\), then we run single-path algorithm version, where one vector comparison checks the \(L\) links. Formally this condition is specified as:
+\[
+  \operatorname{Run}_L(j,c)\iff
+  j\geq L-1\ \land\ c\leq n-L\ \land\
+  \bigwedge_{u=0}^{L-1}p_{j-u}=j-u-1.
+\]
+
+%TODO: Continue here
+\info{Chain optimisation}{At first it might not be intuitive why we are interested in chains of consecutive anchors. We can think of inverse of that condition. If the anchors are not consecutive, then it means that for some anchor there exists alternative very good match i.e for one target position there are multiple competing chainings for different query positions that fight over few sibling anchors. This may happen if there's almost identical repetition which is equally good. For now we will just assume that this condition $\operatorname{Run}_L(j,c)$ is non-trivial algorithm specialisation that is discussed in detail in separate chapter.}
+
+
+
+Two vector stores
 then save and mark the \(L\) anchors.  Otherwise the same Highway loop uses
 only lane zero for that link.  This is a one-lane SIMD operation, not a call
 to the scalar backtracker.
@@ -3634,668 +3645,1295 @@ length is \(5{,}000{,}000\) bases (with two samples).
 The figure above depicts only two runs and presents only quick prototyping test measurements to judge if we are going in right direction.
 
 %%%%%% EDIT BELOW HERE
-\section{How minimap2 and G3SA split the dynamic program}
-\label{sec:chaining-work-split}
+\section{Range minimum query chaining}
+\label{sec:chaining-rmq-idea}
 
-In minimap2 B1, the algorithm fixes one target \(i\) and scans earlier sources
-\(j\). Minimap2 RMQ also fixes one target, but obtains its main candidate from
-a tree query instead of scanning the earlier sources one by one. The G3SA
-short kernel and the triangular part of a tile instead fix one completed
-source \(j\) and update several later targets \(i\) in parallel. The
-rectangular part of a G3SA tile switches back to one target per thread. Both
-implementations fill a score \(f_i\) and predecessor information for each
-sorted anchor. Minimap2 stores the predecessor index \(j\). G3SA stores the
-positive distance \(i-j\). A possible link from earlier anchor \(j\) to later
-anchor \(i\) is one cell of the matrix in
-Figure~\ref{fig:chaining-work-split}. The figure compares only the direction
-in which work is assigned. The tested cells and scoring rules differ.
+The ordered predecessor scan in B1 can calculate many complete link scores for
+one target.  The B4 algorithm first compares a value that depends only on the
+earlier anchor:
+\begin{equation}
+  h(j)=f_j+\frac{\lambda_g}{2}(r_j+q_j).
+\label{eq:chaining-rmq-h}
+\end{equation}
+Once \(f_j\) is known, the same \(h(j)\) can be reused for every later target.
+An RMQ tree stores
+\(\pi(j)=-h(j)\).  A query for the smallest priority therefore returns an
+anchor with the largest \(h(j)\) inside a query-coordinate interval.
+
+This is a candidate-selection method.  The tree does not store the complete
+target-dependent value \(f_j+E(j,i)\).  Minimap2 calculates that value after
+the query.  It can also scan a narrower local interval when the selected link
+is not an exact extension.  This design is used by minimap2's RMQ chaining
+mode and by assembly presets that need to consider links across long gaps.
+In this section, \(f_j+E(j,i)\) is the complete proposed chain score,
+abbreviated to complete score.
+
+\subsection{Minimap2 RMQ}
+\label{sec:chaining-minimap2-rmq}
+
+Let
+\[
+  D=\max\{\texttt{max\_dist},\texttt{bw}\}.
+\]
+The optional local scan uses
+\[
+  D_{\mathrm{in}}
+  =\min\{\max\{\texttt{max\_dist\_inner},0\},D\}.
+\]
+Minimap2 maintains an active set of earlier anchors on the same reference and
+strand as the current target \(i\).  It removes anchors when
+\(r_i-r_j>D\), when the reference or strand changes, or when the configured
+tree-size cap is exceeded.  Anchors at the current reference coordinate are
+held outside the tree until the scan moves to a larger coordinate.  Every
+stored candidate therefore has \(r_j<r_i\).
+
+The AVL search key and stored priority are
+\[
+  K_j=(q_j,j),
+  \qquad
+  \pi(j)=-h(j).
+\]
+The index \(j\) keeps equal query coordinates as separate nodes.  Each node
+also caches the anchor with the smallest priority in its subtree.  The query uses the closed
+interval between
+\begin{equation}
+  K_i^{\mathrm{lo}}=(q_i-D,\mathrm{INT32\_MAX}),
+  \qquad
+  K_i^{\mathrm{hi}}=(q_i,0).
+\label{eq:chaining-rmq-key-range}
+\end{equation}
+For ordinary positive indices, these composite keys admit
+\(q_i-D<q_j<q_i\).  Figure~\ref{fig:chaining-minimap2-rmq} shows the complete
+selection.
+The tree query does not define a stable index tie rule when two anchors have
+the same \(h(j)\).
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
-  \node[anchor=west,font=\bfseries] at (.15,7.20)
-    {(a) minimap2: one target};
-  \node[anchor=west,font=\bfseries] at (7.35,7.20)
-    {(b) G3SA short/triangle: one source};
+\begin{tikzpicture}[x=1cm,y=1cm,font=\scriptsize,>=Latex]
+  \node[anchor=west,font=\bfseries] at (.05,6.35)
+    {(a) Maintain the active set};
+  \node[anchor=west,font=\bfseries] at (4.85,6.35)
+    {(b) Query cached values};
+  \node[anchor=west,font=\bfseries] at (10.05,6.35)
+    {(c) Check the selected link};
 
-  % Left triangular dependency matrix.
-  \foreach \r/\c in {
-      0/1,0/2,0/3,0/4,0/5,
-      1/2,1/3,1/4,1/5,
-      2/3,2/4,2/5,
-      3/4,3/5,
-      4/5}
-    \draw[fill=chainGray!12,draw=chainGray!80!black]
-      (1.35+.62*\c-.27,6.15-.62*\r-.27)
-      rectangle
-      (1.35+.62*\c+.27,6.15-.62*\r+.27);
-  \foreach \r in {0,...,4}
-    \draw[fill=chainBlue!20,draw=chainBlue!90!black,very thick]
-      (1.35+.62*5-.27,6.15-.62*\r-.27)
-      rectangle
-      (1.35+.62*5+.27,6.15-.62*\r+.27);
-  \draw[fill=chainOrange!24,draw=chainOrange!95!black,very thick]
-    (1.35+.62*5-.27,6.15-.62*5-.27)
-    rectangle
-    (1.35+.62*5+.27,6.15-.62*5+.27);
-  \node at (1.35+.62*5,6.15-.62*5) {\(i\)};
-  \foreach \c in {0,...,5}
-    \node[anchor=south] at (1.35+.62*\c,6.49) {\scriptsize \(i_{\c}\)};
-  \foreach \r in {0,...,5}
-    \node[anchor=east] at (1.00,6.15-.62*\r) {\scriptsize \(j_{\r}\)};
-  \node[rotate=90] at (.25,4.60) {earlier source \(j\)};
-  \node[font=\scriptsize] at (3.20,6.88) {later target \(i\)};
-  \draw[chain flow,draw=chainBlue!90!black]
-    (5.28,3.20)--(5.28,5.82);
-  \node[rotate=90,anchor=south,text=chainBlue!90!black] at (5.43,4.50)
-    {scan newest to older};
+  % Active reference window.
+  \draw[fill=chainGray!10,draw=chainGray!80!black]
+    (.15,4.85) rectangle (1.00,5.55);
+  \node at (.575,5.20) {\(j_0\)};
+  \draw[very thick,draw=chainOrange!95!black]
+    (.10,4.78)--(1.05,5.62);
+  \node[anchor=north,text=chainGray!90!black] at (.575,4.72) {expired};
 
-  % Right triangular dependency matrix.
-  \foreach \r/\c in {
-      0/1,0/2,0/3,0/4,0/5,
-      1/2,1/3,1/4,1/5,
-      2/3,2/4,2/5,
-      3/4,3/5,
-      4/5}
-    \draw[fill=chainGray!12,draw=chainGray!80!black]
-      (8.55+.62*\c-.27,6.15-.62*\r-.27)
-      rectangle
-      (8.55+.62*\c+.27,6.15-.62*\r+.27);
-  \foreach \c in {3,...,5}
-    \draw[fill=chainBlue!20,draw=chainBlue!90!black,very thick]
-      (8.55+.62*\c-.27,6.15-.62*2-.27)
-      rectangle
-      (8.55+.62*\c+.27,6.15-.62*2+.27);
-  \draw[fill=chainOrange!24,draw=chainOrange!95!black,very thick]
-    (8.55+.62*2-.27,6.15-.62*2-.27)
-    rectangle
-    (8.55+.62*2+.27,6.15-.62*2+.27);
-  \node at (8.55+.62*2,6.15-.62*2) {\(j\)};
-  \foreach \c in {0,...,5}
-    \node[anchor=south] at (8.55+.62*\c,6.49) {\scriptsize \(i_{\c}\)};
-  \foreach \r in {0,...,5}
-    \node[anchor=east] at (8.20,6.15-.62*\r) {\scriptsize \(j_{\r}\)};
-  \node[rotate=90] at (7.45,4.60) {completed source \(j\)};
-  \node[font=\scriptsize] at (10.40,6.88) {later target \(i\)};
-  \draw[chain flow,draw=chainBlue!90!black]
-    (12.00,4.91)--(13.15,4.91);
-  \node[anchor=west,text=chainBlue!90!black] at (12.05,5.15)
-    {update \(i>j\)};
+  \foreach \x/\lab in {1.25/\(j_1\),2.20/\(j_2\)}
+    {
+      \draw[fill=chainBlue!13,draw=chainBlue!90!black]
+        (\x,4.85) rectangle (\x+.85,5.55);
+      \node at (\x+.425,5.20) {\lab};
+    }
+  \draw[fill=chainGreen!14,draw=chainGreen!80!black,very thick]
+    (4.05,4.85) rectangle (4.70,5.55);
+  \node at (4.375,5.20) {\(i\)};
+  \draw[fill=chainOrange!14,draw=chainOrange!95!black,dashed]
+    (4.05,3.75) rectangle (4.70,4.45);
+  \node at (4.375,4.10) {\(j_3\)};
+  \draw[dashed,draw=chainOrange!95!black]
+    (4.375,4.45)--(4.375,4.85);
+  \node[align=center,text=chainOrange!95!black,anchor=north]
+    at (4.375,3.68) {same \(r\) as \(i\)\\insert later};
+  \draw[<->,draw=chainBlue!90!black,thick]
+    (1.25,5.82)--(4.70,5.82);
+  \node[anchor=south,text=chainBlue!90!black] at (2.98,5.84)
+    {reference distance at most \(D\)};
 
-  % Compact direction summary.
-  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (.75,.55) rectangle (3.55,1.35);
-  \node at (2.15,.95) {earlier anchors \(j<i\)};
+  % Query-coordinate strip and AVL tree.
+  \foreach \x/\q/\fillc in {
+      4.95/7/chainGray!10,
+      5.75/11/chainBlue!12,
+      6.55/14/chainOrange!22,
+      7.35/18/chainBlue!12,
+      8.15/22/chainBlue!12,
+      8.95/27/chainGreen!14}
+    {
+      \draw[fill=\fillc,draw=black!55]
+        (\x,5.08) rectangle (\x+.62,5.62);
+      \node at (\x+.31,5.35) {\q};
+    }
+  \draw[<->,draw=chainOrange!95!black,thick]
+    (5.65,4.77)--(8.85,4.77);
+  \node[anchor=north] at (7.56,4.68)
+    {\(q_i-D<q_j<q_i\)};
+
+  \node[draw=chainBlue!90!black,fill=chainBlue!10,
+    minimum width=1.22cm,minimum height=.74cm,align=center]
+    (r17) at (7.25,3.70) {\(q=18\)\\max \(h=44\)};
+  \node[draw=chainBlue!90!black,fill=chainBlue!10,
+    minimum width=1.22cm,minimum height=.74cm,align=center]
+    (r11) at (5.75,2.55) {\(q=11\)\\max \(h=44\)};
+  \node[draw=chainBlue!90!black,fill=chainBlue!10,
+    minimum width=1.22cm,minimum height=.74cm,align=center]
+    (r22) at (8.75,2.55) {\(q=22\)\\max \(h=29\)};
+  \node[draw=chainOrange!95!black,fill=chainOrange!22,very thick,
+    minimum width=1.22cm,minimum height=.70cm,align=center]
+    (r14) at (6.35,1.35) {\(q=14\)\\\(h=44\)};
+  \node[draw=chainGray!80!black,fill=chainGray!10,
+    minimum width=1.22cm,minimum height=.70cm,align=center]
+    (r7) at (5.10,1.35) {\(q=7\)\\\(h=20\)};
+  \draw[thick] (r17)--(r11);
+  \draw[thick] (r17)--(r22);
+  \draw[thick] (r11)--(r7);
+  \draw[thick] (r11)--(r14);
+
+  % Complete-score path.
   \draw[fill=chainOrange!18,draw=chainOrange!95!black]
-    (4.60,.55) rectangle (6.40,1.35);
-  \node at (5.50,.95) {target \(i\)};
-  \draw[chain flow] (3.55,.95)--(4.60,.95);
-  \node[anchor=south] at (4.08,1.04) {read};
-
-  \draw[fill=chainOrange!18,draw=chainOrange!95!black]
-    (7.55,.55) rectangle (9.35,1.35);
-  \node at (8.45,.95) {source \(j\)};
+    (10.15,4.85) rectangle (11.72,5.55);
+  \node[align=center] at (10.935,5.20) {selected\\\(j^\star\)};
+  \draw[chain flow] (11.72,5.20)--(12.18,5.20);
   \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (10.40,.55) rectangle (13.55,1.35);
-  \node at (11.98,.95) {later anchors \(i>j\)};
-  \draw[chain flow] (9.35,.95)--(10.40,.95);
-  \node[anchor=south] at (9.88,1.04) {write};
+    (12.18,4.75) rectangle (14.15,5.65);
+  \node[align=center] at (13.165,5.20)
+    {\(f_{j^\star}+E(j^\star,i)\)};
+
+  \draw[chain flow] (13.165,4.75)--(13.165,3.95);
+  \draw[fill=chainGreen!13,draw=chainGreen!80!black]
+    (11.95,3.05) rectangle (14.38,3.95);
+  \node[align=center] at (13.165,3.50)
+    {bandwidth and\\strict score check};
+
+  \draw[chain flow] (13.165,3.05)--(13.165,2.25);
+  \draw[fill=chainGreen!13,draw=chainGreen!80!black]
+    (12.15,1.45) rectangle (14.18,2.25);
+  \node at (13.165,1.85) {store \(f_i,p_i\)};
+
+  \draw[dashed,draw=chainOrange!95!black,-{Latex[length=1.7mm]}]
+    (12.18,4.95)--(11.68,4.95)--(11.68,2.20)--(11.85,2.20);
+  \node[align=left,anchor=east,text=chainOrange!95!black]
+    at (11.72,1.55) {narrow local scan\\if link is not exact};
 \end{tikzpicture}
-\caption{Two ways to assign predecessor pairs. Blue cells are processed in
-the shown step. Minimap2 fixes target \(i\) and reads earlier sources. The
-G3SA short kernel and the triangular part of a tile fix completed source
-\(j\) and update later targets. In the rectangular part, each thread instead
-fixes one later target and scans the completed source tile, as shown in
-Figure~\ref{fig:chaining-g3sa-tiles}. The orange box marks the fixed anchor.}
-\label{fig:chaining-work-split}
+\caption{Minimap2 RMQ for one target.  Anchors outside the reference window
+are removed, and anchors at the target's reference coordinate are not yet
+inserted.  The augmented AVL query selects one \(j^\star\) using \(h(j)\).
+Minimap2 then calculates the complete link score for \(j^\star\).  The dashed path is the
+optional local scan.}
+\label{fig:chaining-minimap2-rmq}
+\label{fig:chaining-rmq-contrast}
 \end{figure}
 
+Algorithm~\ref{alg:chaining-minimap2-rmq} states the forward calculation.  The
+maintenance calls insert a completed reference-coordinate group and remove
+entries that fail the active-set rules above.  Each maintenance helper owns
+an independent scan cursor, reads the anchor array and completed scores, and
+updates the named tree.  \textsc{RangeBest} returns the anchor with the largest
+\(h(j)\) in the composite-key interval.
+
+\begin{algorithm}[H]
+\caption{Minimap2 RMQ forward chaining}
+\label{alg:chaining-minimap2-rmq}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require sorted anchors \(a_0,\ldots,a_{n-1}\), distance \(D\),
+    inner distance \(D_{\mathrm{in}}\), bandwidth \(B\), tree cap \(C\),
+    skip limit \(S\)
+  \Ensure scores \(f\) and absolute predecessor indices \(p\)
+  \Function{Minimap2RMQForward}{\(a,D,D_{\mathrm{in}},B,C,S\)}
+    \State \(T\gets\varnothing,\quad T_{\mathrm{in}}\gets\varnothing\)
+          \Comment{augmented AVL trees}
+    \State \(t\gets(0,\ldots,0)\)
+          \Comment{B1 marks for the optional local scan}
+    \For{\(i\gets0\) \textbf{to} \(n-1\)}
+      \State \Call{InsertCompletedReferenceGroup}{\(T,a,f,i\)}
+      \If{\(D_{\mathrm{in}}>0\)}
+        \State \Call{InsertCompletedReferenceGroup}{\(T_{\mathrm{in}},a,f,i\)}
+      \EndIf
+      \State \Call{RemoveExpiredEntries}{\(T,a,i,D,C\)}
+      \If{\(D_{\mathrm{in}}>0\)}
+        \State \Call{RemoveExpiredEntries}{\(T_{\mathrm{in}},a,i,D_{\mathrm{in}},C\)}
+      \EndIf
+      \State \(f_i\gets\ell_i,\quad p_i\gets-1\)
+      \State \(j^\star\gets
+        \Call{RangeBest}{T,(q_i-D,\mathrm{INT32\_MAX}),(q_i,0)}\)
+      \If{\(j^\star\neq\bot\)}
+        \State \((e,\delta,\mathrm{exact})\gets
+          \Call{CompleteLink}{j^\star,i}\)
+              \Comment{\(e=E(j^\star,i)\)}
+        \If{\(\delta\leq B\land f_{j^\star}+e>f_i\)}
+          \State \(f_i\gets f_{j^\star}+e,\quad p_i\gets j^\star\)
+        \EndIf
+        \If{\(\neg\mathrm{exact}\land T_{\mathrm{in}}\neq\varnothing
+             \land q_i>0\)}
+          \State \((f_i,p_i)\gets
+            \Call{ScanLocalInterval}{T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t}\)
+              \Comment{complete scores with the B1 mark and skip rule}
+        \EndIf
+      \EndIf
+    \EndFor
+    \State \Return \(f,p\)
+  \EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+An exact extension has
+\[
+  \delta(j^\star,i)=0
+  \quad\land\quad
+  g(j^\star,i)\leq\ell_{j^\star}.
+\]
+If the selected link is not exact and the inner tree is enabled, the local
+scan visits retained anchors with
+\[
+  q_i-D_{\mathrm{in}}\leq q_j\leq q_i-1
+\]
+from larger to smaller query coordinate.  It calculates the complete score
+for every visited candidate.  The bandwidth check and the B1 mark and skip
+rule apply inside this scan.  The primary tree is not queried for a second
+choice.
+
+Tree insertion, deletion, and the primary query cost
+\(O(\log M_{\max})\) per anchor, where \(M_{\max}\) is the largest active
+tree.  If target \(i\) visits \(k_i\) local candidates, the forward cost is
+\[
+  O(n\log M_{\max})+
+  O\!\left(\sum_i k_i\right).
+\]
+The local scans can still make this quadratic.  The parameter
+\texttt{max\_chain\_iter} is not used.  The parameter
+\texttt{max\_chain\_skip} affects only the local scan.
+
+Minimap2 selects B1 or RMQ for the first chaining call according to the RMQ
+flag.  A
+later long-gap joining condition can sort the retained anchors and call RMQ
+again with a wider bandwidth.  This later call is conditional.  It can follow
+either an initial B1 call or an initial RMQ call.
+\leavevmode\coderef{minimap2/lchain.c}
+  {Minimap2 RMQ forward pass}{mg_lchain_rmq}{250}
+\leavevmode\coderef{minimap2/krmq.h}
+  {Augmented AVL interval query}{__KRMQ_RMQ}{110}
+\leavevmode\coderef{minimap2/map.c}
+  {RMQ selection and wider joining}{mm_map_frag_core}{275}
+
+\subsection{BioseqDB RMQ differences}
+\label{sec:chaining-bioseqdb-rmq-summary}
+
+BioseqDB reuses the high-level procedure in
+Algorithm~\ref{alg:chaining-minimap2-rmq}, including the augmented AVL tree
+and the preliminary value \(h(j)\).  Its RMQ configuration sets the local
+distance to zero, so only the primary tree is used.  The following differences
+affect the selected predecessor:
+
+\begin{itemize}
+  \item BioseqDB stores full-width reference and query coordinates.  It
+    searches the inclusive
+    composite-key interval
+    \[
+      (q_i-D,\mathrm{INT64\_MIN})
+      \ \ldots\
+      (q_i,\mathrm{INT64\_MAX}).
+    \]
+    It can therefore include both query-coordinate boundaries.
+  \item It calculates the selected link's diagonal width but does not reject
+    the link when the width exceeds the configured bandwidth.
+  \item It performs one RMQ pass.  The BioseqDB RMQ route has no local scan
+    and no optional wider second call.  Neither \texttt{max\_chain\_skip} nor
+    \texttt{max\_chain\_iter} affects this forward route.
+  \item It uses BioseqDB's shared scalar chain extraction after the forward
+    pass.  That extractor does not use minimap2's maximum-drop cut search.
+\end{itemize}
+
+Within each equal-reference group, BioseqDB orders anchors by a packed query
+key.  This key contains the query-segment identifier, anchor flags, query
+span, and the low 32 bits of the query position.  The full 64-bit query
+position breaks a tie between equal packed keys.  Minimap2's radix pass sorts
+only the packed reference key.  Equal-priority cache handling also differs,
+so equal \(h(j)\) values can select different predecessor anchors.  The whole
+BioseqDB RMQ route has \(O(n\log n)\) worst-case time.
+Section~\ref{sec:chaining-bioseqdb} describes how this route is selected.
+
+\section{G3SA GPU chaining}
+\label{sec:chaining-b2}
+
+G3SA moves forward scoring and backtracking to CUDA
+\cite{g3sa_paper}.  Its released code is easiest to follow as four logical
+phases.  These phases are not four individual CUDA launches.  Range
+construction, sorting, copying, and output preparation use supporting
+kernels.
+
+\begin{enumerate}
+  \item \textbf{First forward-scoring pass.}  A small range uses the short score
+    kernel.  A larger range uses the tiled score kernel.
+  \item \textbf{First backtracking and packing.}  G3SA applies minimap2's
+    cut and marking rule, reverses accepted paths, and packs their anchors.
+  \item \textbf{Conditional ranking pass.}  The retained anchors of selected
+    reads are sorted again.  A short or tiled
+    kernel compares \(h(j)\) and calculates one complete link score for each
+    target that saved a predecessor.
+  \item \textbf{Final backtracking.}  The same recovery workflow processes
+    the second-pass scores and creates the final chain records.
+\end{enumerate}
+
+\info{G3SA AVL code}{The repository contains CUDA AVL support code and a
+commented experimental entry point.  The active chaining pipeline does not
+call that entry point.  Its second pass uses array-based short and tiled
+kernels.}
+
+Figure~\ref{fig:chaining-pipelines} defines the second-pass decision before the
+individual kernels are described.  Let \(n_u\) be the number of paths retained
+by the first backtracking, let \(Q\) be the query length, and let
+\[
+  R=q_{\mathrm{last}}-q_{\mathrm{first}}
+\]
+be the query-coordinate span of the first path after paths have been ordered
+by their first anchor's packed target key.  This key contains the reference
+identifier, strand, and reference position.  G3SA performs second-pass work for the
+read when
+\begin{equation}
+  n_u>1
+  \quad\land\quad
+  \bigl(Q-R>1000\ \lor\ R>0.10Q\bigr).
+\label{eq:chaining-g3sa-second-condition}
+\end{equation}
+The wrapper is launched for the whole batch.  Reads that fail this condition
+are given an empty second-pass range.
+
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
-  \node[anchor=east,font=\bfseries] at (1.20,2.65) {minimap2};
-  \draw[fill=chainGray!10,draw=chainGray!85!black]
-    (1.45,2.20) rectangle (2.70,3.10);
-  \node at (2.08,2.65) {anchors};
-  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (3.30,2.20) rectangle (6.15,3.10);
-  \node[align=center] at (4.73,2.65) {B1 or tree RMQ};
-  \draw[fill=chainGreen!12,draw=chainGreen!80!black]
-    (6.75,2.20) rectangle (8.85,3.10);
-  \node at (7.80,2.65) {backtrack};
-  \draw[fill=chainOrange!12,draw=chainOrange!95!black]
-    (9.45,2.05) rectangle (13.95,3.25);
-  \node[align=center] at (11.70,2.65)
-    {optional wider RMQ\\or frequent-seed B1};
-  \draw[chain flow] (2.70,2.65)--(3.30,2.65);
-  \draw[chain flow] (6.15,2.65)--(6.75,2.65);
-  \draw[chain flow] (8.85,2.65)--(9.45,2.65);
+  \draw[chain muted] (.10,3.25) rectangle (1.55,4.15);
+  \node at (.825,3.70) {anchors};
 
-  \node[anchor=east,font=\bfseries] at (1.20,.75) {G3SA};
-  \draw[fill=chainGray!10,draw=chainGray!85!black]
-    (1.45,.30) rectangle (2.70,1.20);
-  \node at (2.08,.75) {anchors};
-  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (3.30,.15) rectangle (5.45,1.35);
-  \node[align=center] at (4.38,.75) {first GPU\\pass};
-  \draw[fill=chainGreen!12,draw=chainGreen!80!black]
-    (6.05,.15) rectangle (8.45,1.35);
-  \node[align=center] at (7.25,.75) {backtrack\\pack anchors};
-  \draw[fill=chainOrange!12,draw=chainOrange!95!black]
-    (8.85,.30) rectangle (10.90,1.20);
-  \node[align=center] at (9.88,.75) {second-pass\\condition?};
-  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (11.50,.15) rectangle (14.00,1.35);
-  \node[align=center] at (12.75,.75) {choose with \(h(j)\)\\score one link\\backtrack};
-  \draw[chain flow] (2.70,.75)--(3.30,.75);
-  \draw[chain flow] (5.45,.75)--(6.05,.75);
-  \draw[chain flow] (8.45,.75)--(8.85,.75);
-  \draw[chain flow] (10.90,.75)--(11.50,.75)
-    node[midway,above] {yes};
-  \draw[chain flow] (9.88,.30)--(9.88,-.35);
-  \node[anchor=north,text=chainGreen!80!black] at (9.88,-.35)
-    {no: keep first-pass chains};
+  \draw[chain blue] (2.10,2.92) rectangle (4.65,4.48);
+  \node[font=\bfseries] at (3.375,4.15)
+    {first-pass score};
+  \draw[fill=chainBlue!6,draw=chainBlue!70!black]
+    (2.30,3.08) rectangle (3.28,3.72);
+  \node at (2.79,3.40) {short};
+  \draw[fill=chainBlue!6,draw=chainBlue!70!black]
+    (3.47,3.08) rectangle (4.45,3.72);
+  \node at (3.96,3.40) {tiled};
+
+  \draw[chain green] (5.20,3.15) rectangle (7.55,4.25);
+  \node[align=center] at (6.375,3.70)
+    {backtrack\\and pack};
+
+  \draw[chain orange] (8.10,3.05) rectangle (10.72,4.35);
+  \node[align=center] at (9.41,3.70)
+    {Equation~\ref{eq:chaining-g3sa-second-condition}\\is true?};
+
+  \draw[chain green] (11.35,3.15) rectangle (14.15,4.25);
+  \node[align=center] at (12.75,3.70)
+    {no: keep first-pass\\chain records};
+
+  \draw[chain blue] (8.10,.75) rectangle (10.72,1.95);
+  \node[align=center] at (9.41,1.35)
+    {pool and sort\\rank again};
+
+  \draw[chain green] (11.35,.75) rectangle (14.15,1.95);
+  \node[align=center] at (12.75,1.35)
+    {same backtracking\\final records};
+
+  \draw[chain flow] (1.55,3.70)--(2.10,3.70);
+  \draw[chain flow] (4.65,3.70)--(5.20,3.70);
+  \draw[chain flow] (7.55,3.70)--(8.10,3.70);
+  \draw[chain flow] (10.72,3.70)--(11.35,3.70)
+    node[midway,above] {no};
+  \draw[chain flow] (9.41,3.05)--(9.41,1.95)
+    node[midway,right] {yes};
+  \draw[chain flow] (10.72,1.35)--(11.35,1.35);
 \end{tikzpicture}
-\caption{The chaining calls made by minimap2 and G3SA. G3SA always performs
-its first pass. Only reads satisfying the condition below enter its second
-pass.}
+\caption{The four logical phases of G3SA chaining.  The first score pass
+chooses one of two kernel functions.  The first backtracking packs only
+retained anchors.  Equation~\ref{eq:chaining-g3sa-second-condition} decides
+whether those anchors enter the ranking pass and a second recovery.}
 \label{fig:chaining-pipelines}
 \end{figure}
 
-Minimap2 chooses its first chaining call from the RMQ flag. With the flag
-disabled, it runs B1. With the flag enabled, it runs tree RMQ. When the first
-chains leave a long region unjoined, minimap2 may sort the retained anchors
-again and run RMQ with a wider bandwidth. This is always a second
-chaining call, but it is a second RMQ call only when the first call also used
-RMQ. A separate branch can restore seeds omitted as too frequent and rerun
-B1, but only when the RMQ flag is disabled.
-\coderef{minimap2/map.c}{Minimap2 chaining choices}{mm_map_frag_core}{273}
+\leavevmode\coderef{g3sa/minimap2/src/kernel_wrapper.cu}
+  {G3SA chaining pipeline}{chaining_kernel_wrapper}{775}
+\leavevmode\coderef{g3sa/minimap2/src/krmq_cuda.cu}
+  {Commented CUDA AVL entry point}{gpu_chain_rmq}{406}
 
-G3SA always runs its first GPU pass. For each read separately, it backtracks
-and packs the retained anchors at the start of the part of the anchor array
-assigned to that read. Let \(n_u\) be the number of retained chains, \(Q\)
-the query length, and
-\(R=q_{\mathrm{last}}-q_{\mathrm{first}}\), the query-coordinate distance from
-the first to the last anchor of the first retained chain.
-The second pass runs exactly when
+\subsection{Short first-pass kernel}
+\label{sec:chaining-work-split}
+
+For one inclusive anchor range with first index \(s\) and last index \(e\),
+G3SA classifies the anchor-index span
 \[
-  n_u>1
-  \quad\land\quad
-  \bigl(Q-R>1{,}000\ \lor\ R>0.10Q\bigr).
+  d=e-s.
 \]
-Other reads keep the chains produced by the first pass. The second pass uses
-the preliminary value \(h(j)\), defined below, to choose one predecessor before
-it calculates the complete link score. Selected reads are then backtracked a
-second time.
+The short kernel handles \(d\leq512\), which is at most \(513\) anchors.
+The tiled kernel handles larger values.  Its two launch configurations are
+described below.
 
-\section{G3SA first pass for one seed segment}
-\label{sec:chaining-b2}
-
-For two anchors from the same seed segment, the first G3SA pass uses bandwidth
-zero, fixed span \(15\), maximum coordinate distance \(5{,}000\), and
-\(\lambda_s=0\). Every same-segment predecessor that G3SA stores satisfies
+The first forward-scoring pass sets \(f_i=15\) and stores no predecessor.  When a
+predecessor is selected, G3SA stores its positive index distance
 \[
-  0<i-j\leq5{,}000,
+  \widehat p_i=i-j.
+\]
+Backtracking therefore moves from \(i\) to \(i-\widehat p_i\).
+For two anchors in the same query segment, the active first-pass parameters
+use bandwidth zero, fixed span \(15\), maximum coordinate distance \(5000\),
+and \(\lambda_s=0\).  Every stored same-query-segment link satisfies
+\[
+  0<i-j\leq5000,
   \qquad
-  0<d_r(j,i)=d_q(j,i)\leq5{,}000.
+  0<d_r(j,i)=d_q(j,i)\leq5000.
 \]
-The complete link score from Equation~\ref{eq:chaining-link-score} then reduces
-to
+Its link score reduces to
 \[
   E(j,i)=\min\{15,d_r(j,i)\}.
 \]
-Within one seed segment, this pass can link only anchors whose reference and
-query distances are equal. It is not the general minimap2 B1 scan. Links
-between different seed segments use another scoring branch and are not
-restricted by the zero bandwidth.
+The code has a separate scoring branch for links between query segments.  The
+single-query-segment case is used below because it makes the work assignment
+clear.
 
-G3SA sets \(f_i=15\) and \(p_i=-1\). In the short kernel and the triangular
-part of a tile, sources are used in increasing index order and the block waits
-after every source. In the rectangular part, all source scores are already
-complete, so one thread scans the tile for one later target without waiting
-after each source.
+In minimap2 B1, one target \(i\) reads earlier candidates.  The G3SA short
+kernel fixes one completed source \(j\), assigns later targets to threads, and
+waits before advancing to \(j+1\).  Figure~\ref{fig:chaining-work-split}
+compares these directions.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
+  \node[anchor=west,font=\bfseries] at (.15,6.75)
+    {(a) minimap2 B1: fix target \(i\)};
+  \node[anchor=west,font=\bfseries] at (7.35,6.75)
+    {(b) G3SA short: fix source \(j\)};
+
+  \foreach \r/\c in {
+      0/1,0/2,0/3,0/4,0/5,
+      1/2,1/3,1/4,1/5,
+      2/3,2/4,2/5,
+      3/4,3/5,
+      4/5}
+    \draw[fill=chainGray!12,draw=chainGray!80!black]
+      (1.35+.62*\c-.27,5.72-.62*\r-.27)
+      rectangle
+      (1.35+.62*\c+.27,5.72-.62*\r+.27);
+  \foreach \r in {0,...,4}
+    \draw[fill=chainBlue!20,draw=chainBlue!90!black,very thick]
+      (1.35+.62*5-.27,5.72-.62*\r-.27)
+      rectangle
+      (1.35+.62*5+.27,5.72-.62*\r+.27);
+  \draw[fill=chainOrange!24,draw=chainOrange!95!black,very thick]
+    (1.35+.62*5-.27,5.72-.62*5-.27)
+    rectangle
+    (1.35+.62*5+.27,5.72-.62*5+.27);
+  \node at (1.35+.62*5,5.72-.62*5) {\(i\)};
+  \foreach \c in {0,...,5}
+    \node[anchor=south] at (1.35+.62*\c,6.06) {\scriptsize \(i_{\c}\)};
+  \foreach \r in {0,...,5}
+    \node[anchor=east] at (1.00,5.72-.62*\r) {\scriptsize \(j_{\r}\)};
+  \draw[chain flow,draw=chainBlue!90!black]
+    (5.28,2.78)--(5.28,5.40);
+  \node[rotate=90,anchor=south,text=chainBlue!90!black]
+    at (5.43,4.08) {newest to older};
+
+  \foreach \r/\c in {
+      0/1,0/2,0/3,0/4,0/5,
+      1/2,1/3,1/4,1/5,
+      2/3,2/4,2/5,
+      3/4,3/5,
+      4/5}
+    \draw[fill=chainGray!12,draw=chainGray!80!black]
+      (8.55+.62*\c-.27,5.72-.62*\r-.27)
+      rectangle
+      (8.55+.62*\c+.27,5.72-.62*\r+.27);
+  \foreach \c in {3,...,5}
+    \draw[fill=chainBlue!20,draw=chainBlue!90!black,very thick]
+      (8.55+.62*\c-.27,5.72-.62*2-.27)
+      rectangle
+      (8.55+.62*\c+.27,5.72-.62*2+.27);
+  \draw[fill=chainOrange!24,draw=chainOrange!95!black,very thick]
+    (8.55+.62*2-.27,5.72-.62*2-.27)
+    rectangle
+    (8.55+.62*2+.27,5.72-.62*2+.27);
+  \node at (8.55+.62*2,5.72-.62*2) {\(j\)};
+  \foreach \c in {0,...,5}
+    \node[anchor=south] at (8.55+.62*\c,6.06) {\scriptsize \(i_{\c}\)};
+  \foreach \r in {0,...,5}
+    \node[anchor=east] at (8.20,5.72-.62*\r) {\scriptsize \(j_{\r}\)};
+  \draw[chain flow,draw=chainBlue!90!black]
+    (12.00,4.48)--(13.20,4.48);
+  \node[anchor=south,text=chainBlue!90!black] at (12.60,4.58)
+    {update \(i>j\)};
+
+  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
+    (.80,.45) rectangle (3.75,1.25);
+  \node at (2.275,.85) {read earlier \(j\)};
+  \draw[fill=chainOrange!18,draw=chainOrange!95!black]
+    (4.55,.45) rectangle (6.30,1.25);
+  \node at (5.425,.85) {one \(i\)};
+  \draw[chain flow] (3.75,.85)--(4.55,.85);
+
+  \draw[fill=chainOrange!18,draw=chainOrange!95!black]
+    (7.55,.45) rectangle (9.30,1.25);
+  \node at (8.425,.85) {one \(j\)};
+  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
+    (10.10,.45) rectangle (13.55,1.25);
+  \node at (11.825,.85) {write later \(i\)};
+  \draw[chain flow] (9.30,.85)--(10.10,.85);
+\end{tikzpicture}
+\caption{Target-centred and source-centred work assignment.  Blue cells are
+processed in the shown step.  The orange box marks the fixed anchor.  G3SA
+waits until all updates from source \(j\) are complete before it uses the next
+source score.}
+\label{fig:chaining-work-split}
+\end{figure}
+
+Algorithm~\ref{alg:chaining-g3sa-first} shows the case with one query segment.
+The comparison uses \(\geq\), so an equal score replaces the predecessor
+stored earlier.
 
 \begin{algorithm}[H]
-\caption{G3SA short-kernel exact-diagonal first pass for one single-segment
-range}
+\caption{G3SA short first pass for one query segment}
 \label{alg:chaining-g3sa-first}
+\footnotesize
 \begin{algorithmic}[1]
-  \Require one sorted single-segment range
-    \(a_0,\ldots,a_{n-1}\)
-  \Ensure scores \(f_i\) and predecessor distances \(p_i=i-j\),
-    or \(p_i=-1\)
+  \Require sorted anchors \(a_0,\ldots,a_{n-1}\) from one query segment
+  \Ensure scores \(f_i\) and predecessor distances \(\widehat p_i\)
   \For{\(i\gets0\) \textbf{to} \(n-1\)}
-    \State \(f_i\gets15,\quad p_i\gets-1\)
+    \State \(f_i\gets15,\quad\widehat p_i\gets-1\)
   \EndFor
   \For{\(j\gets0\) \textbf{to} \(n-1\)}
     \ForAll{\(i\in\{j+1,\ldots,\min(n-1,j+5000)\}\) in parallel}
       \State \(d_r\gets r_i-r_j,\quad d_q\gets q_i-q_j\)
       \If{\(0<d_r=d_q\leq5000\)}
         \State \(c\gets f_j+\min\{15,d_r\}\)
-        \If{\(c\geq f_i\) and \(c>15\)}
-          \State \(f_i\gets c,\quad p_i\gets i-j\)
+        \If{\(c\geq f_i\land c>15\)}
+          \State \(f_i\gets c,\quad\widehat p_i\gets i-j\)
         \EndIf
       \EndIf
     \EndFor
-    \State \Call{WaitForThreads}{}
-          \Comment{all updates from source \(j\) are complete}
+    \State \(\operatorname{await}(\mathrm{sourceUpdates}_j)\)
+          \Comment{finish every update from source \(j\)}
   \EndFor
 \end{algorithmic}
 \end{algorithm}
 
-The tiled kernel may test sources outside the \(5{,}000\)-index limit that
-controls whether a predecessor is stored. A full tile starting at \(s\) loads
-sources \(s\) through \(s+1023\). A partial tile stops at the last available
-source. In a sufficiently long range, the rectangular scan can reach target
-\(s+6024\). It stores the tile result only when the selected
-predecessor satisfies \(0<p_i\leq5000\). A source more than \(5{,}000\)
-indices behind can therefore become the temporary winner. If it remains the
-winner, the kernel does not store that tile result, even when a lower-scoring
-predecessor inside the \(5{,}000\)-index limit was tested.
+\leavevmode\coderef{g3sa/minimap2/src/chaining_kernel.cu}
+  {G3SA short first-pass kernel}{mm_compute_chain_short}{188}
 
-The stored predecessor is a positive distance, so G3SA backtracking moves from
-\(i\) to \(i-p_i\). The triangle checks source indices in increasing order.
-For the rectangular part, a later-target thread starts with the source at its
-own thread number and wraps at 1024. Equal scores can therefore select a
-different predecessor in the two loops.
+\subsection{Backtracking and packing}
+\label{sec:chaining-g3sa-backtracking}
+
+This phase runs after either first-pass score kernel.  G3SA uses the same
+high-level cut, mark, and acceptance rules as minimap2 scalar backtracking in
+Algorithm~\ref{alg:chaining-minimap2-backtrack}.  It does not use BioseqDB's
+SIMD backtracking.  The main representation difference is
+\[
+  \Call{Previous}{i}=
+  \begin{cases}
+    i-\widehat p_i,&\widehat p_i>0,\\
+    -1,&\widehat p_i=-1.
+  \end{cases}
+\]
+The predecessor walk for one read remains ordered and scalar.  CUDA
+parallelism is used across reads, in sorting, and while copied anchors are
+packed.
+
+In the released kernel, the guard that would assign this scalar walk to one
+thread is commented out.  Every lane in the read's 32-lane CUDA warp therefore
+executes the same walk over the same per-read arrays.  Only reversal and
+copying are divided among lanes.  Algorithm~\ref{alg:chaining-g3sa-backtracking}
+states the serial rule that these redundant executions follow.
 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
-  \node[anchor=west,font=\bfseries] at (.10,8.60)
-    {(a) Kernel chosen from the range size};
-  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (.20,7.05) rectangle (4.30,8.15);
-  \node[align=center] at (2.25,7.60)
-    {\(\leq513\) anchors\\32 threads, short kernel};
-  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (4.95,7.05) rectangle (9.15,8.15);
-  \node[align=center] at (7.05,7.60)
-    {\(514\ldots5121\) anchors\\512 threads, tiled kernel};
-  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (9.80,7.05) rectangle (14.00,8.15);
-  \node[align=center] at (11.90,7.60)
-    {\(\geq5122\) anchors\\1024 threads, tiled kernel};
+  \draw[chain blue] (.15,2.45) rectangle (2.20,3.55);
+  \node[align=center] at (1.175,3.00)
+    {first-pass\\\(f,\widehat p\)};
 
-  \node[anchor=west,font=\bfseries] at (.10,6.65)
-    {(b) One 1024-source tile};
-  \node[rotate=90] at (.45,4.20) {source order};
-  \draw[chain flow,draw=chainOrange!95!black]
-    (.85,5.65)--(.85,2.65);
+  \draw[chain orange] (2.85,2.45) rectangle (5.05,3.55);
+  \node[align=center] at (3.95,3.00)
+    {ends with\\\(f_i\geq40\)};
 
-  \foreach \r/\lab in {0/\(j_0\),1/\(j_1\),2/\(j_2\),3/\(j_3\)}
-    \node[anchor=east] at (2.10,5.55-.72*\r) {\lab};
+  \draw[chain orange] (5.70,2.45) rectangle (8.10,3.55);
+  \node[align=center] at (6.90,3.00)
+    {largest score first\\walk \(i-\widehat p_i\)};
+
+  \draw[chain green] (8.75,2.35) rectangle (11.05,3.65);
+  \node[align=center] at (9.90,3.00)
+    {choose cut\\mark prefix};
+
+  \draw[chain green] (11.70,2.25) rectangle (14.15,3.75);
+  \node[align=center] at (12.925,3.00)
+    {score \(\geq40\)\\count \(\geq3\)\\reverse and pack};
+
+  \draw[chain flow] (2.20,3.00)--(2.85,3.00);
+  \draw[chain flow] (5.05,3.00)--(5.70,3.00);
+  \draw[chain flow] (8.10,3.00)--(8.75,3.00);
+  \draw[chain flow] (11.05,3.00)--(11.70,3.00);
+
+  \node[chain current] (be) at (9.35,1.05) {\(e\)};
+  \node[chain point] (b2) at (8.25,1.05) {};
+  \node[chain point] (b1) at (7.15,1.05) {};
+  \node[draw=chainGray!85!black,fill=white,circle,
+    minimum size=.42cm,inner sep=0pt] (bc) at (6.05,1.05) {\(b\)};
+  \draw[chain soft flow] (be)--(b2);
+  \draw[chain soft flow] (b2)--(b1);
+  \draw[chain soft flow] (b1)--(bc);
+  \node[anchor=north,align=center] at (7.70,.72)
+    {permanently marked\\even if rejected};
+  \node[anchor=east,text=chainGray!90!black] at (5.72,1.05)
+    {cut excluded};
+\end{tikzpicture}
+\caption{G3SA recovery after a score pass.  It reuses minimap2's
+\textsc{ChooseCut} rule with a positive predecessor distance.  The marked
+prefix stops before cut \(b\).  G3SA marks that prefix before testing its score
+and count, so the marks remain when a candidate is rejected.  Accepted paths
+are reversed into forward order, sorted by the first packed target key, and
+packed into a contiguous prefix for the read.}
+\label{fig:chaining-g3sa-backtracking}
+\end{figure}
+
+Algorithm~\ref{alg:chaining-g3sa-backtracking} refers to the previously
+defined \textsc{ChooseCut} through a conceptual absolute-predecessor view.
+The CUDA kernel follows \(i-\widehat p_i\) directly and does not construct an
+extra predecessor array.  The first call uses \(D=0\).  The final call uses
+\(D=20000\).  Both calls require score \(40\) and at least three anchors.
+
+\begin{algorithm}[H]
+\caption{G3SA backtracking and per-read packing}
+\label{alg:chaining-g3sa-backtracking}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require anchors \(a\), scores \(f\), distances \(\widehat p\),
+    drop limit \(D\)
+  \Ensure concatenated anchors and each path's score and count
+  \Function{G3SABacktrackAndPack}{\(a,f,\widehat p,D\)}
+    \State define \(p_i\equiv\Call{Previous}{i}\) as a view of \(\widehat p\)
+    \State \(Z\gets[(f_i,i)\mid f_i\geq40]\) in increasing \(i\)
+    \State stably sort \(Z\) by increasing score
+          \Comment{read backward, so equal scores use larger \(i\) first}
+    \State \(t[0\ldots n)\gets0,\quad\mathcal C\gets[\,]\)
+    \For{\(k\gets|Z|-1\) \textbf{down to} \(0\)}
+      \State \(e\gets Z_k.\mathrm{index}\)
+      \If{\(t_e=0\)}
+        \State \(b\gets\Call{ChooseCut}{e,f,p,t,D}\)
+        \State \(P\gets[\,],\quad i\gets e\)
+        \While{\(i\neq b\)}
+          \State append \(i\) to \(P,\quad t_i\gets1,\quad i\gets p_i\)
+              \Comment{marks remain even if \(P\) is rejected}
+        \EndWhile
+        \State \(s\gets f_e\) if \(b<0\), otherwise \(s\gets f_e-f_b\)
+        \If{\(s\geq40\land |P|\geq3\)}
+          \State append \((s,\Call{Reverse}{P})\) to \(\mathcal C\)
+        \EndIf
+      \EndIf
+    \EndFor
+    \State stably sort \(\mathcal C\) by the first anchor's packed target key
+    \State \Return \Call{PackWithMetadata}{\(\mathcal C,a\)}
+  \EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\leavevmode\coderef{g3sa/minimap2/src/chaining_kernel.cu}
+  {G3SA active backtracking kernel}{mm_chain_backtrack_parallel}{1572}
+\leavevmode\coderef{g3sa/minimap2/src/kernel_wrapper.cu}
+  {G3SA backtracking workflow}{mm_chain_backtrack_kernels}{1112}
+
+The packed metadata preserves each accepted path's score and anchor count.
+Path starts are recovered from cumulative counts in the concatenated anchor
+array.  This supplies \(n_u\) and the first-path span used by
+Equation~\ref{eq:chaining-g3sa-second-condition}.
+G3SA's stable sorts make equal-score ends use decreasing anchor index and
+preserve the earlier order of paths with the same first packed target key.
+Minimap2's corresponding in-place radix sorts are not stable, so these tie
+cases can be ordered differently.
+
+\subsection{Tiled first-pass kernel}
+\label{sec:chaining-g3sa-tiles}
+
+The tiled kernel is an alternative to the short kernel and feeds the same
+backtracking phase.  It uses a source tile of \(T=1024\) anchors.  With
+\(d=e-s\), ranges satisfying \(512<d\leq5120\) use 512 threads.  Ranges with
+\(d>5120\) use 1024 threads.  Both launches call the same tiled kernel.
+
+The upper triangle contains links whose source and target are both in the
+tile.  These scores have dependencies, so source rows are completed in
+increasing order with a wait after each row.  The rectangle contains later
+targets.  One thread keeps one of these targets in registers and scans all
+completed sources in the tile.  It writes at most one result for that target
+and tile.
+
+After the rectangle is complete, the source start moves from \(s\) to
+\(s+T\).  Anchors that were targets in the previous rectangle now form the
+next source tile.  A final partial tile stops at the range end.
+Figure~\ref{fig:chaining-g3sa-tiles} shows this movement.
+The pseudocode below shows one query segment, as did
+Algorithm~\ref{alg:chaining-g3sa-first}.  A mixed-segment range uses G3SA's
+separate cross-segment score branch without changing the tile movement.
+For a rectangle target owned by lane \(v\), the source order is
+\begin{equation}
+  j_k=s+((v+k)\bmod T),\qquad 0\leq k<T.
+\label{eq:chaining-g3sa-rotated-source-order}
+\end{equation}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
+  \node[anchor=west,font=\bfseries] at (.10,8.45)
+    {(a) Select the first-pass launch from \(d=e-s\)};
+  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
+    (.20,6.95) rectangle (4.30,8.00);
+  \node[align=center] at (2.25,7.475)
+    {\(d\leq512\)\\short, 32 threads};
+  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
+    (4.95,6.95) rectangle (9.15,8.00);
+  \node[align=center] at (7.05,7.475)
+    {\(512<d\leq5120\)\\tiled, 512 threads};
+  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
+    (9.80,6.95) rectangle (14.00,8.00);
+  \node[align=center] at (11.90,7.475)
+    {\(d>5120\)\\tiled, 1024 threads};
+
+  \node[anchor=west,font=\bfseries] at (.10,6.55)
+    {(b) One source tile \([s,s+T)\), \(T=1024\)};
+
+  \foreach \r/\lab in {
+      0/\(j_s\),1/\(j_{s+1}\),2/\(j_{s+2}\),3/\(j_{s+3}\)}
+    \node[anchor=east] at (1.75,5.45-.72*\r) {\lab};
   \foreach \c/\lab in {
-      0/\(i_0\),1/\(i_1\),2/\(i_2\),3/\(i_3\),
-      4/\(i_4\),5/\(i_5\),6/\(i_6\),7/\(i_7\)}
-    \node[anchor=south] at (2.65+.78*\c,5.92) {\lab};
+      0/\(i_s\),1/\(i_{s+1}\),2/\(i_{s+2}\),3/\(i_{s+3}\),
+      4/\(i_{s+T}\),5/\(\cdots\),6/\(i_{s+T+M}\)}
+    \node[anchor=south] at (2.30+.92*\c,5.82) {\lab};
 
   \foreach \r/\c in {
       0/1,0/2,0/3,
       1/2,1/3,
       2/3}
     \draw[fill=chainOrange!17,draw=chainOrange!95!black]
-      (2.65+.78*\c-.32,5.55-.72*\r-.28)
+      (2.30+.92*\c-.36,5.45-.72*\r-.28)
       rectangle
-      (2.65+.78*\c+.32,5.55-.72*\r+.28);
+      (2.30+.92*\c+.36,5.45-.72*\r+.28);
   \foreach \r in {0,...,3}
-    \draw[fill=chainGreen!16,draw=chainGreen!80!black,very thick]
-      (2.65+.78*\r-.32,5.55-.72*\r-.28)
+    \draw[fill=chainGray!12,draw=chainGray!75!black]
+      (2.30+.92*\r-.36,5.45-.72*\r-.28)
       rectangle
-      (2.65+.78*\r+.32,5.55-.72*\r+.28);
+      (2.30+.92*\r+.36,5.45-.72*\r+.28);
   \foreach \r in {0,...,3}
-    \foreach \c in {4,...,7}
+    \foreach \c in {4,...,6}
       \draw[fill=chainBlue!14,draw=chainBlue!90!black]
-        (2.65+.78*\c-.32,5.55-.72*\r-.28)
+        (2.30+.92*\c-.36,5.45-.72*\r-.28)
         rectangle
-        (2.65+.78*\c+.32,5.55-.72*\r+.28);
+        (2.30+.92*\c+.36,5.45-.72*\r+.28);
 
   \draw[dashed,very thick,draw=chainOrange!95!black]
-    (2.25,2.75) rectangle (5.35,5.95);
+    (1.85,2.62) rectangle (5.38,5.82);
   \draw[dashed,very thick,draw=chainBlue!90!black]
-    (5.40,2.75) rectangle (8.90,5.95);
-  \node[align=center,text=chainOrange!95!black] at (3.78,2.18)
-    {triangle: finish scores\\inside the source tile};
-  \node[align=center,text=chainBlue!90!black] at (7.15,2.18)
-    {rectangle: one thread\\keeps one later target};
+    (5.43,2.62) rectangle (8.72,5.82);
+  \node[align=center,text=chainOrange!95!black] at (3.62,2.08)
+    {triangle\\finish source rows};
+  \node[align=center,text=chainBlue!90!black] at (7.08,2.08)
+    {rectangle\\later targets};
 
   \draw[fill=chainGray!10,draw=chainGray!85!black]
-    (9.75,5.15) rectangle (13.85,6.00);
-  \node at (11.80,5.58) {load 1024 sources};
-  \draw[chain flow] (11.80,5.15)--(11.80,4.55);
+    (9.45,5.05) rectangle (13.90,5.90);
+  \node at (11.675,5.475) {load sources \([s,s+T)\)};
+  \draw[chain flow] (11.675,5.05)--(11.675,4.47);
   \draw[fill=chainOrange!14,draw=chainOrange!95!black]
-    (9.75,3.70) rectangle (13.85,4.55);
-  \node at (11.80,4.13) {finish the triangle in order};
-  \draw[chain flow] (11.80,3.70)--(11.80,3.10);
+    (9.45,3.62) rectangle (13.90,4.47);
+  \node at (11.675,4.045) {finish the triangle in order};
+  \draw[chain flow] (11.675,3.62)--(11.675,3.04);
   \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-    (9.75,2.25) rectangle (13.85,3.10);
-  \node at (11.80,2.68) {scan later targets in parallel};
-  \draw[chain flow] (11.80,2.25)--(11.80,1.65);
+    (9.45,2.19) rectangle (13.90,3.04);
+  \node[align=center] at (11.675,2.615)
+    {scan later targets\\in parallel};
+  \draw[chain flow] (11.675,2.19)--(11.675,1.61);
   \draw[fill=chainGreen!12,draw=chainGreen!80!black]
-    (9.75,.80) rectangle (13.85,1.65);
-  \node at (11.80,1.23) {store \(f_i\) and \(p_i\)};
+    (9.45,.76) rectangle (13.90,1.61);
+  \node at (11.675,1.185) {advance \(s\gets s+T\)};
+
+  \draw[chain flow,draw=chainGreen!80!black]
+    (9.45,1.185)--(8.68,1.185)--(8.68,5.20);
+  \node[anchor=east,align=right,text=chainGreen!80!black]
+    at (8.55,1.18) {former targets become\\the next source tile};
 \end{tikzpicture}
-\caption{G3SA changes the number of threads with the range size. A tiled
-kernel loads up to 1024 sources. Green diagonal boxes are completed source
-scores. Orange cells are links among anchors in the tile and must be finished
-in source order. During each rectangular iteration, one thread keeps one later
-target in registers and scans the blue cells. Threads repeat this step for the
-remaining target columns.}
+\caption{G3SA tiled first-pass work.  Gray diagonal cells and the absent lower
+triangle are not scored because a predecessor must occur before its target.  Orange cells complete
+scores inside the source tile.  Blue cells apply that completed tile to later
+targets up to \(s+T+M\), where \(M=5000\).  The source pointer then advances
+by \(T\).}
 \label{fig:chaining-g3sa-tiles}
 \end{figure}
 
-In the triangle, one source row is completed before the next row starts. In
-the rectangle, each thread holds one later target at a time and scans the
-completed source tile. It performs at most one score and predecessor write
-after that tile has been scanned. A later source tile can update the same
-target again.
-\coderef{g3sa/minimap2/src/chaining_kernel.cu}
-{G3SA direct tiled chaining}{mm_compute_chain_long_tiled}{333}
+The rotated source order makes the selected predecessor for equal rectangle
+scores depend on the lane that owns the target.  The rectangle loop can
+compare a source more than \(5000\) indices behind the target.  The distance
+limit is checked only when the selected result is stored.  A farther source
+can therefore become the temporary maximum and cause the tile write to be
+rejected, even if the tile also contained a lower valid candidate.
 
-After this pass, G3SA considers ends with \(f_i\geq40\). It follows
-predecessor paths from higher score to lower score. For each read, it retains
-paths with at least three anchors and score at least \(40\), using maximum
-drop \(0\), then packs their anchors into a contiguous prefix of that read's
-part of the anchor array.
+\begin{algorithm}[H]
+\caption{G3SA tiled first pass for one query-segment range}
+\label{alg:chaining-g3sa-tiled}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require inclusive range \(a_b,\ldots,a_e\) from one query segment, tile size
+    \(T=1024\), predecessor limit \(M=5000\)
+  \Ensure scores \(f\) and predecessor distances \(\widehat p\)
+  \State initialize \(f_i\gets15,\ \widehat p_i\gets-1\) for \(b\leq i\leq e\)
+  \For{\(s\gets b,b+T,b+2T,\ldots\) while \(s<e\)}
+    \State \(u\gets\min(e+1,s+T)\)
+          \Comment{\([s,u)\) is the source tile}
+    \State load \(a_j,f_j,\widehat p_j\) for \(s\leq j<u\) into shared memory
+    \For{\(j\gets s\) \textbf{to} \(u-1\)}
+      \ForAll{\(i\in\{j+1,\ldots,u-1\}\) in parallel}
+        \State \(c\gets f_j+E(j,i)\)
+              \Comment{\(-\infty\) when G3SA rejects the pair}
+        \If{\(c\geq f_i\land c>15\)}
+          \State \(f_i\gets c,\quad\widehat p_i\gets i-j\)
+        \EndIf
+      \EndFor
+      \State \(\operatorname{await}(\mathrm{rowUpdates}_j)\)
+            \Comment{source score \(f_j\) is now complete}
+    \EndFor
+    \State write the completed triangle scores
+    \ForAll{\(i\in\{u,\ldots,\min(e,s+T+M)\}\) in target batches}
+      \State \((c,j^\star)\gets(f_i,\bot)\)
+      \For{\(k\gets0\) \textbf{to} \(T-1\)}
+        \State \(j\gets s+((\operatorname{lane}(i)+k)\bmod T)\)
+        \If{\(j\geq u\)}
+          \State \textbf{continue}
+        \EndIf
+        \State \(x\gets f_j+E(j,i)\)
+              \Comment{\(-\infty\) when G3SA rejects the pair}
+        \If{\(x\geq c\land x>15\)}
+          \State \(c\gets x,\quad j^\star\gets j\)
+        \EndIf
+      \EndFor
+      \If{\(j^\star\neq\bot\land 0<i-j^\star\leq M\)}
+        \State \(f_i\gets c,\quad\widehat p_i\gets i-j^\star\)
+            \Comment{one write for this target and source tile}
+      \EndIf
+    \EndFor
+    \State \(\operatorname{await}(\mathrm{tileUpdates}_s)\)
+  \EndFor
+\end{algorithmic}
+\end{algorithm}
 
-\section{Choosing one predecessor before computing its full score}
-\label{sec:chaining-rmq-idea}
+The pseudocode masks the final partial target batch.  The released kernel
+loads \(j+\mathit{tid}\) before checking each lane against the range end, so a
+partial final batch can read and possibly update beyond \(e\).  This boundary defect is not part
+of the intended work shown in Figure~\ref{fig:chaining-g3sa-tiles}.
+\leavevmode\coderef{g3sa/minimap2/src/chaining_kernel.cu}
+  {G3SA tiled first-pass kernel}{mm_compute_chain_long_tiled}{333}
 
-The complete candidate score is \(f_j+E(j,i)\). Calculating \(E(j,i)\) needs
-both coordinates, the span, and the gap penalty. Minimap2 first calculates
-the following preliminary value for every earlier anchor:
+\subsection{Conditional ranking second pass}
+\label{sec:chaining-g3sa-rank}
+
+G3SA sorts the accepted first-pass anchors by packed target key.  Consecutive
+anchors remain in one range while the
+next key is strictly less than the preceding key plus \(20000\).  Each
+adjacent reference-coordinate gap is therefore smaller than \(20000\), while
+the range's total reference-coordinate span can be larger.  G3SA then chooses
+a short or tiled kernel.  The active function names contain \texttt{\_rmq}.
+
+For a selected read, the second DP ignores the old path boundaries and treats the pooled anchors
+as one packed-target-key-sorted array.  The second pass can therefore link anchors from
+different first-pass paths.  Final backtracking starts with a fresh mark array,
+so first-pass marks and rejected anchors do not carry into that recovery.
+
+For every tested pair \((j,i)\), the kernel compares the preliminary value
+from Equation~\ref{eq:chaining-rmq-h}.  The short kernel keeps the largest
+\(h(j)\), and an equal value replaces the saved predecessor.  The tiled
+kernel processes one source group at a time and ignores values no larger than
+15.  If a group's selected source is more than 5000 anchor positions behind
+\(i\), the kernel discards that group's update and restores the choice saved
+before the group.  After all groups, G3SA calculates one complete score
+\[
+  f_{j^\star}+E(j^\star,i).
+\]
+A result no larger than the initial span \(15\) starts a new chain.
+Figure~\ref{fig:chaining-g3sa-second-pass} separates the preliminary
+comparisons from this complete score.
+
+Let \(x_i\) be anchor \(i\)'s packed target key.  Its high 32 bits contain the
+mapping orientation and target-sequence identifier:
+\[
+  \operatorname{hi}(x_i)
+  =(\operatorname{rev}_i\ll31)\mathbin{\vert}\operatorname{tid}_i.
+\]
+Thus \(\operatorname{hi}(x_i)=\operatorname{hi}(x_j)\) requires the same
+target sequence and orientation.  It does not require equal coordinates.
+For the short kernel, the candidates of target \(i\) are
 \begin{equation}
-  h(j)=f_j+\frac{\lambda_g}{2}(r_j+q_j).
-\label{eq:chaining-rmq-h}
+\begin{split}
+  \mathcal P_i^{\mathrm{short}}=\{j:\;&s\leq j<i,\quad i-j\leq5000,\\
+    &0<r_i-r_j\leq20000,\quad 0<q_i-q_j\leq20000,\\
+    &\operatorname{hi}(x_i)=\operatorname{hi}(x_j)\}.
+\end{split}
+\label{eq:chaining-g3sa-rank-short-candidates}
 \end{equation}
-A larger \(h(j)\) is chosen. Once \(f_j\) is finished, \(h(j)\) can be stored
-and reused for later targets. This comparison chooses one candidate,
-but does not give the final chain score. The selected link still needs
-\(f_j+E(j,i)\).
-
-The name \emph{range minimum query}, abbreviated RMQ, means the following
-operation: among stored items whose keys lie in a given interval, return the
-item with the smallest stored priority. Minimap2 stores
-\(\pi(j)=-h(j)\), so its minimum priority is the largest \(h(j)\).
-Figure~\ref{fig:chaining-rmq-contrast} contrasts this tree query with G3SA's
-second pass. G3SA's function names contain \texttt{\_rmq}, but the running
-code performs no range query. It compares \(h(j)\) for every source and target
-pair that its GPU kernels test.
+The tiled kernel uses the triangle and rectangle source groups from
+Figure~\ref{fig:chaining-g3sa-tiles}.  For a rectangle source group
+\(J=[s,u)\) from a full tile, where \(u=s+T\), target \(i\) is tested only
+when
+\begin{equation}
+  G_{\mathrm{rect}}(J,i)\iff
+  u\leq i\leq u+5000
+  \ \land\
+  x_i\leq x_{u-1}+20000.
+\label{eq:chaining-g3sa-rank-rectangle-gate}
+\end{equation}
+This group check occurs before the following per-cell predicate:
+\begin{equation}
+  A_{\mathrm{tile}}(j,i)\iff
+  \operatorname{hi}(x_i)=\operatorname{hi}(x_j)
+  \ \land\ r_i\neq r_j
+  \ \land\ 0<q_i-q_j\leq20000.
+\label{eq:chaining-g3sa-rank-tiled-cell}
+\end{equation}
+It has no per-cell reference-distance or bandwidth test.
+Let \(\mathcal J_i\) contain target \(i\)'s triangle source group and the
+earlier rectangle source groups that satisfy
+Equation~\ref{eq:chaining-g3sa-rank-rectangle-gate}.
+Triangle sources are visited in increasing \(j\).  Rectangle sources use the
+rotated order in Equation~\ref{eq:chaining-g3sa-rotated-source-order}.
 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
-  \node[anchor=west,font=\bfseries] at (.10,8.45)
-    {(a) minimap2 tree RMQ};
+  \draw[chain green] (.10,2.55) rectangle (2.15,3.65);
+  \node[align=center] at (1.125,3.10)
+    {packed first-pass\\anchors};
+  \draw[chain flow] (2.15,3.10)--(2.70,3.10);
 
-  % Active query-coordinate strip.
-  \foreach \x/\lab/\fillc in {
-      .45/4/chainGray!12,
-      1.35/9/chainGray!12,
-      2.25/12/chainBlue!12,
-      3.15/14/chainOrange!20,
-      4.05/17/chainBlue!12,
-      4.95/21/chainBlue!12,
-      5.85/26/chainOrange!20}
-    {
-      \draw[fill=\fillc,draw=black!60]
-        (\x,7.05) rectangle (\x+.72,7.68);
-      \node at (\x+.36,7.365) {\lab};
-    }
-  \node[anchor=south,text=chainOrange!95!black] at (6.21,7.92)
-    {target \(i\)};
-  \draw[<->,very thick,draw=chainOrange!95!black]
-    (2.10,6.72)--(5.82,6.72);
-  \node[anchor=north] at (3.50,6.62)
-    {query interval for target \(i\)};
+  \draw[chain muted] (2.70,2.55) rectangle (4.60,3.65);
+  \node[align=center] at (3.65,3.10)
+    {sort and\\build ranges};
+  \draw[chain flow] (4.60,3.10)--(5.05,3.10);
 
-  % Small augmented tree. Each box shows the cached winner of its subtree.
-  \node[draw=chainBlue!90!black,fill=chainBlue!10,
-    minimum width=1.55cm,minimum height=1.00cm,align=center,font=\scriptsize]
-    (t17) at (3.45,5.55)
-    {\(q=17\)\\subtree max\\\(h=42\)};
-  \node[draw=chainBlue!90!black,fill=chainBlue!10,
-    minimum width=1.55cm,minimum height=1.00cm,align=center,font=\scriptsize]
-    (t12) at (1.80,4.15)
-    {\(q=12\)\\subtree max\\\(h=42\)};
-  \node[draw=chainBlue!90!black,fill=chainBlue!10,
-    minimum width=1.55cm,minimum height=1.00cm,align=center,font=\scriptsize]
-    (t21) at (5.10,4.15)
-    {\(q=21\)\\subtree max\\\(h=25\)};
-  \node[draw=chainOrange!95!black,fill=chainOrange!20,very thick,
-    minimum width=1.55cm,minimum height=.82cm,align=center] (t14) at (2.55,2.75)
-    {\(q=14\)\\\(h=42\)};
-  \node[draw=chainGray!85!black,fill=chainGray!10,
-    minimum width=1.55cm,minimum height=.82cm,align=center] (t9) at (.75,2.75)
-    {\(q=9\)\\\(h=18\)};
-  \draw[thick] (t17)--(t12);
-  \draw[thick] (t17)--(t21);
-  \draw[thick] (t12)--(t9);
-  \draw[thick] (t12)--(t14);
-  \draw[fill=chainGreen!14,draw=chainGreen!80!black]
-    (4.35,1.35) rectangle (6.95,2.25);
-  \node[align=center] at (5.65,1.80)
-    {one complete score\\\(f_j+E(j,i)\)};
-  \draw[chain flow,draw=chainOrange!95!black]
-    (t14.south)--(2.55,1.80)--(4.35,1.80);
-
-  \node[anchor=west,font=\bfseries] at (7.40,8.45)
-    {(b) G3SA second pass};
-
-  \foreach \c/\lab in {1/\(i_1\),2/\(i_2\),3/\(i_3\),4/\(i_4\)}
-    \node[anchor=south] at (9.05+.82*\c,7.60) {\lab};
-  \foreach \r/\lab in {0/\(j_0\),1/\(j_1\),2/\(j_2\),3/\(j_3\)}
-    \node[anchor=east] at (9.00,7.20-.78*\r) {\lab};
-
-  \foreach \r/\c/\val in {
+  \node[anchor=south] at (7.05,4.15) {targets \(i\)};
+  \node[rotate=90] at (4.88,1.65) {sources \(j\)};
+  \foreach \r/\c/\v in {
       0/1/22,
       0/2/22,1/2/31,
       0/3/22,1/3/31,2/3/27,
       0/4/22,1/4/31,2/4/27,3/4/40}
     \draw[fill=chainBlue!12,draw=chainBlue!90!black]
-      (9.05+.82*\c-.34,7.20-.78*\r-.30)
+      (5.30+.70*\c-.28,3.75-.62*\r-.24)
       rectangle
-      (9.05+.82*\c+.34,7.20-.78*\r+.30)
-      node[pos=.5] {\val};
-
-  \foreach \r/\c/\val in {0/1/22,1/2/31,1/3/31,3/4/40}
-    \draw[fill=chainOrange!20,draw=chainOrange!95!black,very thick]
-      (9.05+.82*\c-.34,7.20-.78*\r-.30)
+      (5.30+.70*\c+.28,3.75-.62*\r+.24)
+      node[pos=.5] {\scriptsize \v};
+  \foreach \r/\c/\v in {0/1/22,1/2/31,1/3/31,3/4/40}
+    \draw[fill=chainOrange!22,draw=chainOrange!95!black,very thick]
+      (5.30+.70*\c-.28,3.75-.62*\r-.24)
       rectangle
-      (9.05+.82*\c+.34,7.20-.78*\r+.30)
-      node[pos=.5] {\val};
+      (5.30+.70*\c+.28,3.75-.62*\r+.24)
+      node[pos=.5] {\scriptsize \v};
+  \node[align=center] at (7.05,.78)
+    {one orange predecessor\\saved for each target};
 
-  \node[anchor=east] at (9.00,3.63) {saved predecessor:};
-  \foreach \c/\lab in {1/\(j_0\),2/\(j_1\),3/\(j_1\),4/\(j_3\)}
-    {
-      \draw[fill=chainGreen!14,draw=chainGreen!80!black]
-        (9.05+.82*\c-.34,3.32)
-        rectangle
-        (9.05+.82*\c+.34,3.92);
-      \node at (9.05+.82*\c,3.62) {\lab};
-    }
-  \draw[fill=chainGreen!14,draw=chainGreen!80!black]
-    (9.35,1.45) rectangle (12.85,2.55);
-  \node[align=center] at (11.10,2.00)
-    {full score for \(i_3\)\\from saved \(j_1\)};
-  \draw[chain flow] (11.51,3.32)--(11.51,2.55);
+  \draw[chain flow] (8.47,2.80)--(9.15,2.80);
+  \draw[chain blue] (9.15,2.20) rectangle (11.45,3.40);
+  \node[align=center] at (10.30,2.80)
+    {one complete score\\\(f_{j^\star}+E(j^\star,i)\)};
+  \draw[chain flow] (11.45,2.80)--(12.00,2.80);
 
-  \draw[dashed,draw=chainGray!90!black,fill=chainGray!8]
-    (12.85,4.70) rectangle (14.15,6.15);
-  \node[align=center,text=chainGray!90!black] at (13.50,5.43)
-    {CUDA\\AVL tree};
-  \draw[very thick,draw=chainOrange!95!black]
-    (12.78,4.62)--(14.15,6.15);
-  \node[anchor=north,text=chainOrange!95!black] at (13.50,4.52)
-    {not called};
+  \draw[chain green] (12.00,2.20) rectangle (14.15,3.40);
+  \node[align=center] at (13.075,2.80)
+    {second\\backtracking};
 \end{tikzpicture}
-\caption{Minimap2 saves the largest \(h\) for every tree subtree. Its range
-query returns one earlier anchor, shown in orange. G3SA compares \(h(j)\) in
-every blue cell that it tests and saves one predecessor per target. In panel
-(b), each number is the \(h(j)\) value of its source row. The crossed AVL tree
-in G3SA's \texttt{krmq\_cuda.cu} is not called.}
-\label{fig:chaining-rmq-contrast}
+\caption{G3SA's ranking second pass.  Blue cells are preliminary
+\(h(j)\) comparisons.  Values repeat along a source row because \(h(j)\)
+depends on \(j\).  Orange cells are the saved predecessors.  Only one
+complete target-dependent score is calculated for each target with a saved
+    predecessor.}
+\label{fig:chaining-g3sa-second-pass}
 \end{figure}
 
-\subsection{Minimap2 RMQ}
-\label{sec:chaining-minimap2-rmq}
+The active wrapper passes \(20000\) as both coordinate-distance arguments,
+\(\lambda_g=0.12\), and \(\lambda_s=0\).  If a tiled source group's largest
+\(h(j)\) comes from more than \(5000\) anchor positions behind the target, the
+kernel does not try the group's second-largest value.  Neither kernel performs
+minimap2's local scan, tree-size cap, or B1 skip rule.  This pass replaces
+minimap2's AVL candidate query with short or tiled array comparisons, while
+omitting those three RMQ operations.  The tiled second-pass kernel has the
+same final partial-batch boundary defect noted after
+Algorithm~\ref{alg:chaining-g3sa-tiled}.
 
-Minimap2 stores eligible earlier anchors in a height-balanced binary search
-tree, called an AVL tree. The search key is
+\begin{algorithm}[H]
+\caption{Conceptual G3SA ranking second pass}
+\label{alg:chaining-g3sa-second-pass}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require anchors retained by the first backtracking for a selected read
+  \Ensure second-pass scores \(f\) and predecessor distances \(\widehat p\)
+  \State \(\mathcal R\gets
+    \Call{SortAndBuildSecondPassRanges}{\text{retained anchors}}\)
+  \For{each range \([s,e]\in\mathcal R\)}
+    \State choose the short or tiled kernel from anchor-index span \(d=e-s\)
+    \For{\(i\gets s\) \textbf{to} \(e\)}
+    \State \(H_i\gets-\infty,\quad j^\star\gets\bot\)
+    \If{the short kernel is selected}
+      \For{\(j\in\mathcal P_i^{\mathrm{short}}\) in kernel order}
+        \If{\(h(j)\geq H_i\)}
+          \State \(H_i\gets h(j),\quad j^\star\gets j\)
+        \EndIf
+      \EndFor
+    \Else
+      \For{\(J\in\mathcal J_i\) by increasing source-tile start}
+        \State \((H_{\mathrm{old}},j_{\mathrm{old}})\gets(H_i,j^\star)\)
+        \For{\(j\in J\) in the source order defined above}
+          \If{\(A_{\mathrm{tile}}(j,i)\)}
+            \If{\(h(j)\geq H_i\land h(j)>15\)}
+              \State \(H_i\gets h(j),\quad j^\star\gets j\)
+            \EndIf
+          \EndIf
+        \EndFor
+        \If{\(j^\star\neq\bot\land i-j^\star>5000\)}
+          \State \((H_i,j^\star)\gets(H_{\mathrm{old}},j_{\mathrm{old}})\)
+              \Comment{reject this group's farther maximum}
+        \EndIf
+      \EndFor
+    \EndIf
+    \If{\(j^\star\neq\bot\)}
+      \State \(c\gets f_{j^\star}+E(j^\star,i)\)
+      \If{\(c>15\)}
+        \State \(f_i\gets c,\quad\widehat p_i\gets i-j^\star\)
+      \Else
+        \State \(f_i\gets15,\quad\widehat p_i\gets-1\)
+      \EndIf
+    \Else
+      \State \(f_i\gets15,\quad\widehat p_i\gets-1\)
+    \EndIf
+    \EndFor
+  \EndFor
+  \State \Return \Call{G3SABacktrackAndPack}{\(a,f,\widehat p,20000\)}
+\end{algorithmic}
+\end{algorithm}
+
+The packed-anchor order remains intermediate.  After final backtracking,
+G3SA sorts final chain records by decreasing score.  A secondary key orders
+records with equal scores.  This key is the path's anchor count XOR a hash of
+the first anchor's packed target and query words.  The hash also includes the
+query length and the fixed seed \(11\).
+\leavevmode\coderef{g3sa/minimap2/src/chaining_kernel.cu}
+  {G3SA short ranking kernel}{mm_compute_chain_short_rmq}{970}
+\leavevmode\coderef{g3sa/minimap2/src/kernel_wrapper.cu}
+  {G3SA ranking-pass launches}{chaining_kernel_wrapper_rmq}{595}
+
+\section{BioseqDB Vulkan tiled dynamic programming}
+\label{sec:chaining-vulkan}
+
+BioseqDB's \texttt{vulkan\_tiled\_dynamic\_programming} route implements B6.
+The current shader fixes one target \(i\) and examines earlier predecessors in
+batches of 32.  It does not use the G3SA source triangle.  It also does not
+use an AVL tree or G3SA's conditional ranking pass.
+
+The host first sets
 \[
-  K_j=(q_j,j).
+  D=\max\{\texttt{max\_gap},\texttt{bandwidth}\}.
 \]
-Including \(j\) keeps anchors with equal query coordinates as separate nodes.
-The tree stores
+It splits the sorted anchors at a strand change or at an adjacent reference
+gap greater than \(D\).  One 32-lane workgroup owns one resulting range.
+Different ranges can run concurrently.  Inside a range, targets are completed
+one after another so every predecessor score is ready before it is read.
+We call each resulting interval a hard range because chaining does not cross
+its boundary.
+
+For a fixed target, lane \(u\) first scores predecessor \(i-u-1\).  The next
+iteration moves all lanes 32 positions farther back.  Every active lane
+calculates the complete value \(f_j+E(j,i)\).  A 32-lane maximum reduction selects one
+pair \((\text{score},j)\).  Equal scores inside a batch select the larger
+index \(j\), which is the nearer predecessor in array order.
+The maximum compares \((c_j,j)\) lexicographically.  Figure~\ref{fig:chaining-vulkan-batches}
+shows this work split.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
+  \node[anchor=west,font=\bfseries] at (.10,6.35)
+    {(a) Independent hard ranges};
+  \foreach \x in {.25,.80,1.35,1.90,2.45,3.00}
+    \node[chain point] at (\x,5.10) {};
+  \draw[very thick,draw=chainOrange!95!black] (3.38,4.68)--(3.38,5.52);
+  \node[anchor=north,text=chainOrange!95!black] at (3.38,4.62)
+    {strand or gap \(>D\)};
+  \foreach \x in {3.80,4.35,4.90,5.45}
+    \node[chain point] at (\x,5.10) {};
+  \draw[decorate,decoration={brace,amplitude=4pt},draw=chainBlue!90!black]
+    (.10,5.52)--(3.18,5.52);
+  \node[anchor=south,text=chainBlue!90!black] at (1.64,5.62)
+    {one workgroup};
+  \draw[decorate,decoration={brace,amplitude=4pt},draw=chainGreen!80!black]
+    (3.62,5.52)--(5.63,5.52);
+  \node[anchor=south,text=chainGreen!80!black] at (4.625,5.62)
+    {another workgroup};
+
+  \node[anchor=west,font=\bfseries] at (.10,3.95)
+    {(b) One target and predecessor batches};
+  \draw[fill=chainGray!10,draw=chainGray!80!black]
+    (.25,2.85) rectangle (2.85,3.55);
+  \node at (1.55,3.20) {older batch};
+  \draw[fill=chainBlue!13,draw=chainBlue!90!black,very thick]
+    (3.25,2.85) rectangle (6.65,3.55);
+  \node at (4.95,3.20)
+    {\(i-32,\ldots,i-2,i-1\)};
+  \draw[fill=chainOrange!20,draw=chainOrange!95!black,very thick]
+    (7.20,2.85) rectangle (8.20,3.55);
+  \node at (7.70,3.20) {\(i\)};
+  \draw[chain flow] (3.25,3.20)--(2.85,3.20);
+  \node[anchor=south] at (3.05,3.30) {next older};
+
+  \draw[fill=chainBlue!10,draw=chainBlue!90!black]
+    (3.25,1.40) rectangle (6.65,2.20);
+  \node at (4.95,1.80) {32 complete link scores};
+  \foreach \x in {3.43,3.90,4.37,4.84,5.31,5.78,6.25}
+    \draw[chain soft flow] (\x,2.85)--(\x,2.20);
+
+  \draw[chain flow] (6.65,1.80)--(7.45,1.80);
+  \draw[fill=chainOrange!18,draw=chainOrange!95!black]
+    (7.45,1.35) rectangle (8.65,2.25);
+  \node at (8.05,1.80) {\(\max\)};
+
+  \draw[chain flow] (8.65,1.80)--(9.30,1.80);
+  \draw[fill=chainGreen!13,draw=chainGreen!80!black]
+    (9.30,1.25) rectangle (11.40,2.35);
+  \node[align=center] at (10.35,1.80) {update\\\(f_i,p_i\)};
+
+  \draw[chain flow] (11.40,1.80)--(12.05,1.80);
+  \draw[fill=chainGray!10,draw=chainGray!80!black]
+    (12.05,1.25) rectangle (14.15,2.35);
+  \node[align=center] at (13.10,1.80)
+    {finish target\\before \(i+1\)};
+\end{tikzpicture}
+\caption{BioseqDB Vulkan forward chaining.  Workgroups handle independent
+anchor ranges.  For one fixed target, 32 lanes calculate complete scores for
+one predecessor batch.  The 32-lane maximum reduction updates the single state
+\((f_i,p_i)\).  The workgroup then moves to an older batch or advances to the
+next target.}
+\label{fig:chaining-vulkan-batches}
+\end{figure}
+
+Let
 \[
-  \pi(j)=-h(j).
+  K=\min\{\texttt{max\_chain\_iter},3000\}.
 \]
-Each node also points to the smallest \(\pi\) in its subtree. That pointer
-already identifies the subtree's best candidate, so a range query need not
-inspect its anchors one by one.
-
-Minimap2 first sets
+This is the maximum number of predecessor positions examined for one target.
+For positive \(S=\texttt{max\_chain\_skip}\), define
 \[
-  D=\max\{\texttt{max\_dist},\texttt{bw}\}.
+  U=\left\lfloor\frac{S}{32}\right\rfloor+1.
 \]
-Anchors at one reference coordinate are inserted only after the algorithm
-moves to a larger reference coordinate. At query time, every stored anchor is
-on the same reference and strand as \(i\), has \(r_j<r_i\), and satisfies
-\(r_i-r_j\leq D\). Old anchors are removed when their reference distance
-exceeds \(D\). If the tree is larger than \texttt{cap\_rmq\_size}, the oldest
-anchors are also removed until the cap is met.
+The shader stops after \(U\) consecutive batches fail to increase \(f_i\).
+An increase resets the counter.  A non-positive \(S\) disables this stop.
+This batch counter is not minimap2's marked-anchor skip rule.
+The shader also omits B1's final recheck of the best predecessor seen before
+the marked-anchor stop.
 
-The tree searches the closed interval between these composite keys:
-\begin{equation}
-  K_i^{\mathrm{lo}}=(q_i-D,\mathrm{INT32\_MAX}),\qquad
-  K_i^{\mathrm{hi}}=(q_i,0).
-\label{eq:chaining-rmq-key-range}
-\end{equation}
-The tree returns one
-\[
-  j^\star\in\operatorname*{arg\,max}
-  \{h(j):j\text{ is stored and }
-  K_i^{\mathrm{lo}}\leq(q_j,j)\leq K_i^{\mathrm{hi}}\}.
-\]
-For \(0<j<\mathrm{INT32\_MAX}\), this reduces to
-\[
-  q_i-D<q_j<q_i.
-\]
-Equal \(h(j)\) values have no explicit index tie rule.
+The selected public route determines recovery.  The generic C++ full-result
+route returns \(f,p\) from the shader and runs shared scalar chain extraction
+on the CPU.  The C++ coordinate-only route uses a separate GPU reduction that
+examines at most 16 candidate chain ends and returns at most one accepted path.
+The complete PostgreSQL Vulkan route performs recovery on the GPU.  Before
+forward scoring, the host can retain a regularly spaced subset of anchors from
+a very long range.  Section~\ref{sec:chaining-bioseqdb} gives the selection
+formula and runtime rules.
 
-The target starts with \(f_i=\ell_i\) and \(p_i=-1\). Minimap2 calculates
-\[
-  c=f_{j^\star}+E(j^\star,i)
-\]
-for the returned anchor. It updates the target only when
-\[
-  \delta(j^\star,i)\leq\texttt{bw}
-  \quad\land\quad
-  c>f_i.
-\]
-When both conditions hold, it sets \(f_i\gets c\) and
-\(p_i\gets j^\star\).
+\begin{algorithm}[H]
+\caption{BioseqDB Vulkan forward chaining for one hard range}
+\label{alg:chaining-vulkan}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require sorted range \(a_b,\ldots,a_{e-1}\), distance \(D\),
+    scan limit \(K\), skip parameter \(S\)
+  \Ensure scores \(f\) and absolute predecessor indices \(p\)
+  \State \(U\gets\infty\) if \(S\leq0\), otherwise
+    \(U\gets\lfloor S/32\rfloor+1\)
+  \For{\(i\gets b\) \textbf{to} \(e-1\)}
+    \State \(f_i\gets\ell_i,\quad p_i\gets-1\)
+    \State \(o\gets1,\quad u\gets0\)
+    \While{\(o\leq K\land i-o\geq b\)}
+      \State \(B\gets\) the longest prefix of
+        \((i-o,\ldots,i-o-31)\) with \(j\geq b\),
+        \(i-j\leq K\), and \(r_i-r_j\leq D\)
+      \If{\(B=\varnothing\)}
+        \State \textbf{break}
+      \EndIf
+      \ForAll{\(j\in B\) in 32 lanes}
+        \State \(c_j\gets f_j+E(j,i)\)
+            \Comment{invalid links use \(-\infty\)}
+      \EndFor
+      \State \(j^\star\gets
+        \operatorname*{arg\,max}_{j\in B}(c_j,j)\)
+            \Comment{larger \(j\) breaks a score tie}
+      \State \(c\gets c_{j^\star}\)
+      \If{\(c>f_i\)}
+        \State \(f_i\gets c,\quad p_i\gets j^\star,\quad u\gets0\)
+      \ElsIf{\(S>0\)}
+        \State \(u\gets u+1\)
+        \If{\(u\geq U\)}
+          \State \textbf{break}
+        \EndIf
+      \EndIf
+      \If{\(|B|<32\)}
+        \State \textbf{break}
+      \EndIf
+      \State \(o\gets o+32\)
+    \EndWhile
+    \State \(\operatorname{await}(\mathrm{targetUpdates}_i)\)
+          \Comment{make \(f_i,p_i\) visible before target \(i+1\)}
+  \EndFor
+\end{algorithmic}
+\end{algorithm}
 
-Minimap2 treats this link as an exact extension when
-\[
-  \delta(j^\star,i)=0
-  \quad\land\quad
-  g(j^\star,i)\leq\ell_{j^\star}.
-\]
-Equation~\ref{eq:chaining-penalty} gives such a link no penalty. A local repair
-scan has four requirements:
-\begin{enumerate}
-  \item the main tree returned \(j^\star\),
-  \item that link is not an exact extension,
-  \item the local tree is non-empty, which also requires a positive
-    configured local distance, and
-  \item \(q_i>0\).
-\end{enumerate}
-Let \(D_{\mathrm{in}}\) be \texttt{max\_dist\_inner} clamped to the interval
-\([0,D]\). The local tree keeps earlier anchors on the same reference and
-strand whose reference distance is at most \(D_{\mathrm{in}}\), subject to
-the tree-size cap. The scan visits the
-retained anchors with
-\[
-  q_i-D_{\mathrm{in}}\leq q_j\leq q_i-1
-\]
-from larger to smaller query coordinate. It calculates the complete score for
-each visited anchor. Only candidates with
-\(\delta(j,i)\leq\texttt{bw}\) take part in the score update and the B1 mark
-and skip rule. The main tree is never asked for its second choice. If
-\(j^\star\) is exact, no local repair scan runs.
+Table~\ref{tab:chaining-late-algorithm-differences} summarizes the high-level
+differences.  The BioseqDB Vulkan route is a separate B6 algorithm even though
+its public name contains \emph{tiled}.
 
-One tree range query costs \(O(\log M)\), where \(M\) is the number of stored
-anchors. Starting the local iterator also costs \(O(\log M)\), and visiting
-\(k_i\) local anchors adds \(O(k_i)\). Across \(n\) targets, tree queries,
-insertions, and deletions cost \(O(n\log M_{\max})\), where \(M_{\max}\) is
-the largest active-tree size over all targets. The local scans add
-\[
-  O\!\left(\sum_i k_i\right).
-\]
-The parameter \texttt{max\_chain\_iter} is not used by RMQ.
-\texttt{max\_chain\_skip} can stop only the local repair scan.
-\coderef{minimap2/lchain.c}{Minimap2 RMQ chaining}{mg_lchain_rmq}{258}
-\coderef{minimap2/krmq.h}{Augmented AVL range query}{__KRMQ_RMQ}{110}
-
-\subsection{G3SA second pass: comparing \(h(j)\) on the GPU}
-\label{sec:chaining-g3sa-rank}
-
-G3SA runs this pass only for reads selected after the first pass and its
-backtracking step. It sorts the retained anchors again and splits them into
-per-read ranges. The short kernel assigns later targets to 32 threads. The
-medium and long kernels use the 1024-source tiles shown in
-Figure~\ref{fig:chaining-g3sa-tiles}.
-
-For every tested pair \((j,i)\) that passes the coordinate checks, G3SA
-recalculates \(h(j)\) from Equation~\ref{eq:chaining-rmq-h}. Target \(i\)
-keeps the largest value seen so far. It saves the corresponding predecessor
-as \(j_i^\star\), represented by the distance \(p_i=i-j_i^\star\). An equal
-value replaces the predecessor saved earlier. After this selection, one
-thread calculates
-\[
-  c_i=f_{j_i^\star}+E(j_i^\star,i).
-\]
-If \(c_i>15\), it sets \(f_i=c_i\). Otherwise it restores
-\(f_i=15,p_i=-1\). The complete calculation uses the span stored in
-predecessor anchor \(j_i^\star\), not a fixed span of \(15\).
-
-G3SA still compares every source and target pair tested by its kernels. It
-only avoids calculating \(E(j,i)\) for most pairs. Minimap2 instead uses its
-main tree to choose one candidate in \(O(\log M)\). When that link is not
-exact, minimap2 may also calculate complete scores for candidates from its
-local repair tree.
-
-Each new range starts with score \(15\). The wrapper passes \(20{,}000\) as
-both coordinate-distance arguments, with \(\lambda_g=0.12\) and
-\(\lambda_s=0\). The short kernel compares a source with at most the next
-\(5{,}000\) anchor indices and checks both coordinate-distance limits. The
-tiled kernels use the wider scan described above and apply \(p_i\leq5000\)
-only when writing the selected predecessor. Their pair comparison checks
-increasing query coordinate, query distance at most \(20{,}000\), the same
-reference and strand group, and different reference coordinates. It does not
-check the \(20{,}000\) reference-distance bound in every tiled cell. None of
-the called kernels rejects a pair by comparing its diagonal width with the
-supplied bandwidth.
-They do not perform minimap2's local repair scan and do not use
-\texttt{max\_chain\_skip} or a tree-size cap.
-
-G3SA backtracks this second result with minimum score \(40\), at least three
-anchors, and maximum drop \(20{,}000\). These differences mean that the
-second pass is not an exact GPU copy of minimap2 RMQ.
-\coderef{g3sa/minimap2/src/chaining_kernel.cu}
-{G3SA second-pass comparison}{mm_compute_chain_short_rmq}{970}
-\coderef{g3sa/minimap2/src/kernel_wrapper.cu}
-{G3SA second-pass launches}{chaining_kernel_wrapper_rmq}{595}
-
-The file \texttt{krmq\_cuda.cu} contains CUDA versions of minimap2's AVL
-operations. The entire \texttt{gpu\_chain\_rmq} definition is commented out.
-The header still declares it, but nothing calls it. As written, one CUDA
-thread would process one read and perform the tree operations in sequence.
-The local repair code is disabled. This function does not backtrack or pack
-anchors. It does not run in current G3SA.
-\coderef{g3sa/minimap2/src/krmq_cuda.cu}
-{Dormant CUDA AVL prototype}{gpu_chain_rmq}{406}
+\begin{table}[H]
+\centering
+\caption{High-level differences among the later chaining algorithms}
+\label{tab:chaining-late-algorithm-differences}
+\scriptsize
+\setlength{\tabcolsep}{2.6pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{@{}
+  >{\raggedright\arraybackslash}p{0.17\linewidth}
+  >{\raggedright\arraybackslash}X
+  >{\raggedright\arraybackslash}X
+  >{\raggedright\arraybackslash}X
+  >{\raggedright\arraybackslash}X@{}}
+\toprule
+ & \textbf{minimap2 RMQ} & \textbf{G3SA first pass} &
+   \textbf{G3SA second pass} & \textbf{BioseqDB Vulkan}\\
+\midrule
+Parallel unit
+& one target
+& short and triangle use one source, rectangle uses one target
+& short and triangle use one source, rectangle uses one target
+& one target\\
+Candidate choice
+& largest cached \(h(j)\) in an AVL interval
+& largest complete score seen so far
+& largest \(h(j)\) among tested cells
+& largest complete score in 32-lane batches\\
+Complete scores
+& one tree-selected score plus an optional local scan
+& one for every allowed source-target pair
+& at most one after \(h(j)\) selection
+& one for every active lane\\
+Stored predecessor
+& absolute index \(j\)
+& distance \(i-j\)
+& distance \(i-j\)
+& absolute index \(j\)\\
+Forward stop
+& coordinate window and tree cap
+& coordinate and index limits
+& coordinate and index limits
+& coordinate and scan limits, then batches that do not increase \(f_i\)\\
+Recovery
+& minimap2 scalar cut search
+& minimap2-style cut search on CUDA
+& the same G3SA recovery
+& scalar CPU for a generic full result, GPU for coordinate and complete
+  Vulkan routes\\
+\bottomrule
+\end{tabularx}
+\end{table}
 
 \section{BioseqDB implementation}
 \label{sec:chaining-bioseqdb}
