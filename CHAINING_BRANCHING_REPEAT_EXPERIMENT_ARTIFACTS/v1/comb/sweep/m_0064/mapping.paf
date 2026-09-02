@@ -1,0 +1,2 @@
+comb_query_m64	242311	19374	242295	+	comb_reference_m64	247136	25199	247120	36480	253921	60	tp:A:P	cm:i:2432	s1:i:28668	s2:i:0	dv:f:0.0034	rl:i:0
+comb_query_m64	242311	986	4901	+	comb_reference_m64	247136	986	4901	600	3915	60	tp:A:P	cm:i:40	s1:i:600	s2:i:0	dv:f:0.0032	rl:i:0

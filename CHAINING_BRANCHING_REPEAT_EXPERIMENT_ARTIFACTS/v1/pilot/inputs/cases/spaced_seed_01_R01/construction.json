@@ -1,0 +1,39 @@
+{
+  "case_id": "spaced_seed_01_R01",
+  "construction_type": "exact_spaced_query_copies",
+  "copy_count": 1,
+  "copy_intervals": [
+    {
+      "copy_index": 0,
+      "end": 4096,
+      "query_minus_target_diagonal": 0,
+      "start": 0
+    }
+  ],
+  "copy_pitch": 20480,
+  "copy_pitch_exceeds_default_bw_long": true,
+  "copy_pitch_exceeds_default_max_chain_gap": true,
+  "default_bw_long": 20000,
+  "default_max_chain_gap": 5000,
+  "guard_base": "N",
+  "guard_intervals": [
+    {
+      "end": 20480,
+      "guard_index": 0,
+      "start": 4096
+    }
+  ],
+  "guard_length": 16384,
+  "master_seed": 7314159,
+  "reference_guard_interval": [
+    4096,
+    20480
+  ],
+  "reference_source_interval": [
+    0,
+    4096
+  ],
+  "schema_version": 1,
+  "source_length": 4096,
+  "source_sequence_sha256": "8865f1ef69d66c12e6888ed8a70dc6526472607be3d9fa2bc40c58a7810ecb94"
+}

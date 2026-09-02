@@ -1,0 +1,742 @@
+[M::mm_idx_gen::0.002*1.55] collected minimizers
+[M::mm_idx_gen::0.002*1.48] sorted minimizers
+[M::main::0.002*1.48] loaded/built the index for 1 target sequence(s)
+[M::mm_mapopt_update::0.002*1.46] mid_occ = 10
+[M::mm_idx_stat] kmer size: 15; skip: 10; is_hpc: 0; #seq: 1
+[M::mm_idx_stat::0.002*1.44] distinct minimizers: 371 (100.00% are singletons); average occurrences: 1.000; average spacing: 137.833; total length: 51136
+QR	comb_query_m8	0	46311
+MM_RUNL_MAP	{"schema_version":1,"query_length":46311,"raw_query_minimizers":371,"query_minimizers_after_query_filter":371,"retained_anchor_count":371,"mid_occ":10,"max_occ":0,"max_max_occ":4095,"occ_dist":500,"rep_len":0}
+RS	0
+SD	comb_reference_m8	1000	+	1000	15	0
+SD	comb_reference_m8	1100	+	1100	15	0
+SD	comb_reference_m8	1200	+	1200	15	0
+SD	comb_reference_m8	1300	+	1300	15	0
+SD	comb_reference_m8	1400	+	1400	15	0
+SD	comb_reference_m8	1500	+	1500	15	0
+SD	comb_reference_m8	1600	+	1600	15	0
+SD	comb_reference_m8	1700	+	1700	15	0
+SD	comb_reference_m8	1800	+	1800	15	0
+SD	comb_reference_m8	1900	+	1900	15	0
+SD	comb_reference_m8	2000	+	2000	15	0
+SD	comb_reference_m8	2100	+	2100	15	0
+SD	comb_reference_m8	2200	+	2200	15	0
+SD	comb_reference_m8	2300	+	2300	15	0
+SD	comb_reference_m8	2400	+	2400	15	0
+SD	comb_reference_m8	2500	+	2500	15	0
+SD	comb_reference_m8	2600	+	2600	15	0
+SD	comb_reference_m8	2700	+	2700	15	0
+SD	comb_reference_m8	2800	+	2800	15	0
+SD	comb_reference_m8	2900	+	2900	15	0
+SD	comb_reference_m8	3000	+	3000	15	0
+SD	comb_reference_m8	3100	+	3100	15	0
+SD	comb_reference_m8	3200	+	3200	15	0
+SD	comb_reference_m8	3300	+	3300	15	0
+SD	comb_reference_m8	3400	+	3400	15	0
+SD	comb_reference_m8	3500	+	3500	15	0
+SD	comb_reference_m8	3600	+	3600	15	0
+SD	comb_reference_m8	3700	+	3700	15	0
+SD	comb_reference_m8	3800	+	3800	15	0
+SD	comb_reference_m8	3900	+	3900	15	0
+SD	comb_reference_m8	4000	+	4000	15	0
+SD	comb_reference_m8	4100	+	4100	15	0
+SD	comb_reference_m8	4200	+	4200	15	0
+SD	comb_reference_m8	4300	+	4300	15	0
+SD	comb_reference_m8	4400	+	4400	15	0
+SD	comb_reference_m8	4500	+	4500	15	0
+SD	comb_reference_m8	4600	+	4600	15	0
+SD	comb_reference_m8	4700	+	4700	15	0
+SD	comb_reference_m8	4800	+	4800	15	0
+SD	comb_reference_m8	4900	+	4900	15	0
+SD	comb_reference_m8	6400	+	5900	15	-500
+SD	comb_reference_m8	7900	+	6900	15	-500
+SD	comb_reference_m8	9400	+	7900	15	-500
+SD	comb_reference_m8	10900	+	8900	15	-500
+SD	comb_reference_m8	12400	+	9900	15	-500
+SD	comb_reference_m8	13900	+	10900	15	-500
+SD	comb_reference_m8	15400	+	11900	15	-500
+SD	comb_reference_m8	16900	+	12900	15	-500
+SD	comb_reference_m8	18400	+	13900	15	-500
+SD	comb_reference_m8	19900	+	14900	15	-500
+SD	comb_reference_m8	21175	+	15900	15	-275
+SD	comb_reference_m8	24675	+	19300	15	-100
+SD	comb_reference_m8	25175	+	19350	15	-450
+SD	comb_reference_m8	25213	+	19388	15	0
+SD	comb_reference_m8	25251	+	19426	15	0
+SD	comb_reference_m8	25289	+	19464	15	0
+SD	comb_reference_m8	25327	+	19502	15	0
+SD	comb_reference_m8	25365	+	19540	15	0
+SD	comb_reference_m8	25403	+	19578	15	0
+SD	comb_reference_m8	25441	+	19616	15	0
+SD	comb_reference_m8	25479	+	19654	15	0
+SD	comb_reference_m8	25517	+	19692	15	0
+SD	comb_reference_m8	25555	+	19730	15	0
+SD	comb_reference_m8	25593	+	19768	15	0
+SD	comb_reference_m8	25631	+	19806	15	0
+SD	comb_reference_m8	25669	+	19844	15	0
+SD	comb_reference_m8	25707	+	19882	15	0
+SD	comb_reference_m8	25745	+	19920	15	0
+SD	comb_reference_m8	25783	+	19958	15	0
+SD	comb_reference_m8	25821	+	19996	15	0
+SD	comb_reference_m8	25859	+	20034	15	0
+SD	comb_reference_m8	25897	+	20072	15	0
+SD	comb_reference_m8	25935	+	20110	15	0
+SD	comb_reference_m8	25973	+	20148	15	0
+SD	comb_reference_m8	26011	+	20186	15	0
+SD	comb_reference_m8	26049	+	20224	15	0
+SD	comb_reference_m8	26087	+	20262	15	0
+SD	comb_reference_m8	26125	+	20300	15	0
+SD	comb_reference_m8	26163	+	20338	15	0
+SD	comb_reference_m8	26201	+	20376	15	0
+SD	comb_reference_m8	26239	+	20414	15	0
+SD	comb_reference_m8	26277	+	20452	15	0
+SD	comb_reference_m8	26315	+	20490	15	0
+SD	comb_reference_m8	26353	+	20528	15	0
+SD	comb_reference_m8	26391	+	20566	15	0
+SD	comb_reference_m8	26429	+	20604	15	0
+SD	comb_reference_m8	26467	+	20642	15	0
+SD	comb_reference_m8	26505	+	20680	15	0
+SD	comb_reference_m8	26543	+	20718	15	0
+SD	comb_reference_m8	26581	+	20756	15	0
+SD	comb_reference_m8	26619	+	20794	15	0
+SD	comb_reference_m8	28175	+	22900	15	550
+SD	comb_reference_m8	28675	+	23850	15	450
+SD	comb_reference_m8	28713	+	23888	15	0
+SD	comb_reference_m8	28751	+	23926	15	0
+SD	comb_reference_m8	28789	+	23964	15	0
+SD	comb_reference_m8	28827	+	24002	15	0
+SD	comb_reference_m8	28865	+	24040	15	0
+SD	comb_reference_m8	28903	+	24078	15	0
+SD	comb_reference_m8	28941	+	24116	15	0
+SD	comb_reference_m8	28979	+	24154	15	0
+SD	comb_reference_m8	29017	+	24192	15	0
+SD	comb_reference_m8	29055	+	24230	15	0
+SD	comb_reference_m8	29093	+	24268	15	0
+SD	comb_reference_m8	29131	+	24306	15	0
+SD	comb_reference_m8	29169	+	24344	15	0
+SD	comb_reference_m8	29207	+	24382	15	0
+SD	comb_reference_m8	29245	+	24420	15	0
+SD	comb_reference_m8	29283	+	24458	15	0
+SD	comb_reference_m8	29321	+	24496	15	0
+SD	comb_reference_m8	29359	+	24534	15	0
+SD	comb_reference_m8	29397	+	24572	15	0
+SD	comb_reference_m8	29435	+	24610	15	0
+SD	comb_reference_m8	29473	+	24648	15	0
+SD	comb_reference_m8	29511	+	24686	15	0
+SD	comb_reference_m8	29549	+	24724	15	0
+SD	comb_reference_m8	29587	+	24762	15	0
+SD	comb_reference_m8	29625	+	24800	15	0
+SD	comb_reference_m8	29663	+	24838	15	0
+SD	comb_reference_m8	29701	+	24876	15	0
+SD	comb_reference_m8	29739	+	24914	15	0
+SD	comb_reference_m8	29777	+	24952	15	0
+SD	comb_reference_m8	29815	+	24990	15	0
+SD	comb_reference_m8	29853	+	25028	15	0
+SD	comb_reference_m8	29891	+	25066	15	0
+SD	comb_reference_m8	29929	+	25104	15	0
+SD	comb_reference_m8	29967	+	25142	15	0
+SD	comb_reference_m8	30005	+	25180	15	0
+SD	comb_reference_m8	30043	+	25218	15	0
+SD	comb_reference_m8	30081	+	25256	15	0
+SD	comb_reference_m8	30119	+	25294	15	0
+SD	comb_reference_m8	31675	+	26300	15	-550
+SD	comb_reference_m8	32175	+	26350	15	-450
+SD	comb_reference_m8	32213	+	26388	15	0
+SD	comb_reference_m8	32251	+	26426	15	0
+SD	comb_reference_m8	32289	+	26464	15	0
+SD	comb_reference_m8	32327	+	26502	15	0
+SD	comb_reference_m8	32365	+	26540	15	0
+SD	comb_reference_m8	32403	+	26578	15	0
+SD	comb_reference_m8	32441	+	26616	15	0
+SD	comb_reference_m8	32479	+	26654	15	0
+SD	comb_reference_m8	32517	+	26692	15	0
+SD	comb_reference_m8	32555	+	26730	15	0
+SD	comb_reference_m8	32593	+	26768	15	0
+SD	comb_reference_m8	32631	+	26806	15	0
+SD	comb_reference_m8	32669	+	26844	15	0
+SD	comb_reference_m8	32707	+	26882	15	0
+SD	comb_reference_m8	32745	+	26920	15	0
+SD	comb_reference_m8	32783	+	26958	15	0
+SD	comb_reference_m8	32821	+	26996	15	0
+SD	comb_reference_m8	32859	+	27034	15	0
+SD	comb_reference_m8	32897	+	27072	15	0
+SD	comb_reference_m8	32935	+	27110	15	0
+SD	comb_reference_m8	32973	+	27148	15	0
+SD	comb_reference_m8	33011	+	27186	15	0
+SD	comb_reference_m8	33049	+	27224	15	0
+SD	comb_reference_m8	33087	+	27262	15	0
+SD	comb_reference_m8	33125	+	27300	15	0
+SD	comb_reference_m8	33163	+	27338	15	0
+SD	comb_reference_m8	33201	+	27376	15	0
+SD	comb_reference_m8	33239	+	27414	15	0
+SD	comb_reference_m8	33277	+	27452	15	0
+SD	comb_reference_m8	33315	+	27490	15	0
+SD	comb_reference_m8	33353	+	27528	15	0
+SD	comb_reference_m8	33391	+	27566	15	0
+SD	comb_reference_m8	33429	+	27604	15	0
+SD	comb_reference_m8	33467	+	27642	15	0
+SD	comb_reference_m8	33505	+	27680	15	0
+SD	comb_reference_m8	33543	+	27718	15	0
+SD	comb_reference_m8	33581	+	27756	15	0
+SD	comb_reference_m8	33619	+	27794	15	0
+SD	comb_reference_m8	35175	+	29900	15	550
+SD	comb_reference_m8	35675	+	30850	15	450
+SD	comb_reference_m8	35713	+	30888	15	0
+SD	comb_reference_m8	35751	+	30926	15	0
+SD	comb_reference_m8	35789	+	30964	15	0
+SD	comb_reference_m8	35827	+	31002	15	0
+SD	comb_reference_m8	35865	+	31040	15	0
+SD	comb_reference_m8	35903	+	31078	15	0
+SD	comb_reference_m8	35941	+	31116	15	0
+SD	comb_reference_m8	35979	+	31154	15	0
+SD	comb_reference_m8	36017	+	31192	15	0
+SD	comb_reference_m8	36055	+	31230	15	0
+SD	comb_reference_m8	36093	+	31268	15	0
+SD	comb_reference_m8	36131	+	31306	15	0
+SD	comb_reference_m8	36169	+	31344	15	0
+SD	comb_reference_m8	36207	+	31382	15	0
+SD	comb_reference_m8	36245	+	31420	15	0
+SD	comb_reference_m8	36283	+	31458	15	0
+SD	comb_reference_m8	36321	+	31496	15	0
+SD	comb_reference_m8	36359	+	31534	15	0
+SD	comb_reference_m8	36397	+	31572	15	0
+SD	comb_reference_m8	36435	+	31610	15	0
+SD	comb_reference_m8	36473	+	31648	15	0
+SD	comb_reference_m8	36511	+	31686	15	0
+SD	comb_reference_m8	36549	+	31724	15	0
+SD	comb_reference_m8	36587	+	31762	15	0
+SD	comb_reference_m8	36625	+	31800	15	0
+SD	comb_reference_m8	36663	+	31838	15	0
+SD	comb_reference_m8	36701	+	31876	15	0
+SD	comb_reference_m8	36739	+	31914	15	0
+SD	comb_reference_m8	36777	+	31952	15	0
+SD	comb_reference_m8	36815	+	31990	15	0
+SD	comb_reference_m8	36853	+	32028	15	0
+SD	comb_reference_m8	36891	+	32066	15	0
+SD	comb_reference_m8	36929	+	32104	15	0
+SD	comb_reference_m8	36967	+	32142	15	0
+SD	comb_reference_m8	37005	+	32180	15	0
+SD	comb_reference_m8	37043	+	32218	15	0
+SD	comb_reference_m8	37081	+	32256	15	0
+SD	comb_reference_m8	37119	+	32294	15	0
+SD	comb_reference_m8	38675	+	33300	15	-550
+SD	comb_reference_m8	39175	+	33350	15	-450
+SD	comb_reference_m8	39213	+	33388	15	0
+SD	comb_reference_m8	39251	+	33426	15	0
+SD	comb_reference_m8	39289	+	33464	15	0
+SD	comb_reference_m8	39327	+	33502	15	0
+SD	comb_reference_m8	39365	+	33540	15	0
+SD	comb_reference_m8	39403	+	33578	15	0
+SD	comb_reference_m8	39441	+	33616	15	0
+SD	comb_reference_m8	39479	+	33654	15	0
+SD	comb_reference_m8	39517	+	33692	15	0
+SD	comb_reference_m8	39555	+	33730	15	0
+SD	comb_reference_m8	39593	+	33768	15	0
+SD	comb_reference_m8	39631	+	33806	15	0
+SD	comb_reference_m8	39669	+	33844	15	0
+SD	comb_reference_m8	39707	+	33882	15	0
+SD	comb_reference_m8	39745	+	33920	15	0
+SD	comb_reference_m8	39783	+	33958	15	0
+SD	comb_reference_m8	39821	+	33996	15	0
+SD	comb_reference_m8	39859	+	34034	15	0
+SD	comb_reference_m8	39897	+	34072	15	0
+SD	comb_reference_m8	39935	+	34110	15	0
+SD	comb_reference_m8	39973	+	34148	15	0
+SD	comb_reference_m8	40011	+	34186	15	0
+SD	comb_reference_m8	40049	+	34224	15	0
+SD	comb_reference_m8	40087	+	34262	15	0
+SD	comb_reference_m8	40125	+	34300	15	0
+SD	comb_reference_m8	40163	+	34338	15	0
+SD	comb_reference_m8	40201	+	34376	15	0
+SD	comb_reference_m8	40239	+	34414	15	0
+SD	comb_reference_m8	40277	+	34452	15	0
+SD	comb_reference_m8	40315	+	34490	15	0
+SD	comb_reference_m8	40353	+	34528	15	0
+SD	comb_reference_m8	40391	+	34566	15	0
+SD	comb_reference_m8	40429	+	34604	15	0
+SD	comb_reference_m8	40467	+	34642	15	0
+SD	comb_reference_m8	40505	+	34680	15	0
+SD	comb_reference_m8	40543	+	34718	15	0
+SD	comb_reference_m8	40581	+	34756	15	0
+SD	comb_reference_m8	40619	+	34794	15	0
+SD	comb_reference_m8	42175	+	36900	15	550
+SD	comb_reference_m8	42675	+	37850	15	450
+SD	comb_reference_m8	42713	+	37888	15	0
+SD	comb_reference_m8	42751	+	37926	15	0
+SD	comb_reference_m8	42789	+	37964	15	0
+SD	comb_reference_m8	42827	+	38002	15	0
+SD	comb_reference_m8	42865	+	38040	15	0
+SD	comb_reference_m8	42903	+	38078	15	0
+SD	comb_reference_m8	42941	+	38116	15	0
+SD	comb_reference_m8	42979	+	38154	15	0
+SD	comb_reference_m8	43017	+	38192	15	0
+SD	comb_reference_m8	43055	+	38230	15	0
+SD	comb_reference_m8	43093	+	38268	15	0
+SD	comb_reference_m8	43131	+	38306	15	0
+SD	comb_reference_m8	43169	+	38344	15	0
+SD	comb_reference_m8	43207	+	38382	15	0
+SD	comb_reference_m8	43245	+	38420	15	0
+SD	comb_reference_m8	43283	+	38458	15	0
+SD	comb_reference_m8	43321	+	38496	15	0
+SD	comb_reference_m8	43359	+	38534	15	0
+SD	comb_reference_m8	43397	+	38572	15	0
+SD	comb_reference_m8	43435	+	38610	15	0
+SD	comb_reference_m8	43473	+	38648	15	0
+SD	comb_reference_m8	43511	+	38686	15	0
+SD	comb_reference_m8	43549	+	38724	15	0
+SD	comb_reference_m8	43587	+	38762	15	0
+SD	comb_reference_m8	43625	+	38800	15	0
+SD	comb_reference_m8	43663	+	38838	15	0
+SD	comb_reference_m8	43701	+	38876	15	0
+SD	comb_reference_m8	43739	+	38914	15	0
+SD	comb_reference_m8	43777	+	38952	15	0
+SD	comb_reference_m8	43815	+	38990	15	0
+SD	comb_reference_m8	43853	+	39028	15	0
+SD	comb_reference_m8	43891	+	39066	15	0
+SD	comb_reference_m8	43929	+	39104	15	0
+SD	comb_reference_m8	43967	+	39142	15	0
+SD	comb_reference_m8	44005	+	39180	15	0
+SD	comb_reference_m8	44043	+	39218	15	0
+SD	comb_reference_m8	44081	+	39256	15	0
+SD	comb_reference_m8	44119	+	39294	15	0
+SD	comb_reference_m8	45675	+	40300	15	-550
+SD	comb_reference_m8	46175	+	40350	15	-450
+SD	comb_reference_m8	46213	+	40388	15	0
+SD	comb_reference_m8	46251	+	40426	15	0
+SD	comb_reference_m8	46289	+	40464	15	0
+SD	comb_reference_m8	46327	+	40502	15	0
+SD	comb_reference_m8	46365	+	40540	15	0
+SD	comb_reference_m8	46403	+	40578	15	0
+SD	comb_reference_m8	46441	+	40616	15	0
+SD	comb_reference_m8	46479	+	40654	15	0
+SD	comb_reference_m8	46517	+	40692	15	0
+SD	comb_reference_m8	46555	+	40730	15	0
+SD	comb_reference_m8	46593	+	40768	15	0
+SD	comb_reference_m8	46631	+	40806	15	0
+SD	comb_reference_m8	46669	+	40844	15	0
+SD	comb_reference_m8	46707	+	40882	15	0
+SD	comb_reference_m8	46745	+	40920	15	0
+SD	comb_reference_m8	46783	+	40958	15	0
+SD	comb_reference_m8	46821	+	40996	15	0
+SD	comb_reference_m8	46859	+	41034	15	0
+SD	comb_reference_m8	46897	+	41072	15	0
+SD	comb_reference_m8	46935	+	41110	15	0
+SD	comb_reference_m8	46973	+	41148	15	0
+SD	comb_reference_m8	47011	+	41186	15	0
+SD	comb_reference_m8	47049	+	41224	15	0
+SD	comb_reference_m8	47087	+	41262	15	0
+SD	comb_reference_m8	47125	+	41300	15	0
+SD	comb_reference_m8	47163	+	41338	15	0
+SD	comb_reference_m8	47201	+	41376	15	0
+SD	comb_reference_m8	47239	+	41414	15	0
+SD	comb_reference_m8	47277	+	41452	15	0
+SD	comb_reference_m8	47315	+	41490	15	0
+SD	comb_reference_m8	47353	+	41528	15	0
+SD	comb_reference_m8	47391	+	41566	15	0
+SD	comb_reference_m8	47429	+	41604	15	0
+SD	comb_reference_m8	47467	+	41642	15	0
+SD	comb_reference_m8	47505	+	41680	15	0
+SD	comb_reference_m8	47543	+	41718	15	0
+SD	comb_reference_m8	47581	+	41756	15	0
+SD	comb_reference_m8	47619	+	41794	15	0
+SD	comb_reference_m8	49175	+	43900	15	550
+SD	comb_reference_m8	49675	+	44850	15	450
+SD	comb_reference_m8	49713	+	44888	15	0
+SD	comb_reference_m8	49751	+	44926	15	0
+SD	comb_reference_m8	49789	+	44964	15	0
+SD	comb_reference_m8	49827	+	45002	15	0
+SD	comb_reference_m8	49865	+	45040	15	0
+SD	comb_reference_m8	49903	+	45078	15	0
+SD	comb_reference_m8	49941	+	45116	15	0
+SD	comb_reference_m8	49979	+	45154	15	0
+SD	comb_reference_m8	50017	+	45192	15	0
+SD	comb_reference_m8	50055	+	45230	15	0
+SD	comb_reference_m8	50093	+	45268	15	0
+SD	comb_reference_m8	50131	+	45306	15	0
+SD	comb_reference_m8	50169	+	45344	15	0
+SD	comb_reference_m8	50207	+	45382	15	0
+SD	comb_reference_m8	50245	+	45420	15	0
+SD	comb_reference_m8	50283	+	45458	15	0
+SD	comb_reference_m8	50321	+	45496	15	0
+SD	comb_reference_m8	50359	+	45534	15	0
+SD	comb_reference_m8	50397	+	45572	15	0
+SD	comb_reference_m8	50435	+	45610	15	0
+SD	comb_reference_m8	50473	+	45648	15	0
+SD	comb_reference_m8	50511	+	45686	15	0
+SD	comb_reference_m8	50549	+	45724	15	0
+SD	comb_reference_m8	50587	+	45762	15	0
+SD	comb_reference_m8	50625	+	45800	15	0
+SD	comb_reference_m8	50663	+	45838	15	0
+SD	comb_reference_m8	50701	+	45876	15	0
+SD	comb_reference_m8	50739	+	45914	15	0
+SD	comb_reference_m8	50777	+	45952	15	0
+SD	comb_reference_m8	50815	+	45990	15	0
+SD	comb_reference_m8	50853	+	46028	15	0
+SD	comb_reference_m8	50891	+	46066	15	0
+SD	comb_reference_m8	50929	+	46104	15	0
+SD	comb_reference_m8	50967	+	46142	15	0
+SD	comb_reference_m8	51005	+	46180	15	0
+SD	comb_reference_m8	51043	+	46218	15	0
+SD	comb_reference_m8	51081	+	46256	15	0
+SD	comb_reference_m8	51119	+	46294	15	0
+MM_RUNL	{"schema_version":1,"call_id":1,"stage":"dp","lanes":2,"anchor_count":371,"candidate_end_count":369,"start_index":370,"start_score":615,"loop_evaluations":53,"bounds_pass":53,"bounds_fail_current":0,"bounds_fail_capacity":0,"bounds_fail_both":0,"contiguous_mismatch":8,"fast_batches":45,"scalar_fallbacks":8,"primary_path_anchors":98,"fast_covered_anchors":90,"scalar_path_length":98,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":1}
+MM_RUNL	{"schema_version":1,"call_id":1,"stage":"dp","lanes":4,"anchor_count":371,"candidate_end_count":369,"start_index":370,"start_score":615,"loop_evaluations":32,"bounds_pass":32,"bounds_fail_current":0,"bounds_fail_capacity":0,"bounds_fail_both":0,"contiguous_mismatch":10,"fast_batches":22,"scalar_fallbacks":10,"primary_path_anchors":98,"fast_covered_anchors":88,"scalar_path_length":98,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":1}
+MM_RUNL	{"schema_version":1,"call_id":1,"stage":"dp","lanes":8,"anchor_count":371,"candidate_end_count":369,"start_index":370,"start_score":615,"loop_evaluations":28,"bounds_pass":24,"bounds_fail_current":4,"bounds_fail_capacity":0,"bounds_fail_both":0,"contiguous_mismatch":14,"fast_batches":10,"scalar_fallbacks":18,"primary_path_anchors":98,"fast_covered_anchors":80,"scalar_path_length":98,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":1}
+MM_RUNL	{"schema_version":1,"call_id":1,"stage":"dp","lanes":16,"anchor_count":371,"candidate_end_count":369,"start_index":370,"start_score":615,"loop_evaluations":23,"bounds_pass":19,"bounds_fail_current":4,"bounds_fail_capacity":0,"bounds_fail_both":0,"contiguous_mismatch":14,"fast_batches":5,"scalar_fallbacks":18,"primary_path_anchors":98,"fast_covered_anchors":80,"scalar_path_length":98,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":1}
+MM_RUNL	{"schema_version":1,"call_id":1,"stage":"dp","lanes":32,"anchor_count":371,"candidate_end_count":369,"start_index":370,"start_score":615,"loop_evaluations":36,"bounds_pass":16,"bounds_fail_current":20,"bounds_fail_capacity":0,"bounds_fail_both":0,"contiguous_mismatch":14,"fast_batches":2,"scalar_fallbacks":34,"primary_path_anchors":98,"fast_covered_anchors":64,"scalar_path_length":98,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":1}
+MM_RUNL	{"schema_version":1,"call_id":1,"stage":"dp","lanes":64,"anchor_count":371,"candidate_end_count":369,"start_index":370,"start_score":615,"loop_evaluations":98,"bounds_pass":46,"bounds_fail_current":52,"bounds_fail_capacity":0,"bounds_fail_both":0,"contiguous_mismatch":46,"fast_batches":0,"scalar_fallbacks":98,"primary_path_anchors":98,"fast_covered_anchors":0,"scalar_path_length":98,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":0}
+MM_RUNL	{"schema_version":1,"call_id":2,"stage":"rmq","lanes":2,"anchor_count":344,"candidate_end_count":340,"start_index":343,"start_score":3692,"loop_evaluations":153,"bounds_pass":153,"bounds_fail_current":0,"bounds_fail_capacity":0,"bounds_fail_both":0,"contiguous_mismatch":2,"fast_batches":151,"scalar_fallbacks":2,"primary_path_anchors":304,"fast_covered_anchors":302,"scalar_path_length":304,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":1}
+MM_RUNL	{"schema_version":1,"call_id":2,"stage":"rmq","lanes":4,"anchor_count":344,"candidate_end_count":340,"start_index":343,"start_score":3692,"loop_evaluations":79,"bounds_pass":79,"bounds_fail_current":0,"bounds_fail_capacity":0,"bounds_fail_both":0,"contiguous_mismatch":4,"fast_batches":75,"scalar_fallbacks":4,"primary_path_anchors":304,"fast_covered_anchors":300,"scalar_path_length":304,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":1}
+MM_RUNL	{"schema_version":1,"call_id":2,"stage":"rmq","lanes":8,"anchor_count":344,"candidate_end_count":340,"start_index":343,"start_score":3692,"loop_evaluations":45,"bounds_pass":45,"bounds_fail_current":0,"bounds_fail_capacity":0,"bounds_fail_both":0,"contiguous_mismatch":8,"fast_batches":37,"scalar_fallbacks":8,"primary_path_anchors":304,"fast_covered_anchors":296,"scalar_path_length":304,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":1}
+MM_RUNL	{"schema_version":1,"call_id":2,"stage":"rmq","lanes":16,"anchor_count":344,"candidate_end_count":340,"start_index":343,"start_score":3692,"loop_evaluations":34,"bounds_pass":34,"bounds_fail_current":0,"bounds_fail_capacity":0,"bounds_fail_both":0,"contiguous_mismatch":16,"fast_batches":18,"scalar_fallbacks":16,"primary_path_anchors":304,"fast_covered_anchors":288,"scalar_path_length":304,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":1}
+MM_RUNL	{"schema_version":1,"call_id":2,"stage":"rmq","lanes":32,"anchor_count":344,"candidate_end_count":340,"start_index":343,"start_score":3692,"loop_evaluations":25,"bounds_pass":25,"bounds_fail_current":0,"bounds_fail_capacity":0,"bounds_fail_both":0,"contiguous_mismatch":16,"fast_batches":9,"scalar_fallbacks":16,"primary_path_anchors":304,"fast_covered_anchors":288,"scalar_path_length":304,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":1}
+MM_RUNL	{"schema_version":1,"call_id":2,"stage":"rmq","lanes":64,"anchor_count":344,"candidate_end_count":340,"start_index":343,"start_score":3692,"loop_evaluations":52,"bounds_pass":29,"bounds_fail_current":0,"bounds_fail_capacity":0,"bounds_fail_both":23,"contiguous_mismatch":25,"fast_batches":4,"scalar_fallbacks":48,"primary_path_anchors":304,"fast_covered_anchors":256,"scalar_path_length":304,"scalar_validation_error":0,"emulation_error":0,"min_score":40,"has_ranked_end":1,"has_fast_batch":1}
+CN	0	comb_reference_m8	25213	+	19388	15	0
+CN	0	comb_reference_m8	25251	+	19426	15	0
+CN	0	comb_reference_m8	25289	+	19464	15	0
+CN	0	comb_reference_m8	25327	+	19502	15	0
+CN	0	comb_reference_m8	25365	+	19540	15	0
+CN	0	comb_reference_m8	25403	+	19578	15	0
+CN	0	comb_reference_m8	25441	+	19616	15	0
+CN	0	comb_reference_m8	25479	+	19654	15	0
+CN	0	comb_reference_m8	25517	+	19692	15	0
+CN	0	comb_reference_m8	25555	+	19730	15	0
+CN	0	comb_reference_m8	25593	+	19768	15	0
+CN	0	comb_reference_m8	25631	+	19806	15	0
+CN	0	comb_reference_m8	25669	+	19844	15	0
+CN	0	comb_reference_m8	25707	+	19882	15	0
+CN	0	comb_reference_m8	25745	+	19920	15	0
+CN	0	comb_reference_m8	25783	+	19958	15	0
+CN	0	comb_reference_m8	25821	+	19996	15	0
+CN	0	comb_reference_m8	25859	+	20034	15	0
+CN	0	comb_reference_m8	25897	+	20072	15	0
+CN	0	comb_reference_m8	25935	+	20110	15	0
+CN	0	comb_reference_m8	25973	+	20148	15	0
+CN	0	comb_reference_m8	26011	+	20186	15	0
+CN	0	comb_reference_m8	26049	+	20224	15	0
+CN	0	comb_reference_m8	26087	+	20262	15	0
+CN	0	comb_reference_m8	26125	+	20300	15	0
+CN	0	comb_reference_m8	26163	+	20338	15	0
+CN	0	comb_reference_m8	26201	+	20376	15	0
+CN	0	comb_reference_m8	26239	+	20414	15	0
+CN	0	comb_reference_m8	26277	+	20452	15	0
+CN	0	comb_reference_m8	26315	+	20490	15	0
+CN	0	comb_reference_m8	26353	+	20528	15	0
+CN	0	comb_reference_m8	26391	+	20566	15	0
+CN	0	comb_reference_m8	26429	+	20604	15	0
+CN	0	comb_reference_m8	26467	+	20642	15	0
+CN	0	comb_reference_m8	26505	+	20680	15	0
+CN	0	comb_reference_m8	26543	+	20718	15	0
+CN	0	comb_reference_m8	26581	+	20756	15	0
+CN	0	comb_reference_m8	26619	+	20794	15	0
+CN	0	comb_reference_m8	28713	+	23888	15	1000
+CN	0	comb_reference_m8	28751	+	23926	15	0
+CN	0	comb_reference_m8	28789	+	23964	15	0
+CN	0	comb_reference_m8	28827	+	24002	15	0
+CN	0	comb_reference_m8	28865	+	24040	15	0
+CN	0	comb_reference_m8	28903	+	24078	15	0
+CN	0	comb_reference_m8	28941	+	24116	15	0
+CN	0	comb_reference_m8	28979	+	24154	15	0
+CN	0	comb_reference_m8	29017	+	24192	15	0
+CN	0	comb_reference_m8	29055	+	24230	15	0
+CN	0	comb_reference_m8	29093	+	24268	15	0
+CN	0	comb_reference_m8	29131	+	24306	15	0
+CN	0	comb_reference_m8	29169	+	24344	15	0
+CN	0	comb_reference_m8	29207	+	24382	15	0
+CN	0	comb_reference_m8	29245	+	24420	15	0
+CN	0	comb_reference_m8	29283	+	24458	15	0
+CN	0	comb_reference_m8	29321	+	24496	15	0
+CN	0	comb_reference_m8	29359	+	24534	15	0
+CN	0	comb_reference_m8	29397	+	24572	15	0
+CN	0	comb_reference_m8	29435	+	24610	15	0
+CN	0	comb_reference_m8	29473	+	24648	15	0
+CN	0	comb_reference_m8	29511	+	24686	15	0
+CN	0	comb_reference_m8	29549	+	24724	15	0
+CN	0	comb_reference_m8	29587	+	24762	15	0
+CN	0	comb_reference_m8	29625	+	24800	15	0
+CN	0	comb_reference_m8	29663	+	24838	15	0
+CN	0	comb_reference_m8	29701	+	24876	15	0
+CN	0	comb_reference_m8	29739	+	24914	15	0
+CN	0	comb_reference_m8	29777	+	24952	15	0
+CN	0	comb_reference_m8	29815	+	24990	15	0
+CN	0	comb_reference_m8	29853	+	25028	15	0
+CN	0	comb_reference_m8	29891	+	25066	15	0
+CN	0	comb_reference_m8	29929	+	25104	15	0
+CN	0	comb_reference_m8	29967	+	25142	15	0
+CN	0	comb_reference_m8	30005	+	25180	15	0
+CN	0	comb_reference_m8	30043	+	25218	15	0
+CN	0	comb_reference_m8	30081	+	25256	15	0
+CN	0	comb_reference_m8	30119	+	25294	15	0
+CN	0	comb_reference_m8	32213	+	26388	15	-1000
+CN	0	comb_reference_m8	32251	+	26426	15	0
+CN	0	comb_reference_m8	32289	+	26464	15	0
+CN	0	comb_reference_m8	32327	+	26502	15	0
+CN	0	comb_reference_m8	32365	+	26540	15	0
+CN	0	comb_reference_m8	32403	+	26578	15	0
+CN	0	comb_reference_m8	32441	+	26616	15	0
+CN	0	comb_reference_m8	32479	+	26654	15	0
+CN	0	comb_reference_m8	32517	+	26692	15	0
+CN	0	comb_reference_m8	32555	+	26730	15	0
+CN	0	comb_reference_m8	32593	+	26768	15	0
+CN	0	comb_reference_m8	32631	+	26806	15	0
+CN	0	comb_reference_m8	32669	+	26844	15	0
+CN	0	comb_reference_m8	32707	+	26882	15	0
+CN	0	comb_reference_m8	32745	+	26920	15	0
+CN	0	comb_reference_m8	32783	+	26958	15	0
+CN	0	comb_reference_m8	32821	+	26996	15	0
+CN	0	comb_reference_m8	32859	+	27034	15	0
+CN	0	comb_reference_m8	32897	+	27072	15	0
+CN	0	comb_reference_m8	32935	+	27110	15	0
+CN	0	comb_reference_m8	32973	+	27148	15	0
+CN	0	comb_reference_m8	33011	+	27186	15	0
+CN	0	comb_reference_m8	33049	+	27224	15	0
+CN	0	comb_reference_m8	33087	+	27262	15	0
+CN	0	comb_reference_m8	33125	+	27300	15	0
+CN	0	comb_reference_m8	33163	+	27338	15	0
+CN	0	comb_reference_m8	33201	+	27376	15	0
+CN	0	comb_reference_m8	33239	+	27414	15	0
+CN	0	comb_reference_m8	33277	+	27452	15	0
+CN	0	comb_reference_m8	33315	+	27490	15	0
+CN	0	comb_reference_m8	33353	+	27528	15	0
+CN	0	comb_reference_m8	33391	+	27566	15	0
+CN	0	comb_reference_m8	33429	+	27604	15	0
+CN	0	comb_reference_m8	33467	+	27642	15	0
+CN	0	comb_reference_m8	33505	+	27680	15	0
+CN	0	comb_reference_m8	33543	+	27718	15	0
+CN	0	comb_reference_m8	33581	+	27756	15	0
+CN	0	comb_reference_m8	33619	+	27794	15	0
+CN	0	comb_reference_m8	35713	+	30888	15	1000
+CN	0	comb_reference_m8	35751	+	30926	15	0
+CN	0	comb_reference_m8	35789	+	30964	15	0
+CN	0	comb_reference_m8	35827	+	31002	15	0
+CN	0	comb_reference_m8	35865	+	31040	15	0
+CN	0	comb_reference_m8	35903	+	31078	15	0
+CN	0	comb_reference_m8	35941	+	31116	15	0
+CN	0	comb_reference_m8	35979	+	31154	15	0
+CN	0	comb_reference_m8	36017	+	31192	15	0
+CN	0	comb_reference_m8	36055	+	31230	15	0
+CN	0	comb_reference_m8	36093	+	31268	15	0
+CN	0	comb_reference_m8	36131	+	31306	15	0
+CN	0	comb_reference_m8	36169	+	31344	15	0
+CN	0	comb_reference_m8	36207	+	31382	15	0
+CN	0	comb_reference_m8	36245	+	31420	15	0
+CN	0	comb_reference_m8	36283	+	31458	15	0
+CN	0	comb_reference_m8	36321	+	31496	15	0
+CN	0	comb_reference_m8	36359	+	31534	15	0
+CN	0	comb_reference_m8	36397	+	31572	15	0
+CN	0	comb_reference_m8	36435	+	31610	15	0
+CN	0	comb_reference_m8	36473	+	31648	15	0
+CN	0	comb_reference_m8	36511	+	31686	15	0
+CN	0	comb_reference_m8	36549	+	31724	15	0
+CN	0	comb_reference_m8	36587	+	31762	15	0
+CN	0	comb_reference_m8	36625	+	31800	15	0
+CN	0	comb_reference_m8	36663	+	31838	15	0
+CN	0	comb_reference_m8	36701	+	31876	15	0
+CN	0	comb_reference_m8	36739	+	31914	15	0
+CN	0	comb_reference_m8	36777	+	31952	15	0
+CN	0	comb_reference_m8	36815	+	31990	15	0
+CN	0	comb_reference_m8	36853	+	32028	15	0
+CN	0	comb_reference_m8	36891	+	32066	15	0
+CN	0	comb_reference_m8	36929	+	32104	15	0
+CN	0	comb_reference_m8	36967	+	32142	15	0
+CN	0	comb_reference_m8	37005	+	32180	15	0
+CN	0	comb_reference_m8	37043	+	32218	15	0
+CN	0	comb_reference_m8	37081	+	32256	15	0
+CN	0	comb_reference_m8	37119	+	32294	15	0
+CN	0	comb_reference_m8	39213	+	33388	15	-1000
+CN	0	comb_reference_m8	39251	+	33426	15	0
+CN	0	comb_reference_m8	39289	+	33464	15	0
+CN	0	comb_reference_m8	39327	+	33502	15	0
+CN	0	comb_reference_m8	39365	+	33540	15	0
+CN	0	comb_reference_m8	39403	+	33578	15	0
+CN	0	comb_reference_m8	39441	+	33616	15	0
+CN	0	comb_reference_m8	39479	+	33654	15	0
+CN	0	comb_reference_m8	39517	+	33692	15	0
+CN	0	comb_reference_m8	39555	+	33730	15	0
+CN	0	comb_reference_m8	39593	+	33768	15	0
+CN	0	comb_reference_m8	39631	+	33806	15	0
+CN	0	comb_reference_m8	39669	+	33844	15	0
+CN	0	comb_reference_m8	39707	+	33882	15	0
+CN	0	comb_reference_m8	39745	+	33920	15	0
+CN	0	comb_reference_m8	39783	+	33958	15	0
+CN	0	comb_reference_m8	39821	+	33996	15	0
+CN	0	comb_reference_m8	39859	+	34034	15	0
+CN	0	comb_reference_m8	39897	+	34072	15	0
+CN	0	comb_reference_m8	39935	+	34110	15	0
+CN	0	comb_reference_m8	39973	+	34148	15	0
+CN	0	comb_reference_m8	40011	+	34186	15	0
+CN	0	comb_reference_m8	40049	+	34224	15	0
+CN	0	comb_reference_m8	40087	+	34262	15	0
+CN	0	comb_reference_m8	40125	+	34300	15	0
+CN	0	comb_reference_m8	40163	+	34338	15	0
+CN	0	comb_reference_m8	40201	+	34376	15	0
+CN	0	comb_reference_m8	40239	+	34414	15	0
+CN	0	comb_reference_m8	40277	+	34452	15	0
+CN	0	comb_reference_m8	40315	+	34490	15	0
+CN	0	comb_reference_m8	40353	+	34528	15	0
+CN	0	comb_reference_m8	40391	+	34566	15	0
+CN	0	comb_reference_m8	40429	+	34604	15	0
+CN	0	comb_reference_m8	40467	+	34642	15	0
+CN	0	comb_reference_m8	40505	+	34680	15	0
+CN	0	comb_reference_m8	40543	+	34718	15	0
+CN	0	comb_reference_m8	40581	+	34756	15	0
+CN	0	comb_reference_m8	40619	+	34794	15	0
+CN	0	comb_reference_m8	42713	+	37888	15	1000
+CN	0	comb_reference_m8	42751	+	37926	15	0
+CN	0	comb_reference_m8	42789	+	37964	15	0
+CN	0	comb_reference_m8	42827	+	38002	15	0
+CN	0	comb_reference_m8	42865	+	38040	15	0
+CN	0	comb_reference_m8	42903	+	38078	15	0
+CN	0	comb_reference_m8	42941	+	38116	15	0
+CN	0	comb_reference_m8	42979	+	38154	15	0
+CN	0	comb_reference_m8	43017	+	38192	15	0
+CN	0	comb_reference_m8	43055	+	38230	15	0
+CN	0	comb_reference_m8	43093	+	38268	15	0
+CN	0	comb_reference_m8	43131	+	38306	15	0
+CN	0	comb_reference_m8	43169	+	38344	15	0
+CN	0	comb_reference_m8	43207	+	38382	15	0
+CN	0	comb_reference_m8	43245	+	38420	15	0
+CN	0	comb_reference_m8	43283	+	38458	15	0
+CN	0	comb_reference_m8	43321	+	38496	15	0
+CN	0	comb_reference_m8	43359	+	38534	15	0
+CN	0	comb_reference_m8	43397	+	38572	15	0
+CN	0	comb_reference_m8	43435	+	38610	15	0
+CN	0	comb_reference_m8	43473	+	38648	15	0
+CN	0	comb_reference_m8	43511	+	38686	15	0
+CN	0	comb_reference_m8	43549	+	38724	15	0
+CN	0	comb_reference_m8	43587	+	38762	15	0
+CN	0	comb_reference_m8	43625	+	38800	15	0
+CN	0	comb_reference_m8	43663	+	38838	15	0
+CN	0	comb_reference_m8	43701	+	38876	15	0
+CN	0	comb_reference_m8	43739	+	38914	15	0
+CN	0	comb_reference_m8	43777	+	38952	15	0
+CN	0	comb_reference_m8	43815	+	38990	15	0
+CN	0	comb_reference_m8	43853	+	39028	15	0
+CN	0	comb_reference_m8	43891	+	39066	15	0
+CN	0	comb_reference_m8	43929	+	39104	15	0
+CN	0	comb_reference_m8	43967	+	39142	15	0
+CN	0	comb_reference_m8	44005	+	39180	15	0
+CN	0	comb_reference_m8	44043	+	39218	15	0
+CN	0	comb_reference_m8	44081	+	39256	15	0
+CN	0	comb_reference_m8	44119	+	39294	15	0
+CN	0	comb_reference_m8	46213	+	40388	15	-1000
+CN	0	comb_reference_m8	46251	+	40426	15	0
+CN	0	comb_reference_m8	46289	+	40464	15	0
+CN	0	comb_reference_m8	46327	+	40502	15	0
+CN	0	comb_reference_m8	46365	+	40540	15	0
+CN	0	comb_reference_m8	46403	+	40578	15	0
+CN	0	comb_reference_m8	46441	+	40616	15	0
+CN	0	comb_reference_m8	46479	+	40654	15	0
+CN	0	comb_reference_m8	46517	+	40692	15	0
+CN	0	comb_reference_m8	46555	+	40730	15	0
+CN	0	comb_reference_m8	46593	+	40768	15	0
+CN	0	comb_reference_m8	46631	+	40806	15	0
+CN	0	comb_reference_m8	46669	+	40844	15	0
+CN	0	comb_reference_m8	46707	+	40882	15	0
+CN	0	comb_reference_m8	46745	+	40920	15	0
+CN	0	comb_reference_m8	46783	+	40958	15	0
+CN	0	comb_reference_m8	46821	+	40996	15	0
+CN	0	comb_reference_m8	46859	+	41034	15	0
+CN	0	comb_reference_m8	46897	+	41072	15	0
+CN	0	comb_reference_m8	46935	+	41110	15	0
+CN	0	comb_reference_m8	46973	+	41148	15	0
+CN	0	comb_reference_m8	47011	+	41186	15	0
+CN	0	comb_reference_m8	47049	+	41224	15	0
+CN	0	comb_reference_m8	47087	+	41262	15	0
+CN	0	comb_reference_m8	47125	+	41300	15	0
+CN	0	comb_reference_m8	47163	+	41338	15	0
+CN	0	comb_reference_m8	47201	+	41376	15	0
+CN	0	comb_reference_m8	47239	+	41414	15	0
+CN	0	comb_reference_m8	47277	+	41452	15	0
+CN	0	comb_reference_m8	47315	+	41490	15	0
+CN	0	comb_reference_m8	47353	+	41528	15	0
+CN	0	comb_reference_m8	47391	+	41566	15	0
+CN	0	comb_reference_m8	47429	+	41604	15	0
+CN	0	comb_reference_m8	47467	+	41642	15	0
+CN	0	comb_reference_m8	47505	+	41680	15	0
+CN	0	comb_reference_m8	47543	+	41718	15	0
+CN	0	comb_reference_m8	47581	+	41756	15	0
+CN	0	comb_reference_m8	47619	+	41794	15	0
+CN	0	comb_reference_m8	49713	+	44888	15	1000
+CN	0	comb_reference_m8	49751	+	44926	15	0
+CN	0	comb_reference_m8	49789	+	44964	15	0
+CN	0	comb_reference_m8	49827	+	45002	15	0
+CN	0	comb_reference_m8	49865	+	45040	15	0
+CN	0	comb_reference_m8	49903	+	45078	15	0
+CN	0	comb_reference_m8	49941	+	45116	15	0
+CN	0	comb_reference_m8	49979	+	45154	15	0
+CN	0	comb_reference_m8	50017	+	45192	15	0
+CN	0	comb_reference_m8	50055	+	45230	15	0
+CN	0	comb_reference_m8	50093	+	45268	15	0
+CN	0	comb_reference_m8	50131	+	45306	15	0
+CN	0	comb_reference_m8	50169	+	45344	15	0
+CN	0	comb_reference_m8	50207	+	45382	15	0
+CN	0	comb_reference_m8	50245	+	45420	15	0
+CN	0	comb_reference_m8	50283	+	45458	15	0
+CN	0	comb_reference_m8	50321	+	45496	15	0
+CN	0	comb_reference_m8	50359	+	45534	15	0
+CN	0	comb_reference_m8	50397	+	45572	15	0
+CN	0	comb_reference_m8	50435	+	45610	15	0
+CN	0	comb_reference_m8	50473	+	45648	15	0
+CN	0	comb_reference_m8	50511	+	45686	15	0
+CN	0	comb_reference_m8	50549	+	45724	15	0
+CN	0	comb_reference_m8	50587	+	45762	15	0
+CN	0	comb_reference_m8	50625	+	45800	15	0
+CN	0	comb_reference_m8	50663	+	45838	15	0
+CN	0	comb_reference_m8	50701	+	45876	15	0
+CN	0	comb_reference_m8	50739	+	45914	15	0
+CN	0	comb_reference_m8	50777	+	45952	15	0
+CN	0	comb_reference_m8	50815	+	45990	15	0
+CN	0	comb_reference_m8	50853	+	46028	15	0
+CN	0	comb_reference_m8	50891	+	46066	15	0
+CN	0	comb_reference_m8	50929	+	46104	15	0
+CN	0	comb_reference_m8	50967	+	46142	15	0
+CN	0	comb_reference_m8	51005	+	46180	15	0
+CN	0	comb_reference_m8	51043	+	46218	15	0
+CN	0	comb_reference_m8	51081	+	46256	15	0
+CN	0	comb_reference_m8	51119	+	46294	15	0
+CN	1	comb_reference_m8	1000	+	1000	15	0
+CN	1	comb_reference_m8	1100	+	1100	15	0
+CN	1	comb_reference_m8	1200	+	1200	15	0
+CN	1	comb_reference_m8	1300	+	1300	15	0
+CN	1	comb_reference_m8	1400	+	1400	15	0
+CN	1	comb_reference_m8	1500	+	1500	15	0
+CN	1	comb_reference_m8	1600	+	1600	15	0
+CN	1	comb_reference_m8	1700	+	1700	15	0
+CN	1	comb_reference_m8	1800	+	1800	15	0
+CN	1	comb_reference_m8	1900	+	1900	15	0
+CN	1	comb_reference_m8	2000	+	2000	15	0
+CN	1	comb_reference_m8	2100	+	2100	15	0
+CN	1	comb_reference_m8	2200	+	2200	15	0
+CN	1	comb_reference_m8	2300	+	2300	15	0
+CN	1	comb_reference_m8	2400	+	2400	15	0
+CN	1	comb_reference_m8	2500	+	2500	15	0
+CN	1	comb_reference_m8	2600	+	2600	15	0
+CN	1	comb_reference_m8	2700	+	2700	15	0
+CN	1	comb_reference_m8	2800	+	2800	15	0
+CN	1	comb_reference_m8	2900	+	2900	15	0
+CN	1	comb_reference_m8	3000	+	3000	15	0
+CN	1	comb_reference_m8	3100	+	3100	15	0
+CN	1	comb_reference_m8	3200	+	3200	15	0
+CN	1	comb_reference_m8	3300	+	3300	15	0
+CN	1	comb_reference_m8	3400	+	3400	15	0
+CN	1	comb_reference_m8	3500	+	3500	15	0
+CN	1	comb_reference_m8	3600	+	3600	15	0
+CN	1	comb_reference_m8	3700	+	3700	15	0
+CN	1	comb_reference_m8	3800	+	3800	15	0
+CN	1	comb_reference_m8	3900	+	3900	15	0
+CN	1	comb_reference_m8	4000	+	4000	15	0
+CN	1	comb_reference_m8	4100	+	4100	15	0
+CN	1	comb_reference_m8	4200	+	4200	15	0
+CN	1	comb_reference_m8	4300	+	4300	15	0
+CN	1	comb_reference_m8	4400	+	4400	15	0
+CN	1	comb_reference_m8	4500	+	4500	15	0
+CN	1	comb_reference_m8	4600	+	4600	15	0
+CN	1	comb_reference_m8	4700	+	4700	15	0
+CN	1	comb_reference_m8	4800	+	4800	15	0
+CN	1	comb_reference_m8	4900	+	4900	15	0
+QM	comb_query_m8	46311	cap=8388608,nCore=1,largest=8388608
+QT	comb_query_m8	0	0.002698
+[M::worker_pipeline::0.006*1.15] mapped 1 sequences
+[M::main] Version: 2.31-r1302
+[M::main] CMD: /home/ubuntu/bioseqdb/original-minimap2-code/minimap2 -x map-ont -k 15 -w 10 -t 1 --print-seeds /home/ubuntu/bioseqdb/original-minimap2-code/comb_sweep_final_20260902T123232Z/m_0008/reference.fa /home/ubuntu/bioseqdb/original-minimap2-code/comb_sweep_final_20260902T123232Z/m_0008/query.fa
+[M::main] Real time: 0.006 sec; CPU: 0.007 sec; Peak RSS: 0.022 GB
