@@ -1,0 +1,2 @@
+query_spaced_seed_02_R02	40960	20482	24566	+	ref_spaced_seed_02_R02	20480	2	4086	4084	4084	60	tp:A:P	cm:i:774	s1:i:4084	s2:i:0	dv:f:0.0001	rl:i:0
+query_spaced_seed_02_R02	40960	2	4086	+	ref_spaced_seed_02_R02	20480	2	4086	4084	4084	60	tp:A:P	cm:i:774	s1:i:4084	s2:i:0	dv:f:0.0001	rl:i:0

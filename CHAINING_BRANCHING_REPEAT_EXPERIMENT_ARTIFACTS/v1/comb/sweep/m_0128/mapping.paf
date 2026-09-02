@@ -1,0 +1,2 @@
+comb_query_m128	466311	19374	466295	+	comb_reference_m128	471136	25199	471120	72960	509921	60	tp:A:P	cm:i:4864	s1:i:57212	s2:i:0	dv:f:0.0034	rl:i:0
+comb_query_m128	466311	986	4901	+	comb_reference_m128	471136	986	4901	600	3915	60	tp:A:P	cm:i:40	s1:i:600	s2:i:0	dv:f:0.0032	rl:i:0

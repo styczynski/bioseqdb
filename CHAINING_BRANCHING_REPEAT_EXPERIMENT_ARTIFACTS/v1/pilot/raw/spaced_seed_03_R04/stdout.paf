@@ -1,0 +1,4 @@
+query_spaced_seed_03_R04	81920	61445	65532	+	ref_spaced_seed_03_R04	20480	5	4092	4087	4087	60	tp:A:P	cm:i:775	s1:i:4087	s2:i:0	dv:f:0.0001	rl:i:0
+query_spaced_seed_03_R04	81920	20485	24572	+	ref_spaced_seed_03_R04	20480	5	4092	4087	4087	60	tp:A:P	cm:i:775	s1:i:4087	s2:i:0	dv:f:0.0001	rl:i:0
+query_spaced_seed_03_R04	81920	5	4092	+	ref_spaced_seed_03_R04	20480	5	4092	4087	4087	60	tp:A:P	cm:i:775	s1:i:4087	s2:i:0	dv:f:0.0001	rl:i:0
+query_spaced_seed_03_R04	81920	40965	45052	+	ref_spaced_seed_03_R04	20480	5	4092	4087	4087	60	tp:A:P	cm:i:775	s1:i:4087	s2:i:0	dv:f:0.0001	rl:i:0
