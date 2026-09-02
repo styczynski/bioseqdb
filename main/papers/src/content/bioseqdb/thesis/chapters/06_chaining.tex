@@ -2416,14 +2416,18 @@ score and equal-score tie rule select the first chain end.  The predicate then
 requires each of the next \(L\) predecessor links to move to the preceding
 slot in the coordinate-sorted anchor array.
 
-A \emph{repeat-derived anchor} is a retained match between a selected
-minimizer in one block and an occurrence in another block.  A
-\emph{same-target anchor group} contains retained anchors with the same target
-sequence, target coordinate, and strand.  Its members have different query
-coordinates in these constructions.  A predecessor path contains at most one
-member of such a group.  Other group members still occupy array slots.  They
-can make \(p_j<j-1\), even when consecutive path anchors are close in both
-sequences.
+The \emph{first predecessor path} starts at this chain end and repeatedly
+follows \(p_j\) until the next predecessor is \(-1\).  A \emph{retained
+anchor} is a minimizer hit that remains in the coordinate-sorted anchor array
+after minimap2 applies its occurrence-frequency filters.  A
+\emph{repeat-derived anchor} is a retained anchor that links a selected
+minimizer in one block to an occurrence in another block.  A
+\emph{same-target anchor group} contains retained anchors with the same
+reference-sequence identifier, target end coordinate, and orientation.  Its
+members have different query end coordinates in these constructions.  The
+first predecessor path contains at most one member of such a group.  The
+remaining members still occupy array slots.  They can make \(p_j<j-1\), even
+when consecutive path anchors are close in both sequences.
 
 \subsubsection{Reference and query structures}
 
@@ -2462,7 +2466,7 @@ are not to scale.
     inner sep=3pt,rounded corners=0pt}
 ]
   \node[anchor=west,font=\bfseries] at (.10,9.25)
-    {(a) Approximate copy inside a valid full-length mapping};
+    {(a) Two internal blocks in an exact full-length mapping};
 
   \node[anchor=east] at (.72,8.55) {reference};
   \node[runl unique,minimum width=.70cm] (rUzero) at (1.25,8.55)
@@ -2504,7 +2508,7 @@ are not to scale.
     \(A\)-to-\(A'_{\delta}\) offset \(=33280\)
   };
   \draw[runl main] (9.72,7.60)--(10.38,7.60);
-  \node[anchor=west] at (10.50,7.60) {selected full diagonal};
+  \node[anchor=west] at (10.50,7.60) {selected equal-coordinate path};
   \draw[runl extra] (9.72,7.28)--(10.38,7.28);
   \node[anchor=west] at (10.50,7.28) {repeat-derived anchors};
 
@@ -2610,7 +2614,7 @@ are not to scale.
     (rRm.south)--(qRm.north);
 
   \node[runl note,text width=3.35cm] at (11.84,2.36) {
-    one distinct 25-base island per intended anchor\\
+    one isolated 25-base block per intended anchor\\
     \(N\)-filled gaps set positions
   };
 
@@ -2654,12 +2658,13 @@ are not to scale.
 \end{tikzpicture}
 \caption{Reference and query structures used to measure the first-path
 \(\operatorname{Run}_L\) branch.  Green vertical lines connect matching
-blocks on the selected diagonal.  Green boxes in the anchor-array row show
-the selected first path.  Dashed orange links in panel~(a) are repeat-derived.
-Dashed orange boxes in panel~(c)'s anchor-array row are outside that path.
-Panel~(a) keeps a full-length mapping while adding anchors from an approximate
-copy.  Panel~(b) isolates the array-index effect of exact copies.
-Panel~(c) constructs fixed anchor coordinates from distinct minimizer islands.}
+blocks at equal reference and query coordinates.  Green boxes in the
+anchor-array row show the first predecessor path.  Dashed orange links in
+panel~(a) are repeat-derived.  Dashed orange boxes in panel~(c)'s anchor-array
+row are outside that path.  Panel~(a) keeps a full-length mapping while
+placing \(A\) and \(A'\) inside the same sequence.  Panel~(b) isolates the
+array-index effect of exact copies.  Panel~(c) constructs fixed anchor
+coordinates from isolated 25-base blocks that each emit one minimizer.}
 \label{fig:chaining-runl-inputs}
 \end{figure}
 
@@ -2681,21 +2686,26 @@ of positions at which the two blocks differ is therefore
 \[
   \widehat{\delta}=\frac{s_{\delta}}{\lvert A\rvert}.
 \]
-This value is fixed when the input is generated.  The configured values are
+This value is fixed when the input is generated.  The dense sweep uses
 \[
-  \delta\in
-  \{0.20,0.10,0.05,0.02,0.01,0.005,0.002,0\}.
+  \delta_i=\frac{i}{400},
+  \qquad i=0,\ldots,80.
 \]
-Within each sequence seed, the substitutions for a smaller \(\delta\) form a
-subset of those used for every larger value.  Both \(T\) and \(Q\) contain the
-same \(A\) and \(A'_{\delta}\) blocks, so their query/reference error rate is
-zero.  The quantities \(\delta\) and \(\widehat{\delta}\) describe only the
-internal difference between the two blocks inside each sequence.
+These 81 values run from 0 to 20 percent in steps of 0.25 percentage points.
+Within each input generated from one fixed random-number-generator seed, the
+substitutions for a smaller \(\delta\) form a subset of those used for every
+larger value.  Both \(T\) and \(Q\) contain the same \(A\) and
+\(A'_{\delta}\) blocks, so their query/reference error rate is zero.  The
+quantities \(\delta\) and \(\widehat{\delta}\) describe only the internal
+difference between the two blocks inside each sequence.
 
-An independently generated \(A'\) provides a separate no-copy control.
-Across the three tested inputs, its selected first path contained no
-same-target group larger than one.  The full diagonal remains a valid
-highest-scoring path in every case.
+An independently generated \(A'\) provides a separate control.  It is
+generated without copying or mutating \(A\).  Across the three inputs
+generated from fixed random-number-generator seeds, no anchor on the first
+predecessor path shared its reference-sequence identifier, target end
+coordinate, and orientation with another retained anchor.  The path that
+links equal target and query coordinates remains valid and has the maximum
+score in every case.
 Table~\ref{tab:chaining-runl-mosaic-divergence} lists the realized divergence
 and corresponding first-path measurements.
 
@@ -2711,24 +2721,26 @@ The exact-copy control in panel~(b) uses
 \]
 Here \(R\) is the number of query copies.  The \(N\)-filled spacer blocks emit
 no minimizers and make the copy pitch 20480.  In the generated inputs, each
-retained target minimizer produced one anchor for every query copy.  Let
+target minimizer that passed occurrence filtering produced one anchor for
+every query copy.  Let
 \(j_{t,v}\) be the array index for copy \(v\), where \(0\leq v<R\).
 Consecutive target minimizers satisfy
 \[
   p_{j_{t+1,v}}=j_{t,v}=j_{t+1,v}-R.
 \]
-For \(R\geq2\), the selected path contains no run of at least two unit
+For \(R\geq2\), the first predecessor path contains no run of at least two unit
 predecessor relations.  The construction therefore predicts zero vector
 batches for every tested \(L\geq2\).
 
-Panel~(c) is a constructed coordinate control.  Every intended anchor is a
-distinct 25-base island that emits one minimizer for \(k=15\) and \(w=10\).
-The remaining positions contain \(N\).  This control does not estimate the
-frequency of the structure in biological sequence.  Write \(r_{k,\ell}\) for
-the \(\ell\)-th anchor in \(R_k\).  In the equations below, \(c_k\) and
-\(r_{k,\ell}\) denote their target-query coordinate pairs.  Let \(s_k=1\) for
-odd \(k\) and \(s_k=-1\) for even \(k\).  The following pairs give the target
-and query coordinate increments:
+Panel~(c) is a constructed coordinate control.  Every intended anchor comes
+from a distinct 25-base non-\(N\) block surrounded by \(N\) bases.  Each such
+block emits one minimizer for \(k=15\) and \(w=10\).  This isolated block is
+called a minimizer island.  The remaining positions contain \(N\).  This
+control does not estimate the frequency of the structure in biological
+sequence.  Write \(r_{k,\ell}\) for the \(\ell\)-th anchor in \(R_k\).  In the
+equations below, \(c_k\) and \(r_{k,\ell}\) denote their target-query
+coordinate pairs.  Let \(s_k=1\) for odd \(k\) and \(s_k=-1\) for even \(k\).
+The following pairs give the target and query coordinate increments:
 \[
 \begin{aligned}
   c_k-c_{k-1}
@@ -2770,16 +2782,19 @@ scoring parameters were not changed.  Instrumentation recorded the score and
 predecessor arrays.  The only candidate-order change placed equal-score ends
 in decreasing anchor-array index, matching BioseqDB's tie rule.  The tested
 widths were \(L\in\{2,4,8,16,32,64\}\).  The branch counters were recomputed
-from the recorded arrays.  Mosaic and spaced-copy paths were checked against
-coordinate-based oracles, while the coordinate control was checked against
-its predeclared predecessor array.  The mosaic and spaced-copy inputs used
-three deterministic sequence seeds.
+from the recorded arrays.  For the mosaic and spaced-copy inputs, an
+independent checker reconstructed the expected path coordinates and compared
+them with the recorded predecessor path.  For the coordinate control, the
+checker compared the recorded predecessor array with the array specified by
+the construction.  The mosaic and spaced-copy inputs used three fixed
+random-number-generator seeds.
 
 Let \(q\) be the number of anchors on the first predecessor path.  Let
 \(B_L\) be the number of evaluations for which
-\(\operatorname{Run}_L\) is true, \(E_L\) the number of loop evaluations,
-and \(P_L\) the number that pass both array bounds.  Three different ratios
-are useful:
+\(\operatorname{Run}_L\) is true, \(E_L\) the number of times the first-path
+loop evaluates \(\operatorname{Run}_L\), and \(P_L\) the number that satisfy
+both bounds \(j\geq L-1\) and
+\(c\leq n-L\).  Three different ratios are useful:
 \[
   \operatorname{Fire}_L=\frac{B_L}{E_L},
   \qquad
@@ -2815,13 +2830,20 @@ For fixed \(L\) with \(B_L>0\), both \(\operatorname{Fire}_L\) and
 \(\operatorname{Coverage}_L\) decrease as \(\Theta(1/m)\).  For \(L=64\),
 both values are zero for every \(m\geq2\).
 
+The row prefixes in the next table refer to
+Figure~\ref{fig:chaining-runl-inputs}.  In the mosaic rows, \emph{exact}
+means \(A'=A\), while \emph{independent} means that \(A'\) was generated
+without copying \(A\).  The itemized notes below the table describe every
+input family.
+
 \begin{table}[H]
 \centering
 \caption{Observed first-path branch-firing rate \(100B_L/E_L\), in percent.
 The mosaic rows and the \(R=1\) spaced-copy row report medians over three
-sequence seeds.  The \(R\geq2\) spaced-copy row covers the tested powers of two
-from 2 through 64, all of which gave zero.  Coordinate-control values are
-deterministic and agreed with the recorded counters.}
+inputs generated from fixed random-number-generator seeds.  The \(R\geq2\)
+spaced-copy row covers the tested powers of two from 2 through 64, all of
+which gave zero.  Coordinate-control values are deterministic and agreed with
+the recorded counters.}
 \label{tab:chaining-runl-firing}
 \scriptsize
 \setlength{\tabcolsep}{3.2pt}
@@ -2829,28 +2851,98 @@ deterministic and agreed with the recorded counters.}
 \toprule
 Input & \(L=2\) & \(L=4\) & \(L=8\) & \(L=16\) & \(L=32\) & \(L=64\) \\
 \midrule
-Mosaic, independent \(A'\) & 100.00 & 99.94 & 99.74 & 99.24 & 97.01 & 91.12 \\
-Mosaic, exact \(A'=A\)     &   1.17 &  0.59 &  0.29 &  0.14 &  0.07 &  0.02 \\
-Spaced copies, \(R=1\)     & 100.00 & 98.97 & 94.12 & 88.89 & 80.00 & 66.67 \\
-Spaced copies, \(R\geq2\) &   0.00 &  0.00 &  0.00 &  0.00 &  0.00 &  0.00 \\
-Coordinate control, \(m=2\)    & 95.74 & 84.62 & 45.45 & 29.41 & 6.67 & 0.00 \\
-Coordinate control, \(m=1024\) &  4.21 &  2.10 &  0.96 &  0.48 & 0.19 & 0.00 \\
+(a) Mosaic, independent \(A'\) & 100.00 & 99.94 & 99.74 & 99.24 & 97.01 & 91.12 \\
+(a) Mosaic, exact \(A'=A\)     &   1.17 &  0.59 &  0.29 &  0.14 &  0.07 &  0.02 \\
+(b) Spaced copies, \(R=1\)     & 100.00 & 98.97 & 94.12 & 88.89 & 80.00 & 66.67 \\
+(b) Spaced copies, \(R\geq2\) &   0.00 &  0.00 &  0.00 &  0.00 &  0.00 &  0.00 \\
+(c) Coordinate control, \(m=2\)    & 95.74 & 84.62 & 45.45 & 29.41 & 6.67 & 0.00 \\
+(c) Coordinate control, \(m=1024\) &  4.21 &  2.10 &  0.96 &  0.48 & 0.19 & 0.00 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:chaining-runl-mosaic-divergence} shows the intermediate mosaic
-cases.  The grouped-path column gives the percentage of selected-path anchors
-whose same-target group contains more than one anchor.  Such groups add
-off-path array entries that can interrupt unit predecessor steps.  This
-percentage does not count the interrupted steps.
+The row prefixes refer to the panels in
+Figure~\ref{fig:chaining-runl-inputs}.
+\begin{itemize}
+  \item \textbf{(a) Mosaic, exact.}
+    The target and query are both
+    \(U_0 A U_1 A' U_2\), and \(A'=A\).  The word \emph{mosaic} refers to
+    this sequence layout.  The word \emph{exact} means that it contains two
+    exact copies of \(A\).
+
+  \item \textbf{(a) Mosaic, independent.}
+    The layout is the same, but \(A'\) is generated without copying or
+    mutating \(A\).  The same complete sequence is used as the target and
+    query.  Its equal-coordinate path is therefore exact.
+
+  \item \textbf{(b) Spaced copies.}
+    The reference contains one source block \(S\).  The query contains \(R\)
+    exact copies separated by \(N\)-filled gaps.  The \(R=1\) case is the
+    baseline.
+
+  \item \textbf{(c) Coordinate control.}
+    Each minimizer island is an isolated 25-base non-\(N\) block that emits
+    one minimizer.  These blocks and the surrounding \(N\)-filled gaps create
+    the fixed anchor coordinates specified above.  The parameter \(m\) is the
+    number of \(R_k\) groups.  This input checks the counters and does not
+    represent a biological sequence distribution.
+\end{itemize}
+
+Table~\ref{tab:chaining-runl-mosaic-divergence} shows selected checkpoints
+from the dense mosaic sweep.  Its notation and the percentage of path anchors
+with same-target alternatives are defined below.
+\begin{itemize}
+  \item \textbf{Configured internal divergence \(\delta\).}
+    This is the requested fraction of positions changed when constructing
+    \(A'_{\delta}\) from \(A\).  It compares two blocks inside one sequence.
+    Every mosaic input still has \(T=Q\).
+
+  \item \textbf{Substitution count \(s_{\delta}\).}
+    The generator changes exactly
+    \[
+      s_{\delta}
+      =\left\lfloor
+        \delta\lvert A\rvert+\frac{1}{2}
+       \right\rfloor
+    \]
+    positions.  Every selected base is replaced by a different base.
+
+  \item \textbf{Realized internal divergence \(\widehat{\delta}\).}
+    For any generated \(A'\),
+    \[
+      \widehat{\delta}
+      =\frac{\lvert\{i:A_i\neq A'_i\}\rvert}{\lvert A\rvert}.
+    \]
+    In the fixed-count sweep this equals
+    \(s_{\delta}/\lvert A\rvert\).  The table reports
+    \(100\widehat{\delta}\) as a percentage.
+
+  \item \textbf{Independent \(A'\).}
+    This block is generated without copying or mutating \(A\), so it has no
+    configured \(\delta\) or \(s_{\delta}\).  Its realized divergence is
+    measured directly with the formula above.
+
+  \item \textbf{Path anchors with same-target alternatives.}
+    The raw experiment data call this measurement \emph{grouped path}.  Two
+    retained anchors belong to the same group when they have the same
+    reference-sequence identifier, target end coordinate, and orientation.
+    Let \(g_{\mathrm{path}}\) be the number of anchors on the first predecessor
+    path whose group contains at least one other retained anchor.  If the path
+    contains \(q\) anchors, the reported percentage is
+    \(100g_{\mathrm{path}}/q\).  The other anchor occupies a different
+    anchor-array slot and can separate consecutive path anchors.  This
+    percentage does not count groups, broken predecessor relations, or
+    \(\operatorname{Run}_L\) evaluations.
+\end{itemize}
+
+\input{chapters/06_chaining_dense_divergence_coordinates}
 
 \begin{table}[H]
 \centering
-\caption{Configured and realized internal divergence in the mosaic
-construction.  Each entry in the last three columns gives the median followed
-by the observed minimum and maximum over three sequence seeds, in percent.
-The firing column is
+\caption{Selected checkpoints from the 81-level dense mosaic sweep.  Each
+entry in the last three columns gives the median followed by the observed
+minimum and maximum over three inputs generated from fixed
+random-number-generator seeds, in percent.  The firing column is
 \(100\operatorname{Fire}_4=100B_4/E_4\).  The coverage column is
 \(100\operatorname{Coverage}_4=100(4B_4)/q\).  The independent block is a
 separate control.  Its realized divergence is measured directly from the two
@@ -2862,332 +2954,242 @@ to 75.186 percent.}
 \begin{tabular}{lrrlll}
 \toprule
 Case & \(s_{\delta}\) & \(100\widehat{\delta}\) &
-Grouped path & \(100\operatorname{Fire}_4\) &
+\shortstack{Path anchors with\\same-target alternatives} &
+\(100\operatorname{Fire}_4\) &
 \(100\operatorname{Coverage}_4\) \\
 & & (\%) & (\%) & (\%) & (\%) \\
 \midrule
-\(\delta=0\)     &    0 &  0.000 & 97.69 [97.64, 97.69] &  0.59 [0.58, 0.59] &  2.31 [2.29, 2.33] \\
-\(\delta=0.002\) &   66 &  0.201 & 94.33 [94.12, 94.34] &  0.97 [0.92, 1.10] &  3.77 [3.60, 4.25] \\
-\(\delta=0.005\) &  164 &  0.500 & 89.55 [89.47, 89.68] &  1.56 [1.47, 1.79] &  5.96 [5.64, 6.79] \\
-\(\delta=0.010\) &  328 &  1.001 & 82.24 [82.19, 82.29] &  2.61 [2.57, 2.80] &  9.69 [9.55, 10.34] \\
-\(\delta=0.020\) &  655 &  1.999 & 69.33 [68.93, 69.42] &  5.14 [5.08, 5.30] & 17.82 [17.64, 18.28] \\
-\(\delta=0.050\) & 1638 &  4.999 & 41.41 [41.33, 41.63] & 14.97 [14.97, 15.38] & 41.32 [41.32, 42.09] \\
-\(\delta=0.100\) & 3277 & 10.001 & 17.23 [16.81, 17.64] & 37.99 [37.64, 38.72] & 71.02 [70.71, 71.65] \\
-\(\delta=0.200\) & 6554 & 20.001 &  3.04 [2.66, 3.36]   & 79.41 [77.58, 81.93] & 93.91 [93.26, 94.77] \\
+\RunLDenseSelectedTableRows
 \midrule
-Independent \(A'\) & \text{n/a} & 75.043 & 0.00 [0.00, 0.00] & 99.94 [99.90, 100.00] & 99.98 [99.98, 100.00] \\
+\RunLDenseIndependentTableRow
 \bottomrule
 \end{tabular}
 \end{table}
 
-To model seed preservation, let \(\pi\) denote the deterministic mutation
-ranking used by the generator.  We model \(\pi\) as a uniform random
-permutation of the \(M=\lvert A\rvert\) block positions, independent of
-\(A\).  Once a sequence seed is fixed, the generated input and the minimap2
-run are deterministic.  For a fixed span of \(r\) bases, the probability that
-none of its positions belongs to the fixed-size mutation set is
-\[
-  H_r(M,s_{\delta})
-  =\frac{\binom{M-r}{s_{\delta}}}{\binom{M}{s_{\delta}}}
-  =\prod_{a=0}^{r-1}
-    \frac{M-s_{\delta}-a}{M-a}.
-\]
-An aligned, same-orientation \(k\)-mer is unchanged with probability \(H_k\).
-For fixed \(k\), \(M\) large, and \(\widehat{\delta}\) bounded away from one,
-\[
-  H_k(M,s_{\delta})
-  =(1-\widehat{\delta})^k
-   \exp\!\left(O\!\left(
-     \frac{\widehat{\delta}k^2}{M}\right)\right).
-\]
-Counting individual substituted positions gives the upper bound below.
-Subtracting their pairwise overlaps gives the lower bound:
-\[
-  k\widehat{\delta}
-  -\binom{k}{2}
-   \frac{s_{\delta}(s_{\delta}-1)}{M(M-1)}
-  \ \leq\ 1-H_k(M,s_{\delta})
-  \ \leq\ k\widehat{\delta}.
-\]
-Consequently, the expected number of disrupted aligned \(k\)-mer spans is
-\[
-  (M-k+1)\bigl[1-H_k(M,s_{\delta})\bigr]
-  =\Theta(Mk\widehat{\delta})
-\]
-when \(0<k\widehat{\delta}\ll1\).  This count covers all aligned \(k\)-mer
-spans before minimizer selection.
+The repeated blocks affect \(\operatorname{Run}_L\) through anchor-array order.
+When \(A\) and \(A'_{\delta}\) share a minimizer, one target minimizer can
+produce anchors at both query copies.  The first predecessor path uses one of
+them.  The other anchor remains in the coordinate-sorted array and can occupy
+an array position between two consecutive path anchors.  This changes a unit
+predecessor relation \(p_j=j-1\) into a larger index jump.  Increasing internal
+divergence removes some of these shared minimizers and therefore removes some
+of the extra array entries.
 
-A selected minimizer also depends on its surrounding \(w\)-window.  Let \(I\)
-contain the selected minimizer occurrences in \(A\) for which one supporting
-\(w\)-window lies wholly inside \(A\), and let \(n_I=\lvert I\rvert\).  Let
-\(Y_{\delta}\) count members of \(I\) that remain selected at the corresponding
-block-relative coordinate and orientation with the same exact \(k\)-mer in
-\(A'_{\delta}\).  In this experiment, \(k=15\) and \(w=10\), so a complete
-minimizer window spans \(k+w-1=24\) bases.  An unchanged supporting window is
-sufficient to preserve the selected occurrence.  An unchanged selected
-\(k\)-mer is necessary.  Conditional on \(A\), expectation over \(\pi\)
-therefore satisfies
+A local probability bound describes how substitutions can enable one
+previously false evaluation.  Consider a loop state \((j,c)\) for which
+\(\operatorname{Run}_L(j,c)\) is false when \(A'=A\).  Assume that this state
+has \(h\) fixed, pairwise-disjoint blocking minimizer windows
+\(W_1,\ldots,W_h\).  Each \(W_i\) is the base interval that supports one
+repeat-derived minimizer occurrence whose retained anchor blocks this
+specific \(\operatorname{Run}_L(j,c)\) evaluation.  The interval contains
 \[
-  n_I H_{24}(M,s_{\delta})
-  \ \leq\ \mathbb{E}_{\pi}[Y_{\delta}\mid A]
-  \ \leq\ n_I H_{15}(M,s_{\delta}).
+  b=k+w-1
 \]
-The selected windows overlap, so their preservation events are dependent.
-The calculation does not assume that neighboring minimizers change
-independently.
-For \(k=15\), minimap2's masked \texttt{hash64} transformation is one-to-one
-on canonical 30-bit codes.  Two different canonical 15-mers therefore cannot
-share an encoded key.  Requiring the same orientation also removes the
-canonical match between a \(k\)-mer and its reverse complement.
+bases because it covers the \(w\) overlapping \(k\)-mers that select the
+minimizer.  The evaluation can become true only if every \(W_i\) receives at
+least one substitution.  If one window remains unchanged, its selected
+minimizer occurrence and repeat-derived anchor remain available.
 
-Figure~\ref{fig:chaining-runl-mosaic-divergence} compares this local model
-with the measured path.  The gray reference region is
-\(100\alpha H_{24}\) to \(100\alpha H_{15}\), where
+The generator ranks positions deterministically.  For this probability model,
+let \(\pi\) be a uniform random permutation of the block positions.  Let
+\(S_{\delta}\) be the first \(s_{\delta}\) positions under \(\pi\).  Thus
+\(S_{\delta}\) is a uniformly selected subset of the
+\(M=\lvert A\rvert\) block positions and
+\(\widehat{\delta}=s_{\delta}/M\).  For one chosen base from every blocking
+window, the probability that all \(h\) bases belong to \(S_{\delta}\) is
 \[
-  \alpha=\frac{2M}{2M+3\lvert U_i\rvert}=0.9771
+  \frac{(s_{\delta})_h}{(M)_h},
+  \qquad
+  (x)_h=x(x-1)\cdots(x-h+1).
 \]
-is the fraction of sequence bases in the two repeated blocks.  Multiplication
-by \(\alpha\) provides a simple length weight when comparing preservation
-probabilities with the grouped-path percentage.  It does not account for
-variation in minimizer or anchor density.  The gray region is a visual
-probability reference.  It is not a confidence interval or a bound on the
-chaining metric.
+There are \(b^h\) ways to choose one base from every window.  A union bound
+therefore gives
+\[
+\begin{aligned}
+  \Pr_{\pi}\!\left[
+    \operatorname{Run}_L(j,c)\text{ changes from false to true}
+  \right]
+  &\leq
+  \Pr_{\pi}\!\left[
+    S_{\delta}\cap W_i\neq\varnothing
+    \text{ for every }i
+  \right] \\
+  &\leq
+  b^h\frac{(s_{\delta})_h}{(M)_h}
+  \leq
+  (b\widehat{\delta})^h .
+\end{aligned}
+\]
+The probability is zero when \(s_{\delta}<h\).  For a lower bound, choose one
+fixed base in each window.  The event that all \(h\) chosen bases are
+substituted is contained in the event above and has probability
+\[
+  \frac{(s_{\delta})_h}{(M)_h}.
+\]
+For the asymptotic statement, consider a family of blocks with
+\(M\to\infty\).  Keep \(b\) and \(h\) fixed, with the experimental values
+\(k=15\), \(w=10\), and hence \(b=24\).  Require \(s_{\delta}\geq h\) and
+\(\widehat{\delta}=s_{\delta}/M\to0\).  In this family, the probability that
+every blocking window receives a substitution has order
+\[
+  \Theta\!\left(\widehat{\delta}^{\,h}\right).
+\]
+Since \(k\) is fixed here, this is equivalently
+\[
+  \Theta\!\left((k\widehat{\delta})^h\right).
+\]
+
+The last \(\Theta\) statement concerns the event that all blocking windows
+receive substitutions.  It is not a two-sided bound on
+\(\operatorname{Run}_L\).  Necessity gives only
+\[
+  \Pr_{\pi}\!\left[
+    \operatorname{Run}_L(j,c)\text{ changes from false to true}
+  \right]
+  =
+  O\!\left((k\widehat{\delta})^h\right).
+\]
+A matching lower bound would require substitutions in the \(h\) windows to
+make the branch true.  Minimap2 does not provide that guarantee.  Minimizer
+reselection, anchor order, chaining scores, predecessor choices, and the array
+bounds can still prevent the run.  Outside the disjoint-window model, one
+substitution can affect several overlapping windows.  The exponent can then
+be smaller than the number of windows.
+
+Figure~\ref{fig:chaining-runl-mosaic-divergence} reports the complete dense
+sweep.  It uses all 81 measured divergence levels.
 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[
   font=\scriptsize,
   mosaic grouped/.style={
-    draw=chainBlue!90!black,line width=.9pt},
+    draw=chainBlue!90!black,line width=.85pt},
+  mosaic grouped range/.style={
+    draw=chainBlue!45,line width=.35pt},
   mosaic fire/.style={
-    draw=chainOrange!95!black,line width=.9pt,dashed},
-  mosaic grouped mark/.style={
-    circle,draw=chainBlue!90!black,fill=white,
-    minimum size=4.2pt,inner sep=0pt,line width=.7pt},
-  mosaic fire mark/.style={
-    rectangle,draw=chainOrange!95!black,fill=white,
-    minimum size=4.2pt,inner sep=0pt,line width=.7pt}
+    draw=chainOrange!95!black,line width=.85pt,dashed},
+  mosaic fire range/.style={
+    draw=chainOrange!55,line width=.35pt,densely dashed}
 ]
-\begin{scope}[x=1cm,y=.046cm]
+\begin{scope}[x=.48cm,y=.045cm]
   \path[fill=black!3,draw=black!20]
-    (11.45,0) rectangle (12.75,100);
+    (21.2,0) rectangle (23.2,100);
 
   \foreach \yy in {0,25,50,75,100} {
-    \draw[black!12] (0,\yy)--(4.10,\yy);
-    \draw[black!12] (4.68,\yy)--(10.95,\yy);
-    \node[anchor=east] at (-.13,\yy) {\yy};
+    \draw[black!12] (0,\yy)--(20.5,\yy);
+    \node[anchor=east] at (-.25,\yy) {\yy};
   }
 
-  \path[fill=black!12,draw=none]
-    (0.000,97.71)--
-    (0.402,94.80)--
-    (1.000,90.62)--
-    (2.002,84.02)--
-    (3.998,72.17)--
-    (3.998,60.17)--
-    (2.002,76.74)--
-    (1.000,86.62)--
-    (0.402,93.09)--
-    (0.000,97.71)--cycle;
-  \path[fill=black!12,draw=none]
-    (5.800,45.27)--
-    (7.467,20.11)--
-    (10.800,3.43)--
-    (10.800,0.46)--
-    (7.467,7.79)--
-    (5.800,28.53)--cycle;
-  \draw[black!48,densely dotted,line width=.55pt] plot coordinates {
-    (0.000,97.71) (0.402,94.80) (1.000,90.62) (2.002,84.02)
-    (3.998,72.17)
-  };
-  \draw[black!48,densely dotted,line width=.55pt] plot coordinates {
-    (5.800,45.27) (7.467,20.11) (10.800,3.43)
-  };
-  \draw[black!48,densely dotted,line width=.55pt] plot coordinates {
-    (0.000,97.71) (0.402,93.09) (1.000,86.62) (2.002,76.74)
-    (3.998,60.17)
-  };
-  \draw[black!48,densely dotted,line width=.55pt] plot coordinates {
-    (5.800,28.53) (7.467,7.79) (10.800,0.46)
-  };
+  \draw[mosaic grouped range]
+    plot coordinates {\RunLDenseGroupedMinimumCoordinates};
+  \draw[mosaic grouped range]
+    plot coordinates {\RunLDenseGroupedMaximumCoordinates};
+  \draw[mosaic fire range]
+    plot coordinates {\RunLDenseFireFourMinimumCoordinates};
+  \draw[mosaic fire range]
+    plot coordinates {\RunLDenseFireFourMaximumCoordinates};
 
-  \draw[mosaic grouped] plot coordinates {
-    (0.000,97.69) (0.402,94.33) (1.000,89.55) (2.002,82.24)
-    (3.998,69.33)
-  };
-  \draw[mosaic grouped] plot coordinates {
-    (5.800,41.41) (7.467,17.23) (10.800,3.04)
-  };
-  \draw[mosaic fire] plot coordinates {
-    (0.000,0.59) (0.402,0.97) (1.000,1.56) (2.002,2.61)
-    (3.998,5.14)
-  };
-  \draw[mosaic fire] plot coordinates {
-    (5.800,14.97) (7.467,37.99) (10.800,79.41)
-  };
-
-  \foreach \xx/\lo/\yy/\hi in {
-    0.000/97.64/97.69/97.69,
-    0.402/94.12/94.33/94.34,
-    1.000/89.47/89.55/89.68,
-    2.002/82.19/82.24/82.29,
-    3.998/68.93/69.33/69.42,
-    5.800/41.33/41.41/41.63,
-    7.467/16.81/17.23/17.64,
-    10.800/2.66/3.04/3.36} {
-    \draw[chainBlue!90!black,line width=.45pt]
-      (\xx,\lo)--(\xx,\hi)
-      (\xx-.05,\lo)--(\xx+.05,\lo)
-      (\xx-.05,\hi)--(\xx+.05,\hi);
-    \node[mosaic grouped mark] at (\xx,\yy) {};
-  }
-  \foreach \xx/\lo/\yy/\hi in {
-    0.000/0.58/0.59/0.59,
-    0.402/0.92/0.97/1.10,
-    1.000/1.47/1.56/1.79,
-    2.002/2.57/2.61/2.80,
-    3.998/5.08/5.14/5.30,
-    5.800/14.97/14.97/15.38,
-    7.467/37.64/37.99/38.72,
-    10.800/77.58/79.41/81.93} {
-    \draw[chainOrange!95!black,line width=.45pt]
-      (\xx,\lo)--(\xx,\hi)
-      (\xx-.05,\lo)--(\xx+.05,\lo)
-      (\xx-.05,\hi)--(\xx+.05,\hi);
-    \node[mosaic fire mark] at (\xx,\yy) {};
-  }
-
-  \path[fill=white] (4.10,-3) rectangle (4.68,104);
+  \draw[mosaic grouped]
+    plot[mark=*,mark size=.42pt]
+    coordinates {\RunLDenseGroupedMedianCoordinates};
+  \draw[mosaic fire]
+    plot[mark=x,mark size=.42pt]
+    coordinates {\RunLDenseFireFourMedianCoordinates};
 
   \draw[->] (0,0)--(0,105);
-  \draw (0,0)--(4.10,0);
-  \draw[->] (4.68,0)--(10.95,0);
-  \draw (4.25,-2.2)--(4.36,2.2);
-  \draw (4.43,-2.2)--(4.54,2.2);
-
-  \foreach \xx/\lab in {
-    0.000/0,1.000/0.5,2.000/1,3.998/2,
-    5.800/5,7.467/10,10.800/20} {
+  \draw[->] (0,0)--(20.8,0);
+  \foreach \xx in {0,5,10,15,20} {
     \draw (\xx,-2)--(\xx,2);
-    \node[anchor=north] at (\xx,-4.4) {\lab};
+    \node[anchor=north] at (\xx,-4.5) {\xx};
   }
 
-  \node[rotate=90] at (-.88,50) {reported value (\%)};
-  \node at (5.40,-13)
+  \node[rotate=90] at (-1.55,50) {reported value (\%)};
+  \node at (10,-13)
     {realized internal divergence \(100\widehat{\delta}\) (\%)};
 
-  \draw[chainOrange!95!black,line width=.55pt]
-    (12.10,99.90)--(12.10,100.00);
-  \node[mosaic fire mark] at (12.10,99.94) {};
-  \node[mosaic grouped mark] at (12.10,0.00) {};
-  \node[rotate=90,text=black!55] at (12.10,50)
+  \node[circle,draw=chainBlue!90!black,fill=white,
+        minimum size=3.1pt,inner sep=0pt]
+    at (22.2,0) {};
+  \node[rectangle,draw=chainOrange!95!black,fill=white,
+        minimum size=3.1pt,inner sep=0pt]
+    at (22.2,99.94) {};
+  \node[rotate=90,text=black!58] at (22.2,50)
     {independent \(A'\) control};
-  \node[anchor=north] at (12.10,-4.4) {75.043};
+  \node[anchor=north,align=center] at (22.2,-4.5)
+    {75.043\\outside axis};
 
-  \draw[mosaic grouped] (.25,109)--(.80,109);
-  \node[mosaic grouped mark] at (.525,109) {};
-  \node[anchor=west] at (.90,109) {grouped path};
-
-  \draw[mosaic fire] (3.05,109)--(3.60,109);
-  \node[mosaic fire mark] at (3.325,109) {};
-  \node[anchor=west] at (3.70,109) {\(\operatorname{Fire}_4\)};
-
-  \path[fill=black!12,draw=black!48]
-    (6.32,107.4) rectangle (6.87,110.6);
-  \node[anchor=west] at (6.98,109)
-    {local seed-preservation reference};
+  \draw[mosaic grouped] (.4,110)--(1.4,110);
+  \node[anchor=west,align=left] at (1.65,110)
+    {path anchors with\\same-target alternatives};
+  \draw[mosaic fire] (12.0,110)--(13.0,110);
+  \node[anchor=west] at (13.25,110) {\(\operatorname{Fire}_4\)};
 \end{scope}
 \end{tikzpicture}
-\caption{Internal divergence, grouped-path percentage, and \(L=4\) branch
-firing in the mosaic experiment.  Markers report medians over three
-deterministic sequence seeds.  Whiskers span their observed minimum and
-maximum.  The gray region shows the local seed-preservation reference defined
-in the text.  It is not a confidence interval or a bound on the chaining
-metric.  The nested sweep uses separate linear scales from zero to two percent
-and from five to twenty percent.  The axis break covers the interval with no
-tested case.  The independent \(A'\) control appears in the separate shaded
-column.}
+\caption{Internal divergence, percentage of path anchors with same-target
+alternatives, and \(L=4\) branch firing in the mosaic experiment.  All 81
+configured levels from 0 to 20 percent are shown.  The small markers report
+medians over three inputs generated from fixed random-number-generator seeds.
+The lighter lines give the observed minimum and maximum.  They are descriptive
+ranges, not confidence intervals.  The independent \(A'\) control is outside
+the plotted divergence range and is shown in a separate column.}
 \label{fig:chaining-runl-mosaic-divergence}
 \end{figure}
 
-In the exact mosaic, a median of 97.69 percent of selected-path anchors
-belonged to same-target groups larger than one.  The independent control had
-no such group.  For \(L=4\), their median firing rates were 0.59 percent and
-99.94 percent.  Their corresponding anchor coverages were 2.31 percent and
-99.98 percent.  Within the nested sweep, every increase in
-\(\widehat{\delta}\) was accompanied by a lower median grouped-path percentage
-and a higher median \(\operatorname{Fire}_4\).  Every nonzero-divergence
-grouped-path median lies inside the local reference region in
-Figure~\ref{fig:chaining-runl-mosaic-divergence}.  At zero divergence, the
-measured median is 0.02 percentage points below the reference.  For the first
-three nonzero realized divergence levels, write their ascending values as
-\(d_1,d_2,d_3\).  Then
-\[
-  \left(
-    \frac{\operatorname{Fire}_4(d_i)-\operatorname{Fire}_4(0)}{d_i}
-  \right)_{i=1}^{3}
-  \approx(1.89,1.94,2.02),
-\]
-where firing rates and divergence are fractions.  The three similar ratios
-show an approximately linear increase over these three low-divergence points.
+The dense sweep contains 243 mappings.  It uses 81 nested divergence levels
+for each of three inputs generated from fixed random-number-generator seeds.
+Three additional mappings provide the independent \(A'\) controls.  Minimap2
+emitted an alignment covering at least 99\% of both query and target for all
+246 mappings.  Each mapping had exactly one anchor with the maximum dynamic
+programming score.  This anchor fixed the start of the first predecessor path.
+An independent checker reconstructed and matched every recorded predecessor
+path.  All query minimizers survived query-side frequency filtering.  No
+reference seed hits were removed by reference-occurrence filtering.  Each
+retained minimizer value occurred once or twice in the reference, below the
+cutoff of ten.
 
-A second local model shows why the response can contain first or higher powers
-of \(\widehat{\delta}\).  Suppose \(\operatorname{Run}_L\) becomes true only
-after mutations affect \(c\geq1\) disjoint shared \(k\)-mer spans.  Assume
-that every other path property stays fixed.  Counting all ways to place
-substitutions in these spans gives
-\[
-  P_{\mathrm{break},c}(M,s_{\delta})
-  =\sum_{a=0}^{c}(-1)^a\binom{c}{a}H_{ak}(M,s_{\delta}).
-\]
-This is the probability that every one of the \(c\) spans contains at least
-one substituted base.  For fixed \(c\) and \(k\), take \(M\) to infinity and
-\(\widehat{\delta}\) to zero with
-\(s_{\delta}=M\widehat{\delta}\geq c\) and \(ck=o(M)\).  Then
-\[
-  P_{\mathrm{break},c}(M,s_{\delta})
-  =\Theta\!\left((k\widehat{\delta})^c\right)
-\]
-in this limit.  For \(c=1\), the probability is proportional to
-\(k\widehat{\delta}\).
-If \(s_{\delta}<c\), then \(P_{\mathrm{break},c}=0\) because fewer than \(c\)
-substitutions cannot reach all \(c\) disjoint spans.
+In the exact mosaic, the median percentage of path anchors with same-target
+alternatives was 97.69 percent, and the median \(\operatorname{Fire}_4\) was
+0.59 percent.  At 20 percent configured divergence, these values were 3.04
+percent and 79.41 percent.  In the independent control, no anchor on the first
+predecessor path had a same-target alternative.  Its median
+\(\operatorname{Fire}_4\) was 99.94 percent.  At each of the 80 increases in
+divergence, the alternative-anchor percentage decreased and
+\(\operatorname{Fire}_4\) increased for all three inputs generated from fixed
+random-number-generator seeds.  The medians followed the same directions.
 
-This calculation describes preservation of shared seed keys.  Chaining scores
-are evaluated later.  All 27 mosaic mappings had one unique maximum-score end.
-Query minimizer filtering removed none.  Reference occurrence filtering
-removed no mosaic seed hits.  The retained reference occurrence counts were
-one or two, below the cutoff of ten.  Shared keys between \(A\) and
-\(A'_{\delta}\) created cross-copy anchors in same-target groups.  Those
-off-path anchors remained in the coordinate-sorted array and could make the
-selected predecessor skip an array slot.  They became less frequent as
-divergence increased.
+The measurements support the array-order explanation.  More internal
+divergence leaves fewer repeat-derived anchors interleaved with anchors on the
+first predecessor path.  This restores more consecutive relations
+\(p_j=j-1\), so \(\operatorname{Run}_4\) becomes true more often.  The result
+is empirical and does not identify a universal power law.  Within each
+input generated from one fixed random-number-generator seed, the 81 cases
+share a cumulative mutation set.  They measure the effect of adding
+substitutions to the same base sequence.  Statistical independence does not
+apply to these 81 points.
 
-The local model does not give a universal formula for
-\(\operatorname{Fire}_L\).  Minimizer reselection, overlapping windows,
-anchor coordinates, predecessor choices, and unit-run lengths also affect
-\(\operatorname{Run}_L\).  The monotone result is an empirical property of
-this crafted \(L=4\) sweep.  Some other widths had small departures because
-unit-run lengths are discrete.  For fixed \(L\), coverage is determined by
-firing rate:
+For fixed \(L\), coverage is determined by firing rate:
 \[
   \operatorname{Coverage}_L
   =\frac{L\operatorname{Fire}_L}
          {1+(L-1)\operatorname{Fire}_L}.
 \]
-This descriptive comparison uses three deterministic sequence seeds.
+This follows from \(E_L=q-(L-1)B_L\).  It explains why the coverage values in
+Table~\ref{tab:chaining-runl-mosaic-divergence} rise faster than the firing
+rate.
 
 The spaced-copy control reached zero firing and zero anchor coverage at
 \(R=2\), and both remained zero through \(R=64\).  In this construction,
-retained exact-copy anchors removed every tested vector opportunity.  These
-data do not establish a scaling law or the frequency of this pattern in real
-reads.
+the extra exact-copy anchors made \(\operatorname{Run}_L\) false at every
+evaluated loop state.  These data do not establish the frequency of this
+pattern in real reads.
 
-The coordinate sweep accepted \(m=1\) and every tested power of two from 2
-through 1024.  Every measured value agreed with the closed form above.  At
-\(m=1024\), anchor coverage was 8.08 percent for \(L=2\) and 7.90 percent for
-\(L=4\).  It was 7.18 percent for both \(L=8\) and \(L=16\), 5.75 percent for
-\(L=32\), and zero for \(L=64\).
+Every tested coordinate-control case produced a path with defined counters.
+The tested values were \(m=1\) and every power of two from 2 through 1024.
+Every measured value agreed with the closed form above.  At \(m=1024\), anchor
+coverage was 8.08 percent for \(L=2\) and 7.90 percent for \(L=4\).  It was
+7.18 percent for both \(L=8\) and \(L=16\), 5.75 percent for \(L=32\), and
+zero for \(L=64\).
 
 \subsubsection{Random-sequence controls}
 

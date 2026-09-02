@@ -1,0 +1,171 @@
+minimap2_binary:
+  sha256: 6533837743e94e3ec22db01b874e75efbc8b2c6402f232cde0d5709924efd6c3
+  size_bytes: 1114880
+  mode_octal: 0o775
+minimap2_source_tree:
+  file_count: 45
+  size_bytes: 446859
+  canonical_manifest_sha256: 77d2a45e558459110d7f0032b464fa84e10767a14769a7ef0ab9320c028d1eee
+  files:
+  - path: .gitignore
+    sha256: 518dd65a3813a172cee1349864b297741b849abf095477a759adcb17861ec323
+    size_bytes: 58
+  - path: .gitmodules
+    sha256: 98585fbf40470d2256a5e4ff271952366e6985a06238899a7a394ba726019080
+    size_bytes: 85
+  - path: LICENSE.txt
+    sha256: b68a701dea24796190ef9e860ff56e79d578c96183722cf4ec3738793e8e75f4
+    size_bytes: 1140
+  - path: Makefile
+    sha256: e7b970f150adab377fe1d5d32a2d374f64a109efbc4df25a8b3094c69d3742c1
+    size_bytes: 4787
+  - path: Makefile.simde
+    sha256: 1477a7eb57ebcb92c08954c35d3bd5e5ced067a7ef68a03360a65ae122696e6c
+    size_bytes: 3110
+  - path: README.md
+    sha256: 5488a9f29931fae6ca0218d8abe26fcb131d61af9a90572a45c40d4e0354ae29
+    size_bytes: 21615
+  - path: align.c
+    sha256: 8abb12d446f372afe11a511bf0fc12da47ed077600543851d4b6ad6282a51389
+    size_bytes: 42485
+  - path: bseq.c
+    sha256: 5f8fa2883b3fbcafac97c309c5e99dc47094c210307392a303647fc12ed2a876
+    size_bytes: 5363
+  - path: bseq.h
+    sha256: 14f0359aa4878a9813429337acfc2c06872503e6fdbda9e40f4a1f05e4fe4a0b
+    size_bytes: 1811
+  - path: esterr.c
+    sha256: bbecd179dda102643f2fee4e9e2488d7b855cb72cef51ece4dd9f43c3f408e41
+    size_bytes: 1871
+  - path: example.c
+    sha256: a718e22d0e12727f7f73ee7b50b7679c47977a7a77d6ec8608d6057abd4496f6
+    size_bytes: 2157
+  - path: format.c
+    sha256: 85fab14afc2f66c8d95d2e1f83508ecce7eab11969f675e06784fd2460cb64c7
+    size_bytes: 24044
+  - path: hit.c
+    sha256: 157c06aa2c40c1684985465bac64f57b2da5c84657d12483bc77ee5a35279fac
+    size_bytes: 15879
+  - path: index.c
+    sha256: ec37b45e8cc4c92bfd48b647c69377322a5aa19952caaed6733d52ca9170ca6f
+    size_bytes: 30174
+  - path: jump.c
+    sha256: d26e19175311d92e89730b52587d946a78afb4138eb8d9fa5d97bdf1de55ac1f
+    size_bytes: 7923
+  - path: kalloc.c
+    sha256: 095b07825c42436673deb1d287e9f0b9c8ab9db7abbe8b913c1ac6e79187505d
+    size_bytes: 8054
+  - path: kalloc.h
+    sha256: aaa32a69fab6ec946bbc218c4fa962fb9ee97548c6877817b1007b00f637d7e1
+    size_bytes: 2822
+  - path: kdq.h
+    sha256: 9d2e21abb886ba500724d3a75b33a3301d652a9002170bd3b7d6e22c2b8cd68a
+    size_bytes: 4400
+  - path: ketopt.h
+    sha256: f1f4aea1e269d7327e87c6bdf536c1008cefb55a4ef102f67d234bba642b985c
+    size_bytes: 3969
+  - path: khash.h
+    sha256: 8657c031be13afccec83469d9d1c178f1c40cac2ad51986b27234985b8bd1db9
+    size_bytes: 21381
+  - path: krmq.h
+    sha256: 5c335783a84bb2f27fe44ccc66d1fbc78fbf5dc718fddb5f64acc3dda01d28ed
+    size_bytes: 16446
+  - path: kseq.h
+    sha256: a4a2b959d849965c48ca33c0c3714ab369a33e0e34538f3f1258d8194d1e1662
+    size_bytes: 8780
+  - path: ksort.h
+    sha256: 2ed9cf5fc6bcae55ee961df7222fe1ef0ea8f5dc93156990f5ab0c277e0026e0
+    size_bytes: 5145
+  - path: ksw2.h
+    sha256: e6499bda435ebd55940d2fa5f4c70c108b603c5077587fb5528ed1fbe9adfaf0
+    size_bytes: 8770
+  - path: ksw2_dispatch.c
+    sha256: b8edf5bbb9a5752f9e3b472962eec79b5989716265bc5e6a74b0dd01d1d8632f
+    size_bytes: 4744
+  - path: ksw2_extd2_sse.c
+    sha256: 46911ad50e3b03e02354371bb756f6c0ce30d0f22feb87c30822874abe7452f1
+    size_bytes: 17583
+  - path: ksw2_exts2_sse.c
+    sha256: 05f5fb72aec7ac78aae6e80d92e434fe1a959f8eccd5b8430af32840c26a12e6
+    size_bytes: 20807
+  - path: ksw2_extz2_sse.c
+    sha256: 74c491c834396b574df1246beb27186118e4e7a2d3373b66134b713998409f7d
+    size_bytes: 13354
+  - path: ksw2_ll_sse.c
+    sha256: 2e4160bc3b293655811006a46efa5922a90da992c389205c370a95bb7e86333a
+    size_bytes: 4625
+  - path: kthread.c
+    sha256: d9b18fcb9412a05e2e235274ade871154640366208073577e5a353514e5825fe
+    size_bytes: 4074
+  - path: kthread.h
+    sha256: ed92aa2bd8692741cbf787adace74ba72583a2bb18a450e07ef03fc9ce1fc9a9
+    size_bytes: 291
+  - path: kvec.h
+    sha256: 074ac9bdd03acc0763f4e8640bb62fb894200c217d6333e0fb9eb06353431a30
+    size_bytes: 3029
+  - path: lchain.c
+    sha256: 879e032527fcfcccdab69ceda588a9bb7a106a94c0e880b0710bdf2b2ae215f3
+    size_bytes: 18160
+  - path: main.c
+    sha256: 941b21f41660866204c5e801e36567c24808029644835dd566f6bc8aefbb0db2
+    size_bytes: 25644
+  - path: map.c
+    sha256: 21fd9ec17bddd252dfc756ca99e89d7f6ea0c907c586affcbd0d83c9eab68ad3
+    size_bytes: 30121
+  - path: minimap.h
+    sha256: fe070ea30df31df5b8991eaf5680838ec2a345017f8ac0e5851aa430e491b0dc
+    size_bytes: 15183
+  - path: misc.c
+    sha256: c4cb4bc5cf4048220417b6b3c1be9bf46902a945abe3879ab507e61e12b642ef
+    size_bytes: 4393
+  - path: mmpriv.h
+    sha256: 6032156ee4bd0e0511a755fc9fcd56b8e010834b2fc774c89066b05d20248c7e
+    size_bytes: 7460
+  - path: options.c
+    sha256: 8ffd0235798712c87c8126f54503a75066153d37691cc48f9cd6ec618920bd9e
+    size_bytes: 9943
+  - path: pe.c
+    sha256: a6afcbacc171bdac1a2b3720c13e01c239b3052b94fb82b441e27d622eab4bc8
+    size_bytes: 5814
+  - path: sdust.c
+    sha256: 024b1b746b1b3f8ca8cffe6ce6589e9c5569264fda5160e5210442d8ae6a6fd0
+    size_bytes: 6642
+  - path: sdust.h
+    sha256: 86ebb6b0061166328747e49222bc74e4d2089f45d302bda28bd233e977795004
+    size_bytes: 574
+  - path: seed.c
+    sha256: a9e6022157dce7ae08aab0e989706fcae628724f95cf78b1786631928f446233
+    size_bytes: 4194
+  - path: sketch.c
+    sha256: 9cd8c6b348b3ce166897c883a2a4bfdde58c9df925430c47ce539d685a611b99
+    size_bytes: 5829
+  - path: splitidx.c
+    sha256: 9d72bafb813a9ac33f27c5a89f97349318b1e420d6ae6018be9933bfe13126dd
+    size_bytes: 2126
+binary_source_relationship:
+  build_receipt_available: false
+  classification: contemporaneous instrumented source snapshot
+  claim: The hashes preserve the executable and source state separately. They do not prove that this executable was built
+    from this snapshot.
+experiment_sources:
+- path: runl_dense_divergence_audit.py
+  sha256: 6e5f66ecf5bff69bc40889646c2d44ba7875f32d8d24ce7f08f51741c6a4e563
+  size_bytes: 58020
+- path: runl_dense_divergence_finalize.py
+  sha256: 2599f6b9cd61cdb33fe80e1b7f1cf6530a6293f30ef56a8231c4774e98492b96
+  size_bytes: 60913
+- path: runl_dense_divergence_generate_data.py
+  sha256: 1cc1a7655d4b0e45a27a0d052ee89339c09cc00c2cfcb10caa5d4214231a2bf8
+  size_bytes: 17679
+- path: runl_repeat_common.py
+  sha256: c55c00f4a87a17de450b4e95c8db3afa01fbf947cdff7d99c81ce4fc45d80aa2
+  size_bytes: 13811
+- path: runl_repeat_dense_run_experiment.py
+  sha256: 8136441b3978ee3f8393f7ee3dab40e31e9cd8c024253d0bfb0f78d206bac250
+  size_bytes: 6814
+- path: runl_repeat_generate_data.py
+  sha256: 0c360a2860e566282b22eb4e8bd97d3fdc02ceeea3dc75a0042688a9c6a07396
+  size_bytes: 28857
+- path: runl_repeat_run_experiment.py
+  sha256: 2d3aeb83dd70cb835bcbbd4feeecfc4740c76555e4b812431bd774dafc04a591
+  size_bytes: 117550
