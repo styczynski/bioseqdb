@@ -2043,28 +2043,34 @@ If \(L\) consecutive links satisfy \(p_j=j-1\), then we run single-path algorith
   \bigwedge_{u=0}^{L-1}p_{j-u}=j-u-1.
 \]
 
-%TODO: Continue here
-\info{Chain optimisation}{At first it might not be intuitive why we are interested in chains of consecutive anchors. We can think of inverse of that condition. If the anchors are not consecutive, then it means that for some anchor there exists alternative very good match i.e for one target position there are multiple competing chainings for different query positions that fight over few sibling anchors. This may happen if there's almost identical repetition which is equally good. For now we will just assume that this condition $\operatorname{Run}_L(j,c)$ is non-trivial algorithm specialisation that is discussed in detail in separate chapter.}
+\info{Chain order heuristic}{At first it might not be intuitive why we are interested in chains of consecutive anchors.
+We can think of inverse of that condition. If the anchors are not consecutive, then it means that for some anchor there exists alternative very good match i.e for one target position there are multiple competing chainings for different query positions that fight over few sibling anchors. 
+This means that fragment in query is not easily recognisable as query is repetitive and each repetition is equally good (very low divergence rates). For now we will just assume that this condition $\operatorname{Run}_L(j,c)$ is non-trivial algorithm specialisation that is discussed in detail in separate chapter.}
 
-
-
-Two vector stores
-then save and mark the \(L\) anchors.  Otherwise the same Highway loop uses
-only lane zero for that link.  This is a one-lane SIMD operation, not a call
-to the scalar backtracker.
-
-Each later batch contains at most \(L\) ends.  During collection, lane
-\(\lambda\) follows one end.  At depth \(d\), an indexed scatter writes that
-lane directly to
+If the $\operatorname{Run}_L(j,c)$ condition is met then we use only two store operations to mark $L$ anchors of that single chain (we pay the cost of checking the condition, but the we benefit by using less instructions). If not "multi-path" version follows one chain per lane. 
+This concept is illustrated in Figure~\ref{fig:chaining-simd-backtracking} section (b). At first each lane contains consecutive indices which are highest-scoring anchors used as ends. Then we iterate trhough all of them until we reach the stop condition. Each lane $\lambda$ follows one chain and can stop 
+earlier than others. We don't want to explicitly hold this structure as matrix and transpose it. Instead for iteration (depth) $d$ we directly store (scatter)lanes:
 \[
-  V_{\lambda,d}\quad\text{at address}\quad V+\lambda n+d.
+  V_{\lambda,d}\quad\overrightarrow{\text{memory address}}\quad \text{Address}(V)+(\lambda n+d)*\text{sizeof}(V_{0,0}).
 \]
-Consequently each path is already one contiguous row.  No second matrix and
-no later transpose pass are used.  The \(L\)-by-\(n\) path matrix itself uses
-\(4nL\) bytes.  The ranked ends and marks are separate temporary arrays.
+where $n$ constant is the arbitrary number of SIMD vectors we want to store ($d < n$)
 
-Figure~\ref{fig:chaining-simd-backtracking} follows the example with
-\(L=4\), \(S=30\), and \(K=2\).  The first path is
+Figure~\ref{fig:chaining-simd-backtracking} illustrates the algorithm with
+number of lanes: \(L=4\), minimum score $F_{\text{min}}$: \(S=30\), and minimum chain length $C_{\text{min}}$: \(K=2\). 
+The relevant scores for the example are:
+\[
+  f_{19}=100,\quad f_{18}=90,\quad f_{17}=85,\quad f_{16}=80,\quad
+  f_{15}=75,\quad f_9=40,\quad f_{11}=55,\quad f_{10}=50.
+\]
+\begin{itemize}
+  \item First we start with $f_{19}$ as this is the highest-scoring anchor. We look for $p[19]$ and load $[p[19], p[18], p[17], p[16]] = [9, 8, 7, 6]$ into SIMD vector. This is compared to vector ${[p[19], p[19], p[19], p[19]] - [0, 1, 2, 3]}$, which in this case are equal. This means (toegether with bound checks) that $\operatorname{Run}_L(19,0)$ is true. Hence we run the single-path algorithm. I specifically split the second vector in the comparison to illustrate how SIMD vectors are constructed and compared in the real code. Then the single-path (a) will use store operation to mark $L$ anchors as visited and reverse the indices and store them in the result vector.
+  \item For first path (a) when we encounter $1$ (the end of the array of anchors) we fallback to multi-path behaviour (this is the simplest way to avoid out-of-bounds access. Otherwise we would need to implement complicated masking). This is observed in (a) as $1$ and $0$ being in separate fragments rather than single one.
+  \item The multi-path is illustrated in (b). The next highest scoring anchor after $f_{19}$ is $f_{18}$ with score $90$. We look for $p[18]$ and load $[p[18], p[17], p[16], p[15]] = [14, 13, 12, 10]$ into SIMD vector. The comparison in this case will yield false as $p[15] \neq 11$. This means that we follow each index one by one. Each time we load markings for the index and check what lanes were already marked (this forms a SIMD binary mask). If all lanes are masked-out then we can stop iteration completely. At each iteration we store lanes values in correct indices in our $V$ array.
+  \item After multi-path (b) runs we still needs to filter the chains by score and length. 
+\end{itemize}
+
+
+The first path is
 \(19,9,8,\ldots,0\).  It marks these anchors before the next four ends are
 collected.  For the later ends, the relevant scores are
 \[
@@ -2332,7 +2338,7 @@ sequence when \(c=0\).
         \begin{cases}p_{j_\lambda},&\eta_\lambda=1\\-1,&\text{otherwise}
         \end{cases},\quad \alpha_\lambda\gets[j_\lambda\geq0]\)
     \EndFor
-    \State \textbf{abort this call if }
+    \State \textbf{assert}
       \(\sum_{\lambda=0}^{q-1}\alpha_\lambda\neq0\)
     \State \Return \((\boldsymbol\ell,\mathbf b)\)
   \EndFunction
