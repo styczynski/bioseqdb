@@ -1263,6 +1263,87 @@ The algorithm is described in detail in Algorithm~\ref{alg:chaining-b5}.
 \end{algorithmic}
 \end{algorithm}
 
+\clearpage
+\subsection{Summary of forward chaining algorithms for CPU}
+\label{sec:chaining-mm2-fast-forward}
+
+mm2-fast is another version of minimap2 where specific parts were accelerated. The chaining algorithm in BioseqDB was inspired by mm2-fast (but note that as in case of other scientific work, mm2-fast provided only AVX2 kernel, not universal code like in case of BioseqDB).
+There are some slight differences in high-level algorithm design:
+\begin{itemize}
+    \item mm2-fast doesn't seem to have counter of anchors that does not improve the best score in the current batch (In BioseqDB bounded SIMD B1 we introduced such counter)
+    \item mm2-fast uses scalar code to check for the lane winner, while BioseqDB bounded SIMD B1 uses SIMD instructions
+\end{itemize}
+
+\todo{Do we know if the $U$ limit helps here?}
+
+\begin{table}[H]
+\centering
+\caption{Forward B1 implementations for one fixed current anchor \(a_i\).
+In the SIMD rows, each lane holds one predecessor candidate, not one chain.}
+\label{tab:chaining-mm2-fast-forward}
+\footnotesize
+\setlength{\tabcolsep}{3.0pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{@{}
+  >{\raggedright\arraybackslash}p{0.18\linewidth}
+  >{\raggedright\arraybackslash}X
+  >{\raggedright\arraybackslash}p{0.26\linewidth}
+  >{\raggedright\arraybackslash}p{0.18\linewidth}@{}}
+\toprule
+\textbf{Method} &
+\textbf{How candidates are processed} &
+\textbf{When the scan stops} &
+\textbf{How the result is selected}\\
+\midrule
+minimap2 B1 &
+Score one predecessor \(j\) at a time.  After each candidate, update the
+shared best pair and scalar skip/mark state &
+At the end of the main window, or when the scalar \texttt{max\_skip} rule
+fires while \(j\) decreases &
+The shared \((f_i,p_i)\) is already final\\
+\addlinespace
+BioseqDB exact SIMD B1 &
+Score one predecessor per active lane.  Inspect a batch in decreasing \(j\)
+order when it may improve the best score or locate the exact
+\texttt{max\_skip} stop &
+At the same candidate as scalar B1 &
+The shared \((f_i,p_i)\) is already final\\
+\addlinespace
+mm2-fast &
+Score one predecessor per active lane.  Each lane keeps its best pair across
+blocks &
+At the end of the bounded main window; there is no \texttt{max\_skip} &
+Scalar code scans the lane winners\\
+\addlinespace
+BioseqDB bounded batch SIMD B1 &
+Score one predecessor per active lane.  Each lane keeps its best pair, and
+one counter tracks batches with no lane-local improvement &
+At the end of the main window, or after \(U\) such consecutive batches &
+Choose the best lane result\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+mm2-fast's forward loop is most similar to bounded SIMD B1.  Both keep one
+best candidate per lane and compare the winners after processing candidate
+blocks.  Their stopping rules differ.  The mm2-fast SIMD kernel examines every
+predecessor in this window.  The supplied implementation can also test one
+saved high-score anchor outside the window with scalar code.  It does not apply
+\texttt{max\_skip}.
+Bounded SIMD B1 can stop when its shared count of consecutive batches in which
+no lane improves reaches its limit.  Exact SIMD B1 also scores a vector of
+candidates.  It walks candidates in decreasing \(j\) order only when a batch
+may improve the best score or when it must locate the exact
+\texttt{max\_skip} stop.
+
+mm2-fast stores 32-bit anchor fields in separate arrays and uses eight AVX2
+lanes or sixteen AVX-512 lanes.  The paper reports a scalar fallback for fewer
+than five inner-loop iterations; the inspected later source instead uses
+scalar code for up to six candidates.  Anchor \(i\) still needs earlier scores,
+so the worst case is \(O(n^2)\), and the paper does not vectorize RMQ
+chaining.  Because mm2-fast disables \texttt{max\_skip}, output comparisons
+must also disable it in minimap2.  Default minimap2 output need not match.
+
 \subsection{Reverse chaining (backtracking)}
 
 The forward pass has already produced one score \(f_i\) and one predecessor
@@ -3651,6 +3732,129 @@ length is \(5{,}000{,}000\) bases (with two samples).
 The figure above depicts only two runs and presents only quick prototyping test measurements to judge if we are going in right direction.
 
 %%%%%% EDIT BELOW HERE
+\clearpage
+\section{Backtracking in minimap2, mm2-fast, and BioseqDB}
+\label{sec:chaining-mm2-fast-backtracking}
+
+Forward scoring and chain recovery are separate algorithms.  The mm2-fast
+paper ends its chaining method after the forward pass produces the score and
+predecessor arrays \(f\) and \(p\).  It does not propose SIMD chain recovery
+\cite{Kalikar2021.07.21.453294}.  The inspected mm2-fast source is based on the
+later minimap2 v2.24.  It passes \(f\) and \(p\) to the same scalar
+\texttt{mg\_chain\_backtrack} routine as minimap2.
+
+A candidate chain end has index \(e\) and score \(f_e\).  Minimap2 and the
+inspected mm2-fast source order these ends by decreasing score; their order on
+a tie is unspecified.  BioseqDB uses decreasing \((f_e,e)\).  The figure
+calls both lists \emph{ranked ends}.  A \emph{marked} anchor was reached by an
+earlier higher-ranked recovery search.  In the scalar boxes, the first pass
+counts the needed output anchors and the second repeats the searches to write
+them.
+
+A BioseqDB \emph{provisional path} has been collected but has not yet been
+marked or copied to the output.  A path is accepted when it passes the
+existing minimum-score and anchor-count tests.  Its \emph{unmarked prefix}
+runs from the candidate end to just before the first already marked anchor.
+The condition
+\(\operatorname{Run}_L\) means that the next \(L\) predecessor links follow
+consecutive entries in the sorted anchor array.  A partial-path score is the
+score contributed by the anchors followed so far from \(e\).  Its running
+maximum starts at zero.  The \emph{drawdown} is that running maximum minus its
+current value.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\scriptsize,>=Latex,
+  rec scalar/.style={draw=chainGray!85!black,fill=chainGray!9,
+    minimum height=.52cm,align=center,inner sep=2pt},
+  rec stop/.style={draw=chainOrange!95!black,fill=chainOrange!12,
+    minimum height=.56cm,align=center,inner sep=2pt},
+  rec path/.style={draw=chainGreen!80!black,fill=chainGreen!13,
+    minimum width=.78cm,minimum height=.50cm,align=center,inner sep=1pt},
+  rec lane/.style={draw=chainBlue!85!black,fill=chainBlue!11,
+    minimum width=.74cm,minimum height=.48cm,align=center,inner sep=1pt},
+  rec commit/.style={draw=chainOrange!90!black,fill=chainOrange!11,
+    minimum height=.58cm,align=center,inner sep=2pt},
+  rec flow/.style={-{Latex[length=1.3mm]},thick,draw=black!65},
+  rec soft/.style={-{Latex[length=1.0mm]},draw=black!55}
+]
+  \node[anchor=west,font=\bfseries] at (.05,4.55)
+    {(a) minimap2 v2.24 and inspected v2.24-based mm2-fast source: scalar recovery};
+  \node[rec scalar,minimum width=1.10cm] (recends) at (.62,3.68)
+    {ranked\\ends};
+  \node[rec stop,minimum width=3.10cm] (recpassone) at (3.05,3.68)
+    {pass 1: count\\\(e\to p(e)\to p^2(e)\to\cdots\)\\
+     stop at \(-1\) or marked, or\\drawdown \(>\texttt{max\_drop}\)};
+  \node[rec stop,minimum width=3.10cm] (recpasstwo) at (7.00,3.68)
+    {pass 2: write\\\(e\to p(e)\to p^2(e)\to\cdots\)\\
+     stop at \(-1\) or marked, or\\drawdown \(>\texttt{max\_drop}\)};
+  \node[rec scalar,minimum width=3.25cm] (recsort) at (11.25,3.68)
+    {reverse anchors in each path\\and sort complete chains};
+  \draw[rec flow] (recends.east)--(recpassone.west);
+  \draw[rec flow] (recpassone.east)--(recpasstwo.west)
+    node[midway,above,inner sep=1pt] {restart};
+  \draw[rec flow] (recpasstwo.east)--(recsort.west);
+  \draw[black!30] (.05,2.93)--(13.80,2.93);
+  \node[anchor=west,font=\bfseries] at (.05,2.65)
+    {(b) BioseqDB: SIMD chain recovery};
+
+  \node[anchor=west,font=\bfseries] at (.20,2.10)
+    {highest-ranked path};
+  \node[anchor=east] at (1.55,1.48)
+    {\(\operatorname{Run}_L\) true};
+  \foreach \x/\value in {2.05/j,3.10/j-1,4.15/j-2,5.20/j-3} {
+    \node[rec path] at (\x,1.48) {\(\value\)};
+  }
+  \draw[rec soft] (2.44,1.48)--(2.71,1.48);
+  \draw[rec soft] (3.49,1.48)--(3.76,1.48);
+  \draw[rec soft] (4.54,1.48)--(4.81,1.48);
+  \node[anchor=east] at (1.55,.58)
+    {\(\operatorname{Run}_L\) false};
+  \node[rec path] (reconelink) at (2.05,.58) {one link};
+  \node[anchor=west] at (2.61,.58)
+    {one active lane, then retry};
+
+  \node[anchor=west,font=\bfseries] at (6.55,2.10)
+    {later ranked ends};
+  \foreach \x/\lane in {6.92/0,7.77/1,8.62/2,9.47/3} {
+    \node[rec lane] (rece\lane) at (\x,1.48) {\(e_\lane\)};
+    \node[rec path] (recnext\lane) at (\x,.58) {\(p(e_\lane)\)};
+    \draw[rec soft] (rece\lane.south)--(recnext\lane.north);
+  }
+  \node at (8.20,.05) {one provisional path per lane};
+  \node[rec commit,minimum width=2.72cm] (reccommit) at (12.00,1.03)
+    {process one collected path\\mark unmarked prefix\\copy only if accepted};
+  \draw[rec flow] (9.88,1.03)--(reccommit.west);
+\end{tikzpicture}
+\caption{Chain recovery begins after \(f\) and \(p\) are known.  Minimap2 v2.24
+and the inspected v2.24-based mm2-fast source run the scalar ranked-end loop
+twice, first to count and then to write.  BioseqDB does not use
+\texttt{max\_drop} or repeat
+the loop.  It handles the highest-ranked path alone and collects later paths
+one per lane.  When it checks a collected path, its lanes hold consecutive
+entries from that path.}
+\label{fig:chaining-mm2-fast-backtracking}
+\end{figure}
+
+The inspected source uses minimap2's scalar recovery, not SIMD recovery.  For
+ordinary genomic mappings (not cDNA),
+\(\texttt{max\_drop}=\texttt{bw}\), the chaining-bandwidth setting.  A drawdown
+stop keeps the best-scoring part found before the stop.  The routine runs the
+count and write loops, reverses each chain, and sorts chains by the target
+position of their first anchor.
+
+BioseqDB has no \texttt{max\_drop} or separate count and write passes.  It
+handles the first path alone: a true \(\operatorname{Run}_L\) marks \(L\)
+anchors together, while a false result advances one link in one active lane.
+Only later ends use provisional one-path-per-lane collection.  These paths are
+not marked while being collected and can contain the same predecessor anchors.
+BioseqDB then checks them one at a time in decreasing \((f_e,e)\) order.  It
+marks each unmarked prefix and copies only accepted paths.  It keeps this rank
+order instead of minimap2's final coordinate sort.
+Thus the inspected v2.24-based mm2-fast source implements neither BioseqDB
+recovery branch; it uses minimap2 v2.24's scalar backtracking.
+
 \section{BioseqDB \texttt{max\_drop} analysis}
 \label{sec:chaining-max-drop-analysis}
 
