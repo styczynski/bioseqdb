@@ -1,0 +1,304 @@
+
+\section{Range minimum query chaining}
+\label{sec:chaining-rmq-idea}
+
+The ordered predecessor scan in B1 can calculate many complete link scores for
+one target.  The B4 algorithm first compares a value that depends only on the
+earlier anchor:
+\begin{equation}
+  h(j)=f_j+\frac{\lambda_g}{2}(r_j+q_j).
+\label{eq:chaining-rmq-h}
+\end{equation}
+Once \(f_j\) is known, the same \(h(j)\) can be reused for every later target.
+An RMQ tree stores
+\(\pi(j)=-h(j)\).  A query for the smallest priority therefore returns an
+anchor with the largest \(h(j)\) inside a query-coordinate interval.
+
+This is a candidate-selection method.  The tree does not store the complete
+target-dependent value \(f_j+E(j,i)\).  Minimap2 calculates that value after
+the query.  It can also scan a narrower local interval when the selected link
+is not an exact extension.  This design is used by minimap2's RMQ chaining
+mode and by assembly presets that need to consider links across long gaps.
+In this section, \(f_j+E(j,i)\) is the complete proposed chain score,
+abbreviated to complete score.
+
+\subsection{Minimap2 RMQ}
+\label{sec:chaining-minimap2-rmq}
+
+Let
+\[
+  D=\max\{\texttt{max\_dist},\texttt{bw}\}.
+\]
+The optional local scan uses
+\[
+  D_{\mathrm{in}}
+  =\min\{\max\{\texttt{max\_dist\_inner},0\},D\}.
+\]
+Minimap2 maintains an active set of earlier anchors on the same reference and
+strand as the current target \(i\).  It removes anchors when
+\(r_i-r_j>D\), when the reference or strand changes, or when the configured
+tree-size cap is exceeded.  Anchors at the current reference coordinate are
+held outside the tree until the scan moves to a larger coordinate.  Every
+stored candidate therefore has \(r_j<r_i\).
+
+The AVL search key and stored priority are
+\[
+  K_j=(q_j,j),
+  \qquad
+  \pi(j)=-h(j).
+\]
+The index \(j\) keeps equal query coordinates as separate nodes.  Each node
+also caches the anchor with the smallest priority in its subtree.  The query uses the closed
+interval between
+\begin{equation}
+  K_i^{\mathrm{lo}}=(q_i-D,\mathrm{INT32\_MAX}),
+  \qquad
+  K_i^{\mathrm{hi}}=(q_i,0).
+\label{eq:chaining-rmq-key-range}
+\end{equation}
+For ordinary positive indices, these composite keys admit
+\(q_i-D<q_j<q_i\).  Figure~\ref{fig:chaining-minimap2-rmq} shows the complete
+selection.
+The tree query does not define a stable index tie rule when two anchors have
+the same \(h(j)\).
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\scriptsize,>=Latex]
+  \node[anchor=west,font=\bfseries] at (.05,6.35)
+    {(a) Maintain the active set};
+  \node[anchor=west,font=\bfseries] at (4.85,6.35)
+    {(b) Query cached values};
+  \node[anchor=west,font=\bfseries] at (10.05,6.35)
+    {(c) Check the selected link};
+
+  % Active reference window.
+  \draw[fill=chainGray!10,draw=chainGray!80!black]
+    (.15,4.85) rectangle (1.00,5.55);
+  \node at (.575,5.20) {\(j_0\)};
+  \draw[very thick,draw=chainOrange!95!black]
+    (.10,4.78)--(1.05,5.62);
+  \node[anchor=north,text=chainGray!90!black] at (.575,4.72) {expired};
+
+  \foreach \x/\lab in {1.25/\(j_1\),2.20/\(j_2\)}
+    {
+      \draw[fill=chainBlue!13,draw=chainBlue!90!black]
+        (\x,4.85) rectangle (\x+.85,5.55);
+      \node at (\x+.425,5.20) {\lab};
+    }
+  \draw[fill=chainGreen!14,draw=chainGreen!80!black,very thick]
+    (4.05,4.85) rectangle (4.70,5.55);
+  \node at (4.375,5.20) {\(i\)};
+  \draw[fill=chainOrange!14,draw=chainOrange!95!black,dashed]
+    (4.05,3.75) rectangle (4.70,4.45);
+  \node at (4.375,4.10) {\(j_3\)};
+  \draw[dashed,draw=chainOrange!95!black]
+    (4.375,4.45)--(4.375,4.85);
+  \node[align=center,text=chainOrange!95!black,anchor=north]
+    at (4.375,3.68) {same \(r\) as \(i\)\\insert later};
+  \draw[<->,draw=chainBlue!90!black,thick]
+    (1.25,5.82)--(4.70,5.82);
+  \node[anchor=south,text=chainBlue!90!black] at (2.98,5.84)
+    {reference distance at most \(D\)};
+
+  % Query-coordinate strip and AVL tree.
+  \foreach \x/\q/\fillc in {
+      4.95/7/chainGray!10,
+      5.75/11/chainBlue!12,
+      6.55/14/chainOrange!22,
+      7.35/18/chainBlue!12,
+      8.15/22/chainBlue!12,
+      8.95/27/chainGreen!14}
+    {
+      \draw[fill=\fillc,draw=black!55]
+        (\x,5.08) rectangle (\x+.62,5.62);
+      \node at (\x+.31,5.35) {\q};
+    }
+  \draw[<->,draw=chainOrange!95!black,thick]
+    (5.65,4.77)--(8.85,4.77);
+  \node[anchor=north] at (7.56,4.68)
+    {\(q_i-D<q_j<q_i\)};
+
+  \node[draw=chainBlue!90!black,fill=chainBlue!10,
+    minimum width=1.22cm,minimum height=.74cm,align=center]
+    (r17) at (7.25,3.70) {\(q=18\)\\max \(h=44\)};
+  \node[draw=chainBlue!90!black,fill=chainBlue!10,
+    minimum width=1.22cm,minimum height=.74cm,align=center]
+    (r11) at (5.75,2.55) {\(q=11\)\\max \(h=44\)};
+  \node[draw=chainBlue!90!black,fill=chainBlue!10,
+    minimum width=1.22cm,minimum height=.74cm,align=center]
+    (r22) at (8.75,2.55) {\(q=22\)\\max \(h=29\)};
+  \node[draw=chainOrange!95!black,fill=chainOrange!22,very thick,
+    minimum width=1.22cm,minimum height=.70cm,align=center]
+    (r14) at (6.35,1.35) {\(q=14\)\\\(h=44\)};
+  \node[draw=chainGray!80!black,fill=chainGray!10,
+    minimum width=1.22cm,minimum height=.70cm,align=center]
+    (r7) at (5.10,1.35) {\(q=7\)\\\(h=20\)};
+  \draw[thick] (r17)--(r11);
+  \draw[thick] (r17)--(r22);
+  \draw[thick] (r11)--(r7);
+  \draw[thick] (r11)--(r14);
+
+  % Complete-score path.
+  \draw[fill=chainOrange!18,draw=chainOrange!95!black]
+    (10.15,4.85) rectangle (11.72,5.55);
+  \node[align=center] at (10.935,5.20) {selected\\\(j^\star\)};
+  \draw[chain flow] (11.72,5.20)--(12.18,5.20);
+  \draw[fill=chainBlue!12,draw=chainBlue!90!black]
+    (12.18,4.75) rectangle (14.15,5.65);
+  \node[align=center] at (13.165,5.20)
+    {\(f_{j^\star}+E(j^\star,i)\)};
+
+  \draw[chain flow] (13.165,4.75)--(13.165,3.95);
+  \draw[fill=chainGreen!13,draw=chainGreen!80!black]
+    (11.95,3.05) rectangle (14.38,3.95);
+  \node[align=center] at (13.165,3.50)
+    {bandwidth and\\strict score check};
+
+  \draw[chain flow] (13.165,3.05)--(13.165,2.25);
+  \draw[fill=chainGreen!13,draw=chainGreen!80!black]
+    (12.15,1.45) rectangle (14.18,2.25);
+  \node at (13.165,1.85) {store \(f_i,p_i\)};
+
+  \draw[dashed,draw=chainOrange!95!black,-{Latex[length=1.7mm]}]
+    (12.18,4.95)--(11.68,4.95)--(11.68,2.20)--(11.85,2.20);
+  \node[align=left,anchor=east,text=chainOrange!95!black]
+    at (11.72,1.55) {narrow local scan\\if link is not exact};
+\end{tikzpicture}
+\caption{Minimap2 RMQ for one target.  Anchors outside the reference window
+are removed, and anchors at the target's reference coordinate are not yet
+inserted.  The augmented AVL query selects one \(j^\star\) using \(h(j)\).
+Minimap2 then calculates the complete link score for \(j^\star\).  The dashed path is the
+optional local scan.}
+\label{fig:chaining-minimap2-rmq}
+\label{fig:chaining-rmq-contrast}
+\end{figure}
+
+Algorithm~\ref{alg:chaining-minimap2-rmq} states the forward calculation.  The
+maintenance calls insert a completed reference-coordinate group and remove
+entries that fail the active-set rules above.  Each maintenance helper owns
+an independent scan cursor, reads the anchor array and completed scores, and
+updates the named tree.  \textsc{RangeBest} returns the anchor with the largest
+\(h(j)\) in the composite-key interval.
+
+\begin{algorithm}[H]
+\caption{Minimap2 RMQ forward chaining}
+\label{alg:chaining-minimap2-rmq}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require sorted anchors \(a_0,\ldots,a_{n-1}\), distance \(D\),
+    inner distance \(D_{\mathrm{in}}\), bandwidth \(B\), tree cap \(C\),
+    skip limit \(S\)
+  \Ensure scores \(f\) and absolute predecessor indices \(p\)
+  \Function{Minimap2RMQForward}{\(a,D,D_{\mathrm{in}},B,C,S\)}
+    \State \(T\gets\varnothing,\quad T_{\mathrm{in}}\gets\varnothing\)
+          \Comment{augmented AVL trees}
+    \State \(t\gets(0,\ldots,0)\)
+          \Comment{B1 marks for the optional local scan}
+    \For{\(i\gets0\) \textbf{to} \(n-1\)}
+      \State \Call{InsertCompletedReferenceGroup}{\(T,a,f,i\)}
+      \If{\(D_{\mathrm{in}}>0\)}
+        \State \Call{InsertCompletedReferenceGroup}{\(T_{\mathrm{in}},a,f,i\)}
+      \EndIf
+      \State \Call{RemoveExpiredEntries}{\(T,a,i,D,C\)}
+      \If{\(D_{\mathrm{in}}>0\)}
+        \State \Call{RemoveExpiredEntries}{\(T_{\mathrm{in}},a,i,D_{\mathrm{in}},C\)}
+      \EndIf
+      \State \(f_i\gets\ell_i,\quad p_i\gets-1\)
+      \State \(j^\star\gets
+        \Call{RangeBest}{T,(q_i-D,\mathrm{INT32\_MAX}),(q_i,0)}\)
+      \If{\(j^\star\neq\bot\)}
+        \State \((e,\delta,\mathrm{exact})\gets
+          \Call{CompleteLink}{j^\star,i}\)
+              \Comment{\(e=E(j^\star,i)\)}
+        \If{\(\delta\leq B\land f_{j^\star}+e>f_i\)}
+          \State \(f_i\gets f_{j^\star}+e,\quad p_i\gets j^\star\)
+        \EndIf
+        \If{\(\neg\mathrm{exact}\land T_{\mathrm{in}}\neq\varnothing
+             \land q_i>0\)}
+          \State \((f_i,p_i)\gets
+            \Call{ScanLocalInterval}{T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t}\)
+              \Comment{complete scores with the B1 mark and skip rule}
+        \EndIf
+      \EndIf
+    \EndFor
+    \State \Return \(f,p\)
+  \EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+An exact extension has
+\[
+  \delta(j^\star,i)=0
+  \quad\land\quad
+  g(j^\star,i)\leq\ell_{j^\star}.
+\]
+If the selected link is not exact and the inner tree is enabled, the local
+scan visits retained anchors with
+\[
+  q_i-D_{\mathrm{in}}\leq q_j\leq q_i-1
+\]
+from larger to smaller query coordinate.  It calculates the complete score
+for every visited candidate.  The bandwidth check and the B1 mark and skip
+rule apply inside this scan.  The primary tree is not queried for a second
+choice.
+
+Tree insertion, deletion, and the primary query cost
+\(O(\log M_{\max})\) per anchor, where \(M_{\max}\) is the largest active
+tree.  If target \(i\) visits \(k_i\) local candidates, the forward cost is
+\[
+  O(n\log M_{\max})+
+  O\!\left(\sum_i k_i\right).
+\]
+The local scans can still make this quadratic.  The parameter
+\texttt{max\_chain\_iter} is not used.  The parameter
+\texttt{max\_chain\_skip} affects only the local scan.
+
+Minimap2 selects B1 or RMQ for the first chaining call according to the RMQ
+flag.  A
+later long-gap joining condition can sort the retained anchors and call RMQ
+again with a wider bandwidth.  This later call is conditional.  It can follow
+either an initial B1 call or an initial RMQ call.
+\leavevmode\coderef{minimap2/lchain.c}
+  {Minimap2 RMQ forward pass}{mg_lchain_rmq}{250}
+\leavevmode\coderef{minimap2/krmq.h}
+  {Augmented AVL interval query}{__KRMQ_RMQ}{110}
+\leavevmode\coderef{minimap2/map.c}
+  {RMQ selection and wider joining}{mm_map_frag_core}{275}
+
+\subsection{BioseqDB RMQ differences}
+\label{sec:chaining-bioseqdb-rmq-summary}
+
+BioseqDB reuses the high-level procedure in
+Algorithm~\ref{alg:chaining-minimap2-rmq}, including the augmented AVL tree
+and the preliminary value \(h(j)\).  Its RMQ configuration sets the local
+distance to zero, so only the primary tree is used.  The following differences
+affect the selected predecessor:
+
+\begin{itemize}
+  \item BioseqDB stores full-width reference and query coordinates.  It
+    searches the inclusive
+    composite-key interval
+    \[
+      (q_i-D,\mathrm{INT64\_MIN})
+      \ \ldots\
+      (q_i,\mathrm{INT64\_MAX}).
+    \]
+    It can therefore include both query-coordinate boundaries.
+  \item It calculates the selected link's diagonal width but does not reject
+    the link when the width exceeds the configured bandwidth.
+  \item It performs one RMQ pass.  The BioseqDB RMQ route has no local scan
+    and no optional wider second call.  Neither \texttt{max\_chain\_skip} nor
+    \texttt{max\_chain\_iter} affects this forward route.
+  \item It uses BioseqDB's shared scalar chain extraction after the forward
+    pass.  That extractor does not use minimap2's maximum-drop cut search.
+\end{itemize}
+
+Within each equal-reference group, BioseqDB orders anchors by a packed query
+key.  This key contains the query-segment identifier, anchor flags, query
+span, and the low 32 bits of the query position.  The full 64-bit query
+position breaks a tie between equal packed keys.  Minimap2's radix pass sorts
+only the packed reference key.  Equal-priority cache handling also differs,
+so equal \(h(j)\) values can select different predecessor anchors.  The whole
+BioseqDB RMQ route has \(O(n\log n)\) worst-case time.
+Section~\ref{sec:chaining-bioseqdb} describes how this route is selected.

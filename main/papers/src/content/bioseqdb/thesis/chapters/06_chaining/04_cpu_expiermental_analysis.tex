@@ -1,0 +1,2311 @@
+\clearpage
+\subsection{Statistical modelling ofCPU forward and backward passes}
+\label{sec:chaining-runl-repeat-experiment}
+
+The first loop in Algorithm~\ref{alg:chaining-simd-backtrack} can process
+\(L\) anchors at once only when \(\operatorname{Run}_L(j,c)\) is true.  The
+score and equal-score tie rule select the first chain end.  The predicate then
+requires each of the next \(L\) predecessor links to move to the preceding
+slot in the coordinate-sorted anchor array.
+
+The \emph{first predecessor path} starts at this chain end and repeatedly
+follows \(p_j\) until the next predecessor is \(-1\).  A \emph{retained
+anchor} is a minimizer hit that remains in the coordinate-sorted anchor array
+after minimap2 applies its occurrence-frequency filters.  A
+\emph{repeat-derived anchor} is a retained anchor that links a selected
+minimizer in one block to an occurrence in another block.  A
+\emph{same-target anchor group} contains retained anchors with the same
+reference-sequence identifier, target end coordinate, and orientation.  Its
+members have different query end coordinates in these constructions.  The
+first predecessor path contains at most one member of such a group.  The
+remaining members still occupy array slots.  They can make \(p_j<j-1\), even
+when consecutive path anchors are close in both sequences.
+
+\subsubsection{Reference and query structures}
+
+Figure~\ref{fig:chaining-runl-inputs} shows the three constructions used to
+measure this effect.  The drawings show representative minimizer links and
+are not to scale.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\scriptsize,>=Latex,
+  runl unit/.style={
+    draw=black!60,minimum height=.48cm,align=center,
+    inner sep=1.5pt,outer sep=0pt,rounded corners=0pt},
+  runl unique/.style={
+    runl unit,draw=chainGray!85!black,fill=chainGray!10},
+  runl source/.style={
+    runl unit,draw=chainBlue!90!black,fill=chainBlue!13},
+  runl variant/.style={
+    runl unit,draw=chainOrange!95!black,fill=chainOrange!16},
+  runl selected/.style={
+    runl unit,draw=chainGreen!80!black,fill=chainGreen!14,very thick},
+  runl unused/.style={
+    runl unit,draw=chainOrange!95!black,fill=chainOrange!10,dashed},
+  runl cell/.style={
+    runl unit,minimum width=.52cm,minimum height=.42cm,
+    fill=chainGray!8,font=\tiny},
+  runl chosen cell/.style={
+    runl cell,draw=chainGreen!80!black,fill=chainGreen!16,very thick},
+  runl main/.style={line width=.85pt,draw=chainGreen!80!black},
+  runl extra/.style={
+    line width=.75pt,draw=chainOrange!95!black,dashed},
+  runl pred/.style={-{Latex[length=1.4mm]},thick,draw=black!72},
+  runl note/.style={
+    draw=black!45,fill=black!2,align=left,
+    inner sep=3pt,rounded corners=0pt}
+]
+  \node[anchor=west,font=\bfseries] at (.10,9.25)
+    {(a) Two internal blocks in an exact full-length mapping};
+
+  \node[anchor=east] at (.72,8.55) {reference};
+  \node[runl unique,minimum width=.70cm] (rUzero) at (1.25,8.55)
+    {\(U_0\)};
+  \node[runl source,minimum width=3.00cm] (rA) at (3.15,8.55)
+    {\(A\)};
+  \node[runl unique,minimum width=.70cm] (rUone) at (5.05,8.55)
+    {\(U_1\)};
+  \node[runl variant,minimum width=3.00cm] (rAprime) at (6.95,8.55)
+    {\(A'_{\delta}\)};
+  \node[runl unique,minimum width=.70cm] (rUtwo) at (8.85,8.55)
+    {\(U_2\)};
+
+  \node[anchor=east] at (.72,7.72) {query};
+  \node[runl unique,minimum width=.70cm] (qUzero) at (1.25,7.72)
+    {\(U_0\)};
+  \node[runl source,minimum width=3.00cm] (qA) at (3.15,7.72)
+    {\(A\)};
+  \node[runl unique,minimum width=.70cm] (qUone) at (5.05,7.72)
+    {\(U_1\)};
+  \node[runl variant,minimum width=3.00cm] (qAprime) at (6.95,7.72)
+    {\(A'_{\delta}\)};
+  \node[runl unique,minimum width=.70cm] (qUtwo) at (8.85,7.72)
+    {\(U_2\)};
+
+  \draw[runl main]
+    (rUzero.south)--(qUzero.north)
+    (rA.south)--(qA.north)
+    (rUone.south)--(qUone.north)
+    (rAprime.south)--(qAprime.north)
+    (rUtwo.south)--(qUtwo.north);
+  \draw[runl extra] (rA.south)--(qAprime.north);
+  \draw[runl extra] (rAprime.south)--(qA.north);
+
+  \node[runl note,text width=3.55cm] at (11.60,8.46) {
+    reference \(=\) query\\[2pt]
+    \(\lvert A\rvert=32768\)\\
+    \(\lvert U_i\rvert=512\)\\
+    \(A\)-to-\(A'_{\delta}\) offset \(=33280\)
+  };
+  \draw[runl main] (9.72,7.60)--(10.38,7.60);
+  \node[anchor=west] at (10.50,7.60) {selected equal-coordinate path};
+  \draw[runl extra] (9.72,7.28)--(10.38,7.28);
+  \node[anchor=west] at (10.50,7.28) {repeat-derived anchors};
+
+  \draw[black!35] (.10,6.98)--(13.75,6.98);
+
+  \node[anchor=west,font=\bfseries] at (.10,6.70)
+    {(b) Exact spaced-copy control};
+
+  \node[anchor=east] at (.72,6.05) {reference};
+  \node[runl source,minimum width=1.50cm] at (1.48,6.05) {\(S\)};
+  \node[runl unique,minimum width=1.50cm] at (3.00,6.05) {\(N^G\)};
+
+  \node[anchor=east] at (.72,5.35) {query};
+  \node[runl source,minimum width=.78cm] at (1.10,5.35) {\(S_0\)};
+  \node[runl unique,minimum width=.72cm] at (1.87,5.35) {\(N^G\)};
+  \node[runl source,minimum width=.78cm] at (2.64,5.35) {\(S_1\)};
+  \node[runl unique,minimum width=.72cm] at (3.41,5.35) {\(N^G\)};
+  \node at (4.13,5.35) {\(\cdots\)};
+  \node[runl source,minimum width=1.02cm] at (5.05,5.35)
+    {\(S_{R-1}\)};
+  \node[runl unique,minimum width=.72cm] at (5.95,5.35) {\(N^G\)};
+
+  \node[runl note,text width=1.55cm] at (7.30,5.70) {
+    \(\lvert S\rvert=4096\)\\
+    \(G=16384\)\\
+    pitch \(=20480\)
+  };
+
+  \node[anchor=east] at (8.66,4.43) {\(r_t:\)};
+  \node[runl cell] at (9.00,4.43) {\(0\)};
+  \node[runl chosen cell] (previousV) at (9.58,4.43) {\(v\)};
+  \node[runl cell] at (10.16,4.43) {\(R-1\)};
+
+  \node[anchor=east] at (11.28,4.43) {\(r_{t+1}:\)};
+  \node[runl cell] at (11.65,4.43) {\(0\)};
+  \node[runl chosen cell] (currentV) at (12.23,4.43) {\(v\)};
+  \node[runl cell] at (12.81,4.43) {\(R-1\)};
+
+  \draw[runl pred]
+    (currentV.north) .. controls +(0,.52) and +(0,.52) ..
+    (previousV.north);
+  \node[anchor=south,fill=white,inner sep=1pt] at (10.91,4.94)
+    {\(p_j=j-R\neq j-1\quad(R\geq2)\)};
+  \node[anchor=north] at (9.58,4.18) {index \(j-R\)};
+  \node[anchor=north] at (12.23,4.18) {index \(j\)};
+
+  \draw[black!35] (.10,3.55)--(13.75,3.55);
+
+  \node[anchor=west,font=\bfseries] at (.10,3.28)
+    {(c) Constructed coordinate control};
+
+  \node[anchor=east] at (.72,2.70) {reference};
+  \node[runl selected,minimum width=1.05cm] (rP) at (1.25,2.70)
+    {\(P\ (40)\)};
+  \node[runl unique,minimum width=1.05cm] (rG) at (2.45,2.70)
+    {\(G_t\ (10)\)};
+  \node[runl source,minimum width=.62cm] (rCzero) at (3.43,2.70)
+    {\(c_0\)};
+  \node[runl source,minimum width=.62cm] (rCone) at (4.18,2.70)
+    {\(c_1\)};
+  \node[runl variant,minimum width=.92cm] (rRone) at (5.06,2.70)
+    {\(R_1\ (39)\)};
+  \node[runl source,minimum width=.62cm] (rCtwo) at (5.94,2.70)
+    {\(c_2\)};
+  \node[runl variant,minimum width=.92cm] (rRtwo) at (6.82,2.70)
+    {\(R_2\ (39)\)};
+  \node at (7.62,2.70) {\(\cdots\)};
+  \node[runl source,minimum width=.68cm] (rCm) at (8.42,2.70)
+    {\(c_m\)};
+  \node[runl variant,minimum width=.96cm] (rRm) at (9.36,2.70)
+    {\(R_m\ (39)\)};
+
+  \node[anchor=east] at (.72,2.03) {query};
+  \node[runl selected,minimum width=1.05cm] (qP) at (1.25,2.03)
+    {\(P\ (40)\)};
+  \node[runl unique,minimum width=1.05cm] (qG) at (2.45,2.03)
+    {\(G_q\ (10)\)};
+  \node[runl source,minimum width=.62cm] (qCzero) at (3.43,2.03)
+    {\(c_0\)};
+  \node[runl source,minimum width=.62cm] (qCone) at (4.18,2.03)
+    {\(c_1\)};
+  \node[runl variant,minimum width=.92cm] (qRone) at (5.06,2.03)
+    {\(R_1\ (39)\)};
+  \node[runl source,minimum width=.62cm] (qCtwo) at (5.94,2.03)
+    {\(c_2\)};
+  \node[runl variant,minimum width=.92cm] (qRtwo) at (6.82,2.03)
+    {\(R_2\ (39)\)};
+  \node at (7.62,2.03) {\(\cdots\)};
+  \node[runl source,minimum width=.68cm] (qCm) at (8.42,2.03)
+    {\(c_m\)};
+  \node[runl variant,minimum width=.96cm] (qRm) at (9.36,2.03)
+    {\(R_m\ (39)\)};
+
+  \draw[runl main]
+    (rP.south)--(qP.north)
+    (rG.south)--(qG.north)
+    (rCzero.south)--(qCzero.north)
+    (rCone.south)--(qCone.north)
+    (rRone.south)--(qRone.north)
+    (rCtwo.south)--(qCtwo.north)
+    (rRtwo.south)--(qRtwo.north)
+    (rCm.south)--(qCm.north)
+    (rRm.south)--(qRm.north);
+
+  \node[runl note,text width=3.35cm] at (11.84,2.36) {
+    one isolated 25-base block per intended anchor\\
+    \(N\)-filled gaps set positions
+  };
+
+  \node[anchor=east] at (.72,.82) {anchor array};
+  \node[runl selected,minimum width=.82cm] (aP) at (1.18,.82) {\(P\)};
+  \node[runl selected,minimum width=.82cm] (aG) at (2.08,.82) {\(G\)};
+  \node[runl selected,minimum width=.58cm] (aCzero) at (2.82,.82)
+    {\(c_0\)};
+  \node[runl selected,minimum width=.58cm] (aCone) at (3.50,.82)
+    {\(c_1\)};
+  \node[runl unused,minimum width=.82cm] (aRone) at (4.30,.82)
+    {\(R_1\)};
+  \node[runl selected,minimum width=.58cm] (aCtwo) at (5.10,.82)
+    {\(c_2\)};
+  \node[runl unused,minimum width=.82cm] (aRtwo) at (5.90,.82)
+    {\(R_2\)};
+  \node at (6.62,.82) {\(\cdots\)};
+  \node[runl selected,minimum width=.64cm] (aCm) at (7.35,.82)
+    {\(c_m\)};
+  \node[runl selected,minimum width=1.08cm] (aRm) at (8.22,.82)
+    {\(e_m\in R_m\)};
+
+  \draw[runl pred]
+    (aRm.north) .. controls +(0,.28) and +(0,.28) .. (aCm.north);
+  \draw[runl pred,dashed]
+    (aCm.north) .. controls +(0,.60) and +(0,.60) .. (aCtwo.north);
+  \draw[runl pred]
+    (aCtwo.north) .. controls +(0,.60) and +(0,.60) .. (aCone.north);
+  \draw[runl pred]
+    (aCone.north) .. controls +(0,.28) and +(0,.28) .. (aCzero.north);
+  \draw[runl pred]
+    (aCzero.north) .. controls +(0,.28) and +(0,.28) .. (aG.north);
+  \draw[runl pred]
+    (aG.north) .. controls +(0,.28) and +(0,.28) .. (aP.north);
+
+  \node[runl note,text width=4.35cm] at (11.28,.84) {
+    first path:
+    \(e_m\to\cdots\to r_{m,1}\to c_m\to\cdots\to c_0\to G\to P\)\\[2pt]
+    \(R_1,\ldots,R_{m-1}\) stay in the array but are not on this path
+  };
+\end{tikzpicture}
+\caption{Reference and query structures used to measure the first-path
+\(\operatorname{Run}_L\) branch.  Green vertical lines connect matching
+blocks at equal reference and query coordinates.  Green boxes in the
+anchor-array row show the first predecessor path.  Dashed orange links in
+panel~(a) are repeat-derived.  Dashed orange boxes in panel~(c)'s anchor-array
+row are outside that path.  Panel~(a) keeps a full-length mapping while
+placing \(A\) and \(A'\) inside the same sequence.  Panel~(b) isolates the
+array-index effect of exact copies.  Panel~(c) constructs fixed anchor
+coordinates from isolated 25-base blocks that each emit one minimizer.}
+\label{fig:chaining-runl-inputs}
+\end{figure}
+
+The mosaic construction in panel~(a) uses a reference and query with identical
+bytes:
+\[
+  T=Q=U_0\,A\,U_1\,A'_{\delta}\,U_2.
+\]
+Here \(\lvert A\rvert=32768\), every \(U_i\) has length 512, and the
+complete sequence has length 67072.  The configured parameter \(\delta\)
+sets the substitution fraction between \(A\) and \(A'_{\delta}\).  The
+generator applies the exact count
+\[
+  s_{\delta}=
+  \left\lfloor\delta\lvert A\rvert+\frac{1}{2}\right\rfloor.
+\]
+Every substituted base is changed to a different base.  The realized fraction
+of positions at which the two blocks differ is therefore
+\[
+  \widehat{\delta}=\frac{s_{\delta}}{\lvert A\rvert}.
+\]
+This value is fixed when the input is generated.  The dense sweep uses
+\[
+  \delta_i=\frac{i}{400},
+  \qquad i=0,\ldots,80.
+\]
+These 81 values run from 0 to 20 percent in steps of 0.25 percentage points.
+Within each input generated from one fixed random-number-generator seed, the
+substitutions for a smaller \(\delta\) form a subset of those used for every
+larger value.  Both \(T\) and \(Q\) contain the same \(A\) and
+\(A'_{\delta}\) blocks, so their query/reference error rate is zero.  The
+quantities \(\delta\) and \(\widehat{\delta}\) describe only the internal
+difference between the two blocks inside each sequence.
+
+An independently generated \(A'\) provides a separate control.  It is
+generated without copying or mutating \(A\).  Across the three inputs
+generated from fixed random-number-generator seeds, no anchor on the first
+predecessor path shared its reference-sequence identifier, target end
+coordinate, and orientation with another retained anchor.  The path that
+links equal target and query coordinates remains valid and has the maximum
+score in every case.
+Table~\ref{tab:chaining-runl-mosaic-divergence} lists the realized divergence
+and corresponding first-path measurements.
+
+The exact-copy control in panel~(b) uses
+\[
+  T=S\,N^G,
+  \qquad
+  Q=(S\,N^G)^R,
+  \qquad
+  \lvert S\rvert=4096,
+  \qquad
+  G=16384.
+\]
+Here \(R\) is the number of query copies.  The \(N\)-filled spacer blocks emit
+no minimizers and make the copy pitch 20480.  In the generated inputs, each
+target minimizer that passed occurrence filtering produced one anchor for
+every query copy.  Let
+\(j_{t,v}\) be the array index for copy \(v\), where \(0\leq v<R\).
+Consecutive target minimizers satisfy
+\[
+  p_{j_{t+1,v}}=j_{t,v}=j_{t+1,v}-R.
+\]
+For \(R\geq2\), the first predecessor path contains no run of at least two unit
+predecessor relations.  The construction therefore predicts zero vector
+batches for every tested \(L\geq2\).
+
+Panel~(c) is a constructed coordinate control.  Every intended anchor comes
+from a distinct 25-base non-\(N\) block surrounded by \(N\) bases.  Each such
+block emits one minimizer for \(k=15\) and \(w=10\).  This isolated block is
+called a minimizer island.  The remaining positions contain \(N\).  This
+control does not estimate the frequency of the structure in biological
+sequence.  Write \(r_{k,\ell}\) for the \(\ell\)-th anchor in \(R_k\).  In the
+equations below, \(c_k\) and \(r_{k,\ell}\) denote their target-query
+coordinate pairs.  Let \(s_k=1\) for odd \(k\) and \(s_k=-1\) for even \(k\).
+The following pairs give the target and query coordinate increments:
+\[
+\begin{aligned}
+  c_k-c_{k-1}
+    &=(3500,\ 3500-100s_k),\\
+  r_{k,\ell}-c_k
+    &=(500+38(\ell-1),\
+       500-450s_k+38(\ell-1)),
+       &&1\leq\ell\leq39.
+\end{aligned}
+\]
+The \texttt{map-ont} preset sets the short-range chaining bandwidth to 500.
+Every anchor in \(R_k\) and \(c_{k+1}\) differ by 550 between the target and
+query distances, so those anchors fail the bandwidth check.  The preceding
+\(c_k\) remains valid, and the recorded predecessor array confirms
+\(p(c_{k+1})=c_k\).  The 39 anchors of \(R_k\) lie between \(c_k\) and
+\(c_{k+1}\) in array order, which gives an index jump of 40.
+
+Let \(h\) be the last anchor in \(P\), and let \(e_k=r_{k,39}\) be the last
+anchor in \(R_k\).  With the unmodified \texttt{map-ont} scoring coefficients,
+the construction gives
+\[
+  f(h)=600,
+  \qquad
+  f(c_k)=88,
+  \qquad
+  f(e_k)=615.
+\]
+All \(e_k\) values share the maximum score.  The experiment orders equal-score
+ends by decreasing anchor-array index, matching BioseqDB's tie rule.  This
+selects \(e_m\).  The first measured path passes through \(R_m\) and then
+follows \(c_m,\ldots,c_0,G,P\).  The worst-case argument for all minimap2 cut
+searches concerns the total work over every selected chain end and remains a
+separate result.
+
+\subsubsection{Metrics and results}
+
+Minimap2 2.31-r1302 was run with the \texttt{map-ont} preset.  Filtering and
+scoring parameters were not changed.  Instrumentation recorded the score and
+predecessor arrays.  The only candidate-order change placed equal-score ends
+in decreasing anchor-array index, matching BioseqDB's tie rule.  The tested
+widths were \(L\in\{2,4,8,16,32,64\}\).  The branch counters were recomputed
+from the recorded arrays.  For the mosaic and spaced-copy inputs, an
+independent checker reconstructed the expected path coordinates and compared
+them with the recorded predecessor path.  For the coordinate control, the
+checker compared the recorded predecessor array with the array specified by
+the construction.  The mosaic and spaced-copy inputs used three fixed
+random-number-generator seeds.
+
+Let \(q\) be the number of anchors on the first predecessor path.  Let
+\(B_L\) be the number of evaluations for which
+\(\operatorname{Run}_L\) is true, \(E_L\) the number of times the first-path
+loop evaluates \(\operatorname{Run}_L\), and \(P_L\) the number that satisfy
+both bounds \(j\geq L-1\) and
+\(c\leq n-L\).  Three different ratios are useful:
+\[
+  \operatorname{Fire}_L=\frac{B_L}{E_L},
+  \qquad
+  \operatorname{Contiguous}_L=\frac{B_L}{P_L},
+  \qquad
+  \operatorname{Coverage}_L=\frac{LB_L}{q}.
+\]
+The first ratio is the observed branch-firing rate.  The second isolates the
+predecessor test after the bounds pass.  The third is the fraction of path
+anchors consumed by vector batches.  A successful evaluation consumes
+\(L\) anchors, so firing rate and anchor coverage are not interchangeable.
+An empty denominator gives an undefined value.
+
+For maximal runs of unit predecessor relations with lengths \(r_i\), the
+greedy loop gives
+\[
+  B_L=\sum_i\left\lfloor\frac{r_i}{L}\right\rfloor,
+  \qquad
+  E_L=q-(L-1)B_L.
+\]
+In the coordinate control, the path ends at anchor-array index zero, so
+\(p_0=-1=0-1\) contributes one unit relation.  The \(m=1\) path is one run of
+length 91.  For
+\(m\geq2\), the only maximal runs have lengths 39 and 52.  Thus
+\[
+  B_L=
+  \left\lfloor\frac{39}{L}\right\rfloor+
+  \left\lfloor\frac{52}{L}\right\rfloor,
+  \qquad
+  q=m+90.
+\]
+For fixed \(L\) with \(B_L>0\), both \(\operatorname{Fire}_L\) and
+\(\operatorname{Coverage}_L\) decrease as \(\Theta(1/m)\).  For \(L=64\),
+both values are zero for every \(m\geq2\).
+
+The row prefixes in the next table refer to
+Figure~\ref{fig:chaining-runl-inputs}.  In the mosaic rows, \emph{exact}
+means \(A'=A\), while \emph{independent} means that \(A'\) was generated
+without copying \(A\).  The itemized notes below the table describe every
+input family.
+
+\begin{table}[H]
+\centering
+\caption{Observed first-path branch-firing rate \(100B_L/E_L\), in percent.
+The mosaic rows and the \(R=1\) spaced-copy row report medians over three
+inputs generated from fixed random-number-generator seeds.  The \(R\geq2\)
+spaced-copy row covers the tested powers of two from 2 through 64, all of
+which gave zero.  Coordinate-control values are deterministic and agreed with
+the recorded counters.}
+\label{tab:chaining-runl-firing}
+\scriptsize
+\setlength{\tabcolsep}{3.2pt}
+\begin{tabular}{lrrrrrr}
+\toprule
+Input & \(L=2\) & \(L=4\) & \(L=8\) & \(L=16\) & \(L=32\) & \(L=64\) \\
+\midrule
+(a) Mosaic, independent \(A'\) & 100.00 & 99.94 & 99.74 & 99.24 & 97.01 & 91.12 \\
+(a) Mosaic, exact \(A'=A\)     &   1.17 &  0.59 &  0.29 &  0.14 &  0.07 &  0.02 \\
+(b) Spaced copies, \(R=1\)     & 100.00 & 98.97 & 94.12 & 88.89 & 80.00 & 66.67 \\
+(b) Spaced copies, \(R\geq2\) &   0.00 &  0.00 &  0.00 &  0.00 &  0.00 &  0.00 \\
+(c) Coordinate control, \(m=2\)    & 95.74 & 84.62 & 45.45 & 29.41 & 6.67 & 0.00 \\
+(c) Coordinate control, \(m=1024\) &  4.21 &  2.10 &  0.96 &  0.48 & 0.19 & 0.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The row prefixes refer to the panels in
+Figure~\ref{fig:chaining-runl-inputs}.
+\begin{itemize}
+  \item \textbf{(a) Mosaic, exact.}
+    The target and query are both
+    \(U_0 A U_1 A' U_2\), and \(A'=A\).  The word \emph{mosaic} refers to
+    this sequence layout.  The word \emph{exact} means that it contains two
+    exact copies of \(A\).
+
+  \item \textbf{(a) Mosaic, independent.}
+    The layout is the same, but \(A'\) is generated without copying or
+    mutating \(A\).  The same complete sequence is used as the target and
+    query.  Its equal-coordinate path is therefore exact.
+
+  \item \textbf{(b) Spaced copies.}
+    The reference contains one source block \(S\).  The query contains \(R\)
+    exact copies separated by \(N\)-filled gaps.  The \(R=1\) case is the
+    baseline.
+
+  \item \textbf{(c) Coordinate control.}
+    Each minimizer island is an isolated 25-base non-\(N\) block that emits
+    one minimizer.  These blocks and the surrounding \(N\)-filled gaps create
+    the fixed anchor coordinates specified above.  The parameter \(m\) is the
+    number of \(R_k\) groups.  This input checks the counters and does not
+    represent a biological sequence distribution.
+\end{itemize}
+
+Table~\ref{tab:chaining-runl-mosaic-divergence} shows selected checkpoints
+from the dense mosaic sweep.  Its notation and the percentage of path anchors
+with same-target alternatives are defined below.
+\begin{itemize}
+  \item \textbf{Configured internal divergence \(\delta\).}
+    This is the requested fraction of positions changed when constructing
+    \(A'_{\delta}\) from \(A\).  It compares two blocks inside one sequence.
+    Every mosaic input still has \(T=Q\).
+
+  \item \textbf{Substitution count \(s_{\delta}\).}
+    The generator changes exactly
+    \[
+      s_{\delta}
+      =\left\lfloor
+        \delta\lvert A\rvert+\frac{1}{2}
+       \right\rfloor
+    \]
+    positions.  Every selected base is replaced by a different base.
+
+  \item \textbf{Realized internal divergence \(\widehat{\delta}\).}
+    For any generated \(A'\),
+    \[
+      \widehat{\delta}
+      =\frac{\lvert\{i:A_i\neq A'_i\}\rvert}{\lvert A\rvert}.
+    \]
+    In the fixed-count sweep this equals
+    \(s_{\delta}/\lvert A\rvert\).  The table reports
+    \(100\widehat{\delta}\) as a percentage.
+
+  \item \textbf{Independent \(A'\).}
+    This block is generated without copying or mutating \(A\), so it has no
+    configured \(\delta\) or \(s_{\delta}\).  Its realized divergence is
+    measured directly with the formula above.
+
+  \item \textbf{Path anchors with same-target alternatives.}
+    The raw experiment data call this measurement \emph{grouped path}.  Two
+    retained anchors belong to the same group when they have the same
+    reference-sequence identifier, target end coordinate, and orientation.
+    Let \(g_{\mathrm{path}}\) be the number of anchors on the first predecessor
+    path whose group contains at least one other retained anchor.  If the path
+    contains \(q\) anchors, the reported percentage is
+    \(100g_{\mathrm{path}}/q\).  The other anchor occupies a different
+    anchor-array slot and can separate consecutive path anchors.  This
+    percentage does not count groups, broken predecessor relations, or
+    \(\operatorname{Run}_L\) evaluations.
+\end{itemize}
+
+\input{chapters/06_chaining/04_cpu_experimental_analysis/dense_divergence_coordinates}
+
+\begin{table}[H]
+\centering
+\caption{Selected checkpoints from the 81-level dense mosaic sweep.  Each
+entry in the last three columns gives the median followed by the observed
+minimum and maximum over three inputs generated from fixed
+random-number-generator seeds, in percent.  The firing column is
+\(100\operatorname{Fire}_4=100B_4/E_4\).  The coverage column is
+\(100\operatorname{Coverage}_4=100(4B_4)/q\).  The independent block is a
+separate control.  Its realized divergence is measured directly from the two
+generated blocks.  The third column gives its median, whose range was 74.930
+to 75.186 percent.}
+\label{tab:chaining-runl-mosaic-divergence}
+\scriptsize
+\setlength{\tabcolsep}{3.0pt}
+\begin{tabular}{lrrlll}
+\toprule
+Case & \(s_{\delta}\) & \(100\widehat{\delta}\) &
+\shortstack{Path anchors with\\same-target alternatives} &
+\(100\operatorname{Fire}_4\) &
+\(100\operatorname{Coverage}_4\) \\
+& & (\%) & (\%) & (\%) & (\%) \\
+\midrule
+\RunLDenseSelectedTableRows
+\midrule
+\RunLDenseIndependentTableRow
+\bottomrule
+\end{tabular}
+\end{table}
+
+The repeated blocks affect \(\operatorname{Run}_L\) through anchor-array order.
+When \(A\) and \(A'_{\delta}\) share a minimizer, one target minimizer can
+produce anchors at both query copies.  The first predecessor path uses one of
+them.  The other anchor remains in the coordinate-sorted array and can occupy
+an array position between two consecutive path anchors.  This changes a unit
+predecessor relation \(p_j=j-1\) into a larger index jump.  Increasing internal
+divergence removes some of these shared minimizers and therefore removes some
+of the extra array entries.
+
+A local probability bound describes how substitutions can enable one
+previously false evaluation.  Consider a loop state \((j,c)\) for which
+\(\operatorname{Run}_L(j,c)\) is false when \(A'=A\).  Assume that this state
+has \(h\) fixed, pairwise-disjoint blocking minimizer windows
+\(W_1,\ldots,W_h\).  Each \(W_i\) is the base interval that supports one
+repeat-derived minimizer occurrence whose retained anchor blocks this
+specific \(\operatorname{Run}_L(j,c)\) evaluation.  The interval contains
+\[
+  b=k+w-1
+\]
+bases because it covers the \(w\) overlapping \(k\)-mers that select the
+minimizer.  The evaluation can become true only if every \(W_i\) receives at
+least one substitution.  If one window remains unchanged, its selected
+minimizer occurrence and repeat-derived anchor remain available.
+
+The generator ranks positions deterministically.  For this probability model,
+let \(\pi\) be a uniform random permutation of the block positions.  Let
+\(S_{\delta}\) be the first \(s_{\delta}\) positions under \(\pi\).  Thus
+\(S_{\delta}\) is a uniformly selected subset of the
+\(M=\lvert A\rvert\) block positions and
+\(\widehat{\delta}=s_{\delta}/M\).  For one chosen base from every blocking
+window, the probability that all \(h\) bases belong to \(S_{\delta}\) is
+\[
+  \frac{(s_{\delta})_h}{(M)_h},
+  \qquad
+  (x)_h=x(x-1)\cdots(x-h+1).
+\]
+There are \(b^h\) ways to choose one base from every window.  A union bound
+therefore gives
+\[
+\begin{aligned}
+  \Pr_{\pi}\!\left[
+    \operatorname{Run}_L(j,c)\text{ changes from false to true}
+  \right]
+  &\leq
+  \Pr_{\pi}\!\left[
+    S_{\delta}\cap W_i\neq\varnothing
+    \text{ for every }i
+  \right] \\
+  &\leq
+  b^h\frac{(s_{\delta})_h}{(M)_h}
+  \leq
+  (b\widehat{\delta})^h .
+\end{aligned}
+\]
+The probability is zero when \(s_{\delta}<h\).  For a lower bound, choose one
+fixed base in each window.  The event that all \(h\) chosen bases are
+substituted is contained in the event above and has probability
+\[
+  \frac{(s_{\delta})_h}{(M)_h}.
+\]
+For the asymptotic statement, consider a family of blocks with
+\(M\to\infty\).  Keep \(b\) and \(h\) fixed, with the experimental values
+\(k=15\), \(w=10\), and hence \(b=24\).  Require \(s_{\delta}\geq h\) and
+\(\widehat{\delta}=s_{\delta}/M\to0\).  In this family, the probability that
+every blocking window receives a substitution has order
+\[
+  \Theta\!\left(\widehat{\delta}^{\,h}\right).
+\]
+Since \(k\) is fixed here, this is equivalently
+\[
+  \Theta\!\left((k\widehat{\delta})^h\right).
+\]
+
+The last \(\Theta\) statement concerns the event that all blocking windows
+receive substitutions.  It is not a two-sided bound on
+\(\operatorname{Run}_L\).  Necessity gives only
+\[
+  \Pr_{\pi}\!\left[
+    \operatorname{Run}_L(j,c)\text{ changes from false to true}
+  \right]
+  =
+  O\!\left((k\widehat{\delta})^h\right).
+\]
+A matching lower bound would require substitutions in the \(h\) windows to
+make the branch true.  Minimap2 does not provide that guarantee.  Minimizer
+reselection, anchor order, chaining scores, predecessor choices, and the array
+bounds can still prevent the run.  Outside the disjoint-window model, one
+substitution can affect several overlapping windows.  The exponent can then
+be smaller than the number of windows.
+
+Figure~\ref{fig:chaining-runl-mosaic-divergence} reports the complete dense
+sweep.  It uses all 81 measured divergence levels.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  font=\scriptsize,
+  mosaic grouped/.style={
+    draw=chainBlue!90!black,line width=.85pt},
+  mosaic grouped range/.style={
+    draw=chainBlue!45,line width=.35pt},
+  mosaic fire/.style={
+    draw=chainOrange!95!black,line width=.85pt,dashed},
+  mosaic fire range/.style={
+    draw=chainOrange!55,line width=.35pt,densely dashed}
+]
+\begin{scope}[x=.48cm,y=.045cm]
+  \path[fill=black!3,draw=black!20]
+    (21.2,0) rectangle (23.2,100);
+
+  \foreach \yy in {0,25,50,75,100} {
+    \draw[black!12] (0,\yy)--(20.5,\yy);
+    \node[anchor=east] at (-.25,\yy) {\yy};
+  }
+
+  \draw[mosaic grouped range]
+    plot coordinates {\RunLDenseGroupedMinimumCoordinates};
+  \draw[mosaic grouped range]
+    plot coordinates {\RunLDenseGroupedMaximumCoordinates};
+  \draw[mosaic fire range]
+    plot coordinates {\RunLDenseFireFourMinimumCoordinates};
+  \draw[mosaic fire range]
+    plot coordinates {\RunLDenseFireFourMaximumCoordinates};
+
+  \draw[mosaic grouped]
+    plot[mark=*,mark size=.42pt]
+    coordinates {\RunLDenseGroupedMedianCoordinates};
+  \draw[mosaic fire]
+    plot[mark=x,mark size=.42pt]
+    coordinates {\RunLDenseFireFourMedianCoordinates};
+
+  \draw[->] (0,0)--(0,105);
+  \draw[->] (0,0)--(20.8,0);
+  \foreach \xx in {0,5,10,15,20} {
+    \draw (\xx,-2)--(\xx,2);
+    \node[anchor=north] at (\xx,-4.5) {\xx};
+  }
+
+  \node[rotate=90] at (-1.55,50) {reported value (\%)};
+  \node at (10,-13)
+    {realized internal divergence \(100\widehat{\delta}\) (\%)};
+
+  \node[circle,draw=chainBlue!90!black,fill=white,
+        minimum size=3.1pt,inner sep=0pt]
+    at (22.2,0) {};
+  \node[rectangle,draw=chainOrange!95!black,fill=white,
+        minimum size=3.1pt,inner sep=0pt]
+    at (22.2,99.94) {};
+  \node[rotate=90,text=black!58] at (22.2,50)
+    {independent \(A'\) control};
+  \node[anchor=north,align=center] at (22.2,-4.5)
+    {75.043\\outside axis};
+
+  \draw[mosaic grouped] (.4,110)--(1.4,110);
+  \node[anchor=west,align=left] at (1.65,110)
+    {path anchors with\\same-target alternatives};
+  \draw[mosaic fire] (12.0,110)--(13.0,110);
+  \node[anchor=west] at (13.25,110) {\(\operatorname{Fire}_4\)};
+\end{scope}
+\end{tikzpicture}
+\caption{Internal divergence, percentage of path anchors with same-target
+alternatives, and \(L=4\) branch firing in the mosaic experiment.  All 81
+configured levels from 0 to 20 percent are shown.  The small markers report
+medians over three inputs generated from fixed random-number-generator seeds.
+The lighter lines give the observed minimum and maximum.  They are descriptive
+ranges, not confidence intervals.  The independent \(A'\) control is outside
+the plotted divergence range and is shown in a separate column.}
+\label{fig:chaining-runl-mosaic-divergence}
+\end{figure}
+
+The dense sweep contains 243 mappings.  It uses 81 nested divergence levels
+for each of three inputs generated from fixed random-number-generator seeds.
+Three additional mappings provide the independent \(A'\) controls.  Minimap2
+emitted an alignment covering at least 99\% of both query and target for all
+246 mappings.  Each mapping had exactly one anchor with the maximum dynamic
+programming score.  This anchor fixed the start of the first predecessor path.
+An independent checker reconstructed and matched every recorded predecessor
+path.  All query minimizers survived query-side frequency filtering.  No
+reference seed hits were removed by reference-occurrence filtering.  Each
+retained minimizer value occurred once or twice in the reference, below the
+cutoff of ten.
+
+In the exact mosaic, the median percentage of path anchors with same-target
+alternatives was 97.69 percent, and the median \(\operatorname{Fire}_4\) was
+0.59 percent.  At 20 percent configured divergence, these values were 3.04
+percent and 79.41 percent.  In the independent control, no anchor on the first
+predecessor path had a same-target alternative.  Its median
+\(\operatorname{Fire}_4\) was 99.94 percent.  At each of the 80 increases in
+divergence, the alternative-anchor percentage decreased and
+\(\operatorname{Fire}_4\) increased for all three inputs generated from fixed
+random-number-generator seeds.  The medians followed the same directions.
+
+The measurements support the array-order explanation.  More internal
+divergence leaves fewer repeat-derived anchors interleaved with anchors on the
+first predecessor path.  This restores more consecutive relations
+\(p_j=j-1\), so \(\operatorname{Run}_4\) becomes true more often.  The result
+is empirical and does not identify a universal power law.  Within each
+input generated from one fixed random-number-generator seed, the 81 cases
+share a cumulative mutation set.  They measure the effect of adding
+substitutions to the same base sequence.  Statistical independence does not
+apply to these 81 points.
+
+For fixed \(L\), coverage is determined by firing rate:
+\[
+  \operatorname{Coverage}_L
+  =\frac{L\operatorname{Fire}_L}
+         {1+(L-1)\operatorname{Fire}_L}.
+\]
+This follows from \(E_L=q-(L-1)B_L\).  It explains why the coverage values in
+Table~\ref{tab:chaining-runl-mosaic-divergence} rise faster than the firing
+rate.
+
+The spaced-copy control reached zero firing and zero anchor coverage at
+\(R=2\), and both remained zero through \(R=64\).  In this construction,
+the extra exact-copy anchors made \(\operatorname{Run}_L\) false at every
+evaluated loop state.  These data do not establish the frequency of this
+pattern in real reads.
+
+Every tested coordinate-control case produced a path with defined counters.
+The tested values were \(m=1\) and every power of two from 2 through 1024.
+Every measured value agreed with the closed form above.  At \(m=1024\), anchor
+coverage was 8.08 percent for \(L=2\) and 7.90 percent for \(L=4\).  It was
+7.18 percent for both \(L=8\) and \(L=16\), 5.75 percent for \(L=32\), and
+zero for \(L=64\).
+
+\subsubsection{Random-sequence controls}
+
+This experiment measures how often \(\operatorname{Run}_L\) is true for
+anchors obtained from random DNA.  No anchor coordinates were predeclared.
+Each target began with independently sampled A, C, G, and T bases with equal
+probability.  A random source segment was then copied into \(N\)
+non-overlapping target intervals.  The query was a randomly oriented copy of
+that segment.  The mutation model used a substitution probability of 0.001.
+The insertion and deletion tests each used probability 0.0005 at every source
+base visited by the generator.  Candidate insertion and deletion lengths were sampled from a Gaussian
+distribution with a mean and standard deviation of one base.  They were
+rounded to integers and clipped at zero.  Zero-length draws caused no edit.
+Deletions were clipped at the end of the oriented source.  Minimap2 used its default \(k=15\),
+\(w=10\), occurrence filtering, and chaining scores.  Mapping used one thread.
+
+The instrumentation reported the branch-firing percentage \(100B_L/E_L\) for
+the first predecessor path from the initial dynamic-programming call.  Its
+starting anchor was selected by score and the equal-score tie rule.  The
+experiment tested \(L\in\{4,8,16\}\).  Equal scores were ordered by decreasing
+anchor-array index to match BioseqDB.  A value is defined only when minimap2
+found a score-qualified chain end and the measured path had \(E_L>0\).  Runs
+without such a path are omitted because no firing percentage exists when
+\(E_L=0\).  A displayed zero means that a measured path existed and
+\(B_L=0\).  Neither experiment runner saved minimap2's PAF output.  These
+results describe the internal predecessor path.  Whether minimap2 later
+emitted each path as an alignment is unknown.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  font=\scriptsize,
+  runl four/.style={draw=chainBlue!90!black,line width=.85pt},
+  runl eight/.style={
+    draw=chainOrange!95!black,line width=.85pt,dashed},
+  runl sixteen/.style={
+    draw=chainGreen!70!black,line width=.9pt,densely dotted},
+  runl mark four/.style={
+    circle,draw=chainBlue!90!black,fill=white,
+    minimum size=4.4pt,inner sep=0pt},
+  runl mark eight/.style={
+    rectangle,draw=chainOrange!95!black,fill=white,
+    minimum size=4.4pt,inner sep=0pt},
+  runl mark sixteen/.style={
+    circle,draw=chainGreen!70!black,fill=chainGreen!55,
+    minimum size=4.4pt,inner sep=0pt}
+]
+  % Panel (a): original 10 Mb / 1 kb occurrence sweep.
+  \begin{scope}[x=1cm,y=.038cm,xshift=1.55cm,yshift=6.05cm]
+    \node[anchor=west,font=\bfseries\footnotesize] at (-1.25,112)
+      {(a) Original: \(10\,\mathrm{Mb}\) target,
+       \(1\,\mathrm{kb}\) query, one input};
+
+    \foreach \yy in {0,25,50,75,100} {
+      \draw[black!12] (0,\yy)--(11.15,\yy);
+      \node[anchor=east] at (-.13,\yy) {\yy};
+    }
+    \draw[->] (0,0)--(6.08,0);
+    \draw[->] (6.72,0)--(11.30,0)
+      node[anchor=west] {\(N\)};
+    \draw[->] (0,0)--(0,105);
+    \node[rotate=90] at (-1.02,50)
+      {branch firing (\%)};
+    \draw (6.16,-3.6)--(6.31,3.6);
+    \draw (6.45,-3.6)--(6.60,3.6);
+
+    \foreach \xx/\lab in {
+      .50/1,1.7041/2,2.4085/3,2.9082/4,
+      3.2959/5,4.50/10,10.65/5000} {
+      \draw (\xx,-2.2)--(\xx,2.2);
+      \node[anchor=north] at (\xx,-5.0) {\lab};
+    }
+
+    \draw[runl four] plot coordinates {
+      (.50,97.9167) (1.7041,97.9167) (2.4085,97.9167)
+      (2.9082,97.9167) (3.2959,97.9167) (4.50,92.0000)};
+    \draw[runl eight] plot coordinates {
+      (.50,82.1429) (1.7041,82.1429) (2.4085,82.1429)
+      (2.9082,82.1429) (3.2959,82.1429) (4.50,85.1852)};
+    \draw[runl sixteen] plot coordinates {
+      (.50,45.8333) (1.7041,45.8333) (2.4085,45.8333)
+      (2.9082,45.8333) (3.2959,45.8333) (4.50,47.8261)};
+
+    \foreach \xx/\yy in {
+      .50/97.9167,1.7041/97.9167,2.4085/97.9167,
+      2.9082/97.9167,3.2959/97.9167,4.50/92.0000}
+      \node[runl mark four] at (\xx,\yy) {};
+    \foreach \xx/\yy in {
+      .50/82.1429,1.7041/82.1429,2.4085/82.1429,
+      2.9082/82.1429,3.2959/82.1429,4.50/85.1852}
+      \node[runl mark eight] at (\xx,\yy) {};
+    \foreach \xx/\yy in {
+      .50/45.8333,1.7041/45.8333,2.4085/45.8333,
+      2.9082/45.8333,3.2959/45.8333,4.50/47.8261}
+      \node[runl mark sixteen] at (\xx,\yy) {};
+
+    \node[runl mark four] at (10.65,97.9167) {};
+    \node[runl mark eight] at (10.65,82.1429) {};
+    \node[runl mark sixteen] at (10.65,45.8333) {};
+
+    \draw[runl four] (5.65,108)--(6.15,108);
+    \node[anchor=west] at (6.23,108) {\(L=4\)};
+    \draw[runl eight] (7.35,108)--(7.85,108);
+    \node[anchor=west] at (7.93,108) {\(L=8\)};
+    \draw[runl sixteen] (9.05,108)--(9.55,108);
+    \node[anchor=west] at (9.63,108) {\(L=16\)};
+  \end{scope}
+
+  % Panel (b): corrected ten-input compact series.
+  \begin{scope}[x=1cm,y=.038cm,xshift=1.55cm,yshift=.70cm]
+    \node[anchor=west,font=\bfseries\footnotesize] at (-1.25,112)
+      {(b) Ten-input compact series: \(\lvert T\rvert=4.5\,\mathrm{Mb}\),
+       \(\lvert Q\rvert=997\) to \(1002\,\mathrm{bp}\)};
+
+    \path[fill=chainBlue!45,fill opacity=.15]
+      (.20,93.1008) rectangle (11.7051,95.7639);
+    \path[fill=chainOrange!55,fill opacity=.13]
+      (.20,83.5000) rectangle (11.7051,88.3462);
+    \path[fill=chainGreen!45,fill opacity=.13]
+      (.20,45.9957) rectangle (11.7051,66.7293);
+
+    \foreach \yy in {0,25,50,75,100} {
+      \draw[black!12] (0,\yy)--(11.90,\yy);
+      \node[anchor=east] at (-.13,\yy) {\yy};
+    }
+    \draw[->] (0,0)--(12.05,0)
+      node[anchor=west] {\(N\)};
+    \draw[->] (0,0)--(0,105);
+    \node[rotate=90] at (-1.02,50)
+      {branch firing (\%)};
+
+    \foreach \xx in {
+      .20,1.0805,1.7051,2.1897,3.6949,5.2000,6.0805,
+      6.7051,7.1897,8.6949,10.2000,11.0805,11.7051}
+      \draw (\xx,-2.0)--(\xx,2.0);
+    \foreach \xx/\lab in {
+      .20/20,2.1897/50,3.6949/100,
+      7.1897/500,8.6949/1000,11.7051/4000}
+      \node[anchor=north] at (\xx,-5.0) {\lab};
+
+    \draw[runl four] (.20,93.7473)--(11.7051,93.7473);
+    \draw[runl eight] (.20,87.2283)--(11.7051,87.2283);
+    \draw[runl sixteen] (.20,51.1905)--(11.7051,51.1905);
+
+    \foreach \xx in {
+      .20,1.0805,1.7051,2.1897,3.6949,5.2000,6.0805,
+      6.7051,7.1897,8.6949,10.2000,11.0805,11.7051} {
+      \node[runl mark four] at (\xx,93.7473) {};
+      \node[runl mark eight] at (\xx,87.2283) {};
+      \node[runl mark sixteen] at (\xx,51.1905) {};
+    }
+    \node[anchor=east,text=black!60] at (11.75,65)
+      {shading: middle 50\% of inputs};
+  \end{scope}
+\end{tikzpicture}
+\caption{First-path branch firing on random-sequence occurrence sweeps.
+The plotted value is \(100B_L/E_L\).  Horizontal positions are logarithmic in
+\(N\) within each unbroken axis segment.  Panel~(a) shows every defined result
+from the original sweep over \(N\) with \(k=15\) and \(w=10\).
+The axis break spans the tested values between \(N=20\) and \(N=4000\), for
+which no score-qualified chain end was available.  The \(N=5000\) point is
+plotted separately.  Panel~(b) shows the median over ten generated inputs at
+each tested \(N\).  Its bands span the middle half of those ten values.  Every
+panel~(b) run had a defined first path.}
+\label{fig:chaining-runl-random-occurrences}
+\end{figure}
+
+Panel~(a) records the original run.  Its missing middle prevents an estimate
+of the trend over \(N\).  The ten-input compact series produced a defined value for
+all 13 selected \(N\) values spanning 20 to 4000.  Its median firing rates were
+93.75 percent for \(L=4\), 87.23 percent for \(L=8\), and 51.19 percent for
+\(L=16\).  For each generated input, all \(N\) values used the same sequence
+background.  The measured path length and branch counters stayed constant as
+\(N\) changed.  The selected copy and absolute anchor-array positions could
+change.  The recorded \(\operatorname{Run}_L\) outcomes produced the flat
+lines.  The earlier three-input compact pilot is not plotted.
+
+The size controls kept \(k\), \(w\), mutation probabilities, and minimap2
+parameters fixed.  They tested \(N=20\) and \(N=4000\).
+Figure~\ref{fig:chaining-runl-random-sizes} shows the three target/query size
+pairs that produced defined percentages: approximately
+\(4.5\,\mathrm{Mb}/1\,\mathrm{kb}\), \(40\,\mathrm{Mb}/4\,\mathrm{kb}\),
+and \(80\,\mathrm{Mb}/8\,\mathrm{kb}\).  The
+\(10\,\mathrm{Mb}/1\,\mathrm{kb}\), \(20\,\mathrm{Mb}/2\,\mathrm{kb}\),
+and \(40\,\mathrm{Mb}/1\,\mathrm{kb}\) controls produced no defined
+percentage at either tested \(N\).
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  font=\scriptsize,
+  runl mark four/.style={
+    circle,draw=chainBlue!90!black,fill=white,line width=.8pt,
+    minimum size=5.2pt,inner sep=0pt},
+  runl mark eight/.style={
+    rectangle,draw=chainOrange!95!black,fill=white,line width=.8pt,
+    minimum size=5.2pt,inner sep=0pt},
+  runl mark sixteen/.style={
+    circle,draw=chainGreen!70!black,fill=chainGreen!55,line width=.8pt,
+    minimum size=5.2pt,inner sep=0pt},
+  runl whisk four/.style={draw=chainBlue!90!black,line width=.55pt},
+  runl whisk eight/.style={draw=chainOrange!95!black,line width=.55pt},
+  runl whisk sixteen/.style={draw=chainGreen!70!black,line width=.55pt}
+]
+  \node[runl mark four] at (5.05,5.55) {};
+  \node[anchor=west] at (5.18,5.55) {\(L=4\)};
+  \node[runl mark eight] at (6.42,5.55) {};
+  \node[anchor=west] at (6.55,5.55) {\(L=8\)};
+  \node[runl mark sixteen] at (7.79,5.55) {};
+  \node[anchor=west] at (7.92,5.55) {\(L=16\)};
+
+  \begin{scope}[x=1cm,y=.041cm,xshift=1.35cm,yshift=.62cm]
+    \node[font=\bfseries] at (2.50,109) {(a) \(N=20\)};
+    \foreach \yy in {0,25,50,75,100} {
+      \draw[black!12] (0,\yy)--(5.00,\yy);
+      \node[anchor=east] at (-.12,\yy) {\yy};
+    }
+    \draw[->] (0,0)--(5.15,0);
+    \draw[->] (0,0)--(0,104);
+    \node[rotate=90] at (-.92,50) {branch firing (\%)};
+
+    \foreach \xx in {.85,2.50,4.15}
+      \draw[black!28] (\xx,0)--(\xx,100);
+    \foreach \xx/\lo/\hi in {
+      .67/90.9091/97.7273,3.97/42.8571/80.0000} {
+      \draw[runl whisk four] (\xx,\lo)--(\xx,\hi);
+      \draw[runl whisk four] (\xx-.06,\lo)--(\xx+.06,\lo);
+      \draw[runl whisk four] (\xx-.06,\hi)--(\xx+.06,\hi);
+    }
+    \foreach \xx/\lo/\hi in {
+      .85/77.7778/95.4545,4.15/11.1111/66.6667} {
+      \draw[runl whisk eight] (\xx,\lo)--(\xx,\hi);
+      \draw[runl whisk eight] (\xx-.06,\lo)--(\xx+.06,\lo);
+      \draw[runl whisk eight] (\xx-.06,\hi)--(\xx+.06,\hi);
+    }
+    \foreach \xx/\lo/\hi in {
+      1.03/41.6667/78.5714,4.33/0.0000/50.0000} {
+      \draw[runl whisk sixteen] (\xx,\lo)--(\xx,\hi);
+      \draw[runl whisk sixteen] (\xx-.06,\lo)--(\xx+.06,\lo);
+      \draw[runl whisk sixteen] (\xx-.06,\hi)--(\xx+.06,\hi);
+    }
+    \node[runl mark four] at (.67,93.7473) {};
+    \node[runl mark eight] at (.85,87.2283) {};
+    \node[runl mark sixteen] at (1.03,51.1905) {};
+    \node[runl mark four] at (2.32,20.0000) {};
+    \node[runl mark eight] at (2.50,0.0000) {};
+    \node[runl mark sixteen] at (2.68,0.0000) {};
+    \node[runl mark four] at (3.97,50.0000) {};
+    \node[runl mark eight] at (4.15,12.5000) {};
+    \node[runl mark sixteen] at (4.33,0.0000) {};
+
+    \node[anchor=north,align=center] at (.85,-6)
+      {4.5/1\\[-1pt]\tiny 10 defined};
+    \node[anchor=north,align=center] at (2.50,-6)
+      {40/4\\[-1pt]\tiny 2 defined};
+    \node[anchor=north,align=center] at (4.15,-6)
+      {80/8\\[-1pt]\tiny 3 defined};
+  \end{scope}
+
+  \begin{scope}[x=1cm,y=.041cm,xshift=7.65cm,yshift=.62cm]
+    \node[font=\bfseries] at (2.50,109) {(b) \(N=4000\)};
+    \foreach \yy in {0,25,50,75,100}
+      \draw[black!12] (0,\yy)--(5.00,\yy);
+    \draw[->] (0,0)--(5.15,0);
+    \draw[->] (0,0)--(0,104);
+
+    \foreach \xx in {.85,2.50,4.15}
+      \draw[black!28] (\xx,0)--(\xx,100);
+    \foreach \xx/\lo/\hi in {
+      .67/90.9091/97.7273,3.97/42.8571/80.0000} {
+      \draw[runl whisk four] (\xx,\lo)--(\xx,\hi);
+      \draw[runl whisk four] (\xx-.06,\lo)--(\xx+.06,\lo);
+      \draw[runl whisk four] (\xx-.06,\hi)--(\xx+.06,\hi);
+    }
+    \foreach \xx/\lo/\hi in {
+      .85/77.7778/95.4545,4.15/11.1111/66.6667} {
+      \draw[runl whisk eight] (\xx,\lo)--(\xx,\hi);
+      \draw[runl whisk eight] (\xx-.06,\lo)--(\xx+.06,\lo);
+      \draw[runl whisk eight] (\xx-.06,\hi)--(\xx+.06,\hi);
+    }
+    \foreach \xx/\lo/\hi in {
+      1.03/41.6667/78.5714,4.33/0.0000/50.0000} {
+      \draw[runl whisk sixteen] (\xx,\lo)--(\xx,\hi);
+      \draw[runl whisk sixteen] (\xx-.06,\lo)--(\xx+.06,\lo);
+      \draw[runl whisk sixteen] (\xx-.06,\hi)--(\xx+.06,\hi);
+    }
+    \node[runl mark four] at (.67,93.7473) {};
+    \node[runl mark eight] at (.85,87.2283) {};
+    \node[runl mark sixteen] at (1.03,51.1905) {};
+    \node[runl mark four] at (2.32,20.0000) {};
+    \node[runl mark eight] at (2.50,0.0000) {};
+    \node[runl mark sixteen] at (2.68,0.0000) {};
+    \node[runl mark four] at (3.97,80.0000) {};
+    \node[runl mark eight] at (4.15,66.6667) {};
+    \node[runl mark sixteen] at (4.33,50.0000) {};
+
+    \node[anchor=north,align=center] at (.85,-6)
+      {4.5/1\\[-1pt]\tiny 10 defined};
+    \node[anchor=north,align=center] at (2.50,-6)
+      {40/4\\[-1pt]\tiny 3 defined};
+    \node[anchor=north,align=center] at (4.15,-6)
+      {80/8\\[-1pt]\tiny 3 defined};
+  \end{scope}
+
+\end{tikzpicture}
+\caption{Median first-path branch firing for random-sequence size controls
+with a defined path.  Each point is the median of the defined per-input
+percentages.  The number of contributing inputs is printed below it.  The
+horizontal labels give target length in megabases followed by query length in
+kilobases.  Query lengths were 997 to 1002 bases, 3998 to 4004 bases, and 7999
+to 8008 bases.  Vertical whiskers span the smallest and largest per-input
+percentages.  Within each size pair, markers and whiskers are offset
+horizontally only for visibility.  A plotted zero
+means that a measured path existed and \(B_L=0\).  Runs with no score-qualified
+chain end are omitted.  At \(40\,\mathrm{Mb}/4\,\mathrm{kb}\) and \(N=20\),
+one of three generated inputs had no defined percentage, so the median uses
+the other two.  The omitted target/query size pairs are
+\(10\,\mathrm{Mb}/1\,\mathrm{kb}\), \(20\,\mathrm{Mb}/2\,\mathrm{kb}\),
+and \(40\,\mathrm{Mb}/1\,\mathrm{kb}\) at both tested \(N\) values.}
+\label{fig:chaining-runl-random-sizes}
+\end{figure}
+
+In the 40-Mb/4-kb and 80-Mb/8-kb controls, default occurrence filtering left
+short first paths.  Query-side filtering removed none of their generated
+minimizers.  For both sizes, the adaptive reference cutoff
+\texttt{mid\_occ} remained 10.  Most repeated source minimizers had
+approximately \(N\) reference occurrences.  A few also matched elsewhere in
+the random target.  These counts exceeded \texttt{mid\_occ}.  Reference
+occurrence filtering removed between 98.79 and 98.90 percent of the raw anchor
+hits.  For each consecutive group above the cutoff, \texttt{occ\_dist}=500
+set the number of minimizers that could remain from its query-coordinate
+span.  It kept those with the smallest reference occurrence counts.  Every
+defined 4-kb input had \(q=8\), while the 8-kb inputs had
+\(q\in\{15,16,17\}\).  The longer query produced a larger limit under this
+rule.  Target length also affects the adaptive cutoff, so this comparison does
+not isolate query length.
+
+The 4.5-Mb/1-kb series used larger adaptive cutoffs.  They were 21 for
+\(N=20\) and 4001 for \(N=4000\).  Reference occurrence filtering retained
+every anchor hit.  On each validated first path, every predecessor index was
+one less than the current index.  These paths contained 163 to 187 anchors and
+gave the higher firing percentages shown in
+Figure~\ref{fig:chaining-runl-random-sizes}.
+
+After filtering, \(\operatorname{Run}_L\) is evaluated from the predecessor
+indices on these short paths.  All recorded bounds tests passed.  A displayed
+zero therefore means that the predecessor-index equalities in
+\(\operatorname{Run}_L\) failed at every loop evaluation.  The observed
+first-path profiles were
+\[
+\begin{array}{c|ccc}
+q & \operatorname{Fire}_4 & \operatorname{Fire}_8 &
+    \operatorname{Fire}_{16} \\
+\hline
+8  & 1/5=20\% & 0/8=0\%     & 0/8=0\% \\
+15 & 3/6=50\% & 1/8=12.5\%  & 0/15=0\% \\
+16 & 3/7=42.86\% & 1/9=11.11\% & 0/16=0\% \\
+17 & 4/5=80\% & 2/3=66.67\% & 1/2=50\%
+\end{array}
+\]
+Every defined 40-Mb/4-kb input had the first profile.  It provided one
+four-wide batch and no eight-wide or sixteen-wide batch.  For the 80-Mb/8-kb
+controls, the path lengths at \(N=20\) were 16, 15, and 17.  At \(N=4000\)
+they were 16, 17, and 17.  A 17-anchor path was the only observed profile with
+one sixteen-wide batch.  That batch was followed by one scalar evaluation, so
+\(B_{16}=1\), \(E_{16}=2\), and the firing percentage was 50 percent.  The
+other profiles gave zero.  These discrete outcomes produce the whisker from
+0 to 50 percent in Figure~\ref{fig:chaining-runl-random-sizes}.
+
+The 40-Mb and 80-Mb conditions contained only two or three inputs with a
+defined percentage.  Their whiskers are descriptive ranges.  The results do
+not establish a length trend.  Minimap2 required a chaining score of at least
+40.  The omitted 40-Mb/4-kb input at \(N=20\) had no anchor reaching that
+threshold.
+
+These measurements describe opportunities for the first-path vector branch.
+They do not measure BioseqDB execution time.  The cost of failed checks and
+the speed of successful vector batches must be evaluated by a BioseqDB
+runtime benchmark.  Initial dynamic-programming and later RMQ calls were
+recorded separately.  Table~\ref{tab:chaining-runl-firing} and
+Figures~\ref{fig:chaining-runl-random-occurrences}
+and~\ref{fig:chaining-runl-random-sizes} report only the initial
+dynamic-programming call used by the special first-path loop.
+
+\subsection{Does the bounded SIMD \texorpdfstring{$U$}{U} limit help?}
+\label{sec:chaining-u-batch-experiment}
+\begingroup
+\small
+\setlength{\intextsep}{5pt plus 1pt minus 1pt}
+
+A standalone minimap2 v2.31 was instrumented with scalar shadows of bounded
+SIMD B1 for \(L\in\{2,4,8,16,32,64\}\).  Each width recursively used its own
+scores and the saved-anchor check from Algorithm~\ref{alg:chaining-b5}; the
+shadows did not change minimap2's mapping.
+For width \(L\), let \(E_L\) be the number of executed batches, \(Z_L\) the
+executed batches for which no lane satisfies \(C_\lambda>H_\lambda\), and
+\(Q_L\) the batches in the complete window without the \(U\) stop.  The two
+pooled rates are
+\[
+ \operatorname{NoUpdate}_L=Z_L/E_L,
+ \qquad
+ \operatorname{Reduction}^{U}_L=(Q_L-E_L)/Q_L.
+\]
+The first rate counts outcomes that increment \(u\), while the second isolates
+batch-loop iterations saved by \(U\).  Pooling sums counters before division,
+so it is neither a median nor an unweighted mean.  The scalar-loop analogue of
+the earlier \(\operatorname{Reduction}_L\) was 96.3--99.5\% for random
+occurrences and 98.7--99.7\% for mosaic, but includes ordinary batching.
+\(\operatorname{Reduction}^{U}_L\) isolates the counter's effect.
+
+\begin{figure}[H]
+\centering
+\input{chapters/06_chaining/04_cpu_experimental_analysis/u_batch_chart}
+\caption{Pooled \(U\)-only reduction at each divergence for (a) random inputs
+(six seeds) and (b) mosaic inputs (three seeds).  Each point is a ratio of
+summed integer counters, rather than a mean of per-input percentages.}
+\label{fig:chaining-u-batch-reduction}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{\(\operatorname{NoUpdate}_L/\operatorname{Reduction}^{U}_L\) (percent).
+The 0\% and 10\% rows pool seeds at that level.  Pooled denotes the full sweep.
+only Random and Mosaic vary divergence.  Random uses \(N=4000\), a 4.5-Mbase
+target, 997--1002-base queries, and 81 substitution levels, with ten exact
+30-base intervals.  Mosaic uses \(T=Q=U_0AU_1A'_\delta U_2\), length 67072.
+Spaced copies use \(\lvert S\rvert=4096\), \(G=16384\), and
+\(R\in\{1,2,4,8,16,32,64\}\).  Coordinate control uses
+\(m\in\{1,2,4,\ldots,1024\}\).  Defaults are \(k=15\), \(w=10\), \(S=25\), and
+\texttt{max\_chain\_iter}=5000.}
+\label{tab:chaining-u-batch-rates}
+\scriptsize
+\setlength{\tabcolsep}{2.5pt}
+\renewcommand{\arraystretch}{1.0}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{@{}llrrrrrr@{}}
+\toprule
+\textbf{Subset} & \textbf{Input} & \(L=2\) & \(L=4\) & \(L=8\) & \(L=16\) & \(L=32\) & \(L=64\)\\
+\midrule
+\input{chapters/06_chaining/04_cpu_experimental_analysis/u_batch_table}
+\\\bottomrule
+\end{tabular}}
+\end{table}
+
+All 761 queries had validated PAF matches.  For increasing widths, \(U\) is
+\(13,7,4,2,1,1\).  Omitted batches per random-arm check were 13.17, 7.44, and 2.36 at
+\(L=2,16,64\); at 20\% divergence the reductions were 81.8, 70.5, and 34.3\%.
+Mosaic and spaced copies saved more.  Coordinate control at \(L=64\) was the
+only zero.  The requested decreasing-score/decreasing-position tie order was
+audited, but end sorting follows forward scoring and cannot affect these counts.
+The data therefore support retaining \(U\).  This measures opportunity rather
+than wall-clock speedup.  Final cost depends on the SIMD reduction for
+\(\operatorname{Any}(\mathbf I)\).
+\endgroup
+
+
+\section{BioseqDB \texttt{max\_drop} analysis}
+\label{sec:chaining-max-drop-analysis}
+
+The BioseqDB backtracking procedure follows predecessor links until it reaches
+the sentinel \(p_j=-1\) or an anchor that was already assigned to an earlier
+chain.  Minimap2 can stop a predecessor scan earlier when its running score
+falls sufficiently far below the best score seen on that scan.  This
+\texttt{max\_drop} rule introduces score arithmetic, comparisons, and
+running-maximum and lane-stop state during scan steps.  It can therefore help
+only when the steps that it avoids repay the cost of those checks.  This
+section measures that opportunity on minimap2 chaining data.  It does not
+measure BioseqDB running time.
+
+In the two synthetic repeated-copy screens below, the default \(D=500\)
+cutoff did not avoid a single backtracking scan step.  The separate four-lane
+\(\operatorname{Run}_4\) condition was nevertheless frequent, because it tests
+path adjacency rather than score drawdown.
+
+The same experiment also measures the condition used by the special
+BioseqDB first-path branch, \(\operatorname{Run}_L\), where \(L\) is the SIMD
+batch width.  The two questions are kept separate.  A score drop can shorten
+a predecessor scan.  In contrast, \(\operatorname{Run}_L\) processes a
+consecutive part of the highest-ranked predecessor path in a vector batch.
+
+\subsection{Measured quantities}
+
+Let \(f_i\) be minimap2's dynamic-programming score for the best chain ending
+at anchor \(i\).  The score plots include every anchor in the initial-DP array
+of each retained observation.  Candidate ends are the subset satisfying
+\(f_i\geq\texttt{min\_sc}\), where the default value in these initial chaining
+calls was 40.  Minimap2 normally orders these ends by score.  The experiment
+ordered them by increasing \((f_i,i)\) and consumed the array backwards.  It
+therefore used decreasing score and, on a score tie, decreasing anchor-array
+index.  Here ``position'' means the index in minimap2's coordinate-sorted
+anchor array.  The anchor array itself was not reordered.
+
+One executed search is a predecessor scan started from an eligible chain end
+whose anchor is unmarked on entry.  For end \(e\), let \(B\) be the number of
+steps made by the BioseqDB-style baseline scan, which stops only at
+\(p_j=-1\) or at a previously marked anchor.  Let \(b_m\) be the boundary
+reached after predecessor step \(m\), and define
+\[
+  s_m=
+  \begin{cases}
+    f_e-f_{b_m}, & b_m\geq0,\\
+    f_e, & b_m=-1,
+  \end{cases}
+  \qquad
+  M_m=\max(0,s_1,\ldots,s_m).
+\]
+Define the score drop at step \(m\) as
+\[
+  d_m=M_m-s_m,
+  \qquad
+  \Delta(e)=\max_{1\leq m\leq B}d_m.
+\]
+Thus \(d_m\) is the distance from the best score already seen in this
+backtrack to the score at the current step.  The value \(\Delta(e)\) is the
+largest such drop in the scan from end \(e\).  The max-drop predicate with
+threshold \(D\) fires exactly when \(d_m>D\).  Equality does not fire.
+
+Let \(I(D)\) be the steps made from the same entry
+marking state when the literal minimap2 rule stops at the first predicate
+firing.  If the predicate never fires, then \(I(D)=B\).  The local suffix and
+the per-search local suffix fraction are
+\begin{equation}
+  S(D)=B-I(D),
+  \qquad
+  \beta(D)=
+  \begin{cases}
+    1-I(D)/B, & B>0,\\
+    0, & B=0.
+  \end{cases}
+\label{eq:chaining-max-drop-benefit}
+\end{equation}
+The fixed-start calculation uses the same chain end and the same incoming
+marks as the baseline scan, and it does not write new marks.  Thus \(S(D)\)
+is the part of that baseline path after its first crossing.  Across several
+scans, the reported fraction is \(\sum S(D)/\sum B\).  A productive crossing is one for which
+\(S(D)>0\), not merely one on which the predicate becomes true.  This
+distinction matters because the predicate can fire on the final scan step and
+leave no suffix.
+
+This one-scan calculation need not equal the work of applying the rule to a
+complete backtrack.  Committing a shorter path changes the marked anchors and
+can expose later candidate ends.  Let \(\widetilde E\) and \(\widetilde I\)
+denote the searches and backtracking scan steps when every cutoff is applied
+and the marks are updated.  The experiment reports both calculations.  Steps
+after a crossing are not called saved work unless the complete replay also
+keeps search ownership and accepted output unchanged.
+
+The complete replay retains minimap2's best-cut selection after a path, even
+when no score-drop cutoff fires.  A matched no-drop replay keeps that
+bookkeeping but disables only the score drop.  Comparing the finite and
+no-drop replays therefore isolates the
+\(D\)-threshold decision.  Comparing either replay with the BioseqDB-style
+baseline can additionally expose changes caused by the independent best-cut
+boundary.  The audit checks search counts, scan-step counts, accepted chains,
+execution traces, and final marks separately.  Here accepted-chain output is
+the output of the initial-DP backtracking replay, not final PAF output.
+
+The cost model makes the break-even point explicit.  Let \(v>0\) be the cost
+of one backtracking scan step without the new rule, let \(h\geq0\) be the
+incremental cost of one drop check, and let \(C\) be the number of checks.
+For a conservative implementation budget, one logical score-check exposure
+is charged per limited scan step, so \(C=\sum I\).  This is not a measured
+machine-instruction count, nor the literal count of native threshold
+comparisons.  A scan step that establishes a new maximum may bypass that
+comparison.  Ignoring fixed setup cost, the fixed-start model is
+\begin{equation}
+  T_0=v\sum B,
+  \qquad
+  T_D^{\mathrm{fixed}}=v\sum I+hC.
+\label{eq:chaining-max-drop-cost}
+\end{equation}
+Writing \(r=h/v\), and noting that \(C>0\) for every reported exposure, the
+local opportunity can repay the checks only if
+\begin{equation}
+  r<\frac{\sum S}{C}.
+\label{eq:chaining-max-drop-break-even}
+\end{equation}
+Equivalently, it requires
+\(\sum S/\sum B>r/(1+r)\).  The threshold \(D\) controls where a scan stops.
+It is not the instruction-cost ratio \(r\).  For the complete replay,
+however,
+\begin{equation}
+  T_D^{\mathrm{full}}=v\widetilde I+h\widetilde C,
+\label{eq:chaining-max-drop-full-cost}
+\end{equation}
+where \(\widetilde C\) is its own check exposure.  Consequently, even a large
+fixed-start suffix is insufficient when \(\widetilde I\geq\sum B\), or when the
+cutoff changes an output that BioseqDB must preserve.
+This expression models variable scan work and excludes per-search setup cost.
+
+For the SIMD replay, later candidate ends are collected in batches containing
+at most \(L\) candidates, with \(L\in\{4,8,16\}\).  Each batch uses one common
+pre-batch marking state.  The baseline
+and drop-limited depth of each lane are recorded.  The batch critical depth
+is the maximum lane depth, so a productive lane helps the critical path only
+when it shortens that maximum.  These are logical work counters, not SIMD
+instructions or clock cycles.
+
+For the highest-ranked first path, let \(j\) be the current anchor, \(c\) the
+number of anchors already consumed, and \(n\) the anchor-array length.  The
+measured BioseqDB predicate is
+\begin{equation}
+  \operatorname{Run}_L(j,c)
+  \iff
+  j\geq L-1
+  \land c\leq n-L
+  \land
+  \bigwedge_{u=0}^{L-1}p_{j-u}=j-u-1.
+\label{eq:chaining-max-drop-runl}
+\end{equation}
+The relation \(p_0=-1=0-1\) may complete the final successful batch.  If
+\(B_L\) is the number of true evaluations, \(E_L\) is the number of all loop
+evaluations, and \(q\) is the scalar path length, the two reported quantities
+are
+\begin{equation}
+  \operatorname{Fire}_L=\frac{B_L}{E_L},
+  \qquad
+  \operatorname{Reduction}_L
+  =\frac{q-E_L}{q}
+  =\frac{(L-1)B_L}{q}.
+\label{eq:chaining-max-drop-runl-metrics}
+\end{equation}
+The symbol \(B_L\) counts successful fast batches and is unrelated to the
+baseline scan-step count \(B\) above.  The reported data have \(E_L>0\) and
+\(q>0\).  The second value is the ideal fraction of scalar loop evaluations
+removed by the mixed fast/scalar loop.  It is not a measured speedup.
+
+\subsection{Experimental design and validation}
+
+The experiment used a disposable copy of minimap2 2.31-r1302, upstream tag
+\texttt{v2.31} at commit \texttt{3c28777}.  It was built and run independently
+of the BioseqDB build system.  Mapping used the default \texttt{map-ont} preset
+and one mapping thread.  The experimental changes only emitted telemetry and
+applied the score/index tie order described above.  When telemetry was
+disabled, the modified executable and the official upstream executable
+produced byte-identical PAF output in four fixed equivalence checks.
+
+An experimental arm fixes the reference geometry.  The primary arm used a
+4.5-Mbp reference.  An observation is one mapped query for a fixed arm, input
+block, \(N\), and divergence.  A cell fixes the arm, \(N\), and divergence and
+contains six observations when all are feasible.  The experiment used six
+independently seeded input blocks with query lengths 997, 998, 999, 1000,
+1001, and 1002 bases.  One query-length value is associated with one generator
+seed, so this design does not separate query-length effects from seed
+variation.  References across \(N\) and queries across divergence are nested
+within each block.  The planted homologous-locus count was
+\[
+  N\in\{1,2,3,4,5,10,20,30,40,50,100,200,300,400,500,
+       1000,2000,3000,4000\}.
+\]
+For each \(N\), the requested query substitution percentage ranged from 0 to 10 percent in
+0.25-percentage-point steps.  Divergence used nested substitution-only
+prefixes, and the copies used nested placement prefixes within each generated
+input.  The 4,674 primary observations are therefore repeated measurements
+in six input blocks, not 4,674 independent replicates.  Ratios were calculated
+within an input before the median, linearly interpolated interquartile range,
+and observed range were taken across the six inputs.  These ranges are
+descriptive, not confidence intervals.
+
+Five thousand non-overlapping copies of even the shortest query require
+4,985,000 bases, before any separating sequence is added.  The requested
+\(N=5000\) condition is therefore structurally impossible in an exactly
+4.5-Mbp reference.  The canonical data record its 246 planned primary
+observations as structural missing values rather than as zeros.  A separate
+5.625-Mbp sensitivity arm contains \(N=5000\).  It changes reference length
+together with \(N\), so it is not an extension of the primary \(N\)-axis.
+
+Before the full sweep, a corner pilot fixed the validity rule at one forward
+PAF record that overlaps a planted locus and covers at least 50 percent of
+both the query and the intended copy.  This replaced an initial 90-percent
+rule because minimap2's anchor-only PAF spans can be shorter than a base-level
+alignment even for a clear planted-locus match.  All 4,920 feasible
+observations passed the final rule.  The lowest observed best overlap was
+80.34 percent.  The stricter 90-percent descriptive check retained 4,560 of
+4,920 observations.  Repeated copies make the mapping non-unique, so this
+gate proves a planted-locus match, not unique-locus recovery.
+
+Score ties occurred in 4,674 of 4,920 initial calls.  At least one equal-score
+group was reordered in 4,594 calls, although the highest-ranked anchor did
+not change in this workload.  Thus the requested tie rule was active for
+lower-ranked candidates even though it did not change the first endpoint.
+An independent full-data audit accepted all 4,920 feasible observations plus
+246 structural records with no error or warning.  A second oracle
+reconstructed 3,216,718 dumped anchors and 3,113,498 candidate ends in 14
+fixed cases selected before result inspection.  It
+matched the score histograms, scalar drop rule, all three
+\(\operatorname{Run}_L\) widths, and the SIMD batch counters exactly.
+
+The seed used in the corner pilot remains one of the six fixed inputs.  A
+leave-pilot-seed-out sensitivity left five input blocks.  The default-drop
+metrics remained identically zero over 300,886,632 checks, the \(N=4000\)
+median score still fell from 501 through 294 to 153 at 0, 5, and 10 percent
+divergence, and every retained input still contained a successful
+\(\operatorname{Run}_L\) batch at each width.  The conclusions below therefore
+do not depend on the viewed pilot input.
+
+\subsection{DP-score distribution across anchors}
+
+Figure~\ref{fig:chaining-max-drop-score-counts} shows the requested count of
+initial-DP anchors at each exact integer score.  A point is the arithmetic
+mean of the six input-level counts, including zero counts, so the points in a
+panel sum to that panel's mean DP-anchor count.  No score-width binning or
+smoothing is used.  Since changing \(N\) did not visibly change the
+distribution shape, the figure shows only the larger \(N=4000\) case.  The
+orange line marks \(\texttt{min\_sc}=40\).
+
+\begin{figure}[H]
+\centering
+\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+import matplotlib
+matplotlib.use("pgf")
+import matplotlib.pyplot as plt
+
+matplotlib.rcParams.update({
+    "font.family": "serif",
+    "font.serif": [],
+    "text.usetex": True,
+})
+
+def expand_ranges(spec):
+    values = []
+    for token in spec.split(","):
+        if "-" in token:
+            lo, hi = (int(value) for value in token.split("-"))
+            values.extend(range(lo, hi + 1))
+        else:
+            values.append(int(token))
+    return values
+
+# Each tuple stores a combined six-input count followed by the exact scores
+# having that count.  Dividing by six gives the plotted equal-input mean.
+score_groups = {
+    0: [
+        (4000, "18,20-21,23,26,31,33,35-36,38,40,43,45,47-50,52,55,61-62,66,68,71,73,77-78,82-84,87-89,91-95,97-98,100,102,107,109-110,113,115,119,121,125,128,130,132,136-137,140,145,151,154-155,163,168-169,171,173-174,176,180,183-185,187,191,193,200-202,206-207,209,211,214-216,218,222,225,230,232,235,237-239,243-244,248-249,251,256,258,261-262,264,268,270,276-284,287,291-292,295,302-307,310,314,317-318,321,326,328-330,335-336,341,346,350,354,356-359,365-367,370,372,375,380-381,384,387,392-393,396,399-400,402,404,406-407,411,413-414,416,418,420,422,424-426,429,435,437,440,443-444,446-447,452,454,456,460,463,465,467-468,470,472-475,478,482,484,486,488,491,493,495,498-500,502-503,505-506,508-509,511,518,524,528-529,533,537-539,541,544,548,552-553,556,561,566,572,574,578-582,586-587,592-595,598,605,608,610,614,616-617,619,622,629,632,637-638,641,643-645,649,652,654-656,661-662,665,667-668,673,675,677,679-680,682,685,688,692,695,697,699-700,702,705-709,712-714,716,720,723,727-728,731,737-738,749,756,758-759,761,763-764,766,768-769,771-772,775,777,782-783,786,789,791,793,795-796,798,802,808,813,816-817,821,825-826,828,830,832-833,837,839,841,843,845,848,854,856-857,859,862,865,868-869,874,876,880,884-885,887,889-895,898,903-905,910,924-925,927-928,931-932,935-937,940-941,946,950-951,954-958,960,963,970,974,977,979-988,990-991,995-996"),
+        (8000, "22,24-25,27,30,39,44,54,60,67,72,79-80,85,99,104,108,111,117-118,123,129,131,139,141-142,144,157-158,160-161,166,170,175,178,182,188-189,192,194-196,203-204,210,212-213,223,226,229,231,234,236,240,247,252-253,257,263,273-275,285,288,293-294,296,311,315,319,324,327,332,340,347,355,363-364,373-374,376-377,382-383,389,391,395,398,401,409-410,412,419,431,436,438-439,448-449,453,457-459,462,466,469,479-481,487,489,496,501,504,512,516,519,521,525,527,530,534-535,540,554,558,563,568,573,575,589,596,601,606,611,615,621,625,630-631,633,635,639,650-651,653,658-659,666,681,684,686,689,693,698,703,715,717,719,721,733,736,739,742,744,747-748,751,753-754,760,774,776,779-781,785,792,801,806-807,810-812,814,819,822-823,827,829,834,836,838,842,853,855,861,864,867,871,873,879,882-883,899,902,906-909,913,916,919-920,944,948,959,961,966,968,975-976,978"),
+        (8001, "669"),
+        (12000, "34,53,69,74,90,120,134,153,220,224,245-246,297,322-323,343-345,352,386,423,430,442,477,497,514,543,547,555,564,571,584,588,597,609,634,647,657,672,674,696,784,794,803,844,852,860,875,896,918,922,930,933"),
+        (16000, "59,103,116,147,265,312,333,362,620,636,726,734,767,943,945,965"),
+        (20000, "743"),
+        (24001, "15"),
+    ],
+    5: [
+        (4000, "20-21,24-25,28,31-33,36-38,40,42,46-47,50,58,62-63,65,68-70,74-76,86,93,95,97,100,106-107,109,112,118-119,124,129,138,140,142-143,145,151-152,155,158-159,164-165,167,169,173,180,183,185,191-192,195,197,200,202-203,206-207,209,214-215,220-222,224,228,235-237,239,242-244,249-250,254,261,269-272,278,280,283,285,292-293,295-297,300-302,304,306,309-310,313-316,318-319,321-322,324,328,333,337-338,342-343,351-352,354,356-358,361-362,364,366,368,375-376,381,383-385,389,391-392,394-395,402-403,409,411,415-416,418,420-422,427,430-431,433,435-436,442,445-448,452,455,465,467-468,472,475,477,479-480,482,484,491,493,498,500-501,503-504,510,513,515-516,518,520-523,528,530,532,534,536,543-545,547,550,552,559-560,565,568-570,572,579,590,596,600,603,606,611,613,618"),
+        (8000, "43,45,53,56,60,73,77,88,92,104,111,120,122-123,126-127,131-133,137,144,148,157,162-163,168,170-172,174,186,204,210,218-219,223,229,234,240,251-252,264-265,274,282,312,317,325,329,332,334,340-341,345,350,355,365,367,370,378-379,387,393,399,407-408,413-414,425,429,440,450-451,462,466,470-471,478,485,488,490,497,499,514,525,529,551,563,578"),
+        (12000, "30,48,61,85,103,146-147,189,259,279,290,294,327,349,353,371,483,489,527,542,557,585"),
+        (16000, "255,299"),
+        (24001, "15"),
+    ],
+    10: [
+        (4000, "16-18,20-21,26-29,32,35-36,41,43-45,47,50-51,57-58,62,64-65,68-70,75-76,80-82,88-89,92-93,99-103,105,107-108,118,121,123,126,131,133,135,138,140,145,147-148,150,153,159,162-163,166-168,173,175,177,179-180,190,192,196,198-201,203-204,209,211-212,215-216,218-219,221-224,226-227,230,232,236,242-244,248,251,255,257,259,261,263-264,274,276-277,287,299,310,314,325,328-329,331,338,343-344,349,355"),
+        (8000, "30,56,59,66,74,90,111,114,117,132,136,144,151,155,170,178,182,185,188,195,197,231,237,239,246,258,273,278,285,288,295"),
+        (12000, "85,96,129,194"),
+        (24000, "15"),
+    ],
+}
+mean_totals = {0: 722667, 5: 317333.5, 10: 134000}
+
+fig, axes = plt.subplots(1, 3, sharex=True, sharey=True)
+fig.set_size_inches(0.94 * __LINEWIDTH__, 0.36 * __LINEWIDTH__, forward=True)
+for ax, divergence in zip(axes, (0, 5, 10)):
+    for combined_count, encoded_scores in score_groups[divergence]:
+        scores = expand_ranges(encoded_scores)
+        ax.scatter(scores, [combined_count / 6.0] * len(scores),
+                   s=3.0, color="#4C78A8", linewidths=0)
+    ax.axvline(40, color="#F28E2B", linestyle="--", linewidth=0.9)
+    ax.set_xlim(0, 1000)
+    ax.set_ylim(0, 4300)
+    ax.set_xticks((0, 250, 500, 750, 1000))
+    ax.set_yticks((0, 1000, 2000, 3000, 4000))
+    ax.set_title(rf"{divergence}\% divergence" + "\n" +
+                 rf"{mean_totals[divergence]:,.0f} mean anchors", fontsize=8)
+    ax.tick_params(axis="both", labelsize=7)
+    ax.grid(axis="y", color="#e5e5e5", linewidth=0.45)
+    ax.set_xlabel(r"DP score $f_i$", fontsize=8)
+axes[0].set_ylabel("mean anchors at exact score", fontsize=8)
+axes[0].text(48, 4100, r"$\mathtt{min\_sc}=40$", rotation=90,
+             va="top", ha="left", color="#A95700", fontsize=6.5)
+fig.subplots_adjust(left=0.085, right=0.995, bottom=0.18, top=0.82, wspace=0.10)
+
+print(get_filename_from_extension(".pgf"))
+plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
+\end{CacheMeCode}
+\caption{Exact initial-DP anchor score counts when the target contains
+\(N=4000\) planted occurrences of the query source.  Here \(f_i\) is the DP
+score of the best chain ending at anchor \(i\).  Each point is the arithmetic
+mean of the six input-level counts at that integer score, including zero
+counts in the mean.  Scores absent from all six inputs are blank.  The panels
+show 0, 5, and 10 percent requested query substitutions.  No score-width binning or
+smoothing is applied.  The dashed line is the default candidate-end threshold
+\(\texttt{min\_sc}=40\).}
+\label{fig:chaining-max-drop-score-counts}
+\end{figure}
+
+The \(N=4000\) panels contain approximately twenty times as many anchors as
+the corresponding \(N=200\) panels, while their occupied score values and
+shapes are nearly the same.  Across all 41 divergence settings, the ratio of
+the two median anchor counts stayed between 19.9938 and 20.0000.  The largest
+difference in the median percentage at or above score 40 was only 0.0157
+percentage point.  As \(N\) increased in this construction, it therefore
+scaled the amount of data but did not materially change the score-distribution
+shape.
+
+Figure~\ref{fig:chaining-max-drop-score-divergence} follows the \(N=4000\)
+distribution over all 41 divergence values.  Score percentiles are first
+calculated within each generated input using the lower-rank empirical
+quantile, which is the first score whose cumulative count reaches the
+requested fraction of anchors.  The solid curves in the upper panel are
+across-input medians of those percentiles.  Its nested bands describe
+within-input score intervals.  The lower panel shows the across-input median
+fraction reaching \(\texttt{min\_sc}\), with the between-input interquartile
+range.
+
+\begin{figure}[H]
+\centering
+\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+import matplotlib
+matplotlib.use("pgf")
+import matplotlib.pyplot as plt
+
+matplotlib.rcParams.update({
+    "font.family": "serif",
+    "font.serif": [],
+    "text.usetex": True,
+})
+
+# divergence, q10, q25, q50, q75, q90, fraction>=40 median, q1, q3
+score_data = [
+    (0.00, 109.5, 258.0, 501.5, 745.5, 894.5, 96.89655379, 96.63857678, 97.66870700),
+    (0.25, 107.5, 246.0, 485.0, 725.5, 868.5, 97.35982328, 96.63312802, 97.70091896),
+    (0.50, 100.0, 242.0, 473.0, 707.5, 846.5, 97.55349580, 96.67565969, 97.62553895),
+    (0.75, 101.0, 230.5, 469.0, 695.5, 833.5, 97.19355847, 96.42530488, 97.49562322),
+    (1.00, 101.0, 231.0, 454.0, 675.0, 821.0, 97.32294958, 96.89571365, 97.41092243),
+    (1.25, 94.5, 235.0, 447.5, 661.5, 800.5, 97.25004953, 96.76691552, 97.33757050),
+    (1.50, 94.0, 232.5, 435.5, 645.5, 784.5, 97.07967219, 96.61841419, 97.21161132),
+    (1.75, 95.5, 239.0, 426.5, 628.5, 762.0, 97.12096376, 96.99197996, 97.61667017),
+    (2.00, 87.5, 224.0, 411.5, 613.5, 741.0, 96.87481226, 96.37168933, 97.00258548),
+    (2.25, 88.5, 224.0, 404.0, 599.0, 723.0, 96.85883222, 96.11322138, 97.36742424),
+    (2.50, 87.0, 211.0, 395.0, 581.5, 699.5, 96.72547447, 95.95996493, 97.28515103),
+    (2.75, 85.5, 202.0, 390.0, 567.5, 683.0, 96.68606642, 95.81185071, 97.14837824),
+    (3.00, 83.0, 196.5, 378.0, 560.5, 672.0, 96.79292929, 95.68181818, 97.33187567),
+    (3.25, 91.0, 192.0, 372.0, 556.5, 659.0, 96.67505392, 96.09728507, 97.29014133),
+    (3.50, 91.0, 195.0, 363.5, 533.5, 640.0, 97.12912428, 96.30854912, 97.32903546),
+    (3.75, 87.0, 191.5, 344.0, 515.5, 608.0, 96.96939151, 96.23469388, 97.24091038),
+    (4.00, 88.5, 187.5, 342.0, 505.0, 601.0, 96.87364698, 96.10934415, 97.44898154),
+    (4.25, 82.5, 178.5, 334.0, 497.0, 593.5, 96.82317745, 95.99329325, 97.35180612),
+    (4.50, 80.5, 175.5, 329.0, 475.0, 574.5, 96.75590791, 95.72754831, 97.27905286),
+    (4.75, 70.5, 169.5, 317.0, 455.0, 553.5, 95.87486157, 94.69993477, 97.12790698),
+    (5.00, 69.0, 159.5, 303.0, 431.5, 531.5, 95.49006838, 94.42329654, 97.06935852),
+    (5.25, 67.5, 154.0, 292.0, 412.5, 510.5, 94.32595573, 94.26108374, 96.50821596),
+    (5.50, 61.5, 148.5, 280.5, 398.5, 498.5, 94.20168067, 93.98395722, 96.42857143),
+    (5.75, 59.5, 141.5, 277.5, 402.5, 483.0, 93.67088608, 93.65581676, 96.03676914),
+    (6.00, 59.5, 141.5, 270.0, 393.0, 471.5, 93.51618327, 93.44262295, 96.01648352),
+    (6.25, 54.5, 129.5, 255.0, 385.5, 465.5, 93.27683616, 93.16809844, 95.83333333),
+    (6.50, 54.5, 126.0, 249.0, 359.5, 451.0, 92.95774648, 92.88229376, 95.73943662),
+    (6.75, 56.0, 120.5, 239.5, 361.0, 433.5, 93.43563512, 92.52802844, 95.89783282),
+    (7.00, 56.0, 124.0, 236.0, 359.5, 431.5, 93.93382353, 92.84048507, 95.75163399),
+    (7.25, 58.0, 124.0, 229.0, 337.0, 420.0, 93.60544218, 92.56410256, 95.58477237),
+    (7.50, 58.0, 112.5, 221.5, 317.0, 382.5, 93.29085457, 92.02586207, 95.36956522),
+    (7.75, 54.0, 104.0, 207.5, 295.5, 373.5, 92.27433977, 90.73849879, 93.08340016),
+    (8.00, 51.5, 104.0, 206.5, 291.5, 362.5, 91.81818182, 90.07421150, 92.82467532),
+    (8.25, 51.5, 109.0, 204.5, 290.0, 356.0, 91.60839161, 90.07421150, 92.58911820),
+    (8.50, 44.0, 104.0, 196.5, 274.5, 346.0, 91.11505122, 89.53301127, 92.38453555),
+    (8.75, 44.0, 100.5, 188.5, 269.0, 339.5, 91.02254428, 89.35185185, 91.74500588),
+    (9.00, 44.0, 93.0, 187.0, 246.5, 321.0, 90.43040293, 87.59615385, 91.53796654),
+    (9.25, 41.0, 94.0, 184.5, 248.0, 313.0, 90.13605442, 86.98386331, 91.19047619),
+    (9.50, 35.5, 94.5, 178.5, 241.0, 295.5, 89.89795918, 89.55424275, 91.87500000),
+    (9.75, 35.5, 91.5, 169.0, 225.0, 279.0, 89.41769317, 89.30471125, 91.28733997),
+    (10.0, 35.5, 87.0, 154.0, 215.0, 260.5, 89.39280360, 88.62876254, 91.16379310),
+]
+
+(divergence, q10, q25, q50, q75, q90,
+ fraction, fraction_q1, fraction_q3) = map(list, zip(*score_data))
+
+fig, axes = plt.subplots(2, 1, sharex=True)
+fig.set_size_inches(0.98 * __LINEWIDTH__, 0.53 * __LINEWIDTH__, forward=True)
+
+axes[0].fill_between(divergence, q10, q90, color="#4C78A8", alpha=0.14,
+                     label="10th--90th percentile")
+axes[0].fill_between(divergence, q25, q75, color="#4C78A8", alpha=0.30,
+                     label="25th--75th percentile")
+axes[0].plot(divergence, q50, color="#285F8F", linewidth=1.3,
+             label="median score")
+axes[0].axhline(40, color="#F28E2B", linestyle="--", linewidth=0.9,
+                label=r"$\mathtt{min\_sc}=40$")
+axes[0].set_ylim(0, 1000)
+axes[0].set_ylabel(r"DP score $f_i$", fontsize=8)
+axes[0].set_title("(a) Within-input score spread", fontsize=8, loc="left")
+axes[0].legend(frameon=False, fontsize=6.5, ncol=2, loc="upper right")
+
+axes[1].fill_between(divergence, fraction_q1, fraction_q3,
+                     color="#59A14F", alpha=0.22,
+                     label="six-input interquartile range")
+axes[1].plot(divergence, fraction, color="#3C7C36", linewidth=1.3,
+             label="six-input median")
+axes[1].set_ylim(85, 100)
+axes[1].set_yticks((85, 90, 95, 100))
+axes[1].set_ylabel(r"anchors with $f_i\geq40$ (\%)", fontsize=8)
+axes[1].set_xlabel(r"query substitutions requested (\%)", fontsize=8)
+axes[1].set_title(r"(b) Anchors reaching $\mathtt{min\_sc}$", fontsize=8, loc="left")
+axes[1].legend(frameon=False, fontsize=6.5, loc="lower left")
+
+for ax in axes:
+    ax.set_xlim(0, 10)
+    ax.set_xticks((0, 2, 4, 6, 8, 10))
+    ax.tick_params(axis="both", labelsize=7)
+    ax.grid(axis="y", color="#e5e5e5", linewidth=0.45)
+fig.subplots_adjust(left=0.10, right=0.985, bottom=0.12, top=0.97, hspace=0.23)
+
+print(get_filename_from_extension(".pgf"))
+plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
+\end{CacheMeCode}
+\caption{DP-score distribution across all 41 divergence settings when the
+target contains \(N=4000\) planted occurrences.  The score \(f_i\) belongs to
+the best chain ending at anchor \(i\).  The upper panel shows across-input
+medians of within-input score percentiles.  The nested bands therefore describe
+score spread, not uncertainty.  The lower panel shows the across-input median
+percentage of anchors reaching the default \(\texttt{min\_sc}=40\) candidate-end
+threshold, with the six-input interquartile range.  All ranges are descriptive.}
+\label{fig:chaining-max-drop-score-divergence}
+\end{figure}
+
+At 0, 5, and 10 percent divergence, the across-input median DP
+scores were 501.5, 303, and 154.  The corresponding median percentages with
+\(f_i\geq40\) were 96.90, 95.49, and 89.39 percent, and the median DP-anchor
+counts were 716,000, 314,000, and 128,000.  The median score and the
+90th percentile decreased at every quarter-point divergence step.  The
+median 10th percentile first fell below \texttt{min\_sc} at 9.5 percent
+divergence.  The small local rebounds in the fraction above 40 mean that this
+fraction should not be described as strictly monotone.
+
+These marginal distributions explain the scale and range of \(f_i\), but
+they do not by themselves predict \texttt{max\_drop}.  The drop rule depends
+on the ordered score changes along predecessor paths, rather than on the
+unordered histogram of all anchor scores.
+
+\subsection{Default \texttt{max\_drop} on ordinary repeated copies}
+
+The occurrence-by-divergence screen found no local opportunity at minimap2's
+default \(D=500\).  In the 4.5-Mbp primary arm, none of 2,869,628 executed
+searches crossed the strict threshold.  The fixed-start scan examined all
+255,965,133 baseline scan steps, leaving no suffix.  The separate
+\(N=5000\) sensitivity arm required a 5.625-Mbp reference and gave the same
+result.  Across both feasible arms, none of 4,099,647 searches crossed
+\(D=500\), and the fixed-start calculation retained all 365,680,152 baseline scan
+steps.  No \(D=500\) cutoff fired.  The audited complete replay nevertheless
+had the same aggregate search and scan-step counts and the same accepted-chain
+output as the baseline.  Its execution trace and final marking nevertheless
+differed in 57 of 4,920 observations because minimap2's best-cut boundary can
+differ from the baseline terminal without a threshold crossing.  The matched
+no-drop replay produced the same 57 differences, which isolates them from
+the \(D=500\) rule.
+
+A threshold sensitivity used
+\(D\in\{0,25,50,100,200,500,750,1000\}\).  Thresholds 0 and 25 each fired on
+57 of 4,099,647 searches, or 0.001390 percent, but each crossing occurred on
+the final scan step and left no suffix.  No threshold of 50 or greater fired.  The
+largest observed baseline-path drawdown was 39.  The SIMD replay agreed: at
+each width \(L\in\{4,8,16\}\), \(D=0\) and \(D=25\) each produced 57 batches
+containing a crossing, but no lane scan step or batch-critical step was removed.
+No SIMD batch crossed \(D\geq50\).
+
+The first screen kept the query length near 1,000 bases.  A second operational
+screen therefore crossed target lengths 1.125, 4.5, and 18~Mbp with query
+lengths near 250, 1,000, 4,000, and 16,000 bases.  A separate 72-Mbp/16-kbp
+row extends a four-point constant-density diagonal.  On this diagonal, the
+combined length of the five source-template occurrences is
+\(5Q/T\approx0.111\) percent, where \(Q\) is query length and \(T\) is
+target length.  This holds for the
+1.125-Mbp/250-bp, 4.5-Mbp/1-kbp, 18-Mbp/4-kbp, and 72-Mbp/16-kbp cases.
+Every configuration used five target occurrences of the unmutated source
+template, the same six fixed sequence seeds, and all 41 requested substitution
+levels from 0 to 10 percent in 0.25-percentage-point steps.  Thus each row in
+Table~\ref{tab:chaining-max-drop-length-screen} contains 246 observations.
+
+Five copies were used to preserve minimap2's default occurrence filtering.
+In a predeclared \(N=50\) feasibility pilot, the default filter removed all
+50-copy minimizers from the sparse 18-Mbp/247-base case and produced no
+mapping.  That failed pilot was excluded before the final acquisition.  No
+filter parameter was relaxed.  In the final screen every observation had a
+forward PAF placement covering at least half of the query and half of a
+planted locus.
+
+The table uses the following labels.  \(V\) is the count of observations
+passing that mapping gate.  \(E\) is the count of executed baseline searches.
+\(H_{500}\) counts strict \(D=500\) crossings, while \(P_{500}\)
+counts productive crossings with a nonempty suffix.  \(B\) is the baseline
+backtracking scan-step count.  \(S_{500}\) counts steps after the first crossing
+when the start and incoming marks are held fixed.  For each executed search,
+\(\Delta(e)=\max_m d_m\) is measured while following its predecessor links.
+The table reports \(\Delta_{\max}=\max_e\Delta(e)\), the largest observed
+value in the row.  All are raw logical counters, not elapsed times.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
+\renewcommand{\arraystretch}{1.05}
+\begin{tabular}{@{}rrrrrrrrr@{}}
+\toprule
+\(T\) (Mbp) & query length (bp) & \(V/246\) & \(E\) & \(H_{500}\) &
+\(P_{500}\) & \(B\) & \(S_{500}\) & \(\Delta_{\max}\) \\
+\midrule
+1.125  & 247--252     & 246/246 & 1\,230 & 0 & 0 & 25\,705    & 0 & 0 \\
+1.125  & 997--1002    & 246/246 & 1\,230 & 0 & 0 & 109\,715   & 0 & 0 \\
+1.125  & 3997--4002   & 246/246 & 1\,230 & 0 & 0 & 440\,525   & 0 & 0 \\
+1.125  & 15997--16002 & 246/246 & 1\,230 & 0 & 0 & 1\,757\,774 & 0 & 0 \\
+\midrule
+4.500  & 247--252     & 246/246 & 1\,230 & 0 & 0 & 25\,705    & 0 & 0 \\
+4.500  & 997--1002    & 246/246 & 1\,230 & 0 & 0 & 109\,715   & 0 & 0 \\
+4.500  & 3997--4002   & 246/246 & 1\,230 & 0 & 0 & 440\,525   & 0 & 0 \\
+4.500  & 15997--16002 & 246/246 & 1\,230 & 0 & 0 & 1\,757\,741 & 0 & 0 \\
+\midrule
+18.000 & 247--252     & 246/246 & 1\,230 & 0 & 0 & 25\,670    & 0 & 0 \\
+18.000 & 997--1002    & 246/246 & 1\,230 & 0 & 0 & 109\,715   & 0 & 0 \\
+18.000 & 3997--4002   & 246/246 & 1\,230 & 0 & 0 & 440\,525   & 0 & 0 \\
+18.000 & 15997--16002 & 246/246 & 1\,230 & 0 & 0 & 1\,757\,741 & 0 & 0 \\
+\midrule
+72.000\(^*\) & 15997--16002 & 246/246 & 1\,230 & 0 & 0 & 1\,757\,675 & 0 & 0 \\
+\bottomrule
+\end{tabular}
+\caption{Default-\(D=500\) target- and query-length screen.  Each row combines
+six seed blocks and 41 requested substitution percentages.  Count columns
+are sums over those observations, while \(\Delta_{\max}\) is their maximum.
+\(V\) is valid mapped
+observations, \(E\) is baseline scans, \(H_{500}\) is threshold crossings,
+\(P_{500}\) is productive crossings, \(B\) is baseline scan steps,
+\(S_{500}\) is the count of remaining steps after the first crossing, and
+\(\Delta_{\max}\) is the largest score drop.  The starred 72-Mbp row extends the constant-density diagonal and
+is not part of the 3-by-4 screen.}
+\label{tab:chaining-max-drop-length-screen}
+\end{table}
+
+All 3,198 observations mapped, giving 15,990 executed searches and 8,758,731
+baseline scan steps.  None of the \(13\times41=533\)
+configuration-by-divergence cells contained a strict \(D=500\) crossing.
+This zero occurs in every cell, not only after the counts are added.  The audited
+complete max-drop replay also made 15,990 searches and 8,758,731 scan steps.  Its
+execution trace, final marks, and accepted-chain output matched the baseline
+in all 3,198 observations.  The approximately 250-base
+tier is a structural boundary case.  A chain score is bounded by the query
+span credited along that segment, which is at most 252 bases here, so its
+score range cannot produce a drawdown above 500.  Its 41 requested substitution
+levels also collapse to 26 distinct rounded mutation counts.  The longer
+queries are the informative rows.  Their maximum drawdown was nevertheless
+also zero.
+
+The zero values in the last column are measured values, not rounded values or
+missing data.  The matched no-drop backtrack evaluated 8,758,731 values of
+\(s_m\) while traversing the same paths as the separate drop diagnostic.  Every
+value was larger than the preceding running maximum, so \(M_m=s_m\) and
+\(d_m=0\) at every evaluated step.  This is possible even on a long chain.
+These inputs contain collinear, substitution-only copies, and on every
+predecessor edge traversed by those executed searches, the DP score increased
+by a positive amount toward the chain end.  Moving backward therefore lowers
+the prefix score \(f_{b_m}\), which makes \(s_m=f_e-f_{b_m}\) increase.  The
+same code measured nonzero drops in the ordinary occurrence screen and in the
+long-chain example below, so the zero is specific to this length screen.
+
+Target length, planted-copy fraction, retained-anchor load, and adaptive
+occurrence filtering change together in this construction.  The table is
+therefore an operational screen, not a causal estimate of a target-length or
+query-length effect.  Within this synthetic construction, no tested
+target/query-length configuration produced a crossing.
+
+\subsection{A long-chain example that crosses
+\texorpdfstring{\(D=500\)}{D=500}}
+
+A specially prepared long-chain example tests whether the instrumented
+predicate can fire at all.  The sequence letters are pseudorandom, but their
+layout is deliberately chosen.  The 12,480-base query is a 6,000-base left
+flank, followed by 16 adjacent 30-base exact pieces, followed by a 6,000-base
+right flank.  The 19,980-base target contains the same parts in the same
+order, but inserts a 500-base target-only gap between every neighboring pair
+of exact pieces.  There are therefore 15 inserted gaps.  Figure~\ref{fig:chaining-max-drop-long-chain-accounting}(a)
+shows this construction.
+
+The horizontal variable in panels (b) and (c) is the requested substitution
+percentage \(x_k\), defined by
+\[
+  x_k=0.25k,
+  \qquad
+  m_k=\left\lfloor
+    12{,}480\frac{x_k}{100}+\frac{1}{2}
+  \right\rfloor,
+  \qquad k=0,\ldots,40.
+\]
+If \(u_{k,r}=1\) when query base \(r\) is changed at level \(k\), and zero
+otherwise, then \(m_k=\sum_{r=1}^{12{,}480}u_{k,r}\).  In simple terms,
+\(m_k\) is the number of query bases that are changed.  These positions
+are chosen only from the 12,000 flank bases, and the sets are nested as
+\(k\) increases.  All 480 bases in the 16 exact pieces remain unchanged.  For
+example, \(x_k=5\) changes \(m_k=624\) query bases, all in the two flanks.
+Thus \(x_k\) uses the complete 12,480-base query as its denominator, but it
+does not mean that five percent of every region is changed.
+
+For panel (b), each baseline scan keeps its original starting end and incoming
+marks.  The calculation finds the first step with \(d_m>500\) and counts the
+remaining baseline steps.  It does not update the marks.  Panel (c) instead
+applies every cutoff and updates the marks before the next scan.  At each
+\(x_k\), each plotted percentage is a ratio of sums: its numerator and
+denominator are first added across the six fixed sequence seeds.  The
+16-piece layout was selected after exploratory 8- and 12-piece examples did
+not cross \(D=500\).  It demonstrates that the rule can fire, but it does not
+estimate how often this happens in ordinary inputs.
+
+\begin{figure}[H]
+\centering
+\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+import matplotlib
+matplotlib.use("pgf")
+import matplotlib.pyplot as plt
+
+matplotlib.rcParams.update({
+    "font.family": "serif",
+    "font.serif": [],
+    "text.usetex": True,
+})
+
+from matplotlib.patches import Rectangle
+
+# Requested substitution percentage, the fraction of one fixed-start scan
+# after its first crossing, and the complete-replay scan-step change.
+long_chain_data = [
+    (0.00,49.50771492,1.95444526),(0.25,49.54381661,2.03940811),
+    (0.50,49.40009598,2.12765957),(0.75,49.45421215,2.21648196),
+    (1.00,49.62654160,2.31023102),(1.25,49.29270947,2.41204207),
+    (1.50,49.08352230,2.51322751),(1.75,49.28895912,2.62690105),
+    (2.00,49.26516249,2.75305320),(2.25,49.28633218,2.87629758),
+    (2.50,49.67283394,3.00090253),(2.75,49.84097067,3.13346684),
+    (3.00,49.76687117,3.26380368),(3.25,49.71187092,3.40632603),
+    (3.50,49.85938128,3.56234097),(3.75,49.63035291,3.71041986),
+    (4.00,49.47598253,3.87190684),(4.25,48.96341463,4.05487805),
+    (4.50,49.03493380,4.24310097),(4.75,49.25422605,4.40835267),
+    (5.00,49.42251336,4.58541631),(5.25,49.63950973,4.79452055),
+    (5.50,50.15054573,5.00564546),(5.75,50.29492725,5.23004326),
+    (6.00,50.23464599,5.42746378),(6.25,50.08481764,5.64037320),
+    (6.50,49.80106101,5.87975243),(6.75,50.06938020,6.15171138),
+    (7.00,50.20546290,6.42978003),(7.25,50.07571933,6.71378092),
+    (7.50,50.02626050,6.98529412),(7.75,50.24711697,7.30367930),
+    (8.00,50.15754798,7.61959324),(8.25,50.20908005,7.94504182),
+    (8.50,49.56222639,8.31769856),(8.75,49.43200260,8.63356053),
+    (9.00,49.39597315,8.92617450),(9.25,48.65054329,9.32351910),
+    (9.50,48.52027768,9.71867008),(9.75,48.41057066,10.18766756),
+    (10.00,48.53057983,10.56393963),
+]
+substitution_percent, remaining_percent, full_extra_percent = map(
+    list, zip(*long_chain_data)
+)
+
+fig = plt.figure()
+fig.set_size_inches(0.91 * __LINEWIDTH__, 0.68 * __LINEWIDTH__, forward=True)
+grid = fig.add_gridspec(2, 2, height_ratios=(1.0, 1.18), hspace=0.56,
+                        wspace=0.27)
+top = fig.add_subplot(grid[0, :])
+left = fig.add_subplot(grid[1, 0])
+right = fig.add_subplot(grid[1, 1])
+
+flank_color = "#B8C7D9"
+piece_color = "#2F6B9A"
+gap_color = "#E17C05"
+edge_color = "#3D4A57"
+x_start = 0.055
+flank_width = 0.160
+piece_width = 0.008
+gap_width = 0.018
+block_height = 0.22
+query_y = 1.25
+target_y = 0.48
+
+top.set_xlim(0, 1)
+top.set_ylim(0, 2.02)
+top.axis("off")
+top.set_title("(a) Construction of the long-chain example (not to scale)",
+              fontsize=8, loc="left")
+
+def add_block(x, y, width, color, edge=edge_color, linewidth=0.45):
+    top.add_patch(Rectangle((x, y), width, block_height,
+                            facecolor=color, edgecolor=edge,
+                            linewidth=linewidth))
+
+def add_bracket(x_left, x_right, y, text_value, text_y):
+    top.plot([x_left, x_left, x_right, x_right],
+             [y - 0.035, y, y, y - 0.035],
+             color=edge_color, linewidth=0.55)
+    top.text((x_left + x_right) / 2, text_y, text_value,
+             ha="center", va="center", fontsize=6.3)
+
+query_middle_start = x_start + flank_width
+query_middle_end = query_middle_start + 16 * piece_width
+query_end = query_middle_end + flank_width
+target_middle_start = query_middle_start
+target_middle_end = target_middle_start + 16 * piece_width + 15 * gap_width
+target_end = target_middle_end + flank_width
+
+add_block(x_start, query_y, flank_width, flank_color)
+for piece_index in range(16):
+    add_block(query_middle_start + piece_index * piece_width, query_y,
+              piece_width, piece_color, edge="white", linewidth=0.30)
+add_block(query_middle_end, query_y, flank_width, flank_color)
+
+add_block(x_start, target_y, flank_width, flank_color)
+target_x = target_middle_start
+for piece_index in range(16):
+    add_block(target_x, target_y, piece_width, piece_color,
+              edge="white", linewidth=0.30)
+    target_x += piece_width
+    if piece_index < 15:
+        add_block(target_x, target_y, gap_width, gap_color,
+                  edge="white", linewidth=0.30)
+        target_x += gap_width
+add_block(target_middle_end, target_y, flank_width, flank_color)
+
+top.text(0.045, query_y + block_height / 2, "query", ha="right",
+         va="center", fontsize=7)
+top.text(0.045, target_y + block_height / 2, "target", ha="right",
+         va="center", fontsize=7)
+for x_position, y_position in (
+    (x_start + flank_width / 2, query_y),
+    (query_middle_end + flank_width / 2, query_y),
+    (x_start + flank_width / 2, target_y),
+    (target_middle_end + flank_width / 2, target_y),
+):
+    top.text(x_position, y_position + block_height / 2,
+             "6,000-bp\nflank", ha="center", va="center", fontsize=5.7)
+
+add_bracket(query_middle_start, query_middle_end,
+            query_y + block_height + 0.07,
+            "16 adjacent exact pieces, 30 bp each",
+            query_y + block_height + 0.14)
+add_bracket(target_middle_start, target_middle_end,
+            target_y - 0.07,
+            "15 target-only gaps, 500 bp each",
+            target_y - 0.16)
+top.text((x_start + query_end) / 2, 1.05,
+         r"At $x_k>0$, only query-flank bases are changed.",
+         ha="center", va="center", fontsize=6.2, color="#8A3E00")
+top.text(0.80, 1.36,
+         r"$|Q|=6000+16(30)+6000$" "\n" r"$=12{,}480$ bp",
+         ha="left", va="center", fontsize=6.4)
+top.text(0.80, 0.59,
+         r"$|T|=|Q|+15(500)$" "\n" r"$=19{,}980$ bp",
+         ha="left", va="center", fontsize=6.4)
+
+left.plot(substitution_percent, remaining_percent,
+          color="#4C78A8", linewidth=1.25)
+left.axhline(49.54799892, color="#7F7F7F", linestyle="--", linewidth=0.8,
+             zorder=1)
+left.set_xlim(0, 10)
+left.set_ylim(47.5, 51.0)
+left.set_xticks((0, 2.5, 5, 7.5, 10))
+left.set_yticks((48, 49, 50, 51))
+left.set_title("(b) Stop one scan at its first crossing", fontsize=8, loc="left")
+left.set_ylabel("steps after first crossing\n" r"/ baseline steps (\%)",
+                fontsize=8)
+left.set_xlabel(r"requested substitutions $x_k$ (\%)", fontsize=8)
+left.text(0.35, 50.65,
+          "all 246 observations\n" r"combined: 49.548\%",
+          fontsize=6.5, color="#555555", va="top")
+
+right.plot(substitution_percent, full_extra_percent,
+           color="#D55E00", linewidth=1.25)
+right.axhline(0, color="#555555", linewidth=0.7)
+right.set_xlim(0, 10)
+right.set_ylim(0, 12)
+right.set_xticks((0, 2.5, 5, 7.5, 10))
+right.set_yticks((0, 3, 6, 9, 12))
+right.set_title("(c) Apply every cutoff and update marks", fontsize=8, loc="left")
+right.set_ylabel(r"extra scan steps vs. baseline (\%)", fontsize=8)
+right.set_xlabel(r"requested substitutions $x_k$ (\%)", fontsize=8)
+right.text(0.35, 10.8,
+           "all 246 observations\n" r"combined: +4.046\%",
+           fontsize=6.5, color="#A34700", va="top")
+
+for ax in (left, right):
+    ax.tick_params(axis="both", labelsize=7)
+    ax.grid(axis="y", color="#e5e5e5", linewidth=0.45)
+fig.subplots_adjust(left=0.14, right=0.985, bottom=0.10, top=0.98)
+
+print(get_filename_from_extension(".pgf"))
+plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
+\end{CacheMeCode}
+\caption{Construction and scan-step accounting for the long-chain example at
+default \(D=500\).  Panel (a) shows the specially prepared layout.  Its
+sequence letters are pseudorandom.  The 12,480-base query has two 6,000-base
+flanks around 16 adjacent exact 30-base pieces.  The 19,980-base target adds
+one 500-base target-only gap between each neighboring pair.  The drawing is
+not to scale.  At \(x_k>0\), substitutions are made only in the query flanks.
+Panel (b) counts the part of each fixed-start baseline scan after its first
+strict crossing.  The dashed value is \(\sum S/\sum B\) over all 246
+observations.  Panel (c) applies every cutoff and updates the marks, which
+increases the complete scan work.  These are logical scan steps, not
+instructions, elapsed time, or a measured slowdown.}
+\label{fig:chaining-max-drop-long-chain-accounting}
+\end{figure}
+
+All 246 long-chain observations retained one long-span, plus-strand, MAPQ-60
+placement on the sole intended target, with at least 98.910 percent query-axis
+coverage.  This validates the intended chaining placement, not a high-identity
+alignment: the residue-match count divided by query length fell to 26.402
+percent, and only 147 of 246 observations reached 50 percent.
+
+Holding each baseline start and its incoming marks fixed, all 246 paths
+crossed productively.  These scans reached the first crossing after 136,008 of 269,579
+baseline scan steps,
+leaving a local suffix of 133,571 steps, or 49.548 percent.  Its
+\(\sum S/C=0.9821\) is a large local opportunity under
+Equation~\eqref{eq:chaining-max-drop-break-even}.  It does not compose into a
+complete-work reduction.  The complete replay left suffix anchors unmarked,
+then processed the newly exposed candidate ends.  It made 7,503
+searches and 280,485 scan steps, compared with 246 searches and
+269,579 steps for the baseline policy: 10,906 more steps, or 4.046 percent,
+before charging any added check cost.  It accepted 492 chains and rejected
+7,011 paths, whereas the baseline policy accepted 246 and rejected none.  The
+accepted-chain output of this initial-DP replay changed in all 246
+observations.  This is an internal chaining result, not a comparison of final
+PAF records.  The no-drop best-cut replay
+kept the same bookkeeping but disabled the score-drop cutoff and matched
+the baseline policy exactly.  The difference therefore came from the
+\(D=500\) cutoff decisions rather than from that independent bookkeeping rule.
+
+The fraction of steps after the first crossing stayed near one half across the
+substitution sweep, but the complete-work penalty grew from 1.954 percent at
+\(x_k=0\) to 10.564 percent at \(x_k=10\).  The absolute excess was 266 scan steps over the six seeds
+at every level.  The percentage rose because baseline path work decreased.
+
+For both ordinary screens, \(\sum S/C=0\).  Even a free check can only tie the
+baseline scan in the fixed-start variable-work model, while any positive check cost
+makes that model worse.  The long-chain example proves that the predicate
+can fire, but it increases complete logical scan work and changes chain
+semantics.  These results therefore do not justify an always-on SIMD
+\texttt{max\_drop} check for the studied BioseqDB path.  They do not prove the
+rule useless for indels, noisy reads, other presets, or other reference
+structures, and they do not quantify wall-clock performance.  A timing study
+of baseline and checked BioseqDB kernels would still be required.
+
+This max-drop conclusion does not predict \(\operatorname{Run}_L\), which
+tests structural adjacency rather than score drawdown.  The next subsection
+evaluates that separate existing fast-path condition.
+
+\subsection{Frequency of the \texorpdfstring{\(\operatorname{Run}_L\)}{Run-L}
+condition}
+
+Figure~\ref{fig:chaining-max-drop-runl} reports the condition-true ratio
+\(100B_L/E_L\), meaning the percentage of loop checks for which
+\(\operatorname{Run}_L\) is true, and the ideal loop-iteration reduction
+\(100(q-E_L)/q\).  Within each generated input, the measured counters were
+identical for every \(N=2,\ldots,4000\), so one curve represents all 18 of
+those \(N\) values.  Hollow markers
+show only the divergence settings at which the six-input \(N=1\) median
+differed.
+
+\begin{figure}[H]
+\centering
+\begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+import matplotlib
+matplotlib.use("pgf")
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+
+matplotlib.rcParams.update({
+    "font.family": "serif",
+    "font.serif": [],
+    "text.usetex": True,
+})
+
+# divergence, Fire_4, Fire_8, Fire_16, Reduction_4, Reduction_8, Reduction_16
+# Each row is the six-input median common to every tested N>=2.
+runl_data = [
+    (0.00, 95.74275362, 88.14102564, 62.85714286, 74.17542588, 86.03620474, 90.18817204),
+    (0.25, 93.40579710, 84.49074074, 48.80952381, 73.69924812, 85.52389260, 87.97729618),
+    (0.50, 93.25075834, 83.33333333, 66.96428571, 73.66695881, 85.36585366, 90.91243021),
+    (0.75, 90.80338266, 82.60869565, 49.20634921, 73.14786585, 85.25641026, 87.91208791),
+    (1.00, 96.05263158, 88.18181818, 50.00000000, 74.23462352, 86.05391074, 88.23529412),
+    (1.25, 90.00000000, 71.41666667, 45.51630435, 72.97297297, 83.33024591, 86.66002871),
+    (1.50, 93.24324324, 79.45652174, 42.10526316, 73.66247847, 84.70716385, 86.33093525),
+    (1.75, 91.73745174, 73.32015810, 57.14285714, 73.33735733, 83.69245323, 89.55223881),
+    (2.00, 91.42156863, 70.49689441, 43.33333333, 73.28083990, 83.14814815, 86.11111111),
+    (2.25, 90.76704545, 75.71428571, 43.92156863, 73.13998770, 84.09090909, 86.78278689),
+    (2.50, 91.93548387, 80.06535948, 63.63636364, 73.38614591, 84.85007496, 90.51724138),
+    (2.75, 90.74952562, 74.34640523, 40.00000000, 73.13591236, 83.87274890, 85.41666667),
+    (3.00, 90.66937120, 72.44582043, 35.08771930, 73.10850440, 83.49326599, 84.00537634),
+    (3.25, 88.37597330, 66.66666667, 46.42857143, 72.60931242, 82.35294118, 87.38687783),
+    (3.50, 93.23821340, 70.58823529, 48.70129870, 73.65045200, 83.16831683, 87.82368621),
+    (3.75, 89.70223325, 75.00000000, 47.85714286, 72.89540816, 84.00000000, 87.13483146),
+    (4.00, 89.33333333, 74.90196078, 44.44444444, 72.81323877, 83.97745572, 86.30952381),
+    (4.25, 90.64285714, 65.68627451, 37.78280543, 73.10989465, 82.13391740, 84.45018995),
+    (4.50, 89.23809524, 66.96832579, 28.78289474, 72.80219780, 82.40481523, 81.10240823),
+    (4.75, 91.48550725, 73.21428571, 32.05128205, 73.29457364, 83.66666667, 82.76255708),
+    (5.00, 88.47826087, 69.71153846, 37.41258741, 72.63106480, 82.86634912, 84.86715749),
+    (5.25, 88.48684211, 57.98319328, 40.83333333, 72.63546798, 80.22988506, 85.96059113),
+    (5.50, 89.18128655, 61.90476190, 40.00000000, 72.79220779, 81.17647059, 85.71428571),
+    (5.75, 84.84848485, 51.92307692, 19.34984520, 71.79023508, 78.40501792, 74.26500612),
+    (6.00, 88.09523810, 58.33333333, 20.48611111, 72.53846154, 80.32786885, 75.34678436),
+    (6.25, 84.03361345, 66.81818182, 26.96969697, 71.59322034, 82.35875706, 80.17857143),
+    (6.50, 80.99415205, 56.66666667, 36.36363636, 70.82089552, 79.82123510, 84.50704225),
+    (6.75, 92.58241758, 68.33333333, 40.97222222, 73.52714671, 82.70189432, 85.93109106),
+    (7.00, 82.10526316, 58.33333333, 28.20512821, 71.11501317, 80.06535948, 80.45977011),
+    (7.25, 85.04273504, 74.67532468, 33.92857143, 71.73469388, 83.69047619, 82.74291498),
+    (7.50, 83.97435897, 67.53246753, 21.53846154, 71.58385093, 82.50000000, 76.29310345),
+    (7.75, 81.17647059, 68.33333333, 19.04761905, 70.88733799, 82.70189432, 73.84987893),
+    (8.00, 81.25000000, 56.41025641, 30.00000000, 70.90909091, 79.35828877, 81.81818182),
+    (8.25, 82.93269231, 63.33333333, 36.42857143, 71.32411067, 81.56108597, 84.17832168),
+    (8.50, 85.64102564, 47.72727273, 12.91666667, 71.98067633, 76.93236715, 65.94202899),
+    (8.75, 85.64102564, 47.72727273, 13.80952381, 71.98067633, 76.93236715, 67.42424242),
+    (9.00, 77.35042735, 52.22222222, 18.33333333, 69.88372093, 78.22245322, 73.21428571),
+    (9.25, 80.12820513, 59.82142857, 22.61904762, 70.59800664, 80.69767442, 76.25482625),
+    (9.50, 79.79797980, 41.42857143, 22.50000000, 70.52631579, 74.34210526, 76.97368421),
+    (9.75, 80.19480519, 42.85714286, 18.38235294, 70.63269877, 75.00000000, 71.38857783),
+    (10.0, 79.80769231, 47.72727273, 10.79545455, 70.48494983, 76.93236715, 61.45484950),
+]
+
+# Actual N=1 medians are listed only where they differ from the common N>=2
+# value.  Empty positions are deliberately not drawn.
+n1_fire = {
+    4: [(0.50,95.40169133),(0.75,100.0),(1.25,96.25),(1.75,97.29729730),(2.00,92.80303030),(2.25,92.32954545),(2.50,93.64919355),(2.75,96.49014778),(3.00,93.21839080),(3.25,91.60879630),(3.75,95.74275362),(4.00,98.0),(4.25,93.72727273),(4.50,91.23809524),(5.25,90.19138756),(5.50,89.47368421),(5.75,86.36363636),(6.50,84.60526316),(7.00,85.43859649),(7.25,92.82051282),(7.50,85.16483516),(8.25,87.76223776),(9.00,80.55555556),(9.50,85.90909091),(9.75,85.35353535),(10.0,86.05769231)],
+    8: [(0.75,89.28571429),(1.25,76.90909091),(1.75,76.95652174),(2.75,79.41176471),(3.00,77.70897833),(3.25,70.83333333),(3.75,80.35714286),(4.25,70.0),(5.25,71.07843137),(5.75,55.04807692),(6.50,61.81818182),(7.00,69.69696970),(9.50,43.65079365)],
+    16: [(0.75,63.49206349),(1.25,62.74038462),(3.25,50.0),(3.75,60.0),(4.25,48.07692308),(7.00,41.66666667)],
+}
+n1_reduction = {
+    4: [(0.50,74.10701630),(0.75,75.0),(1.25,74.25496689),(1.75,74.47183099),(2.00,73.57142857),(2.25,73.47061176),(2.50,73.74965268),(2.75,74.32410490),(3.00,73.66028708),(3.25,73.31932773),(3.75,74.17542588),(4.00,74.61340206),(4.25,73.76095119),(4.50,73.24058920),(5.25,73.01393728),(5.50,72.85714286),(5.75,72.15189873),(6.50,71.73638848),(7.00,71.93200663),(7.25,73.57679914),(7.50,71.86956522),(8.25,72.45493107),(9.00,70.71428571),(9.50,72.01280228),(9.75,71.88995215),(10.0,72.07646177)],
+    8: [(0.75,86.16118770),(1.25,84.28942187),(1.75,84.32565087),(2.75,84.73832528),(3.00,84.46833931),(3.25,83.17647059),(3.75,84.85714286),(4.25,83.02429668),(5.25,82.91281189),(5.75,79.38954675),(6.50,81.21794872),(7.00,82.96751536),(9.50,75.33783784)],
+    16: [(0.75,90.37456446),(1.25,90.31009486),(3.25,88.23529412),(3.75,90.0),(4.25,87.80696745),(7.00,85.78431373)],
+}
+
+divergence = [row[0] for row in runl_data]
+colors = {4: "#2F6B9A", 8: "#E17C05", 16: "#3C7C36"}
+widths = {4: 1.55, 8: 1.05, 16: 1.05}
+
+fig, axes = plt.subplots(2, 1, sharex=True)
+fig.set_size_inches(0.98 * __LINEWIDTH__, 0.53 * __LINEWIDTH__, forward=True)
+for column, lanes in enumerate((4, 8, 16), start=1):
+    axes[0].plot(divergence, [row[column] for row in runl_data],
+                 color=colors[lanes], linewidth=widths[lanes])
+    axes[1].plot(divergence, [row[column + 3] for row in runl_data],
+                 color=colors[lanes], linewidth=widths[lanes])
+    for ax, exceptional in ((axes[0], n1_fire[lanes]),
+                            (axes[1], n1_reduction[lanes])):
+        if exceptional:
+            x, y = zip(*exceptional)
+            ax.scatter(x, y, s=13, facecolors="white", edgecolors=colors[lanes],
+                       linewidths=0.75, zorder=4)
+
+axes[0].set_title(r"(a) Checks where $\mathrm{Run}_L$ is true",
+                  fontsize=8, loc="left")
+axes[1].set_title(r"(b) Scalar loop iterations removed",
+                  fontsize=8, loc="left")
+axes[0].set_ylabel(r"condition true (\%)", fontsize=8)
+axes[1].set_ylabel(r"ideal reduction (\%)", fontsize=8)
+axes[1].set_xlabel(r"query substitutions requested (\%)", fontsize=8)
+for ax in axes:
+    ax.set_xlim(-0.1, 10.1)
+    ax.set_ylim(0, 105)
+    ax.set_xticks((0, 2, 4, 6, 8, 10))
+    ax.set_yticks((0, 25, 50, 75, 100))
+    ax.tick_params(axis="both", labelsize=7)
+    ax.grid(axis="y", color="#e5e5e5", linewidth=0.45)
+
+legend = [
+    Line2D([0], [0], color=colors[4], linewidth=widths[4], label=r"$L=4$"),
+    Line2D([0], [0], color=colors[8], linewidth=widths[8], label=r"$L=8$"),
+    Line2D([0], [0], color=colors[16], linewidth=widths[16], label=r"$L=16$"),
+    Line2D([0], [0], marker="o", markerfacecolor="white",
+           markeredgecolor="#333333", linestyle="none", markersize=4,
+           label=r"$N=1$ differs"),
+]
+fig.legend(handles=legend, frameon=False, fontsize=7, ncol=4,
+           loc="lower center", bbox_to_anchor=(0.5, 0.005))
+fig.subplots_adjust(left=0.09, right=0.985, bottom=0.19, top=0.98, hspace=0.25)
+
+print(get_filename_from_extension(".pgf"))
+plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
+\end{CacheMeCode}
+\caption{BioseqDB \(\operatorname{Run}_L\) behavior along the highest-ranked
+predecessor path in the ordinary synthetic repeated-copy inputs, not the
+long-chain example.  Each of six fixed input blocks uses a pseudorandom
+4.5-Mbp target background and one pseudorandom source of length 997--1002
+bases.  For the 19 listed values from \(N=1\) to \(N=4000\), nonoverlapping
+forward copies of the unchanged source were deliberately planted in the
+target.  Queries were made from that source with nested substitutions from 0
+to 10 percent.  Thus, at nonzero substitution percentages, \(N\) counts
+homologous planted loci rather than exact copies of the changed query.  The
+separate \(N=5000\) sensitivity arm is not shown.  Here \(L\) is the batch
+width, \(B_L\) counts checks where \(\operatorname{Run}_L\) is true, \(E_L\)
+counts all loop checks, and \(q\) is the scalar path length.  Solid curves are
+six-input medians common to every tested \(N\geq2\).  Hollow markers show
+where the \(N=1\) median differs.  The values are logical opportunities, not
+measured speedups.}
+\label{fig:chaining-max-drop-runl}
+\end{figure}
+
+After summing the numerators and denominators over all primary observations,
+the firing ratios were 89.42, 70.05, and 37.15 percent for
+\(L=4,8,16\).  The corresponding ideal loop-iteration reductions were 72.84,
+83.06, and 84.79 percent.  At least one fast batch occurred in every one of
+the 4,674 primary observations for every width.  This 100-percent incidence
+does not mean that every evaluation was fast.  The upper panel gives that
+denominator-specific ratio.
+
+The median scalar path length fell from 179 anchors at zero divergence to
+78.5 at 5 percent and 32 at 10 percent.  At the last point, the 16-wide
+condition produced only one or two successful batches per input.  Its
+percentage was consequently discrete and variable, with an observed firing
+range of 6.25 to 66.67 percent.
+
+Within each seed and divergence level, every \((q,B_L,E_L)\) counter was
+identical for all 18 values \(N=2,\ldots,4000\).  Only \(N=1\) sometimes had
+longer runs of consecutive predecessor indices.  Its largest median firing-rate differences were 9.20,
+13.10, and 17.22 percentage points for \(L=4,8,16\), respectively.  Thus, as
+\(N\) increased in this construction, the number of candidate ends increased
+but no graded \(N\) trend appeared on the single highest-ranked path.  This
+statement must not be extended to all later backtracking paths.
+
+The four-wide case is the directly relevant Apple ARM64 width: four
+32-bit predecessor indices fit in one 128-bit NEON vector.  It remained true
+for a median 79.81 percent of loop evaluations even at 10 percent divergence,
+with a 70.48-percent ideal reduction in loop evaluations.  The 8- and
+16-wide results are what-if measurements for wider batches that require
+multiple NEON registers or other scheduling.  They are not single-instruction
+widths.  The evidence
+therefore supports keeping the four-wide \(\operatorname{Run}_4\) fast path as
+a frequent logical opportunity on this workload.  A BioseqDB timing benchmark
+is still required to decide its actual gain.  The next section returns from
+this empirical test to alternative chaining algorithms.
+
+
+
+\clearpage
