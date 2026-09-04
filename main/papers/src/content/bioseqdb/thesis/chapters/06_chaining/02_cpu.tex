@@ -1,0 +1,874 @@
+\section{B1: minimap2 dynamic programming}
+\label{sec:chaining-b1}
+
+As our scoring model $E(i,j)$ depends only on two anchors we can define recursive equations for dynamic programming:
+\begin{equation}
+ f_i=\max\!\left(
+   \ell_i,
+   \max_{j\in\mathcal{C}_i}\{f_j+E(j,i)\}
+ \right),
+ \qquad
+ p_i=\operatorname*{arg\,max}_{j\in\mathcal{C}_i}\{f_j+E(j,i)\}.
+\label{eq:chaining-b1-recurrence}
+\end{equation}
+Where $\mathcal{C}_i$ is the set of valid predecessors (selected by being close to diagonal - this is form of specifying cutoff condition so we don't need to check all possible predecessors all the time).
+Maximum function is used here to make sure that in worst case if our definition of $E(i,j)$ yield very low score we can say that we matched at least length of the minimizer span.
+
+If no predecessor improves the base value of score \(\ell_i\), then
+\(p_i=-1\).
+
+We will call iteration over $\mathcal{C}_i$ a scan. Minimap2 does this scan by visiting anchors in order from newest to oldest.
+
+After sorting, minimap2 numbers the anchors \(0,1,\ldots,n-1\). When the DP algorithm
+reaches anchor \(i\), the scores \(f_0,\ldots,f_{i-1}\) and predecessor
+indices \(p_0,\ldots,p_{i-1}\) have already been calculated. It starts a new
+chain at \(i\) with
+\[
+  f_i=\ell_i \qquad\text{and}\qquad p_i=-1,
+\]
+Minimap2 tests earlier anchors in the order \(j=i-1,i-2,\ldots\) (larger
+index is tested first). For every pair that passes the distance checks, it
+calculates
+\[
+  c_j=f_j+E(j,i).
+\]
+If \(c_j>f_i\), anchor \(j\) becomes the new predecessor:
+\(f_i\gets c_j\) and \(p_i\gets j\) (strict equality is important here so we avoid using older anchors with the same score)
+
+Trying every earlier anchor would make this dynamic program expensive. Minimap2 applies the following strategies to limit the work performed:
+\begin{itemize}
+  \item \texttt{max\_iter} limits how many previous anchors we scan: this is the number of highest-numbered array positions before \(i\).
+  \item \texttt{max\_skip} is the limit on skip counter \(s\). It starts at zero for every new \(i\) and is increased by one on marked anchor that fails to improve the score and decreased by one on marked anchor that improves the score. If skip counter exceeds limit we finish scan loop early and do not scan other previous anchors.
+  \item \texttt{m} is an extra candidate that is tested after the scan loop. It is the anchor with the highest score among all previously tested anchors (this is a measure to prevent skipping good chains due to too aggressive skip counter limit)
+  \item \texttt{CanScore(j,i)} checks the anchor distances to make sure the anchor lies within the band (close to diagonal). It uses $D_x$ and $D_y$ for limits on reference and query distances respectively and $B$ for distance from diagonal.
+\end{itemize}
+
+Minimap2 contains separate rules for multi-segment and cDNA input. The key algorithm stays the same and differences are very subtle:
+\begin{itemize}
+  \item There are differences in handling scoring case of \(g_i=g_j\)
+  \item Multi-segment non-cDNA input adds special requirement \(d_r\leq D_y\)
+  \item cDNA input does not force \(D_y\geq B\)
+  \item There are differences in penatly factors for scoring function $E(j,i)$
+\end{itemize}
+
+In description below I assume we talk about default case of one-segment, non-cDNA input.
+
+\info{Different kinds of input}{Multi-segment input is in case of Minimap2 described as a situation in which single query maps to different fragments of the reference section. I do not support this use case in BioseqDB out of the box at this time. This situation is also known as split-read or supplementary alignment and normally occurs due to due to structural variations, translocations, or chimeric artifacts in the genome. cDNA in this case describes the same situation, but has slightly different scoring parameters. Even though that can be interesting, we don't want to describe these modes here since those are very specialized heuristics}
+
+\subsection{Skipping with counters and marked anchors}
+
+As discussed above minimap2 scores only valid pairs of anchors:
+\begin{equation}
+  0<d_r(j,i)\leq D_x,\qquad
+  0<d_q(j,i)\leq\min(D_x,D_y),\qquad
+  \delta(j,i)\leq B,
+  \label{eq:chaining-b1-pair-checks}
+\end{equation}
+where \(B=\texttt{bw}\) where all parameters like $\texttt{bw}$ are minimap2's CLI arguments.
+\[
+  D_x=\max(\texttt{max\_dist\_x},B),\qquad
+  D_y=\max(\texttt{max\_dist\_y},B).
+\]
+
+After a candidate \(j\) passes this checks, we calculate $E(i,j)$ score and then update $p_j$ if we see better score. We want to that $p_j$ was updated in scan for $i$. This can be understood as building chains in parallel where we want to save information about predecessor for each anchor:
+\[
+  t_{p_j}\gets i \qquad\text{when }p_j\geq0.
+\]
+If some time later in other scan we see that $t_{p_j}=i$ then we know that $p_j$ was updated in scan for $i$ (we already tested candidate with a larger anchor). If marked anchor \(x\)
+fails to improve \(f_i\), then \(s\) increases by one. A failed unmarked anchor leaves \(s\) unchanged. An improvement subtracts one from a positive
+\(s\). It does not necessarily reset the counter to zero. The loop stops only when
+\(s>\texttt{max\_skip}\)
+
+\info{Interpretation}{This marking with skip counter can be intuitevely understood as a situation in which we try to improve the best chain by adding new anchor. If repeatedly this chain fails to improve the score, we don't want to waste more time on it.}
+
+We don't perform this marking when this is candidate thatraises \(s\) above
+\texttt{max\_skip} (in that case we stop the scan loop early).
+
+Minimap2 keeps the loop index in \(e\). If the skip
+test stopped the loop while it was processing \(j\), then \(e=j\). $e$ is used to check if we can score anchor $m$ (if $m<e$ then we can).
+
+\(m\) is additional index saved by minimap2 on the side, which we call the
+\emph{saved high-score anchor}. The saved value is
+an anchor index whose previously calculated \(f_m\) is large. If \(m\) is absent or has left the reference-distance window (is too far),
+minimap2 first rebuilds it by finding the largest \(f_j\) in the current
+\texttt{max\_iter} set.
+
+This saved anchor can then remain saved after
+\(m<i-\texttt{max\_iter}\). Each time we check $e<m$ (see if we already scored this anchor) and if not we calculate $E(m,i)$ and do update checks similar to other anchors.
+$m$ is introduced to make sure to take into consideration anchor that could be potentially a little bit further away. Minimap2 doesn't use priority queue or list here, because chaining accuracy is already good enough and this approach is much simpler.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=.86cm,y=.78cm,font=\footnotesize,>=Latex,
+  scan anchor/.style={circle,draw=black!70,very thick,minimum size=.62cm,
+    inner sep=0pt,font=\bfseries},
+  scan improve/.style={scan anchor,draw=chainOrange!95!black,
+    fill=chainOrange!22},
+  scan marked/.style={scan anchor,draw=chainBlue!95!black,
+    fill=chainBlue!19},
+  scan plain/.style={scan anchor,draw=chainGray!90!black,
+    fill=chainGray!16},
+  scan cache/.style={scan anchor,draw=chainGreen!85!black,
+    fill=chainGreen!18},
+  skip badge/.style={draw=black!65,fill=white,minimum width=.72cm,
+    minimum height=.34cm,inner sep=1pt,font=\scriptsize},
+  pred link/.style={-{Latex[length=1.6mm]},very thick,
+    draw=chainOrange!90!black},
+  square note/.style={draw=black!65,fill=gray!5,align=left,
+    rounded corners=0pt,inner sep=4pt}]
+  \node[anchor=west,font=\bfseries] at (.15,12.95)
+    {(a) Which earlier anchors can be scored};
+  \draw[->] (.65,6.65)--(6.25,6.65) node[right] {reference \(r\)};
+  \draw[->] (.65,6.65)--(.65,11.75) node[above] {query \(q\)};
+  \draw[draw=chainBlue!65,dashed,fill=chainBlue!5]
+    (1.20,7.05) rectangle (5.35,11.15);
+  \draw[dashed,chainOrange!85!black] (1.10,6.95)--(5.55,11.40);
+  \draw[dashed,chainOrange!85!black] (1.10,7.65)--(4.85,11.40);
+  \node[chain point,label=below left:\(a_0\)] at (1.55,7.55) {};
+  \node[chain point,label=below:\(a_1\)] at (2.55,8.55) {};
+  \node[chain point,label=below right:\(a_2\)] at (3.70,9.10) {};
+  \node[chain current,label=above right:\(a_i\)] at (5.35,11.15) {};
+  \node[circle,draw=chainGray!90,fill=chainGray!15,minimum size=.35cm,
+    inner sep=0pt,label={[align=right]left:{outside\\reference window}}]
+    at (.88,7.02) {};
+  \draw[chainOrange!90!black,very thick]
+    (4.03,7.72)--(4.31,8.00) (4.03,8.00)--(4.31,7.72);
+  \node[anchor=west,text=chainOrange!90!black] at (4.38,7.86)
+    {outside band};
+  \node[anchor=west,text=chainBlue!85!black] at (1.25,11.45)
+    {distance limits};
+
+  \node[square note,text width=5.45cm,anchor=west] at (7.35,9.35)
+    {For one query segment, score \(j\) only if\\[2pt]
+     \(a_j,a_i\) use the same reference and strand,\\
+     \(0<d_r\leq D_x\),\\
+     \(0<d_q\leq\min(D_x,D_y)\), and\\
+     \(\lvert d_r-d_q\rvert\leq B\).};
+
+  \node[anchor=west,font=\bfseries] at (.15,6.15)
+    {(b) One complete backward scan with concrete counter values};
+  \node[square note,text width=1.35cm,align=center] at (.85,2.75)
+    {current \(i=8\)\\start \(f_8=8\)\\\(p_8=-1\)\\saved \(m=0\)};
+  \draw[decorate,decoration={brace,amplitude=3pt}]
+    (1.72,5.25)--(11.40,5.25)
+    node[midway,above=4pt]
+      {main loop: positions 7 through 1
+       (\texttt{max\_iter}\(=7\))};
+
+  \node[scan improve] (s7) at (2.10,3.72) {7};
+  \node[scan plain]   (s6) at (3.60,1.78) {6};
+  \node[scan marked]  (s5) at (5.10,3.72) {5};
+  \node[scan marked]  (s4) at (6.60,1.78) {4};
+  \node[scan improve] (s3) at (8.10,3.72) {3};
+  \node[scan marked]  (s2) at (9.60,1.78) {2};
+  \node[scan marked]  (s1) at (11.10,3.72) {1};
+  \node[scan cache]   (s0) at (12.60,1.78) {0};
+
+  \draw[pred link] (s7.east)--node[midway,above,font=\scriptsize]
+    {\(p_7=5\)} (s5.west);
+  \draw[pred link] (s5.east)--node[midway,above,font=\scriptsize]
+    {\(p_5=3\)} (s3.west);
+  \draw[pred link] (s3.east)--node[midway,above,font=\scriptsize]
+    {\(p_3=1\)} (s1.west);
+  \draw[pred link] (s6.east)--node[midway,below,font=\scriptsize]
+    {\(p_6=4\)} (s4.west);
+  \draw[pred link] (s4.east)--node[midway,below,font=\scriptsize]
+    {\(p_4=2\)} (s2.west);
+  \draw[pred link] (s2.east)--node[midway,below,font=\scriptsize]
+    {\(p_2=0\)} (s0.west);
+
+  \node[align=center,font=\scriptsize] at (2.10,4.52)
+    {step 1\\\(c_7=14>8\)};
+  \node[align=center,font=\scriptsize] at (5.10,4.52)
+    {step 3\\\(c_5=12<14\)};
+  \node[align=center,font=\scriptsize] at (8.10,4.52)
+    {step 5\\\(c_3=16>14\)};
+  \node[align=center,font=\scriptsize] at (11.10,4.52)
+    {step 7\\\(c_1=14<16\): stop};
+
+  \node[align=center,font=\scriptsize] at (3.60,.62)
+    {step 2\\\(c_6=13<14\)};
+  \node[align=center,font=\scriptsize] at (6.60,.62)
+    {step 4\\\(c_4=11<14\)};
+  \node[align=center,font=\scriptsize] at (9.60,.62)
+    {step 6\\\(c_2=15<16\)};
+  \node[align=center,font=\scriptsize,text=chainGreen!60!black] at (12.60,.62)
+    {saved \(m=0\)\\\(c_0=17>16\)};
+
+  \node[skip badge] at (2.47,3.34) {\(s=0\)};
+  \node[skip badge] at (3.97,2.16) {\(s=0\)};
+  \node[skip badge] at (5.47,3.34) {\(s=1\)};
+  \node[skip badge] at (6.97,2.16) {\(s=2\)};
+  \node[skip badge] at (8.47,3.34) {\(s=1\)};
+  \node[skip badge] at (9.97,2.16) {\(s=2\)};
+  \node[skip badge] at (11.47,3.34) {\(s=3\)};
+
+  \node[square note,draw=chainGreen!75!black,fill=chainGreen!8,
+    text width=1.55cm,align=center] (cacheout) at (14.38,2.72)
+    {after checking \((0,8)\)\\\(f_8=17\)\\\(p_8=0\)};
+  \draw[-{Latex[length=1.7mm]},very thick,draw=chainGreen!75!black]
+    (s0.east)--(cacheout.west);
+
+  \node[scan improve,minimum size=.38cm] at (1.05,-.38) {};
+  \node[anchor=west,font=\scriptsize] at (1.30,-.38) {improves};
+  \node[scan marked,minimum size=.38cm] at (3.25,-.38) {};
+  \node[anchor=west,font=\scriptsize] at (3.50,-.38) {marked failure};
+  \node[scan plain,minimum size=.38cm] at (6.25,-.38) {};
+  \node[anchor=west,font=\scriptsize] at (6.50,-.38) {unmarked failure};
+  \node[scan cache,minimum size=.38cm] at (9.65,-.38) {};
+  \node[anchor=west,font=\scriptsize] at (9.90,-.38)
+    {saved high-score anchor};
+\end{tikzpicture}
+\caption{(a) The reference and query limits and diagonal band decide whether a pair can be
+scored or not. (b) If distance checks pass, then we perform scans in a loop. The picture shows one pass of the scan for the current anchor $i=8$. The numbers inside the circles are anchor indices. The orange
+arrow from \(j\) to \(p_j\) shows the predecessor previously saved for anchor
+\(j\). After \(j\) is scored without stopping, the arrow's destination
+receives the current mark \(i=8\). The numbered steps visit anchors
+\(7,6,\ldots,1\). The small \(s\) boxes show the single skip counter for
+current anchor 8. Step 2 doesn't affect \(s\) as this anchor doesn't have a predecessor in this scan pass (it's unmarked). Step 5 improves the score and changes \(s=2\) to \(s=1\).
+Anchor 0 is already outside the main loop because
+\(\texttt{max\_iter}=7\), so we don't scan it, but we check it later with $m=0$. Step 7 stops with \(e=1\), so saved \(m=0\)
+satisfies \(m<e\) and is checked once. The score of $m=0$ equal to 17 wins, but in some other scan other anchor could have a better score.}
+\label{fig:chaining-b1-scan}
+\end{figure}
+
+\begin{algorithm}[H]
+\caption{Minimap2's ordered predecessor scan for one query segment}
+\label{alg:chaining-b1}
+\small
+\begin{algorithmic}[1]
+  \Require sorted anchors \(a_0,\ldots,a_{n-1}\); ordinary non-cDNA mode;
+           configured distance limits, \(B=\texttt{bw}\),
+           \texttt{max\_iter}, and \texttt{max\_skip}
+  \Ensure chain scores \(f_i\) and predecessor indices \(p_i\)
+  \State \(D_x\gets\max(\texttt{max\_dist\_x},B)\)
+  \State \(D_y\gets\max(\texttt{max\_dist\_y},B)\)
+  \Function{CanScore}{\(j,i\)}
+    \State \(d_q\gets q_i-q_j,\quad d_r\gets r_i-r_j\)
+    \If{\(a_j,a_i\) use different references or strands}
+      \State \Return false
+    \EndIf
+    \If{\(d_r\leq0\) \textbf{or} \(d_r>D_x\)}
+      \State \Return false
+    \EndIf
+    \If{\(d_q\leq0\) \textbf{or} \(d_q>D_x\) \textbf{or} \(d_q>D_y\)}
+      \State \Return false
+    \EndIf
+    \If{\(\lvert d_r-d_q\rvert>B\)}
+      \State \Return false
+    \EndIf
+    \State \Return true
+  \EndFunction
+  \State \(t_j\gets0\) for every \(j\); \(m\gets-1\); \(st\gets0\)
+        \Comment{\(m\) is one saved anchor index}
+  \For{\(i\gets0\) \textbf{to} \(n-1\)}
+    \While{\(st<i\) and
+      (\(a_{st}\) has a different reference or strand from \(a_i\), or
+       \(r_i-r_{st}>D_x\))}
+      \State \(st\gets st+1\)
+    \EndWhile
+    \State \(st\gets\max(st,i-\texttt{max\_iter})\)
+          \Comment{hard lower bound for the main scan}
+    \State \(f_i\gets\ell_i,\quad p_i\gets-1,\quad s\gets0,\quad
+            e\gets st-1\)
+    \For{\(j\gets i-1\) \textbf{down to} \(st\)}
+      \If{\Call{CanScore}{\(j,i\)}}
+        \State \(c\gets f_j+E(j,i)\)
+        \If{\(c>f_i\)}
+          \State \(f_i\gets c,\quad p_i\gets j\)
+          \If{\(s>0\)}
+            \State \(s\gets s-1\)
+          \EndIf
+        \ElsIf{\(t_j=i\)}
+          \State \(s\gets s+1\)
+          \If{\(s>\texttt{max\_skip}\)}
+            \State \(e\gets j\)
+            \State \textbf{break}
+          \EndIf
+        \EndIf
+        \If{\(p_j\geq0\)}
+          \State \(t_{p_j}\gets i\)
+              \Comment{mark one older anchor for this scan}
+        \EndIf
+      \EndIf
+    \EndFor
+    \If{\(m<0\), or \(a_m\) has a different reference or strand from \(a_i\),
+          or \(r_i-r_m>D_x\)}
+      \State \(m\gets-1\)
+      \For{\(j\gets i-1\) \textbf{down to} \(st\)}
+        \If{\(m<0\) \textbf{or} \(f_j>f_m\)}
+          \State \(m\gets j\)
+        \EndIf
+      \EndFor
+    \EndIf
+    \If{\(m\geq0\) and \(m<e\)}
+      \If{\Call{CanScore}{\(m,i\)}}
+        \State \(c\gets f_m+E(m,i)\)
+        \If{\(c>f_i\)}
+          \State \(f_i\gets c,\quad p_i\gets m\)
+        \EndIf
+      \EndIf
+    \EndIf
+    \If{\(m<0\), or (\(a_m,a_i\) use the same reference and strand,
+          \(r_i-r_m\leq D_x\), and \(f_i>f_m\))}
+      \State \(m\gets i\)
+    \EndIf
+  \EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\info{Algorithm details}{We check if \(a_{st}\) has a different reference or strand from \(a_i\), because anchors in minimap2 can originate from different refences. In BioseqDB this won't happen, but we still need to check for strand direction. Also please note that formally we use different values for marking $t_{p_j} \gets i$, but it's main goal is just to detect visited anchors for the same scan pass (like in binary map, but assigning $i$ just means that we don't have to clear it.)}
+
+
+\section{BioseqDB SIMD DP: exact and bounded batch}
+\label{sec:chaining-simd-forward}
+
+For one target anchor \(a_i\), scalar B1 tests possible predecessors one at a
+time.  During the sacan it starts at \(a_{i-1}\) and walks towards the lower end of the search
+window. SIMD implementations both implement the same outer loop, but the scan itself is rewritten: We place each predecessor candidate in batches of size $L$ (each batch is one SIMD vector) - one vector call can
+calculate as many as \(L\) values of \(E(j,i)\). We have two kinds of SIMD algorithm:
+
+\begin{enumerate}
+  \item \textbf{Exact SIMD B1 called \texttt{exact\_visited}}
+        It it the most naive implementation: it calculates up to \(L\) pair scores together in a SIMD vector, but \(F\), \(P\), and \(s\) are still single scalars as in original B1. 
+
+  \item \textbf{Bounded batch SIMD B1 called
+        \texttt{bounded\_batch\_}\allowbreak\texttt{approximate}.}
+        Algorithm removes the mark array completely, while scalar skip counter in now counting batches.  Lane \(\lambda\)
+        keeps its own temporary best score \(H_\lambda\) and predecessor
+        \(P_\lambda\).  A shared counter \(u\) records how many
+        batches in a row failed to improve any lane (the algorithm stops when \(u\)
+        reaches its batch limit \(U\)). We take the largest score across the lane winners and test the saved
+        anchor \(m\) once.
+\end{enumerate}
+
+We will discuss bounded batch SIMD B1 first, as it is more interesting one.
+
+\subsection{Candidates in SIMD vectors}
+
+The candidates are placed in batches. So now in loops we use \(b=0\) instead of $j$ where $0$ is the first batch, \(b=1\) is the next older
+batch, and so on.  Within one batch,
+\(\lambda\in\{0,\ldots,L-1\}\) is the SIMD lane number.  The candidate
+placed in that lane is \(j_{b,\lambda}\).
+
+First we introduce the most boring thing - coordinates mapping:
+\begin{equation}
+\begin{aligned}
+  \mathrm{end}_b   &= i-bL,
+  &\qquad \mathrm{begin}_b &= \max(st_i,\mathrm{end}_b-L),\\
+  a_b              &= \mathrm{end}_b-\mathrm{begin}_b,
+  &\qquad j_{b,\lambda} &= \mathrm{begin}_b+\lambda .
+\end{aligned}
+  \label{eq:chaining-simd-batch-map}
+\end{equation}
+Here \(\mathrm{end}_b\) is the position immediately after the batch,
+\(\mathrm{begin}_b\) is its first candidate, and \(a_b\) is its number of
+active lanes. As candidates are split into batches, the last one can be partial (so $a_b$ will be used to mask out the inactive lanes).
+
+For lane \(\lambda\), the pair scorer first calculates
+\(\epsilon_{b,\lambda}=E(j_{b,\lambda},i)\).  The code then loads the earlier
+chain score \(f_{j_{b,\lambda}}\) and adds it to \(\epsilon_{b,\lambda}\).
+The complete proposed chain score is \(C_{b,\lambda}\), and
+\(\mathbf C_b\) is the vector containing one such total per lane.  A rejected
+candidate or an inactive lane receives \(-\infty\).
+
+Figure~\ref{fig:chaining-simd-lane-placement} depicts that now instead of single candidate being checked, we check batches:
+\begin{itemize}
+    \item \(C_{b,\lambda}\) holds total score for the candidates which corresponds to $c$ in original B1 algorithm
+    \item \(\mathbf j_b\) holds position of the candidate which corresponds to $j$ in original B1 algorithm
+    \item \(\mathbf H^{(b)}\) holds the best score for the batch which corresponds to $f_i$ in original B1 algorithm (note that now we hold vector instead of scalar, so at the end we need to select minimum value)
+    \item \(\mathbf P^{(b)}\) is shown later on the next figure and holds the index for \(\mathbf H^{(b)}\)
+\end{itemize}
+
+Note that only \(\mathbf H^{(b)}\) and \(\mathbf P^{(b)}\) are presisted between scans. The superscript \((-1)\) over $H$ means that we got this value from previous scan.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  x=1cm,
+  y=1cm,
+  font=\footnotesize,
+  cell/.style={draw=black!50,minimum width=.68cm,
+               minimum height=.58cm,inner sep=0pt},
+  candidate/.style={cell,draw=chainBlue!80!black,fill=chainBlue!12},
+  total/.style={cell,fill=chainOrange!7},
+  retained/.style={cell,draw=chainGreen!70!black,fill=chainGreen!12},
+  inactive/.style={cell,draw=chainGray!75,dashed,fill=chainGray!9,
+                   text=chainGray!85!black},
+  flow/.style={-{Latex[length=1.7mm]},line width=.65pt},
+  carry/.style={flow,draw=chainGreen!65!black}]
+
+  \node[anchor=west] at (.10,1.68)
+    {target \(i=16\), \(L=4\), \(st_i=2\); B5 starts with
+     \(\mathbf H^{(-1)}=[8,8,8,8]\)};
+  \node at (3.02,1.05) {candidate indices \(\mathbf j_b\)};
+  \node at (6.32,1.05) {candidate totals \(\mathbf C_b\)};
+  \node at (9.77,1.05) {B5 lane winners \(\mathbf H^{(b)}\)};
+
+  \node[anchor=east,font=\scriptsize] at (1.72,.62) {lane \(\lambda\)};
+  \foreach \base in {2.00,5.30,8.75} {
+    \foreach \lane in {0,...,3} {
+      \pgfmathsetmacro{\xx}{\base+.68*\lane}
+      \node[font=\scriptsize] at (\xx,.62) {\(\lane\)};
+    }
+  }
+
+  \newcommand{\DrawChainBatch}[5]{%
+    \node[anchor=east] at (1.55,#2) {\(b=#1\)};
+    \foreach \value [count=\lane from 0] in {#3} {
+      \pgfmathsetmacro{\xx}{2.00+.68*\lane}
+      \node[candidate] (chainj#1\lane) at (\xx,#2) {\(\value\)};
+    }
+    \foreach \value [count=\lane from 0] in {#4} {
+      \pgfmathsetmacro{\xx}{5.30+.68*\lane}
+      \node[total] (chainc#1\lane) at (\xx,#2) {\(\value\)};
+    }
+    \foreach \value [count=\lane from 0] in {#5} {
+      \pgfmathsetmacro{\xx}{8.75+.68*\lane}
+      \node[retained] (chainh#1\lane) at (\xx,#2) {\(\value\)};
+    }
+    \draw[flow] (chainj#13.east) -- (chainc#10.west);
+    \draw[flow] (chainc#13.east) -- (chainh#10.west);
+  }
+
+  \DrawChainBatch{0}{ 0.00}{12,13,14,15}{12,16,11,15}{12,16,11,15}
+  \DrawChainBatch{1}{-1.15}{ 8, 9,10,11}{13,14,10,15}{13,16,11,15}
+  \DrawChainBatch{2}{-2.30}{ 4, 5, 6, 7}{12,15, 9,14}{13,16,11,15}
+
+  \node[anchor=east] at (1.55,-3.45) {\(b=3\)};
+  \node[candidate] (chainj30) at (2.00,-3.45) {2};
+  \node[candidate] (chainj31) at (2.68,-3.45) {3};
+  \node[inactive]  (chainj32) at (3.36,-3.45) {--};
+  \node[inactive]  (chainj33) at (4.04,-3.45) {--};
+  \node[total]     (chainc30) at (5.30,-3.45) {10};
+  \node[total]     (chainc31) at (5.98,-3.45) {14};
+  \node[inactive]  (chainc32) at (6.66,-3.45) {$-\infty$};
+  \node[inactive]  (chainc33) at (7.34,-3.45) {$-\infty$};
+  \foreach \lane/\value in {0/13,1/16,2/11,3/15} {
+    \pgfmathsetmacro{\xx}{8.75+.68*\lane}
+    \node[retained] (chainh3\lane) at (\xx,-3.45) {\(\value\)};
+  }
+  \draw[flow] (chainj33.east) -- (chainc30.west);
+  \draw[flow] (chainc33.east) -- (chainh30.west);
+
+  \node[font=\scriptsize,text=chainOrange!90!black] at (.30,.47) {newest};
+  \draw[flow,draw=chainOrange!90!black] (.30,.27) -- (.30,-3.72);
+  \node[font=\scriptsize,text=chainOrange!90!black] at (.30,-3.94) {older};
+
+  \draw[carry] (chainh03.east) -- (11.45,0) |- (chainh13.east);
+  \draw[carry] (chainh13.east) -- (11.45,-1.15) |- (chainh23.east);
+  \draw[carry] (chainh23.east) -- (11.45,-2.30) |- (chainh33.east);
+  \node[rotate=90,font=\scriptsize,text=chainGreen!55!black]
+    at (11.72,-1.72) {carry all four values};
+
+  \foreach \n in {
+    chainc00,chainc01,chainc02,chainc03,
+    chainh00,chainh01,chainh02,chainh03,
+    chainc10,chainh10} {
+    \draw[chainOrange!95!black,line width=.8pt]
+      (\n.south west) rectangle (\n.north east);
+  }
+\end{tikzpicture}
+\caption{How predecessor candidates are placed in four SIMD lanes. The lane number \(\lambda\)
+selects the corresponding column in all three vectors.  Blue boxes are
+candidate indices, orange boxes are calculated scores, and green boxes
+are best scores (the scores are improved vertically).  When a lane improves its new maximum has an orange outline.  Batch 3 is partial (we exhausted all candidates), so its two dashed lanes are inactive and their
+totals are \(-\infty\).}
+\label{fig:chaining-simd-lane-placement}
+\end{figure}
+
+
+% \subsection{Exact SIMD B1}
+
+% For target \(i\), exact SIMD B1 initializes one shared score \(F=\ell_i\), one
+% shared predecessor \(P=-1\), and one shared skip counter \(s=0\).  These
+% values belong to the target, not to individual lanes.  After calculating
+% \(\mathbf C_b\), it builds two masks:
+% \begin{align}
+%   X_{b,\lambda}
+%     &= [C_{b,\lambda}>F],
+%     \label{eq:chaining-simd-can-improve}\\
+%   V_{b,\lambda}
+%     &= [C_{b,\lambda}\neq-\infty]\land[t_{j_{b,\lambda}}=i].
+%     \label{eq:chaining-simd-visited-hit}
+% \end{align}
+% Here \(X\) says that a candidate can beat the target score at the start of the
+% batch.  The mask \(V\) says that a valid candidate is marked by a newer
+% candidate's saved predecessor.  Before reading \(V\), the SIMD code writes
+% \(t_{p_j}\gets i\) for every valid lane with \(p_j\geq0\).  A predecessor
+% always has a smaller index than its anchor.  The writes can therefore be made
+% for the whole batch before the decisions without changing which marks the
+% newest-to-oldest scan observes.
+
+% If every element of \(\mathbf X_b\) is false, no candidate in the batch can
+% change \(F\).  Exact SIMD counts the true elements of \(\mathbf V_b\) at once.
+% If that count would make \(s\) exceed \texttt{max\_skip}, it reads only the
+% bits needed to locate the exact candidate where scalar B1 would stop.
+
+% If any element of \(\mathbf X_b\) is true, the code copies the pair scores
+% \(\boldsymbol\epsilon_b=[E(j_{b,\lambda},i)]_\lambda\) and \(\mathbf V_b\) to
+% small lane arrays.  It then reads those values from the newest lane to the
+% oldest lane, forms \(C_{b,\lambda}=f_{j_{b,\lambda}}+\epsilon_{b,\lambda}\),
+% and applies the scalar rules:
+% \begin{equation}
+%   \begin{aligned}
+%   C_{b,\lambda}>F
+%     &\;\Longrightarrow\;
+%       (F,P,s)\gets
+%       (C_{b,\lambda},j_{b,\lambda},\max(0,s-1)),\\
+%   C_{b,\lambda}\leq F\ \land\ V_{b,\lambda}
+%     &\;\Longrightarrow\; s\gets s+1.
+%   \end{aligned}
+%   \label{eq:chaining-simd-exact-control}
+% \end{equation}
+% This second step is a one-by-one control pass over SIMD-produced scores.  It
+% does not call the scalar pair-scoring function.  Strict comparison keeps the
+% newest predecessor when two candidates give an equal total score.  The code
+% then performs B1's saved-high-score-anchor check for \(m\), including its
+% strict cache update.  That extra calculation uses the SIMD scorer with one
+% active lane.
+
+
+We operate on batches so we need to adjust our definition of skip counter.
+Let \(S=\texttt{max\_chain\_skip}\):
+\begin{equation}
+ U=\max\!\left\{1,\left\lfloor\frac{S}{L}\right\rfloor+1\right\}
+\label{eq:chaining-batch-limit}
+\end{equation}
+
+As a helper we introduce $I_{b,\lambda}$ which is just binary mask checking lane-wise which $C$ value is better than $H$, so we update skip counter according to the following rules:
+\begin{equation}
+ u_b=
+ \begin{cases}
+   0,&\text{if any }I_{b,\lambda}\text{ is true},\\
+   u_{b-1}+1,&\text{otherwise.}
+ \end{cases}
+ \label{eq:chaining-b5-counter}
+\end{equation}
+When \(u_b\geq U\) the algorithm stops. In original B1 we had guarantee that we will stop after $S$ skipped candidates, but here we stop after $U$ such that: \(S<LU\leq S+L\). This doesn't however bother us at all, as this is only very minor implementation detail user doesn't need to see.
+
+The figure below depcits two kinds of SIMD B1 algorithms. The first one (a) wasn't discussed in detail as it only puts the candidates in a single SIMD vector to speed up only few operations like finding the maximum, where the rest of the code stays unchanged. The second parts of figure (b) is more interesting as it shows the approach we discussed with vector batching.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  x=.60cm,y=.72cm,font=\footnotesize,>=Latex,
+  vec/.style={draw=black!70,fill=white,minimum width=.62cm,
+              minimum height=.48cm,inner sep=0pt},
+  improve/.style={vec,draw=chainOrange!95!black,very thick,
+                  fill=chainOrange!18},
+  keep/.style={vec,draw=chainBlue!85!black,fill=chainBlue!12},
+  winner/.style={vec,draw=chainGreen!80!black,very thick,
+                 fill=chainGreen!17},
+  hstate/.style={vec,draw=chainGreen!75!black,fill=chainGreen!11},
+  pstate/.style={vec,draw=chainBlue!80!black,fill=chainBlue!11},
+  omitted/.style={vec,draw=chainGray!80!black,dashed,
+                  fill=chainGray!15,text=chainGray!90!black},
+  saved/.style={omitted,draw=chainOrange!95!black,very thick,
+                fill=chainOrange!18,text=black},
+  note/.style={draw=black!65,fill=gray!5,align=center,inner sep=3pt},
+  state/.style={note,minimum width=2.25cm,minimum height=.62cm},
+  process/.style={note,minimum width=2.80cm,minimum height=.82cm,
+                  inner xsep=5pt,inner ysep=4pt},
+  rescue/.style={note,minimum width=4.60cm,minimum height=.92cm,
+                 inner xsep=7pt,inner ysep=5pt},
+  finalstate/.style={winner,minimum width=3.10cm,minimum height=.92cm,
+                    inner xsep=7pt,inner ysep=5pt,align=center}]
+
+  \node[anchor=west,font=\bfseries] at (.10,12.70)
+    {(a) Exact B1: we just score 4 candidates together, while most of the code is still scalar};
+  \node[anchor=west] at (.10,12.05)
+    {target \(i=16\), \(L=4\), start \(F=\ell_i=8\)};
+  \node[anchor=east,font=\scriptsize] at (4.55,11.42) {lane};
+  \foreach \x/\lab in {5.25/0,6.25/1,7.25/2,8.25/3}
+    \node[font=\scriptsize] at (\x,11.42) {\(\lab\)};
+  \node[anchor=east] at (4.55,10.72) {candidate \(j\)};
+  \foreach \x/\v in {5.25/12,6.25/13,7.25/14,8.25/15}
+    \node[vec] at (\x,10.72) {\(\v\)};
+  \node[anchor=east] at (4.55,10.00) {total \(C_j\)};
+  \foreach \x/\v in {5.25/12,6.25/16,7.25/11,8.25/15}
+    \node[improve] at (\x,10.00) {\(\v\)};
+  \node[anchor=east,font=\scriptsize] at (4.55,9.28)
+    {read newest first};
+  \draw[->,very thick,draw=chainOrange!90!black]
+    (8.60,9.28)--(5.00,9.28);
+
+  \node[state] (a0) at (2.10,8.10) {start\\\((F,P)=(8,-1)\)};
+  \node[state] (a1) at (6.05,8.10) {read \(j=15\)\\\((F,P)=(15,15)\)};
+  \node[state] (a2) at (10.00,8.10) {read \(j=14\)\\\((F,P)=(15,15)\)};
+  \node[state] (a3) at (13.95,8.10) {read \(j=13\)\\\((F,P)=(16,13)\)};
+  \node[state] (a4) at (17.90,8.10) {read \(j=12\)\\\((F,P)=(16,13)\)};
+  \draw[->,thick] (a0)--(a1);
+  \draw[->,thick] (a1)--(a2);
+  \draw[->,thick] (a2)--(a3);
+  \draw[->,thick] (a3)--(a4);
+
+  \draw[black!35] (.10,7.20)--(23.65,7.20);
+  \node[anchor=west,font=\bfseries] at (.10,6.70)
+    {(b) Bounded B5: persistent lane winners and one shared counter};
+  \node[anchor=west] at (.10,6.10)
+    {target \(i=16\), \(L=4\), \(st_i=0\), \(S=3\),
+     \(U=\lfloor3/4\rfloor+1=1\)};
+  \node at (.35,5.55) {batch};
+  \node at (3.045,5.55) {candidates \(\mathbf j_b\)};
+  \node at (7.545,5.55) {totals \(\mathbf C_b\)};
+  \node at (13.195,5.55) {scores \(\mathbf H^{(b)}\)};
+  \node at (17.645,5.55) {indices \(\mathbf P^{(b)}\)};
+  \node at (21.35,5.55) {\(\mathbf I_b\)};
+  \node at (23.00,5.55) {\(u_b\)};
+  \foreach \x/\lab in {11.65/0,12.68/1,13.71/2,14.74/3,
+                         16.10/0,17.13/1,18.16/2,19.19/3}
+    \node[font=\scriptsize] at (\x,4.95) {\(\lab\)};
+
+  \node at (.35,4.25) {initial};
+  \foreach \x/\v in {11.65/8,12.68/8,13.71/8,14.74/8}
+    \node[hstate] at (\x,4.25) {\(\v\)};
+  \foreach \x/\v in {16.10/{-1},17.13/{-1},18.16/{-1},19.19/{-1}}
+    \node[pstate] at (\x,4.25) {\(\v\)};
+
+  \node at (.35,3.15) {0};
+  \foreach \x/\v in {1.50/12,2.53/13,3.56/14,4.59/15}
+    \node[vec] at (\x,3.15) {\(\v\)};
+  \foreach \x/\v in {6.00/12,7.03/16,8.06/11,9.09/15}
+    \node[improve] at (\x,3.15) {\(\v\)};
+  \foreach \x/\v [count=\lane from 0] in {11.65/12,12.68/16,13.71/11,14.74/15}
+    \node[hstate] (bh0\lane) at (\x,3.15) {\(\v\)};
+  \foreach \x/\v [count=\lane from 0] in {16.10/12,17.13/13,18.16/14,19.19/15}
+    \node[pstate] (bp0\lane) at (\x,3.15) {\(\v\)};
+  \node at (21.35,3.15) {\([1,1,1,1]\)};
+  \node at (23.00,3.15) {0};
+
+  \node at (.35,2.05) {1};
+  \foreach \x/\v in {1.50/8,2.53/9,3.56/10,4.59/11}
+    \node[vec] at (\x,2.05) {\(\v\)};
+  \node[improve] at (6.00,2.05) {\(13\)};
+  \foreach \x/\v in {7.03/14,8.06/10,9.09/15}
+    \node[keep] at (\x,2.05) {\(\v\)};
+  \foreach \x/\v [count=\lane from 0] in {11.65/13,12.68/16,13.71/11,14.74/15}
+    \node[hstate] (bh1\lane) at (\x,2.05) {\(\v\)};
+  \foreach \x/\v [count=\lane from 0] in {16.10/8,17.13/13,18.16/14,19.19/15}
+    \node[pstate] (bp1\lane) at (\x,2.05) {\(\v\)};
+  \node at (21.35,2.05) {\([1,0,0,0]\)};
+  \node[improve] at (23.00,2.05) {0};
+
+  \node at (.35,.95) {2};
+  \foreach \x/\v in {1.50/4,2.53/5,3.56/6,4.59/7}
+    \node[vec] at (\x,.95) {\(\v\)};
+  \foreach \x/\v in {6.00/12,7.03/15,8.06/9,9.09/14}
+    \node[keep] at (\x,.95) {\(\v\)};
+  \foreach \x/\v [count=\lane from 0] in {11.65/13,12.68/16,13.71/11,14.74/15}
+    \node[hstate] (bh2\lane) at (\x,.95) {\(\v\)};
+  \foreach \x/\v [count=\lane from 0] in {16.10/8,17.13/13,18.16/14,19.19/15}
+    \node[pstate] (bp2\lane) at (\x,.95) {\(\v\)};
+  \node at (21.35,.95) {\([0,0,0,0]\)};
+  \node[winner] (bstop) at (23.00,.95) {1};
+
+  \draw[->,very thick,draw=chainGreen!75!black]
+    (10.38,4.55)--(10.38,.78);
+  \node[rotate=90,font=\scriptsize,text=chainGreen!65!black,
+        fill=white,inner sep=1pt] at (10.02,2.67)
+    {vertical maximum};
+
+  \foreach \n in {
+    bh00,bh01,bh02,bh03,bp00,bp01,bp02,bp03,bh10,bp10} {
+    \draw[chainOrange!95!black,very thick]
+      (\n.south west) rectangle (\n.north east);
+  }
+  \draw[chainGreen!80!black,very thick]
+    (bh21.south)--(12.68,.40)--(17.13,.40)--(bp21.south);
+  \draw[chainGreen!80!black,very thick]
+    (bh21.south west) rectangle (bh21.north east);
+  \draw[chainGreen!80!black,very thick]
+    (bp21.south west) rectangle (bp21.north east);
+  \node[font=\scriptsize,text=chainGreen!65!black] at (14.905,.08)
+    {horizontal maximum: \((16,13)\)};
+  \draw[->,thick,draw=chainGreen!75!black]
+    (bstop.south)--(23.00,.35);
+  \node[anchor=east,font=\scriptsize,text=chainGreen!65!black]
+    at (23.65,.08) {stop: \(u=1=U\)};
+
+  \node[anchor=east,align=right] at (1.05,-.80) {omitted by\\batch loop};
+  \foreach \x/\v in {1.50/0,2.53/1,4.59/3}
+    \node[omitted] at (\x,-.80) {\(\v\)};
+  \node[saved] (savedm) at (3.56,-.80) {\(2\)};
+  \node[anchor=south,font=\scriptsize,text=chainOrange!95!black]
+    at (3.56,-.34) {saved \(m=2\)};
+
+  \node[process] (b0) at (2.90,-2.55)
+    {horizontal maximum\\\((F,P)=(16,13)\)};
+  \node[rescue] (b1) at (11.20,-2.55)
+    {score the saved anchor \(m=2\) once\\\(C_m=17\)};
+  \node[finalstate] (b2) at (21.05,-2.55)
+    {final \((F,P)=(17,2)\)};
+  \draw[->,thick] (b0)--(b1);
+  \draw[->,thick] (b1)--(b2);
+  \draw[->,thick,draw=chainOrange!95!black]
+    (savedm.south)--(3.56,-1.55)--(11.20,-1.55)--(b1.north);
+  \node[font=\footnotesize,text=chainOrange!95!black,fill=white,
+        inner xsep=4pt,inner ysep=2pt]
+    at (7.35,-1.55) {one-lane total \(C_m=17\)};
+\end{tikzpicture}
+\caption{Two strategies for calculating SIMD B1 (a) Exact B1 calculates
+four totals together, then applies state changes in the scalar order whenever
+some lane can improve.  (b) Bounded SIMD is more clever - it starts with
+\(\mathbf H^{(-1)}=[8,8,8,8]\) and
+\(\mathbf P^{(-1)}=[-1,-1,-1,-1]\).  Each row shows both vectors after its
+batch.  Green boxes hold scores and blue boxes hold their predecessor indices.
+An orange border around \(C\) marks a new improvement (maximum). Orange
+borders around \(H\) and \(P\) show the stored pair that changed.  All four
+lanes change in batch 0.  In batch 1, only lane zero changes, to
+\((H_0,P_0)=(13,8)\).
+Batch 2 changes neither vector, so \(u=1=U\) and candidates 0 through 3 (bottom gray area) are
+omitted.  The downward arrow shows that each lane keeps its best
+\((H,P)\) pair while the scan moves through older batches.  The horizontal
+maximum then compares the four lane scores.  Lane 1 supplies the pair selected
+by that horizontal maximum,
+\((H^{(2)}_1,P^{(2)}_1)=(16,13)\), marked by the green bracket and outlines.
+The orange box marks saved candidate \(m=2\), whose separate one-lane total
+\(C_m=17\) replaces the result with \((17,2)\).}
+\label{fig:chaining-b5-batches}
+\end{figure}
+
+After the last scored batch, the algorithm takes horizontal maximum of a vector once more:
+\begin{equation}
+ f_i=\max_\lambda H_\lambda,
+ \qquad
+ p_i=\max\{P_\lambda:H_\lambda=f_i\}.
+ \label{eq:chaining-b5-horizontal-reduction}
+\end{equation}
+
+The algorithm is described in detail in Algorithm~\ref{alg:chaining-b5}.
+
+\begin{algorithm}[H]
+\caption{Bounded SIMD B1}
+\label{alg:chaining-b5}
+\small
+\begin{algorithmic}[1]
+  \Require target \(i\), window \([st_i,i)\), SIMD width \(L\),
+           \(S=\texttt{max\_chain\_skip}>0\),
+           \(\texttt{max\_chain\_iter}>0\), saved index \(m\)
+  \Ensure \(f_i,p_i\)
+  \State \(U\gets\max\{1,\lfloor S/L\rfloor+1\}\)
+        \Comment{whole-batch stopping limit}
+  \State \(\mathbf H\gets[\ell_i]^L,\quad
+         \mathbf P\gets[-1]^L,\quad u\gets0\)
+        \Comment{one temporary winner per lane}
+  \State \(o\gets st_i\)
+        \Comment{no omitted interval yet: \([st_i,o)\) is empty}
+  \For{\(b\gets0,1,\ldots\) while \(\mathrm{end}_b>st_i\)}
+    \State calculate \(\mathrm{begin}_b,\mathrm{end}_b,a_b,\mathbf j_b\) using
+           Equation~\ref{eq:chaining-simd-batch-map}
+    \State \(\mathbf A\gets[\lambda<a_b]_{\lambda=0}^{L-1}\)
+          \Comment{mask unused lanes in the oldest partial batch}
+    \State \(\boldsymbol\epsilon\gets
+           \Call{PairScoreBatch}{\mathbf j_b,i,\mathbf A}\)
+          \Comment{\(E(j,i)\), or \(-\infty\) for a rejected pair}
+    \State \(\mathbf C\gets
+           \Call{Select}{\boldsymbol\epsilon\neq-\infty,
+             \mathbf f[\mathbf j_b]+\boldsymbol\epsilon,-\infty}\)
+          \Comment{total candidate scores}
+    \State \(\mathbf I\gets(\mathbf C>\mathbf H)\)
+          \Comment{strict lane-wise improvements}
+    \State \(\mathbf H\gets\Call{Select}{\mathbf I,\mathbf C,\mathbf H}\)
+    \State \(\mathbf P\gets\Call{Select}{\mathbf I,\mathbf j_b,\mathbf P}\)
+          \Comment{equal older candidates do not replace}
+    \If{\(\Call{Any}{\mathbf I}\)}
+      \State \(u\gets0\)
+    \Else
+      \State \(u\gets u+1\)
+    \EndIf
+    \If{\(u\geq U\) and \(\mathrm{begin}_b>st_i\)}
+      \State \(o\gets \mathrm{begin}_b\)
+            \Comment{batch loop omits \([st_i,o)\)}
+      \State \textbf{break}
+    \EndIf
+  \EndFor
+  \State \(f_i\gets\Call{HorizontalMax}{\mathbf H}\)
+  \State \(\mathbf T\gets\Call{Select}{\mathbf H=f_i,\mathbf P,-1}\)
+  \State \(p_i\gets\Call{HorizontalMax}{\mathbf T}\)
+        \Comment{largest predecessor index wins a score tie}
+  \If{\(f_i=\ell_i\)}
+    \State \(p_i\gets-1\)
+  \EndIf
+  \If{\(m<st_i\) or \(m\) is outside the current reference and strand window}
+    \State \(m\gets\operatorname*{arg\,max}_{st_i\leq j<i}(f_j,j)\),
+           or \(-1\) if this interval is empty
+          \Comment{compare score first, then index}
+  \EndIf
+  \If{\(st_i\leq m<o\)}
+    \State \(\epsilon_m\gets\Call{PairScoreOneSIMDLane}{m,i}\)
+          \Comment{\(-\infty\) when the pair is rejected}
+    \If{\(\epsilon_m\neq-\infty\)}
+      \State \(c\gets f_m+\epsilon_m\)
+      \If{\(c>f_i\)}
+        \State \(f_i\gets c,\quad p_i\gets m\)
+      \EndIf
+    \EndIf
+  \EndIf
+  \If{\(m<0\) or \(f_i\geq f_m\)}
+    \State \(m\gets i\)
+          \Comment{B5 moves the cache to the newer anchor on a tie}
+  \EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\clearpage
+\subsection{Summary of forward chaining algorithms for CPU}
+\label{sec:chaining-mm2-fast-forward}
+
+mm2-fast is another version of minimap2 where specific parts were accelerated. The chaining algorithm in BioseqDB was inspired by mm2-fast (but note that as in case of other scientific work, mm2-fast provided only AVX2/AVX512 kernel, not universal code like in case of BioseqDB).
+There are some slight differences in high-level algorithm design:
+\begin{itemize}
+    \item mm2-fast doesn't seem to have counter of anchors that does not improve the best score in the current batch (In BioseqDB bounded SIMD B1 we introduced such counter and in the pseudocode it's called $U$)
+    \item mm2-fast uses scalar code to check for the lane winner, while BioseqDB bounded SIMD B1 uses SIMD instructions
+    \item mm2-fast fallbacks to scalar code for fewer anchors than lane count
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\caption{Summary of all forward chaining implementations for CPU}
+\label{tab:chaining-mm2-fast-forward}
+\footnotesize
+\setlength{\tabcolsep}{3.0pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{@{}
+  >{\raggedright\arraybackslash}p{0.18\linewidth}
+  >{\raggedright\arraybackslash}X
+  >{\raggedright\arraybackslash}p{0.26\linewidth}
+  >{\raggedright\arraybackslash}p{0.18\linewidth}@{}}
+\toprule
+\textbf{Method} &
+\textbf{How candidates are processed} &
+\textbf{When the scan stops} &
+\textbf{How the result is selected}\\
+\midrule
+minimap2 B1 &
+Score one predecessor \(j\) at a time.  After each candidate, update the
+shared best pair and scalar skip/mark state &
+At the end of the chain, or when the scalar \texttt{max\_skip} rule
+fires while \(j\) decreases &
+The shared \((f_i,p_i)\) is already final\\
+\addlinespace
+BioseqDB exact SIMD B1 &
+Score one predecessor per active lane.  Inspect a batch in decreasing \(j\)
+order when it may improve the best score or locate the exact
+\texttt{max\_skip} stop &
+At the same candidate as scalar B1 &
+The shared \((f_i,p_i)\) is already final\\
+\addlinespace
+mm2-fast &
+Score one predecessor per active lane.  Each lane keeps its best pair across
+blocks &
+At the end of chain as there is no \texttt{max\_skip} &
+Scalar code scans the lane winners\\
+\addlinespace
+BioseqDB bounded batch SIMD B1 &
+Score one predecessor per active lane.  Each lane keeps its best pair, and
+one counter tracks batches with no lane-local improvement &
+At the end of the chain, or after \(U\) such consecutive batches &
+Choose the best lane result\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\warn{Experimental justification}{Note that although I was inspired by mm2-fast I still decided to apply the $U$ limit with a counter (for counting anchors that do not improve score). This is not justified for now. Experimental data supporting this decision is presented in a separate section}
