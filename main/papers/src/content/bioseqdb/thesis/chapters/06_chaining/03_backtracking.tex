@@ -1110,5 +1110,5 @@ On the pseudocode listing for row \(\lambda\) of \(V\) denoted as \(V_\lambda\):
 \end{algorithmic}
 \end{algorithm}
 
-\info{Minor improvements}{Note that we check $\bigwedge_{\lambda=0}^{q-1}t_{e_\lambda}=1\)$ for the first iteration to check if we have chains that all go through other chains that were already all marked. This could be implemented via SIMD masks operations, but in my code I count the true bits and compare their count.
+\info{Minor improvements}{Note that we check $\bigwedge_{\lambda=0}^{q-1}t_{e_\lambda}=1$ for the first iteration to check if we have chains that all go through other chains that were already all marked. This could be implemented via SIMD masks operations, but in my code I count the true bits and compare their count.
 This means there are still some very minor optimisation opportunities that could be explored}
