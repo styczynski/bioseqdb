@@ -1,8 +1,25 @@
-\section{Statistical modelling ofCPU forward and backward passes}
+\section{Statistical modelling of CPU forward and backward passes}
 \label{sec:chaining-runl-repeat-experiment}
 
 The first loop in Algorithm~\ref{alg:chaining-simd-backtrack} can process
-\(L\) anchors at once only when \(\operatorname{Run}_L(j,c)\) is true.  The
+\(L\) anchors at once only when \(\operatorname{Run}_L(j,c)\) is true. 
+We also use update counter $U$ in Algorithm~\ref{alg:chaining-b5} to terminate loop if the consecutive updates don't improve any SIMD lane.
+At the same time minimap2 uses \text{max\_drop} in its algorithm~\ref{fig:chaining-minimap2-backtracking} to terminate backtracking if the score drop is too large.
+
+We never explained any proper justification for using or not using these heuristics. This section talks about random synthetic data and intuitive explanation behind the choices.
+The subsections talk about:
+\begin{itemize}
+  \item Preparing synthetic data (randomly generated sequences with no insertions/deletions) and specially constructed examples
+  \item Answering if counting number of updates that do not improve score in forward chaining algorithm~\ref{alg:chaining-b5} improve performance
+  \item Answering if the anchors during backtracking~\ref{alg:chaining-simd-backtrack} are just continous sequences of indices incremented by 1 (\(\operatorname{Run}_L(j,c)\) condition)
+  \item Answering if max drop would help us increase performance of SIMD backtracking algorithm~\ref{fig:chaining-minimap2-backtracking}
+\end{itemize}
+
+\warn{Synthetic data}{The modelling here is conducted on synthetic data without indels. Under normal conditions substitutions should be at least few times more frequent than indels. The analysis on the syntetic data is only meant to show motivation behind our approach and formulate conditions under which the optimisations cost will be higher than the benefit.}
+
+\subsection{Problematic chains}
+
+The
 score and equal-score tie rule select the first chain end.  The predicate then
 requires each of the next \(L\) predecessor links to move to the preceding
 slot in the coordinate-sorted anchor array.
