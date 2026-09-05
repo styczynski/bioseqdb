@@ -1,12 +1,12 @@
 
-\subsection{Reverse chaining (backtracking)}
+\section{Reverse chaining (backtracking)}
 
 The forward pass has already produced one score \(f_i\) and one predecessor
 \(p_i\) for every anchor. Backtracking follows the predecessor links and turns
 them into the chain records and flat anchor array \(A\) defined at the start of
 this chapter.
 
-\subsubsection{Formal definition for backtracking}
+\subsection{Formal definition for backtracking}
 
 Anchors have their score assigned: \(f_i\). We would like to start by considering the highest scores as they are the best chains according to our score function. 
 We sort the anchors in descending order of their scores: \(f_{a_0} \geq f_{a_1} \geq \ldots \geq f_{a_{n-1}}\).
@@ -806,14 +806,6 @@ The relevant scores for the example are:
 \end{itemize}
 
 
-The first path is
-\(19,9,8,\ldots,0\).  It marks these anchors before the next four ends are
-collected.  For the later ends, the relevant scores are
-\[
-  f_{19}=100,\quad f_{18}=90,\quad f_{17}=85,\quad f_{16}=80,\quad
-  f_{15}=75,\quad f_9=40,\quad f_{11}=55,\quad f_{10}=50.
-\]
-
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[
@@ -1000,12 +992,9 @@ collected.  For the later ends, the relevant scores are
   \node[anchor=west,font=\scriptsize] at (10.05,1.30)
     {the stop anchor is excluded};
 \end{tikzpicture}
-\caption{BioseqDB SIMD backtracking with four lanes.  Every SIMD vector is a
-connected horizontal group.  Panel~(a) shows the special handling of the
-first path.  Panel~(b) shows horizontal collection vectors on the left and
-the path-row buffer on the right.  Indexed scatter creates this layout
-directly.  Panel~(c) reads one row at a time, so the path with the larger
-\((f_e,e)\) pair claims a shared anchor first.}
+\caption{BioseqDB SIMD backtracking with four $L$ lanes. Panel~(a) shows the special handling of the
+first path. If we detect $Run_L$ is true, then we use entire SIMD vector just for this one chain (SIMD vector contains anchors for $L=4$ different chains).  Panel~(b) shows the other case when $Run_L$ if false. The SIMD vector changes with each iteration $d=0,1,2,3$ and it's used to store (scatter) anchors indices into the buffer (on the right size).
+Panel~(c) reads one row at a time from the buffer starting at highest-scoring anchors first (now the SIMD vector as in case of Panel~(a) contains one chain), we check for marked nodes via $\text{FirstMarked}$ function. If there are no marked anchors detected then we iterate this processing multiple times going through the chain. After reaching either end or marked node, we save the chain if it's score is greater than required threshold and it's length is sufficient.}
 \label{fig:chaining-simd-backtracking}
 \end{figure}
 
@@ -1018,37 +1007,24 @@ The accepted output in this example is
 \end{aligned}
 \]
 Each record in \(C\) is \((\text{score},\text{count},\text{start})\).
-Path~3 marks \(a_{15}\) before testing its thresholds.  Its rejected anchor
-therefore remains claimed but is not copied into \(A\).
+For \(a_{15}\) (in the Panel~(c)) we mark it before testing its thresholds, but then the next anchor has too low score and is rejected. Because the chain length is just $1$ which is lower than minimum required length, we don't copy that chain into \(A\).
 
-The following listing uses the same symbols as
-Algorithms~\ref{alg:chaining-minimap2-boundary} and
-\ref{alg:chaining-minimap2-backtrack}.  For one stored row, define
+In the listing below, I present the code for this backtracking algorithm.
+
+In the pseudocode we use $Run_L$ to set $g$ which is either $L$ or $1$ depending if we choose multi-path or single-path iteration.
+Additionally, we didn't define $FirstMarked$ function in the pseudocode as it's just helper to determine left-most marked anchor in the row (limited to only $g$ entries):
 \[
   \operatorname{FirstMarked}(t,V_{\lambda},o,g)=
   \min\bigl(\{u\mid 0\leq u<g\land
     t_{V_{\lambda,o+u}}=1\}\cup\{g\}\bigr).
 \]
-It returns \(g\) when none of the \(g\) entries is marked.  The first-path
-vector run is used when
-\[
-  \operatorname{Run}_L(j,c)\iff
-  j\geq L-1\ \land\ c\leq n-L\ \land\
-  \bigwedge_{u=0}^{L-1}p_{j-u}=j-u-1.
-\]
-Here \(V_\lambda\) means row \(\lambda\) of \(V\).
-\(\ell_\lambda\) is the number of stored entries in that row,
-\(b_\lambda\) is its stop, and \(\alpha_\lambda\) says whether its collection
-lane is active.  During marking, \(o\) is the next unread row offset and \(g\)
-is the number of entries in the current vector.  Square brackets around a
-condition have value one when it is true and zero otherwise.
-Every equation indexed by \(\lambda\) below is evaluated for
-\(0\leq\lambda<q\) in one SIMD vector.  Indexed reads are made only in lanes
-whose stated condition is true.
-Algorithm~\ref{alg:chaining-simd-backtrack} then gives the complete procedure.
-The notation
-\(a_{V_{\lambda,c-1}},\ldots,a_{V_{\lambda,0}}\) denotes an empty
-sequence when \(c=0\).
+It returns \(g\) when none of the \(g\) entries is marked.
+On the pseudocode listing for row \(\lambda\) of \(V\) denoted as \(V_\lambda\):
+\begin{itemize}
+  \item \(\ell_\lambda\) is the number of stored entries in that row
+  \item \(b_\lambda\) is the row's stop anchor
+  \item \(\alpha_\lambda\) says whether its collection lane is active (this is SIMD mask to determine if we need to terminate the chain if we either reach $-1$ or already marked anchor)
+\end{itemize}
 
 \begin{algorithm}[H]
 \caption{BioseqDB SIMD path collection and backtracking}
@@ -1061,11 +1037,11 @@ sequence when \(c=0\).
     \State \(q\gets|\mathbf e|,\quad \mathbf j\gets\mathbf e,\quad
       \boldsymbol\ell\gets\mathbf0,\quad \mathbf b\gets-\mathbf1,\quad
       \boldsymbol\alpha\gets\mathbf1\)
-    \For{\(d\gets0,\ldots,n-1\) while
+    \For{\(d\gets0,\ldots,n-1\) while \Comment{Note that all things detnoted by $\lambda$ are evaluated for $0\leq\lambda<q$ in one SIMD vector}
           \(\sum_{\lambda=0}^{q-1}\alpha_\lambda\neq0\)}
       \State \(h_\lambda\gets
         [\alpha_\lambda=1\land t_{j_\lambda}=1],\quad
-        \eta_\lambda\gets\alpha_\lambda\land\neg h_\lambda\)
+        \eta_\lambda\gets\alpha_\lambda\land\neg h_\lambda\) \Comment{check if we reached marked anchor in the lane}
       \State \(b_\lambda\gets j_\lambda\) if \(h_\lambda=1\), and
         \((V_{\lambda,d},\ell_\lambda)\gets
         (j_\lambda,\ell_\lambda+1)\) if \(\eta_\lambda=1\)
@@ -1075,7 +1051,7 @@ sequence when \(c=0\).
         \end{cases},\quad \alpha_\lambda\gets[j_\lambda\geq0]\)
     \EndFor
     \State \textbf{assert}
-      \(\sum_{\lambda=0}^{q-1}\alpha_\lambda\neq0\)
+      \(\sum_{\lambda=0}^{q-1}\alpha_\lambda = 0\) \Comment{All of the lanes should terminate chains}
     \State \Return \((\boldsymbol\ell,\mathbf b)\)
   \EndFunction
 
@@ -1094,7 +1070,7 @@ sequence when \(c=0\).
         \State \((V_{0,c+u},t_{j-u})\gets(j-u,1)\) for \(0\leq u<g\),
           then \((j,c)\gets(p_{j-g+1},c+g)\)
       \EndWhile
-      \State \textbf{abort this call if } \(j\geq0\)
+      \State \textbf{assert } \(j < 0\)
       \State \textbf{if } \(f_e\geq S\land c\geq K\) \textbf{ then append }
         \((f_e,c,|A|)\) to \(C\) and
         \((a_{V_{0,c-1}},\ldots,a_{V_{0,0}})\) to \(A\)
@@ -1110,7 +1086,7 @@ sequence when \(c=0\).
       \State \((\boldsymbol\ell,\mathbf b)\gets
         \Call{ChooseCutsSIMD}{\mathbf e,p,t,V,n}\)
       \For{\(\lambda\gets0\) \textbf{to} \(q-1\)}
-        \State \(c\gets0,\quad o\gets0\)
+        \State \(c\gets0,\quad o\gets0\) \Comment{$c$ holds length of chain and $o$ is the offset in the $A$ where we store it}
         \While{\(o<\ell_\lambda\)}
           \State \(g\gets\min(L,\ell_\lambda-o),\quad
             r\gets\operatorname{FirstMarked}(t,V_\lambda,o,g)\)
@@ -1134,28 +1110,5 @@ sequence when \(c=0\).
 \end{algorithmic}
 \end{algorithm}
 
-Collection does not modify \(t\).  This lets several lanes collect a shared
-suffix before any of them claims it.  The mark-and-copy step then handles rows
-with larger \((f_e,e)\) first.  It loads successive entries from one row into
-horizontal SIMD lanes, finds the first entry with \(t=1\), and permanently
-marks only the prefix before that entry.  The stop \(b_\lambda\) can therefore
-change from the stop found during collection to an anchor just marked by an
-earlier row in the same batch.
-
-If \(b_\lambda<0\), the row score is \(f_{e_\lambda}\).  Otherwise it is
-\(f_{e_\lambda}-f_{b_\lambda}\).  The boundary is excluded.  Only the newly
-marked prefix contributes to the count and to \(A\).  The output records stay
-in decreasing \((f_e,e)\) order, while anchors inside each record are copied
-in forward path order.  The backtracker does not apply
-\texttt{max\_drop}, does not repeat a count pass, and does not sort complete
-chains by coordinate.
-
-Two checks handle already marked ends and predecessor cycles.  If every start
-in a later batch is already marked and \(S>0\) or \(K>0\), the code skips the
-empty rows immediately.  When \(S=K=0\), this shortcut is disabled, and an
-already-marked end can produce a score-zero record with zero anchors.  If an
-unmarked path is still active after \(n\) links, the whole backtracking call
-reports a predecessor cycle before that batch marks or copies anchors.  Exact
-SIMD B1 and bounded SIMD B1 both call this same backtracking function.  Their
-difference lies in how the forward pass produces \(f\) and \(p\), not in the
-recovery step above.
+\info{Suboptimal operations}{Note that we check $\bigwedge_{\lambda=0}^{q-1}t_{e_\lambda}=1\)$ for the first iteration to check if we have chains that all go through other chains that were already all marked. This could be implemented as SIMD equality check, but in my code I count the true bits and compare their count.
+I talked about this as there are still major performance improvements that could be done by some low effort refactoring.}
