@@ -89,6 +89,27 @@ Comparison is lexicographic in \(K_r\), \(K_q\), and the full \(q_i\). The hashi
 
 The ordering is required, because the chaining wants to process anchors in sequential order (increasing query positions), while we build chains of anchors using reference positions.
 
+\section{Intuitive interpretation}
+\label{sec:chaining-interpretation}
+
+We need to first understand how intuitively human would align sequences. First we choose a random fragment of query and use text search in our editor to find that exact fragment. The longer fragment is better, because it's less likely that we found it just because of random subsitutions ocurring.
+At first we won't find it, but we repeatadly delete chacters from the fragment start or end until match is found. Each match corresponds to possible location in the target sequence.
+If we repat the process enough for other fragments of query we will establih the most probable locations of query in the target sequence (by seeing groups of matches). Throughout this chapter we will never gave any reason to treat query
+and target asymetrically as  scoring functions don't distinguish between both inputs. The distinction was rather coming from their role in the alignment flow
+(the larger set of sequences can be called the set of references or targets, while the smaller one could be called queries).
+
+\note{Longest increasing sequence}{If the reference coordinates are increasing, then naive approach would be finding LIS (longest increasing subsequence) of query coordinates. You can think of the chaining as "improving" this simplistic approach by changing query coordinates to more complex scoring function which can handle gaps and other complex cases.}
+
+The sorting mentioned in section~\ref{sec:chaining-geometry} is required, because what we would like to intuitively do is check where the first reference fragment can be placed in query sequence and when we move to the next anchor (increasing reference positon), the position of query should increase too (logically if the middle of query matches somewhere, then we should see the end of it, not the beggining).
+This introduces some emergent assymetry: it will be very likely to see one anchor in query matched with multiple anchors in referece (query can occur multiple times in reference), however what happens if one reference fragment is matched to multiple query fragments?
+This situation means that is hard to distinguish which part of the query is best to match:
+\begin{itemize}
+  \item $\text{Reference}\getsXYZVW, \text{Query}\getsYZV$ - it's immediately obvious that for $V$ in the reference we found the end of query
+  \item $\text{Reference}\getsXYZVW, \text{Query}\getsVXVXVXV$ - we don't know what part (is this start or the end of query, or the middle part?) we should consider without looking at neighbours of $V$. 
+\end{itemize}
+
+\warn{Emergent assymetry}{In the following chapters I will present new optimisations that are not discussed in the field of computational biology. The emergent assymetry will play important role when talking about the experimental results in separate chapter~\ref{sec:chaining-cpu-experimental-analysis}.} 
+
 \section{Chaining components}
 
 We defined the anchors that are input to chaining pipeline stage, however chaining itself isn't a monolith. It can be viewed as composition of several steps. 

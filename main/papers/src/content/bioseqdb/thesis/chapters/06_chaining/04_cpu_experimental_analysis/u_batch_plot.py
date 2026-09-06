@@ -147,16 +147,16 @@ def make_table(document: dict[str, object]) -> str:
             r"10\% divergence",
             (
                 ("Random occurrences", curve_widths("random_occurrences", 10.0)),
-                ("Mosaic", curve_widths("mosaic", 10.0)),
+                ("Degraded mosaic", curve_widths("mosaic", 10.0)),
             ),
         ),
         (
             "Pooled",
             (
                 ("Random occurrences", by_construction["random_occurrences"]),
-                ("Mosaic", by_construction["mosaic"]),
-                ("Spaced copies", by_construction["spaced_copies"]),
-                ("Coordinate control", by_construction["constructed_coordinate_control"]),
+                ("Mosaic and Degraded mosaic", by_construction["mosaic"]),
+                ("Spaced copy", by_construction["spaced_copies"]),
+                ("Narrow-gap spaced-copy", by_construction["constructed_coordinate_control"]),
             ),
         ),
     )
