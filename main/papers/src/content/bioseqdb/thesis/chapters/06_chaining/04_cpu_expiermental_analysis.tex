@@ -62,6 +62,9 @@ As mentioned in section~\ref{sec:chaining-interpretation} there is a case of eme
     fill=chainGray!8,font=\tiny},
   runl chosen cell/.style={
     runl cell,draw=chainGreen!80!black,fill=chainGreen!16,very thick},
+  runl gap/.style={
+    runl unit,draw=black!35,fill=black!3,minimum height=.36cm,
+    inner sep=.6pt,font=\tiny},
   runl main/.style={line width=.85pt,draw=chainGreen!80!black},
   runl extra/.style={
     line width=.75pt,draw=chainOrange!95!black,dashed},
@@ -209,49 +212,73 @@ As mentioned in section~\ref{sec:chaining-interpretation} there is a case of eme
   \draw[black!35] (.10,5.15)--(13.75,5.15);
 
   \node[anchor=west,font=\bfseries] at (.10,4.88)
-    {(d) Narrow-gap spaced-copy};
+    {(d) Minimizer-island comb};
 
   \node[anchor=east] at (.72,4.30) {reference};
-  \node[runl selected,minimum width=1.05cm] (rP) at (1.25,4.30)
+  \node[runl selected,minimum width=.44cm] (rP) at (1.02,4.30)
     {\(P\)};
-  \node[runl unique,minimum width=1.05cm] (rG) at (2.45,4.30)
+  \node[runl gap,minimum width=.60cm] at (1.62,4.30)
+    {\(N^{1475}\)};
+  \node[runl unique,minimum width=.44cm] (rG) at (2.22,4.30)
     {\(G_t\)};
-  \node[runl source,minimum width=.62cm] (rCzero) at (3.38,4.30)
+  \node[runl gap,minimum width=.60cm] at (2.82,4.30)
+    {\(N^{1250}\)};
+  \node[runl source,minimum width=.36cm] (rCzero) at (3.38,4.30)
     {\(c_0\)};
-  \node[runl source,minimum width=.62cm] (rCone) at (4.10,4.30)
+  \node[runl gap,minimum width=.65cm] at (3.97,4.30)
+    {\(N^{3475}\)};
+  \node[runl source,minimum width=.36cm] (rCone) at (4.55,4.30)
     {\(c_1\)};
-  \node[runl variant,minimum width=.86cm] (rRone) at (4.95,4.30)
+  \node[runl gap,minimum width=.54cm] at (5.08,4.30)
+    {\(N^{475}\)};
+  \node[runl variant,minimum width=.46cm] (rRone) at (5.66,4.30)
     {\(R_1\)};
-  \node[runl source,minimum width=.62cm] (rCtwo) at (5.78,4.30)
+  \node[runl gap,minimum width=.60cm] at (6.27,4.30)
+    {\(N^{1531}\)};
+  \node[runl source,minimum width=.36cm] (rCtwo) at (6.83,4.30)
     {\(c_2\)};
-  \node[runl variant,minimum width=.86cm] (rRtwo) at (6.63,4.30)
+  \node[runl gap,minimum width=.54cm] at (7.36,4.30)
+    {\(N^{475}\)};
+  \node[runl variant,minimum width=.46cm] (rRtwo) at (7.94,4.30)
     {\(R_2\)};
-  \node at (7.37,4.30) {\(\cdots\)};
-  \node[runl source,minimum width=.68cm] (rCm) at (8.05,4.30)
-    {\(c_m\)};
-  \node[runl variant,minimum width=.86cm] (rRm) at (8.90,4.30)
-    {\(R_m\)};
+  \node[runl gap,minimum width=.60cm] at (8.55,4.30)
+    {\(N^{1531}\)};
+  \node[runl source,minimum width=.36cm] (rCthree) at (9.11,4.30)
+    {\(c_3\)};
+  \node at (9.55,4.30) {\(\cdots\)};
 
   \node[anchor=east] at (.72,3.63) {query};
-  \node[runl selected,minimum width=1.05cm] (qP) at (1.25,3.63)
+  \node[runl selected,minimum width=.44cm] (qP) at (1.02,3.63)
     {\(P\)};
-  \node[runl unique,minimum width=1.05cm] (qG) at (2.45,3.63)
+  \node[runl gap,minimum width=.54cm] at (1.59,3.63)
+    {\(N^{975}\)};
+  \node[runl unique,minimum width=.44cm] (qG) at (2.16,3.63)
     {\(G_q\)};
-  \node[runl source,minimum width=.62cm] (qCzero) at (3.38,3.63)
+  \node[runl gap,minimum width=.54cm] at (2.73,3.63)
+    {\(N^{975}\)};
+  \node[runl source,minimum width=.36cm] (qCzero) at (3.26,3.63)
     {\(c_0\)};
-  \node[runl source,minimum width=.62cm] (qCone) at (4.10,3.63)
+  \node[runl gap,minimum width=.65cm] at (3.85,3.63)
+    {\(N^{3375}\)};
+  \node[runl source,minimum width=.36cm] (qCone) at (4.43,3.63)
     {\(c_1\)};
-  \node[runl variant,minimum width=.86cm] (qRone) at (4.95,3.63)
+  \node[runl gap,minimum width=.44cm] at (4.91,3.63)
+    {\(N^{25}\)};
+  \node[runl variant,minimum width=.46cm] (qRone) at (5.44,3.63)
     {\(R_1\)};
-  \node[runl source,minimum width=.62cm] (qCtwo) at (5.78,3.63)
+  \node[runl gap,minimum width=.60cm] at (6.05,3.63)
+    {\(N^{2081}\)};
+  \node[runl source,minimum width=.36cm] (qCtwo) at (6.61,3.63)
     {\(c_2\)};
-  \node[runl variant,minimum width=.86cm] (qRtwo) at (6.63,3.63)
+  \node[runl gap,minimum width=.54cm] at (7.14,3.63)
+    {\(N^{925}\)};
+  \node[runl variant,minimum width=.46cm] (qRtwo) at (7.72,3.63)
     {\(R_2\)};
-  \node at (7.37,3.63) {\(\cdots\)};
-  \node[runl source,minimum width=.68cm] (qCm) at (8.05,3.63)
-    {\(c_m\)};
-  \node[runl variant,minimum width=.86cm] (qRm) at (8.90,3.63)
-    {\(R_m\)};
+  \node[runl gap,minimum width=.54cm] at (8.30,3.63)
+    {\(N^{981}\)};
+  \node[runl source,minimum width=.36cm] (qCthree) at (8.83,3.63)
+    {\(c_3\)};
+  \node at (9.27,3.63) {\(\cdots\)};
 
   \draw[runl main]
     (rP.south)--(qP.north)
@@ -261,14 +288,14 @@ As mentioned in section~\ref{sec:chaining-interpretation} there is a case of eme
     (rRone.south)--(qRone.north)
     (rCtwo.south)--(qCtwo.north)
     (rRtwo.south)--(qRtwo.north)
-    (rCm.south)--(qCm.north)
-    (rRm.south)--(qRm.north);
+    (rCthree.south)--(qCthree.north);
 
   \node[runl info] at (11.75,3.96) {
-    each \(c_k,r_{k,\ell}\): one 25-bp island\\
-    island counts: \(P=40\)\\
-    \(G_t=G_q=10,\ R_k=39\)\\
-    all other bases: \(N\)
+    spans: \(P=3925\) bp\\
+    \(G_t=13525,\ G_q=9025\) bp\\
+    \(c_k=25,\ R_k=1469\) bp\\
+    \(R_k\) internal gap: 13 \(N\)\\
+    horizontal distances are not to scale
   };
 
   \node[anchor=east] at (.72,2.31) {anchor array};
@@ -287,7 +314,7 @@ As mentioned in section~\ref{sec:chaining-interpretation} there is a case of eme
   \node at (6.62,2.31) {\(\cdots\)};
   \node[runl selected,minimum width=.64cm] (aCm) at (7.35,2.31)
     {\(c_m\)};
-  \node[runl selected,minimum width=1.08cm] (aRm) at (8.22,2.31)
+  \node[runl selected,minimum width=1.08cm] (aRm) at (8.28,2.31)
     {\(e_m\in R_m\)};
 
   \draw[runl pred]
@@ -348,18 +375,17 @@ As mentioned in section~\ref{sec:chaining-interpretation} there is a case of eme
   \node[anchor=north,text=chainOrange!85!black] at (4.72,-.65)
     {for \(x_k>0\), substitutions occur only in the query flanks};
 \end{tikzpicture}
-\caption{Canonical synthetic constructions used in this section.  Panel~(a)
-is Mosaic, with \(A'=A\).  Panel~(b) is Degraded mosaic, with \(A'\neq A\)
-through controlled substitutions or independent generation.  Panel~(c) is
-Spaced copy.  Each 4,096-base \(S_v\) block is followed by 16,384 \(N\) bases.
-Panel~(d) is Narrow-gap spaced-copy.  Every \(c_k\) and \(r_{k,\ell}\) is an
-isolated 25-base minimizer island, and neighboring islands within each \(R_k\)
-have 13 \(N\) bases between them.  Panel~(e) is Wide-gap spaced-copy, with 16
-distinct shared exact 30-base pieces separated in the target by fifteen
-pseudorandom 500-base gaps.  Solid green links mark the equal-coordinate path,
-and dashed orange links mark repeat-derived anchors.  Green boxes in
-panel~(d)'s anchor-array row show the first predecessor path.  Dashed orange
-boxes remain in the array but lie outside that path.}
+\caption{Panel~(a)
+presents mosaic, with \(A'=A\) so $T = Q = U_0\,A\,U_1\,A'_{\delta}\,U_2 \text{where} A' = \text{Randomize}_{\delta}(A)$.  Panel~(b) is degraded mosaic, so the $A$ and $A'$ are independently generated, so the divergence between them should be very high, used as control example.  Panel~(c) is
+shows spaced copy, which is contructed in the following way $T=S\,N^G,
+\qquad
+Q=(S\,N^G)^R,
+\qquad
+\lvert S\rvert=4096,
+\qquad
+G=16384$ Panel~(d) is the Minimizer-island comb. I construct it by assuming that every \(c_k\) and \(r_{k,\ell}\) is
+an isolated 25-base minimizer island. Then \(r_{k,\ell}\) are grouped together with 13-$N$ intervals to create $R_k$ groups. The construction is calculated in such a way that $|d_r - d_q|$ is lower for $c_k$ anchors than for $R_k$ anchors.
+Panel~(e) is wide-gap spaced-copy, where we insert gaps between 16 30-base pieces of query with absurdly large 500-base gaps.}
 \label{fig:chaining-runl-inputs}
 \end{figure}
 
@@ -373,13 +399,27 @@ The $+\frac{1}{2}$ is just used to round the result to the nearest integer. The 
 Figure~\ref{fig:chaining-runl-inputs} depicts all of my constructions:
 \begin{itemize}
   \item Random reference and query - parameters to experiments are $|Q|$ and $|T|$, number of occurences of query $1 \leq N$. I first generate random target, then place $N$ query occurences in it and use divergence to create substitution in the occurences.
-  \item (A) Mosaic - reference and query with identical bytes. $A$ is randomly generated and I perform substitutions on it. This is example of exact duplication of long fragment. The specific $A$ length was choosen to be very long to generate long, very similar chains.
-  \item (B) Degraded mosaic - this is version of mosaic, where we use two regions that aren't equal and do not perform any substitutions on them. This is control case, where the generation of both $A$ regions is independent. Meaning the expected divergence should be very high (as sequences are random).
+  \item (A) Mosaic - reference and query with identical bytes. $A$ is randomly generated and I perform substitutions on it. This is example of exact duplication of long fragment.
+  The specific $A$ length was choosen to be very long to generate long, very similar chains.
+  \item (B) Degraded mosaic - this is version of mosaic, where we use two regions that aren't equal and do not perform any substitutions on them. This is control case, where the generation of both $A$ regions is independent. Meaning the expected
+  divergence should be very high (as sequences are random).
   \item (C) Spaced copy - we insert very long blocks $N^G$ between parts of reference, where $N$ denotes symbol $N$ (in dna4 alphabet it denotes unknown symbol). Normal processing just ignores these blocks (minimap2 doesn't generate minimizers for them), but they distrupt anchor positions. You can think of this construction as very special case of gapped repeatitions of same sequence, where instead of random gap-filler we use symbol $N$. That kind of contruction shouldn't occur in real-world example, it's here to illustrate that we can utilize $N$ symbol to sabotage chaining.
-  \item (D) Narrow-gap spaced-copy - ???
-  \item (E) Wide-gap spaced-copy - reference and query with wide-gap spaced bytes\
+  \item (D) Minimizer-island comb - we also use $N$ symbol as filler between inslands. As we use default minimap2 parameters including $w=10, k=15$, we adjusted $|c_k|$ to be $w+k=25$ bases, so these fragments generate maximum of two non-N minimizers.
+  $R_k$ groups are internally built from the same 25-symbol "islands" separated by $13$ $N$ bases ($13$ was arbitrary choice).
+  This creates very interesting scenario where we can control which minimizers occur where.
+  Then we adjust wider gaps between "islands" with tricky criteria. As DP algorithm selects one "next" best anchor to "connect" chain to, we adjust the gaps so the difference between target and query distances are large for the anchors just at the edge of $R_k$ but smaller for $ck_kj$.
+  You can look at the example and see that if we try to chain $c_1$ to $c_0$ the $\delta(c_0, c_1) = |d_r - d_q| = 3475-3375 = 100$ but $\delta$ for $R_1$ will be $\delta(c_0, R_1) = (3475+475) - (3375 + 25) = 550$. We exploit the feature of scoring function to convince the minimap2 that 
+  $c_k$ is "better" match being closer to diagonal than $R_k$. This will create long chain starting at $R_k$ and going through all $c_k$ anchors (ommiting all other $R$)
+  \item (E) This example is more practical one, where we don't overuse $N$ symbols and divide the query to add random gaps between its pieces. However the gaps are very large compared to the "islands" so this example is "exaggerated" as well.
 \end{itemize}
 
+\info{Overuse of $N$ symbol}{
+  Usually $N$ is used only to distinbguish processing errors (from the sequencing hardware) and do not occur with high quantities. The construction of the examples use them as gap-fillers to have easier control over occurence of minimizers and their behavior. Cases (A) and (E) are closer to real-world examples,
+  where repetitions of genomes happen frequently.
+}
+
+
+The first constructions (a) and (b) are simple. For spaced copy we can observe that the...
 
 Figure~\ref{fig:chaining-runl-inputs} collects the five named constructions
 used in this section. Each construction has its own panel.  The drawings
@@ -452,15 +492,16 @@ For \(R\geq2\), the first predecessor path contains no run of at least two unit
 predecessor relations.  The construction therefore predicts zero vector
 batches for every tested \(L\geq2\).
 
-Panel~(d) is Narrow-gap spaced-copy.  Every intended anchor comes
+Panel~(d) is the Minimizer-island comb.  Every intended anchor comes
 from a distinct 25-base non-\(N\) block surrounded by \(N\) bases.  Each such
 block emits one minimizer for \(k=15\) and \(w=10\).  This isolated block is
 called a minimizer island.  The remaining positions contain \(N\).  This
 construction does not estimate the frequency of the structure in biological
-sequence.  The name \emph{Narrow-gap} refers specifically to the 13 \(N\)
-bases between neighboring 25-base islands within each \(R_k\), whose starts
-are 38 bases apart.  Other gaps in the construction are wider and follow the
-coordinates below.  Write \(r_{k,\ell}\) for the \(\ell\)-th anchor in \(R_k\).  In the
+sequence.  Its name describes the \(c_k\) backbone and the \(R_k\) groups of
+minimizer-island ``teeth.''  Only the gaps inside a tooth are narrow: the 39
+islands of \(R_k\) span 1469 bases, with 13 \(N\) bases between neighboring
+25-base islands.  The other gaps are substantially wider.  Write
+\(r_{k,\ell}\) for the \(\ell\)-th anchor in \(R_k\).  In the
 equations below, \(c_k\) and \(r_{k,\ell}\) denote their target-query
 coordinate pairs.  Let \(s_k=1\) for odd \(k\) and \(s_k=-1\) for even \(k\).
 The following pairs give the target and query coordinate increments:
@@ -474,6 +515,26 @@ The following pairs give the target and query coordinate increments:
        &&1\leq\ell\leq39.
 \end{aligned}
 \]
+Because every island has length 25, subtracting 25 from successive coordinate
+increments gives the actual intervening \(N\)-run.  The physical order is
+\[
+  P,G,c_0,c_1,R_1,c_2,R_2,\ldots,c_m,R_m.
+\]
+The gaps from the end of one named fragment to the start of the next are
+\[
+\begin{array}{c|cc}
+\text{transition} & \text{target }N\text{-run} & \text{query }N\text{-run}\\
+\hline
+P\to G & 1475 & 975\\
+G\to c_0 & 1250 & 975\\
+c_0\to c_1 & 3475 & 3375\\
+c_k\to R_k & 475 & 25\ (k\text{ odd}),\ 925\ (k\text{ even})\\
+R_k\to c_{k+1} & 1531 & 2081\ (k\text{ odd}),\ 981\ (k\text{ even}).
+\end{array}
+\]
+Thus the construction contains many gaps longer than 500 bases; 13 is only
+the internal gap within each \(R_k\).  The leading and trailing \(N\)-runs are
+981 and 11 bases, respectively, in both sequences.
 The \texttt{map-ont} preset sets the short-range chaining bandwidth to 500.
 Every anchor in \(R_k\) and \(c_{k+1}\) differ by 550 between the target and
 query distances, so those anchors fail the bandwidth check.  The preceding
@@ -507,7 +568,7 @@ in decreasing anchor-array index, matching BioseqDB's tie rule.  The tested
 widths were \(L\in\{2,4,8,16,32,64\}\).  The branch counters were recomputed
 from the recorded arrays.  For Mosaic, Degraded mosaic, and Spaced copy, an
 independent checker reconstructed the expected path coordinates and compared
-them with the recorded predecessor path.  For Narrow-gap spaced-copy, the
+them with the recorded predecessor path.  For the Minimizer-island comb, the
 checker compared the recorded predecessor array with the array specified by
 the construction.  The first three named inputs used three fixed
 random-number-generator seeds.
@@ -538,7 +599,7 @@ greedy loop gives
   \qquad
   E_L=q-(L-1)B_L.
 \]
-In Narrow-gap spaced-copy, the path ends at anchor-array index zero, so
+In the Minimizer-island comb, the path ends at anchor-array index zero, so
 \(p_0=-1=0-1\) contributes one unit relation.  The \(m=1\) path is one run of
 length 91.  For
 \(m\geq2\), the only maximal runs have lengths 39 and 52.  Thus
@@ -563,7 +624,7 @@ describe every input family.
 The Mosaic, Degraded mosaic, and \(R=1\) Spaced copy rows report medians over three
 inputs generated from fixed random-number-generator seeds.  The \(R\geq2\)
 Spaced copy row covers the tested powers of two from 2 through 64, all of
-which gave zero.  Narrow-gap spaced-copy values are deterministic and agreed
+which gave zero.  Minimizer-island-comb values are deterministic and agreed
 with the recorded counters.}
 \label{tab:chaining-runl-firing}
 \scriptsize
@@ -576,8 +637,8 @@ Input & \(L=2\) & \(L=4\) & \(L=8\) & \(L=16\) & \(L=32\) & \(L=64\) \\
 (b) Degraded mosaic (independent \(A'\)) & 100.00 & 99.94 & 99.74 & 99.24 & 97.01 & 91.12 \\
 (c) Spaced copy, \(R=1\)       & 100.00 & 98.97 & 94.12 & 88.89 & 80.00 & 66.67 \\
 (c) Spaced copy, \(R\geq2\)   &   0.00 &  0.00 &  0.00 &  0.00 &  0.00 &  0.00 \\
-(d) Narrow-gap spaced-copy, \(m=2\)    & 95.74 & 84.62 & 45.45 & 29.41 & 6.67 & 0.00 \\
-(d) Narrow-gap spaced-copy, \(m=1024\) &  4.21 &  2.10 &  0.96 &  0.48 & 0.19 & 0.00 \\
+(d) Minimizer-island comb, \(m=2\)    & 95.74 & 84.62 & 45.45 & 29.41 & 6.67 & 0.00 \\
+(d) Minimizer-island comb, \(m=1024\) &  4.21 &  2.10 &  0.96 &  0.48 & 0.19 & 0.00 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -603,7 +664,7 @@ Figure~\ref{fig:chaining-runl-inputs}.
     exact copies separated by \(N\)-filled gaps.  The \(R=1\) case is the
     baseline.
 
-  \item \textbf{(d) Narrow-gap spaced-copy.}
+  \item \textbf{(d) Minimizer-island comb.}
     Each minimizer island is an isolated 25-base non-\(N\) block that emits
     one minimizer.  Within each \(R_k\), neighboring islands have 13 \(N\)
     bases between them.  These blocks and the other, wider \(N\)-filled gaps
@@ -911,7 +972,8 @@ the extra exact-copy anchors made \(\operatorname{Run}_L\) false at every
 evaluated loop state.  These data do not establish the frequency of this
 pattern in real reads.
 
-Every tested Narrow-gap spaced-copy case produced a path with defined counters.
+Every tested case of the Minimizer-island comb produced a path with defined
+counters.
 The tested values were \(m=1\) and every power of two from 2 through 1024.
 Every measured value agreed with the closed form above.  At \(m=1024\), anchor
 coverage was 8.08 percent for \(L=2\) and 7.90 percent for \(L=4\).  It was
@@ -1349,7 +1411,7 @@ target, 997--1002-base queries, and 81 substitution levels, with ten exact
 30-base intervals.  Mosaic and Degraded mosaic use
 \(T=Q=U_0AU_1A'_\delta U_2\), length 67072.  Spaced copy uses
 \(\lvert S\rvert=4096\), \(G=16384\), and
-\(R\in\{1,2,4,8,16,32,64\}\).  Narrow-gap spaced-copy uses
+\(R\in\{1,2,4,8,16,32,64\}\).  The Minimizer-island comb uses
 \(m\in\{1,2,4,\ldots,1024\}\).  Defaults are \(k=15\), \(w=10\), \(S=25\), and
 \texttt{max\_chain\_iter}=5000.}
 \label{tab:chaining-u-batch-rates}
@@ -1369,7 +1431,7 @@ target, 997--1002-base queries, and 81 substitution levels, with ten exact
 All 761 queries had validated PAF matches.  For increasing widths, \(U\) is
 \(13,7,4,2,1,1\).  Omitted batches per random-arm check were 13.17, 7.44, and 2.36 at
 \(L=2,16,64\); at 20\% divergence the reductions were 81.8, 70.5, and 34.3\%.
-Mosaic, Degraded mosaic, and Spaced copy saved more.  Narrow-gap spaced-copy
+Mosaic, Degraded mosaic, and Spaced copy saved more.  The Minimizer-island comb
 at \(L=64\) was the only zero.  The requested
 decreasing-score/decreasing-position tie order was
 audited, but end sorting follows forward scoring and cannot affect these counts.
