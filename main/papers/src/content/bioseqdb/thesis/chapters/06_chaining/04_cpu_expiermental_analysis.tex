@@ -15,35 +15,32 @@ The subsections talk about:
   \item Answering if max drop would help us increase performance of SIMD backtracking algorithm~\ref{fig:chaining-minimap2-backtracking}
 \end{itemize}
 
-\warn{Synthetic data}{The modelling here is conducted on synthetic data without indels. Under normal conditions substitutions should be at least few times more frequent than indels. The analysis on the syntetic data is only meant to show motivation behind our approach and formulate conditions under which the optimisations cost will be higher than the benefit.}
+\warn{Synthetic data}{Primary modelling here uses substitution-only synthetic
+data. Under normal conditions substitutions should be
+at least a few times more frequent than indels. I prepared special cases of sequence construction using gaps or equal regions to see what happens in cases where large gaps occur as secondary method of analysis. Overall the analysis is intended to
+motivate the approach and formulate conditions under which an optimisation's
+cost exceeds its benefit.}
 
 \subsection{Problematic chains}
 
-The
-score and equal-score tie rule select the first chain end.  The predicate then
-requires each of the next \(L\) predecessor links to move to the preceding
-slot in the coordinate-sorted anchor array.
+As mentioned in section~\ref{sec:chaining-interpretation} there is a case of emergent assymetry: if one anchor matches with multiple anchors in the query, then we cannot easily tell which part of the query is best to match. The following sections demonstrates what happens in this scenario. The special query/target constructions are prepared in that asymmetry in mind.
 
-The \emph{first predecessor path} starts at this chain end and repeatedly
-follows \(p_j\) until the next predecessor is \(-1\).  A \emph{retained
-anchor} is a minimizer hit that remains in the coordinate-sorted anchor array
-after minimap2 applies its occurrence-frequency filters.  A
-\emph{repeat-derived anchor} is a retained anchor that links a selected
-minimizer in one block to an occurrence in another block.  A
-\emph{same-target anchor group} contains retained anchors with the same
-reference-sequence identifier, target end coordinate, and orientation.  Its
-members have different query end coordinates in these constructions.  The
-first predecessor path contains at most one member of such a group.  The
-remaining members still occupy array slots.  They can make \(p_j<j-1\), even
-when consecutive path anchors are close in both sequences.
+% The \emph{first predecessor path} starts at this chain end and repeatedly
+% follows \(p_j\) until the next predecessor is \(-1\).  A \emph{retained
+% anchor} is a minimizer hit that remains in the coordinate-sorted anchor array
+% after minimap2 applies its occurrence-frequency filters.  A
+% \emph{repeat-derived anchor} is a retained anchor that links a selected
+% minimizer in one block to an occurrence in another block.  A
+% \emph{same-target anchor group} contains retained anchors with the same
+% reference-sequence identifier, target end coordinate, and orientation.  Its
+% members have different query end coordinates in these constructions.  The
+% first predecessor path contains at most one member of such a group.  The
+% remaining members still occupy array slots.  They can make \(p_j<j-1\), even
+% when consecutive path anchors are close in both sequences.
 
 \subsubsection{Reference and query structures}
 
-Figure~\ref{fig:chaining-runl-inputs} shows the three constructions used to
-measure this effect.  The drawings show representative minimizer links and
-are not to scale.
-
-\begin{figure}[H]
+\begin{figure}[p]
 \centering
 \begin{tikzpicture}[
   x=1cm,y=1cm,font=\scriptsize,>=Latex,
@@ -71,144 +68,190 @@ are not to scale.
   runl pred/.style={-{Latex[length=1.4mm]},thick,draw=black!72},
   runl note/.style={
     draw=black!45,fill=black!2,align=left,
-    inner sep=3pt,rounded corners=0pt}
+    inner sep=3pt,rounded corners=0pt},
+  runl info/.style={
+    runl note,text width=3.35cm,minimum height=1.60cm,font=\tiny}
 ]
-  \node[anchor=west,font=\bfseries] at (.10,9.25)
-    {(a) Two internal blocks in an exact full-length mapping};
+  \node[anchor=west,font=\bfseries] at (.10,12.80)
+    {(a) Mosaic};
 
-  \node[anchor=east] at (.72,8.55) {reference};
-  \node[runl unique,minimum width=.70cm] (rUzero) at (1.25,8.55)
+  \node[anchor=east] at (.72,12.22) {reference};
+  \node[runl unique,minimum width=.70cm] (mrUzero) at (1.25,12.22)
     {\(U_0\)};
-  \node[runl source,minimum width=3.00cm] (rA) at (3.15,8.55)
+  \node[runl source,minimum width=3.00cm] (mrA) at (3.15,12.22)
     {\(A\)};
-  \node[runl unique,minimum width=.70cm] (rUone) at (5.05,8.55)
+  \node[runl unique,minimum width=.70cm] (mrUone) at (5.05,12.22)
     {\(U_1\)};
-  \node[runl variant,minimum width=3.00cm] (rAprime) at (6.95,8.55)
-    {\(A'_{\delta}\)};
-  \node[runl unique,minimum width=.70cm] (rUtwo) at (8.85,8.55)
+  \node[runl source,minimum width=3.00cm] (mrAprime) at (6.95,12.22)
+    {\(A'=A\)};
+  \node[runl unique,minimum width=.70cm] (mrUtwo) at (8.85,12.22)
     {\(U_2\)};
 
-  \node[anchor=east] at (.72,7.72) {query};
-  \node[runl unique,minimum width=.70cm] (qUzero) at (1.25,7.72)
+  \node[anchor=east] at (.72,11.52) {query};
+  \node[runl unique,minimum width=.70cm] (mqUzero) at (1.25,11.52)
     {\(U_0\)};
-  \node[runl source,minimum width=3.00cm] (qA) at (3.15,7.72)
+  \node[runl source,minimum width=3.00cm] (mqA) at (3.15,11.52)
     {\(A\)};
-  \node[runl unique,minimum width=.70cm] (qUone) at (5.05,7.72)
+  \node[runl unique,minimum width=.70cm] (mqUone) at (5.05,11.52)
     {\(U_1\)};
-  \node[runl variant,minimum width=3.00cm] (qAprime) at (6.95,7.72)
-    {\(A'_{\delta}\)};
-  \node[runl unique,minimum width=.70cm] (qUtwo) at (8.85,7.72)
+  \node[runl source,minimum width=3.00cm] (mqAprime) at (6.95,11.52)
+    {\(A'=A\)};
+  \node[runl unique,minimum width=.70cm] (mqUtwo) at (8.85,11.52)
     {\(U_2\)};
 
   \draw[runl main]
-    (rUzero.south)--(qUzero.north)
-    (rA.south)--(qA.north)
-    (rUone.south)--(qUone.north)
-    (rAprime.south)--(qAprime.north)
-    (rUtwo.south)--(qUtwo.north);
-  \draw[runl extra] (rA.south)--(qAprime.north);
-  \draw[runl extra] (rAprime.south)--(qA.north);
+    (mrUzero.south)--(mqUzero.north)
+    (mrA.south)--(mqA.north)
+    (mrUone.south)--(mqUone.north)
+    (mrAprime.south)--(mqAprime.north)
+    (mrUtwo.south)--(mqUtwo.north);
+  \draw[runl extra] (mrA.south)--(mqAprime.north);
+  \draw[runl extra] (mrAprime.south)--(mqA.north);
 
-  \node[runl note,text width=3.55cm] at (11.60,8.46) {
+  \node[runl info] at (11.75,11.87) {
     reference \(=\) query\\[2pt]
-    \(\lvert A\rvert=32768\)\\
-    \(\lvert U_i\rvert=512\)\\
-    \(A\)-to-\(A'_{\delta}\) offset \(=33280\)
+    \(A'=A\)\\
+    \(\lvert A\rvert=\lvert A'\rvert=32768\) bp\\
+    \(\lvert U_i\rvert=512\) bp\\
+    block-start offset: \(33280\) bp
   };
-  \draw[runl main] (9.72,7.60)--(10.38,7.60);
-  \node[anchor=west] at (10.50,7.60) {selected equal-coordinate path};
-  \draw[runl extra] (9.72,7.28)--(10.38,7.28);
-  \node[anchor=west] at (10.50,7.28) {repeat-derived anchors};
 
-  \draw[black!35] (.10,6.98)--(13.75,6.98);
+  \draw[black!35] (.10,10.87)--(13.75,10.87);
 
-  \node[anchor=west,font=\bfseries] at (.10,6.70)
-    {(b) Exact spaced-copy control};
+  \node[anchor=west,font=\bfseries] at (.10,10.60)
+    {(b) Degraded mosaic};
 
-  \node[anchor=east] at (.72,6.05) {reference};
-  \node[runl source,minimum width=1.50cm] at (1.48,6.05) {\(S\)};
-  \node[runl unique,minimum width=1.50cm] at (3.00,6.05) {\(N^G\)};
+  \node[anchor=east] at (.72,10.02) {reference};
+  \node[runl unique,minimum width=.70cm] (drUzero) at (1.25,10.02)
+    {\(U_0\)};
+  \node[runl source,minimum width=3.00cm] (drA) at (3.15,10.02)
+    {\(A\)};
+  \node[runl unique,minimum width=.70cm] (drUone) at (5.05,10.02)
+    {\(U_1\)};
+  \node[runl variant,minimum width=3.00cm] (drAprime) at (6.95,10.02)
+    {\(A'_{\delta}\neq A\)};
+  \node[runl unique,minimum width=.70cm] (drUtwo) at (8.85,10.02)
+    {\(U_2\)};
 
-  \node[anchor=east] at (.72,5.35) {query};
-  \node[runl source,minimum width=.78cm] at (1.10,5.35) {\(S_0\)};
-  \node[runl unique,minimum width=.72cm] at (1.87,5.35) {\(N^G\)};
-  \node[runl source,minimum width=.78cm] at (2.64,5.35) {\(S_1\)};
-  \node[runl unique,minimum width=.72cm] at (3.41,5.35) {\(N^G\)};
-  \node at (4.13,5.35) {\(\cdots\)};
-  \node[runl source,minimum width=1.02cm] at (5.05,5.35)
+  \node[anchor=east] at (.72,9.32) {query};
+  \node[runl unique,minimum width=.70cm] (dqUzero) at (1.25,9.32)
+    {\(U_0\)};
+  \node[runl source,minimum width=3.00cm] (dqA) at (3.15,9.32)
+    {\(A\)};
+  \node[runl unique,minimum width=.70cm] (dqUone) at (5.05,9.32)
+    {\(U_1\)};
+  \node[runl variant,minimum width=3.00cm] (dqAprime) at (6.95,9.32)
+    {\(A'_{\delta}\neq A\)};
+  \node[runl unique,minimum width=.70cm] (dqUtwo) at (8.85,9.32)
+    {\(U_2\)};
+
+  \draw[runl main]
+    (drUzero.south)--(dqUzero.north)
+    (drA.south)--(dqA.north)
+    (drUone.south)--(dqUone.north)
+    (drAprime.south)--(dqAprime.north)
+    (drUtwo.south)--(dqUtwo.north);
+  \draw[runl extra] (drA.south)--(dqAprime.north);
+  \draw[runl extra] (drAprime.south)--(dqA.north);
+
+  \node[runl info] at (11.75,9.67) {
+    reference \(=\) query\\[2pt]
+    \(A'_{\delta}\neq A\)\\
+    \(\lvert A\rvert=\lvert A'_{\delta}\rvert=32768\) bp\\
+    \(\lvert U_i\rvert=512\) bp\\
+    block-start offset: \(33280\) bp
+  };
+
+  \draw[black!35] (.10,8.67)--(13.75,8.67);
+
+  \node[anchor=west,font=\bfseries] at (.10,8.40)
+    {(c) Spaced copy};
+
+  \node[anchor=east] at (.72,7.82) {reference};
+  \node[runl source,minimum width=1.50cm] at (1.48,7.82) {\(S\)};
+  \node[runl unique,minimum width=1.50cm] at (3.00,7.82) {\(N^G\)};
+
+  \node[anchor=east] at (.72,7.15) {query};
+  \node[runl source,minimum width=.78cm] at (1.10,7.15) {\(S_0\)};
+  \node[runl unique,minimum width=.72cm] at (1.87,7.15) {\(N^G\)};
+  \node[runl source,minimum width=.78cm] at (2.64,7.15) {\(S_1\)};
+  \node[runl unique,minimum width=.72cm] at (3.41,7.15) {\(N^G\)};
+  \node at (4.13,7.15) {\(\cdots\)};
+  \node[runl source,minimum width=1.02cm] at (5.05,7.15)
     {\(S_{R-1}\)};
-  \node[runl unique,minimum width=.72cm] at (5.95,5.35) {\(N^G\)};
+  \node[runl unique,minimum width=.72cm] at (5.95,7.15) {\(N^G\)};
 
-  \node[runl note,text width=1.55cm] at (7.30,5.70) {
-    \(\lvert S\rvert=4096\)\\
-    \(G=16384\)\\
-    pitch \(=20480\)
+  \node[runl info] at (11.75,7.47) {
+    \(\lvert S_v\rvert=4096\) bp\\
+    \(\lvert N^G\rvert=16384\) bp\\
+    \(R\in\{1,2,4,8,16,32,64\}\)\\
+    repeated-unit length: \(20480\) bp
   };
 
-  \node[anchor=east] at (8.66,4.43) {\(r_t:\)};
-  \node[runl cell] at (9.00,4.43) {\(0\)};
-  \node[runl chosen cell] (previousV) at (9.58,4.43) {\(v\)};
-  \node[runl cell] at (10.16,4.43) {\(R-1\)};
+  \node[anchor=east] at (1.75,5.88) {\(r_t:\)};
+  \node[runl cell] at (2.12,5.88) {\(0\)};
+  \node[runl chosen cell] (previousV) at (2.70,5.88) {\(v\)};
+  \node[runl cell] at (3.28,5.88) {\(R-1\)};
 
-  \node[anchor=east] at (11.28,4.43) {\(r_{t+1}:\)};
-  \node[runl cell] at (11.65,4.43) {\(0\)};
-  \node[runl chosen cell] (currentV) at (12.23,4.43) {\(v\)};
-  \node[runl cell] at (12.81,4.43) {\(R-1\)};
+  \node[anchor=east] at (4.90,5.88) {\(r_{t+1}:\)};
+  \node[runl cell] at (5.27,5.88) {\(0\)};
+  \node[runl chosen cell] (currentV) at (5.85,5.88) {\(v\)};
+  \node[runl cell] at (6.43,5.88) {\(R-1\)};
 
   \draw[runl pred]
     (currentV.north) .. controls +(0,.52) and +(0,.52) ..
     (previousV.north);
-  \node[anchor=south,fill=white,inner sep=1pt] at (10.91,4.94)
+  \node[anchor=south,fill=white,inner sep=1pt] at (4.28,6.39)
     {\(p_j=j-R\neq j-1\quad(R\geq2)\)};
-  \node[anchor=north] at (9.58,4.18) {index \(j-R\)};
-  \node[anchor=north] at (12.23,4.18) {index \(j\)};
+  \node[anchor=north] at (2.70,5.63) {index \(j-R\)};
+  \node[anchor=north] at (5.85,5.63) {index \(j\)};
 
-  \draw[black!35] (.10,3.55)--(13.75,3.55);
+  \draw[black!35] (.10,5.15)--(13.75,5.15);
 
-  \node[anchor=west,font=\bfseries] at (.10,3.28)
-    {(c) Constructed coordinate control};
+  \node[anchor=west,font=\bfseries] at (.10,4.88)
+    {(d) Narrow-gap spaced-copy};
 
-  \node[anchor=east] at (.72,2.70) {reference};
-  \node[runl selected,minimum width=1.05cm] (rP) at (1.25,2.70)
-    {\(P\ (40)\)};
-  \node[runl unique,minimum width=1.05cm] (rG) at (2.45,2.70)
-    {\(G_t\ (10)\)};
-  \node[runl source,minimum width=.62cm] (rCzero) at (3.43,2.70)
+  \node[anchor=east] at (.72,4.30) {reference};
+  \node[runl selected,minimum width=1.05cm] (rP) at (1.25,4.30)
+    {\(P\)};
+  \node[runl unique,minimum width=1.05cm] (rG) at (2.45,4.30)
+    {\(G_t\)};
+  \node[runl source,minimum width=.62cm] (rCzero) at (3.38,4.30)
     {\(c_0\)};
-  \node[runl source,minimum width=.62cm] (rCone) at (4.18,2.70)
+  \node[runl source,minimum width=.62cm] (rCone) at (4.10,4.30)
     {\(c_1\)};
-  \node[runl variant,minimum width=.92cm] (rRone) at (5.06,2.70)
-    {\(R_1\ (39)\)};
-  \node[runl source,minimum width=.62cm] (rCtwo) at (5.94,2.70)
+  \node[runl variant,minimum width=.86cm] (rRone) at (4.95,4.30)
+    {\(R_1\)};
+  \node[runl source,minimum width=.62cm] (rCtwo) at (5.78,4.30)
     {\(c_2\)};
-  \node[runl variant,minimum width=.92cm] (rRtwo) at (6.82,2.70)
-    {\(R_2\ (39)\)};
-  \node at (7.62,2.70) {\(\cdots\)};
-  \node[runl source,minimum width=.68cm] (rCm) at (8.42,2.70)
+  \node[runl variant,minimum width=.86cm] (rRtwo) at (6.63,4.30)
+    {\(R_2\)};
+  \node at (7.37,4.30) {\(\cdots\)};
+  \node[runl source,minimum width=.68cm] (rCm) at (8.05,4.30)
     {\(c_m\)};
-  \node[runl variant,minimum width=.96cm] (rRm) at (9.36,2.70)
-    {\(R_m\ (39)\)};
+  \node[runl variant,minimum width=.86cm] (rRm) at (8.90,4.30)
+    {\(R_m\)};
 
-  \node[anchor=east] at (.72,2.03) {query};
-  \node[runl selected,minimum width=1.05cm] (qP) at (1.25,2.03)
-    {\(P\ (40)\)};
-  \node[runl unique,minimum width=1.05cm] (qG) at (2.45,2.03)
-    {\(G_q\ (10)\)};
-  \node[runl source,minimum width=.62cm] (qCzero) at (3.43,2.03)
+  \node[anchor=east] at (.72,3.63) {query};
+  \node[runl selected,minimum width=1.05cm] (qP) at (1.25,3.63)
+    {\(P\)};
+  \node[runl unique,minimum width=1.05cm] (qG) at (2.45,3.63)
+    {\(G_q\)};
+  \node[runl source,minimum width=.62cm] (qCzero) at (3.38,3.63)
     {\(c_0\)};
-  \node[runl source,minimum width=.62cm] (qCone) at (4.18,2.03)
+  \node[runl source,minimum width=.62cm] (qCone) at (4.10,3.63)
     {\(c_1\)};
-  \node[runl variant,minimum width=.92cm] (qRone) at (5.06,2.03)
-    {\(R_1\ (39)\)};
-  \node[runl source,minimum width=.62cm] (qCtwo) at (5.94,2.03)
+  \node[runl variant,minimum width=.86cm] (qRone) at (4.95,3.63)
+    {\(R_1\)};
+  \node[runl source,minimum width=.62cm] (qCtwo) at (5.78,3.63)
     {\(c_2\)};
-  \node[runl variant,minimum width=.92cm] (qRtwo) at (6.82,2.03)
-    {\(R_2\ (39)\)};
-  \node at (7.62,2.03) {\(\cdots\)};
-  \node[runl source,minimum width=.68cm] (qCm) at (8.42,2.03)
+  \node[runl variant,minimum width=.86cm] (qRtwo) at (6.63,3.63)
+    {\(R_2\)};
+  \node at (7.37,3.63) {\(\cdots\)};
+  \node[runl source,minimum width=.68cm] (qCm) at (8.05,3.63)
     {\(c_m\)};
-  \node[runl variant,minimum width=.96cm] (qRm) at (9.36,2.03)
-    {\(R_m\ (39)\)};
+  \node[runl variant,minimum width=.86cm] (qRm) at (8.90,3.63)
+    {\(R_m\)};
 
   \draw[runl main]
     (rP.south)--(qP.north)
@@ -221,28 +264,30 @@ are not to scale.
     (rCm.south)--(qCm.north)
     (rRm.south)--(qRm.north);
 
-  \node[runl note,text width=3.35cm] at (11.84,2.36) {
-    one isolated 25-base block per intended anchor\\
-    \(N\)-filled gaps set positions
+  \node[runl info] at (11.75,3.96) {
+    each \(c_k,r_{k,\ell}\): one 25-bp island\\
+    island counts: \(P=40\)\\
+    \(G_t=G_q=10,\ R_k=39\)\\
+    all other bases: \(N\)
   };
 
-  \node[anchor=east] at (.72,.82) {anchor array};
-  \node[runl selected,minimum width=.82cm] (aP) at (1.18,.82) {\(P\)};
-  \node[runl selected,minimum width=.82cm] (aG) at (2.08,.82) {\(G\)};
-  \node[runl selected,minimum width=.58cm] (aCzero) at (2.82,.82)
+  \node[anchor=east] at (.72,2.31) {anchor array};
+  \node[runl selected,minimum width=.82cm] (aP) at (1.18,2.31) {\(P\)};
+  \node[runl selected,minimum width=.82cm] (aG) at (2.08,2.31) {\(G\)};
+  \node[runl selected,minimum width=.58cm] (aCzero) at (2.82,2.31)
     {\(c_0\)};
-  \node[runl selected,minimum width=.58cm] (aCone) at (3.50,.82)
+  \node[runl selected,minimum width=.58cm] (aCone) at (3.50,2.31)
     {\(c_1\)};
-  \node[runl unused,minimum width=.82cm] (aRone) at (4.30,.82)
+  \node[runl unused,minimum width=.82cm] (aRone) at (4.30,2.31)
     {\(R_1\)};
-  \node[runl selected,minimum width=.58cm] (aCtwo) at (5.10,.82)
+  \node[runl selected,minimum width=.58cm] (aCtwo) at (5.10,2.31)
     {\(c_2\)};
-  \node[runl unused,minimum width=.82cm] (aRtwo) at (5.90,.82)
+  \node[runl unused,minimum width=.82cm] (aRtwo) at (5.90,2.31)
     {\(R_2\)};
-  \node at (6.62,.82) {\(\cdots\)};
-  \node[runl selected,minimum width=.64cm] (aCm) at (7.35,.82)
+  \node at (6.62,2.31) {\(\cdots\)};
+  \node[runl selected,minimum width=.64cm] (aCm) at (7.35,2.31)
     {\(c_m\)};
-  \node[runl selected,minimum width=1.08cm] (aRm) at (8.22,.82)
+  \node[runl selected,minimum width=1.08cm] (aRm) at (8.22,2.31)
     {\(e_m\in R_m\)};
 
   \draw[runl pred]
@@ -258,26 +303,90 @@ are not to scale.
   \draw[runl pred]
     (aG.north) .. controls +(0,.28) and +(0,.28) .. (aP.north);
 
-  \node[runl note,text width=4.35cm] at (11.28,.84) {
-    first path:
-    \(e_m\to\cdots\to r_{m,1}\to c_m\to\cdots\to c_0\to G\to P\)\\[2pt]
-    \(R_1,\ldots,R_{m-1}\) stay in the array but are not on this path
+  \node[runl info] at (11.75,2.15) {
+    first path:\\
+    \(e_m\to\cdots\to r_{m,1}\to c_m\to\)\\
+    \(\cdots\to c_0\to G\to P\)\\
+    \(R_1,\ldots,R_{m-1}\): retained, off path
   };
+
+  \draw[black!35] (.10,1.23)--(13.75,1.23);
+
+  \node[anchor=west,font=\bfseries] at (.10,.96)
+    {(e) Wide-gap spaced-copy};
+
+  \node[anchor=east] at (.72,.38) {query};
+  \node[runl unique,minimum width=1.70cm] at (1.55,.38)
+    {\(F_L\)};
+  \node[runl source,minimum width=4.50cm] at (4.72,.38)
+    {\(P_0\ P_1\ \cdots\ P_{15}\) (adjacent)};
+  \node[runl unique,minimum width=1.70cm] at (7.95,.38)
+    {\(F_R\)};
+
+  \node[anchor=east] at (.72,-.29) {target};
+  \node[runl unique,minimum width=1.70cm] at (1.55,-.29)
+    {\(F_L\)};
+  \foreach \i in {0,...,15} {
+    \pgfmathsetmacro{\pieceX}{2.55 + .29*\i}
+    \node[runl source,minimum width=.16cm,minimum height=.40cm,
+          inner sep=0pt] at (\pieceX,-.29) {};
+  }
+  \foreach \i in {0,...,14} {
+    \pgfmathsetmacro{\gapX}{2.695 + .29*\i}
+    \node[runl variant,minimum width=.13cm,minimum height=.40cm,
+          inner sep=0pt] at (\gapX,-.29) {};
+  }
+  \node[runl unique,minimum width=1.70cm] at (7.95,-.29)
+    {\(F_R\)};
+
+  \node[runl info] at (11.75,.04) {
+    flanks: 6000 bp each\\
+    16 distinct shared pieces: 30 bp each\\
+    15 pseudorandom target gaps: 500 bp each\\
+    \(\lvert Q\rvert=12480\) bp, \(\lvert T\rvert=19980\) bp
+  };
+  \node[anchor=north,text=chainOrange!85!black] at (4.72,-.65)
+    {for \(x_k>0\), substitutions occur only in the query flanks};
 \end{tikzpicture}
-\caption{Reference and query structures used to measure the first-path
-\(\operatorname{Run}_L\) branch.  Green vertical lines connect matching
-blocks at equal reference and query coordinates.  Green boxes in the
-anchor-array row show the first predecessor path.  Dashed orange links in
-panel~(a) are repeat-derived.  Dashed orange boxes in panel~(c)'s anchor-array
-row are outside that path.  Panel~(a) keeps a full-length mapping while
-placing \(A\) and \(A'\) inside the same sequence.  Panel~(b) isolates the
-array-index effect of exact copies.  Panel~(c) constructs fixed anchor
-coordinates from isolated 25-base blocks that each emit one minimizer.}
+\caption{Canonical synthetic constructions used in this section.  Panel~(a)
+is Mosaic, with \(A'=A\).  Panel~(b) is Degraded mosaic, with \(A'\neq A\)
+through controlled substitutions or independent generation.  Panel~(c) is
+Spaced copy.  Each 4,096-base \(S_v\) block is followed by 16,384 \(N\) bases.
+Panel~(d) is Narrow-gap spaced-copy.  Every \(c_k\) and \(r_{k,\ell}\) is an
+isolated 25-base minimizer island, and neighboring islands within each \(R_k\)
+have 13 \(N\) bases between them.  Panel~(e) is Wide-gap spaced-copy, with 16
+distinct shared exact 30-base pieces separated in the target by fifteen
+pseudorandom 500-base gaps.  Solid green links mark the equal-coordinate path,
+and dashed orange links mark repeat-derived anchors.  Green boxes in
+panel~(d)'s anchor-array row show the first predecessor path.  Dashed orange
+boxes remain in the array but lie outside that path.}
 \label{fig:chaining-runl-inputs}
 \end{figure}
 
-The mosaic construction in panel~(a) uses a reference and query with identical
-bytes:
+
+In our experiments we use $\delta$ as input parameter for divergence (controlling substituiton rates). The exact substituion count (number of replaced bases in entire sequence) can be expressed as:
+\begin{equation}
+  s_{\delta} = \sum_{\text{fragment} \in \text{query}} \left\lfloor\delta\lvert A\rvert+\frac{1}{2}\right\rfloor
+\end{equation}
+The $+\frac{1}{2}$ is just used to round the result to the nearest integer. The sum goes over all fragments we can change (this depends on exact construction as some of them need to contain specific exact regions)
+
+Figure~\ref{fig:chaining-runl-inputs} depicts all of my constructions:
+\begin{itemize}
+  \item Random reference and query - parameters to experiments are $|Q|$ and $|T|$, number of occurences of query $1 \leq N$. I first generate random target, then place $N$ query occurences in it and use divergence to create substitution in the occurences.
+  \item (A) Mosaic - reference and query with identical bytes. $A$ is randomly generated and I perform substitutions on it. This is example of exact duplication of long fragment. The specific $A$ length was choosen to be very long to generate long, very similar chains.
+  \item (B) Degraded mosaic - this is version of mosaic, where we use two regions that aren't equal and do not perform any substitutions on them. This is control case, where the generation of both $A$ regions is independent. Meaning the expected divergence should be very high (as sequences are random).
+  \item (C) Spaced copy - we insert very long blocks $N^G$ between parts of reference, where $N$ denotes symbol $N$ (in dna4 alphabet it denotes unknown symbol). Normal processing just ignores these blocks (minimap2 doesn't generate minimizers for them), but they distrupt anchor positions. You can think of this construction as very special case of gapped repeatitions of same sequence, where instead of random gap-filler we use symbol $N$. That kind of contruction shouldn't occur in real-world example, it's here to illustrate that we can utilize $N$ symbol to sabotage chaining.
+  \item (D) Narrow-gap spaced-copy - ???
+  \item (E) Wide-gap spaced-copy - reference and query with wide-gap spaced bytes\
+\end{itemize}
+
+
+Figure~\ref{fig:chaining-runl-inputs} collects the five named constructions
+used in this section. Each construction has its own panel.  The drawings
+show representative minimizer links and are not to scale.
+
+Mosaic and Degraded mosaic in panels~(a) and~(b) use a reference and query
+with identical bytes:
 \[
   T=Q=U_0\,A\,U_1\,A'_{\delta}\,U_2.
 \]
@@ -307,8 +416,10 @@ larger value.  Both \(T\) and \(Q\) contain the same \(A\) and
 quantities \(\delta\) and \(\widehat{\delta}\) describe only the internal
 difference between the two blocks inside each sequence.
 
-An independently generated \(A'\) provides a separate control.  It is
-generated without copying or mutating \(A\).  Across the three inputs
+When \(A'=A\), the construction is called Mosaic.  When \(A'\neq A\), the
+construction is called Degraded mosaic.  This includes both the controlled
+\(A'_{\delta}\) sweep and the separate case in which \(A'\) is generated
+independently, without copying or mutating \(A\).  Across the three inputs
 generated from fixed random-number-generator seeds, no anchor on the first
 predecessor path shared its reference-sequence identifier, target end
 coordinate, and orientation with another retained anchor.  The path that
@@ -317,7 +428,7 @@ score in every case.
 Table~\ref{tab:chaining-runl-mosaic-divergence} lists the realized divergence
 and corresponding first-path measurements.
 
-The exact-copy control in panel~(b) uses
+The Spaced copy construction in panel~(c) uses
 \[
   T=S\,N^G,
   \qquad
@@ -327,8 +438,9 @@ The exact-copy control in panel~(b) uses
   \qquad
   G=16384.
 \]
-Here \(R\) is the number of query copies.  The \(N\)-filled spacer blocks emit
-no minimizers and make the copy pitch 20480.  In the generated inputs, each
+Here \(R\) is the number of query copies.  Each \(N\)-filled spacer has length
+\(G=16384\), emits no minimizers, and makes each repeated unit
+\(\lvert S N^G\rvert=20480\) bases long.  In the generated inputs, each
 target minimizer that passed occurrence filtering produced one anchor for
 every query copy.  Let
 \(j_{t,v}\) be the array index for copy \(v\), where \(0\leq v<R\).
@@ -340,12 +452,15 @@ For \(R\geq2\), the first predecessor path contains no run of at least two unit
 predecessor relations.  The construction therefore predicts zero vector
 batches for every tested \(L\geq2\).
 
-Panel~(c) is a constructed coordinate control.  Every intended anchor comes
+Panel~(d) is Narrow-gap spaced-copy.  Every intended anchor comes
 from a distinct 25-base non-\(N\) block surrounded by \(N\) bases.  Each such
 block emits one minimizer for \(k=15\) and \(w=10\).  This isolated block is
 called a minimizer island.  The remaining positions contain \(N\).  This
-control does not estimate the frequency of the structure in biological
-sequence.  Write \(r_{k,\ell}\) for the \(\ell\)-th anchor in \(R_k\).  In the
+construction does not estimate the frequency of the structure in biological
+sequence.  The name \emph{Narrow-gap} refers specifically to the 13 \(N\)
+bases between neighboring 25-base islands within each \(R_k\), whose starts
+are 38 bases apart.  Other gaps in the construction are wider and follow the
+coordinates below.  Write \(r_{k,\ell}\) for the \(\ell\)-th anchor in \(R_k\).  In the
 equations below, \(c_k\) and \(r_{k,\ell}\) denote their target-query
 coordinate pairs.  Let \(s_k=1\) for odd \(k\) and \(s_k=-1\) for even \(k\).
 The following pairs give the target and query coordinate increments:
@@ -390,11 +505,11 @@ scoring parameters were not changed.  Instrumentation recorded the score and
 predecessor arrays.  The only candidate-order change placed equal-score ends
 in decreasing anchor-array index, matching BioseqDB's tie rule.  The tested
 widths were \(L\in\{2,4,8,16,32,64\}\).  The branch counters were recomputed
-from the recorded arrays.  For the mosaic and spaced-copy inputs, an
+from the recorded arrays.  For Mosaic, Degraded mosaic, and Spaced copy, an
 independent checker reconstructed the expected path coordinates and compared
-them with the recorded predecessor path.  For the coordinate control, the
+them with the recorded predecessor path.  For Narrow-gap spaced-copy, the
 checker compared the recorded predecessor array with the array specified by
-the construction.  The mosaic and spaced-copy inputs used three fixed
+the construction.  The first three named inputs used three fixed
 random-number-generator seeds.
 
 Let \(q\) be the number of anchors on the first predecessor path.  Let
@@ -423,7 +538,7 @@ greedy loop gives
   \qquad
   E_L=q-(L-1)B_L.
 \]
-In the coordinate control, the path ends at anchor-array index zero, so
+In Narrow-gap spaced-copy, the path ends at anchor-array index zero, so
 \(p_0=-1=0-1\) contributes one unit relation.  The \(m=1\) path is one run of
 length 91.  For
 \(m\geq2\), the only maximal runs have lengths 39 and 52.  Thus
@@ -438,20 +553,18 @@ For fixed \(L\) with \(B_L>0\), both \(\operatorname{Fire}_L\) and
 \(\operatorname{Coverage}_L\) decrease as \(\Theta(1/m)\).  For \(L=64\),
 both values are zero for every \(m\geq2\).
 
-The row prefixes in the next table refer to
-Figure~\ref{fig:chaining-runl-inputs}.  In the mosaic rows, \emph{exact}
-means \(A'=A\), while \emph{independent} means that \(A'\) was generated
-without copying \(A\).  The itemized notes below the table describe every
-input family.
+The row prefixes in the next table refer to panels~(a)--(d) of
+Figure~\ref{fig:chaining-runl-inputs}.  The itemized notes below the table
+describe every input family.
 
 \begin{table}[H]
 \centering
 \caption{Observed first-path branch-firing rate \(100B_L/E_L\), in percent.
-The mosaic rows and the \(R=1\) spaced-copy row report medians over three
+The Mosaic, Degraded mosaic, and \(R=1\) Spaced copy rows report medians over three
 inputs generated from fixed random-number-generator seeds.  The \(R\geq2\)
-spaced-copy row covers the tested powers of two from 2 through 64, all of
-which gave zero.  Coordinate-control values are deterministic and agreed with
-the recorded counters.}
+Spaced copy row covers the tested powers of two from 2 through 64, all of
+which gave zero.  Narrow-gap spaced-copy values are deterministic and agreed
+with the recorded counters.}
 \label{tab:chaining-runl-firing}
 \scriptsize
 \setlength{\tabcolsep}{3.2pt}
@@ -459,12 +572,12 @@ the recorded counters.}
 \toprule
 Input & \(L=2\) & \(L=4\) & \(L=8\) & \(L=16\) & \(L=32\) & \(L=64\) \\
 \midrule
-(a) Mosaic, independent \(A'\) & 100.00 & 99.94 & 99.74 & 99.24 & 97.01 & 91.12 \\
-(a) Mosaic, exact \(A'=A\)     &   1.17 &  0.59 &  0.29 &  0.14 &  0.07 &  0.02 \\
-(b) Spaced copies, \(R=1\)     & 100.00 & 98.97 & 94.12 & 88.89 & 80.00 & 66.67 \\
-(b) Spaced copies, \(R\geq2\) &   0.00 &  0.00 &  0.00 &  0.00 &  0.00 &  0.00 \\
-(c) Coordinate control, \(m=2\)    & 95.74 & 84.62 & 45.45 & 29.41 & 6.67 & 0.00 \\
-(c) Coordinate control, \(m=1024\) &  4.21 &  2.10 &  0.96 &  0.48 & 0.19 & 0.00 \\
+(a) Mosaic                     &   1.17 &  0.59 &  0.29 &  0.14 &  0.07 &  0.02 \\
+(b) Degraded mosaic (independent \(A'\)) & 100.00 & 99.94 & 99.74 & 99.24 & 97.01 & 91.12 \\
+(c) Spaced copy, \(R=1\)       & 100.00 & 98.97 & 94.12 & 88.89 & 80.00 & 66.67 \\
+(c) Spaced copy, \(R\geq2\)   &   0.00 &  0.00 &  0.00 &  0.00 &  0.00 &  0.00 \\
+(d) Narrow-gap spaced-copy, \(m=2\)    & 95.74 & 84.62 & 45.45 & 29.41 & 6.67 & 0.00 \\
+(d) Narrow-gap spaced-copy, \(m=1024\) &  4.21 &  2.10 &  0.96 &  0.48 & 0.19 & 0.00 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -472,38 +585,42 @@ Input & \(L=2\) & \(L=4\) & \(L=8\) & \(L=16\) & \(L=32\) & \(L=64\) \\
 The row prefixes refer to the panels in
 Figure~\ref{fig:chaining-runl-inputs}.
 \begin{itemize}
-  \item \textbf{(a) Mosaic, exact.}
+  \item \textbf{(a) Mosaic.}
     The target and query are both
-    \(U_0 A U_1 A' U_2\), and \(A'=A\).  The word \emph{mosaic} refers to
-    this sequence layout.  The word \emph{exact} means that it contains two
-    exact copies of \(A\).
+    \(U_0 A U_1 A' U_2\), and \(A'=A\).  They therefore contain two exact
+    copies of \(A\).
 
-  \item \textbf{(a) Mosaic, independent.}
-    The layout is the same, but \(A'\) is generated without copying or
-    mutating \(A\).  The same complete sequence is used as the target and
-    query.  Its equal-coordinate path is therefore exact.
+  \item \textbf{(b) Degraded mosaic.}
+    The layout is unchanged and \(A'\neq A\).  In Table~\ref{tab:chaining-runl-firing},
+    \(A'\) is generated independently rather than literally degraded from
+    \(A\).  The following dense sweep instead obtains \(A'_{\delta}\) by
+    controlled substitutions.  In both variants the difference is internal
+    to the two blocks.  The same complete sequence is used as the target and
+    query, so its equal-coordinate path remains exact.
 
-  \item \textbf{(b) Spaced copies.}
+  \item \textbf{(c) Spaced copy.}
     The reference contains one source block \(S\).  The query contains \(R\)
     exact copies separated by \(N\)-filled gaps.  The \(R=1\) case is the
     baseline.
 
-  \item \textbf{(c) Coordinate control.}
+  \item \textbf{(d) Narrow-gap spaced-copy.}
     Each minimizer island is an isolated 25-base non-\(N\) block that emits
-    one minimizer.  These blocks and the surrounding \(N\)-filled gaps create
-    the fixed anchor coordinates specified above.  The parameter \(m\) is the
-    number of \(R_k\) groups.  This input checks the counters and does not
-    represent a biological sequence distribution.
+    one minimizer.  Within each \(R_k\), neighboring islands have 13 \(N\)
+    bases between them.  These blocks and the other, wider \(N\)-filled gaps
+    create the fixed anchor coordinates specified above.  The parameter
+    \(m\) is the number of \(R_k\) groups.  This input checks the counters and
+    does not represent a biological sequence distribution.
 \end{itemize}
 
 Table~\ref{tab:chaining-runl-mosaic-divergence} shows selected checkpoints
-from the dense mosaic sweep.  Its notation and the percentage of path anchors
+from the dense sweep from Mosaic at \(\delta=0\) through Degraded mosaic at
+\(\delta>0\).  Its notation and the percentage of path anchors
 with same-target alternatives are defined below.
 \begin{itemize}
   \item \textbf{Configured internal divergence \(\delta\).}
     This is the requested fraction of positions changed when constructing
     \(A'_{\delta}\) from \(A\).  It compares two blocks inside one sequence.
-    Every mosaic input still has \(T=Q\).
+    Every Mosaic or Degraded mosaic input still has \(T=Q\).
 
   \item \textbf{Substitution count \(s_{\delta}\).}
     The generator changes exactly
@@ -525,7 +642,7 @@ with same-target alternatives are defined below.
     \(s_{\delta}/\lvert A\rvert\).  The table reports
     \(100\widehat{\delta}\) as a percentage.
 
-  \item \textbf{Independent \(A'\).}
+  \item \textbf{Independently generated Degraded mosaic.}
     This block is generated without copying or mutating \(A\), so it has no
     configured \(\delta\) or \(s_{\delta}\).  Its realized divergence is
     measured directly with the formula above.
@@ -547,7 +664,8 @@ with same-target alternatives are defined below.
 
 \begin{table}[H]
 \centering
-\caption{Selected checkpoints from the 81-level dense mosaic sweep.  Each
+\caption{Selected checkpoints from the 81-level sweep from Mosaic at
+\(\delta=0\) through Degraded mosaic at \(\delta>0\).  Each
 entry in the last three columns gives the median followed by the observed
 minimum and maximum over three inputs generated from fixed
 random-number-generator seeds, in percent.  The firing column is
@@ -735,7 +853,8 @@ sweep.  It uses all 81 measured divergence levels.
 \end{scope}
 \end{tikzpicture}
 \caption{Internal divergence, percentage of path anchors with same-target
-alternatives, and \(L=4\) branch firing in the mosaic experiment.  All 81
+alternatives, and \(L=4\) branch firing in the experiment spanning Mosaic and
+Degraded mosaic.  All 81
 configured levels from 0 to 20 percent are shown.  The small markers report
 medians over three inputs generated from fixed random-number-generator seeds.
 The lighter lines give the observed minimum and maximum.  They are descriptive
@@ -756,7 +875,7 @@ reference seed hits were removed by reference-occurrence filtering.  Each
 retained minimizer value occurred once or twice in the reference, below the
 cutoff of ten.
 
-In the exact mosaic, the median percentage of path anchors with same-target
+In Mosaic, the median percentage of path anchors with same-target
 alternatives was 97.69 percent, and the median \(\operatorname{Fire}_4\) was
 0.59 percent.  At 20 percent configured divergence, these values were 3.04
 percent and 79.41 percent.  In the independent control, no anchor on the first
@@ -786,13 +905,13 @@ This follows from \(E_L=q-(L-1)B_L\).  It explains why the coverage values in
 Table~\ref{tab:chaining-runl-mosaic-divergence} rise faster than the firing
 rate.
 
-The spaced-copy control reached zero firing and zero anchor coverage at
+Spaced copy reached zero firing and zero anchor coverage at
 \(R=2\), and both remained zero through \(R=64\).  In this construction,
 the extra exact-copy anchors made \(\operatorname{Run}_L\) false at every
 evaluated loop state.  These data do not establish the frequency of this
 pattern in real reads.
 
-Every tested coordinate-control case produced a path with defined counters.
+Every tested Narrow-gap spaced-copy case produced a path with defined counters.
 The tested values were \(m=1\) and every power of two from 2 through 1024.
 Every measured value agreed with the closed form above.  At \(m=1024\), anchor
 coverage was 8.08 percent for \(L=2\) and 7.90 percent for \(L=4\).  It was
@@ -1205,14 +1324,16 @@ The first rate counts outcomes that increment \(u\), while the second isolates
 batch-loop iterations saved by \(U\).  Pooling sums counters before division,
 so it is neither a median nor an unweighted mean.  The scalar-loop analogue of
 the earlier \(\operatorname{Reduction}_L\) was 96.3--99.5\% for random
-occurrences and 98.7--99.7\% for mosaic, but includes ordinary batching.
+occurrences and 98.7--99.7\% for Mosaic and Degraded mosaic, but includes
+ordinary batching.
 \(\operatorname{Reduction}^{U}_L\) isolates the counter's effect.
 
 \begin{figure}[H]
 \centering
 \input{chapters/06_chaining/04_cpu_experimental_analysis/u_batch_chart}
 \caption{Pooled \(U\)-only reduction at each divergence for (a) random inputs
-(six seeds) and (b) mosaic inputs (three seeds).  Each point is a ratio of
+(six seeds) and (b) Mosaic at zero divergence or Degraded mosaic above zero
+(three seeds).  Each point is a ratio of
 summed integer counters, rather than a mean of per-input percentages.}
 \label{fig:chaining-u-batch-reduction}
 \end{figure}
@@ -1221,11 +1342,14 @@ summed integer counters, rather than a mean of per-input percentages.}
 \centering
 \caption{\(\operatorname{NoUpdate}_L/\operatorname{Reduction}^{U}_L\) (percent).
 The 0\% and 10\% rows pool seeds at that level.  Pooled denotes the full sweep.
-only Random and Mosaic vary divergence.  Random uses \(N=4000\), a 4.5-Mbase
+Only Random and the Mosaic and Degraded mosaic sweep vary divergence.  In that
+sweep, zero divergence is Mosaic and positive divergence is Degraded mosaic.
+Random uses \(N=4000\), a 4.5-Mbase
 target, 997--1002-base queries, and 81 substitution levels, with ten exact
-30-base intervals.  Mosaic uses \(T=Q=U_0AU_1A'_\delta U_2\), length 67072.
-Spaced copies use \(\lvert S\rvert=4096\), \(G=16384\), and
-\(R\in\{1,2,4,8,16,32,64\}\).  Coordinate control uses
+30-base intervals.  Mosaic and Degraded mosaic use
+\(T=Q=U_0AU_1A'_\delta U_2\), length 67072.  Spaced copy uses
+\(\lvert S\rvert=4096\), \(G=16384\), and
+\(R\in\{1,2,4,8,16,32,64\}\).  Narrow-gap spaced-copy uses
 \(m\in\{1,2,4,\ldots,1024\}\).  Defaults are \(k=15\), \(w=10\), \(S=25\), and
 \texttt{max\_chain\_iter}=5000.}
 \label{tab:chaining-u-batch-rates}
@@ -1245,8 +1369,9 @@ Spaced copies use \(\lvert S\rvert=4096\), \(G=16384\), and
 All 761 queries had validated PAF matches.  For increasing widths, \(U\) is
 \(13,7,4,2,1,1\).  Omitted batches per random-arm check were 13.17, 7.44, and 2.36 at
 \(L=2,16,64\); at 20\% divergence the reductions were 81.8, 70.5, and 34.3\%.
-Mosaic and spaced copies saved more.  Coordinate control at \(L=64\) was the
-only zero.  The requested decreasing-score/decreasing-position tie order was
+Mosaic, Degraded mosaic, and Spaced copy saved more.  Narrow-gap spaced-copy
+at \(L=64\) was the only zero.  The requested
+decreasing-score/decreasing-position tie order was
 audited, but end sorting follows forward scoring and cannot affect these counts.
 The data therefore support retaining \(U\).  This measures opportunity rather
 than wall-clock speedup.  Final cost depends on the SIMD reduction for
@@ -1903,7 +2028,7 @@ predecessor edge traversed by those executed searches, the DP score increased
 by a positive amount toward the chain end.  Moving backward therefore lowers
 the prefix score \(f_{b_m}\), which makes \(s_m=f_e-f_{b_m}\) increase.  The
 same code measured nonzero drops in the ordinary occurrence screen and in the
-long-chain example below, so the zero is specific to this length screen.
+Wide-gap spaced-copy below, so the zero is specific to this length screen.
 
 Target length, planted-copy fraction, retained-anchor load, and adaptive
 occurrence filtering change together in this construction.  The table is
@@ -1911,19 +2036,21 @@ therefore an operational screen, not a causal estimate of a target-length or
 query-length effect.  Within this synthetic construction, no tested
 target/query-length configuration produced a crossing.
 
-\subsection{A long-chain example that crosses
+\subsection{A Wide-gap spaced-copy that crosses
 \texorpdfstring{\(D=500\)}{D=500}}
 
-A specially prepared long-chain example tests whether the instrumented
-predicate can fire at all.  The sequence letters are pseudorandom, but their
+The specially prepared Wide-gap spaced-copy tests whether the instrumented
+predicate can fire at all.  Its sequence letters are pseudorandom, but its
 layout is deliberately chosen.  The 12,480-base query is a 6,000-base left
-flank, followed by 16 adjacent 30-base exact pieces, followed by a 6,000-base
-right flank.  The 19,980-base target contains the same parts in the same
-order, but inserts a 500-base target-only gap between every neighboring pair
-of exact pieces.  There are therefore 15 inserted gaps.  Figure~\ref{fig:chaining-max-drop-long-chain-accounting}(a)
-shows this construction.
+flank, followed by 16 adjacent, distinct shared exact pieces of 30 bases each,
+followed by a 6,000-base right flank.  The 19,980-base target contains the
+same parts in the same order, but inserts a pseudorandom 500-base target-only
+gap between every neighboring pair of exact pieces.  There are therefore 15
+inserted gaps.  Figure~\ref{fig:chaining-runl-inputs}(e) shows this
+construction.
 
-The horizontal variable in panels (b) and (c) is the requested substitution
+The horizontal variable in panels (a) and (b) of
+Figure~\ref{fig:chaining-max-drop-long-chain-accounting} is the requested substitution
 percentage \(x_k\), defined by
 \[
   x_k=0.25k,
@@ -1937,14 +2064,15 @@ If \(u_{k,r}=1\) when query base \(r\) is changed at level \(k\), and zero
 otherwise, then \(m_k=\sum_{r=1}^{12{,}480}u_{k,r}\).  In simple terms,
 \(m_k\) is the number of query bases that are changed.  These positions
 are chosen only from the 12,000 flank bases, and the sets are nested as
-\(k\) increases.  All 480 bases in the 16 exact pieces remain unchanged.  For
+\(k\) increases.  All 480 bases in the 16 distinct shared exact pieces remain
+unchanged.  For
 example, \(x_k=5\) changes \(m_k=624\) query bases, all in the two flanks.
 Thus \(x_k\) uses the complete 12,480-base query as its denominator, but it
 does not mean that five percent of every region is changed.
 
-For panel (b), each baseline scan keeps its original starting end and incoming
+For panel (a), each baseline scan keeps its original starting end and incoming
 marks.  The calculation finds the first step with \(d_m>500\) and counts the
-remaining baseline steps.  It does not update the marks.  Panel (c) instead
+remaining baseline steps.  It does not update the marks.  Panel (b) instead
 applies every cutoff and updates the marks before the next scan.  At each
 \(x_k\), each plotted percentage is a ratio of sums: its numerator and
 denominator are first added across the six fixed sequence seeds.  The
@@ -1964,8 +2092,6 @@ matplotlib.rcParams.update({
     "font.serif": [],
     "text.usetex": True,
 })
-
-from matplotlib.patches import Rectangle
 
 # Requested substitution percentage, the fraction of one fixed-start scan
 # after its first crossing, and the complete-replay scan-step change.
@@ -1996,99 +2122,8 @@ substitution_percent, remaining_percent, full_extra_percent = map(
     list, zip(*long_chain_data)
 )
 
-fig = plt.figure()
-fig.set_size_inches(0.91 * __LINEWIDTH__, 0.68 * __LINEWIDTH__, forward=True)
-grid = fig.add_gridspec(2, 2, height_ratios=(1.0, 1.18), hspace=0.56,
-                        wspace=0.27)
-top = fig.add_subplot(grid[0, :])
-left = fig.add_subplot(grid[1, 0])
-right = fig.add_subplot(grid[1, 1])
-
-flank_color = "#B8C7D9"
-piece_color = "#2F6B9A"
-gap_color = "#E17C05"
-edge_color = "#3D4A57"
-x_start = 0.055
-flank_width = 0.160
-piece_width = 0.008
-gap_width = 0.018
-block_height = 0.22
-query_y = 1.25
-target_y = 0.48
-
-top.set_xlim(0, 1)
-top.set_ylim(0, 2.02)
-top.axis("off")
-top.set_title("(a) Construction of the long-chain example (not to scale)",
-              fontsize=8, loc="left")
-
-def add_block(x, y, width, color, edge=edge_color, linewidth=0.45):
-    top.add_patch(Rectangle((x, y), width, block_height,
-                            facecolor=color, edgecolor=edge,
-                            linewidth=linewidth))
-
-def add_bracket(x_left, x_right, y, text_value, text_y):
-    top.plot([x_left, x_left, x_right, x_right],
-             [y - 0.035, y, y, y - 0.035],
-             color=edge_color, linewidth=0.55)
-    top.text((x_left + x_right) / 2, text_y, text_value,
-             ha="center", va="center", fontsize=6.3)
-
-query_middle_start = x_start + flank_width
-query_middle_end = query_middle_start + 16 * piece_width
-query_end = query_middle_end + flank_width
-target_middle_start = query_middle_start
-target_middle_end = target_middle_start + 16 * piece_width + 15 * gap_width
-target_end = target_middle_end + flank_width
-
-add_block(x_start, query_y, flank_width, flank_color)
-for piece_index in range(16):
-    add_block(query_middle_start + piece_index * piece_width, query_y,
-              piece_width, piece_color, edge="white", linewidth=0.30)
-add_block(query_middle_end, query_y, flank_width, flank_color)
-
-add_block(x_start, target_y, flank_width, flank_color)
-target_x = target_middle_start
-for piece_index in range(16):
-    add_block(target_x, target_y, piece_width, piece_color,
-              edge="white", linewidth=0.30)
-    target_x += piece_width
-    if piece_index < 15:
-        add_block(target_x, target_y, gap_width, gap_color,
-                  edge="white", linewidth=0.30)
-        target_x += gap_width
-add_block(target_middle_end, target_y, flank_width, flank_color)
-
-top.text(0.045, query_y + block_height / 2, "query", ha="right",
-         va="center", fontsize=7)
-top.text(0.045, target_y + block_height / 2, "target", ha="right",
-         va="center", fontsize=7)
-for x_position, y_position in (
-    (x_start + flank_width / 2, query_y),
-    (query_middle_end + flank_width / 2, query_y),
-    (x_start + flank_width / 2, target_y),
-    (target_middle_end + flank_width / 2, target_y),
-):
-    top.text(x_position, y_position + block_height / 2,
-             "6,000-bp\nflank", ha="center", va="center", fontsize=5.7)
-
-add_bracket(query_middle_start, query_middle_end,
-            query_y + block_height + 0.07,
-            "16 adjacent exact pieces, 30 bp each",
-            query_y + block_height + 0.14)
-add_bracket(target_middle_start, target_middle_end,
-            target_y - 0.07,
-            "15 target-only gaps, 500 bp each",
-            target_y - 0.16)
-top.text((x_start + query_end) / 2, 1.05,
-         r"At $x_k>0$, only query-flank bases are changed.",
-         ha="center", va="center", fontsize=6.2, color="#8A3E00")
-top.text(0.80, 1.36,
-         r"$|Q|=6000+16(30)+6000$" "\n" r"$=12{,}480$ bp",
-         ha="left", va="center", fontsize=6.4)
-top.text(0.80, 0.59,
-         r"$|T|=|Q|+15(500)$" "\n" r"$=19{,}980$ bp",
-         ha="left", va="center", fontsize=6.4)
+fig, (left, right) = plt.subplots(1, 2)
+fig.set_size_inches(0.91 * __LINEWIDTH__, 0.34 * __LINEWIDTH__, forward=True)
 
 left.plot(substitution_percent, remaining_percent,
           color="#4C78A8", linewidth=1.25)
@@ -2098,7 +2133,7 @@ left.set_xlim(0, 10)
 left.set_ylim(47.5, 51.0)
 left.set_xticks((0, 2.5, 5, 7.5, 10))
 left.set_yticks((48, 49, 50, 51))
-left.set_title("(b) Stop one scan at its first crossing", fontsize=8, loc="left")
+left.set_title("(a) Stop one scan at its first crossing", fontsize=8, loc="left")
 left.set_ylabel("steps after first crossing\n" r"/ baseline steps (\%)",
                 fontsize=8)
 left.set_xlabel(r"requested substitutions $x_k$ (\%)", fontsize=8)
@@ -2113,7 +2148,7 @@ right.set_xlim(0, 10)
 right.set_ylim(0, 12)
 right.set_xticks((0, 2.5, 5, 7.5, 10))
 right.set_yticks((0, 3, 6, 9, 12))
-right.set_title("(c) Apply every cutoff and update marks", fontsize=8, loc="left")
+right.set_title("(b) Apply every cutoff and update marks", fontsize=8, loc="left")
 right.set_ylabel(r"extra scan steps vs. baseline (\%)", fontsize=8)
 right.set_xlabel(r"requested substitutions $x_k$ (\%)", fontsize=8)
 right.text(0.35, 10.8,
@@ -2123,26 +2158,24 @@ right.text(0.35, 10.8,
 for ax in (left, right):
     ax.tick_params(axis="both", labelsize=7)
     ax.grid(axis="y", color="#e5e5e5", linewidth=0.45)
-fig.subplots_adjust(left=0.14, right=0.985, bottom=0.10, top=0.98)
+fig.subplots_adjust(left=0.14, right=0.985, bottom=0.18, top=0.91, wspace=0.30)
 
 print(get_filename_from_extension(".pgf"))
 plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
 \end{CacheMeCode}
-\caption{Construction and scan-step accounting for the long-chain example at
-default \(D=500\).  Panel (a) shows the specially prepared layout.  Its
-sequence letters are pseudorandom.  The 12,480-base query has two 6,000-base
-flanks around 16 adjacent exact 30-base pieces.  The 19,980-base target adds
-one 500-base target-only gap between each neighboring pair.  The drawing is
-not to scale.  At \(x_k>0\), substitutions are made only in the query flanks.
-Panel (b) counts the part of each fixed-start baseline scan after its first
+\caption{Scan-step accounting for Wide-gap spaced-copy at default \(D=500\).
+Its construction and exact dimensions are shown in
+Figure~\ref{fig:chaining-runl-inputs}(e).  Panel (a) counts the part of each
+fixed-start baseline scan after its first
 strict crossing.  The dashed value is \(\sum S/\sum B\) over all 246
-observations.  Panel (c) applies every cutoff and updates the marks, which
+observations.  Panel (b) applies every cutoff and updates the marks, which
 increases the complete scan work.  These are logical scan steps, not
 instructions, elapsed time, or a measured slowdown.}
 \label{fig:chaining-max-drop-long-chain-accounting}
 \end{figure}
 
-All 246 long-chain observations retained one long-span, plus-strand, MAPQ-60
+All 246 Wide-gap spaced-copy observations retained one long-span, plus-strand,
+MAPQ-60
 placement on the sole intended target, with at least 98.910 percent query-axis
 coverage.  This validates the intended chaining placement, not a high-identity
 alignment: the residue-match count divided by query length fell to 26.402
@@ -2174,7 +2207,7 @@ at every level.  The percentage rose because baseline path work decreased.
 
 For both ordinary screens, \(\sum S/C=0\).  Even a free check can only tie the
 baseline scan in the fixed-start variable-work model, while any positive check cost
-makes that model worse.  The long-chain example proves that the predicate
+makes that model worse.  Wide-gap spaced-copy proves that the predicate
 can fire, but it increases complete logical scan work and changes chain
 semantics.  These results therefore do not justify an always-on SIMD
 \texttt{max\_drop} check for the studied BioseqDB path.  They do not prove the
@@ -2320,8 +2353,8 @@ print(get_filename_from_extension(".pgf"))
 plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
 \end{CacheMeCode}
 \caption{BioseqDB \(\operatorname{Run}_L\) behavior along the highest-ranked
-predecessor path in the ordinary synthetic repeated-copy inputs, not the
-long-chain example.  Each of six fixed input blocks uses a pseudorandom
+predecessor path in the ordinary synthetic repeated-copy inputs, not
+Wide-gap spaced-copy.  Each of six fixed input blocks uses a pseudorandom
 4.5-Mbp target background and one pseudorandom source of length 997--1002
 bases.  For the 19 listed values from \(N=1\) to \(N=4000\), nonoverlapping
 forward copies of the unchanged source were deliberately planted in the
