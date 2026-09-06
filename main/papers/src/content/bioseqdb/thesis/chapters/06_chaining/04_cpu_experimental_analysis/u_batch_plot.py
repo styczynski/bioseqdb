@@ -156,7 +156,7 @@ def make_table(document: dict[str, object]) -> str:
                 ("Random occurrences", by_construction["random_occurrences"]),
                 ("Mosaic and Degraded mosaic", by_construction["mosaic"]),
                 ("Spaced copy", by_construction["spaced_copies"]),
-                ("Narrow-gap spaced-copy", by_construction["constructed_coordinate_control"]),
+                ("Minimizer-island comb", by_construction["constructed_coordinate_control"]),
             ),
         ),
     )
