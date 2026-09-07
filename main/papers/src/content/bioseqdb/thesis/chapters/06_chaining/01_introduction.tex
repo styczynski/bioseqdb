@@ -397,7 +397,7 @@ We can have selection function that not only takes the best score, but also adds
 \begin{equation}
 \begin{aligned}
   f_j = \max_{i < j}\{f_i+E(j,i)\}, \\
-  \text{Selection}(i) &= f_j + \phi(r_i, q_i)
+  \text{Selection}(i) &= f_i + \phi(r_i, q_i)
 \end{aligned}
 \end{equation}
 
@@ -407,9 +407,10 @@ Please note that the difference here is that it's not a cummulative chain score.
 In the later chapters we discuss selection function that uses artithmetical average of positions:
 \begin{equation}
 \begin{aligned}
-  \operatorname{Selection}(j) = f_j+\phi(r_i, q_i) \\
+  \operatorname{Selection}(j) = f_i+\phi(r_i, q_i) \\
   \phi(r_i, q_i) = \frac{r_i + q_i}{2}
 \end{aligned}
+\label{eq:selection-chain-score-func-def}
 \end{equation}
 
 \begin{figure}[tbp]
