@@ -2,25 +2,17 @@
 \section{Range minimum query chaining}
 \label{sec:chaining-rmq-idea}
 
-The ordered predecessor scan in B1 can calculate many complete link scores for
-one target.  The B4 algorithm first compares a value that depends only on the
-earlier anchor:
+As we scan anchors during chaining, we need to choose the best candidate for chain. This can be viewed as finding a minimum in a range.
+The problem is that the final score $f_j+E(j,i)$ depends on both anchors. We can formulate selection function which only depends on one anchor as done in Equation~\ref{eq:selection-chain-score-func-def}
 \begin{equation}
   h(j)=f_j+\frac{\lambda_g}{2}(r_j+q_j).
 \label{eq:chaining-rmq-h}
 \end{equation}
-Once \(f_j\) is known, the same \(h(j)\) can be reused for every later target.
-An RMQ tree stores
-\(\pi(j)=-h(j)\).  A query for the smallest priority therefore returns an
-anchor with the largest \(h(j)\) inside a query-coordinate interval.
+Once \(f_j\) is known, the same \(h(j)\) can be reused for every later target, which can reduce amount of work needed to calculate final score for later anchors.
+Finding a minimum in a range can be done using a range minimum query (RMQ) tree.
 
-This is a candidate-selection method.  The tree does not store the complete
-target-dependent value \(f_j+E(j,i)\).  Minimap2 calculates that value after
-the query.  It can also scan a narrower local interval when the selected link
-is not an exact extension.  This design is used by minimap2's RMQ chaining
-mode and by assembly presets that need to consider links across long gaps.
-In this section, \(f_j+E(j,i)\) is the complete proposed chain score,
-abbreviated to complete score.
+
+An RMQ tree stores priority function, formally \(\pi(j)=-h(j)\) (value is negated to convert maximum which we want to minimum in RMQ tree).
 
 \subsection{Minimap2 RMQ}
 \label{sec:chaining-minimap2-rmq}
