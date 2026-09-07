@@ -15,9 +15,8 @@ The subsections talk about:
   \item Answering if max drop would help us increase performance of SIMD backtracking algorithm~\ref{fig:chaining-minimap2-backtracking}
 \end{itemize}
 
-\warn{Synthetic data}{Primary modelling here uses substitution-only synthetic
-data. Under normal conditions substitutions should be
-at least a few times more frequent than indels. I prepared special cases of sequence construction using gaps or equal regions to see what happens in cases where large gaps occur as secondary method of analysis. Overall the analysis is intended to
+\warn{Synthetic data}{Primary modelling here uses synthetic
+data built from randomly generated sequences assuming default substitution rate of $0.001$ and insertion/deleteion probability of $0.0005$. I prepared special cases of sequence construction using gaps or equal regions to see what happens in cases where extremally large gaps occur as secondary method of analysis. Overall the analysis is intended to
 motivate the approach and formulate conditions under which an optimisation's
 cost exceeds its benefit.}
 
@@ -418,109 +417,83 @@ Figure~\ref{fig:chaining-runl-inputs} depicts all of my constructions:
   where repetitions of genomes happen frequently.
 }
 
+Constructions~(a), (b) and~(c) are primary using the same idea. After collecting and sorting anchors the anchor table looks like this for spaced copy (sorted by target coordinate):
 
-The first constructions (a) and (b) are simple. For spaced copy we can observe that the...
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  index cell/.style={
+    draw=black!35,
+    fill=black!3,
+    minimum width=1.35cm,
+    minimum height=0.42cm,
+    inner sep=1pt,
+    font=\small
+  },
+  anchor cell/.style={
+    draw=blue!55!black,
+    fill=blue!6,
+    minimum width=1.80cm,
+    minimum height=0.42cm,
+    inner sep=1pt,
+    font=\small
+  },
+  chain zero/.style={->, >=stealth, line width=0.7pt, blue!70!black},
+  chain one/.style={->, >=stealth, line width=0.7pt, orange!85!black},
+  chain two/.style={->, >=stealth, line width=0.7pt, green!55!black}
+]
+  \node[font=\small\bfseries] at (0,0.55) {array index};
+  \node[font=\small\bfseries] at (1.85,0.55) {anchor};
+  \node[font=\scriptsize] at (-1.15,-0.50) {$t=0$};
+  \node[font=\scriptsize] at (-1.15,-2.10) {$t=1$};
+  \node[font=\scriptsize] at (-1.15,-3.70) {$t=2$};
 
-Figure~\ref{fig:chaining-runl-inputs} collects the five named constructions
-used in this section. Each construction has its own panel.  The drawings
-show representative minimizer links and are not to scale.
+  \node[index cell]  (i00) at (0,0.00) {$0$};
+  \node[anchor cell] (a00) at (1.85,0.00) {$a_{0,0}$};
+  \node[index cell]  (i01) at (0,-0.50) {$1$};
+  \node[anchor cell] (a01) at (1.85,-0.50) {$a_{0,1}$};
+  \node[index cell]  (i02) at (0,-1.00) {$2$};
+  \node[anchor cell] (a02) at (1.85,-1.00) {$a_{0,2}$};
 
-Mosaic and Degraded mosaic in panels~(a) and~(b) use a reference and query
-with identical bytes:
-\[
-  T=Q=U_0\,A\,U_1\,A'_{\delta}\,U_2.
-\]
-Here \(\lvert A\rvert=32768\), every \(U_i\) has length 512, and the
-complete sequence has length 67072.  The configured parameter \(\delta\)
-sets the substitution fraction between \(A\) and \(A'_{\delta}\).  The
-generator applies the exact count
-\[
-  s_{\delta}=
-  \left\lfloor\delta\lvert A\rvert+\frac{1}{2}\right\rfloor.
-\]
-Every substituted base is changed to a different base.  The realized fraction
-of positions at which the two blocks differ is therefore
-\[
-  \widehat{\delta}=\frac{s_{\delta}}{\lvert A\rvert}.
-\]
-This value is fixed when the input is generated.  The dense sweep uses
-\[
-  \delta_i=\frac{i}{400},
-  \qquad i=0,\ldots,80.
-\]
-These 81 values run from 0 to 20 percent in steps of 0.25 percentage points.
-Within each input generated from one fixed random-number-generator seed, the
-substitutions for a smaller \(\delta\) form a subset of those used for every
-larger value.  Both \(T\) and \(Q\) contain the same \(A\) and
-\(A'_{\delta}\) blocks, so their query/reference error rate is zero.  The
-quantities \(\delta\) and \(\widehat{\delta}\) describe only the internal
-difference between the two blocks inside each sequence.
+  \draw[black!25,dashed] (-0.78,-1.30) -- (2.78,-1.30);
 
-When \(A'=A\), the construction is called Mosaic.  When \(A'\neq A\), the
-construction is called Degraded mosaic.  This includes both the controlled
-\(A'_{\delta}\) sweep and the separate case in which \(A'\) is generated
-independently, without copying or mutating \(A\).  Across the three inputs
-generated from fixed random-number-generator seeds, no anchor on the first
-predecessor path shared its reference-sequence identifier, target end
-coordinate, and orientation with another retained anchor.  The path that
-links equal target and query coordinates remains valid and has the maximum
-score in every case.
-Table~\ref{tab:chaining-runl-mosaic-divergence} lists the realized divergence
-and corresponding first-path measurements.
+  \node[index cell]  (i10) at (0,-1.60) {$3$};
+  \node[anchor cell] (a10) at (1.85,-1.60) {$a_{1,0}$};
+  \node[index cell]  (i11) at (0,-2.10) {$4$};
+  \node[anchor cell] (a11) at (1.85,-2.10) {$a_{1,1}$};
+  \node[index cell]  (i12) at (0,-2.60) {$5$};
+  \node[anchor cell] (a12) at (1.85,-2.60) {$a_{1,2}$};
 
-The Spaced copy construction in panel~(c) uses
-\[
-  T=S\,N^G,
-  \qquad
-  Q=(S\,N^G)^R,
-  \qquad
-  \lvert S\rvert=4096,
-  \qquad
-  G=16384.
-\]
-Here \(R\) is the number of query copies.  Each \(N\)-filled spacer has length
-\(G=16384\), emits no minimizers, and makes each repeated unit
-\(\lvert S N^G\rvert=20480\) bases long.  In the generated inputs, each
-target minimizer that passed occurrence filtering produced one anchor for
-every query copy.  Let
-\(j_{t,v}\) be the array index for copy \(v\), where \(0\leq v<R\).
-Consecutive target minimizers satisfy
-\[
-  p_{j_{t+1,v}}=j_{t,v}=j_{t+1,v}-R.
-\]
-For \(R\geq2\), the first predecessor path contains no run of at least two unit
-predecessor relations.  The construction therefore predicts zero vector
-batches for every tested \(L\geq2\).
+  \draw[black!25,dashed] (-0.78,-2.90) -- (2.78,-2.90);
 
-Panel~(d) is the Minimizer-island comb.  Every intended anchor comes
-from a distinct 25-base non-\(N\) block surrounded by \(N\) bases.  Each such
-block emits one minimizer for \(k=15\) and \(w=10\).  This isolated block is
-called a minimizer island.  The remaining positions contain \(N\).  This
-construction does not estimate the frequency of the structure in biological
-sequence.  Its name describes the \(c_k\) backbone and the \(R_k\) groups of
-minimizer-island ``teeth.''  Only the gaps inside a tooth are narrow: the 39
-islands of \(R_k\) span 1469 bases, with 13 \(N\) bases between neighboring
-25-base islands.  The other gaps are substantially wider.  Write
-\(r_{k,\ell}\) for the \(\ell\)-th anchor in \(R_k\).  In the
-equations below, \(c_k\) and \(r_{k,\ell}\) denote their target-query
-coordinate pairs.  Let \(s_k=1\) for odd \(k\) and \(s_k=-1\) for even \(k\).
-The following pairs give the target and query coordinate increments:
-\[
-\begin{aligned}
-  c_k-c_{k-1}
-    &=(3500,\ 3500-100s_k),\\
-  r_{k,\ell}-c_k
-    &=(500+38(\ell-1),\
-       500-450s_k+38(\ell-1)),
-       &&1\leq\ell\leq39.
-\end{aligned}
-\]
-Because every island has length 25, subtracting 25 from successive coordinate
-increments gives the actual intervening \(N\)-run.  The physical order is
-\[
-  P,G,c_0,c_1,R_1,c_2,R_2,\ldots,c_m,R_m.
-\]
-The gaps from the end of one named fragment to the start of the next are
+  \node[index cell]  (i20) at (0,-3.20) {$6$};
+  \node[anchor cell] (a20) at (1.85,-3.20) {$a_{2,0}$};
+  \node[index cell]  (i21) at (0,-3.70) {$7$};
+  \node[anchor cell] (a21) at (1.85,-3.70) {$a_{2,1}$};
+  \node[index cell]  (i22) at (0,-4.20) {$8$};
+  \node[anchor cell] (a22) at (1.85,-4.20) {$a_{2,2}$};
+
+  \draw[chain zero] (a00.east) -- (3.25,0.00) -- (3.25,-1.60) -- (a10.east);
+  \draw[chain zero] (a10.east) -- (3.25,-1.60) -- (3.25,-3.20) -- (a20.east);
+  \draw[chain one]  (a01.east) -- (3.55,-0.50) -- (3.55,-2.10) -- (a11.east);
+  \draw[chain one]  (a11.east) -- (3.55,-2.10) -- (3.55,-3.70) -- (a21.east);
+  \draw[chain two]  (a02.east) -- (3.85,-1.00) -- (3.85,-2.60) -- (a12.east);
+  \draw[chain two]  (a12.east) -- (3.85,-2.60) -- (3.85,-4.20) -- (a22.east);
+
+  \node[font=\scriptsize,align=center] at (3.55,-4.65)
+    {same-copy link: array index advances by $R=3$};
+  \draw[->,>=stealth,line width=0.8pt,black!65]
+    (5.05,0.20) -- (5.05,-4.40)
+    node[midway,right=2pt,font=\scriptsize,align=left]
+      {sorted by\\reference position};
+\end{tikzpicture}
+\caption{Coordinate-sorted spaced-copy anchors for the concrete case $R=3$.
+As the query contains exact $R$ copies we will have "layers" ($t=0,1,2...$) of the same anchors with the same reference position. Anchor
+$a_{t,v}$ is the anchor for $v$-th copy in the query.  Colored arrows follow mark the next anchor in the chain. Naturally each anchor points to the next anchor in the same $v$-th copy. This means that each anchor will just point $R$ anchors forward.}
+\label{fig:spaced-copy-anchor-order}
+\end{figure}
+
+The construction (d) - minimizer-island comb was created by adjusting gap sizes between query and target islands:
 \[
 \begin{array}{c|cc}
 \text{transition} & \text{target }N\text{-run} & \text{query }N\text{-run}\\
@@ -532,53 +505,47 @@ c_k\to R_k & 475 & 25\ (k\text{ odd}),\ 925\ (k\text{ even})\\
 R_k\to c_{k+1} & 1531 & 2081\ (k\text{ odd}),\ 981\ (k\text{ even}).
 \end{array}
 \]
-Thus the construction contains many gaps longer than 500 bases; 13 is only
-the internal gap within each \(R_k\).  The leading and trailing \(N\)-runs are
-981 and 11 bases, respectively, in both sequences.
-The \texttt{map-ont} preset sets the short-range chaining bandwidth to 500.
-Every anchor in \(R_k\) and \(c_{k+1}\) differ by 550 between the target and
-query distances, so those anchors fail the bandwidth check.  The preceding
-\(c_k\) remains valid, and the recorded predecessor array confirms
-\(p(c_{k+1})=c_k\).  The 39 anchors of \(R_k\) lie between \(c_k\) and
-\(c_{k+1}\) in array order, which gives an index jump of 40.
 
-Let \(h\) be the last anchor in \(P\), and let \(e_k=r_{k,39}\) be the last
-anchor in \(R_k\).  With the unmodified \texttt{map-ont} scoring coefficients,
-the construction gives
+\info{Default minimap2 parameters}{
+As we discussed due to larger shifts between target and query coordinates, the $R_k$ anchors will have larger pentalty due to higher distance from diagonal i.e $\delta$. Minimap2 by default uses max bandwith of $B = \text{bw} = 500$.
+Every anchor in $R_k$ and $c_{k+1}$ differ by 550 between the target and query distances, so those anchors fail
+the bandwidth check.
+This means that the best chain will be going through: $R_{m},c_{m},c_{m-1},...c_0,G,P$ as depicted in the figure~\ref{fig:minimizer-island-comb-chain}
+The original dimentions of constrution can be calculated from the following formula ($r_{k,\ell}$ is the $\ell$-th anchor in $R_k$), $L$ is the count of "islands" in $R_k$:
 \[
-  f(h)=600,
-  \qquad
-  f(c_k)=88,
-  \qquad
-  f(e_k)=615.
+\begin{aligned}
+  B = 500, L = 39,
+  s(k) = \begin{cases}
+    1 & \text{if } k \text{ is odd} \\
+    -1 & \text{if } k \text{ is even} \\
+  \end{cases}\\
+  c_k \rightarrow c_{k-1}
+    &: (3500,\ 3500-100*s(k)),\\
+  r_{k,\ell} \rightarrow c_k
+    &: (B+(L-1)(\ell-1),\
+       B-450*s(k)+(L-1)(\ell-1)),
+       &&1\leq\ell\leq L.
+\end{aligned}
 \]
-All \(e_k\) values share the maximum score.  The experiment orders equal-score
-ends by decreasing anchor-array index, matching BioseqDB's tie rule.  This
-selects \(e_m\).  The first measured path passes through \(R_m\) and then
-follows \(c_m,\ldots,c_0,G,P\).  The worst-case argument for all minimap2 cut
-searches concerns the total work over every selected chain end and remains a
-separate result.
+}
 
-\subsubsection{Metrics and results}
+\subsubsection{Experiment design}
 
-Minimap2 2.31-r1302 was run with the \texttt{map-ont} preset.  Filtering and
-scoring parameters were not changed.  Instrumentation recorded the score and
-predecessor arrays.  The only candidate-order change placed equal-score ends
-in decreasing anchor-array index, matching BioseqDB's tie rule.  The tested
-widths were \(L\in\{2,4,8,16,32,64\}\).  The branch counters were recomputed
-from the recorded arrays.  For Mosaic, Degraded mosaic, and Spaced copy, an
-independent checker reconstructed the expected path coordinates and compared
-them with the recorded predecessor path.  For the Minimizer-island comb, the
-checker compared the recorded predecessor array with the array specified by
-the construction.  The first three named inputs used three fixed
-random-number-generator seeds.
+Minimap2 2.31-r1302 was run with the \texttt{map-ont} preset (default one). 
+I added instrumentation to record the score and predecessor arrays.
+\begin{itemize}
+    \item Let $L\in\{2,4,8,16,32,64\}$ be the number of anchors viewed at the same time similar to our SIMD algorithms. 
+    \item Let $\operatorname{Run}_L(j,c) \iff j\geq L-1 \land c\leq n-L \land \bigwedge_{u=0}^{L-1}p_{j-u}=j-u-1$ be the condition used in BioseqDB SIMD algorithms.
+    \item Let \(B_L\) be the number of evaluations for which \(\operatorname{Run}_L\) is true
+    \item Let \(E_L\) the number of times the first-path loop evaluates \(\operatorname{Run}_L\)
+    \item Let \(P_L\) the number that satisfy both bounds \(j\geq L-1\) and \(c\leq n-L\).
+    \item Let $q$ be the number of anchors on the first predecessor path.
+    \item Let $\operatorname{Fire}_L$ be the observed rate at which my heuristic fires
+    \item Let $\operatorname{Contiguous}_L$ be the the ratio $\operatorname{Fire}_L$ but with bounds checks excluded (we measure firing rate but only after bounds checks)
+    \item Let $\operatorname{Coverage}_L$ be the fraction of path anchors consumed by vector batches (this is a metric that answers the question "How many anchors we can cover by SIMD batches")
+\end{itemize}
 
-Let \(q\) be the number of anchors on the first predecessor path.  Let
-\(B_L\) be the number of evaluations for which
-\(\operatorname{Run}_L\) is true, \(E_L\) the number of times the first-path
-loop evaluates \(\operatorname{Run}_L\), and \(P_L\) the number that satisfy
-both bounds \(j\geq L-1\) and
-\(c\leq n-L\).  Three different ratios are useful:
+The exact definitions are as follows:
 \[
   \operatorname{Fire}_L=\frac{B_L}{E_L},
   \qquad
@@ -586,37 +553,65 @@ both bounds \(j\geq L-1\) and
   \qquad
   \operatorname{Coverage}_L=\frac{LB_L}{q}.
 \]
-The first ratio is the observed branch-firing rate.  The second isolates the
-predecessor test after the bounds pass.  The third is the fraction of path
-anchors consumed by vector batches.  A successful evaluation consumes
-\(L\) anchors, so firing rate and anchor coverage are not interchangeable.
-An empty denominator gives an undefined value.
 
-For maximal runs of unit predecessor relations with lengths \(r_i\), the
-greedy loop gives
-\[
-  B_L=\sum_i\left\lfloor\frac{r_i}{L}\right\rfloor,
-  \qquad
-  E_L=q-(L-1)B_L.
-\]
-In the Minimizer-island comb, the path ends at anchor-array index zero, so
-\(p_0=-1=0-1\) contributes one unit relation.  The \(m=1\) path is one run of
-length 91.  For
-\(m\geq2\), the only maximal runs have lengths 39 and 52.  Thus
-\[
-  B_L=
-  \left\lfloor\frac{39}{L}\right\rfloor+
-  \left\lfloor\frac{52}{L}\right\rfloor,
-  \qquad
-  q=m+90.
-\]
-For fixed \(L\) with \(B_L>0\), both \(\operatorname{Fire}_L\) and
-\(\operatorname{Coverage}_L\) decrease as \(\Theta(1/m)\).  For \(L=64\),
-both values are zero for every \(m\geq2\).
 
-The row prefixes in the next table refer to panels~(a)--(d) of
-Figure~\ref{fig:chaining-runl-inputs}.  The itemized notes below the table
-describe every input family.
+
+% Filtering and
+% scoring parameters were not changed.  Instrumentation recorded the score and
+% predecessor arrays.  The only candidate-order change placed equal-score ends
+% in decreasing anchor-array index, matching BioseqDB's tie rule.  The tested
+% widths were \(L\in\{2,4,8,16,32,64\}\).  The branch counters were recomputed
+% from the recorded arrays.  For Mosaic, Degraded mosaic, and Spaced copy, an
+% independent checker reconstructed the expected path coordinates and compared
+% them with the recorded predecessor path.  For the Minimizer-island comb, the
+% checker compared the recorded predecessor array with the array specified by
+% the construction.  The first three named inputs used three fixed
+% random-number-generator seeds.
+
+% Let \(q\) be the number of anchors on the first predecessor path.  Let
+% \(B_L\) be the number of evaluations for which
+% \(\operatorname{Run}_L\) is true, \(E_L\) the number of times the first-path
+% loop evaluates \(\operatorname{Run}_L\), and \(P_L\) the number that satisfy
+% both bounds \(j\geq L-1\) and
+% \(c\leq n-L\).  Three different ratios are useful:
+% \[
+%   \operatorname{Fire}_L=\frac{B_L}{E_L},
+%   \qquad
+%   \operatorname{Contiguous}_L=\frac{B_L}{P_L},
+%   \qquad
+%   \operatorname{Coverage}_L=\frac{LB_L}{q}.
+% \]
+% The first ratio is the observed branch-firing rate.  The second isolates the
+% predecessor test after the bounds pass.  The third is the fraction of path
+% anchors consumed by vector batches.  A successful evaluation consumes
+% \(L\) anchors, so firing rate and anchor coverage are not interchangeable.
+% An empty denominator gives an undefined value.
+
+% For maximal runs of unit predecessor relations with lengths \(r_i\), the
+% greedy loop gives
+% \[
+%   B_L=\sum_i\left\lfloor\frac{r_i}{L}\right\rfloor,
+%   \qquad
+%   E_L=q-(L-1)B_L.
+% \]
+% In the Minimizer-island comb, the path ends at anchor-array index zero, so
+% \(p_0=-1=0-1\) contributes one unit relation.  The \(m=1\) path is one run of
+% length 91.  For
+% \(m\geq2\), the only maximal runs have lengths 39 and 52.  Thus
+% \[
+%   B_L=
+%   \left\lfloor\frac{39}{L}\right\rfloor+
+%   \left\lfloor\frac{52}{L}\right\rfloor,
+%   \qquad
+%   q=m+90.
+% \]
+% For fixed \(L\) with \(B_L>0\), both \(\operatorname{Fire}_L\) and
+% \(\operatorname{Coverage}_L\) decrease as \(\Theta(1/m)\).  For \(L=64\),
+% both values are zero for every \(m\geq2\).
+
+% The row prefixes in the next table refer to panels~(a)--(d) of
+% Figure~\ref{fig:chaining-runl-inputs}.  The itemized notes below the table
+% describe every input family.
 
 \begin{table}[H]
 \centering
@@ -643,98 +638,30 @@ Input & \(L=2\) & \(L=4\) & \(L=8\) & \(L=16\) & \(L=32\) & \(L=64\) \\
 \end{tabular}
 \end{table}
 
-The row prefixes refer to the panels in
-Figure~\ref{fig:chaining-runl-inputs}.
+We can make the following observations:
 \begin{itemize}
-  \item \textbf{(a) Mosaic.}
-    The target and query are both
-    \(U_0 A U_1 A' U_2\), and \(A'=A\).  They therefore contain two exact
-    copies of \(A\).
-
-  \item \textbf{(b) Degraded mosaic.}
-    The layout is unchanged and \(A'\neq A\).  In Table~\ref{tab:chaining-runl-firing},
-    \(A'\) is generated independently rather than literally degraded from
-    \(A\).  The following dense sweep instead obtains \(A'_{\delta}\) by
-    controlled substitutions.  In both variants the difference is internal
-    to the two blocks.  The same complete sequence is used as the target and
-    query, so its equal-coordinate path remains exact.
-
-  \item \textbf{(c) Spaced copy.}
-    The reference contains one source block \(S\).  The query contains \(R\)
-    exact copies separated by \(N\)-filled gaps.  The \(R=1\) case is the
-    baseline.
-
-  \item \textbf{(d) Minimizer-island comb.}
-    Each minimizer island is an isolated 25-base non-\(N\) block that emits
-    one minimizer.  Within each \(R_k\), neighboring islands have 13 \(N\)
-    bases between them.  These blocks and the other, wider \(N\)-filled gaps
-    create the fixed anchor coordinates specified above.  The parameter
-    \(m\) is the number of \(R_k\) groups.  This input checks the counters and
-    does not represent a biological sequence distribution.
+  \item For minimizer-island the prefix will contain some $C > 0$ anchors, meaning that we will get only continuous parts in $R_m$ at the end and in the sequence prefix: $B_L \simeq \left\lfloor\frac{39}{L}\right\rfloor + \left\lfloor\frac{C}{L}\right\rfloor, q = m + C$
+  This means that for $L = const:$ $\operatorname{Fire}_L, \operatorname{Coverage}_L < \theta(1/m)$ and for large enough $L > 39 \land m \rightarrow \infty$ they will approach $0$.
+  \item For spaced copy the anchors are always separated by $R$ so $\operatorname{Fire}_L$ should be zero for all $R > 0$
+  \item Degraded mosaic is just simulating two random fragments, so $\operatorname{Fire}_L$ should be almost $100\%$ with high measured divergence.
+  \item Mosaic in this case was simulated with zero divergence, so the $\operatorname{Fire}_L$ should measure anchors only in the fillers between equal parts i.e $0\% < \operatorname{Fire}_L < \frac{|U_i|*3}{|U_i|*3+|A|} < 4\%$
 \end{itemize}
 
-Table~\ref{tab:chaining-runl-mosaic-divergence} shows selected checkpoints
-from the dense sweep from Mosaic at \(\delta=0\) through Degraded mosaic at
-\(\delta>0\).  Its notation and the percentage of path anchors
-with same-target alternatives are defined below.
-\begin{itemize}
-  \item \textbf{Configured internal divergence \(\delta\).}
-    This is the requested fraction of positions changed when constructing
-    \(A'_{\delta}\) from \(A\).  It compares two blocks inside one sequence.
-    Every Mosaic or Degraded mosaic input still has \(T=Q\).
+The table~\ref{tab:chaining-runl-firing} confirms our assumptions.
 
-  \item \textbf{Substitution count \(s_{\delta}\).}
-    The generator changes exactly
-    \[
-      s_{\delta}
-      =\left\lfloor
-        \delta\lvert A\rvert+\frac{1}{2}
-       \right\rfloor
-    \]
-    positions.  Every selected base is replaced by a different base.
-
-  \item \textbf{Realized internal divergence \(\widehat{\delta}\).}
-    For any generated \(A'\),
-    \[
-      \widehat{\delta}
-      =\frac{\lvert\{i:A_i\neq A'_i\}\rvert}{\lvert A\rvert}.
-    \]
-    In the fixed-count sweep this equals
-    \(s_{\delta}/\lvert A\rvert\).  The table reports
-    \(100\widehat{\delta}\) as a percentage.
-
-  \item \textbf{Independently generated Degraded mosaic.}
-    This block is generated without copying or mutating \(A\), so it has no
-    configured \(\delta\) or \(s_{\delta}\).  Its realized divergence is
-    measured directly with the formula above.
-
-  \item \textbf{Path anchors with same-target alternatives.}
-    The raw experiment data call this measurement \emph{grouped path}.  Two
-    retained anchors belong to the same group when they have the same
-    reference-sequence identifier, target end coordinate, and orientation.
-    Let \(g_{\mathrm{path}}\) be the number of anchors on the first predecessor
-    path whose group contains at least one other retained anchor.  If the path
-    contains \(q\) anchors, the reported percentage is
-    \(100g_{\mathrm{path}}/q\).  The other anchor occupies a different
-    anchor-array slot and can separate consecutive path anchors.  This
-    percentage does not count groups, broken predecessor relations, or
-    \(\operatorname{Run}_L\) evaluations.
-\end{itemize}
+Now we would like to see how divergence $\delta$ affects the mosaic rates.
+Table~\ref{tab:chaining-runl-mosaic-divergence} shows selected data points
+from Mosaic runs at \(\delta\). $s_{\delta}$ is the number of substitutions made to the target sequence. We can see that the higher number of same-target anchor alternatives (multiple query positions per anchor), the worse results we get (as predicted).
 
 \input{chapters/06_chaining/04_cpu_experimental_analysis/dense_divergence_coordinates}
 
 \begin{table}[H]
 \centering
-\caption{Selected checkpoints from the 81-level sweep from Mosaic at
-\(\delta=0\) through Degraded mosaic at \(\delta>0\).  Each
-entry in the last three columns gives the median followed by the observed
+\caption{Few most important data points for mosaic construction for different values of
+\(\delta\) and degraded mosaic (should have effective high divergence).  Each
+entry in the last three columns id the median followed by the observed
 minimum and maximum over three inputs generated from fixed
-random-number-generator seeds, in percent.  The firing column is
-\(100\operatorname{Fire}_4=100B_4/E_4\).  The coverage column is
-\(100\operatorname{Coverage}_4=100(4B_4)/q\).  The independent block is a
-separate control.  Its realized divergence is measured directly from the two
-generated blocks.  The third column gives its median, whose range was 74.930
-to 75.186 percent.}
+random-number-generator seeds, in percent.}
 \label{tab:chaining-runl-mosaic-divergence}
 \scriptsize
 \setlength{\tabcolsep}{3.0pt}
@@ -753,44 +680,10 @@ Case & \(s_{\delta}\) & \(100\widehat{\delta}\) &
 \end{tabular}
 \end{table}
 
-The repeated blocks affect \(\operatorname{Run}_L\) through anchor-array order.
-When \(A\) and \(A'_{\delta}\) share a minimizer, one target minimizer can
-produce anchors at both query copies.  The first predecessor path uses one of
-them.  The other anchor remains in the coordinate-sorted array and can occupy
-an array position between two consecutive path anchors.  This changes a unit
-predecessor relation \(p_j=j-1\) into a larger index jump.  Increasing internal
-divergence removes some of these shared minimizers and therefore removes some
-of the extra array entries.
-
-A local probability bound describes how substitutions can enable one
-previously false evaluation.  Consider a loop state \((j,c)\) for which
-\(\operatorname{Run}_L(j,c)\) is false when \(A'=A\).  Assume that this state
-has \(h\) fixed, pairwise-disjoint blocking minimizer windows
-\(W_1,\ldots,W_h\).  Each \(W_i\) is the base interval that supports one
-repeat-derived minimizer occurrence whose retained anchor blocks this
-specific \(\operatorname{Run}_L(j,c)\) evaluation.  The interval contains
-\[
-  b=k+w-1
-\]
-bases because it covers the \(w\) overlapping \(k\)-mers that select the
-minimizer.  The evaluation can become true only if every \(W_i\) receives at
-least one substitution.  If one window remains unchanged, its selected
-minimizer occurrence and repeat-derived anchor remain available.
-
-The generator ranks positions deterministically.  For this probability model,
-let \(\pi\) be a uniform random permutation of the block positions.  Let
-\(S_{\delta}\) be the first \(s_{\delta}\) positions under \(\pi\).  Thus
-\(S_{\delta}\) is a uniformly selected subset of the
-\(M=\lvert A\rvert\) block positions and
-\(\widehat{\delta}=s_{\delta}/M\).  For one chosen base from every blocking
-window, the probability that all \(h\) bases belong to \(S_{\delta}\) is
-\[
-  \frac{(s_{\delta})_h}{(M)_h},
-  \qquad
-  (x)_h=x(x-1)\cdots(x-h+1).
-\]
-There are \(b^h\) ways to choose one base from every window.  A union bound
-therefore gives
+Let's consider that we are looking at mosaic with divergence rate $\delta = 0$, so $A = A'$. Then we have $h$ pairwise-disjoint "blocking" minimizer windows $W_1, \ldots, W_h$. Each $W_i$ has some minimizer that now forms an anchor that makes $Run_L(j,c)$ evaluation false. $W_i$ covers $k+w-1$ bases. Each of the windows needs to receive at least one subsitution 
+so they're changed and do not generate one anchor with two different positions.
+So with probability $\frac{(s_{\delta})_h}{(M)_h}$ all $h$ windows will receive at least one substitution (for $(x)_h = x(x-1)\cdots(x-h+1)$).
+We can choose one base from every window with $b^h$ ways, so this gives us very loose upper bound on the probability:
 \[
 \begin{aligned}
   \Pr_{\pi}\!\left[
@@ -807,44 +700,10 @@ therefore gives
   (b\widehat{\delta})^h .
 \end{aligned}
 \]
-The probability is zero when \(s_{\delta}<h\).  For a lower bound, choose one
-fixed base in each window.  The event that all \(h\) chosen bases are
-substituted is contained in the event above and has probability
-\[
-  \frac{(s_{\delta})_h}{(M)_h}.
-\]
-For the asymptotic statement, consider a family of blocks with
-\(M\to\infty\).  Keep \(b\) and \(h\) fixed, with the experimental values
-\(k=15\), \(w=10\), and hence \(b=24\).  Require \(s_{\delta}\geq h\) and
-\(\widehat{\delta}=s_{\delta}/M\to0\).  In this family, the probability that
-every blocking window receives a substitution has order
-\[
-  \Theta\!\left(\widehat{\delta}^{\,h}\right).
-\]
-Since \(k\) is fixed here, this is equivalently
-\[
-  \Theta\!\left((k\widehat{\delta})^h\right).
-\]
+Obiously disjoint-window model is a bad assumption as substitution can affect several overlapping windows and conversely with high divergence we can spontaneusly get random matches with other fragments like $U_i$ (although this is unlikely).
+However we can loosely bound the probability by $\theta((k\widehat{\delta})^h)$. This gives us idea that the worst sequences are the one with perfect repeats (low divergence).
 
-The last \(\Theta\) statement concerns the event that all blocking windows
-receive substitutions.  It is not a two-sided bound on
-\(\operatorname{Run}_L\).  Necessity gives only
-\[
-  \Pr_{\pi}\!\left[
-    \operatorname{Run}_L(j,c)\text{ changes from false to true}
-  \right]
-  =
-  O\!\left((k\widehat{\delta})^h\right).
-\]
-A matching lower bound would require substitutions in the \(h\) windows to
-make the branch true.  Minimap2 does not provide that guarantee.  Minimizer
-reselection, anchor order, chaining scores, predecessor choices, and the array
-bounds can still prevent the run.  Outside the disjoint-window model, one
-substitution can affect several overlapping windows.  The exponent can then
-be smaller than the number of windows.
-
-Figure~\ref{fig:chaining-runl-mosaic-divergence} reports the complete dense
-sweep.  It uses all 81 measured divergence levels.
+Figure~\ref{fig:chaining-runl-mosaic-divergence} shows the results for mosaic for different levels of divergence (the degraded mosaic - as control sample - is show separately as a gray rectangle on the right side of chart)
 
 \begin{figure}[H]
 \centering
@@ -913,99 +772,19 @@ sweep.  It uses all 81 measured divergence levels.
   \node[anchor=west] at (13.25,110) {\(\operatorname{Fire}_4\)};
 \end{scope}
 \end{tikzpicture}
-\caption{Internal divergence, percentage of path anchors with same-target
-alternatives, and \(L=4\) branch firing in the experiment spanning Mosaic and
-Degraded mosaic.  All 81
-configured levels from 0 to 20 percent are shown.  The small markers report
-medians over three inputs generated from fixed random-number-generator seeds.
-The lighter lines give the observed minimum and maximum.  They are descriptive
-ranges, not confidence intervals.  The independent \(A'\) control is outside
-the plotted divergence range and is shown in a separate column.}
+\caption{The lighter colours represent minimum/maximum while the darker ones represent median. As we can see the chart confirms that the $Run_L$ firing rates are tied to number of anchors with same-target positions which are competing for the same anchor. Additionally we observe that divergence levels of at least 12\% mitigate the negative effect of highly-repetive query.}
 \label{fig:chaining-runl-mosaic-divergence}
 \end{figure}
 
-The dense sweep contains 243 mappings.  It uses 81 nested divergence levels
-for each of three inputs generated from fixed random-number-generator seeds.
-Three additional mappings provide the independent \(A'\) controls.  Minimap2
-emitted an alignment covering at least 99\% of both query and target for all
-246 mappings.  Each mapping had exactly one anchor with the maximum dynamic
-programming score.  This anchor fixed the start of the first predecessor path.
-An independent checker reconstructed and matched every recorded predecessor
-path.  All query minimizers survived query-side frequency filtering.  No
-reference seed hits were removed by reference-occurrence filtering.  Each
-retained minimizer value occurred once or twice in the reference, below the
-cutoff of ten.
+As we can see from Figure~\ref{fig:chaining-runl-mosaic-divergence}, table~\ref{tab:chaining-runl-mosaic-divergence} and table~\ref{tab:chaining-runl-firing} the most inconvenient case is the high number of repetitions in the query. These repetitions can be mitigated by increased divergence levels. This was intuitive consulsion that we now sucessfully confirmed with the experiments.
 
-In Mosaic, the median percentage of path anchors with same-target
-alternatives was 97.69 percent, and the median \(\operatorname{Fire}_4\) was
-0.59 percent.  At 20 percent configured divergence, these values were 3.04
-percent and 79.41 percent.  In the independent control, no anchor on the first
-predecessor path had a same-target alternative.  Its median
-\(\operatorname{Fire}_4\) was 99.94 percent.  At each of the 80 increases in
-divergence, the alternative-anchor percentage decreased and
-\(\operatorname{Fire}_4\) increased for all three inputs generated from fixed
-random-number-generator seeds.  The medians followed the same directions.
+\subsubsection{Random-sequence subsitutions}
 
-The measurements support the array-order explanation.  More internal
-divergence leaves fewer repeat-derived anchors interleaved with anchors on the
-first predecessor path.  This restores more consecutive relations
-\(p_j=j-1\), so \(\operatorname{Run}_4\) becomes true more often.  The result
-is empirical and does not identify a universal power law.  Within each
-input generated from one fixed random-number-generator seed, the 81 cases
-share a cumulative mutation set.  They measure the effect of adding
-substitutions to the same base sequence.  Statistical independence does not
-apply to these 81 points.
-
-For fixed \(L\), coverage is determined by firing rate:
-\[
-  \operatorname{Coverage}_L
-  =\frac{L\operatorname{Fire}_L}
-         {1+(L-1)\operatorname{Fire}_L}.
-\]
-This follows from \(E_L=q-(L-1)B_L\).  It explains why the coverage values in
-Table~\ref{tab:chaining-runl-mosaic-divergence} rise faster than the firing
-rate.
-
-Spaced copy reached zero firing and zero anchor coverage at
-\(R=2\), and both remained zero through \(R=64\).  In this construction,
-the extra exact-copy anchors made \(\operatorname{Run}_L\) false at every
-evaluated loop state.  These data do not establish the frequency of this
-pattern in real reads.
-
-Every tested case of the Minimizer-island comb produced a path with defined
-counters.
-The tested values were \(m=1\) and every power of two from 2 through 1024.
-Every measured value agreed with the closed form above.  At \(m=1024\), anchor
-coverage was 8.08 percent for \(L=2\) and 7.90 percent for \(L=4\).  It was
-7.18 percent for both \(L=8\) and \(L=16\), 5.75 percent for \(L=32\), and
-zero for \(L=64\).
-
-\subsubsection{Random-sequence controls}
-
-This experiment measures how often \(\operatorname{Run}_L\) is true for
-anchors obtained from random DNA.  No anchor coordinates were predeclared.
-Each target began with independently sampled A, C, G, and T bases with equal
-probability.  A random source segment was then copied into \(N\)
-non-overlapping target intervals.  The query was a randomly oriented copy of
-that segment.  The mutation model used a substitution probability of 0.001.
-The insertion and deletion tests each used probability 0.0005 at every source
-base visited by the generator.  Candidate insertion and deletion lengths were sampled from a Gaussian
-distribution with a mean and standard deviation of one base.  They were
-rounded to integers and clipped at zero.  Zero-length draws caused no edit.
-Deletions were clipped at the end of the oriented source.  Minimap2 used its default \(k=15\),
-\(w=10\), occurrence filtering, and chaining scores.  Mapping used one thread.
-
-The instrumentation reported the branch-firing percentage \(100B_L/E_L\) for
-the first predecessor path from the initial dynamic-programming call.  Its
-starting anchor was selected by score and the equal-score tie rule.  The
-experiment tested \(L\in\{4,8,16\}\).  Equal scores were ordered by decreasing
-anchor-array index to match BioseqDB.  A value is defined only when minimap2
-found a score-qualified chain end and the measured path had \(E_L>0\).  Runs
-without such a path are omitted because no firing percentage exists when
-\(E_L=0\).  A displayed zero means that a measured path existed and
-\(B_L=0\).  Neither experiment runner saved minimap2's PAF output.  These
-results describe the internal predecessor path.  Whether minimap2 later
-emitted each path as an alignment is unknown.
+I also wanted to measure effects of random sequences (not specially constructed) on the $Run_L$ firing rates:
+\begin{itemize}
+  \item We generate random sequences query/target parameterized by their lengths: $|T|$ and $|Q|$. We choose $N$ positions in target to be the query and replace its fragments accordingly. By default we test each such occurence base with probability $0.001$ to be substituted, $0.0005$ to be inserted/deleted.
+  \item Here I also use the default minimap2 parameters: $k=15$, $w=10$, occurrence filtering, and chaining scores.
+\end{itemize}
 
 \begin{figure}[H]
 \centering
@@ -1026,67 +805,6 @@ emitted each path as an alignment is unknown.
     circle,draw=chainGreen!70!black,fill=chainGreen!55,
     minimum size=4.4pt,inner sep=0pt}
 ]
-  % Panel (a): original 10 Mb / 1 kb occurrence sweep.
-  \begin{scope}[x=1cm,y=.038cm,xshift=1.55cm,yshift=6.05cm]
-    \node[anchor=west,font=\bfseries\footnotesize] at (-1.25,112)
-      {(a) Original: \(10\,\mathrm{Mb}\) target,
-       \(1\,\mathrm{kb}\) query, one input};
-
-    \foreach \yy in {0,25,50,75,100} {
-      \draw[black!12] (0,\yy)--(11.15,\yy);
-      \node[anchor=east] at (-.13,\yy) {\yy};
-    }
-    \draw[->] (0,0)--(6.08,0);
-    \draw[->] (6.72,0)--(11.30,0)
-      node[anchor=west] {\(N\)};
-    \draw[->] (0,0)--(0,105);
-    \node[rotate=90] at (-1.02,50)
-      {branch firing (\%)};
-    \draw (6.16,-3.6)--(6.31,3.6);
-    \draw (6.45,-3.6)--(6.60,3.6);
-
-    \foreach \xx/\lab in {
-      .50/1,1.7041/2,2.4085/3,2.9082/4,
-      3.2959/5,4.50/10,10.65/5000} {
-      \draw (\xx,-2.2)--(\xx,2.2);
-      \node[anchor=north] at (\xx,-5.0) {\lab};
-    }
-
-    \draw[runl four] plot coordinates {
-      (.50,97.9167) (1.7041,97.9167) (2.4085,97.9167)
-      (2.9082,97.9167) (3.2959,97.9167) (4.50,92.0000)};
-    \draw[runl eight] plot coordinates {
-      (.50,82.1429) (1.7041,82.1429) (2.4085,82.1429)
-      (2.9082,82.1429) (3.2959,82.1429) (4.50,85.1852)};
-    \draw[runl sixteen] plot coordinates {
-      (.50,45.8333) (1.7041,45.8333) (2.4085,45.8333)
-      (2.9082,45.8333) (3.2959,45.8333) (4.50,47.8261)};
-
-    \foreach \xx/\yy in {
-      .50/97.9167,1.7041/97.9167,2.4085/97.9167,
-      2.9082/97.9167,3.2959/97.9167,4.50/92.0000}
-      \node[runl mark four] at (\xx,\yy) {};
-    \foreach \xx/\yy in {
-      .50/82.1429,1.7041/82.1429,2.4085/82.1429,
-      2.9082/82.1429,3.2959/82.1429,4.50/85.1852}
-      \node[runl mark eight] at (\xx,\yy) {};
-    \foreach \xx/\yy in {
-      .50/45.8333,1.7041/45.8333,2.4085/45.8333,
-      2.9082/45.8333,3.2959/45.8333,4.50/47.8261}
-      \node[runl mark sixteen] at (\xx,\yy) {};
-
-    \node[runl mark four] at (10.65,97.9167) {};
-    \node[runl mark eight] at (10.65,82.1429) {};
-    \node[runl mark sixteen] at (10.65,45.8333) {};
-
-    \draw[runl four] (5.65,108)--(6.15,108);
-    \node[anchor=west] at (6.23,108) {\(L=4\)};
-    \draw[runl eight] (7.35,108)--(7.85,108);
-    \node[anchor=west] at (7.93,108) {\(L=8\)};
-    \draw[runl sixteen] (9.05,108)--(9.55,108);
-    \node[anchor=west] at (9.63,108) {\(L=16\)};
-  \end{scope}
-
   % Panel (b): corrected ten-input compact series.
   \begin{scope}[x=1cm,y=.038cm,xshift=1.55cm,yshift=.70cm]
     \node[anchor=west,font=\bfseries\footnotesize] at (-1.25,112)
