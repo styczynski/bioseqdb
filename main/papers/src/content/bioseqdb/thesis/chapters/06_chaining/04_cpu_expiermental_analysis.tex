@@ -13,7 +13,7 @@ The subsections talk about:
   \item Preparing synthetic data (randomly generated sequences with insertions/deletions) and specially constructed examples aimed at absuing the scoring function and thresholds
   \item Answering if counting number of updates that do not improve score in forward chaining algorithm~\ref{alg:chaining-b5} improve performance
   \item Answering if the anchors during backtracking~\ref{alg:chaining-simd-backtrack} are just continous sequences of indices incremented by 1 (\(\operatorname{Run}_L(j,c)\) condition)
-  \item Answering if max drop would help us increase performance of SIMD backtracking algorithm~\ref{fig:chaining-minimap2-backtracking}
+  \item Answering if max drop would help us increase performance of SIMD backtracking algorithm or not~\ref{fig:chaining-minimap2-backtracking}
 \end{itemize}
 
 \warn{Synthetic data}{Primary modelling here uses synthetic
@@ -1337,9 +1337,8 @@ Thankfully the wide-gap construction can help in this case. The 19,980-base targ
 same parts in the same order, but we insert a random 500-base. Figure~\ref{fig:chaining-runl-inputs}(e) shows this
 construction. This means that we can get lots of anchors that doesn't match to improve the score at all. The "requested substituiton" rate refers to substitutions in the separated target fragments.
 
-
 For panel (a)~\ref{fig:chaining-max-drop-long-chain-accounting} I calculate how many steps we perform compared to the place where we could terminate execution (lower percentage means that the heuristic won't save anything). I don't mark the anchors so we always follow chains right to the end.
-Panel (b)~\ref{fig:chaining-max-drop-long-chain-accounting} we count how much additional work we perform (each )
+Panel (b)~\ref{fig:chaining-max-drop-long-chain-accounting} demonstrates that when marking chains the panel (a) don't show full truth. Max drop will save us scanned anchors, but because we won't mark the chains the actual work is larger (later we need to scan the anchors).
 
 \begin{figure}[H]
 \centering
@@ -1434,51 +1433,21 @@ instructions, elapsed time, or a measured slowdown.}
 \label{fig:chaining-max-drop-long-chain-accounting}
 \end{figure}
 
-All 246 Wide-gap spaced-copy observations retained one long-span, plus-strand,
-MAPQ-60
-placement on the sole intended target, with at least 98.910 percent query-axis
-coverage.  This validates the intended chaining placement, not a high-identity
-alignment: the residue-match count divided by query length fell to 26.402
-percent, and only 147 of 246 observations reached 50 percent.
+After consulting relevant work we see that max drop heuristic isn't used to reduce number of scanned anchors, but rather to prevent chaining unrelated fragments of sequences.
+The minimap2 will try to chain large gaps as unrelated fragments, which increases amount of work performed. This however is reported to increase matching accuracy~\cite{minimap2_why_max_drop}
 
-Holding each baseline start and its incoming marks fixed, all 246 paths
-crossed productively.  These scans reached the first crossing after 136,008 of 269,579
-baseline scan steps,
-leaving a local suffix of 133,571 steps, or 49.548 percent.  Its
-\(\sum S/C=0.9821\) is a large local opportunity under
-Equation~\eqref{eq:chaining-max-drop-break-even}.  It does not compose into a
-complete-work reduction.  The complete replay left suffix anchors unmarked,
-then processed the newly exposed candidate ends.  It made 7,503
-searches and 280,485 scan steps, compared with 246 searches and
-269,579 steps for the baseline policy: 10,906 more steps, or 4.046 percent,
-before charging any added check cost.  It accepted 492 chains and rejected
-7,011 paths, whereas the baseline policy accepted 246 and rejected none.  The
-accepted-chain output of this initial-DP replay changed in all 246
-observations.  This is an internal chaining result, not a comparison of final
-PAF records.  The no-drop best-cut replay
-kept the same bookkeeping but disabled the score-drop cutoff and matched
-the baseline policy exactly.  The difference therefore came from the
-\(D=500\) cutoff decisions rather than from that independent bookkeeping rule.
+In BioseqDB I didn't implement this heuristic in the SIMD algorithm at this point.
 
-The fraction of steps after the first crossing stayed near one half across the
-substitution sweep, but the complete-work penalty grew from 1.954 percent at
-\(x_k=0\) to 10.564 percent at \(x_k=10\).  The absolute excess was 266 scan steps over the six seeds
-at every level.  The percentage rose because baseline path work decreased.
+\subsection{Conlusions}
 
-For both ordinary screens, \(\sum S/C=0\).  Even a free check can only tie the
-baseline scan in the fixed-start variable-work model, while any positive check cost
-makes that model worse.  Wide-gap spaced-copy proves that the predicate
-can fire, but it increases complete logical scan work and changes chain
-semantics.  These results therefore do not justify an always-on SIMD
-\texttt{max\_drop} check for the studied BioseqDB path.  They do not prove the
-rule useless for indels, noisy reads, other presets, or other reference
-structures, and they do not quantify wall-clock performance.  A timing study
-of baseline and checked BioseqDB kernels would still be required.
-
-This max-drop conclusion does not predict \(\operatorname{Run}_L\), which
-tests structural adjacency rather than score drawdown.  The next subsection
-evaluates that separate existing fast-path condition.
-
-
+\warning{Final conlusions}{
+  From the experimental samples we can observe that in the random scenario:
+  \begin{itemize}
+      \item $Run_L$ is beneficial to performance increase
+      \item $U$ limit is very beneficial to performance increase
+      \item $max\_drop$ increases work done scalarily by minimap2, but according to literature increases quality of the alignment
+  \end{itemize}
+  Thus I decided to leave these heuristics in, while the $max\_drop$ can be implemented in the future (as observed on the random cases, it only even triggers in case of very large gaps, so it requires careful testing on real-world datasets as well as estimating how SIMD implementation will penalize the execution times)
+}
 
 \clearpage

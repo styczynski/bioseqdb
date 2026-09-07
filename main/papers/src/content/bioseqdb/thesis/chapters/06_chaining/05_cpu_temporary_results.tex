@@ -1,10 +1,11 @@
 
 \section{BioseqDB SIMD performance comparison}
 
+I perfomed intermediate testing to verify if predictions coming from synthetic results can be correct.
 
-This test configuration used a
-\(500{,}000{,}000\)-base reference and one query fragment whose configured mean
-length is \(5{,}000{,}000\) bases (with two samples).
+The test used $|T|=500Mbps$ and $|Q|=5Mbps$ sequences  with just one $N=1$ occurence (this means that this is very optimistic case of random scenario)
+
+\todo{Replace this section with final results or remove it entirely (the b panel is misleading and there's no interpretation of the results.). For anyone reading: this is just old test I found to illustrate performance so it's probably outdated and misleading because for backtracking there is single SIMD algorithm. Benchmarking framwork resuses labels but it's the same algorithm in panel B for B1/B5 and it makes no sense at all}
 
 \begin{figure}[H]
 \centering
