@@ -1,0 +1,124 @@
+\section{Composing sequences without joining their payloads}
+\label{sec:sequence-piece-tree}
+
+A slice can be described by two bounds, but a concatenation may contain pieces
+from several sources. BioSeqDB stores such SQL expressions as expanded
+PostgreSQL values containing an immutable balanced tree of pieces. An
+\emph{expanded value} is a PostgreSQL value kept in a form suited to operations
+in memory. It can later be converted to the flat form required for storage.
+
+The tree has three kinds of node.
+\begin{itemize}
+  \item A \textbf{source leaf} retains access to a source and describes an
+        interval in that source.
+  \item A \textbf{literal leaf} owns the bytes of a literal and the information
+        needed to interpret them.
+  \item A \textbf{branch} joins two children. It records their total length,
+        piece count, and tree height.
+\end{itemize}
+Reverse and complement flags belong to the edges. A reverse flag makes the
+reader visit children in the opposite order and read each selected leaf
+backward. A complement flag changes the ranks as they are read.
+
+Figure~\ref{fig:piece-tree} uses the source from the slice example. It forms
+\[
+  Z=S[2,6)\ \Vert\ \operatorname{reverse}(S[8,12))\ \Vert\ \texttt{AC},
+\]
+where \(\Vert\) means concatenation. The three pieces produce
+\texttt{GTAA}, \texttt{ATTG}, and \texttt{AC}. The result is
+\texttt{GTAAATTGAC}, with length \(4+4+2=10\).
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,
+  branch/.style={circle,draw=black!60,fill=black!4,
+    minimum size=.68cm,inner sep=1pt},
+  leaf/.style={draw=seqNineBlue,fill=seqNineBlue!10,
+    minimum width=2.15cm,minimum height=.7cm,align=center}]
+  \node[anchor=west,font=\bfseries] at (0,5.9)
+    {(a) One source supplies two pieces};
+  \foreach \i/\s in {0/A,1/C,2/G,3/T,4/A,5/A,6/C,7/C,8/G,9/T,10/T,11/A}
+    \node[seq nine cell,fill=black!3] at (1.35+.72*\i,5.15) {\texttt{\s}};
+  \draw[seqNineBlue,thick] (2.43,4.77) rectangle (5.31,5.53);
+  \draw[seqNineOrange,thick] (6.75,4.77) rectangle (9.63,5.53);
+  \node[anchor=east] at (.9,5.15) {$S$};
+  \node[text=seqNineBlue] at (3.87,4.45) {$[2,6)$};
+  \node[text=seqNineOrange] at (8.19,4.45) {$[8,12)$};
+  \node[branch] (r) at (6.2,3.5) {10};
+  \node[leaf] (a) at (3,2.15) {$S[2,6)$};
+  \node[branch] (b) at (9,2.15) {6};
+  \node[leaf,draw=seqNineOrange,fill=seqNineOrange!12] (c)
+    at (7.25,.72) {$S[8,12)$};
+  \node[leaf,draw=seqNineGreen,fill=seqNineGreen!12] (d)
+    at (11,.72) {literal \texttt{AC}};
+  \draw[seq nine flow] (r)--(a);
+  \draw[seq nine flow] (r)--(b);
+  \draw[seq nine flow,seqNineOrange] (b)--node[above left] {reverse} (c);
+  \draw[seq nine flow] (b)--(d);
+  \draw[dashed,seqNineBlue] (3.3,2.55)--(3.3,4.1);
+  \draw[dashed,seqNineOrange,rounded corners=3pt]
+    (c.south)--(7.25,.18)--(13.3,.18)--(13.3,4.1)--(8.19,4.1);
+  \node[anchor=west,align=left] at (10.15,3.55)
+    {circle: total length\\rectangle: one piece};
+  \node[anchor=west,font=\bfseries] at (0,-.23)
+    {(b) The reader emits the pieces in logical order};
+  \foreach \i/\s in {0/G,1/T,2/A,3/A}
+    \node[seq nine blue] at (2.05+.72*\i,-1.0) {\texttt{\s}};
+  \foreach \i/\s in {0/A,1/T,2/T,3/G}
+    \node[seq nine orange] at (5.33+.72*\i,-1.0) {\texttt{\s}};
+  \foreach \i/\s in {0/A,1/C}
+    \node[seq nine green] at (8.61+.72*\i,-1.0) {\texttt{\s}};
+  \node[anchor=east] at (1.45,-1.0) {$Z$};
+  \node[text=seqNineBlue] at (3.13,-1.6) {source, forward};
+  \node[text=seqNineOrange] at (6.41,-1.6) {source, backward};
+  \node[text=seqNineGreen] at (8.97,-1.6) {owned literal};
+\end{tikzpicture}
+\caption{A piece tree describes a ten-symbol result without putting the two
+source intervals into a new sequence buffer. Dashed lines connect source
+leaves to their intervals. The orange edge reverses one piece.}
+\label{fig:piece-tree}
+\end{figure}
+
+The same tree can be shared by later expressions because existing nodes do
+not change. Concatenation joins roots and restores balance. Slicing splits at
+the two bounds and retains the middle part, sharing unaffected nodes.
+Reversing a complete tree changes the edge flags. Two reversals cancel, as do
+two complements when the alphabet's complement operation maps each symbol
+back to itself after two applications.
+
+This structure explains both the benefit and its limits.
+\begin{itemize}
+  \item A new expression can share existing payloads while allocating only
+        the metadata needed to describe the change.
+  \item Splits and joins follow paths in the tree. They are not universally
+        constant-time operations.
+  \item Reading \(m\) result symbols still requires producing those \(m\)
+        ranks, together with the work of locating and reading their pieces.
+  \item First expanding a flat value can copy its packed bytes to establish
+        ownership. Binding a text literal also has to validate its symbols.
+\end{itemize}
+The point of the tree is to avoid repeatedly copying a long sequence merely
+to describe a new order or interval.
+
+\subsection{The alphabet is part of the value}
+
+A plain SQL sequence literal can remain \emph{unbound}: it contains text but
+has not yet adopted an alphabet. A bound value has a known alphabet and
+packing width. The distinction prevents operations from silently changing a
+symbol's meaning.
+\begin{itemize}
+  \item Slicing and reversal can operate on unbound text because they need
+        only positions and order.
+  \item Joining a bound sequence with a text literal validates the literal
+        against that alphabet.
+  \item Reverse-complement requires a bound alphabet with a complement rule
+        for every symbol in that alphabet.
+  \item Two different bound alphabets are not silently converted into one
+        another.
+\end{itemize}
+
+Equality and hashing use logical content. For bound values this includes the
+alphabet and the ordered ranks. Storage width, padding, and piece boundaries
+do not change equality. An unbound text value has a different identity from a
+bound sequence, even if both print the same letters. This is needed so that
+SQL comparison and hash-based operations agree for all physical forms.

@@ -1,0 +1,191 @@
+\section{The engineering problem: a search returns hits}
+\label{sec:postgres-custom-scan-scope}
+
+The sequence interfaces in the previous chapter let an alignment algorithm
+read a stored sequence without first copying all its bases. We now need to
+connect that algorithm to SQL. The main difficulty is the result: one pair of
+sequences can produce several alignments, and each alignment has several
+fields. We call one returned alignment a \emph{hit}.
+
+Consider a table \texttt{targets} with an identifier and a sequence. The SQL
+examples in this chapter assume BioSeqDB's table access method and a DNA5
+sequence column packed into 64-bit storage units:
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Search once and return the fields of each hit.}]
+CREATE TABLE targets (
+  id bigint PRIMARY KEY,
+  seq bioseq.seq('dna5', 64)
+) USING bioseq;
+
+SELECT t.id,
+       bioseq.dp_score(t.seq) AS score,
+       bioseq.target_start(t.seq) AS start,
+       bioseq.cigar(t.seq) AS cigar
+FROM targets AS t
+WHERE t.id > 20
+  AND mmsearch(t.seq, $1::bioseq.seq('dna5', 64));
+\end{lstlisting}
+\end{minipage}
+
+The first \texttt{mmsearch} argument is the target sequence and the second
+is the query. Here \texttt{\$1} supplies that query sequence. The
+\texttt{score} alias means the dynamic-programming score of the current hit.
+The CIGAR string describes which positions align and where insertions and
+deletions occur.\footcite{sam_format_specification}
+Three requirements follow from this example:
+
+\begin{itemize}
+  \item \textbf{Compute the search once.} Score, start, and CIGAR must read
+    fields of the same hit. Calling the aligner separately for each field
+    would repeat its most expensive work.
+  \item \textbf{Keep ordinary SQL conditions useful.} The identifier test
+    should remove unwanted targets before alignment. PostgreSQL should still
+    see the tables, their types, and the surrounding joins.
+  \item \textbf{Return every selected hit as a row.} A Boolean filter alone
+    can keep or remove an input row. It cannot turn that row into two rows.
+\end{itemize}
+
+Figure~\ref{fig:scan-occurrences} uses abstract symbols to show how one input
+row can produce two occurrences.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,3.15) {One stored row};
+  \node[scan input,minimum width=1.35cm] at (.85,2.28) {id 27};
+  \foreach \x/\s in {2.1/X,2.85/Y,3.6/X}
+    \node[scan cell] at (\x,2.28) {\texttt{\s}};
+  \foreach \x/\p in {2.1/0,2.85/1,3.6/2}
+    \node[anchor=south,text=black!65] at (\x,2.6) {\p};
+  \node[scan hit,minimum width=1.4cm] (query) at (2.85,.65)
+    {query \texttt{X}};
+  \draw[scan arrow,scanOrange] (query.north west) -- (2.1,1.99);
+  \draw[scan arrow,scanOrange] (query.north east) -- (3.6,1.99);
+  \node[anchor=west,font=\bfseries] at (7.0,3.15) {Two result rows};
+  \node[scan output,minimum width=4.8cm] (r0) at (9.45,2.28)
+    {id 27\qquad hit start 0};
+  \node[scan output,minimum width=4.8cm] (r2) at (9.45,1.17)
+    {id 27\qquad hit start 2};
+  \draw[scan arrow] (4.15,2.28) -- (r0.west);
+  \draw[scan arrow] (4.15,2.28) to[out=-35,in=180] (r2.west);
+  \node[anchor=north,text=black!65] at (9.45,.60)
+    {the identifier repeats, the hit changes};
+\end{tikzpicture}
+\caption{Searching \texttt{XYX} for \texttt{X} gives two occurrences.
+The output must preserve both even though they come from the same stored row.}
+\label{fig:scan-occurrences}
+\end{figure}
+
+For $N_{\mathrm{in}}$ input rows, if row $i$ produces $m_i$ hits, the number
+of output rows is
+\[
+  N_{\mathrm{out}}=\sum_{i=1}^{N_{\mathrm{in}}}m_i,\qquad m_i\geq0.
+\]
+The repeated identifier is intentional. It does not mean that the table
+contains duplicate records.
+
+\subsection{Why not pass a query as text?}
+
+An early interface idea was to pass a table name and an SQL string to a search
+function. The following is a design sketch, not a BioSeqDB API:
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={An early interface sketch passes SQL as text.}]
+SELECT * FROM search_sql(
+  'targets',
+  'SELECT id, seq FROM reads WHERE id > 20'
+);
+\end{lstlisting}
+\end{minipage}
+
+This hides choices that ordinary SQL makes explicit:
+
+\begin{itemize}
+  \item \textbf{Which output is the query sequence?} A function could demand
+    a column called \texttt{query}, assume a fixed column position, or accept
+    a separate column parameter. Renaming or reordering the inner output then
+    becomes part of an extra API contract.
+  \item \textbf{Where do surrounding conditions apply?} In a statement such
+    as the sketch below, the outer planner cannot inspect a string as a
+    relation. It cannot automatically insert the target identifier test into
+    the search's input or choose a join order across the function boundary.
+  \item \textbf{Who connects the two plans?} PostgreSQL can parse and optimize
+    the inner SQL when the function submits it. The extension still has to
+    interpret its output and arrange any rewrite that combines inner and
+    outer conditions. Passing SQL text does not provide that integration.
+\end{itemize}
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={An outer condition cannot automatically filter a hidden scan.}]
+-- Hypothetical SQL-string interface
+SELECT h.*
+FROM search_sql('targets', 'SELECT id, seq FROM reads') AS h
+WHERE h.target_id = 27;
+-- The function must itself restrict the hidden target scan.
+\end{lstlisting}
+\end{minipage}
+
+The function sees the target table through the string \texttt{'targets'}.
+The outer condition cannot become a restriction on that hidden table scan
+unless the interface explicitly passes it in or the extension adds a rewrite.
+In the typed query above, PostgreSQL sees \texttt{t.id > 20} and the target
+relation together.
+
+\subsection{Why not save the last result in a function?}
+
+Another idea is for a Boolean search function to save its result for later
+score and CIGAR calls. This gives the
+appearance of sharing work, but the SQL expression does not describe the
+dependency. PostgreSQL does not guarantee left-to-right evaluation of Boolean
+conditions. It may rearrange or skip parts of an expression.\footnote{PostgreSQL
+17, \href{https://www.postgresql.org/docs/17/sql-expressions.html\#SYNTAX-EXPRESS-EVAL}
+{Expression Evaluation Rules}.}
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Hidden state does not establish an evaluation order.}]
+-- Hypothetical functions with shared hidden state
+SELECT id, last_score(seq)
+FROM targets
+WHERE save_search(seq, $1)
+  AND last_score(seq) > 100;
+\end{lstlisting}
+\end{minipage}
+
+The second condition cannot rely on the first having run. Declaring these
+functions \texttt{VOLATILE} limits some planner transformations, but does not
+establish a safe producer--consumer order between them. It also gives up
+useful assumptions about repeatable calls.\footnote{PostgreSQL 17,
+\href{https://www.postgresql.org/docs/17/xfunc-volatility.html}
+{Function Volatility Categories}.}
+Nested searches, a rescan for a new outer row, and early query termination
+would all need explicit state management. A session variable or temporary
+table merely moves that responsibility elsewhere. The Boolean call still
+cannot emit multiple hit rows.
+
+\subsection{A set-returning function is a valid alternative}
+
+SQL already has a direct way to express one-to-many output. A set-returning
+function in a \texttt{LATERAL} join could return a record for every
+hit.\footcite{postgresql17_set_returning_functions} The \texttt{LATERAL} clause
+lets that call refer to the current target row.\footnote{PostgreSQL 17,
+\href{https://www.postgresql.org/docs/17/queries-table-expressions.html\#QUERIES-LATERAL}
+{\texttt{LATERAL} Subqueries}.}
+This alternative solves both the
+row-count problem and the dependency between result fields:
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={A different API could return explicit hit records.}]
+-- Alternative API sketch, not an existing BioSeqDB function
+SELECT t.id, h.score, h.start, h.cigar
+FROM targets AS t
+CROSS JOIN LATERAL align_hits(t.seq, $1) AS h
+WHERE t.id > 20;
+\end{lstlisting}
+\end{minipage}
+
+The reason to develop custom scans is therefore an engineering choice. We
+wanted the search to appear in ordinary \texttt{WHERE} and \texttt{JOIN ON}
+clauses, while one executor node controls batches, hit fields, and sequence
+lifetimes. A set-returning API would expose the hit record directly and would
+need its own design for batching several input rows.

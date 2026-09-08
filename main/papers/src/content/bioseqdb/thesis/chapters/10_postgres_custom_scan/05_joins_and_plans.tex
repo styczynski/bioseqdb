@@ -1,0 +1,163 @@
+\section{Joins give sequences distinct search roles}
+\label{sec:mmsearch-join-ownership}
+
+A search between two tables needs both input rows before it can align their
+sequences. Assume \texttt{reads} has the same identifier and sequence columns
+as \texttt{targets}:
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Search sequence pairs from two tables.}]
+SELECT t.id AS target_id, q.id AS query_id,
+       bioseq.dp_score(t.seq) AS score,
+       bioseq.cigar(t.seq) AS cigar
+FROM targets AS t
+JOIN reads AS q ON mmsearch(t.seq, q.seq)
+WHERE t.id > 20 AND q.id <= 100;
+\end{lstlisting}
+\end{minipage}
+
+For a supported inner-join shape, \texttt{BioseqBatchJoin} owns the search.
+It retains all query input rows and stable sequence references, and streams
+the target child. It constructs batches of candidate pairs and returns each
+accepted hit with the ordinary columns of both rows. Retaining the query
+input is a real cost: the bounded alignment batch does not mean that every
+part of this join uses only one batch's worth of memory.
+
+There are several possible plan placements:
+
+\begin{itemize}
+  \item \textbf{Search before a join.} A base \texttt{BioseqScan} can search
+    a target against a constant query and pass its hit rows into an ordinary
+    SQL join.
+  \item \textbf{Search with an outer parameter.} A nested-loop plan can
+    supply a query sequence from its current outer row. Rescanning the owner
+    then rebinds that query sequence.
+  \item \textbf{Search at the join.} A supported \texttt{BioseqBatchJoin}
+    receives target and query child plans and owns their sequence pairing.
+  \item \textbf{Evaluate a sequence expression below the owner.} A
+    \texttt{BioseqSliceProject} can make a supported slice or transformation
+    available with a stable source identity.
+\end{itemize}
+
+These placements preserve the same rule: a hit's fields must come from the
+owner of its search. Ordinary join conditions still have to be evaluated at
+the level required by their inputs and SQL null semantics. The specialized
+join owner does not support every outer-join, security, or volatile-expression
+shape.
+
+\subsection{Two searches of the same stored sequence}
+
+The syntax has a cost. A helper takes a target expression, rather than an
+explicit hit-record argument. If both searches below used \texttt{t.seq},
+the helper would not say which query supplied its score:
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Two searches with one ambiguous target binding.}]
+-- Unsupported: two ordinary searches share one target binding
+SELECT t.id, bioseq.dp_score(t.seq)
+FROM targets AS t
+WHERE mmsearch(t.seq, $1::bioseq.seq('dna5', 64))
+  AND mmsearch(t.seq, $2::bioseq.seq('dna5', 64));
+\end{lstlisting}
+\end{minipage}
+
+Independent hit outputs need distinct, unambiguous target bindings. A
+self-join gives the same stored row two such roles. Since \texttt{id} is a
+primary key, the equality below pairs each row with itself:
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Give each independent search its own target binding.}]
+SELECT a.id,
+       bioseq.dp_score(a.seq) AS score_a,
+       bioseq.dp_score(b.seq) AS score_b
+FROM targets AS a
+JOIN targets AS b ON a.id = b.id
+WHERE mmsearch(a.seq, $1::bioseq.seq('dna5', 64))
+  AND mmsearch(b.seq, $2::bioseq.seq('dna5', 64));
+\end{lstlisting}
+\end{minipage}
+
+Let $a_i$ be hit $i$ of the search bound to alias \texttt{a}, and let $b_j$
+be hit $j$ of the search bound to alias \texttt{b}. Figure~\ref{fig:scan-alias-pairs}
+shows their combinations for one target row.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,4.1) {One row, two target bindings};
+  \node[scan input,minimum width=2.5cm] (stored) at (2.9,3.15)
+    {stored row id 27};
+  \node[scan hit,minimum width=2.4cm] (a) at (1.35,1.55)
+    {alias a\\query 1: two hits};
+  \node[scan hit,minimum width=2.4cm] (b) at (4.5,1.55)
+    {alias b\\query 2: three hits};
+  \draw[scan arrow] (stored.south west) -- (a.north);
+  \draw[scan arrow] (stored.south east) -- (b.north);
+  \node[anchor=west,font=\bfseries] at (7.1,4.1) {Six joined hit pairs};
+  \foreach \x/\j in {8.25/0,9.45/1,10.65/2}
+    \node at (\x,3.25) {$b_{\j}$};
+  \foreach \y/\i in {2.4/0,1.35/1}
+    \node at (7.1,\y) {$a_{\i}$};
+  \foreach \x/\j in {8.25/0,9.45/1,10.65/2}
+    \foreach \y/\i in {2.4/0,1.35/1}
+      \node[scan output,minimum width=1.05cm,minimum height=.8cm]
+        at (\x,\y) {$(a_{\i},b_{\j})$};
+  \node[anchor=west,text=black!65] at (.1,.2)
+    {Source identity may be shared. Current hits and result fields stay separate.};
+\end{tikzpicture}
+\caption{The aliases bind independent searches even when their input is the
+same stored row. Two hits from the first search and three from the second
+produce six combinations under the identifier join. Additional hit conditions
+could select a subset of this matrix.}
+\label{fig:scan-alias-pairs}
+\end{figure}
+
+This can also be stated using tuple relational calculus. Let $T$ be the target
+relation and let $\mathcal{H}(s,q)$ be the relation of hit occurrences for sequence $s$ and query
+$q$. Ignoring SQL nulls in this small model, the self-join requests
+\[
+  \{(r.id,h_a,h_b)\mid r\in T\ \land\
+       h_a\in \mathcal{H}(r.seq,q_1)\ \land\ h_b\in \mathcal{H}(r.seq,q_2)\}.
+\]
+Two independent hit variables are needed even though both refer to one stored
+sequence. Ordinary SQL self-joins are already useful for comparing different
+rows and expressing several roles. BioSeqDB adds this particular reason to
+use them: naming separate alignment results. The expression above also
+explains the $2\times3$ row count in Figure~\ref{fig:scan-alias-pairs}.
+
+Logical aliases do not require two private copies of every sequence byte.
+The lazy source and storage reuse mechanisms in the previous chapter can
+reuse eligible underlying regions when both aliases refer to the same stored
+value. That reuse depends on the source, configuration, and lifetime. It is
+not a promise that every self-join reads storage only once. Each owner must
+still keep its own query, current hit, and projected fields.
+
+The hooks use target bindings to detect unsupported stacked searches and
+ambiguous helpers. The current implementation also has a narrow exception:
+an extra constant search beside a parameterized primary search can act as an
+existence filter. It only decides whether primary hit rows survive and does
+not expose a second score or CIGAR. It therefore does not replace independent
+bindings when both searches' hits are required.
+
+\subsection{Understanding the selected plan}
+\label{sec:customscan-explain}
+
+\texttt{EXPLAIN} shows where the search sits in the plan. A
+\texttt{BioseqScan} receives its target from one relation, while a
+\texttt{BioseqBatchJoin} receives both sides of a supported search join.
+Adding \texttt{ANALYZE} executes the statement and reports its row counts:
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Show the search node and its output row count.}]
+EXPLAIN (ANALYZE, VERBOSE)
+SELECT t.id, bioseq.dp_score(t.seq) AS score
+FROM targets AS t
+WHERE t.id > 20
+  AND mmsearch(t.seq, $1::bioseq.seq('dna5', 64));
+\end{lstlisting}
+\end{minipage}
+
+The custom scan's output count is the number of emitted hits. It can exceed
+the count of stored input rows because one target can produce several hits.
+Without \texttt{ANALYZE}, \texttt{EXPLAIN} describes the selected plan without
+running alignment.

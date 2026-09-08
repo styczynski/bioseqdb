@@ -1,0 +1,124 @@
+\section{One current hit supplies every result field}
+\label{sec:match-placeholder-injection}
+
+Assigning the search to a custom scan solves the missing execution order.
+The owner selects a hit before PostgreSQL evaluates the expressions that
+produce its output row. Those expressions read fields already computed by
+the aligner. They do not call it again.
+
+The argument in \texttt{bioseq.dp\_score(t.seq)} is used to identify the
+search target. The score is not stored in \texttt{t.seq}. This distinction
+also explains why the same expression must not silently read a hit belonging
+to another search. For a supported transformed target, such as a slice, the
+corresponding helper can identify that same transformed expression.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,4.5) {Two hits from one target row};
+  \node[scan input,minimum width=2.4cm] (row) at (1.25,3.3) {target id 27};
+  \node[scan box,minimum width=3.1cm,minimum height=.9cm] (hit0) at (5.0,3.8)
+    {hit 0\\score 42, start 100};
+  \node[scan hit,minimum width=3.1cm,minimum height=.9cm,very thick] (hit1) at (5.0,2.4)
+    {hit 1\\score 38, start 800};
+  \draw[scan arrow] (row.east) -- (hit0.west);
+  \draw[scan arrow,scanOrange] (row.east) -- (hit1.west);
+  \node[anchor=west,text=scanOrange] at (3.3,1.65) {current hit};
+  \node[scan output,minimum width=2.0cm] (score) at (9.8,3.8)
+    {score: 38};
+  \node[scan output,minimum width=2.0cm] (start) at (9.8,2.4)
+    {start: 800};
+  \node[scan output,minimum width=2.0cm] (cigar) at (9.8,1.0)
+    {CIGAR of hit 1};
+  \draw[scan arrow,scanOrange] (hit1.east) to[out=20,in=180] (score.west);
+  \draw[scan arrow,scanOrange] (hit1.east) -- (start.west);
+  \draw[scan arrow,scanOrange] (hit1.east) to[out=-20,in=180] (cigar.west);
+  \node[anchor=west,text=black!65] at (0,.2)
+    {Before the next output row, the owner selects the next hit and updates all fields.};
+\end{tikzpicture}
+\caption{The current hit is the common source of score, position, and CIGAR.
+The numbers are illustrative. Changing the current hit changes all projected
+fields together while the target identifier stays the same.}
+\label{fig:scan-current-hit}
+\end{figure}
+
+\subsection{Typed values in the expression tree}
+
+PostgreSQL evaluates output expressions through an expression tree. Before
+returning its first hit, the executor walks this tree and replaces the helpers
+belonging to the owner with typed \texttt{Const} nodes. It retains their
+addresses. Before projecting a hit, it writes the hit's values and null flags
+into these nodes and rebuilds the output-expression evaluator so that it
+reads the changed fields.
+
+\begin{itemize}
+  \item \textbf{Identity answers which search.} The argument's target
+    binding links a helper to the right owner. A function name alone cannot
+    distinguish two searches in one statement.
+  \item \textbf{Type answers how to read the field.} Coordinates use
+    \texttt{BIGINT}, the DP score uses \texttt{INT4}, Boolean properties use
+    \texttt{BOOLEAN}, and CIGAR uses \texttt{TEXT}.
+  \item \textbf{The current hit answers which value.} Every field is filled
+    from the same hit record before the output row is returned.
+\end{itemize}
+
+Although PostgreSQL calls the node a \texttt{Const}, this use is local to the
+executor. The value changes between output rows. The replacement happens
+after planning, so the planner does not fold a current hit's score into a
+reusable plan. No session-wide ``last hit'' variable is needed.
+ParadeDB's base scan uses the same kind of changing score node and rebuilds
+the projection after updating it.
+\coderef{paradedb/pg_search/src/postgres/customscan/basescan/mod.rs}
+  {ParadeDB current-result score}{exec_custom_scan}{1784}
+
+\begin{algorithm}[htbp]
+\caption{Project one hit without repeating alignment}
+\label{alg:scan-project-hit}
+\small
+\begin{enumerate}
+  \item Restore the ordinary input columns for this hit.
+  \item For every requested helper, write its field from this hit into the
+    corresponding typed value node.
+  \item Rebuild the evaluator, then evaluate the output expressions.
+  \item Return the resulting SQL row. Keep the next hit for the next request.
+\end{enumerate}
+\end{algorithm}
+
+The ordinary helper bodies are not a uniform substitute for this mechanism.
+Some helpers report an invalid use, while some generic numeric helpers return
+a special fallback value when called outside a supported owner. Such values
+are not computed alignment results.
+
+\subsection{Placement during planning is a separate problem}
+
+Joins can move expressions between plan levels. An outer join can also add a
+row of nulls for a missing input. PostgreSQL's \texttt{PlaceHolderVar} records
+where an expression must be evaluated and which outer joins can make its
+result null.
+\coderef{postgres17/src/include/nodes/pathnodes.h}
+  {PostgreSQL expression placement}{PlaceHolderVar}{2750}
+BioSeqDB uses this planning mechanism where needed to keep a helper attached
+to the right input.
+ParadeDB uses this mechanism to keep score expressions at their search
+input while planning joins and aggregates.
+\coderef{paradedb/pg_search/src/postgres/customscan/projections.rs}
+  {ParadeDB score placement}{placeholder_support}{314}
+
+\texttt{PlaceHolderVar} and the changing \texttt{Const} nodes do different
+jobs. The first preserves expression placement while the planner builds and
+rewrites the tree. The second supplies a field of the current hit during
+execution. Neither permits unsupported join shapes to bypass the owner's
+validation.
+
+\subsection{Requested fields can require more alignment work}
+
+The owner also records which fields the SQL statement needs. For example,
+CIGAR output requires a base-level edit path and a formatted string. A
+coordinate-only query does not need that string. The requested fields are
+combined with the selected alignment options when the executor starts.
+
+There is a practical limit in the current implementation: requesting CIGAR
+can enable further alignment work, and that path drops hits for which no
+usable CIGAR is produced. Therefore, adding CIGAR to a query is not guaranteed
+to leave its hit count unchanged. This behavior must be considered when
+comparing counts from queries with different output fields.

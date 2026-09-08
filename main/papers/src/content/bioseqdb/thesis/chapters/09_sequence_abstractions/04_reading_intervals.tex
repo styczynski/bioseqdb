@@ -1,0 +1,142 @@
+\section{Reading only what the algorithm requires}
+\label{sec:lazy-sequence-facade}
+\label{sec:sequence-materialization}
+
+The tree describes the value. The algorithm needs a way to read it.
+BioSeqDB supplies \texttt{lazy\_sequence\_view}, an alphabet-specific,
+non-owning view over flat data, stored fragments, sequence sources, or piece
+trees. The view holds a pointer to its backing state and a small table of
+operations. Different storage forms therefore provide the same operations
+without putting a storage-specific branch inside every algorithm.
+
+The view supports four main requests.
+\begin{itemize}
+  \item Report the logical symbol count.
+  \item Copy ranks from a given interval into caller-owned memory.
+  \item Read successive chunks, including reverse or reverse-complement
+        traversal.
+  \item Check whether a compatible packed interval is already in memory and
+        can be borrowed safely.
+\end{itemize}
+Its \texttt{bp\_size()} and \texttt{size()} both report logical symbols.
+This differs from \texttt{size()} on a compact range, which counts storage
+units. Code that works with both interfaces should use \texttt{bp\_size()}
+when it means sequence length.
+
+The access decision follows the consumer's needs. A \emph{memory permit}
+reserves part of the allowed memory budget for an allocation. To
+\emph{materialize} an interval means to create its packed buffer.
+\begin{enumerate}
+  \item \textbf{Stream.} If the algorithm accepts a stream, read the selected
+        interval in bounded chunks. Scratch memory can be reused after each
+        chunk has been consumed.
+  \item \textbf{Borrow.} If the algorithm needs packed data, first check
+        whether the interval already occupies compatible, aligned, stable
+        storage. Keep its owner alive while the algorithm reads it.
+  \item \textbf{Pack.} Otherwise, calculate the required allocation, obtain a
+        memory permit, and pack the selected interval. The resulting owner
+        retains both the buffer and the permit.
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,
+  request/.style={draw=black!60,fill=black!3,minimum width=3.9cm,
+    minimum height=.72cm,align=center},
+  decision/.style={diamond,aspect=2.7,draw=black!60,
+    inner sep=3pt,align=center}]
+  \node[request] (q) at (6.5,4.6) {requested interval $[a,b)$};
+  \node[decision] (need) at (6.5,3.25) {one packed block needed?};
+  \draw[seq nine flow] (q)--(need);
+  \coordinate (stream) at (1.6,1.05);
+  \draw[seq nine flow,seqNineBlue] (need.west)-|node[pos=.18,above] {no} (stream);
+  \node[decision] (safe) at (9.05,1.9) {safe to borrow?};
+  \draw[seq nine flow] (need.east)-|node[pos=.3,above] {yes} (safe);
+  \draw[seq nine flow,seqNineGreen] (safe.west)-|node[pos=.27,above] {yes} (6.45,.45);
+  \draw[seq nine flow,seqNineOrange] (safe.east)-|node[pos=.27,above] {no} (11.5,.45);
+  \foreach \r in {0,1,2} {
+    \foreach \i in {0,1,2}
+      \draw[draw=seqNineBlue,fill=seqNineBlue!12]
+        (.5+.57*\i,.3-.5*\r) rectangle ++(.52,.36);
+  }
+  \draw[seq nine flow,seqNineBlue] (2.35,.46)--(2.35,-.54);
+  \node[align=center] at (1.55,-1.35)
+    {stream chunks\\reuse scratch memory};
+  \draw[fill=black!4,draw=black!50] (4.4,-.32) rectangle (8.3,.2);
+  \draw[draw=seqNineGreen,fill=seqNineGreen!20,thick]
+    (5.375,-.32) rectangle (7.325,.2);
+  \foreach \x in {5.375,6.35,7.325}
+    \draw[black!55] (\x,-.32)--(\x,.2);
+  \node[below,text=seqNineGreen] at (6.35,-.4) {borrow this interval};
+  \node[align=center] at (6.35,-1.5)
+    {existing packed units\\owner stays alive};
+  \foreach \i in {0,...,4}
+    \draw[seqNineOrange,fill=seqNineOrange!15]
+      (10.05+.52*\i,-.32) rectangle ++(.52,.52);
+  \node[below,text=seqNineOrange] at (11.35,-.4) {new packed interval};
+  \node[align=center] at (11.35,-1.5)
+    {allocate with a permit\\retain buffer and permit};
+\end{tikzpicture}
+\caption{The same logical interval can be streamed, borrowed, or packed.
+The drawings at the bottom show the resulting memory use. A resident packed
+interval is borrowed only if its layout and lifetime satisfy the consumer.}
+\label{fig:sequence-abstraction-layers}
+\end{figure}
+
+A slice beginning inside a packed unit illustrates why borrowing can fail.
+Passing the unit's address alone would make the consumer read the wrong first
+symbol. The requested unit type must also meet C++ alignment and type-access
+rules. Matching bit widths is insufficient. A byte buffer suitable for copying
+to a GPU is not automatically safe to dereference as a different C++ integer
+type.
+
+The following pseudocode states the logical read rule. A piece may refer to
+memory or to a stored fragment. Locating it and fetching its storage are
+handled by the storage reader.
+\begin{algorithm}[H]
+\caption{Read one interval of a composed sequence}
+\label{lst:lazy-window-read}
+\small
+\begin{algorithmic}[1]
+  \Require view $V$, valid bounds $0\leq a\leq b\leq |V|$
+  \Require output space for $b-a$ ranks
+  \ForAll{pieces intersecting $V[a,b)$, in logical order}
+    \State Map the intersection to that piece's source positions
+    \State Read those positions, using bounded scratch space if needed
+    \State Apply the piece's reverse and complement flags
+    \State Append the resulting ranks to the output
+  \EndFor
+  \State Require exactly $b-a$ output ranks
+\end{algorithmic}
+\end{algorithm}
+
+An interval crossing two fragments must still produce the same symbols as an
+equivalent flat value. A storage reader may fetch complete fragments, but
+only the requested ranks enter the logical output. Thus the interface limits
+what the algorithm asks for without claiming that every source supports
+equally small physical reads.
+
+\subsection{Where a flat value is required}
+\label{sec:sequence-stdc}
+
+BioSeqDB's flat PostgreSQL value consists of a fixed header followed by aligned
+packed data. The header records the alphabet, unit width, length, and padding.
+The adapter validates the header and payload before selecting a typed compact
+range. Runtime checks happen at this boundary, so the inner loop can use
+compile-time packing rules.
+
+An already resident, uncompressed, aligned value can be borrowed through this
+adapter. PostgreSQL may first have to fetch out-of-line data or decompress it
+using TOAST.\footcite{postgresql17_toast} That work precedes borrowing and can
+include a copy.
+
+Writing a lazy expression into durable storage is another boundary. Its
+temporary source references cannot be stored as raw pointers. The expression
+must be flattened to a value that can stand on its own. Text output similarly
+has to create the requested text. If the result exceeds the flat PostgreSQL
+value's size limit, the operation reports an error.
+
+For repeated full reads, one packed copy can be a useful choice. Laziness
+preserves that option while also supporting the small-interval case. It is
+the consumer's access requirement, not the mere existence of a slice, that
+determines when to build the copy.
