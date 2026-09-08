@@ -3,35 +3,40 @@
 \label{sec:chaining-rmq-idea}
 
 As we scan anchors during chaining, we need to choose the best candidate for chain. This can be viewed as finding a minimum in a range.
-The problem is that the final score $f_j+E(j,i)$ depends on both anchors. We can formulate selection function which only depends on one anchor as done in Equation~\ref{eq:selection-chain-score-func-def}
+The problem is that the final score $f_j+E(j,i)$ depends on both anchors. We can formulate one global score that does depend only on one anchor as done previously in Equation~\ref{eq:global-score-definition-chaining-rmq}
 \begin{equation}
   h(j)=f_j+\frac{\lambda_g}{2}(r_j+q_j).
 \label{eq:chaining-rmq-h}
 \end{equation}
 Once \(f_j\) is known, the same \(h(j)\) can be reused for every later target, which can reduce amount of work needed to calculate final score for later anchors.
 Finding a minimum in a range can be done using a range minimum query (RMQ) tree.
+This approach was described in minigraph paper~\cite{minimap2_rmq_scoring_minigraph} authored by the same author behind minimap2.
 
+In this section I will describe RMQ in more detail than what was done in minigraph paper.
 
 An RMQ tree stores priority function, formally \(\pi(j)=-h(j)\) (value is negated to convert maximum which we want to minimum in RMQ tree).
 
 \subsection{Minimap2 RMQ}
 \label{sec:chaining-minimap2-rmq}
 
-Let
+Let define maximum distances similarily to what was done for chaining~\ref{eq:chaining-b1-pair-checks}
 \[
-  D=\max\{\texttt{max\_dist},\texttt{bw}\}.
+  D = \text{max\_dist} \\
+  D_{\mathrm{in}} = \text{max\_dist\_inner}
 \]
-The optional local scan uses
-\[
-  D_{\mathrm{in}}
-  =\min\{\max\{\texttt{max\_dist\_inner},0\},D\}.
-\]
+
 Minimap2 maintains an active set of earlier anchors on the same reference and
-strand as the current target \(i\).  It removes anchors when
-\(r_i-r_j>D\), when the reference or strand changes, or when the configured
-tree-size cap is exceeded.  Anchors at the current reference coordinate are
-held outside the tree until the scan moves to a larger coordinate.  Every
-stored candidate therefore has \(r_j<r_i\).
+strand as the current target \(i\) and it removes anchors when
+\(r_i-r_j>D\), when the reference or strand changes, or when the configured maximum size of tree is exceeded. 
+The RMQ algorithm will query the tree for the anchor with the smallest global score for the current anchor, but if it was flagged as non-exact then it will perform a local scan to find the best anchor in the interval $[q_i-D_{\mathrm{in}}, q_i-1]$.
+The found anchor $j^\star$ is exact if:
+\[
+  \delta(j^\star,i)=0
+  \quad\land\quad
+  g(j^\star,i)\leq\ell_{j^\star}.
+\]
+
+
 
 The AVL search key and stored priority are
 \[
