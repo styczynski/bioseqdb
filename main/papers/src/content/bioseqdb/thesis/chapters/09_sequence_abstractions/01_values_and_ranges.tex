@@ -1,0 +1,151 @@
+\raggedbottom
+\definecolor{seqNineBlue}{HTML}{356A93}
+\definecolor{seqNineOrange}{HTML}{C97024}
+\definecolor{seqNineGreen}{HTML}{477A45}
+\tikzset{
+  seq nine cell/.style={draw=black!55,minimum width=.66cm,
+    minimum height=.48cm,inner sep=1pt,font=\footnotesize},
+  seq nine blue/.style={seq nine cell,draw=seqNineBlue,
+    fill=seqNineBlue!12},
+  seq nine orange/.style={seq nine cell,draw=seqNineOrange,
+    fill=seqNineOrange!15,thick},
+  seq nine green/.style={seq nine cell,draw=seqNineGreen,
+    fill=seqNineGreen!13},
+  seq nine flow/.style={-{Latex[length=1.7mm]},thick}
+}
+\lstdefinestyle{seq-nine-sql}{style=bioseq-cpp26,language=SQL,
+  basicstyle=\small\ttfamily,columns=fullflexible,keepspaces=true}
+
+\section{One sequence, several ways to read it}
+\label{sec:sequence-abstractions}
+
+Suppose a chromosome contains 100 million symbols, but an alignment step needs
+only positions 500000 through 500099. Its input is the 100-symbol slice
+\(S[500000,500100)\). Decoding the whole chromosome into one byte per symbol
+would first create a 100 MB buffer for this small request. Repeating that
+conversion for each candidate alignment region would waste memory and time.
+
+The database introduces another difficulty: the same sequence can arrive as
+a packed value, several stored fragments, or an expression such as a reversed
+slice. The algorithms need the symbols in the right order in each case.
+BioSeqDB separates a sequence's meaning from the way its symbols are stored.
+The distinction has four parts.
+\begin{itemize}
+  \item \textbf{Value.} A sequence has an alphabet, a length, and an ordered
+        list of symbols.
+  \item \textbf{Storage.} Symbols may already be in memory or may need to be
+        read from stored fragments.
+  \item \textbf{View.} A view describes which symbols to read and their order.
+        A slice can therefore describe part of a sequence without copying its
+        symbols.
+  \item \textbf{Consumer.} An algorithm states whether it can read a stream
+        of symbols or needs one contiguous block of packed data, stored at
+        adjacent memory addresses.
+\end{itemize}
+
+Here, \emph{lazy} means that the system delays reading, decoding, or copying
+symbols until they are needed. Creating a lazy value can still allocate small
+objects and retain access to its source. A lazy slice is useful because its
+description is small even when its source is large. It does not promise that
+every later read will avoid copying. Data is \emph{resident} when it is already
+in memory. An \emph{owner} is the object responsible for keeping that memory
+and any source resources alive until their last use.
+
+\section{Packed symbols and a common C++ interface}
+\label{sec:compact-sequence-range}
+\label{sec:sequence-bit-layout}
+
+An alphabet assigns each symbol an integer called its \emph{rank}. For DNA4,
+the four ranks are \(A=0\), \(C=1\), \(G=2\), and \(T=3\). A rank is an
+encoding of a symbol, not a score. Two bits are enough for these four values.
+Other alphabets can require more bits and different complement rules.
+
+BioSeqDB packs several ranks in an unsigned integer called a \emph{storage
+unit}. For a unit of \(B\) bytes and \(b\) bits per symbol, it stores
+\[
+  L=\left\lfloor\frac{8B}{b}\right\rfloor
+\]
+symbols per unit. The first symbol uses the lowest \(b\) bits. Symbol position
+\(i\) is in unit \(\lfloor i/L\rfloor\), at bit offset
+\(b(i\bmod L)\). Reading its rank loads that unit, shifts it right by the
+offset, and keeps the lowest \(b\) bits.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=east] at (2.1,2.85) {logical position};
+  \foreach \i in {0,...,5}
+    \node at (2.6+.76*\i,2.85) {\i};
+  \node[anchor=east] at (2.1,2.2) {symbols};
+  \foreach \i/\s in {0/A,1/C,2/G,3/T,4/G,5/A}
+    \node[seq nine blue] at (2.6+.76*\i,2.2) {\texttt{\s}};
+  \node[anchor=east] at (2.1,1.2) {packed ranks};
+  \foreach \i/\r in {0/00,1/01,2/10,3/11,4/10,5/00}
+    \node[seq nine blue,font=\ttfamily\footnotesize]
+      at (2.6+.76*\i,1.2) {\r};
+  \foreach \i in {6,7}
+    \node[seq nine cell,dashed,fill=black!4]
+      at (2.6+.76*\i,1.2) {--};
+  \draw[thick] (2.20,.82) rectangle (5.26,1.58);
+  \draw[thick] (5.26,.82) rectangle (8.32,1.58);
+  \node at (3.73,.45) {unit 0: one byte};
+  \node at (6.79,.45) {unit 1: one byte};
+  \draw[seq nine flow] (2.28,-.08)--(5.13,-.08);
+  \draw[seq nine flow] (5.40,-.08)--(8.20,-.08);
+  \node at (5.25,-.48) {low bits to high bits within each unit};
+  \node[anchor=west,align=left] at (9.0,2.1)
+    {6 symbols\\2 storage units\\2 bytes};
+  \node[anchor=west,align=left] at (9.0,.85)
+    {2 empty symbol slots\\in the final unit};
+\end{tikzpicture}
+\caption{Packing \texttt{ACGTGA} with four DNA4 symbols per byte. The dashed
+slots are padding, so they are not part of the sequence. The drawing orders
+slots by logical position, from low bits to high bits.}
+\label{fig:lsb-packed-layout}
+\end{figure}
+
+The C++ type \texttt{compact\_sequence\_range<R>} provides common operations
+for several resident representations. Its compile-time properties, called
+\emph{traits}, supply the alphabet, unit type, and packing rules. Algorithms
+use those traits instead of assuming that
+every input is DNA4 or that every symbol occupies one byte.
+
+Three sizes must be kept separate.
+\begin{itemize}
+  \item \texttt{size()} counts storage units in a compact range.
+  \item \texttt{bp\_size()} counts logical symbols, excluding padding.
+        The name is retained for all supported sequence alphabets.
+  \item \texttt{byte\_size()} counts bytes occupied by the units.
+\end{itemize}
+If the range contains \(U\) units and the last unit has \(P\) empty symbol
+slots, then \(N=UL-P\) is its logical length. Figure~\ref{fig:lsb-packed-layout}
+has \(U=2\), \(L=4\), and \(P=2\), hence \(N=6\). Unused high bits in
+a unit are a separate issue: three-bit ranks in an eight-bit unit leave two
+high bits that cannot hold another symbol. Unlike final padding, these bits
+are unused in every unit.
+
+\noindent\begin{minipage}{\linewidth}
+The following example uses the actual range API at a consumer boundary. The
+caller owns \texttt{output}, which has at least \(last-first\) bytes, and
+passes bounds satisfying \(0\leq first\leq last\leq N\).
+\begin{BioseqCppSnippet}[caption={A consumer requests only the ranks it needs.},
+  label={lst:compact-range-interface}]
+template<supports_compact_sequence_range R>
+void read_fragment(const compact_sequence_range<R>& sequence,
+                   std::size_t first, std::size_t last,
+                   std::span<std::uint8_t> output) {
+    // One rank per output byte, in forward order.
+    sequence.template to_encoded_into<false>(output, first, last);
+}
+\end{BioseqCppSnippet}
+\end{minipage}
+
+For resident packed data, this call seeks to the first selected unit and
+decodes \(last-first\) symbols. It does not first decode the preceding
+symbols. The storage-unit width describes packing; coordinates, scores, and
+hashes can use other integer widths.
+
+The common interface also does not impose one ownership rule. A compact range
+over a packed vector can own its payload. An adapter over a caller's alphabet
+container or a validated PostgreSQL value borrows it. A borrowed range remains
+valid only while that container or value is alive.

@@ -1,0 +1,203 @@
+\section{Batch work inside a row-at-a-time executor}
+\label{sec:customscan-batch-state-machine}
+
+PostgreSQL's executor asks a child node for its next row. This follows the
+iterator interface described in Volcano: the parent requests results one at
+a time.\footnote{G.~Graefe, \emph{Volcano---An Extensible and Parallel Query
+Evaluation System}, IEEE Transactions on Knowledge and Data Engineering
+6(1), 1994, pp.~120--135, \url{https://doi.org/10.1109/69.273032}.}
+A custom scan must
+honor that interface even when the aligner's efficient work unit is a batch
+of sequence pairs. BioSeqDB bridges the two sizes by retaining one batch and
+returning its hits one at a time.
+
+\begin{enumerate}
+  \item \textbf{Collect input.} Read rows and apply supported ordinary
+    conditions that do not depend on a hit. Retain the rows and sequence
+    references needed for alignment.
+  \item \textbf{Process a batch.} When the batch reaches its capacity, or the
+    input ends, submit its sequence pairs to the selected alignment pipeline.
+  \item \textbf{Return hits.} Select the next retained hit, supply its fields,
+    and return one SQL row. Repeated requests advance through the same batch.
+  \item \textbf{Reuse the space.} After all hits have been returned, release
+    the completed batch and collect another one if input remains.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,3.6) {Input batch};
+  \foreach \y/\r in {2.65/A,1.75/B,.85/C}
+    \node[scan input,minimum width=1.4cm] (row\r) at (.85,\y) {row \r};
+  \node[scan hit,minimum width=2.5cm,minimum height=2.5cm] (align)
+    at (4.0,1.75) {one batch\\alignment call};
+  \foreach \r in {A,B,C}
+    \draw[scan arrow] (row\r.east) -- (align.west);
+  \node[anchor=west,font=\bfseries] at (6.25,3.6) {Retained hits};
+  \node[scan hit,minimum width=.75cm] (a) at (6.75,2.65) {$A_0$};
+  \node[scan hit,minimum width=.75cm] (b) at (7.75,2.05) {$A_1$};
+  \node[text=black!60] at (7.25,1.40) {row B: no hit};
+  \node[scan hit,minimum width=.75cm] (c) at (6.75,.85) {$C_0$};
+  \draw[scan arrow] (align.east) -- (a.west);
+  \draw[scan arrow] (align.east) -- (c.west);
+  \node[anchor=west,font=\bfseries] at (9.4,3.6) {SQL rows};
+  \node[scan output,minimum width=1.4cm] (out) at (10.25,2.65) {$A_0$};
+  \draw[scan arrow,scanGreen] (a.east) -- (out.west);
+  \node[align=center] at (10.25,1.5) {one per\\parent request};
+  \node[anchor=west,text=black!65] at (0,-.1)
+    {The next requests return $A_1$ and $C_0$ before another batch is collected.};
+\end{tikzpicture}
+\caption{Three input rows produce three hits with a different distribution:
+two for A, none for B, and one for C. The parent still receives one row per
+request. The aligner processes batches; SQL receives individual rows.}
+\label{fig:scan-batch-pull}
+\end{figure}
+
+Scalar and vectorized table access converge before alignment submission. A
+vectorized condition may first produce a mask of rows to keep, but surviving
+rows still enter the same batch mechanism. PostgreSQL parallel execution is a
+separate choice: the alignment owners are currently marked
+\texttt{parallel\_safe=false}. The alignment pipeline may still use its own
+workers or a GPU under its configuration.
+
+\subsection{Row stability during a search}
+
+PostgreSQL holds its current input row in temporary storage called a tuple
+slot. The scan may still need that row for alignment after the slot is reused.
+Another transaction may also update that row. The scan therefore separates
+its saved values from the database view that it is allowed to read:
+
+\begin{itemize}
+  \item \textbf{Keep the input values.} A batch keeps ordinary fields in
+    compact row copies in memory it owns, and keeps sequence references with
+    their owners. A hit points to
+    its batch entry, so several hits can return the same saved fields.
+    Keeping a lazy reference does not require copying all sequence symbols.
+  \item \textbf{Keep the same database view.} PostgreSQL uses a snapshot to
+    decide which row versions a command can see. The sequence reader retains
+    the scan's snapshot and checks a stored reference against the table,
+    column, and source version visible through it. Stored source fragments
+    are immutable. An update publishes a new version, while an
+    older snapshot can still read its earlier version. Delaying a read does
+    not switch it to the latest committed sequence.\footnote{PostgreSQL 17,
+    \href{https://www.postgresql.org/docs/17/transaction-iso.html}
+    {Transaction Isolation}.}
+  \item \textbf{Separate internal and SQL identity.} The scan's internal
+    row number locates source data; the SQL primary key identifies a logical
+    row for the user. The batch-entry position selects saved values for a
+    hit. None replaces the source-version and snapshot checks.
+  \item \textbf{Keep the relations available.} Normal reads hold an
+    \texttt{ACCESS SHARE} relation lock, and deferred source readers use the
+    same mode. This prevents conflicting operations such as dropping or
+    rewriting a relation while it is in use. Ordinary concurrent updates
+    and deletes remain possible; the read does not lock each selected
+    row.\footnote{PostgreSQL 17,
+    \href{https://www.postgresql.org/docs/17/explicit-locking.html}
+    {Explicit Locking}.}
+\end{itemize}
+
+A rescan discards the previous batch and hit fields while preserving the
+scan's database view. Cleanup releases saved values before their source
+readers and snapshots. Reuse across later queries also needs the result-cache
+checks described below.
+
+\subsection{Filter placement and early stopping}
+
+Two kinds of condition require different inputs:
+
+\begin{itemize}
+  \item \textbf{A row condition} such as \texttt{t.id > 20} depends only on
+    stored columns. Evaluating it before alignment avoids searching discarded
+    rows.
+  \item \textbf{A hit condition} needs an alignment result. The current
+    implementation recognizes a narrow supported form such as
+    \texttt{bioseq.edit(t.seq) < 10} and checks the edit count of each hit.
+    This count is the sum of mismatched, inserted, and deleted symbols in
+    that hit's alignment; each symbol counts once.
+    This does not imply general support for arbitrary helper expressions in
+    \texttt{WHERE}.
+\end{itemize}
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Filter input rows and then filter alignment hits.}]
+SELECT t.id, bioseq.dp_score(t.seq) AS score
+FROM targets AS t
+WHERE t.id > 20
+  AND mmsearch(t.seq, $1::bioseq.seq('dna5', 64))
+  AND bioseq.edit(t.seq) < 10
+LIMIT 5;
+\end{lstlisting}
+\end{minipage}
+
+The identifier condition can avoid alignment for a row. The edit condition
+selects hits after the required alignment information exists.
+
+\texttt{LIMIT 5} lets the parent stop asking after five rows. It does not
+guarantee that only five hits were computed: the current batch may already
+be complete. Likewise, \texttt{ORDER BY score DESC LIMIT 5} does not by itself
+give BioSeqDB a general top-$k$ alignment algorithm. Producing a correct
+global score order can require reading all relevant hits.
+
+\subsection{Initialization, rescans, and cleanup}
+
+PostgreSQL defines four callbacks for the owner's execution
+lifetime:\footnote{PostgreSQL 17,
+\href{https://www.postgresql.org/docs/17/custom-scan-execution.html}
+{Executing Custom Scans}.}
+
+\begin{itemize}
+  \item \texttt{BeginCustomScan} initializes execution state once.
+  \item \texttt{ExecCustomScan} returns the next row, or reports the end.
+  \item \texttt{ReScanCustomScan} restarts with the current input parameters.
+  \item \texttt{EndCustomScan} releases execution resources.
+\end{itemize}
+
+Figure~\ref{fig:scan-lifecycle} shows the normal loop and the paths that need
+special care.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize]
+  \node[scan input,minimum width=2.6cm] (collect) at (2.1,3.1) {collect input};
+  \node[scan hit,minimum width=2.6cm] (process) at (8.8,3.1) {process batch};
+  \node[scan output,minimum width=2.6cm] (return) at (5.45,.5) {select next hit};
+  \draw[scan arrow] (collect) -- node[above] {full batch or input ends} (process);
+  \draw[scan arrow] (process.south) -- (return.east);
+  \draw[scan arrow] (return.west) -- (collect.south);
+  \node[align=center] at (6.5,2.0) {batch\\complete};
+  \node[align=center] at (4.1,2.0) {no hit;\\more input};
+  \draw[scan arrow] (return.south east) to[out=-35,in=-145,looseness=4]
+    node[below,align=center] {return one hit;\\next row request} (return.south west);
+  \node[scan box,minimum width=2.2cm] (init) at (2.1,5.0) {initialize};
+  \draw[scan arrow] (init) -- (collect);
+  \node[scan box,minimum width=2.2cm] (cleanup) at (11.25,.5) {release state};
+  \draw[scan arrow] (return.east) -- node[pos=.55,above] {end or early stop} (cleanup.west);
+  \draw[scan arrow,dashed,scanOrange] (process.east) to[out=0,in=90]
+    node[right] {error} (cleanup.north);
+  \draw[scan arrow,dashed,scanBlue,rounded corners=5pt] (return.west)
+    -- (0,.5) -- (0,3.1) -- (collect.west);
+  \node[anchor=west,align=left,text=scanBlue] at (.15,1.75)
+    {rescan:\\clear hits,\\rebind inputs};
+\end{tikzpicture}
+\caption{One execution owns its batches and current hit. The ordinary loop
+returns all hits of a batch before collecting another. A batch with no hits
+continues to the next input batch or ends the scan. A normal end means that
+no input rows or retained hits remain. A rescan starts with fresh inputs.
+Cleanup is also required after early termination or an error.}
+\label{fig:scan-lifecycle}
+\end{figure}
+
+\begin{itemize}
+  \item \textbf{Initialize only execution state.} A prepared plan stores
+    descriptions of inputs, not live alignment objects. Plain
+    \texttt{EXPLAIN} follows a description-only initialization path and
+    submits no alignment work.
+  \item \textbf{Rescan with the new inputs.} A nested-loop join may supply a
+    different query sequence on every outer row. The owner clears retained
+    rows and hit cursors, rebinds the execution parameters, and restarts.
+  \item \textbf{Release every owned resource.} Rows, sequence references,
+    alignment buffers, and current-hit values have bounded lifetimes.
+    PostgreSQL errors can unwind execution without ordinary C++ stack
+    unwinding, so cleanup must also be registered with PostgreSQL's lifetime
+    mechanisms. It cannot rely only on C++ destructors.
+\end{itemize}

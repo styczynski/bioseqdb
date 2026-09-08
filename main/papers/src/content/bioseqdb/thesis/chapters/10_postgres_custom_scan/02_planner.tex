@@ -1,0 +1,157 @@
+\section{From a Boolean marker to a custom scan}
+\label{sec:mmsearch-sql-rendezvous}
+
+PostgreSQL lets an extension add a \emph{custom scan}: an executor node with
+extension-defined methods for producing rows.\footcite{postgresql17_custom_scan}
+BioSeqDB uses this facility to make a search
+part of the plan tree. The node responsible for one search is its
+\emph{owner}. It receives the input sequences, runs alignment, and produces
+the hit rows.
+
+\texttt{mmsearch} is declared as an ordinary SQL function returning
+\texttt{boolean}. PostgreSQL can therefore resolve its arguments and accept
+it in a condition without a new SQL grammar. Its two-argument form uses the
+session's alignment settings. A third argument can supply typed options.
+The extra hit rows are part of BioSeqDB's search contract, which every
+accepted plan must preserve.
+During planning the call acts as a \emph{marker}: it identifies the search
+that an owning custom scan must perform. When the plan is constructed, the
+owner removes that marker from the conditions that PostgreSQL would otherwise
+execute. An unowned non-null call reaches a function body that reports an
+unsupported query shape. There is no ordinary scalar alignment fallback.
+
+\subsection{Inspiration from PostgreSQL extensions}
+
+ParadeDB was an important motivation for this design. Its search interface
+keeps a search condition and a score expression in ordinary SQL, while its
+custom executor supplies the score of the current search result. This showed
+how an extension could connect a compact SQL expression to a richer execution
+method. BioSeqDB applies the same general idea to alignment fields and adds
+the requirement that one source row may produce several hits.
+The source references below use the public main branch; the inspected source
+snapshot identifies itself as version 0.25.6.
+\coderef{paradedb/pg_search/src/postgres/customscan/basescan/projections/score.rs}
+  {ParadeDB score expression}{score_from_relation}{30}
+
+In particular, ParadeDB replaces score expressions with typed placeholders,
+then fills them from the current search result before projection.
+\coderef{paradedb/pg_search/src/postgres/customscan/projections.rs}
+  {ParadeDB placeholder replacement}{inject_placeholders}{493}
+This is the concrete mechanism that informed the shared-field design
+described in Section~\ref{sec:match-placeholder-injection}.
+
+The pgvector extension supplied another useful example of a concise typed
+operator. Its \texttt{<->} operator returns the Euclidean distance between two
+vectors, so SQL can order rows by that distance:
+\coderef{pgvector/sql/vector.sql}
+  {pgvector distance operator}{CREATE OPERATOR <->}{174}
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={A scalar distance with pgvector.}]
+-- pgvector example: one distance for each stored vector
+SELECT id, embedding <-> '[1,2,3]' AS distance
+FROM items
+ORDER BY embedding <-> '[1,2,3]'
+LIMIT 5;
+\end{lstlisting}
+\end{minipage}
+
+This is an inspiration for the syntax, not an equivalent result model. One
+distance is a scalar value. Alignment must also preserve the identity and
+fields of each of several possible hits from one sequence pair.
+
+\subsection{Paths, plans, and live state}
+\label{sec:planner-support-and-ownership}
+\label{sec:custom-path-plan-lifecycle}
+
+Three PostgreSQL objects have different jobs:
+
+\begin{enumerate}
+  \item \textbf{A path is a candidate execution strategy.} It describes
+    possible inputs, estimated work, output row count, and ordering. The
+    planner may compare several paths before selecting one.
+  \item \textbf{A plan records the chosen strategy.} A \texttt{CustomScan}
+    contains child plans, expression trees, and copyable descriptions of the
+    search. It can be kept for later execution in a prepared statement.
+  \item \textbf{Live state belongs to one execution.} A
+    \texttt{CustomScanState} holds the input cursor, retained rows, alignment
+    buffers, and current hit. These cannot be saved as process-local pointers
+    in a reusable plan.
+\end{enumerate}
+
+The output estimate must describe hit rows, because later joins and sorts
+receive those rows rather than one row per stored sequence. It remains an
+estimate: the actual number of hits is known only after alignment.
+
+PostgreSQL calls \texttt{PlanCustomPath} when it converts a selected custom
+path into a plan. It later calls \texttt{CreateCustomScanState} to create the
+executor state. These are separate extension callbacks.\footnote{PostgreSQL
+17, \href{https://www.postgresql.org/docs/17/custom-scan-path.html}
+{Creating Custom Scan Paths} and
+\href{https://www.postgresql.org/docs/17/custom-scan-plan.html}
+{Creating Custom Scan Plans}.}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,4.7) {SQL expressions};
+  \node[scan box,minimum width=5.0cm] (project0) at (2.6,3.75)
+    {id, score, start};
+  \node[scan hit,minimum width=5.0cm] (filter0) at (2.6,2.25)
+    {id $>20$ and mmsearch(seq, query)};
+  \node[scan input,minimum width=2.7cm] (table0) at (2.6,.75)
+    {target rows};
+  \draw[scan arrow] (table0) -- (filter0);
+  \draw[scan arrow] (filter0) -- (project0);
+  \node[anchor=west,font=\bfseries] at (7.0,4.7) {Custom plan};
+  \node[scan output,minimum width=4.9cm] (project1) at (9.55,3.75)
+    {id and fields of the current hit};
+  \node[scan hit,minimum width=4.9cm] (owner) at (9.55,2.25)
+    {BioSeqDB custom scan};
+  \node[scan input,minimum width=2.7cm] (table1) at (8.05,.75)
+    {rows with id $>20$};
+  \node[scan input,minimum width=1.6cm] (query1) at (11.45,.75)
+    {query};
+  \draw[scan arrow] (table1) -- (owner);
+  \draw[scan arrow] (query1) -- (owner);
+  \draw[scan arrow] (owner) -- (project1);
+  \draw[scan arrow,dashed,black!55] (5.45,2.25) -- (6.8,2.25);
+  \node[align=center,text=black!65] at (6.1,1.45) {plan\\rewrite};
+\end{tikzpicture}
+\caption{A conceptual expression tree and the work assigned by the custom
+plan. The search becomes the operation that produces hit rows. Ordinary
+identifier filtering remains before alignment. The boxes describe logical
+roles, rather than a literal \texttt{EXPLAIN} output.}
+\label{fig:mmsearch-plan-flow}
+\end{figure}
+
+\subsection{What the hooks must establish}
+
+A \emph{hook} is a function that PostgreSQL calls at a defined planning
+stage. BioSeqDB installs relation and join path hooks. A relation hook sees
+candidate access methods for a table. A join hook sees candidate ways to
+combine relations. Their task is more than finding the name
+\texttt{mmsearch}:
+
+\begin{itemize}
+  \item \textbf{Recognize the operation.} Check the function identity, the
+    argument types, the supported expression shape, and the search options.
+  \item \textbf{Find its inputs.} Associate each operand with its table alias
+    and column, or with a supported expression derived from them. For the
+    target operand, this association and its query scope form the
+    \emph{target binding} used by result helpers.
+  \item \textbf{Propose an owner.} Add a candidate base-scan or supported
+    join path whose inputs can supply the search arguments. Selecting a path
+    fixes the owner in the resulting plan; the hook does not run alignment.
+  \item \textbf{Remove ordinary execution sites.} Remove the owned marker
+    from row, vectorized, and storage filter lists. A leftover copy would
+    call the scalar failure body after the custom scan had already done the
+    search.
+\end{itemize}
+
+A planner support function also reports a high cost for scalar
+\texttt{mmsearch} evaluation.\footcite{postgresql17_support_functions} Cost
+encourages a suitable plan, but does not enforce the search's output rules. The
+structural checks and the unowned-call error provide that boundary.
+Unsupported join, security, or expression shapes do not become correct merely
+because a path has a low estimated cost.
