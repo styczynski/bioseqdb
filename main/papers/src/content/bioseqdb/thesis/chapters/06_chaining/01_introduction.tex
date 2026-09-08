@@ -392,26 +392,41 @@ query span of predecessor \(j\). (In our example above we used $k$ for all k-mer
 
 It's worth noting that defined scoring is also symmetrical in terms of coordinates i.e the score doesn't take $r_i, q_i$ positions as parameters so reversing coordinate systems doesn't change the outcome.
 However, in dynamic programming we often want to use the locally close predecessor as the best one. 
-Consider for example situation in which we have two possible candidates for some anchor $i$: one is very close to our position while offering lower cummulative score for the chain, while the other one is very far away but offers high cummulative score. This scenario can happen if we have very good chain with narrow gaps and slightly worse chain with larger gaps, but the two are very far away from current position.
-We can have selection function that not only takes the best score, but also adds function dependent on current anchor position to make sure to formally express that preference:
+
+We see that scoring is not easy to work with as it depends on both anchors. If we used a linear gap scoring similar to what we discussed in alignment foundations chapter~\ref{sec:alignment-model} we would get a score that is not dependent on both anchors.
+Note that the following is true due to trivial relationship between arithmetic average, distance and minimum:
+\begin{equation}
+\begin{aligned}
+  \phi(j, i) = \frac{d_q(j,i) + d_r(j,i)}{2} \\
+  \delta(j,i) + 2*g(j,i) = \phi(j,i)
+\end{aligned}
+\end{equation}
+So we can simplify our scoring function to be only dependent on $\phi(j,i)$ (I replaced $min(\ell_j, g(j,i))$ with just $\ell_j$ and replaced penalty function with a simple linear function dependent on $\phi(j,i)$):
+\begin{equation}
+\begin{aligned}
+  E(j,i) = \ell_j - \lambda_{\phi} * \phi(j,i)
+\end{aligned}
+\end{equation}
+Now if we assume that every anchor has constant span (as most of them will have length $k$), then we can define:
 \begin{equation}
 \begin{aligned}
   f_j = \max_{i < j}\{f_i+E(j,i)\}, \\
-  \text{Selection}(i) &= f_i + \phi(r_i, q_i)
+  \text{GlobalScore}(i) &= f_i + \lambda_{\phi} * (q_i + r_i)
 \end{aligned}
+\label{eq:global-score-definition-chaining-rmq}
 \end{equation}
-
-There shouldn't be any difference in behaviour for query and reference so $\phi$ should be symmetric. Additionally $\phi$ should be monotonic to express the fact that we prefer closer predecessors: $\phi(r_i, q_i) \leq \phi(r_i+1, q_i), \phi(r_i, q_i+1) \leq \phi(r_i+1, q_i+1)$.
-Please note that the difference here is that it's not a cummulative chain score. It's only used to select the best predeccesor for current anchor (if we tried to sum this score up we would get total score having $O(n^2)$ terms, which would severly alter the scoring behaviour discussed earlier).
-
-In the later chapters we discuss selection function that uses artithmetical average of positions:
+We can observe that:
 \begin{equation}
 \begin{aligned}
-  \operatorname{Selection}(j) = f_i+\phi(r_i, q_i) \\
-  \phi(r_i, q_i) = \frac{r_i + q_i}{2}
+  f_i+E(j,i) > f_k+E(k,i) \iff \\
+  f_i + \ell_j - \lambda_{\phi} * \phi(j,i) > f_k + \ell_k - \lambda_{\phi} * \phi(k,i) \iff \\
+  \text{GlobalScore}(i) + \ell_j > \text{GlobalScore}(k) + \ell_k \iff \\
+  \text{GlobalScore}(i) > \text{GlobalScore}(k)
 \end{aligned}
-\label{eq:selection-chain-score-func-def}
 \end{equation}
+This means that we can compute $\text{GlobalScore}(i)$ independently for each anchor and use it to calculate global score.
+This is what was done in minimap2 as described in minigraph paper~\cite{minimap2_rmq_scoring_minigraph}.
+The problem is that the new linear gap scoring is very simplistic and does not exhibit some of the properties I discussed earlier.
 
 \begin{figure}[tbp]
 \centering
@@ -469,4 +484,3 @@ does not mean zero or equal distance.}
 \label{fig:chaining-near-far-distance}
 \end{figure}
 
-\info{Selection}{Adding the term with the coordinate's average can be interpretes as requirement that the chain score should increase linearly with the distance between the current anchor and the selected predecessor. If some chain is twice far away than other then it should offer at least twice better score. There are many otehr functions that could be placed here as $\phi$, but simple average is the simplest one}
