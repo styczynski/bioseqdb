@@ -1,0 +1,176 @@
+\section{Runtime choices and compiled implementations}
+\label{sec:arch-algorithm-selection}
+
+An alignment request names biological work, but it does not identify one
+machine-code function. BioSeqDB must also account for the sequence alphabet,
+packed representation, available indexes, and execution hardware. These
+decisions select an already compiled implementation and connect the algorithms
+described earlier to the storage and execution layers.
+
+The logical flow remains sketching, seed lookup, chaining, region selection,
+and optional base alignment. Sections~\ref{sec:minimizers-role},
+\ref{sec:chaining-bioseqdb}, and~\ref{sec:final-alignment-role} explain those
+algorithms. Here the concern is how the system selects their implementations
+and supplies compatible inputs.
+
+\subsection{Turn SQL settings into a request}
+\label{sec:arch-request-settings}
+
+PostgreSQL configuration parameters, usually called GUCs, provide session
+defaults. The three settings in Listing~\ref{lst:arch-algorithm-options}
+select minimizer extraction, chaining and base alignment, respectively.
+Their defaults are \texttt{scalar}, \texttt{scalar\_minimap2} and
+\texttt{block\_aligner}. The available CPU minimizer choices are described in
+Section~\ref{sec:configured-cpu-minimizers} and
+Table~\ref{tab:current-cpu-minimizers}.
+
+A constant \texttt{aligner\_options} record overrides individual settings
+for one search. Unspecified or NULL fields inherit the session values.
+The following example instead selects all three algorithm families through
+named GUC values: scalar sketching, scalar chaining, and KSW2 base alignment.
+Both \texttt{refs} and \texttt{queries} are stored sequence tables with an
+\texttt{id} column and a \texttt{seq} column of type
+\texttt{bioseq.seq('dna4',32)}.
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,
+  caption={Select algorithm families before planning a sequence join.},
+  label={lst:arch-algorithm-options}]
+BEGIN;
+SET LOCAL bioseq.aligner.minimizer.algorithm = 'scalar';
+SET LOCAL bioseq.aligner.chaining.algorithm = 'scalar_minimap2';
+SET LOCAL bioseq.aligner.base_alignment.algorithm = 'ksw2';
+EXPLAIN
+SELECT r.id, q.id
+FROM refs AS r JOIN queries AS q ON mmsearch(r.seq, q.seq);
+COMMIT;
+\end{lstlisting}
+\end{minipage}
+
+The planner applies these overrides before freezing result-affecting
+settings in the plan. It also finalizes the selected chaining policy:
+PostgreSQL SIMD chaining uses \texttt{bounded\_\allowbreak batch\_\allowbreak approximate}, whereas
+the C++ interface additionally permits \texttt{exact\_visited}. They are
+distinct policies, as described in Section~\ref{sec:chaining-bioseqdb}.
+Likewise, the internal batched KSW2 implementation is not an additional
+PostgreSQL base-aligner setting.
+
+Required results also determine which stages run. A coordinate-only request
+can avoid base alignment. A CIGAR or exact edit-distance request requires
+additional alignment work. Divergence and mapping quality have their own
+requirements. Thus selecting an aligner does not imply that every search
+executes it. A prebuilt query sketch also lets execution enter after
+sketching.
+
+\subsection{Separate algorithm selection from hardware selection}
+\label{sec:arch-hardware-selection}
+
+Figure~\ref{fig:arch-selection} separates the decisions that constrain
+execution. A requested combination must have an implementation and satisfy
+its input contract. The system does not treat every combination of algorithm
+names as interchangeable or supported.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\footnotesize,
+  arch input/.style={draw=black!55,fill=black!3,rounded corners=2pt,
+    minimum height=.88cm,text width=3.55cm,align=center,inner sep=3pt},
+  arch decision/.style={draw=blue!60!black,fill=blue!7,rounded corners=2pt,
+    minimum height=1.00cm,text width=4.35cm,align=center,inner sep=4pt},
+  arch flow/.style={-{Latex[length=1.8mm]},thick}
+]
+  \node[arch input,text width=4.35cm] (request) at (6.8,4.25)
+    {Requested algorithms\\and required results};
+  \node[arch input] (compiled) at (2.05,2.65)
+    {Precompiled stage variants\\and representation choices};
+  \node[arch decision] (admit) at (6.8,2.65)
+    {Select a supported path\\and check its input contract};
+  \node[arch input] (inputs) at (11.55,2.65)
+    {Alphabet, logical ranges,\\and stored-index identity};
+  \node[arch input] (cpu) at (2.05,.85)
+    {CPU paths: instruction set\\compiled and CPU-supported};
+  \node[arch decision,fill=green!7,draw=green!45!black] (execute) at (6.8,.85)
+    {Execute the admitted path\\with its selected kernels};
+  \node[arch input,fill=red!5,draw=red!50!black] (reject) at (11.55,.85)
+    {Reject an unsupported\\request};
+  \draw[arch flow] (request)--(admit);
+  \draw[arch flow] (compiled)--(admit);
+  \draw[arch flow] (inputs)--(admit);
+  \draw[arch flow] (cpu)--(execute);
+  \draw[arch flow] (admit)--(execute);
+  \draw[arch flow] (admit.south east)--(reject.north west);
+\end{tikzpicture}
+\caption{Algorithm selection, input compatibility, and CPU target selection
+have different responsibilities. The diagram shows their dependencies,
+not a universal order of planner callbacks. GPU execution has additional
+admission requirements. A runtime failure can still occur after admission.}
+\label{fig:arch-selection}
+\end{figure}
+
+For CPU kernels, Highway selects an instruction-set target that is both
+compiled into the extension and supported by the running processor.
+BioSeqDB binds the resulting kernel table once at the alignment-batch entry
+and passes it to the selected implementation. It does not repeat CPU feature
+detection for each seed or choose a different biological algorithm because
+another instruction set is available. PostgreSQL vectorized tuple processing
+is a separate execution choice from the SIMD kernels inside an aligner.
+
+Here a \emph{specialization} is a compiled variant of a C++ template.
+Runtime selectors choose among these variants. The dispatch chain fixes
+a representation bucket and algorithm traits before
+calling a typed pipeline. Representation-width choices depend on the
+selected k-mer bucket, avoiding a full independent product of both axes.
+When an outer caller has already selected the representation, the inner
+pipeline retains that choice. When sketches are supplied, it also removes
+the unnecessary sketch-algorithm dispatch dimension.
+
+Not every numerical parameter needs its own specialization. Compile profiles
+control which specialized forms are instantiated. Other values use a compiled
+generic implementation that reads the requested $k$ and $w$ at runtime. This
+\emph{specialization fallback} preserves the biological parameters. It is
+different from the explicit short-pair adjustment of untouched defaults,
+which can choose smaller $k$ and $w$ before execution. An indexed path
+prepares query sketches with the parameters required by the stored lookup.
+
+\subsection{Require compatible indexes and execution routes}
+\label{sec:arch-route-admission}
+
+An index is usable only when its identity matches the selected operation.
+The relevant information includes the source generation, alphabet,
+minimizer scheme, producer identity, and $k,w$ values. Matching the latter
+two numbers alone is insufficient. In particular, the resident and indexed
+continuation routes within the two-stack family cannot be mixed merely
+because they share an algorithm name. The indexed query uses the selection
+route required by its index. Section~\ref{sec:index-runtime-selection}
+describes the separate policies for allowing or requiring persisted reuse.
+
+Admission also limits acceleration:
+\begin{itemize}
+  \item \textbf{CPU SIMD.} Selected kernels check their supported alphabet,
+    representation, parameter range, and vector shape. Bounded ntHash
+    requires DNA4 with $k=15,w=10$. SIMD chaining requires a vector target
+    and valid limits for its selected policy. A rejected request is not
+    retried with another chaining policy or a scalar implementation.
+  \item \textbf{Biological Vulkan stages.} PostgreSQL requires the complete
+    supported resident combination, including Vulkan sketching, seed lookup,
+    chaining, fused execution, and permission to build GPU indexes when
+    needed. It requires
+    usable hardware and a batch containing at least two jobs. Unsupported
+    mixtures and device failures produce errors instead of entering the
+    general CPU pipeline.
+  \item \textbf{GPU output.} The persisted grouped-SoA route currently
+    supports coordinates only. Transient resident execution also has a
+    bounded CIGAR route, which retains host packing and result construction.
+    Admission to a GPU route therefore does not mean that every substage
+    runs on the device.
+\end{itemize}
+
+These rules have specific exceptions and should not be reduced to a blanket
+ban on fallback. The reference SIMD minimizer explicitly uses scalar rescan
+for alphabets without its two-bit representation. A Vulkan rank prefilter
+can accompany CPU biological stages, as explained in
+Section~\ref{sec:prefilter-dispatch}. A permissive index policy can rebuild
+an absent or inapplicable lookup. Finally, a rejected parallel work split can
+run serially with the same algorithm. Each alternative belongs to a
+particular layer and preserves that layer's stated contract.
