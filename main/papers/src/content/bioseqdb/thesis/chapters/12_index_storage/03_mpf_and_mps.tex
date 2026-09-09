@@ -65,9 +65,11 @@ Section~\ref{sec:index-construction} explains this overlap.
 The grouped MPF layout stores hashes, list offsets, counts, and positions in
 separate arrays. Such a layout gives the reader explicit ranges to check and
 allows a prepared lookup to use arrays without recreating a C++ hash table.
-A direct-lookup option additionally builds a sequence-wide
-hash-to-positions section during publication. This option moves a global
-merge into preparation; it does not mean every MPF route avoids that merge.
+An additional read-only index file (Section~\ref{sec:index-mpf5-sidecar})
+contains a sequence-wide hash-to-positions section built during publication.
+The lookup option selects
+whether queries use that section or scan the fragment controls. Building the
+section moves a global merge into index construction.
 Grouped layouts and their readers are optional, rather than implied merely
 by selecting the MPF index name.
 

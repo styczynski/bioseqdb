@@ -1,9 +1,113 @@
 \section{Read the needed columns and row groups}
 \label{sec:pg-storage-columnar}
 
-The parent table uses a columnar layout. Values from the same column are
-stored together, so reading identifiers does not require reading every
-sequence locator. The layout has three levels:
+The parent table uses a columnar layout because sequence workflows often
+scan many rows while using only a few metadata columns. Keeping sequence
+symbols outside the parent row already avoids fetching them for a metadata
+query. Columnar storage adds further ways to save work:
+
+\begin{itemize}
+  \item \textbf{Read fewer columns.} Values from the same column are stored
+    together. A scan of identifiers and sample numbers can leave unrelated
+    metadata and sequence locators unread.
+  \item \textbf{Compress similar values together.} A buffer containing one
+    column's values uses a common byte encoding and often contains repeated
+    patterns. This is ordinary column compression, separate from packing
+    biological symbols into a few bits each.
+  \item \textbf{Process values in batches.} In \emph{vectorized SQL
+    execution}, a supported operator works on an array of column values.
+    A supported comparison can produce a mask of rows that pass the condition.
+    This reduces repeated
+    per-row operator calls and allows a loop over many values of one type.
+    A batch does not imply that every operation uses hardware SIMD.
+  \item \textbf{Reuse decompressed buffers.} A column cache can keep the
+    output of decompression for later reads. This avoids decompressing the
+    same bytes again, although reconstructing SQL values can still require
+    work. BioSeqDB's optional cache and its lifetime are described in
+    Section~\ref{sec:pg-storage-caches}.
+\end{itemize}
+
+Hydra's batch execution and column cache were important reasons to use its
+extension of the Citus design. Its public reader checks the decompressed
+column cache before decompressing a buffer.\coderef
+{hydrastorage/columnar/src/backend/columnar/columnar_reader.c}
+{Hydra column-cache lookup and decompression}{columnar_reader.c}{1916}
+These SQL operations are separate from BioSeqDB's SIMD minimizer, chaining,
+and alignment algorithms. The two layers can reduce different parts of a
+query's cost. Column storage also favors bulk appends and analytical scans;
+it is not a universal improvement for frequent small updates.
+
+\subsection{What analytical benchmarks motivate}
+
+ClickBench supplies a useful example of the potential benefit on a large
+table. Figure~\ref{fig:storage-clickbench-motivation} uses historical
+PostgreSQL, Citus, and Hydra Columnar submissions on the same named machine
+configuration~\autocite{clickbench_2023_columnar}. All contain results for
+the same 43 queries over the roughly 100-million-row web-analytics dataset.
+For each query, take the shorter of its second and third runs, then sum
+those 43 times. We call this the \emph{sum of hot-query times}. Loading time
+is excluded. The figure also shows the submissions' reported storage sizes.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node at (5.2,4.0) {Hot-query time (min)};
+  \node at (11.2,4.0) {Stored size (GB)};
+  \foreach \v in {0,40,80,120,160} {
+    \draw[black!12] (3+.0275*\v,.1)--(3+.0275*\v,3.55);
+    \node[below] at (3+.0275*\v,.05) {\v};
+  }
+  \foreach \v in {0,20,40,60,80} {
+    \draw[black!12] (9+.055*\v,.1)--(9+.055*\v,3.55);
+    \node[below] at (9+.055*\v,.05) {\v};
+  }
+  % From the pinned ClickBench result files: sum(min(run2,run3))/60;
+  % storage bytes / 1e9. All 43 queries are included, without penalties.
+  \foreach \y/\t/\d/\tl/\dl/\col in {
+    3.1/157.0344/77.797067741/157.0/77.8/storageBlue,
+    1.9/38.596661767/18.980918899/38.6/19.0/storageOrange,
+    .7/7.983093133/18.995669982/8.0/19.0/storageGreen} {
+    \draw[draw=\col,fill=\col!25]
+      (3,\y-.25) rectangle (3+.0275*\t,\y+.25);
+    \node[anchor=west] at (3+.0275*\t+.08,\y) {\tl};
+    \draw[draw=\col,fill=\col!25]
+      (9,\y-.25) rectangle (9+.055*\d,\y+.25);
+    \node[anchor=west] at (9+.055*\d+.08,\y) {\dl};
+  }
+  \node[anchor=east,align=right] at (2.75,3.1) {PostgreSQL 14\\2022 submission};
+  \node[anchor=east,align=right] at (2.75,1.9) {Citus 11.0\\2022 submission};
+  \node[anchor=east,align=right] at (2.75,.7) {Hydra Columnar\\2023 submission};
+  \draw[black!55] (3,.1)--(7.4,.1);
+  \draw[black!55] (9,.1)--(13.4,.1);
+  \node at (5.2,-.65) {Sum over all 43 queries};
+  \node at (11.2,-.65) {$1\ \mathrm{GB}=10^9$ bytes};
+\end{tikzpicture}
+\caption{Historical ClickBench workload comparison, calculated from the
+repository snapshot of 20 September 2023. Each submission uses one
+\texttt{c6a.4xlarge} machine with 16 vCPUs, 32~GiB RAM, and 500~GB of GP2
+storage. PostgreSQL and Citus
+results are dated 1 July 2022, and Hydra results 19 September 2023.
+The times use the shorter of runs two and three for every query.
+Versions, settings, and execution paths differ. These are external SQL
+workload results, not BioSeqDB alignment measurements.}
+\label{fig:storage-clickbench-motivation}
+\end{figure}
+
+Both columnar submissions store about 19~GB, compared with PostgreSQL's
+77.8~GB. Hydra has a much shorter sum of query times than Citus despite
+their similar stored sizes. This motivates considering execution and reuse
+as well as compression. It does not measure how much of the difference
+comes from vectorization: parallelism, caching, and PostgreSQL settings also
+differ. Hydra itself attributes its performance to these mechanisms
+together~\autocite{hydra_columnar_source}.
+
+Hydra's benchmark notes likewise separate SELECT execution time from data
+loading. They distinguish release tests on \texttt{c6a.4xlarge} from
+continuous tests on four-core runners~\autocite{hydra_columnar_benchmarks}.
+
+\subsection{Group rows into stripes and chunks}
+
+The columnar layout has three levels:
 
 \begin{itemize}
   \item A \textbf{stripe} is a batch of appended rows. The default maximum
@@ -34,10 +138,10 @@ condition. For example, a group with sample identifiers from 1 to 100 cannot
 satisfy \texttt{BETWEEN 500 AND 600}.
 
 Figure~\ref{fig:column-store-layout} shows both decisions. A retained group
-still needs row-by-row filtering: bounds of 450 and 700 do not say which rows
-fall between 500 and 600.
+still needs filtering. Each retained row must be tested against the condition:
+bounds of 450 and 700 do not say which rows fall between 500 and 600.
 
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
   \node[anchor=west,font=\bfseries] at (0,4.45)
@@ -89,7 +193,7 @@ Only present values enter the value buffer, with the byte alignment required by
 their PostgreSQL types. The reader uses the bitmap to put values back into
 their row positions.
 
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
   \node[anchor=east] at (2.1,3.15) {row position};
@@ -123,6 +227,12 @@ build and table options. Metadata records the compression method used and the
 decoded length. Successful LZ4 and Zstandard output is not always smaller
 than its input, so compression does not guarantee a space saving for every
 chunk. No particular compression ratio is assumed here.
+
+Abadi et al. show that the choice of compression method depends on both
+the data and the query workload~\autocite{abadi2006compression}.
+For compressed columns, BioSeqDB reconstructs SQL values from decoded
+buffers, obtained by decompression or cache reuse, so both stored size
+and decoding work matter.
 
 The physical order differs from the logical grid. Within a stripe, one
 column's presence buffers are written first, followed by that column's value
