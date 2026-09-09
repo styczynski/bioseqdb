@@ -47,8 +47,12 @@ COMMIT;
 \end{lstlisting}
 \end{minipage}
 
-The planner applies these overrides before freezing result-affecting
-settings in the plan. It also finalizes the selected chaining policy:
+An ordinary \texttt{BioseqScan} stores the defaults and overrides in its
+plan. A \texttt{BioseqBatchJoin} reads the defaults again when execution
+starts and reapplies the constant overrides. Changes to the corresponding
+alignment GUCs invalidate cached plans. The options reference in
+Section~\ref{sec:appendix-search-options} gives the complete mapping.
+The request also fixes the selected chaining policy:
 PostgreSQL SIMD chaining uses \texttt{bounded\_\allowbreak batch\_\allowbreak approximate}, whereas
 the C++ interface additionally permits \texttt{exact\_visited}. They are
 distinct policies, as described in Section~\ref{sec:chaining-bioseqdb}.

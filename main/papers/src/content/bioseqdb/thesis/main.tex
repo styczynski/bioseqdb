@@ -293,3 +293,14 @@
     \printbibliography[heading=bibintoc,title={References}]
   \endgroup
 \fi
+
+% Appendices follow the references and do not enter the chapter synopsis.
+\if\dataeq{renderonly}{??}
+  \appendix
+  \renewcommand{\thechapter}{\arabic{chapter}}
+  \renewcommand{\theHchapter}{appendix.\arabic{chapter}}
+  \addtocontents{toc}{\protect\setcounter{tocdepth}{1}}
+  \chapter{Configuration and SQL tutorials}
+  \label{app:user-reference}
+  \input{appendices/01_user_reference}
+\fi
