@@ -1,0 +1,103 @@
+\section{Build a large index with bounded work buffers}
+\label{sec:index-construction}
+
+A simple MPS builder could collect every $(hash,position,strand)$ record and
+sort the complete vector. Its memory use would then grow with the number of
+target minimizers. BioSeqDB instead sorts smaller \emph{runs}: ordered groups
+of records that can be merged without holding their complete contents in
+memory.
+
+The source scan must first handle boundaries correctly. A \emph{halo} is
+the extra context read on either side of a core. For the current grouped
+builder, a halo of $k+w-2$ symbols covers the span needed around a minimizer
+window. An occurrence belongs to the core containing its last-symbol
+coordinate. Thus overlap supplies context without giving the same occurrence
+to two owners.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,5.1) {Neighboring construction cores};
+  \draw[fill=indexBlue!12,draw=indexBlue] (1,3.25) rectangle (6,3.85);
+  \draw[fill=indexGreen!12,draw=indexGreen] (6,3.25) rectangle (11,3.85);
+  \node at (3.5,3.55) {core 0}; \node at (8.5,3.55) {core 1};
+  \draw[dashed,black!55] (6,.25)--(6,4.15);
+  \node[above] at (6,4.15) {boundary $b$};
+  \draw[fill=indexBlue!8,draw=indexBlue] (1,2.15) rectangle (7.2,2.62);
+  \draw[pattern=north east lines,pattern color=indexBlue,draw=indexBlue]
+    (6,2.15) rectangle (7.2,2.62);
+  \draw[fill=indexGreen!8,draw=indexGreen] (4.8,1.05) rectangle (11,1.52);
+  \draw[pattern=north east lines,pattern color=indexGreen,draw=indexGreen]
+    (4.8,1.05) rectangle (6,1.52);
+  \node[anchor=east] at (.8,2.38) {read 0};
+  \node[anchor=east] at (.8,1.28) {read 1};
+  \node[anchor=west] at (7.45,2.38) {right halo};
+  \node[anchor=east] at (4.55,1.28) {left halo};
+  \draw[very thick,indexOrange] (5.25,.5)--(6.25,.5);
+  \fill[indexOrange] (6.25,.5) circle[radius=2.5pt];
+  \node[anchor=west] at (6.5,.5) {seed ending in core 1: emitted by core 1};
+\end{tikzpicture}
+\caption{The readers overlap, but their output ownership does not. The
+orange seed crosses the boundary; its last position belongs to core 1.
+The drawing shows only the internal halos, with lengths exaggerated.}
+\label{fig:index-build-halos}
+\end{figure}
+
+\noindent\begin{minipage}{\linewidth}
+MPS turns the resulting global records into a sequence-wide order:
+\begin{enumerate}
+  \item Fill one work buffer, sort it by hash, then position and strand, and
+    remove duplicate records.
+  \item Write the sorted run to PostgreSQL temporary-file storage, then
+    reuse the work buffer.
+  \item Merge a bounded number of runs at a time. Reading a small prefix
+    from each input is enough to choose the next output record.
+  \item Continue merging until one ordered stream remains. Remove
+    duplicates across runs as well.
+  \item Read that stream to count each hash's occurrences, then replay it
+    to encode controls and positions with the correct counts.
+\end{enumerate}
+\end{minipage}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,5.8) {Small sorted runs};
+  \foreach \x/\name/\items in {1.4/0/{a,c,f},4.5/1/{a,b,e},7.6/2/{b,d,f},10.7/3/{a,c,e}} {
+    \node[index blue,minimum width=2.5cm] (r\name) at (\x,4.8) {run \name\\$\items$};
+  }
+  \node[index orange,minimum width=3.6cm] (m0) at (3,3.0) {$a,a,b,c,e,f$};
+  \node[index orange,minimum width=3.6cm] (m1) at (9,3.0) {$a,b,c,d,e,f$};
+  \draw[index arrow] (r0.south)--(m0.north west);
+  \draw[index arrow] (r1.south)--(m0.north east);
+  \draw[index arrow] (r2.south)--(m1.north west);
+  \draw[index arrow] (r3.south)--(m1.north east);
+  \node[anchor=west,align=left] at (0,1.7)
+    {Only small read buffers\\for each open input};
+  \node[index green,minimum width=6.8cm] (final) at (7.6,1.2)
+    {$a,a,a,b,b,c,c,d,e,e,f,f$};
+  \draw[index arrow] (m0.south)--(final.north west);
+  \draw[index arrow] (m1.south)--(final.north east);
+  \node[anchor=west,text=black!65] at (0,.1)
+    {Two runs merge at a time. Only hashes are shown; positions are omitted.};
+\end{tikzpicture}
+\caption{External merging bounds the number of simultaneously open input
+runs. Equal letters represent equal hashes with different positions, so
+their occurrences are preserved. Only duplicate full records are removed.}
+\label{fig:index-mps-merge}
+\end{figure}
+
+The spill implementation uses PostgreSQL's \texttt{BufFile} temporary-file
+interface, rather than giving each run an unmanaged permanent file. The
+number of merge inputs is limited independently of the total run count.
+One unusually frequent hash can also have a posting list larger than a work
+buffer. Its positions are streamed through bounded buffers, so one long list
+does not require one equally large vector.
+Temporary disk use can still grow with the input and the merge passes. A
+memory bound does not imply constant disk space or constant build time.
+
+Construction writes the complete payload before its final navigation
+metadata becomes usable. In the sequence-wide stream layout, directory
+entries may only refer to finished controls and postings. Publication of the
+new generation is a separate final step, described in
+Section~\ref{sec:index-generations}.

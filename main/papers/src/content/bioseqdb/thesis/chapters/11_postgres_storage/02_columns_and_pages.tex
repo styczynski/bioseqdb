@@ -1,0 +1,237 @@
+\section{Read the needed columns and row groups}
+\label{sec:pg-storage-columnar}
+
+The parent table uses a columnar layout. Values from the same column are
+stored together, so reading identifiers does not require reading every
+sequence locator. The layout has three levels:
+
+\begin{itemize}
+  \item A \textbf{stripe} is a batch of appended rows. The default maximum
+    is 150,000 rows.
+  \item A \textbf{chunk group} is a smaller row interval within a stripe.
+    The default maximum is 10,000 rows. Every column uses the same group
+    boundaries.
+  \item A \textbf{column chunk} contains one column's values for one chunk
+    group. It has a presence bitmap and a value buffer. A presence bit says
+    whether that row contains a non-NULL value.
+\end{itemize}
+
+Stripe and chunk-group sizes are table options. Smaller groups give finer
+read selection, while larger groups give the compressor more values to work
+with. This is the grouping model described by Citus
+Columnar~\autocite{citus_columnar_compression_2021}.
+
+\subsection{Two independent ways to avoid reads}
+
+\emph{Projection} selects the columns required by the query. The sample
+query needs \texttt{id} for its output and \texttt{sample\_id} for its
+condition. It does not need \texttt{seq}.
+
+\emph{Min/max pruning} selects chunk groups. For an ordinary ordered column,
+the writer records the smallest and largest non-NULL values in each chunk.
+A condition can reject a group if none of its values could satisfy the
+condition. For example, a group with sample identifiers from 1 to 100 cannot
+satisfy \texttt{BETWEEN 500 AND 600}.
+
+Figure~\ref{fig:column-store-layout} shows both decisions. A retained group
+still needs row-by-row filtering: bounds of 450 and 700 do not say which rows
+fall between 500 and 600.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,4.45)
+    {One stripe: three chunk groups and three columns};
+  \node at (3.3,3.85) {\texttt{id}};
+  \node at (6.15,3.85) {\texttt{sample\_id}};
+  \node at (9.0,3.85) {\texttt{seq}};
+  \foreach \y/\g in {3.05/0,1.95/1,.85/2} {
+    \node[anchor=east] at (1.7,\y) {group \g};
+    \foreach \x in {1.9,4.75,7.6}
+      \draw[draw=black!45,fill=black!5] (\x,\y-.4)
+        rectangle +(2.65,.8);
+  }
+  \draw[storageBlue,fill=storageBlue!15] (1.9,1.55) rectangle (4.55,2.35);
+  \draw[storageBlue,fill=storageBlue!15] (4.75,1.55) rectangle (7.4,2.35);
+  \node at (3.23,1.95) {read identifiers};
+  \node at (6.08,1.95) {bounds $[450,700]$};
+  \node at (6.08,3.05) {bounds $[1,100]$};
+  \node at (6.08,.85) {bounds $[800,950]$};
+  \foreach \y in {3.05,.85} {
+    \draw[storageOrange,line width=1.1pt] (2.05,\y-.28)--(4.4,\y+.28);
+    \draw[storageOrange,line width=1.1pt] (2.05,\y+.28)--(4.4,\y-.28);
+    \node[anchor=west,text=storageOrange] at (10.55,\y) {skip group};
+  }
+  \node[align=center,text=black!65] at (8.93,1.95) {locator stream\\not requested};
+  \node[anchor=west,text=storageBlue,align=left] at (10.55,1.95)
+    {read group;\\test its rows};
+  \draw[decorate,decoration={brace,mirror,amplitude=4pt},black!60]
+    (7.6,.22)--(10.25,.22);
+  \node[align=center] at (8.93,-.37) {no sequence\\fragment reads};
+\end{tikzpicture}
+\caption{Column selection and group pruning for the metadata query.
+Blue cells are read. Orange crosses mark groups whose scalar bounds exclude
+every row. Unrequested sequence locators remain unread. The drawing shows
+logical chunks, not their byte order on disk.}
+\label{fig:column-store-layout}
+\end{figure}
+
+Sequence columns are excluded from this min/max test. A locator's byte order
+does not describe sequence similarity. A separate scalar length, date, or
+sample identifier can supply useful bounds. When a supported comparison or
+usable bound is missing, the reader keeps the group.
+
+\subsection{A column chunk separates missing values from values}
+
+Figure~\ref{fig:storage-column-streams} uses six rows to show the two
+buffers in one column chunk. The presence bitmap has one bit per row.
+Only present values enter the value buffer, with the byte alignment required by
+their PostgreSQL types. The reader uses the bitmap to put values back into
+their row positions.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=east] at (2.1,3.15) {row position};
+  \node[anchor=east] at (2.1,2.35) {column value};
+  \node[anchor=east] at (2.1,1.55) {presence bit};
+  \foreach \i/\v/\b in {0/12/1,1/NULL/0,2/17/1,3/17/1,4/NULL/0,5/21/1} {
+    \node at (2.75+1.35*\i,3.15) {\i};
+    \node[storage cell,minimum width=1.2cm,fill=black!4]
+      at (2.75+1.35*\i,2.35) {\v};
+    \node[storage cell,minimum width=1.2cm,fill=storageBlue!12]
+      at (2.75+1.35*\i,1.55) {\b};
+  }
+  \node[anchor=east] at (2.1,.25) {value buffer};
+  \foreach \i/\v in {0/12,1/17,2/17,3/21}
+    \node[storage cell,minimum width=1.2cm,fill=storageGreen!13]
+      at (2.75+1.35*\i,.25) {\v};
+  \draw[storage arrow] (8.0,.25)--(9.0,.25);
+  \node[storage cell,fill=storageOrange!12,minimum width=2.25cm]
+    at (10.25,.25) {compress values};
+  \node[anchor=west,text=black!65] at (2.15,-.5)
+    {Only four values are stored; the bitmap keeps their six row positions.};
+\end{tikzpicture}
+\caption{Presence and values have different jobs. Generic column compression
+acts on the serialized value buffer. Sequence rank packing, introduced
+earlier, is a separate encoding step.}
+\label{fig:storage-column-streams}
+\end{figure}
+
+The value buffer can use PostgreSQL PGLZ, LZ4, or Zstandard, depending on the
+build and table options. Metadata records the compression method used and the
+decoded length. Successful LZ4 and Zstandard output is not always smaller
+than its input, so compression does not guarantee a space saving for every
+chunk. No particular compression ratio is assumed here.
+
+The physical order differs from the logical grid. Within a stripe, one
+column's presence buffers are written first, followed by that column's value
+buffers. The next column follows. Stored offsets locate each buffer without
+requiring the reader to decode earlier columns. A column added after a stripe
+was written can be supplied from its constant PostgreSQL default or as NULL.
+
+\section{Store byte streams in PostgreSQL relation pages}
+\label{sec:pg-storage-pages}
+
+A compressed buffer need not fit in one database page. BioSeqDB gives column
+writers a continuous logical byte space and maps it onto page payloads.
+Block 0 contains the metapage, block 1 is reserved, and stream data begin in
+block 2. Each data page keeps its PostgreSQL page header.
+
+Let $\mathrm{BLCKSZ}$ be the PostgreSQL page size in bytes, $H$ the
+page-header size, and $P=\mathrm{BLCKSZ}-H$ the remaining payload capacity.
+Measure $x\geq0$ from the first stream byte in block 2.
+Then
+\[
+  \operatorname{block}(x)=2+\left\lfloor x/P\right\rfloor,
+  \qquad
+  \operatorname{position}(x)=H+(x\bmod P).
+\]
+This choice of origin makes the stream's first byte $x=0$. Page headers do
+not consume positions in the logical byte stream. Figure~\ref{fig:storage-pages}
+shows a request that crosses a page boundary.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,4.05)
+    {Toy pages: 2 header bytes and 10 payload bytes};
+  \node[anchor=east] at (1.45,2.85) {logical bytes};
+  \draw[draw=black!50,fill=black!5] (1.75,2.5) rectangle (11.75,3.2);
+  \draw[storageBlue,fill=storageBlue!20] (5.75,2.5) rectangle (9.25,3.2);
+  \foreach \x/\v in {1.75/0,5.75/8,6.75/10,9.25/15,11.75/20}
+    \node[above=2pt] at (\x,3.2) {$\v$};
+  \node at (7.5,2.85) {request $[8,15)$};
+  \node[anchor=east] at (1.45,1.15) {stored pages};
+  \draw[fill=black!20,draw=black!60] (1.75,.8) rectangle (2.55,1.5);
+  \draw[fill=black!5,draw=black!60] (2.55,.8) rectangle (6.55,1.5);
+  \draw[storageBlue,fill=storageBlue!20] (5.75,.8) rectangle (6.55,1.5);
+  \draw[fill=black!20,draw=black!60] (7.0,.8) rectangle (7.8,1.5);
+  \draw[fill=black!5,draw=black!60] (7.8,.8) rectangle (11.8,1.5);
+  \draw[storageBlue,fill=storageBlue!20] (7.8,.8) rectangle (9.8,1.5);
+  \node at (2.15,1.15) {H};
+  \node at (7.4,1.15) {H};
+  \node at (6.15,1.15) {2};
+  \node at (8.8,1.15) {5 bytes};
+  \node at (4.15,.35) {block 2};
+  \node at (9.4,.35) {block 3};
+  \draw[storage arrow,storageBlue] (6.25,2.45)--(6.15,1.55);
+  \draw[storage arrow,storageBlue] (8.0,2.45)--(8.8,1.55);
+  \node[anchor=west,text=black!65] at (1.75,-.3)
+    {Copy two bytes, skip the next page header, then copy five bytes.};
+\end{tikzpicture}
+\caption{Logical offsets hide page boundaries. The example uses deliberately
+small pages to make the split visible. Actual page sizes and header sizes
+come from the PostgreSQL build.}
+\label{fig:storage-pages}
+\end{figure}
+
+This mapping follows the Citus column-store design. The public source gives
+the corresponding page and logical-offset operations.\coderef
+{citusstorage/src/backend/columnar/columnar_storage.c}
+{Citus columnar page mapping}{columnar_storage.c}{118}
+PostgreSQL documents the common page header separately from the layout an
+access method puts after it~\autocite{postgresql17_storage_page_layout}.
+
+\subsection{Reserve space, write bytes, publish metadata}
+
+Concurrent writers must not allocate the same row numbers or byte interval.
+The metapage records the next stripe number, row number, and free byte offset.
+The write path separates allocation from visibility. It has three
+responsibilities:
+
+\begin{itemize}
+  \item \textbf{Reserve.} Under the relation extension lock, reserve
+    non-overlapping identifiers and byte space.
+  \item \textbf{Write.} Copy the stream bytes into relation pages. Page
+    changes use PostgreSQL buffer locks and generic write-ahead logging
+    (WAL).
+  \item \textbf{Record completed data.} Store rows, offsets, lengths, and
+    chunk metadata in the catalogs. The bytes and catalog changes belong
+    to the same transaction. Other transactions can read a completed stripe
+    when its committed metadata is visible under their snapshots.
+\end{itemize}
+
+A reserved byte range alone is not a readable stripe. If a write does not
+complete, the range does not authorize readers to interpret unfinished
+bytes as table rows. Generic WAL supplies page-change recovery for logged
+relations~\autocite{postgresql17_generic_wal}; the storage code still has to
+publish the right catalog state and release its locks correctly.
+
+\subsection{Why use relations instead of private payload files?}
+
+The primary column and fragment data use PostgreSQL relations. A read obtains
+a shared database buffer. A \textbf{page pin} keeps that buffer assigned to
+the page while it is in use; a buffer lock protects its contents during the
+copy. After copying the requested bytes, the reader releases the pin and
+lock. The copied column buffer belongs to the reader. A sequence view
+therefore does not keep every database page it has touched pinned for the
+rest of the query.
+
+This choice reuses PostgreSQL's shared buffer manager, relation identity,
+locking, and WAL path. A private-file implementation would need separate
+rules connecting its writes, deletion, and recovery to database transactions.
+These benefits do not establish every transaction property of a custom
+access method automatically. They identify the machinery used for these
+particular bytes. Derived index images can use a different read mechanism,
+described in the next chapter.
