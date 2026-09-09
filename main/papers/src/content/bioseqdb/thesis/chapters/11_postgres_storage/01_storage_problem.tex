@@ -52,13 +52,20 @@ separates three objects:
     chapter.
 \end{itemize}
 
-\warn{Adapted from Citus Columnar}{
-BioSeqDB's columnar layer was adapted from Citus Columnar. The code has since
-been substantially changed for BioSeqDB's sequence storage, reads, and
-updates~\autocite{citus_columnar_storage,citus_columnar_compression_2021}.
-The original column-store ideas include stripes, column chunks, compression,
-and min/max pruning. Sequence locators, fragment readers, and sequence indexes
-are BioSeqDB-specific additions.}
+\warn{Adapted from Citus and Hydra Columnar}{
+BioSeqDB's columnar layer adapts code from both Citus Columnar and Hydra
+Columnar~\autocite{citus_columnar_storage,hydra_columnar_source}.
+Hydra extended the Citus code with features including vectorized SQL
+execution and a cache of decompressed column buffers. BioSeqDB modernized
+the adapted C code into C++26 modules and substantially changed the storage,
+reads, and updates. Sequence locators, fragment readers, and sequence
+indexes are BioSeqDB-specific additions.}
+
+The linked Hydra columnar documentation was unavailable when consulted for
+this work. Understanding the chunk operations therefore required tracing
+the available source code to reconstruct their write, read, and cache
+lifetimes. The repository remains a public reference for the original
+implementation~\autocite{hydra_columnar_source}.
 
 The table access method connects this layout to PostgreSQL's table
 operations~\autocite{postgresql17_tableam}. Citus illustrates the broader value of

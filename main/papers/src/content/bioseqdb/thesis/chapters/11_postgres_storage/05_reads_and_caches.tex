@@ -15,6 +15,13 @@ Reading a parent table and reading sequence symbols are separate steps:
     that interval and check their packed representation.
 \end{enumerate}
 
+Chernishev et al. study \emph{late materialization}, which uses row
+positions to postpone tuple reconstruction~\autocite{Chernishev2022ACS}.
+In BioSeqDB's lazy read path, a tuple carries a sequence locator, and
+fragments are fetched when an operation needs their symbols. Sequence
+contents can therefore remain unread after PostgreSQL has formed a tuple
+containing the locator.
+
 The column reader loads stored buffers for all selected groups of a stripe
 before decoding groups in turn. Thus avoiding a whole-sequence allocation
 does not mean that the complete scan retains only one compressed chunk.

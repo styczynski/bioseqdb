@@ -82,83 +82,248 @@ An old reader may still need the former version, and the stored objects need
 their own cleanup policy. The current MPS build path does not automatically
 delete replaced payloads; reclaiming them requires separate cleanup.
 
-\subsection{Relations and immutable reader images}
+\subsection{From stored index rows to a CPU reader file}
 \label{sec:index-mpf5-sidecar}
 \label{sec:index-formats}
 
-The base sequence store from the previous chapter uses PostgreSQL relation
-pages. Persistent indexes also use internal relations for descriptors and
-payloads. The specialized MPS streams are split into heap rows with an indexed
-key, allowing the reader to find the required pieces. Grouped derived payload
-relations are unlogged: their bytes can be rebuilt from source sequences, but
-they must not be assumed to survive a crash reset like logged source data.
+The optional grouped MPF path keeps two stored copies of its index data.
+It first writes index rows in PostgreSQL, then creates a file for CPU reads.
+To understand why, distinguish three objects:
+\begin{itemize}
+  \item \textbf{The sequence.} The original packed symbols remain in the
+    sequence-storage relations from the previous chapter.
+  \item \textbf{The index relation.} Separate heap rows hold the computed
+    minimizer controls and positions, split into byte chunks, with generation
+    metadata. This is already an index, not another copy of the sequence.
+  \item \textbf{The reader file.} This file contains the index payload bytes
+    in consecutive ranges, their directory and metadata, and an additional
+    direct hash lookup. We call this fixed layout a \emph{reader image}.
+    Once published, the image is read-only.
+\end{itemize}
 
-The grouped MPF CPU reader uses an immutable reader image. It is a file with
-a fixed format, derived from a validated relation-backed generation. Mapping
-that image allows a prepared reader to address its arrays without rebuilding
-the whole lookup from many individual heap tuples. The catalog generation
-still decides whether the image is eligible; a pathname cannot make itself
-the current database index. The current grouped MPF GPU preparation path
-reads the complete relation payload into device arrays before search.
+The conversion copies the encoded index payload out of the rows. It does
+not copy PostgreSQL pages or recompute the minimizers. Heap pages contain
+page headers, row headers and other fields around each stored value
+\autocite{postgresql17_storage_page_layout}. Mapping the heap file would
+still leave those fields between payload chunks. It would not expose one
+contiguous index array. The reader image removes that obstacle once during
+index construction.
+
+\paragraph{Construction happens once per generation.}
+The current relation-backed builder takes these steps:
+\begin{enumerate}
+  \item \textbf{Build the index rows.} Compute the minimizers and save a new
+    generation's payload, directory and metadata in the index relation.
+  \item \textbf{Write the reader file.} Reread and check that generation's
+    rows in index order. Append their payload bytes to a private construction
+    file. Add the directory, metadata and direct hash lookup, then finish
+    and check the file header.
+  \item \textbf{Finish the file before publishing the index.} Make the file
+    read-only, synchronize it, give it a new final name without replacing an
+    existing file, and remove the temporary name. Then update the database
+    descriptor and active-generation record in the transaction. Other
+    transactions can select the new generation after commit.
+\end{enumerate}
+The index relation remains after this export. The extra copy costs disk space
+and a complete payload reread during construction. The direct hash lookup
+also adds construction work and bytes. In the current writer this section is
+always built; the lookup setting chooses how a later query reads the image.
+Figure~\ref{fig:index-control-data-plane} shows generation $g$ and its
+completed file $F_g$.
 
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
-  \node[index blue,minimum width=5.2cm] (catalog) at (6,5.2)
-    {PostgreSQL descriptor: source + generation};
-  \node[anchor=west,font=\bfseries] at (0,4.05) {(a) Relation-backed payload};
-  \node[anchor=west,font=\bfseries] at (7.15,4.05) {(b) MPF CPU reader image};
-  \foreach \y in {3.3,2.6,1.9} {
-    \draw[fill=indexBlue!10,draw=indexBlue] (.55,\y-.24) rectangle (5.7,\y+.24);
-    \draw (.55+1.35,\y-.24)--(.55+1.35,\y+.24);
+  \node[anchor=west,font=\bfseries] at (0,7.0)
+    {(a) During construction of generation $g$};
+  \node[anchor=west] at (.3,6.35) {Index relation: three payload chunks};
+  \node[anchor=west] at (7.0,6.35) {Completed reader file $F_g$};
+  \draw[rounded corners,draw=black!55] (6.9,2.85) rectangle (12.2,6.05);
+  \foreach \y/\n/\col in {5.65/0/indexBlue,4.85/1/indexOrange,4.05/2/indexGreen} {
+    \draw[fill=black!5,draw=black!55] (.3,\y-.3) rectangle (1.9,\y+.3);
+    \node at (1.1,\y) {row fields};
+    \draw[fill=\col!15,draw=\col] (1.9,\y-.3) rectangle (4.65,\y+.3);
+    \node at (3.275,\y) {chunk \n};
   }
-  \node at (1.23,3.3) {key};\node at (3.8,3.3) {payload bytes};
-  \node at (1.23,2.6) {key};\node at (3.8,2.6) {payload bytes};
-  \node at (1.23,1.9) {key};\node at (3.8,1.9) {payload bytes};
-  \draw[fill=black!3,draw=indexGreen] (7.45,1.65) rectangle (12,3.55);
-  \draw (7.45,2.95)--(12,2.95);\draw (7.45,2.35)--(12,2.35);
-  \node at (9.725,3.25) {header and array ranges};
-  \node at (9.725,2.65) {hashes, offsets, counts};
-  \node at (9.725,1.95) {positions};
-  \draw[thick] (catalog.south)--(6,3.8);
-  \fill (6,3.8) circle[radius=1.1pt];
-  \draw[index arrow] (6,3.8)-|(3.1,3.6);
-  \draw[index arrow] (6,3.8)-|(9.75,3.6);
-  \draw[index arrow,indexOrange] (5.85,2.6)--(7.3,2.6);
-  \node[anchor=north,align=center,text width=1.4cm,text=indexOrange]
-    at (6.57,2.45) {write image};
-  \node[anchor=west] at (7.45,1.25) {mapped file pages};
+  \draw[fill=black!5,draw=black!55] (7.0,5.35) rectangle (12.1,5.95);
+  \node at (9.55,5.65) {header: identity and byte ranges};
+  \foreach \x/\n/\col in {7.0/0/indexBlue,8.7/1/indexOrange,10.4/2/indexGreen} {
+    \draw[fill=\col!15,draw=\col] (\x,4.55) rectangle (\x+1.7,5.15);
+    \node at (\x+.85,4.85) {chunk \n};
+  }
+  \draw[fill=black!5,draw=black!55] (7.0,3.75) rectangle (12.1,4.35);
+  \node at (9.55,4.05) {directory and generation metadata};
+  \draw[fill=black!5,draw=black!55] (7.0,2.95) rectangle (12.1,3.55);
+  \node at (9.55,3.25) {direct hash lookup};
+  \draw[index arrow] (4.85,4.85)--(6.8,4.85);
+  \node[align=center] at (5.82,4.05) {copy payload\\bytes only};
+  \node[anchor=west,font=\bfseries] at (0,2.3)
+    {(b) A later query: open the existing file};
+  \node[index blue,minimum width=4.5cm,minimum height=.85cm] (desc)
+    at (2.55,1.35) {Visible database descriptor\\source version and $g$};
+  \node[anchor=west] at (7.0,1.85) {File pages mapped for this query};
   \foreach \i in {0,...,5}
-    \draw[fill=black!3,draw=black!50]
-      (7.45+.7583*\i,.45) rectangle (8.2083+.7583*\i,.95);
+    \draw[fill=black!4,draw=black!55]
+      (7.0+.85*\i,1.05) rectangle (7.85+.85*\i,1.65);
   \foreach \i in {0,4}
-    \draw[fill=indexGreen!25,draw=indexGreen]
-      (7.45+.7583*\i,.45) rectangle (8.2083+.7583*\i,.95);
-  \node[anchor=west,align=left] at (.55,-.3)
-    {PostgreSQL buffers and tuple reads\\MPS selects stored stream ranges.};
-  \node[anchor=west,align=left] at (7.45,-.3)
-    {Whole image mapped\\Green pages: touched by this read};
+    \draw[fill=indexGreen!20,draw=indexGreen]
+      (7.0+.85*\i,1.05) rectangle (7.85+.85*\i,1.65);
+  \draw[index arrow] (desc.east)--(6.8,1.35);
+  \node[align=center] at (5.85,.62) {select and\\check $F_g$};
+  \draw[index arrow] (12.2,4.45)--(12.65,4.45)--(12.65,1.35)--(12.3,1.35);
+  \node[anchor=west,align=left] at (.3,-.1)
+    {The query does not repeat the export.};
+  \node[anchor=west,align=left] at (7.0,-.1)
+    {Green: pages used by this lookup.\\The full file need not be resident.};
 \end{tikzpicture}
-\caption{Database authority and read representation have separate roles.
-The mapped image supports CPU reads of eligible grouped MPF generations.
-The small page strip is conceptual: the complete file is
-mapped, while the operating system loads touched pages. Array boundaries
-need not coincide with page boundaries. MPS uses relation-backed streams.}
+\caption{The same index payload has two storage layouts. Colors trace
+three illustrative chunks from heap rows into consecutive file ranges.
+Row fields are left behind. A later query checks the visible generation and
+maps its completed image. The lower strip shows file pages, not index-array
+boundaries; the operating system may also read pages ahead of a request.}
 \label{fig:index-control-data-plane}
 \end{figure}
 
-The image writer creates a private temporary file, finishes its content and
-header, makes it read-only, synchronizes it, and publishes it without
-overwriting an existing generation name. It checks that the final name still
-refers to the expected file. Publication of the database descriptor follows
-the required image checks. This protocol requires more work than saving a
-bare C++ memory dump, but it keeps the descriptor from promising an
-unfinished or different image.
+\paragraph{Queries open the file rather than exporting it again.}
+The CPU reader first validates the source and reads the generation descriptor
+under the query snapshot. It opens the matching file read-only, checks its
+identity and size, and maps it with \texttt{mmap}. Mapping gives the process
+an address range through which it can read the file. After header and range
+checks, the reader uses views of the mapped index arrays. It still allocates
+metadata and query work buffers, but does not copy the complete index
+payload into a new array. One prepared reader can serve several query
+sequences in a batch. A later prepared reader can reopen the same file.
 
-A PostgreSQL resource owner registers each mapping, so normal release and
-database error cleanup unmap it and close its file descriptor. A borrowed
-pointer given to an alignment worker does not extend this lifetime. The owning
-read session must remain alive until the worker finishes. Backup, recovery,
-and cleanup of these extension-owned files need explicit handling or
-regeneration; using \texttt{mmap} does not automatically give them heap-WAL
-or ordinary relation-backup behavior.
+Algorithm~\ref{alg:index-image-lifecycle} separates the two operations.
+Here $s$ is the complete, unchanged stored target sequence, $R_g$ denotes
+its index rows for generation $g$, and $\sigma$ is the query snapshot.
+The named operations are pseudocode, not an API.
+File and database errors stop the operation; registered cleanup releases
+partly opened resources. The build runs within the caller's transaction.
+
+\begin{algorithm}[htbp]
+\caption{Build an MPF reader image once; open it for later queries.}
+\label{alg:index-image-lifecycle}
+\small
+\begin{algorithmic}[1]
+  \Procedure{BuildMappedMPF}{$s$}
+    \State $g\gets$ a new generation number
+    \State $R_g\gets\Call{BuildAndStoreMPF}{s,g}$
+    \State $F\gets\Call{CreatePrivateFile}{}$
+    \ForAll{payload chunks $c$ of $R_g$, in stored index order}
+      \State \Call{CheckChunk}{$c$}
+      \State \Call{AppendPayload}{$F,c$}
+    \EndFor
+    \State \Call{AddMetadataAndDirectLookup}{$F,R_g$}
+    \State $F_g\gets\Call{CheckAndPublishReadOnlyFile}{F,g}$
+    \State \Call{UpdateDescriptorAndActiveGeneration}{$s,g,F_g$}
+    \State \Return $g$ \Comment{the caller commits the transaction}
+  \EndProcedure
+  \Statex
+  \Procedure{OpenMappedMPF}{$s,\sigma$}
+    \State $D\gets\Call{ReadAndCheckVisibleDescriptor}{s,\sigma}$
+    \State $F_g\gets\Call{OpenAndCheckFileReadOnly}{D}$ \Comment{check identity and size}
+    \State $M\gets\Call{MapFileReadOnly}{F_g}$
+    \State \Call{CheckHeaderAndRanges}{$M,D$}
+    \State \Return a reader using $M$ while the read session owns the mapping and file
+  \EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{This is an optional SQL path.}
+The public function \texttt{bioseq.update\_index} reaches the file writer
+when grouped MPF construction is enabled. It is not limited to a test fixture.
+The mapped CPU reader runs in \texttt{BioseqBatchJoin}.
+Set the per-call \texttt{index\_read\_requirement} option to 2,
+meaning \emph{require a compatible stored index}. Ordinary column scans
+do not support that requirement, and the default permissive search does not
+select this mapped route. Enabling grouped construction alone does not
+select it for later queries.
+
+Listing~\ref{lst:index-mapped-user-path} shows the public calls. It assumes
+committed DNA4 sequences with 32-bit packed units in a new permanent
+\texttt{refs(id,seq)} table using the Bioseq table access method, and query
+sequences with the same alphabet and packing in \texttt{queries(id,seq)}.
+Load \texttt{refs} with
+\texttt{bioseq.index.insert\_maintenance.enabled = off}, so it has no older
+ordinary MPF relation. The example
+uses the registered $k=15,w=10$ profile. The same minimizer algorithm is kept
+for construction and search.
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-index-sql,
+  caption={Explicitly build and use the mapped MPF path.},
+  label={lst:index-mapped-user-path}]
+BEGIN;
+SET max_parallel_workers_per_gather = 0;
+SET bioseq.aligner.vulkan.enabled = off;
+SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';
+SET bioseq.aligner.minimizer.kmer_size = 15;
+SET bioseq.aligner.minimizer.window_size = 10;
+SET bioseq.aligner.chaining.algorithm = 'simd_minimap2';
+SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';
+SET bioseq.index.async_persistence.enabled = off;
+SET bioseq.index.recompute_async_persistence.enabled = off;
+SET bioseq.aligner.grouped_soa_generation.enabled = on;
+
+SELECT bioseq.update_index('refs'::regclass,
+                          'minimizers_per_fragment');
+COMMIT;
+
+SET bioseq.index.sequence_read.enabled = on;
+SELECT bioseq.set_active_read_index('refs'::regclass,
+                                   'minimizers_per_fragment');
+SELECT r.id, q.id
+FROM refs AS r JOIN queries AS q
+  ON mmsearch(r.seq, q.seq,
+              aligner_options(index_read_requirement => 2));
+\end{lstlisting}
+\end{minipage}
+
+The default grouped MPF control reader and the optional direct hash reader
+both use the image. MPS instead reads its relation-backed streams. The
+grouped MPF GPU path reads the complete relation payload into device arrays.
+These are separate read paths.
+
+\paragraph{RAM is an alternative, not the opposite of a mapped file.}
+An index kept in RAM can be fast while it remains available. BioSeqDB's
+ordinary index caches already retain prepared CPU objects. However, a new
+backend may have to read and reconstruct its own copy, and an index may be
+larger than the memory available for that copy.
+
+A mapped file still uses RAM: the operating system keeps file pages in its
+page cache. Read-only mappings in different processes can use the same
+cached file pages. Pages can be loaded as needed and reclaimed under memory
+pressure without making each backend retain the whole index in a private
+array. This is the performance reason for the extra representation: avoid
+repeated tuple extraction and full-payload copies at query preparation.
+It is not a guarantee of faster search. A cold query can wait for page reads,
+and a broad lookup can touch much of the file. Building the image also costs
+an extra write, checks and synchronization. A warm in-memory index remains
+a useful comparison.
+
+\paragraph{Releasing a reader and deleting its file are different steps.}
+The file has the following lifecycle:
+\begin{itemize}
+  \item \textbf{During construction:} a private temporary name identifies
+    the unfinished file. Publication installs a distinct final name.
+  \item \textbf{On transaction abort:} registered file actions attempt to remove the
+    transaction's unfinished or newly published files after checking their
+    identity. On commit, the completed file is kept.
+  \item \textbf{When a reader finishes:} its PostgreSQL resource owner
+    unmaps the address range and closes the file descriptor. The file remains
+    available for another reader. Error cleanup releases these resources too.
+  \item \textbf{After replacement or source deletion:} visibility and source
+    checks decide whether a reader may use the old generation. The current
+    query and rebuild paths do not automatically reclaim its retired image.
+\end{itemize}
+
+A missing or damaged image causes the required mapped read to fail. The
+query does not recreate it from the relation. An explicit rebuild produces a
+new generation and image. The file is derived data outside ordinary relation
+WAL. Synchronizing it does not establish a recovery protocol or ensure that
+a backup contains a matching file and database descriptor.
+Its relation-backed generation also uses unlogged payload
+relations. Crash recovery, backup and removal of orphaned files therefore
+need explicit support rather than an assumption that PostgreSQL manages the
+image like a heap relation.
