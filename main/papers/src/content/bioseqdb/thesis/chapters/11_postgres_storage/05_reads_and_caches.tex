@@ -1,0 +1,187 @@
+\section{Load fragments when a consumer needs them}
+\label{sec:pg-storage-reading}
+
+Reading a parent table and reading sequence symbols are separate steps:
+
+\begin{enumerate}
+  \item Read visible stripe and chunk metadata under the scan snapshot.
+  \item Select the required columns and reject chunk groups contradicted
+    by supported scalar bounds.
+  \item Read the selected presence and stored value buffers, decode a
+    group, and apply row masks and remaining conditions.
+  \item Bind the surviving row's locator to its source, validating the
+    source identity, epoch, and fragment geometry under the scan snapshot.
+  \item When symbols are requested, fetch the fragment rows covering
+    that interval and check their packed representation.
+\end{enumerate}
+
+The column reader loads stored buffers for all selected groups of a stripe
+before decoding groups in turn. Thus avoiding a whole-sequence allocation
+does not mean that the complete scan retains only one compressed chunk.
+Likewise, a fragment request can cause its containing column chunk to be
+read and decoded. The logical request and the physical I/O unit differ.
+
+The table reader can return ordinary tuple slots or column batches containing
+projected values, NULL masks, a mask of surviving rows, and internal row
+numbers. Supported scalar conditions can update a column batch's mask.
+Surviving rows can then be extracted into ordinary tuple slots. Alignment
+separately collects its input rows into the batches described in
+Section~\ref{sec:customscan-batch-state-machine}. These are different work
+units. Paths that pass source locators through or evaluate sequence
+expressions retain scalar fetch where the vector conditions are disabled.
+Batching itself does not imply a hardware SIMD instruction for every
+expression.
+
+\subsection{A fragment read owns its copy}
+
+The PostgreSQL sequence scanner has 16 fragment slots. On a miss it finds the
+fragment row through a shard reader using the registered snapshot, checks the
+packed representation, and copies the fragment into scanner-owned memory.
+A later request for a resident fragment can borrow those packed bytes.
+The borrowed view lasts until that fragment is released, its slot is reused,
+or the scanner ends.
+
+For 64-bit packed units, the full payload capacity of these slots is
+\[
+  16\times1024\times8=131{,}072\ \text{bytes}=128\ \text{KiB}.
+\]
+This counts fragment payload only. Open reader state, compressed column
+buffers, scratch space, indexes, anchors, and alignment matrices have
+additional costs. In particular, this is not a 128~KiB bound for a query.
+
+Figure~\ref{fig:storage-resident-slots} distinguishes releasing a fragment
+from releasing its allocated memory.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,4.1)
+    {Two of the scanner's 16 slots};
+  \node at (3.9,3.45) {slot A};
+  \node at (7.15,3.45) {slot B};
+  \node[anchor=east] at (2.1,2.65) {read fragment 1};
+  \node[anchor=east] at (2.1,1.6) {read fragment 2};
+  \node[anchor=east] at (2.1,.55) {release fragment 1};
+  \node[anchor=east] at (2.1,-.5) {read fragment 3};
+  \foreach \y in {2.65,1.6,.55,-.5} {
+    \draw[draw=black!55,fill=black!3] (2.4,\y-.33) rectangle (5.4,\y+.33);
+    \draw[draw=black!55,fill=black!3] (5.65,\y-.33) rectangle (8.65,\y+.33);
+  }
+  \foreach \y in {2.65,1.6} {
+    \draw[draw=storageBlue,fill=storageBlue!17]
+      (2.4,\y-.33) rectangle (5.4,\y+.33);
+    \node at (3.9,\y) {fragment 1};
+  }
+  \foreach \y in {1.6,.55,-.5} {
+    \draw[draw=storageGreen,fill=storageGreen!15]
+      (5.65,\y-.33) rectangle (8.65,\y+.33);
+    \node at (7.15,\y) {fragment 2};
+  }
+  \node[text=black!60] at (7.15,2.65) {unused};
+  \node[text=black!65] at (3.9,.55) {free; allocation kept};
+  \draw[draw=storageOrange,fill=storageOrange!16]
+    (2.4,-.83) rectangle (5.4,-.17);
+  \node at (3.9,-.5) {fragment 3};
+  \node[anchor=west,align=left] at (9.0,.55)
+    {No live borrowed view\\may use released bytes.};
+  \node[anchor=west,align=left] at (9.0,-.5)
+    {The next fragment\\reuses the allocation.};
+  \draw[storage arrow,black!55] (.35,-1.5)--(11.9,-1.5);
+  \node[above] at (6.1,-1.5) {end of read session: release scanner storage};
+\end{tikzpicture}
+\caption{Fragment residency has an explicit lifetime. Releasing a fragment
+marks its slot reusable. It does not immediately return the slot's allocation
+to PostgreSQL. The scanner can refill that space for a later request.}
+\label{fig:storage-resident-slots}
+\end{figure}
+
+Consumers release fragments after their borrowed views are no longer needed.
+The scanner can keep each slot's allocation for reuse. A request crossing a
+fragment boundary can copy the required pieces into bounded scratch space,
+as described in Section~\ref{sec:lazy-sequence-facade}. The scanner uses a
+free slot when one is available. If all 16 slots are occupied, it reuses the
+slot containing the fragment with the smallest number.
+
+The scanner owns its fragment buffers and borrows the read session's shard
+readers and snapshot. Cleanup releases these resources through their
+respective owners. PostgreSQL error cleanup also needs ownership registered with its
+memory-context and resource mechanisms, since a database error can bypass
+ordinary C++ destruction. Views must finish before their source owner is
+released.
+
+\subsection{Decoded column chunks have a different cache}
+\label{sec:pg-storage-caches}
+
+The optional column decompression cache stores decoded compressed chunks
+inside one PostgreSQL backend. Its key contains relation, stripe, chunk
+group, and column identifiers. It is disabled by default; the configured
+capacity when enabled defaults to 200~MiB.
+
+The cache counts reads when selecting entries to remove. It protects one
+current chunk group per relation from removal. A cache hit returns a borrowed
+buffer, which must not outlive its cache entry. Uncompressed chunks do not
+need this decompression cache. Reuse can save repeated decoding during a scan
+or rescan before scan cleanup clears the cache. It does not share a decoded
+buffer between sessions.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Stored bytes and reusable memory have different owners.}
+\label{tab:storage-cache-scopes}
+\begin{tabularx}{\linewidth}{@{}p{.23\linewidth}XX@{}}
+\toprule
+\textbf{Object} & \textbf{Retained data} & \textbf{Scope}\\
+\midrule
+PostgreSQL buffer & Relation page bytes & Shared database buffer manager;
+short pins protect each page operation\\
+Fragment slot & Copy of one packed fragment & Sequence scanner and its
+read-session owner\\
+Column cache & Decoded column value buffer & One backend, subject to its
+configured byte limit\\
+Query-result cache & Completed SQL result rows & Separate extension shared
+across backends\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Physical storage of shared query results}
+\label{sec:pg-storage-request-coordination}
+
+The separate \texttt{bioseq\_cache} extension stores completed SQL results,
+not source fragments. Its producer and waiter lifecycle, exact matching,
+and generic range-reuse contract are described in
+Section~\ref{sec:bioseq-result-cache}. The physical store groups result rows
+into columnar blocks with a schema description, NULL information, value
+offsets, and checksums. Variable-length values are flattened before storage;
+process-local pointers cannot become reusable result bytes.
+
+Completed blocks can live in shared memory or cache-owned private files.
+Before storing a block, the cache reserves capacity. For shared memory, it
+checks the configured byte ceiling and the minimum amount of system memory
+that must be left free. Before writing a file block, it also checks the file
+capacity limit and the minimum amount of disk space that must be left free.
+If neither tier can
+accept another block, the original query continues without publishing a
+reusable result. Active readers keep references that prevent their blocks
+from being removed.
+
+This file tier is derived data with its own cleanup rules. Cached results
+are cleared across a server restart. It should not be confused with the
+PostgreSQL relations holding authoritative sequence data or with persistent
+sequence indexes.
+
+\section{From stable sources to persistent indexes}
+\label{sec:pg-storage-summary}
+
+The storage layer lets two queries use the same table in different ways.
+A metadata query reads selected column chunks and can avoid sequence access
+entirely. An alignment query keeps a validated locator and asks for packed
+fragments under the same snapshot as its input row. Updating or deleting the
+row changes what newer snapshots may read while preserving the old source
+for an existing reader.
+
+The next chapter builds reusable lookup structures on these sources. It
+uses the same distinction between a location, a source version, and its
+lifetime. An index can still occupy bytes after its source is invalidated;
+being present in storage is not sufficient permission to use it.

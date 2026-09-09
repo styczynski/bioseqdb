@@ -1,0 +1,175 @@
+\section{A locator addresses packed sequence fragments}
+\label{sec:pg-storage-sequence-indirection}
+
+When sequence symbols are stored outside the parent row, the row keeps a
+56-byte sequence value: a 16-byte sequence header followed by a 40-byte locator.
+The header retains the alphabet and packed storage width. The locator
+supplies the information needed to find and validate the source:
+
+\begin{itemize}
+  \item the length bucket and shard that hold the sequence,
+  \item its first fragment row and number of fragments,
+  \item its logical length in symbols, and
+  \item its \textbf{source epoch}, an identifier for this immutable
+    stored sequence version.
+\end{itemize}
+
+The current locator format is version 3. Readers check the version, non-zero
+epoch, fragment count, and final padding before accepting it. They also check
+the full registered source identity, which includes the parent table and
+column. A matching fragment row number by itself is insufficient: another
+relation or source version could use the same number.
+
+\subsection{Symbols, packed units, fragments, and pages}
+
+The units have different meanings. A packed storage unit of $B$ bytes holds
+$L$ symbols according to the alphabet encoding from
+Section~\ref{sec:compact-sequence-range}. A fragment reserves 1,024 of these
+units. Thus a full fragment has
+\[
+  \text{payload bytes}=1024B,
+  \qquad
+  \text{symbol capacity}=1024L.
+\]
+For DNA4 and 32-bit units, $B=4$ and $L=16$: one fragment has 4,096
+payload bytes and room for 16,384 symbols. With 64-bit units, it has 8,192
+payload bytes and room for 32,768 symbols. A fragment is consequently not a
+synonym for a PostgreSQL page, even when their sizes happen to be similar.
+
+Consider a 40,000-symbol DNA4 sequence stored with 32-bit units. It needs
+three fragment rows. The last row uses only 7,232 of its symbol positions,
+but its packed payload allocation still has the full fragment size.
+The locator's length prevents a read from returning that unused capacity.
+This is separate from unused symbol positions in the final packed unit.
+If the first fragment row number is $r_0$, fragment $i$ is at $r_0+i$.
+Consecutive row numbers avoid a separate stored address for every fragment.
+The locator needs only the first row number and the fragment count.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,4.75)
+    {40,000 DNA4 symbols, packed in 32-bit units};
+  \node[anchor=east] at (1.4,3.75) {symbols};
+  \draw[draw=black!55,fill=black!4] (1.7,3.35) rectangle (11.9,4.15);
+  \foreach \x in {5.1,8.5} \draw[black!55] (\x,3.35)--(\x,4.15);
+  \draw[fill=black!20,draw=black!55] (10.0,3.35) rectangle (11.9,4.15);
+  \node[align=center] at (3.4,3.75) {fragment\\0};
+  \node[align=center] at (6.8,3.75) {fragment\\1};
+  \node[align=center] at (9.25,3.75) {fragment\\2};
+  \node at (10.95,3.75) {unused};
+  \foreach \x/\n in {1.7/0,5.1/{16\,384},8.5/{32\,768},10/{40\,000}}
+    \node[above=2pt] at (\x,4.15) {$\n$};
+  \draw[storageOrange,line width=3pt] (7.925,2.9)--(8.755,2.9);
+  \draw[storageOrange] (7.925,2.75)--(7.925,3.2);
+  \draw[storageOrange] (8.755,2.75)--(8.755,3.2);
+  \node[anchor=east,text=storageOrange] at (7.65,2.9)
+    {request $[30\,000,34\,000)$};
+  \node[storage cell,fill=storageBlue!12,minimum width=2.4cm]
+    (locator) at (1.75,1.2) {parent locator\\first row $r_0$};
+  \foreach \x/\i/\r in {4.55/0/{r_0},7.6/1/{r_0+1},10.65/2/{r_0+2}} {
+    \node[storage cell,fill=storageGreen!10,minimum width=2.5cm,
+      minimum height=1.15cm] (f\i) at (\x,1.2)
+      {row $\r$\\4,096 payload bytes};
+  }
+  \draw[storage arrow] (locator.east)--(f0.west);
+  \draw[storage arrow,storageOrange] (8.1,2.65)--(f1.north);
+  \draw[storage arrow,storageOrange] (8.65,2.65)--(f2.north);
+  \node[anchor=west,text=black!65] at (.5,.15)
+    {The request uses fragments 1 and 2; it does not ask for fragment 0.};
+\end{tikzpicture}
+\caption{A symbol interval becomes fragment-row requests. Equal-width
+fragments reserve equal packed space. Only the used prefix of the final
+fragment belongs to the sequence. Underlying column chunks and database
+pages can contain additional data, so two requested fragments do not imply
+exactly two physical reads.}
+\label{fig:sequence-fragment-flow}
+\end{figure}
+
+Let $n$ be the sequence length and $F$ the number of symbols per fragment.
+For a requested interval $[a,b)$ with $0\leq a<b\leq n$, the required
+fragment numbers run from
+\[
+  \left\lfloor a/F\right\rfloor
+  \quad\text{through}\quad
+  \left\lfloor (b-1)/F\right\rfloor.
+\]
+The subtraction by one keeps a request ending exactly at a boundary from
+reading the following fragment. This is the physical counterpart of the
+half-open slice convention introduced earlier.
+
+\subsection{Length buckets separate short and long values}
+
+A \textbf{length bucket} groups sequences by their logical number of
+symbols. A \textbf{shard} is an internal fragment relation within one bucket.
+Both belong to a particular sequence column. Length buckets are local
+storage groups, not partitions sent to different database servers.
+For known-length input, a long reference sequence does not fill the active
+shard used for short reads.
+
+The current layout has 35 buckets. The first covers lengths through 256,
+the next through 512, and the next through 1,024. The doubling ranges
+continue through $2^{41}$. The final bucket covers larger lengths.
+Relations are created when needed. A table does not eagerly create every
+possible bucket and shard.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,4.75)
+    {One sequence column, several length buckets};
+  \foreach \x/\b/\range in {1.65/0/{0--256},4.6/1/{257--512},7.55/2/{513--1,024},10.5/34/{over $2^{41}$}} {
+    \draw[rounded corners,black!55,fill=black!3]
+      (\x-1.25,.8) rectangle (\x+1.25,3.8);
+    \node[align=center] at (\x,3.3) {bucket \b\\\range};
+    \draw[fill=storageGreen!12,draw=storageGreen]
+      (\x-1.02,1.2) rectangle (\x+1.02,2.55);
+    \node at (\x,2.22) {one shard};
+  }
+  \node[storage cell,fill=storageBlue!15,minimum width=1.45cm]
+    at (1.65,1.65) {200 symbols};
+  \node[storage cell,fill=storageBlue!15,minimum width=1.45cm]
+    at (4.6,1.65) {300 symbols};
+  \node[storage cell,fill=storageBlue!15,minimum width=1.45cm]
+    at (7.55,1.65) {900 symbols};
+  \node[storage cell,fill=storageOrange!15,minimum width=1.45cm]
+    at (10.5,1.65) {300 symbols};
+  \node[anchor=west,text=storageBlue] at (.4,.22)
+    {Blue: final length known before writing};
+  \node[anchor=west,text=storageOrange] at (.4,-.4)
+    {Orange: streaming input; final length was unknown at placement};
+  \node[anchor=west,align=left] at (.4,-1.25)
+    {Middle buckets are omitted. Every bucket can acquire more shards.\\
+     All fragments of one sequence stay together in one shard.};
+\end{tikzpicture}
+\caption{Length-based placement and its streaming exception. Known-length
+inputs choose their length range. Streaming inputs currently use bucket 34,
+even when the completed sequence is short.}
+\label{fig:storage-length-buckets}
+\end{figure}
+
+Known-length insertion can choose a shard before writing:
+\begin{enumerate}
+  \item Choose the length bucket and calculate the space for its full
+    fragment rows, including padding and row headers.
+  \item Check the active shard's recorded and pending use against its
+    configured size limit.
+  \item If the sequence fits but the active shard lacks space, open a
+    new shard. If the sequence alone exceeds the limit, reject it.
+  \item Reserve consecutive fragment rows in the selected shard, write
+    them, and retain their first row number in the parent locator.
+\end{enumerate}
+
+The default configured shard size is 1~TiB. This is an allocation limit based
+on fragment-row sizes, not a promise about compressed disk size. Streaming
+input currently has a narrower check: it verifies the growing sequence's
+size, but does not first reserve space for its unknown total size in the
+active shard. It also remains in the highest bucket after the final length
+becomes known. Thus the limit is not a strict total-size guarantee for a
+shard receiving streaming inputs.
+
+Transaction-scoped advisory locks coordinate allocation within a parent
+column and bucket, and writes within a selected shard. The compact lock key
+only coordinates writers. Locator validation uses the complete registered
+identity, so a lock-key collision can cause extra waiting without making
+unrelated sequence addresses interchangeable.

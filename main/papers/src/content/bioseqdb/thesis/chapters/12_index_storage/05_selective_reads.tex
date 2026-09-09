@@ -1,0 +1,72 @@
+\section{Read counts before large position lists}
+\label{sec:index-cold-loading}
+\label{sec:index-format6}
+
+Suppose the query contains hashes 12, 35, and 78. Reading every target posting
+would waste work on keys that cannot produce an anchor for this query. It can
+also waste work on a highly repeated key that the occurrence filter will
+reject. The selective MPS format, called Format~6, separates the information
+needed to make these two decisions.
+
+The reader performs four steps:
+\begin{enumerate}
+  \item Read and check the complete directory, then find hash ranges
+    intersecting the distinct query hashes.
+  \item Read the selected controls to find each key's exact global
+    occurrence count.
+  \item Apply the occurrence threshold before requesting positions.
+  \item Read accepted posting ranges and form the lookup needed by the
+    alignment batch.
+\end{enumerate}
+``Global'' here means over the indexed target sequence. Looking at one loaded
+piece alone could underestimate repetition and wrongly admit a frequent key.
+The stored compact counts therefore have additional exact-count information
+when their small field cannot hold the value.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,6.25) {Query hashes $\{12,35,78\}$; occurrence limit 5};
+  \node[anchor=east] at (1.2,5.35) {directory};
+  \foreach \x/\range/\col in {2.6/{0--19}/indexBlue,5.2/{20--39}/indexBlue,7.8/{40--59}/black,10.4/{60--79}/indexBlue}
+    \node[index cell,fill=\col!10,draw=\col,minimum width=2.3cm] at (\x,5.35) {$\range$};
+  \node[anchor=east] at (1.2,3.95) {controls};
+  \node[index green,minimum width=2.3cm] (c12) at (2.6,3.95) {$12:\ count=2$};
+  \node[index orange,minimum width=2.3cm] (c35) at (5.2,3.95) {$35:\ count=90$};
+  \node[index cell,dashed,minimum width=2.3cm] at (7.8,3.95) {not read};
+  \node[index green,minimum width=2.3cm] (c78) at (10.4,3.95) {$78:\ count=3$};
+  \foreach \x in {2.6,5.2,10.4}
+    \draw[index arrow] (\x,5.04)--(\x,4.28);
+  \node[anchor=east] at (1.2,2.0) {postings};
+  \draw[fill=indexGreen!16,draw=indexGreen] (1.45,1.65) rectangle (3.1,2.35);
+  \node at (2.275,2.0) {$17,42$};
+  \draw[fill=black!7,draw=black!45] (3.25,1.65) rectangle (8.9,2.35);
+  \node at (6.075,2.0) {90 positions: not read};
+  \draw[fill=indexGreen!16,draw=indexGreen] (9.05,1.65) rectangle (11.55,2.35);
+  \node at (10.3,2.0) {$18,54,96$};
+  \draw[index arrow,indexGreen] (c12.south)--(2.275,2.39);
+  \draw[index arrow,indexGreen] (c78.south)--(10.3,2.39);
+  \draw[thick,indexOrange] (5.2,3.61)--(5.2,2.92);
+  \draw[thick,indexOrange] (5.02,2.92)--(5.38,2.92);
+  \node[anchor=west,text=indexOrange] at (5.52,3.03) {$90>5$: stop before positions};
+  \node[anchor=west,align=left] at (1.45,.6)
+    {The index retains all occurrences.\\This query reads only the accepted lists.};
+\end{tikzpicture}
+\caption{Two decisions save different reads. All directory entries are
+read; blue ranges select the controls. Counts reject a frequent hash before
+its long list is loaded. Positions and thresholds are illustrative.}
+\label{fig:index-selective-load}
+\label{fig:format6-streams}
+\end{figure}
+
+Adjacent accepted ranges can be read together through a bounded I/O buffer.
+The PostgreSQL representation stores payloads in heap rows, so a requested
+range may fetch a complete row containing some additional bytes. Selective
+logical ranges therefore reduce unnecessary reads without making the physical
+read granularity equal to one posting.
+
+The selective MPS reader prepares a lookup for the complete stored target
+identified by its locator. This reader does not support transformed targets
+or arbitrary SQL slices. Other index readers can clip and rebase positions
+for supported intervals. The conditions for using each reader remain
+separate from the lazy sequence interface itself.

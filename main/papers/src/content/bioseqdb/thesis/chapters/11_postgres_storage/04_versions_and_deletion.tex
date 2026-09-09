@@ -1,0 +1,152 @@
+\section{Keep old readers stable when a row changes}
+\label{sec:pg-storage-versions}
+
+A lazy reader may fetch symbols long after it first receives a parent row.
+If another transaction changes the sequence meanwhile, that later fetch
+must still return the version belonging to the reader's database snapshot.
+PostgreSQL's multiversion concurrency control (MVCC) lets snapshots select
+different committed row versions~\autocite{postgresql17_mvcc}. BioSeqDB connects
+its source epochs and deletion masks to that visibility decision.
+
+\subsection{Deletion changes visibility before it changes storage}
+
+Compressed column streams and stored sequence fragments are not edited
+in place to remove one row. A \textbf{deletion mask} records which internal
+row numbers are deleted. A mask bit is separate from a column's presence bit:
+the first removes a row from a scan, while the second describes a NULL value
+in a row that exists.
+
+For a parent row with sequence data, deletion performs two related changes:
+
+\begin{itemize}
+  \item It invalidates the source epoch for the old row version in the
+    source catalog.
+  \item It marks that internal row number as deleted in the row-mask
+    metadata.
+\end{itemize}
+
+Both catalog changes follow the transaction's visibility. They do not
+overwrite the old fragment bytes. An older registered snapshot can still
+see the earlier source catalog entry and the earlier deletion mask.
+Its later lazy read therefore reaches the same immutable source.
+
+An update uses this removal step and then appends a replacement row. The
+replacement has new sequence storage and a new source epoch. Its SQL primary
+key can remain unchanged even though its internal row number changes.
+Figure~\ref{fig:storage-update-snapshots} shows the distinction.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \draw[storage arrow,black!55] (1.75,4.55)--(12.2,4.55) node[right] {time};
+  \draw[dashed,black!55] (7.25,.1)--(7.25,4.9);
+  \node[above,align=center] at (7.25,4.9) {writer commits\\the update};
+  \node[anchor=east] at (1.5,3.7) {reader A};
+  \draw[storageBlue,line width=2pt] (2.0,3.7)--(10.8,3.7);
+  \fill[storageBlue] (2.0,3.7) circle (2pt);
+  \node[above,text=storageBlue] at (4.3,3.7) {snapshot before update};
+  \node[below,text=storageBlue] at (9.25,3.7) {later read: ACGT};
+  \node[anchor=east] at (1.5,2.55) {reader B};
+  \draw[storageOrange,line width=2pt] (8.1,2.55)--(11.7,2.55);
+  \fill[storageOrange] (8.1,2.55) circle (2pt);
+  \node[above,text=storageOrange] at (9.9,2.55) {snapshot after update};
+  \node[below,text=storageOrange] at (9.9,2.55) {read: TGCA};
+  \node[storage cell,fill=storageBlue!12,minimum width=4.65cm,
+    minimum height=1.15cm] (old) at (4.3,.85)
+    {SQL id 1; internal row 42\\epoch 7: ACGT};
+  \node[storage cell,fill=storageOrange!12,minimum width=4.65cm,
+    minimum height=1.15cm] (new) at (10.0,.85)
+    {SQL id 1; internal row 57\\epoch 8: TGCA};
+  \node[anchor=west] at (1.85,-.2)
+    {After commit, both sets of fragment bytes remain stored.};
+\end{tikzpicture}
+\caption{Two snapshots can read different versions of one logical row.
+The identifiers are illustrative. Reader A keeps its earlier snapshot
+throughout its read session. A plain command started later can use reader B's
+newer view. The old bytes are retained, not modified into the new sequence.}
+\label{fig:storage-update-snapshots}
+\end{figure}
+
+Listing~\ref{lst:storage-repeatable-read} gives a two-session example of
+this visible behavior.
+
+\begin{lstlisting}[style=bioseq-storage-sql,float=htbp,
+  label={lst:storage-repeatable-read},
+  caption={A repeatable-read transaction keeps the old sequence version.
+    Initially, row id 1 begins with ACGTACGT.}]
+-- Session A
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT bioseq.to_text(seq[0:8]) FROM reads WHERE id = 1;
+-- ACGTACGT
+
+-- Session B, while A remains open
+BEGIN;
+UPDATE reads
+SET seq = repeat('TGCA', 4096)::bioseq.seq('dna4', 32)
+WHERE id = 1;
+COMMIT;
+
+-- Session A
+SELECT bioseq.to_text(seq[0:8]) FROM reads WHERE id = 1;
+-- ACGTACGT
+COMMIT;
+SELECT bioseq.to_text(seq[0:8]) FROM reads WHERE id = 1;
+-- TGCATGCA
+\end{lstlisting}
+
+The sequence reader registers the scan snapshot. Keeping its C++ handle
+alive does not permit reads after the owning transaction ends. This is the
+same read-session rule described in
+Section~\ref{sec:sequence-author-contract}.
+
+\subsection{Locks protect different parts of the operation}
+
+PostgreSQL distinguishes relation locks, advisory locks, and short locks
+inside its buffer manager~\autocite{postgresql17_explicit_locking}. BioSeqDB
+uses them for different purposes:
+
+\begin{itemize}
+  \item \textbf{Relation locks keep storage available.} Ordinary readers
+    and deferred source readers use \texttt{ACCESS SHARE}. It conflicts
+    with operations that require \texttt{ACCESS EXCLUSIVE}, such as
+    dropping the relation. It permits ordinary concurrent updates and
+    deletes.
+  \item \textbf{Writer locks coordinate mutations.} Parent update and
+    delete operations take a transaction advisory lock for the parent table's
+    storage identity. Fragment allocation and writing use their own
+    advisory-lock keys.
+  \item \textbf{Buffer locks protect a page copy or change.} These short
+    locks are released after the page operation. They are not held for
+    the duration of an alignment.
+\end{itemize}
+
+The combination supports stable snapshot reads without locking every row
+returned by a search. It is a description of the implemented read and write
+paths, not a claim that every PostgreSQL row-locking feature has identical
+behavior in the custom table access method.
+
+\subsection{Removing bytes is a separate maintenance operation}
+
+Deleting one parent row does not immediately erase its fragment rows or its
+persistent index payload. This preserves old readers, but also means that
+logical deletion alone does not reclaim all occupied space. A reader using
+a newer snapshot must reject a source epoch invalidated in that snapshot,
+even while its bytes remain present.
+
+Registered fragment relations reject direct update, delete, and truncate
+operations. Ordinary vacuum does not compact their live rows into new
+positions, because a locator depends on consecutive internal row numbers.
+An unused physical tail can be truncated when the required lock is available.
+
+Parent-table maintenance owns the larger cleanup boundary. Dropping or
+truncating the parent removes its registered fragment relations.
+A full table rewrite reconstructs visible sequence
+values in a new storage family and then removes the old family. The current
+full-rewrite path can assemble a complete sequence while copying it, so the
+bounded fragment-read guarantee must not be extended to that maintenance
+operation.
+
+Cleanup can also find orphaned fragment relations or stale registry rows.
+This is relation-level cleanup, not a background collector that packs
+individual deleted sequences together. Derived index generations have
+separate validity and cleanup rules, discussed in the next chapter.

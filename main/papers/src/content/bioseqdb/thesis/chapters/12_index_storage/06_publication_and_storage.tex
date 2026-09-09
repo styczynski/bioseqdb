@@ -1,0 +1,164 @@
+\section{A saved index needs a source version}
+\label{sec:index-compatibility}
+
+The same table and SQL primary key can survive an update that changes a
+sequence. An index must therefore identify more than its owner by name. The
+versioned index metadata binds the payload to a source epoch and to the rules
+that produced its minimizers. Invalidation changes the old epoch's catalog
+state. A replacement source receives a new epoch.
+
+The important checks have simple reasons:
+\begin{itemize}
+  \item \textbf{Source identity.} The relation, column, source locator,
+    epoch, and generation must name the intended source version.
+  \item \textbf{Seed meaning.} The alphabet, $k,w$, hash scheme, and scheme
+    version must agree with the query. Equal parameter names alone do not
+    make different hash schemes compatible.
+  \item \textbf{Position meaning.} Width and coordinate encoding must
+    represent the target without truncation, including its strand bits.
+  \item \textbf{Array meaning.} The reader must recognize the format and
+    every addressed range. A device reader also needs a compatible array
+    interface.
+\end{itemize}
+
+Lengths, offsets, and checksums help detect damaged or misaddressed data.
+Checks happen before the reader forms a span or allocates a destination from
+an untrusted stored count. A checksum is a corruption check; it does not
+replace source-version or algorithm checks. Ordinary serialized minimizer
+formats record layout revisions and array sizes, but do not store a source
+epoch or hash-scheme identifier. Generation readers also check the stored
+source version and minimizer hash scheme.
+
+\subsection{Publish complete generations}
+\label{sec:index-generations}
+\label{sec:index-physical-persistence}
+
+A small \emph{descriptor} is the record that identifies a generation and its
+payload. Building a new generation does not require changing
+the old payload in place:
+\begin{enumerate}
+  \item Allocate a new generation and write its payload.
+  \item Check the complete layout and its source and algorithm identities.
+  \item Replace the catalog descriptor transactionally, after the payload
+    is ready.
+\end{enumerate}
+The descriptor update uses PostgreSQL's tuple visibility. An older snapshot
+can continue to see its older descriptor; a later eligible snapshot can see
+the replacement. Failure before publication must not make a partial build
+the current index.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \draw[index arrow,black!50] (1,5.6)--(12.2,5.6) node[right] {time};
+  \node[anchor=east] at (.8,4.55) {writer};
+  \node[index orange,minimum width=4.2cm] at (4.1,4.55) {write and check generation $g+1$};
+  \node[index green,minimum width=2.8cm] at (9.05,4.55) {publish; commit};
+  \draw[index arrow] (6.3,4.55)--(7.6,4.55);
+  \draw[dashed,black!60] (9.05,.85)--(9.05,4.2);
+  \draw[dashed,black!60] (9.05,4.9)--(9.05,5.2);
+  \node[anchor=east] at (.8,3.05) {reader A};
+  \draw[line width=8pt,indexBlue!25] (1.8,3.05)--(10.9,3.05);
+  \node at (5.45,3.05) {older snapshot: descriptor for $g$};
+  \node[anchor=east] at (.8,1.6) {reader B};
+  \draw[line width=8pt,indexGreen!25] (9.45,1.6)--(12,1.6);
+  \node[anchor=east] at (8.85,1.6) {new snapshot};
+  \node at (10.75,1.6) {$g+1$};
+  \node[anchor=west,align=left] at (1.6,.3)
+    {Publication changes which descriptor is visible.\\It does not overwrite the payload still used by reader A.};
+\end{tikzpicture}
+\caption{Versioned publication with two snapshots. Reader A resolves the
+old descriptor and retains its read resources. Reader B starts after commit
+and can resolve the new one. Physical reclamation is a separate operation.}
+\label{fig:index-generation-lifecycle}
+\end{figure}
+
+A snapshot that sees a parent sequence's deletion must also reject its old
+source epoch. These changes belong to the same transaction. Updating a
+sequence similarly invalidates the old source for newer snapshots and
+appends a replacement. Neither
+operation means that every fragment and index byte is immediately erased.
+An old reader may still need the former version, and the stored objects need
+their own cleanup policy. The current MPS build path does not automatically
+delete replaced payloads; reclaiming them requires separate cleanup.
+
+\subsection{Relations and immutable reader images}
+\label{sec:index-mpf5-sidecar}
+\label{sec:index-formats}
+
+The base sequence store from the previous chapter uses PostgreSQL relation
+pages. Persistent indexes also use internal relations for descriptors and
+payloads. The specialized MPS streams are split into heap rows with an indexed
+key, allowing the reader to find the required pieces. Grouped derived payload
+relations are unlogged: their bytes can be rebuilt from source sequences, but
+they must not be assumed to survive a crash reset like logged source data.
+
+The grouped MPF CPU reader uses an immutable reader image. It is a file with
+a fixed format, derived from a validated relation-backed generation. Mapping
+that image allows a prepared reader to address its arrays without rebuilding
+the whole lookup from many individual heap tuples. The catalog generation
+still decides whether the image is eligible; a pathname cannot make itself
+the current database index. The current grouped MPF GPU preparation path
+reads the complete relation payload into device arrays before search.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[index blue,minimum width=5.2cm] (catalog) at (6,5.2)
+    {PostgreSQL descriptor: source + generation};
+  \node[anchor=west,font=\bfseries] at (0,4.05) {(a) Relation-backed payload};
+  \node[anchor=west,font=\bfseries] at (7.15,4.05) {(b) MPF CPU reader image};
+  \foreach \y in {3.3,2.6,1.9} {
+    \draw[fill=indexBlue!10,draw=indexBlue] (.55,\y-.24) rectangle (5.7,\y+.24);
+    \draw (.55+1.35,\y-.24)--(.55+1.35,\y+.24);
+  }
+  \node at (1.23,3.3) {key};\node at (3.8,3.3) {payload bytes};
+  \node at (1.23,2.6) {key};\node at (3.8,2.6) {payload bytes};
+  \node at (1.23,1.9) {key};\node at (3.8,1.9) {payload bytes};
+  \draw[fill=black!3,draw=indexGreen] (7.45,1.65) rectangle (12,3.55);
+  \draw (7.45,2.95)--(12,2.95);\draw (7.45,2.35)--(12,2.35);
+  \node at (9.725,3.25) {header and array ranges};
+  \node at (9.725,2.65) {hashes, offsets, counts};
+  \node at (9.725,1.95) {positions};
+  \draw[thick] (catalog.south)--(6,3.8);
+  \fill (6,3.8) circle[radius=1.1pt];
+  \draw[index arrow] (6,3.8)-|(3.1,3.6);
+  \draw[index arrow] (6,3.8)-|(9.75,3.6);
+  \draw[index arrow,indexOrange] (5.85,2.6)--(7.3,2.6);
+  \node[anchor=north,align=center,text width=1.4cm,text=indexOrange]
+    at (6.57,2.45) {write image};
+  \node[anchor=west] at (7.45,1.25) {mapped file pages};
+  \foreach \i in {0,...,5}
+    \draw[fill=black!3,draw=black!50]
+      (7.45+.7583*\i,.45) rectangle (8.2083+.7583*\i,.95);
+  \foreach \i in {0,4}
+    \draw[fill=indexGreen!25,draw=indexGreen]
+      (7.45+.7583*\i,.45) rectangle (8.2083+.7583*\i,.95);
+  \node[anchor=west,align=left] at (.55,-.3)
+    {PostgreSQL buffers and tuple reads\\MPS selects stored stream ranges.};
+  \node[anchor=west,align=left] at (7.45,-.3)
+    {Whole image mapped\\Green pages: touched by this read};
+\end{tikzpicture}
+\caption{Database authority and read representation have separate roles.
+The mapped image supports CPU reads of eligible grouped MPF generations.
+The small page strip is conceptual: the complete file is
+mapped, while the operating system loads touched pages. Array boundaries
+need not coincide with page boundaries. MPS uses relation-backed streams.}
+\label{fig:index-control-data-plane}
+\end{figure}
+
+The image writer creates a private temporary file, finishes its content and
+header, makes it read-only, synchronizes it, and publishes it without
+overwriting an existing generation name. It checks that the final name still
+refers to the expected file. Publication of the database descriptor follows
+the required image checks. This protocol requires more work than saving a
+bare C++ memory dump, but it keeps the descriptor from promising an
+unfinished or different image.
+
+A PostgreSQL resource owner registers each mapping, so normal release and
+database error cleanup unmap it and close its file descriptor. A borrowed
+pointer given to an alignment worker does not extend this lifetime. The owning
+read session must remain alive until the worker finishes. Backup, recovery,
+and cleanup of these extension-owned files need explicit handling or
+regeneration; using \texttt{mmap} does not automatically give them heap-WAL
+or ordinary relation-backup behavior.

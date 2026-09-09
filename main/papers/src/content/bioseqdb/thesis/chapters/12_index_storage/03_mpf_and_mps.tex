@@ -1,0 +1,142 @@
+\section{The same minimizers in two orders}
+\label{sec:index-logical-layouts}
+
+BioSeqDB supports \emph{minimizers per fragment} (MPF) and
+\emph{minimizers per sequence} (MPS). MPF groups entries by source interval;
+MPS groups them by hash across one logical sequence. Both preserve positions
+needed to form anchors. Figure~\ref{fig:index-mpf-mps} shows the same six
+occurrences in the two organizations. Here a minimizer position is its
+last-symbol coordinate, using zero-based positions.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,6.05) {(a) MPF: keep each source interval together};
+  \foreach \x/\f/\range in {2/0/{[0,100)},6/1/{[100,200)},10/2/{[200,300)}} {
+    \draw[fill=black!3,draw=black!50] (\x-1.55,3.45) rectangle (\x+1.55,5.5);
+    \node at (\x,5.15) {fragment \f: $\range$};
+  }
+  \node[index blue,minimum width=2.5cm] at (2,4.45) {$a:\ 17,65$};
+  \node[index orange,minimum width=2.5cm] at (6,4.45) {$b:\ 120$};
+  \node[index blue,minimum width=2.5cm] at (6,3.82) {$a:\ 180$};
+  \node[index blue,minimum width=2.5cm] at (10,4.45) {$a:\ 230$};
+  \node[index green,minimum width=2.5cm] at (10,3.82) {$c:\ 280$};
+  \node[anchor=west,font=\bfseries] at (0,2.5) {(b) MPS: put equal hashes together across the sequence};
+  \node[index blue,minimum width=1.0cm] at (1,1.65) {$a$};
+  \foreach \x/\p in {3/17,4.6/65,6.2/180,7.8/230}
+    \node[index blue,minimum width=1.45cm] at (\x,1.65) {$\p$};
+  \node[index orange,minimum width=1.0cm] at (1,.85) {$b$};
+  \node[index orange,minimum width=1.45cm] at (3,.85) {$120$};
+  \node[index green,minimum width=1.0cm] at (1,.05) {$c$};
+  \node[index green,minimum width=1.45cm] at (3,.05) {$280$};
+  \foreach \y in {1.65,.85,.05}
+    \draw[index arrow] (1.55,\y)--(2.22,\y);
+  \node[anchor=west,align=left] at (9,1.0)
+    {Query hash $a$ needs\\one sequence-wide list.};
+\end{tikzpicture}
+\caption{Changing the grouping changes which stored units a query needs.
+Only the minimizer hashes $a,b,c$ are shown. All positions are shown in
+global sequence coordinates to make the two panels comparable; MPF storage
+can encode them relative to a fragment and rebase them when read. The
+100-symbol intervals are illustrative.}
+\label{fig:index-mpf-mps}
+\end{figure}
+
+\subsection{MPF follows source intervals}
+\label{sec:index-mpf}
+
+An MPF lookup has a hash table or ordered hash controls and a separate array
+of positions. A \emph{control} records the hash and the location and length
+of its posting list. Local construction avoids sorting the complete logical
+sequence at once. A target query can read or assemble the necessary fragment
+objects, then use their positions to construct anchors.
+
+The ordinary MPF builder uses fixed 32,768-symbol cores. A \emph{core} is the
+interval whose occurrences a construction task owns. A \emph{generation}
+is a separately identified index build, which becomes usable only after
+completion and publication. The optional grouped generation builder groups
+positions according to physical source fragment
+capacity, while collecting them through cores of at most 32,768 symbols.
+These construction units should not be confused with a PostgreSQL page or
+a compressed column chunk. Both builders need symbols around their boundaries
+so that a minimizer near an edge is chosen from a complete window.
+Section~\ref{sec:index-construction} explains this overlap.
+
+The grouped MPF layout stores hashes, list offsets, counts, and positions in
+separate arrays. Such a layout gives the reader explicit ranges to check and
+allows a prepared lookup to use arrays without recreating a C++ hash table.
+A direct-lookup option additionally builds a sequence-wide
+hash-to-positions section during publication. This option moves a global
+merge into preparation; it does not mean every MPF route avoids that merge.
+Grouped layouts and their readers are optional, rather than implied merely
+by selecting the MPF index name.
+
+\subsection{MPS follows hash ranges}
+\label{sec:index-mps}
+
+MPS combines the sequence's minimizers into hash order. Its directory maps
+hash ranges to stored data. A query can search this directory before
+loading positions. The current selective layout separates three streams:
+\begin{itemize}
+  \item the \textbf{directory} identifies the hash ranges and their controls;
+  \item \textbf{controls} give hashes, exact occurrence counts, and posting
+    locations;
+  \item \textbf{postings} give the sequence positions and strands.
+\end{itemize}
+All indexed occurrences remain stored. A query's occurrence threshold controls
+which posting lists are read; it does not remove them permanently during
+construction.
+
+MPS spends more work on sorting and merging so later queries can skip
+unrelated hash ranges. MPF keeps its base representation closer to source
+intervals. The current default active minimizer index is MPF. MPS is an
+explicit choice for workloads that justify a sequence-wide build. The
+registered persistent minimizer profile uses $k=15,w=10$; the selective MPS
+stream route additionally requires the supported DNA4 and hash-layout
+identity. Not every minimizer setting for a lookup built during the query
+has a corresponding persistent reader.
+
+\subsection{A smaller index answers symbol counts}
+\label{sec:index-symbol-counts}
+
+Not every sequence index stores seed positions. The \texttt{symbol\_counts}
+index keeps a histogram for one sequence: one 64-bit counter for each encoded
+symbol rank. For DNA4, the counters are $A,C,G,T$. The sequence
+\texttt{AACGTA} therefore gives $(3,1,1,1)$, occupying 32 counter bytes before
+row and value metadata.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=.7cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,5.6) {One sequence};
+  \foreach \x/\s in {1/A,2/A,3/C,4/G,5/T,6/A}
+    \node[index blue] at (\x,4.7) {\texttt{\s}};
+  \node[anchor=west,font=\bfseries] at (8,5.6) {Four counters};
+  \foreach \x/\s/\n in {8.5/A/3,9.7/C/1,10.9/G/1,12.1/T/1} {
+    \draw[fill=indexGreen!18,draw=indexGreen] (\x-.38,.7) rectangle (\x+.38,.7+\n);
+    \node[above] at (\x,.7+\n) {$\n$};
+    \node[below] at (\x,.7) {\texttt{\s}};
+  }
+  \draw[index arrow] (6.5,3.6)--(7.75,3.6);
+  \node[anchor=west,align=left] at (0,1.6)
+    {To count A, read A's counter.\\Seed lookup: positions are still needed.};
+\end{tikzpicture}
+\caption{A histogram preserves sequence composition but loses position and
+order. It can answer a count directly, but cannot locate an alignment seed.}
+\label{fig:index-symbol-counts}
+\end{figure}
+
+\begin{lstlisting}[style=bioseq-index-sql,
+  caption={Request a symbol count for each stored sequence.},
+  label={lst:index-symbol-counts}]
+SELECT id, bioseq.symbol_count(seq, 'A') AS a_count
+FROM reads;
+\end{lstlisting}
+For a supported scan projection on a typed sequence column and a constant
+letter, the executor can read the current row's saved histogram and supply
+the selected counter. If the eligible histogram is unavailable, it counts
+the lazy sequence's symbols. This index avoids a full sequence read for such
+projections. It is not an implemented rule for discarding alignment
+candidates, and it does not preserve enough information to answer position
+queries. The histogram is stored in an internal relation keyed by the
+parent's internal row number.

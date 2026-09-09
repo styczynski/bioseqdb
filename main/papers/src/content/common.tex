@@ -237,6 +237,10 @@
 \usepackage{fontspec}
 
 \usepackage{ulem}
+% Keep long bibliography titles breakable without changing chapter emphasis.
+\ifdefined\AtBeginBibliography
+  \AtBeginBibliography{\normalem}
+\fi
 \usepackage{texshade} 
 
 \directlua{luaotfload.add_fallback

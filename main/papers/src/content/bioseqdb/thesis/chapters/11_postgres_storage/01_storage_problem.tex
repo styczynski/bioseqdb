@@ -1,0 +1,67 @@
+\section{Store sequences together with their metadata}
+\label{sec:pg-storage-role}
+
+A sequence search usually needs more than sequence symbols. A researcher may
+search samples collected on a particular date, return their identifiers, and
+join the hits to gene annotations. The database must keep these relationships
+while allowing a search to read a small part of a long sequence.
+
+Existing systems show why these relationships matter. BioWorkbench imports
+variant and gene annotations into SQLite and joins them with
+SQL~\autocite{Mondelli_2018}. The IBM Functional Genomics Platform uses a DB2
+column store and mapping tables to connect genomes, genes, proteins, and
+annotations~\autocite{seabolt2020ibmfunctionalgenomicsplatform}. Database-backed
+sequence search has also been studied with DynamoDB records that pair each
+sequence with an organism name~\autocite{flach2020nosql}. These examples motivate
+keeping biological data queryable. Here the engineering question is how to
+store the sequence itself so that database execution can request its symbols
+as needed.
+
+Consider a table \texttt{reads(id, sample\_id, seq)}. The following query
+returns identifiers and does not need sequence symbols:
+
+\begin{lstlisting}[style=bioseq-storage-sql,
+  caption={A metadata query should not read sequence payloads.}]
+SELECT id
+FROM reads
+WHERE sample_id BETWEEN 500 AND 600;
+\end{lstlisting}
+
+An alignment query on the same rows does need symbols, but it may request
+several short intervals rather than the complete sequence. The sequence
+interfaces in Section~\ref{sec:lazy-sequence-facade} already express those
+requests. Storage must support them without first copying a whole chromosome
+into one value.
+
+PostgreSQL already stores large values out of line through TOAST. For some
+uncompressed external values, a substring can fetch only the relevant
+pieces~\autocite{postgresql17_toast}. BioSeqDB additionally needs packed
+biological alphabets and a fragment reader usable by the alignment
+algorithms. A sequence's packed payload can also exceed the ordinary
+one-gigabyte limit for a PostgreSQL variable-length value. BioSeqDB therefore
+separates three objects:
+
+\begin{itemize}
+  \item \textbf{The parent row} holds ordinary metadata and a small sequence
+    locator. A locator identifies where the packed sequence is stored.
+  \item \textbf{Fragment rows} hold fixed-size pieces of packed sequence
+    data in internal PostgreSQL relations. A reader fetches fragment symbols
+    only when they are needed.
+  \item \textbf{Persistent indexes} keep lookup information derived from
+    those symbols. Their identity and storage are described in the next
+    chapter.
+\end{itemize}
+
+\warn{Adapted from Citus Columnar}{
+BioSeqDB's columnar layer was adapted from Citus Columnar. The code has since
+been substantially changed for BioSeqDB's sequence storage, reads, and
+updates~\autocite{citus_columnar_storage,citus_columnar_compression_2021}.
+The original column-store ideas include stripes, column chunks, compression,
+and min/max pruning. Sequence locators, fragment readers, and sequence indexes
+are BioSeqDB-specific additions.}
+
+The table access method connects this layout to PostgreSQL's table
+operations~\autocite{postgresql17_tableam}. Citus illustrates the broader value of
+building database features through PostgreSQL's extension interfaces,
+including hooks and transaction callbacks~\autocite{citus_distributed_2021}.
+The following sections explain the particular choices made in BioSeqDB.
