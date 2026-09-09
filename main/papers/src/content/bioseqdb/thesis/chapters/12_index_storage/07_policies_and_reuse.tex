@@ -26,6 +26,8 @@ For example, ordinary MPF maintenance can index one new reference without
 rebuilding the table's older references. The following uses the storage
 chapter's DNA4 column with 32-bit packed units. It assumes ordinary defaults:
 insertion maintenance enabled and grouped generation construction disabled.
+
+\noindent\begin{minipage}{\linewidth}
 \begin{lstlisting}[style=bioseq-index-sql,
   caption={Maintain MPF when one new sequence row is inserted.},
   label={lst:index-policy}]
@@ -35,6 +37,7 @@ SELECT bioseq.set_index_policy(
 INSERT INTO reads (id, sample_id, seq)
 VALUES (101, 7, repeat('ACGT', 2000)::bioseq.seq('dna4', 32));
 \end{lstlisting}
+\end{minipage}
 
 An update appends a replacement row, so the same insertion policy applies to
 its new sequence. Changing a policy does not
@@ -91,6 +94,8 @@ selecting the scalar CPU minimizer implementation for DNA4 sequences. The build 
 registered $k=15,w=10$ profile. \texttt{SET LOCAL} restores the prior session
 settings at transaction end; later searches must still select a compatible
 minimizer implementation and parameters.
+
+\noindent\begin{minipage}{\linewidth}
 \begin{lstlisting}[style=bioseq-index-sql,
   caption={Build a sequence-wide minimizer index after loading the source.},
   label={lst:index-build-mps}]
@@ -104,6 +109,7 @@ SELECT bioseq.update_index('reference_sequences'::regclass,
                           'minimizers_per_sequence');
 COMMIT;
 \end{lstlisting}
+\end{minipage}
 
 If a query requires compatible persistence, an absent or incompatible object
 is an error. Silently rebuilding it would violate that operational request.
