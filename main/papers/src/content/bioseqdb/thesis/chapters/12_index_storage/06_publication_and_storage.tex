@@ -88,6 +88,11 @@ delete replaced payloads; reclaiming them requires separate cleanup.
 
 The optional grouped MPF path keeps two stored copies of its index data.
 It first writes index rows in PostgreSQL, then creates a file for CPU reads.
+The motivation is repeated searches over a large target. Saving minimizers
+avoids computing them again, but a reader may still need to sort positions
+and rebuild a lookup structure. Grouped arrays make the saved layout usable
+directly. The additional file gives CPU workers stable array ranges without
+extracting heap tuples or copying the full payload into each reader.
 To understand why, distinguish three objects:
 \begin{itemize}
   \item \textbf{The sequence.} The original packed symbols remain in the
@@ -97,7 +102,7 @@ To understand why, distinguish three objects:
     metadata. This is already an index, not another copy of the sequence.
   \item \textbf{The reader file.} This file contains the index payload bytes
     in consecutive ranges, their directory and metadata, and an additional
-    direct hash lookup. We call this fixed layout a \emph{reader image}.
+    hash-to-positions section. We call this fixed layout a \emph{reader image}.
     Once published, the image is read-only.
 \end{itemize}
 
@@ -116,7 +121,7 @@ The current relation-backed builder takes these steps:
     generation's payload, directory and metadata in the index relation.
   \item \textbf{Write the reader file.} Reread and check that generation's
     rows in index order. Append their payload bytes to a private construction
-    file. Add the directory, metadata and direct hash lookup, then finish
+    file. Add the directory, metadata and hash-to-positions section, then finish
     and check the file header.
   \item \textbf{Finish the file before publishing the index.} Make the file
     read-only, synchronize it, give it a new final name without replacing an
@@ -125,62 +130,123 @@ The current relation-backed builder takes these steps:
     transactions can select the new generation after commit.
 \end{enumerate}
 The index relation remains after this export. The extra copy costs disk space
-and a complete payload reread during construction. The direct hash lookup
+and a complete payload reread during construction. The hash-to-positions section
 also adds construction work and bytes. In the current writer this section is
 always built; the lookup setting chooses how a later query reads the image.
 Figure~\ref{fig:index-control-data-plane} shows generation $g$ and its
 completed file $F_g$.
 
+\paragraph{Direct lookup uses a hash as a bit address.}
+\label{sec:index-direct-lookup}
+The extra section combines equal hashes from all fragments of one target
+sequence. It has three kinds of data:
+\begin{itemize}
+  \item \textbf{Membership bits.} Bit $B[h]$ is one when hash $h$ has a
+    position list stored in this section. The hash is the bit's address, so it need not
+    be stored again as a key beside that list.
+  \item \textbf{List records.} Records follow increasing hash order. The
+    number of set bits before $h$, called its \emph{rank}, gives its record
+    number. Saved counts at each 256-hash boundary make this calculation
+    local: add the saved count to the number of set bits before $h$ in that group.
+    A record gives the list's start, total count, and number of strand-zero
+    positions. Strand-zero positions precede strand-one positions.
+  \item \textbf{Positions.} The list start is an entry number in a shared
+    position array, not a file-byte offset. Positions include a strand bit.
+    When a list has one 32-bit position, the record stores it directly.
+\end{itemize}
+
+In Figure~\ref{fig:index-control-data-plane}, hash 5 has one earlier set
+bit. Its rank is therefore 1. Record 1 gives start 2 and count 2, so the
+reader uses posting entries $[2,4)$, which contain positions 40 and 230.
+This is direct addressing followed by a short bit count, with no hash-table
+collision search or reconstruction of a target-wide C++ map.
+
+An unset bit means no list is retained in this extra section. It can mean
+either that the hash is absent or that its sequence-wide count exceeds the
+saved cap, currently 65,534. The original fragment payload remains stored.
+A query can impose a lower positive occurrence limit, but cannot exceed the
+saved cap on this direct route. The $k=15$ profile used below has $2^{30}$
+possible hash values. Its membership bitmap occupies 128~MiB and its saved counts occupy 16~MiB,
+before list records and positions. This fixed space cost favors large
+targets. It is a file-size cost, not a requirement to keep every mapped page
+in RAM at once.
+
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
-  \node[anchor=west,font=\bfseries] at (0,7.0)
+  \node[anchor=west,font=\bfseries] at (0,10.8)
     {(a) During construction of generation $g$};
-  \node[anchor=west] at (.3,6.35) {Index relation: three payload chunks};
-  \node[anchor=west] at (7.0,6.35) {Completed reader file $F_g$};
-  \draw[rounded corners,draw=black!55] (6.9,2.85) rectangle (12.2,6.05);
-  \foreach \y/\n/\col in {5.65/0/indexBlue,4.85/1/indexOrange,4.05/2/indexGreen} {
+  \node[anchor=west] at (.3,10.2) {Index relation};
+  \node[anchor=west] at (7.0,10.2) {Completed reader file $F_g$};
+  \draw[rounded corners,draw=black!55] (6.9,7.05) rectangle (12.2,9.9);
+  \foreach \y/\n/\col in {9.4/0/indexBlue,8.65/1/indexOrange,7.9/2/indexGreen} {
     \draw[fill=black!5,draw=black!55] (.3,\y-.3) rectangle (1.9,\y+.3);
     \node at (1.1,\y) {row fields};
     \draw[fill=\col!15,draw=\col] (1.9,\y-.3) rectangle (4.65,\y+.3);
     \node at (3.275,\y) {chunk \n};
   }
-  \draw[fill=black!5,draw=black!55] (7.0,5.35) rectangle (12.1,5.95);
-  \node at (9.55,5.65) {header: identity and byte ranges};
+  \draw[fill=black!5,draw=black!55] (7.0,9.2) rectangle (12.1,9.8);
+  \node at (9.55,9.5) {header: identity and byte ranges};
   \foreach \x/\n/\col in {7.0/0/indexBlue,8.7/1/indexOrange,10.4/2/indexGreen} {
-    \draw[fill=\col!15,draw=\col] (\x,4.55) rectangle (\x+1.7,5.15);
-    \node at (\x+.85,4.85) {chunk \n};
+    \draw[fill=\col!15,draw=\col] (\x,8.5) rectangle (\x+1.7,9.1);
+    \node at (\x+.85,8.8) {chunk \n};
   }
-  \draw[fill=black!5,draw=black!55] (7.0,3.75) rectangle (12.1,4.35);
-  \node at (9.55,4.05) {directory and generation metadata};
-  \draw[fill=black!5,draw=black!55] (7.0,2.95) rectangle (12.1,3.55);
-  \node at (9.55,3.25) {direct hash lookup};
-  \draw[index arrow] (4.85,4.85)--(6.8,4.85);
-  \node[align=center] at (5.82,4.05) {copy payload\\bytes only};
-  \node[anchor=west,font=\bfseries] at (0,2.3)
-    {(b) A later query: open the existing file};
-  \node[index blue,minimum width=4.5cm,minimum height=.85cm] (desc)
-    at (2.55,1.35) {Visible database descriptor\\source version and $g$};
-  \node[anchor=west] at (7.0,1.85) {File pages mapped for this query};
-  \foreach \i in {0,...,5}
-    \draw[fill=black!4,draw=black!55]
-      (7.0+.85*\i,1.05) rectangle (7.85+.85*\i,1.65);
-  \foreach \i in {0,4}
-    \draw[fill=indexGreen!20,draw=indexGreen]
-      (7.0+.85*\i,1.05) rectangle (7.85+.85*\i,1.65);
-  \draw[index arrow] (desc.east)--(6.8,1.35);
-  \node[align=center] at (5.85,.62) {select and\\check $F_g$};
-  \draw[index arrow] (12.2,4.45)--(12.65,4.45)--(12.65,1.35)--(12.3,1.35);
-  \node[anchor=west,align=left] at (.3,-.1)
-    {The query does not repeat the export.};
-  \node[anchor=west,align=left] at (7.0,-.1)
-    {Green: pages used by this lookup.\\The full file need not be resident.};
+  \draw[fill=black!5,draw=black!55] (7.0,7.8) rectangle (12.1,8.4);
+  \node at (9.55,8.1) {directory and generation metadata};
+  \draw[fill=indexGreen!12,draw=indexGreen] (7.0,7.1) rectangle (12.1,7.7);
+  \node at (9.55,7.4) {hash-to-positions section};
+  \draw[index arrow] (4.85,8.8)--(6.8,8.8);
+  \node[align=center] at (5.82,8.05) {copy payload\\bytes only};
+  \node[anchor=west,font=\bfseries] at (0,6.55)
+    {(b) Inside the extra section: look up hash 5};
+  \draw[rounded corners,draw=indexGreen] (-.15,.05) rectangle (12.2,6.15);
+  \draw[index arrow,indexGreen] (12.2,7.4)--(12.65,7.4)--(12.65,5.0)--(12.3,5.0);
+
+  \node[anchor=east] at (2.05,5.72) {hash $h$};
+  \node[anchor=east] at (2.05,5.13) {bit $B[h]$};
+  \foreach \i/\b in {0/0,1/0,2/1,3/0,4/0,5/1,6/0,7/1} {
+    \node at (2.65+.87*\i,5.72) {\i};
+    \node[index cell,minimum width=.87cm] at (2.65+.87*\i,5.13) {\b};
+  }
+  \node[index blue,minimum width=.87cm] at (4.39,5.13) {1};
+  \node[index green,minimum width=.87cm] (selectedbit) at (7.0,5.13) {1};
+  \node at (9.7,5.13) {$\cdots$};
+  \draw[decorate,decoration={brace,mirror,amplitude=4pt}]
+    (2.215,4.7)--(6.565,4.7);
+  \node[align=center] at (4.39,4.2) {one earlier set bit\\rank $=0+1=1$};
+
+  \node[anchor=east] at (2.65,3.42) {record number};
+  \node[anchor=east] at (2.65,2.76) {(start, count)};
+  \foreach \x/\i/\s in {4.0/0/0,6.65/1/2,9.3/2/4} {
+    \node at (\x,3.42) {\i};
+    \node[index cell,minimum width=2.15cm,minimum height=.65cm]
+      at (\x,2.76) {$(\s,2)$};
+  }
+  \node[index green,minimum width=2.15cm,minimum height=.65cm]
+    (selectedrecord) at (6.65,2.76) {$(2,2)$};
+  \draw[index arrow,indexGreen] (selectedbit.south)--(7.0,3.11);
+
+  \node[anchor=east] at (2.05,1.52) {posting entry};
+  \node[anchor=east] at (2.05,.85) {position};
+  \foreach \i/\p in {0/17,1/180,2/40,3/230,4/65,5/280} {
+    \node at (2.8+1.35*\i,1.52) {\i};
+    \node[index cell,minimum width=1.35cm,minimum height=.65cm]
+      at (2.8+1.35*\i,.85) {\p};
+  }
+  \node[index green,minimum width=1.35cm,minimum height=.65cm]
+    at (5.5,.85) {40};
+  \node[index green,minimum width=1.35cm,minimum height=.65cm]
+    at (6.85,.85) {230};
+  \draw[index arrow,indexGreen] (selectedrecord.south)--(6.65,2.1)--(6.175,2.1)--(6.175,1.22);
 \end{tikzpicture}
-\caption{The same index payload has two storage layouts. Colors trace
-three illustrative chunks from heap rows into consecutive file ranges.
-Row fields are left behind. A later query checks the visible generation and
-maps its completed image. The lower strip shows file pages, not index-array
-boundaries; the operating system may also read pages ahead of a request.}
+\caption{Building the reader image and using its direct lookup. The upper
+panel copies chunk payloads and adds a lookup across the target's fragments.
+The lower panel uses illustrative hashes 2, 5 and 7, each with two positions.
+Only the bitmap's first eight bits are shown. Its first 256-hash group has
+saved count zero. Hash 5 selects bit 5, whose rank selects record 1; that
+record selects posting entries 2 and 3.
+Green marks this lookup. Positions are decoded sequence coordinates;
+all strands are zero, and the record's strand count is omitted here.}
 \label{fig:index-control-data-plane}
 \end{figure}
 
@@ -230,25 +296,117 @@ partly opened resources. The build runs within the caller's transaction.
 \end{algorithmic}
 \end{algorithm}
 
-\paragraph{This is an optional SQL path.}
-The public function \texttt{bioseq.update\_index} reaches the file writer
-when grouped MPF construction is enabled. It is not limited to a test fixture.
-The mapped CPU reader runs in \texttt{BioseqBatchJoin}.
-Set the per-call \texttt{index\_read\_requirement} option to 2,
-meaning \emph{require a compatible stored index}. Ordinary column scans
-do not support that requirement, and the default permissive search does not
-select this mapped route. Enabling grouped construction alone does not
-select it for later queries.
+\paragraph{Which SQL queries use the image?}
+The public function \texttt{bioseq.update\_index} builds the file when grouped
+MPF construction is enabled. Later SQL can reach the mapped CPU reader
+through an eligible \texttt{BioseqBatchJoin}. This custom execution node
+handles an ordinary inner join whose \texttt{mmsearch} call compares a
+stored target column with a query column. The first argument names the
+target; the second supplies the queries. The executor:
+\begin{itemize}
+  \item retains the query rows;
+  \item takes one target row and prepares its index reader once;
+  \item reuses that reader across groups of queries, then moves to the next target.
+\end{itemize}
+A query input with one row is allowed. Two aliases of the same table can
+also supply the two inputs. Thus ``batch'' describes how the executor reuses
+target preparation, not a separate SQL interface or a requirement to search
+two different tables.
+
+The mapped branch currently requires a complete, unchanged stored target,
+a compatible CPU profile and generation, and
+\texttt{index\_read\_requirement = 2}: \emph{require a compatible stored index}.
+An ordinary single-table search such as
+\texttt{WHERE mmsearch(r.seq, 'ACGT...')} does not use this mapped reader.
+Requiring an index does not turn that scan into the two-input join; an
+unsupported required read fails. Even the \texttt{BioseqBatchJoin} name in
+\texttt{EXPLAIN} is insufficient, because a separate variant for transformed
+operands has the same name and rejects this requirement. The example below
+uses plain columns and returns identifiers, leaving the stored target in
+the form needed by the mapped reader.
+
+\paragraph{Construction settings and read settings have different jobs.}
+\label{sec:index-example-settings}
+A GUC is a PostgreSQL configuration setting changed with \texttt{SET}.
+Three settings control the construction choices used here:
+\begin{itemize}
+  \item \texttt{bioseq.aligner.grouped\_soa\_generation.enabled}\newline
+    Default: \texttt{off}. Makes \texttt{update\_index} build a grouped generation.
+    For MPF this writes both relation rows and the reader image. For MPS it
+    writes the separate relation streams. Turning the setting on does not
+    itself build an index, convert an older layout, or select a query reader.
+    Turning it off later does not remove a completed generation.
+  \item \texttt{bioseq.index.async\_persistence.enabled}\newline
+    Default: \texttt{on}. Permits eligible background persistence work. It does not
+    make an explicit \texttt{update\_index} call asynchronous.
+  \item \texttt{bioseq.index.recompute\_async\_persistence.enabled}\newline
+    Default: \texttt{off}. Additionally permits a query that recomputes a lookup to
+    request persistence for later queries. It needs the preceding setting
+    too. Turning it off does not stop a query from building a transient
+    lookup to answer the current search.
+\end{itemize}
+
+The current deferred implementation rebuilds eligible ordinary MPS indexes.
+It stages source identifiers and parameters, then attempts to submit work
+when the transaction commits. Abort discards the request. A background
+worker reopens the source and checks its policy before rebuilding it.
+Queue availability and these checks can prevent persistence, so enabling
+both settings does not promise that every recomputed lookup will be saved.
+This mechanism does not build the grouped MPF image. Explicit grouped
+construction rejects either asynchronous-persistence setting being on;
+both must therefore be off in the example.
 
 Listing~\ref{lst:index-mapped-user-path} shows the public calls. It assumes
 committed DNA4 sequences with 32-bit packed units in a new permanent
 \texttt{refs(id,seq)} table using the Bioseq table access method, and query
 sequences with the same alphabet and packing in \texttt{queries(id,seq)}.
 Load \texttt{refs} with
-\texttt{bioseq.index.insert\_maintenance.enabled = off}, so it has no older
-ordinary MPF relation. The example
-uses the registered $k=15,w=10$ profile. The same minimizer algorithm is kept
-for construction and search.
+\texttt{bioseq.index.insert\_maintenance.enabled = off}. This setting
+disables insertion-time index maintenance, including symbol counts; it
+avoids creating an ordinary MPF relation during this load. It does not
+remove one that already exists. Grouped construction is not an automatic
+conversion of that older layout. Other settings not shown retain their
+ordinary defaults.
+
+The remaining settings select compatible algorithms and execution:
+\begin{itemize}
+  \raggedright
+  \item \texttt{bioseq.aligner.minimizer.algorithm = 'two\_stack\_nthash'}
+    \newline Selects the SIMD implementation with the minimap2 integer hash
+    listed in Table~\ref{tab:current-cpu-minimizers}. Construction and search
+    must agree on that implementation.
+    The accompanying \texttt{kmer\_size} and \texttt{window\_size} settings
+    set the query's $k$ and $w$.
+    The current grouped builder uses the fixed $k=15,w=10$ profile, so the
+    query must match it.
+  \item \texttt{bioseq.aligner.chaining.algorithm = 'simd\_minimap2'}
+    \newline Selects CPU chaining. Setting
+    \texttt{bioseq.aligner.base\_alignment.algorithm} to
+    \texttt{'block\_aligner'} selects base alignment. These choices govern later alignment stages;
+    they do not change the stored minimizer arrays.
+  \item \texttt{bioseq.aligner.vulkan.enabled = off}\newline
+    Marks Vulkan as
+    unavailable to the aligner. Together with the CPU algorithms and the other default
+    settings, this gives a CPU example. It does not rewrite any GPU
+    algorithm choices previously made in the session.
+  \item \texttt{max\_parallel\_workers\_per\_gather = 0}\newline
+    Prevents PostgreSQL
+    parallel query workers \autocite{postgresql17_parallel_resources}.
+    The current batch path needs an eligible serial query input. BioSeqDB
+    can still use its own CPU workers and SIMD instructions.
+  \item \texttt{bioseq.index.sequence\_read.enabled = on}\newline
+    Allows stored
+    reads for permissive searches. The per-call requirement 2 is stronger:
+    it forces stored reading and reports a missing compatible index as an
+    error. It is an \texttt{aligner\_options} argument, not a GUC.
+  \item \texttt{bioseq.aligner.fragment\_minimizer.lookup\_route}\newline
+    Selects
+    the grouped MPF lookup method. The default \texttt{control\_block\_scan}
+    reads fragment controls. The example selects
+    \texttt{direct\_compact\_hash\_lookup}, which uses the bitmap and records
+    in Figure~\ref{fig:index-control-data-plane}. Both methods map the same
+    image; changing between them does not require rebuilding it.
+\end{itemize}
 
 \noindent\begin{minipage}{\linewidth}
 \begin{lstlisting}[style=bioseq-index-sql,
@@ -271,6 +429,8 @@ SELECT bioseq.update_index('refs'::regclass,
 COMMIT;
 
 SET bioseq.index.sequence_read.enabled = on;
+SET bioseq.aligner.fragment_minimizer.lookup_route =
+  'direct_compact_hash_lookup';
 SELECT bioseq.set_active_read_index('refs'::regclass,
                                    'minimizers_per_fragment');
 SELECT r.id, q.id
@@ -280,10 +440,21 @@ FROM refs AS r JOIN queries AS q
 \end{lstlisting}
 \end{minipage}
 
-The default grouped MPF control reader and the optional direct hash reader
-both use the image. MPS instead reads its relation-backed streams. The
-grouped MPF GPU path reads the complete relation payload into device arrays.
-These are separate read paths.
+Plain \texttt{SET} survives a successful \texttt{COMMIT}, so the later query
+keeps the chosen algorithms and parameters. \texttt{SET LOCAL}, used in the
+MPS example below, instead restores the previous session value when the
+transaction ends \autocite{postgresql17_set}. The function
+\texttt{set\_active\_read\_index} records which index the column's searches
+should use; it is a catalog change, not a GUC or an index build.
+
+Grouped MPS reads its relation-backed streams. The grouped MPF GPU path
+reads the complete relation payload into device arrays. Neither uses this
+CPU reader file.
+
+The mapped path is implemented and callable through public SQL, but remains
+an optional, experimental path: construction is disabled by default,
+supported query shapes and profiles are restricted, and automatic removal
+of retired images and complete recovery support remain unfinished.
 
 \paragraph{RAM is an alternative, not the opposite of a mapped file.}
 An index kept in RAM can be fast while it remains available. BioSeqDB's
