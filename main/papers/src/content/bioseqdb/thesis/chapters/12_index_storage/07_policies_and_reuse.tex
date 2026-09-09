@@ -67,20 +67,30 @@ The important choices can be stated without listing every format setting:
 
 For a bulk load, an explicit policy keeps a selected index's construction
 outside the insertion transaction:
+
+\noindent\begin{minipage}{\linewidth}
 \begin{lstlisting}[style=bioseq-index-sql,
   caption={Choose manual MPS maintenance before loading source rows.}]
 SELECT bioseq.set_index_policy('reference_sequences'::regclass,
   'minimizers_per_sequence', 'UPDATE_MANUALLY');
 \end{lstlisting}
+\end{minipage}
+
 This call changes MPS only. MPF and symbol-count maintenance can still run
 under their own policies. Manual maintenance does not remove the work needed
 for a later rebuild; it controls when that work runs.
 
 After loading and committing \texttt{reference\_sequences}, the next example
-requests an MPS generation build. The example uses DNA4 sequences and scalar
-minimizer construction. The transaction-local settings select synchronous
-generation construction without changing later transactions' defaults. The
-build uses the registered $k=15,w=10$ profile.
+requests an MPS generation build. The construction settings have the roles
+explained in Section~\ref{sec:index-example-settings}: grouped arrays are
+enabled and both background-persistence permissions are disabled.
+This example starts without an older ordinary MPS index; changing its
+maintenance policy would not remove one.
+Here \texttt{bioseq.aligner.minimizer.algorithm} is set to \texttt{'scalar'},
+selecting the scalar CPU minimizer implementation for DNA4 sequences. The build uses the
+registered $k=15,w=10$ profile. \texttt{SET LOCAL} restores the prior session
+settings at transaction end; later searches must still select a compatible
+minimizer implementation and parameters.
 \begin{lstlisting}[style=bioseq-index-sql,
   caption={Build a sequence-wide minimizer index after loading the source.},
   label={lst:index-build-mps}]
@@ -102,12 +112,10 @@ a transient lookup bypasses stored-index reuse even when a stored index
 exists. The result's seed semantics still depend on the selected algorithm
 and its parameters, not on whether the same lookup was loaded or rebuilt.
 
-Deferred persistence must also respect PostgreSQL ownership. A background
-job receives stable source identifiers and parameters. It reopens the source
-under its own database context and rechecks eligibility; it does not borrow
+The deferred ordinary MPS work described in
+Section~\ref{sec:index-example-settings} also respects PostgreSQL ownership.
+A background worker uses its own transaction and memory; it does not borrow
 the submitting backend's snapshot, relation pointer, or memory context.
-Such deferred work is separate from the synchronous generation publication
-described earlier.
 
 \subsection{Keep useful bytes while their owners remain valid}
 \label{sec:index-residency}
