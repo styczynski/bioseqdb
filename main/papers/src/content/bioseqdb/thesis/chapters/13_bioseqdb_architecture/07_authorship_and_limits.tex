@@ -1,0 +1,66 @@
+\section{Authorship, development and AI assistance}
+\label{sec:arch-authorship}
+
+I developed BioSeqDB over approximately three years. Early work included
+Python aligner prototypes written approximately two years ago. I
+designed the system and implemented the BioSeqDB-specific algorithms,
+representations and optimizations presented as my contributions in the
+preceding chapters. Moving from those prototypes to a PostgreSQL extension
+also required substantial integration, testing and performance work.
+
+These contributions build on published algorithms and existing software.
+The minimap2 mapping structure, prior SIMD minimizer work and adaptive block
+alignment are important foundations.\autocite{minimap2_paper,
+  groot_koerkamp_simd_minimizers_2025,block_aligner_paper}
+The implementation includes ports and adaptations, as well as new work.
+The basic columnar store comes from Citus and Hydra and retains code written
+by their authors and maintainers, as described in
+Section~\ref{sec:pg-storage-role}.\autocite{citus_columnar_storage,hydra_columnar_source}
+PostgreSQL, SeqAn, Highway and oneTBB also provide substantial components.
+The original contribution lies in the specific algorithms, changes and
+integration identified in this thesis. It does not imply authorship of
+the underlying published algorithms or of all source code in the repository.
+
+\subsection{Where AI tools were used}
+\label{sec:arch-ai-assistance}
+
+I used AI coding tools under requirements and designs that I supplied.
+Their work included:
+\begin{itemize}
+  \item \textbf{Source reorganization.} Long files were divided into modules,
+    functions were renamed, and code was adjusted for Clang-based checks.
+    Many present file and function names were produced during this work.
+  \item \textbf{Development tools.} AI helped implement benchmarking utilities
+    and code generators according to my designs, and assisted with
+    implementation and optimization tasks.
+  \item \textbf{Technical writing.} AI generated working documentation.
+\end{itemize}
+
+The large reorganizations were intended to preserve the algorithms while
+changing names and file boundaries. They nevertheless introduced bugs.
+In my assessment, diagnosing and correcting regressions from AI-assisted
+work consumed approximately two months. Numerical code was particularly
+sensitive: a seemingly equivalent change to a mask, integer width or
+coordinate calculation could change results. A refactoring that compiles
+is therefore insufficient to establish numerical correctness.
+
+AI assistance accelerated parts of development despite these costs. The
+research questions, project-specific designs and decisions about which
+ideas to pursue were mine. I directed and corrected the assisted work and
+retain responsibility for the final implementation and the claims made here.
+
+Automatically generated documentation is not an authoritative specification.
+Some descriptions were incorrect, and others became stale after later
+changes. For this chapter, generated descriptions were checked against the
+implementation, the cited technical sources and the stated tests. Generated
+names and reports alone do not establish how a feature works.
+
+\section{Validation limits of the complete system}
+\label{sec:arch-validation-limits}
+
+Validation of query-result caching, described in
+Section~\ref{sec:bioseq-result-cache}, remains incomplete. It has targeted tests,
+including comparisons with caching disabled, but these do not cover all
+combinations of plans, settings and transaction histories. Incorrect reuse
+and therefore incorrect query results remain a risk. The cache should be
+treated as experimental.
