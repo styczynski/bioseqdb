@@ -261,8 +261,7 @@
     planning, physical storage, persistent indexes, ingestion, external
     providers, and generated SQL boundary code.
 
-    % Keep all generated chapter briefs on this final Introduction text page.
-    % the class still opens Chapter 1 on the following recto.
+    % Keep the chapter roadmap together before the development timeline.
     \begin{itemize}
         \setlength{\itemsep}{0pt}
         \setlength{\parsep}{0pt}
@@ -270,6 +269,125 @@
             \chapterbrief{r:\data{chapters.\chapteri.ref}}{\data{chapters.\chapteri.description}}
         }
     \end{itemize}
+
+    \clearpage
+    \section*{Timeline}
+    \phantomsection
+    \addcontentsline{toc}{section}{Timeline}
+    \label{sec:introduction-timeline}
+
+    This thesis required several years of exploration and experiments.
+    I began without a formal background in computational biology, so
+    learning the field was part of the research. I proposed the database
+    idea and prepared the initial design for our internal team. I directed
+    the 2022 prototype, whose implementation was written by colleagues.\footnote{\fontsize{7.5}{9}\selectfont The current BioSeqDB is a separate project, designed and written by me. It contains no code or intellectual property from the early BWA-MEM integration experiments.}
+    The MMseqs2 discussions did not lead to a collaboration. The Python
+    prototypes that led to the implementation studied here began in
+    December 2023.
+
+    \begin{center}
+    \begin{tikzpicture}[x=1cm,y=1cm,font=\small,
+      timeline date/.style={anchor=east,font=\small\bfseries,
+        inner sep=0pt},
+      timeline event/.style={anchor=west,align=left,text width=11.8cm,
+        inner sep=0pt},
+      timeline dot/.style={circle,inner sep=0pt,minimum size=5pt}]
+      \definecolor{timelineConcept}{HTML}{366B98}
+      \definecolor{timelinePython}{HTML}{438452}
+      \definecolor{timelineBioseq}{HTML}{B36A1F}
+
+      % A separate striped bar marks the career period beside the milestones.
+      \fill[timelineConcept!8] (0,-0.4) rectangle (0.18,-4.8);
+      \begin{scope}
+        \clip (0,-0.4) rectangle (0.18,-4.8);
+        \foreach \timelineStripe in {-5,-4.82,...,-0.2} {
+          \draw[timelineConcept!70,line width=0.35pt]
+            (-0.04,\timelineStripe) -- (0.22,{\timelineStripe+0.26});
+        }
+      \end{scope}
+      \draw[timelineConcept!80,line width=0.4pt]
+        (0,-0.4) rectangle (0.18,-4.8);
+      \node[anchor=west,font=\footnotesize,inner sep=0pt]
+        at (0.35,-0.4) {Apr 2020};
+      \node[anchor=west,font=\footnotesize,inner sep=0pt]
+        at (0.35,-4.8) {Aug 2022};
+      \node[rotate=90,align=center,font=\footnotesize,inner sep=0pt]
+        at (-0.55,-2.6)
+        {Deepflare\footnotemark\\Chief Engineering Officer};
+
+      % A compact key names the phases without long explanations.
+      \fill[timelineConcept] (0,0.1) circle (2.5pt);
+      \node[anchor=west] at (0.15,0.1) {Team exploration};
+      \fill[timelinePython] (4,0.1) circle (2.5pt);
+      \node[anchor=west] at (4.15,0.1) {Python aligners};
+      \fill[timelineBioseq] (8,0.1) circle (2.5pt);
+      \node[anchor=west] at (8.15,0.1) {BioSeqDB};
+
+      \draw[black!18,line width=1pt] (2.2,-0.9) -- (2.2,-12.9);
+      \draw[timelineConcept,line width=2pt] (2.2,-0.9) -- (2.2,-4.05);
+      \draw[timelinePython,line width=2pt] (2.2,-5.4) -- (2.2,-6.3);
+      \draw[timelineBioseq,line width=2pt] (2.2,-7.5) -- (2.2,-12.9);
+
+      \foreach \timelineY/\timelineDate/\timelineColor in {
+        -0.9/Feb 2021/timelineConcept,
+        -2.1/May 2021/timelineConcept,
+        -3.0/Mar 2022/timelineConcept,
+        -4.05/May 2022/timelineConcept,
+        -5.4/Dec 2023/timelinePython,
+        -6.3/Nov 2024/timelinePython,
+        -7.5/Dec 2025/timelineBioseq,
+        -8.4/Jan 2026/timelineBioseq,
+        -9.3/May 2026/timelineBioseq,
+        -10.2/Jun 2026/timelineBioseq,
+        -11.1/Jul 2026/timelineBioseq,
+        -12.0/Aug 2026/timelineBioseq,
+        -12.9/Sep 2026/timelineBioseq} {
+        \node[timeline date] at (1.9,\timelineY) {\timelineDate};
+        \node[timeline dot,fill=\timelineColor] at (2.2,\timelineY) {};
+      }
+
+      \node[timeline event] at (2.55,-0.9)
+        {Training natural language processing models on large GISAID datasets\\
+         FASTA files were hard to manage\\
+         We found no database tools that met our needs};
+      \node[timeline event] at (2.55,-2.1)
+        {Database idea and design\\
+         \href{https://github.com/soedinglab/MMseqs2/issues/450\#issue-878875419}
+           {MMseqs2 Python-bindings discussion}};
+      \node[timeline event] at (2.55,-3.0)
+        {PostgreSQL internals discussion with Joe Conway};
+      \node[timeline event] at (2.55,-4.05)
+        {\href{https://github.com/styczynski/deepflare-bioseqdb-archive}
+           {Team prototype: BWA-MEM in PostgreSQL}\\
+         Limited features and high maintenance effort\\
+         led the company to focus on MMseqs2};
+      \node[timeline event] at (2.55,-5.4)
+        {\href{https://github.com/styczynski/aadg-genomics-class}
+           {First Python aligner prototype}};
+      \node[timeline event] at (2.55,-6.3)
+        {\href{https://github.com/styczynski/aadg-genomics-class}
+           {Improved Python aligner}};
+      \node[timeline event] at (2.55,-7.5)
+        {First BioSeqDB: original minimap2 and columnar storage};
+      \node[timeline event] at (2.55,-8.4)
+        {First custom seeding algorithms};
+      \node[timeline event] at (2.55,-9.3)
+        {Custom chaining and base alignment\\First working benchmark results};
+      \node[timeline event] at (2.55,-10.2)
+        {End-to-end benchmarks, first Vulkan programs and indexes};
+      \node[timeline event] at (2.55,-11.1)
+        {Sequence slices};
+      \node[timeline event] at (2.55,-12.0)
+        {Query cache and code refactoring};
+      \node[timeline event] at (2.55,-12.9)
+        {Debugging, final end-to-end benchmarks and thesis writing\\
+         \textit{Ongoing in September 2026}};
+    \end{tikzpicture}
+    \end{center}
+    {\small\noindent Selected milestones from my project history.
+    Spacing is not proportional to elapsed time. Linked entries point to
+    the related discussion and prototype repositories.\par}
+    \footnotetext{\fontsize{7.5}{9}\selectfont I was a co-founder (shareholder) until 15 July 2022 (KRS update on 3 Jun 2022) in Covid Genomics Sp. z o.o. (registered in Poland in Jun 2020, KRS 0000846289) which then changed its legal name to CGen Sp. z o.o. (on 3 Jun 2022) and then changed its branding name to Deepflare (on Jul 2022). I was also a Chief Engineering Officer from 1 Apr 2020 till 31 Aug 2022.}
 
 \foreachdata{chapters}{\chapteri} {
     \defchapter{\data{chapters.\chapteri.title}}{r:\data{chapters.\chapteri.ref}}
