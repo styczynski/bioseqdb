@@ -199,6 +199,7 @@ set(BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/io/index_maintenance_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/scanner/source_provider_factory_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/fragment_handle_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/chunked_storage/hash_major_session_reader_probe_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/admin/index_build_runtime_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/admin/parallel_scan_probe_boundary_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/admin/policy_catalog_implementation.cppm"

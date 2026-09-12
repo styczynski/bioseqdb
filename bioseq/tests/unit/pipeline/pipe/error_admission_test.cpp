@@ -11,6 +11,73 @@ import bioseq.tests.unit.pipeline.pipe_support;
 
 using namespace bioseq::tests::pipeline::pipe_support;
 
+TEST_CASE("authorized Vulkan query batch moves storage before readback admission",
+          "[component:bioseq][layer:unit][feature:pipeline]") {
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    using owned_type = bioseq::gpu::vulkan::
+        vulkan_batch_sketch_result<budgeted_sketch_lifetime_probe>;
+    STATIC_REQUIRE(!std::is_copy_constructible_v<owned_type>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<owned_type>);
+    STATIC_REQUIRE(std::is_nothrow_move_assignable_v<owned_type>);
+
+    const auto make_owned = [&admission](bool& observed) {
+        constexpr std::size_t count = 4u;
+        auto permit = admission.try_reserve(
+            count * sizeof(budgeted_sketch_lifetime_probe) *
+            bioseq::parallelism::k_vector_preallocation_headroom_factor);
+        REQUIRE(permit.has_value());
+        owned_type owned;
+        owned.memory_retention =
+            std::make_shared<bioseq::gpu::vulkan::vulkan_batch_sketch_memory_retention>();
+        owned.host_readback_permit = std::move(*permit);
+        owned.host_minimizers.reserve(count);
+        const auto exact = owned.host_minimizers.capacity() *
+                           sizeof(budgeted_sketch_lifetime_probe);
+        REQUIRE(exact <= owned.host_readback_permit.bytes());
+        owned.host_readback_permit.shrink_to(exact);
+        owned.host_minimizers.emplace_back(
+            &admission, admission.reserved_bytes(), &observed);
+        return owned;
+    };
+
+    bool source_destroyed_with_permit = false;
+    bool destination_destroyed_with_permit = false;
+    std::weak_ptr<bioseq::gpu::vulkan::vulkan_batch_sketch_memory_retention> lifetime;
+    {
+        owned_type source = make_owned(source_destroyed_with_permit);
+        const auto* original_data = source.host_minimizers.data();
+        const auto exact = source.host_readback_permit.bytes();
+        lifetime = source.memory_retention;
+        owned_type destination = make_owned(destination_destroyed_with_permit);
+        destination = std::move(source);
+        REQUIRE(destination_destroyed_with_permit);
+        REQUIRE_FALSE(source_destroyed_with_permit);
+        REQUIRE(source.host_minimizers.capacity() == 0u);
+        REQUIRE_FALSE(source.host_readback_permit);
+        REQUIRE(destination.host_minimizers.data() == original_data);
+        REQUIRE(admission.reserved_bytes() == baseline + exact);
+        owned_type moved{std::move(destination)};
+        REQUIRE(moved.host_minimizers.data() == original_data);
+        REQUIRE_FALSE(destination.host_readback_permit);
+        auto* self = std::addressof(moved);
+        moved = std::move(*self);
+        REQUIRE(moved.host_minimizers.data() == original_data);
+        REQUIRE_FALSE(lifetime.expired());
+    }
+    REQUIRE(source_destroyed_with_permit);
+    REQUIRE(lifetime.expired());
+    REQUIRE(admission.reserved_bytes() == baseline);
+
+    bool unwind_destroyed_with_permit = false;
+    REQUIRE_THROWS_AS(([&make_owned, &unwind_destroyed_with_permit] {
+        owned_type owned = make_owned(unwind_destroyed_with_permit);
+        throw std::runtime_error{"exercise ordinary owner unwind"};
+    }()), std::runtime_error);
+    REQUIRE(unwind_destroyed_with_permit);
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
 TEST_CASE("budgeted_sketch_vector transfers and destroys host capacity before admission",
           "[component:bioseq][layer:unit][feature:pipeline]") {
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
@@ -198,7 +265,7 @@ TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
     params.minimizer_algorithm =
         minimizer_algorithm::vulkan_minimap_integer;
 
-    params.kmer_size = 7;
+    params.kmer_size = 0;
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
         source_direct_minimizer_fixture>(false, params, 4u, minimum));
     params.kmer_size = 27;
@@ -206,16 +273,16 @@ TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
         source_direct_minimizer_fixture>(false, params, 4u, minimum));
     params.kmer_size = 15;
 
-    params.window_size = 9;
+    params.window_size = 0;
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
         source_direct_minimizer_fixture>(false, params, 4u, minimum));
-    params.window_size = 11;
+    params.window_size = 257;
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
         source_direct_minimizer_fixture>(false, params, 4u, minimum));
     params.window_size = 10;
 
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
-        source_direct_minimizer_fixture>(false, params, 20u, minimum));
+        source_direct_minimizer_fixture>(false, params, 257u, minimum));
     REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
         incompatible_source_direct_minimizer_fixture>(
             false, params, 4u, minimum));

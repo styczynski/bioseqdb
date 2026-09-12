@@ -252,6 +252,18 @@ void mm_mapopt_max_intron_len(mm_mapopt_t *opt, int max_intron_len);
  */
 mm_idx_reader_t *mm_idx_reader_open(const char *fn, const mm_idxopt_t *opt, const char *fn_out);
 
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+/**
+ * Initialize the isolated receipt helper's index reader from descriptors.
+ *
+ * Both descriptors are consumed exactly once on success or failure. The
+ * caller must validate identities and truncate/rewind output_fd before the
+ * transfer. This API is absent from normal vendored minimap2 builds.
+ */
+mm_idx_reader_t *mm_idx_reader_open_fd(int input_fd,
+                                       const mm_idxopt_t *opt,
+                                       int output_fd);
+#endif
 /**
  * Read/build an index
  *

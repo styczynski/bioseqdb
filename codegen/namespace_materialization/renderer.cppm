@@ -260,6 +260,7 @@ namespace detail {
         || name == "logic_error" || name == "map"
         || name == "move" || name == "nullopt"
         || name == "numeric_limits" || name == "optional"
+        || name == "shared_ptr"
         || name == "size_t" || name == "uint8_t"
         || name == "uint16_t" || name == "uint64_t"
         || name == "vector";
@@ -297,7 +298,8 @@ namespace detail {
 [[nodiscard]] inline bool scheduler_scanner_std_entity(
     const std::string_view name) noexcept {
     return name == "forward" || name == "move"
-        || name == "optional" || name == "size_t"
+        || name == "optional" || name == "shared_ptr"
+        || name == "size_t"
         || name == "uint8_t" || name == "uint16_t"
         || name == "vector";
 }

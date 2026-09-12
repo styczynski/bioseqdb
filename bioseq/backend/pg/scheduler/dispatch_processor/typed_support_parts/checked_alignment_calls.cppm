@@ -70,30 +70,47 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
         "runtime or select a non-Vulkan algorithm before dispatch.");
 }
 
+/** Reports a selector-level Vulkan capability boundary, never a runtime failure. */
+[[noreturn]] inline void raise_vulkan_tuple_capability_pg_error() {
+    raise_typed_dispatch_pg_error_as_cpp(
+        ERRCODE_FEATURE_NOT_SUPPORTED,
+        "Vulkan algorithm tuple is unsupported",
+        "requested Vulkan components do not form the complete supported all-GPU tuple; "
+        "generic CPU/SIMD biological fallback is forbidden",
+        "Select vulkan_minimap_integer, vulkan_tiled_dynamic_programming, and "
+        "block_aligner together, or select a wholly non-Vulkan tuple.");
+}
+
 /** Maps an exact SIMD minimizer failure to an unsupported-feature error. */
 [[noreturn]] inline void raise_exact_simd_pg_error(std::string_view stage,
                                                    std::string_view detail) {
     const std::string diagnostic = fmt::format("{}: {}", stage, detail);
+    const std::string hint = fmt::format(
+        "operation_diagnostic={}; Exact SIMD has no scalar fallback; use DNA4 with a "
+        "supported packed storage width and supported W/K/vector shape, or select a "
+        "different algorithm tuple explicitly.",
+        diagnostic);
     raise_typed_dispatch_pg_error_as_cpp(
         ERRCODE_FEATURE_NOT_SUPPORTED,
         "Exact SIMD minimizer execution is unsupported for this request",
-        diagnostic.c_str(),
-        "Exact SIMD has no scalar fallback; use DNA4 with a supported packed "
-        "storage width and supported W/K/vector shape, or select a different "
-        "algorithm tuple explicitly.");
+        "capability=exact_simd_minimizer; fallback=forbidden",
+        hint.c_str());
 }
 
 /** Maps a bounded ntHash SIMD failure to an unsupported-feature error. */
 [[noreturn]] inline void raise_bounded_nthash_pg_error(std::string_view stage,
                                                        std::string_view detail) {
     const std::string diagnostic = fmt::format("{}: {}", stage, detail);
+    const std::string hint = fmt::format(
+        "operation_diagnostic={}; Bounded ntHash SIMD has no scalar or Exact SIMD "
+        "fallback; use DNA4 with packed uint32/uint64 storage, W=10, K=15, and an "
+        "admissible range, or select another algorithm explicitly.",
+        diagnostic);
     raise_typed_dispatch_pg_error_as_cpp(
         ERRCODE_FEATURE_NOT_SUPPORTED,
         "Bounded ntHash SIMD minimizer execution is unsupported for this request",
-        diagnostic.c_str(),
-        "Bounded ntHash SIMD has no scalar or Exact SIMD fallback; use "
-        "DNA4 with packed uint32/uint64 storage, W=10, K=15, and an "
-        "admissible range, or select another algorithm explicitly.");
+        "capability=bounded_nthash_simd_minimizer; fallback=forbidden",
+        hint.c_str());
 }
 
 /** Maps a SIMD chaining failure to a PostgreSQL parameter or feature error. */
@@ -109,13 +126,16 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
             "Select exact_visited or bounded_batch_approximate explicitly; "
             "the rejected request is not retried with exact or scalar chaining.");
     }
+    const std::string capability_hint = fmt::format(
+        "operation_diagnostic={}; The selected SIMD chaining policy has no exact or "
+        "scalar fallback; use a supported SIMD target and valid parameters, or "
+        "explicitly select a different chaining algorithm before dispatch.",
+        diagnostic);
     raise_typed_dispatch_pg_error_as_cpp(
         ERRCODE_FEATURE_NOT_SUPPORTED,
         "SIMD chaining execution is unsupported for this request",
-        diagnostic.c_str(),
-        "The selected SIMD chaining policy has no exact or scalar fallback; use "
-        "a supported SIMD target and valid parameters, or explicitly select a "
-        "different chaining algorithm before dispatch.");
+        "capability=simd_chaining; fallback=forbidden",
+        capability_hint.c_str());
 }
 
 /** Maps inconsistent persisted minimizer lookup to a data-corruption error. */
@@ -217,6 +237,18 @@ minimap_port_fragment_index_vector_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked(
         "minimap2_port_with_index", [&args...]() -> match_result_collection {
             return minimap_port_fragment_index_vector_owned(std::forward<p_arguments>(args)...);
+        });
+}
+
+/** Calls the generated-physical fragment-index aligner through the PostgreSQL boundary. */
+template <class... p_arguments>
+[[nodiscard]] match_result_collection
+minimap_port_fragment_index_physical_pg_checked(p_arguments&&... args) {
+    return run_aligner_pg_checked(
+        "minimap2_port_with_physical_fragment_index",
+        [&args...]() -> match_result_collection {
+            return minimap_port_fragment_index_physical_owned(
+                std::forward<p_arguments>(args)...);
         });
 }
 

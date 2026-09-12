@@ -21,3 +21,9 @@ __pycache__/
 .mcp.json
 .codex/config.toml
 .claude/settings.local.json
+
+
+
+bench/*observed*/**
+reporting/**
+reporting/*

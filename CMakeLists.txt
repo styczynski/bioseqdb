@@ -29,6 +29,8 @@ option(BIOSEQ_BUILD_PAPERS
   "Build paper and chart targets" ON)
 option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
   "Configure generated external API clients and their integration tests" OFF)
+option(BIOSEQ_BENCHMARK_E2E_INTERVALS
+  "Compile statement-scoped CIGAR/MAPQ interval evidence for the dedicated E2E benchmark tree" OFF)
 option(BIOSEQ_BUILD_WEBSITE
   "Build versioned static documentation website" OFF)
 option(BIOSEQ_PACKAGE_BUILD
@@ -866,6 +868,10 @@ if(TARGET bioseq_cache_unit_tests)
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_sanitizer_presets.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
       "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_cache_modes.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
@@ -907,6 +913,21 @@ if(TARGET bioseq_cache_unit_tests)
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
       "${CMAKE_SOURCE_DIR}/cmake/tests/contract/test_postgresql_extension_macho_visibility.py"
+    # These existing Python-only benchmark contracts need no core executable.
+    # Keep them available through the fast MCP verification path so schema and
+    # campaign failures are caught before a full E2E compile/link completes.
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/bench/tests/contract/test_algorithm_matrix_aggregation_authority.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/bench/tests/contract/test_algorithm_matrix_q1024_packed_partition.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/bench/tests/contract/test_algorithm_matrix_deadline_campaign.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running bioseq-build configure freshness contract tests"
     VERBATIM)

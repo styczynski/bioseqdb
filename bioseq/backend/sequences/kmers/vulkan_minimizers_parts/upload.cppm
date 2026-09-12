@@ -351,6 +351,58 @@ template <sequence_alphabet p_alphabet> struct canonical_u32_window {
 };
 
 /**
+ * @brief Retains canonical upload windows through synchronous batch execution.
+ *
+ * Container construction, mutation, movement, and destruction are expressed
+ * by out-of-line operations attached to the module partition that defines
+ * canonical_u32_window. Full-BMI consumers therefore do not spell std::vector
+ * bookkeeping for the imported move-only window at their call sites. Upload
+ * descriptors remain non-owning; this batch must outlive every synchronous
+ * operation that consumes them.
+ *
+ * @tparam p_alphabet Logical sequence alphabet selected by the existing typed
+ * dispatch profile.
+ */
+template <sequence_alphabet p_alphabet> class canonical_u32_window_batch {
+public:
+  using window_type = canonical_u32_window<p_alphabet>;
+  static_assert(std::is_nothrow_move_constructible_v<window_type>);
+
+  [[gnu::noinline]] canonical_u32_window_batch() noexcept {}
+  [[gnu::noinline]] ~canonical_u32_window_batch() noexcept {}
+
+  canonical_u32_window_batch(const canonical_u32_window_batch &) = delete;
+  canonical_u32_window_batch &
+  operator=(const canonical_u32_window_batch &) = delete;
+
+  [[gnu::noinline]] canonical_u32_window_batch(
+      canonical_u32_window_batch &&other) noexcept
+      : windows_(std::move(other.windows_)) {}
+
+  [[gnu::noinline]] canonical_u32_window_batch &
+  operator=(canonical_u32_window_batch &&other) noexcept {
+    windows_ = std::move(other.windows_);
+    return *this;
+  }
+
+  /** @brief Transfers one accepted window into batch-owned lifetime storage. */
+  [[gnu::noinline]] void push_back(window_type &&window) {
+    windows_.push_back(std::move(window));
+  }
+
+  /** @brief Releases every retained window after descriptor consumption. */
+  [[gnu::noinline]] void clear() noexcept { windows_.clear(); }
+
+  /** @brief Returns the number of retained accepted windows. */
+  [[nodiscard, gnu::noinline]] std::size_t size() const noexcept {
+    return windows_.size();
+  }
+
+private:
+  std::vector<window_type> windows_;
+};
+
+/**
  * @brief Visits canonical input through a type-correct upload surface.
  * @tparam p_alphabet Logical sequence alphabet.
  * @tparam p_function Callback receiving a typed or byte-addressed range.
@@ -566,6 +618,80 @@ public:
     std::uint64_t byte_count) noexcept {
     return bioseq::common::checked_align_up(byte_count, std::uint64_t{4u})
         .value_or((std::numeric_limits<std::uint64_t>::max)());
+}
+
+/**
+ * @brief Validates one untyped upload against the typed shader contract.
+ * @param upload Non-owning packed upload descriptor.
+ * @param rank_lut Shared rank mapping.
+ * @param kmer_size Runtime k-mer length in biological symbols.
+ * @return `true` when packing, rolling width, and LUT semantics agree.
+ */
+[[nodiscard]] constexpr bool vulkan_upload_contract_supported(
+    const sequence_upload_view& upload,
+    const vulkan_rank_lut& rank_lut,
+    std::size_t kmer_size) noexcept {
+    if (!vulkan_minimizer_packed_shape_supported(
+            upload.unit_bits,
+            upload.bits_per_char,
+            upload.letters_per_unit,
+            upload.alphabet_size,
+            upload.char_mask)
+        || upload.padding_letters >= upload.letters_per_unit
+        || upload.padded_byte_size != aligned_upload_bytes(upload.byte_size)
+        || (upload.byte_size != 0u && upload.bytes == nullptr)) {
+        return false;
+    }
+    switch (upload.alphabet_kind) {
+    case alphabet_kernel_kind::dna4_nt4:
+        if (upload.bits_per_char != 2u || upload.alphabet_size != 4u) {
+            return false;
+        }
+        break;
+    case alphabet_kernel_kind::dna5_nt4:
+    case alphabet_kernel_kind::generic:
+        break;
+    default:
+        return false;
+    }
+    if (!vulkan_minimizer_kmer_size_supported(
+            upload.alphabet_kind,
+            upload.bits_per_char,
+            kmer_size)) {
+        return false;
+    }
+
+    const std::uint64_t unit_bytes = upload.unit_bits / 8u;
+    if (unit_bytes == 0u || upload.byte_size % unit_bytes != 0u
+        || upload.bp_size
+            > (std::numeric_limits<std::uint64_t>::max)()
+                - upload.padding_letters) {
+        return false;
+    }
+    const std::uint64_t unit_count = upload.byte_size / unit_bytes;
+    if (unit_count > (std::numeric_limits<std::uint64_t>::max)()
+            / upload.letters_per_unit) {
+        return false;
+    }
+    if (unit_count * upload.letters_per_unit
+        != upload.bp_size + upload.padding_letters) {
+        return false;
+    }
+    if (upload.alphabet_kind == alphabet_kernel_kind::dna4_nt4) {
+        return true;
+    }
+    for (std::uint32_t rank = 0u; rank < upload.alphabet_size; ++rank) {
+        const std::uint32_t code = rank_lut.rank_to_code[rank];
+        const std::uint32_t rc_code = rank_lut.rank_to_rc_code[rank];
+        if (code > 4u || rc_code > 4u) {
+            return false;
+        }
+        if (upload.alphabet_kind == alphabet_kernel_kind::generic
+            && code != (rank < 4u ? rank : 4u)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /** @brief Describes a packed unit interval and its exact biological length. */
@@ -1003,17 +1129,10 @@ template <sequence_alphabet p_alphabet>
     }
     const std::uint64_t bytes = static_cast<std::uint64_t>(
         descriptor.unit_count) * descriptor.storage_unit_width;
-    constexpr alphabet_kernel_kind kernel = [] {
-        if constexpr (seqan3::nucleotide_alphabet<p_alphabet>
-            && bits == 2u && seqan3::alphabet_size<p_alphabet> == 4u) {
-            return alphabet_kernel_kind::dna4_nt4;
-        } else if constexpr (seqan3::nucleotide_alphabet<p_alphabet>
-            && bits == 3u && seqan3::alphabet_size<p_alphabet> == 5u) {
-            return alphabet_kernel_kind::dna5_nt4;
-        } else {
-            return alphabet_kernel_kind::generic;
-        }
-    }();
+    constexpr alphabet_kernel_kind kernel = alphabet_kernel_kind_for_shape<
+        p_alphabet,
+        bits,
+        seqan3::alphabet_size<p_alphabet>>();
     return sequence_upload_view{
         .bytes = bytes == 0u ? nullptr : descriptor.units,
         .byte_size = bytes,

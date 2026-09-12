@@ -442,6 +442,21 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
             ready_minimizer_error_as_cpp(ERRCODE_DATA_CORRUPTED,
                                          "READY minimizer fixture locator is invalid");
         }
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_for_backend(
+                backend,
+                index_name == k_minimizers_per_fragment_index_name
+                    ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                    : result.locator.logical_length,
+                result.alphabet_code,
+                static_cast<std::uint8_t>(result.storage_unit_byte_width * 8u),
+                k_kmer_size,
+                k_window_size);
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "READY minimizer fixture algorithm identity is not READY");
+        }
         bioseq::postgres::support::invoke_pg_as_cpp(
             [state] { end_column_read(state->source_read); });
         state->source_read = nullptr;
@@ -472,6 +487,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
              backend,
              backend_request,
              minimizer_kernels,
+             algorithm_identity = *algorithm_identity,
              &result]<class p_sequence_config>() {
                 using source_binding =
                     bioseq::storage::postgres_lazy_sequence_binding<p_sequence_config>;
@@ -516,6 +532,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
                      backend,
                      backend_request,
                      minimizer_kernels,
+                     algorithm_identity,
                      &result,
                      bound_source](auto lazy_view) {
                         arm_ready_minimizer_fixture_failures(backend_request);
@@ -528,6 +545,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
                                 *state->storage,
                                 lazy_view,
                                 bound_source,
+                                algorithm_identity,
                                 backend,
                                 minimizer_kernels));
                         disarm_ready_minimizer_fixture_failures();
@@ -571,6 +589,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
                 backend,
+                *algorithm_identity,
                 result.alphabet_code,
                 result.storage_unit_byte_width,
                 k_kmer_size,
@@ -617,6 +636,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
             result.manifest.minimizer_scheme_revision != scheme.revision ||
             result.manifest.producer_backend_id != producer_backend.id ||
             result.manifest.producer_identity_revision != producer_backend.revision ||
+            result.manifest.algorithm_identity != *algorithm_identity ||
             manifest_storage_contract != result.publication->storage_contract_checksum()) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
@@ -874,6 +894,22 @@ build_minimizer_generation_integration_fixture_impl(
                 "bioseq minimizer generation fixture derived a zero source identity");
         }
 
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_for_backend(
+                backend,
+                index_name == k_minimizers_per_fragment_index_name
+                    ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                    : target_length,
+                source.alphabet_code,
+                static_cast<std::uint8_t>(source.storage_unit_byte_width * 8u),
+                kmer_size,
+                window_size);
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq minimizer generation fixture algorithm identity is not READY");
+        }
+
         state->writer.emplace(identity,
                               sequence_rowno,
                               result.generation_id,
@@ -892,6 +928,7 @@ build_minimizer_generation_integration_fixture_impl(
             .window_size = window_size,
             .minimizer_scheme_id = requested_scheme.id,
             .minimizer_scheme_revision = requested_scheme.revision,
+            .algorithm_identity = *algorithm_identity,
         };
         std::optional<minimizer_generation_encoding_error> encode_error;
         {

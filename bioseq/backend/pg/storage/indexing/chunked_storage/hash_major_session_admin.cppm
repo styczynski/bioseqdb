@@ -94,61 +94,8 @@ import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.hash_major_parallel_probe;
-import bioseq.postgres.storage.indexing.hash_major_session_reader;
+export import bioseq.postgres.storage.indexing.hash_major_session_reader;
 export namespace bioseq::storage::indexing {
-/// Normal open outcome with either an owned reader or classified absence.
-struct hash_major_minimizer_read_session_open_result {
-    std::optional<index_storage_hash_major_minimizer_read_session> session{};
-    minimizer_generation_relation_inspection relation_failure{
-        .kind = minimizer_generation_relation_kind::malformed,
-        .schema_error = minimizer_generation_schema_error::none,
-    };
-    bool head_absent = false;
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return session.has_value();
-    }
-};
-
-/// Open the exact current-generation reader or return a classified absence
-/// without weakening schema validation.
-[[nodiscard]] inline hash_major_minimizer_read_session_open_result
-open_exact_hash_major_minimizer_read_session_pg(
-    std::string_view table_name,
-    std::string_view index_name,
-    std::uint64_t query_key,
-    const borrowed_executor_read_context& executor_read) {
-    if (!executor_read.valid()) {
-        minimizer_generation_storage_error_as_cpp(
-            "hash-major read requires a valid executor context");
-    }
-    hash_major_minimizer_read_session_open_result result{};
-    try {
-        result.session.emplace(table_name,
-                               index_name,
-                               query_key,
-                               executor_read.snapshot(),
-                               executor_read.tablespace_oid());
-        if (!result.session->read_active_head_manifest_once()) {
-            result.session->close_head_absent();
-            result.session.reset();
-            result.head_absent = true;
-            result.relation_failure = {
-                .kind = minimizer_generation_relation_kind::current_exact,
-                .schema_error = minimizer_generation_schema_error::none,
-            };
-        } else {
-            result.relation_failure = {
-                .kind = minimizer_generation_relation_kind::current_exact,
-                .schema_error = minimizer_generation_schema_error::none,
-            };
-        }
-    } catch (const minimizer_generation_relation_open_failure& failure) {
-        result.relation_failure = failure.inspection;
-    }
-    return result;
-}
-
 /// Read-only restart/audit receipt for the complete fixed hash-major metadata
 /// surface. parallel_scan_stream descriptors carry the directory/control/posting counts,
 /// byte lengths and CRCs. The manifest carries the generation CRC.

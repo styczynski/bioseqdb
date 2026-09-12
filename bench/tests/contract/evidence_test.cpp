@@ -9,11 +9,24 @@
 #include <catch2/catch_test_macros.hpp>
 #include <nlohmann/json.hpp>
 
+#include <cerrno>
+#include <cstdlib>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#else
+extern char** environ;
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <ranges>
 #include <set>
 #include <span>
@@ -23,24 +36,34 @@
 #include <utility>
 
 import bioseq.bench.e2e.tests.support;
+import bioseq.bench.framework;
 
 namespace {
 
 namespace e2e_support = bioseq::bench::e2e::tests::support;
 
+using e2e_support::algorithm_matrix_session_sql;
 using e2e_support::batched_transformed_coordinate_sql;
+using e2e_support::annotate_behavior_differences;
 using e2e_support::cold_index_stats_keys;
 using e2e_support::config_value;
 using e2e_support::evaluate;
+using e2e_support::is_canonical_campaign_e2e_config_identity;
+using e2e_support::is_complete_vulkan_algorithm_matrix_tuple;
 using e2e_support::minimizer_fragment_reader_stats_keys;
 using e2e_support::e2e_input;
 using e2e_support::is_sliced_pipeline_stats_configuration_valid;
+using e2e_support::make_logical_query_chunks;
 using e2e_support::minimizers_per_fragment_index;
+using e2e_support::ordinary_algorithm_uses_iteration_boundaries;
 using e2e_support::e2e_output;
 using e2e_support::parameter_map;
 using e2e_support::parse_bioseq_rows;
 using e2e_support::parse_minimap2_rows;
+using e2e_support::persisted_gpu_operation_keys;
+using e2e_support::persisted_setup_must_reject;
 using e2e_support::projection_sql;
+using e2e_support::finalize_paired_oracle_repeat;
 using e2e_support::e2e_query_truth;
 using e2e_support::resolved_execution_tuple;
 using e2e_support::resolve_just_index_setup_requirements;
@@ -48,6 +71,7 @@ using e2e_support::rowset;
 using e2e_support::run_constraints;
 using e2e_support::serialize_raw_sample;
 using e2e_support::sliced_no_index_algorithm;
+using bioseq::bench::framework::e2e_raw_payload_schema_version;
 
 [[nodiscard]] nlohmann::json load_e2e_contract_config(
         const std::filesystem::path& path) {
@@ -527,7 +551,8 @@ TEST_CASE("E2E raw samples pin minimizer-fragment and hash-major index reader st
         serialized, nullptr, /*allow_exceptions=*/false);
     REQUIRE_FALSE(payload.is_discarded());
     REQUIRE(payload.at("payload_schema") == "bioseq.e2e.raw-sample");
-    REQUIRE(payload.at("payload_schema_version") == 6);
+    REQUIRE(payload.at("payload_schema_version")
+        == e2e_raw_payload_schema_version);
     const auto& alignment_snapshot = payload.at("alignment_snapshot");
     REQUIRE(alignment_snapshot.at("schema")
         == "bioseq.last_alignment_execution_stats/raw-rowset");
@@ -778,6 +803,219 @@ TEST_CASE("E2E publishes grouped-SoA provider lifecycle stats",
     }
 }
 
+TEST_CASE("E2E algorithm-matrix session SQL isolates stage selection from target construction",
+          "[component:benchmark][layer:contract][feature:configuration]") {
+    struct route_case {
+        std::string_view label;
+        std::string_view minimizer;
+        std::string_view chaining;
+        bool vulkan_seed;
+    };
+    constexpr std::array<route_case, 4> routes{{
+        {"host", "bounded_nthash_simd", "simd_minimap2", false},
+        {"seed-only", "vulkan_minimap_integer", "simd_minimap2", true},
+        {"chain-only", "bounded_nthash_simd",
+         "vulkan_tiled_dynamic_programming", false},
+        {"seed-and-chain", "vulkan_minimap_integer",
+         "vulkan_tiled_dynamic_programming", true},
+    }};
+
+    for (const auto& route : routes) {
+        for (const bool build_target : std::array{false, true}) {
+          for (const std::string_view minimizer_index : std::array{
+                   std::string_view{"minimizers_per_fragment"},
+                   std::string_view{"minimizers_per_sequence"}}) {
+            CAPTURE(route.label, build_target, minimizer_index);
+            const auto sql = algorithm_matrix_session_sql(
+                15,
+                10,
+                route.minimizer,
+                route.chaining,
+                "block_aligner",
+                "task_parallel",
+                minimizer_index,
+                build_target);
+
+            REQUIRE(sql.size() == 22);
+            CHECK(sql[0] == "SET bioseq.planner.custom_scan.enabled = on;");
+            CHECK(sql[1] == "SET bioseq.planner.index_scan.enabled = on;");
+            CHECK(sql[2] == "SET bioseq.vectorization.enabled = on;");
+            CHECK(sql[3]
+                == "SET bioseq.scheduler.pipeline.mode = 'task_parallel';");
+            CHECK(sql[4]
+                == "SET bioseq.aligner.base_alignment.algorithm = "
+                   "'block_aligner';");
+            CHECK(sql[5]
+                == std::string{"SET bioseq.aligner.chaining.algorithm = '"}
+                    .append(route.chaining)
+                    .append("';"));
+            CHECK(sql[6]
+                == std::string{"SET bioseq.aligner.minimizer.algorithm = '"}
+                    .append(route.minimizer)
+                    .append("';"));
+            CHECK(sql[7]
+                == "SET bioseq.aligner.minimizer.kmer_size = 15;");
+            CHECK(sql[8]
+                == "SET bioseq.aligner.minimizer.window_size = 10;");
+            CHECK(sql[9]
+                == "SET bioseq.aligner.grouped_soa_generation.enabled = on;");
+            CHECK(sql[10] == "SET bioseq.aligner.vulkan.enabled = on;");
+            CHECK(sql[11]
+                == (route.vulkan_seed
+                    ? "SET bioseq.aligner.vulkan.seed_lookup.enabled = on;"
+                    : "SET bioseq.aligner.vulkan.seed_lookup.enabled = off;"));
+            CHECK(sql[12]
+                == "SET bioseq.aligner.vulkan.index_cache.enabled = on;");
+            CHECK(sql[13]
+                == "SET bioseq.aligner.vulkan.fused_frontend.enabled = off;");
+            CHECK(sql[14]
+                == "SET bioseq.aligner.vulkan.alignment_extension.enabled = off;");
+            CHECK(sql[15]
+                == (route.vulkan_seed && build_target
+                    ? "SET bioseq.aligner.vulkan.index_build.enabled = on;"
+                    : "SET bioseq.aligner.vulkan.index_build.enabled = off;"));
+            CHECK(sql[16]
+                == (minimizer_index == "minimizers_per_fragment"
+                    ? "SET bioseq.aligner.fragment_minimizer.lookup_route = "
+                      "'direct_compact_hash_lookup';"
+                    : "SET bioseq.aligner.fragment_minimizer.lookup_route = "
+                      "'control_block_scan';"));
+            CHECK(sql[17] == "SET bioseq.column_cache.enabled = on;");
+            CHECK(sql[18]
+                == "SET bioseq.index.async_persistence.enabled = off;");
+            CHECK(sql[19]
+                == "SET bioseq.index.recompute_async_persistence.enabled = off;");
+            CHECK(sql[20]
+                == "SET bioseq.index.insert_maintenance.enabled = off;");
+            CHECK(sql[21]
+                == (build_target
+                    ? "SET bioseq.index.sequence_read.enabled = off;"
+                    : "SET bioseq.index.sequence_read.enabled = on;"));
+          }
+        }
+    }
+}
+
+TEST_CASE("ordinary Bioseq and minimap2 matrix rows share the exact iteration boundary",
+          "[component:benchmark][layer:contract][feature:measurement_boundary]") {
+    for (const std::string_view algorithm : std::array{
+             std::string_view{"bioseq_algorithm_matrix_no_index"},
+             std::string_view{"bioseq_algorithm_matrix_just_index"},
+             std::string_view{"minimap2_no_index"},
+             std::string_view{"minimap2_just_index"}}) {
+        CAPTURE(algorithm);
+        CHECK(ordinary_algorithm_uses_iteration_boundaries(
+            algorithm, /*paired_minimap2_oracle=*/false));
+        CHECK_FALSE(ordinary_algorithm_uses_iteration_boundaries(
+            algorithm, /*paired_minimap2_oracle=*/true));
+        CHECK_FALSE(ordinary_algorithm_uses_iteration_boundaries(
+            algorithm, /*paired_minimap2_oracle=*/false,
+            /*algorithm_matrix_measurement_scope=*/false));
+    }
+    CHECK_FALSE(ordinary_algorithm_uses_iteration_boundaries(
+        "bioseq_legacy_scalar_no_index", /*paired_minimap2_oracle=*/false));
+}
+
+TEST_CASE("E2E config identity gate preserves sealed campaign families",
+          "[component:benchmark][layer:contract][feature:configuration]") {
+    const auto q1_manifest_path = std::filesystem::path{BIOSEQ_E2E_DATA_DIR}
+        / "bench_e2e_algorithm_matrix_q1_calibration_manifest.json";
+    const auto q1_manifest = load_e2e_contract_config(q1_manifest_path);
+    REQUIRE(q1_manifest.at("schema_version") == 2);
+    REQUIRE(q1_manifest.at("panel_contract").at("result_cells") == 5);
+    REQUIRE(q1_manifest.at("panel_contract").at("expected_raw_records") == 25);
+    REQUIRE(q1_manifest.at("nonpublication_rule").at("merge_authority")
+        == "none");
+    REQUIRE(q1_manifest.at("cells").size() == 5);
+    std::set<std::string> q1_paths;
+    for (const auto& cell : q1_manifest.at("cells")) {
+        const std::string path = cell.at("path").get<std::string>();
+        REQUIRE(q1_paths.insert(path).second);
+        REQUIRE(is_canonical_campaign_e2e_config_identity(path));
+    }
+    REQUIRE(q1_paths.size() == 5);
+
+    const auto deadline_manifest_path = std::filesystem::path{BIOSEQ_E2E_DATA_DIR}
+        / "bench_e2e_algorithm_matrix_deadline_manifest.json";
+    const auto deadline_manifest = load_e2e_contract_config(
+        deadline_manifest_path);
+    REQUIRE(deadline_manifest.at("version") == 1);
+    REQUIRE(deadline_manifest.at("campaign").at("expected_shards") == 59);
+    REQUIRE(deadline_manifest.at("campaign").at("expected_raw_records") == 295);
+    REQUIRE(deadline_manifest.at("schedule").size() == 59);
+    for (const auto& shard : deadline_manifest.at("schedule")) {
+        REQUIRE(is_canonical_campaign_e2e_config_identity(
+            shard.at("path").get<std::string>()));
+    }
+
+    const auto deadline_v2_manifest_path =
+        std::filesystem::path{BIOSEQ_E2E_DATA_DIR}
+        / "bench_e2e_algorithm_matrix_deadline_v2_manifest.json";
+    const auto deadline_v2_manifest = load_e2e_contract_config(
+        deadline_v2_manifest_path);
+    REQUIRE(deadline_v2_manifest.at("version") == 2);
+    REQUIRE(deadline_v2_manifest.at("campaign").at("expected_shards") == 60);
+    REQUIRE(deadline_v2_manifest.at("campaign").at("expected_raw_records") == 300);
+    REQUIRE(deadline_v2_manifest.at("runtime_contract").at(
+        "extended_timeout_shard_count") == 2);
+    REQUIRE(deadline_v2_manifest.at("schedule").size() == 60);
+    for (const auto& shard : deadline_v2_manifest.at("schedule")) {
+        REQUIRE(is_canonical_campaign_e2e_config_identity(
+            shard.at("path").get<std::string>()));
+    }
+
+    REQUIRE(is_canonical_campaign_e2e_config_identity(
+        "bench/bench_e2e_algorithm_matrix_campaign.json"));
+    REQUIRE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_shards/"
+        "bench_e2e_algorithm_matrix_campaign_shard_"
+        "m2_d4_k15_w10_no_index_baselines.json"));
+    REQUIRE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_shards/"
+        "bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+        "0081_423ec685980909f5.json"));
+    REQUIRE(is_canonical_campaign_e2e_config_identity(
+        "bench/bench_e2e_algorithm_matrix_q8_campaign.json"));
+    REQUIRE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_q8_shards/"
+        "bench_e2e_algorithm_matrix_q8_campaign_shard_"
+        "m2_d4_k15_w10_isolated_minimap2_no_index.json"));
+
+    REQUIRE_FALSE(is_canonical_campaign_e2e_config_identity(
+        "bench/arbitrary_campaign.json"));
+    REQUIRE_FALSE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_q8_shards/arbitrary.json"));
+    REQUIRE_FALSE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_q8_shards/"
+        "bench_e2e_algorithm_matrix_q8_campaign_shard_.json"));
+    REQUIRE_FALSE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_q8_shards/"
+        "bench_e2e_algorithm_matrix_q8_campaign_shard_../escape.json"));
+    REQUIRE_FALSE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_q8_shards/"
+        "bench_e2e_algorithm_matrix_q8_campaign_shard_M2.json"));
+    REQUIRE_FALSE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_shards/"
+        "bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+        "0081_423EC685980909F5.json"));
+    REQUIRE_FALSE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_q1_calibration_shards/"
+        "bench_e2e_algorithm_matrix_q1_calibration_m2_d4_k15_w10_"
+        "no_index_scalar_scalar_minimap2_sequence_ksw2_copy.json"));
+    REQUIRE_FALSE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_q1_calibration_shards/../"
+        "bench_e2e_algorithm_matrix_q1_calibration_manifest.json"));
+    REQUIRE_FALSE(is_canonical_campaign_e2e_config_identity(
+        "/absolute/bench/e2e_algorithm_matrix_q1_calibration_shards/"
+        "bench_e2e_algorithm_matrix_q1_calibration_m2_d4_k15_w10_"
+        "no_index_scalar_scalar_minimap2_sequence_ksw2.json"));
+    REQUIRE_FALSE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_deadline_v2_shards/arbitrary.json"));
+    REQUIRE_FALSE(is_canonical_campaign_e2e_config_identity(
+        "bench/e2e_algorithm_matrix_deadline_v2_shards/../"
+        "bench_e2e_algorithm_matrix_deadline_v2_manifest.json"));
+}
+
 TEST_CASE("E2E input setup follows exact expanded execution tuples",
           "[component:benchmark][layer:contract][feature:selection]") {
     const auto grouped_soa_path = std::filesystem::path{BIOSEQ_E2E_DATA_DIR}
@@ -854,6 +1092,33 @@ TEST_CASE("E2E input setup follows exact expanded execution tuples",
     const auto absent = resolve_just_index_setup_requirements(no_index_only);
     REQUIRE_FALSE(absent.any_bioseq());
     REQUIRE_FALSE(absent.minimap2);
+}
+
+TEST_CASE("Persisted matrix setup admits supported DNA4 and DNA5 Vulkan profiles",
+          "[component:benchmark][layer:contract][feature:selection]") {
+    e2e_input input{};
+    input.size_label = "matrix_2gbp_dna4_k15_w10";
+    input.alphabet = "dna4";
+    input.kmer_size = 15;
+    input.window_size = 10;
+    input.cigar_projection = true;
+    input.mapq_projection = true;
+    input.prefilter_enabled = false;
+    REQUIRE_FALSE(persisted_setup_must_reject(
+        input, "vulkan_minimap_integer", minimizers_per_fragment_index()));
+
+    input.size_label = "matrix_2gbp_dna4_k20_w15";
+    input.kmer_size = 20;
+    input.window_size = 15;
+    REQUIRE_FALSE(persisted_setup_must_reject(
+        input, "vulkan_minimap_integer", minimizers_per_fragment_index()));
+
+    input.size_label = "matrix_2gbp_dna5_k15_w10";
+    input.alphabet = "dna5";
+    input.kmer_size = 15;
+    input.window_size = 10;
+    REQUIRE_FALSE(persisted_setup_must_reject(
+        input, "vulkan_minimap_integer", minimizers_per_fragment_index()));
 }
 
 TEST_CASE("Sliced E2E config activates the fully attested SIMD pipeline",
@@ -937,6 +1202,274 @@ TEST_CASE("E2E primary rows require strand and executable CIGAR replay",
     REQUIRE(extra.exact_primary_count_accepted == 0);
 }
 
+TEST_CASE("E2E paired oracle blocks on exact counts and diagnoses MAPQ only",
+          "[component:benchmark][layer:contract][feature:e2e_driver]") {
+    e2e_input input{};
+    input.alphabet = "dna4";
+    input.cigar_projection = true;
+    input.mapq_projection = true;
+    input.paired_minimap2_oracle = true;
+    input.queries = {
+        e2e_query_truth{
+            .id = 0,
+            .bases = "ACGT",
+            .truth_target_start = 10,
+            .truth_target_end = 14,
+            .truth_is_reverse = false,
+            .target_window_start = 10,
+            .target_window_bases = "ACGT",
+        },
+        e2e_query_truth{
+            .id = 1,
+            .bases = "TGCA",
+            .truth_target_start = 30,
+            .truth_target_end = 34,
+            .truth_is_reverse = false,
+            .target_window_start = 30,
+            .target_window_bases = "TGCA",
+        },
+    };
+
+    const rowset bioseq_rows{
+        {
+            std::string{"0"}, std::string{"target"}, std::string{"10"},
+            std::string{"14"}, std::string{"0"}, std::string{"4"},
+            std::string{"f"}, std::string{"t"}, std::string{"4="},
+            std::string{"60"},
+        },
+        {
+            std::string{"1"}, std::string{"target"}, std::string{"30"},
+            std::string{"34"}, std::string{"0"}, std::string{"4"},
+            std::string{"f"}, std::string{"t"}, std::string{"4="},
+            std::string{"47"},
+        },
+    };
+    e2e_output bioseq{};
+    parse_bioseq_rows(bioseq_rows, input, bioseq);
+
+    e2e_output minimap{};
+    parse_minimap2_rows(
+        "query0\t4\t0\t4\t+\tref0\t100\t10\t14\t4\t4\t60\t"
+        "tp:A:P\tcg:Z:4=\n"
+        "query1\t4\t0\t4\t+\tref0\t100\t30\t34\t4\t4\t47\t"
+        "tp:A:P\tcg:Z:4=\n",
+        input,
+        minimap);
+
+    REQUIRE(bioseq.ordered_query_oracle_available == 1);
+    REQUIRE(minimap.ordered_query_oracle_available == 1);
+    REQUIRE(bioseq.ordered_query_oracle == minimap.ordered_query_oracle);
+    REQUIRE(bioseq.ordered_query_oracle_sha256
+        == minimap.ordered_query_oracle_sha256);
+    REQUIRE(bioseq.ordered_query_oracle_sha256_words
+        == minimap.ordered_query_oracle_sha256_words);
+    finalize_paired_oracle_repeat(input, 0, bioseq, minimap);
+    REQUIRE(bioseq.paired_oracle_comparison_available == 1);
+    REQUIRE(bioseq.paired_oracle_exact == 1);
+    REQUIRE(bioseq.paired_oracle_verdict_sealed == 1);
+    REQUIRE(minimap.paired_oracle_comparison_available == 1);
+    REQUIRE(minimap.paired_oracle_exact == 1);
+    REQUIRE(minimap.paired_oracle_verdict_sealed == 1);
+    REQUIRE(bioseq.paired_mapq_vector_equal == 1);
+    REQUIRE(minimap.paired_mapq_vector_equal == 1);
+
+    e2e_output different_mapq{};
+    parse_minimap2_rows(
+        "query0\t4\t0\t4\t+\tref0\t100\t10\t14\t4\t4\t60\t"
+        "tp:A:P\tcg:Z:4=\n"
+        "query1\t4\t0\t4\t+\tref0\t100\t30\t34\t4\t4\t48\t"
+        "tp:A:P\tcg:Z:4=\n",
+        input,
+        different_mapq);
+    e2e_output diagnostic_bioseq = bioseq;
+    finalize_paired_oracle_repeat(
+        input, 1, diagnostic_bioseq, different_mapq);
+    REQUIRE(diagnostic_bioseq.paired_oracle_exact == 1);
+    REQUIRE(different_mapq.paired_oracle_exact == 1);
+    REQUIRE(diagnostic_bioseq.tuple_accepted == 1);
+    REQUIRE(different_mapq.tuple_accepted == 1);
+    REQUIRE(diagnostic_bioseq.paired_mapq_vector_equal == 0);
+    REQUIRE(different_mapq.paired_mapq_vector_equal == 0);
+    REQUIRE(diagnostic_bioseq.behavior_difference_comment.find(
+        "numeric minimap2 MAPQ equivalence is not a validity requirement")
+        != std::string::npos);
+    REQUIRE(different_mapq.ordered_query_oracle_sha256
+        == diagnostic_bioseq.ordered_query_oracle_sha256);
+    REQUIRE(different_mapq.ordered_query_mapq_sha256
+        != diagnostic_bioseq.ordered_query_mapq_sha256);
+
+    e2e_output mismatching_bioseq = bioseq;
+    e2e_output mismatching_minimap = minimap;
+    --mismatching_minimap.match_count;
+    --mismatching_minimap.ordered_query_oracle[1].primary_match_count;
+    finalize_paired_oracle_repeat(
+        input, 2, mismatching_bioseq, mismatching_minimap);
+    REQUIRE(mismatching_bioseq.paired_oracle_comparison_available == 1);
+    REQUIRE(mismatching_bioseq.paired_oracle_exact == 0);
+    REQUIRE(mismatching_bioseq.tuple_accepted == 0);
+    REQUIRE(mismatching_minimap.tuple_accepted == 0);
+    REQUIRE(mismatching_bioseq.cell_disposition == "invalid");
+    REQUIRE(mismatching_minimap.cell_disposition == "invalid");
+    REQUIRE(mismatching_bioseq.tuple_rejection_reason.starts_with(
+        "**INVALID**: paired minimap2 oracle"));
+    REQUIRE(mismatching_bioseq.tuple_rejection_reason.find(
+        "total primary match-count mismatch")
+        != std::string::npos);
+    REQUIRE(mismatching_minimap.tuple_rejection_reason
+        == mismatching_bioseq.tuple_rejection_reason);
+
+    e2e_output ordered_mismatch_bioseq = bioseq;
+    e2e_output ordered_mismatch_minimap = minimap;
+    --ordered_mismatch_minimap.ordered_query_oracle[0].primary_match_count;
+    ++ordered_mismatch_minimap.ordered_query_oracle[1].primary_match_count;
+    finalize_paired_oracle_repeat(
+        input, 3, ordered_mismatch_bioseq, ordered_mismatch_minimap);
+    REQUIRE(ordered_mismatch_bioseq.match_count
+        == ordered_mismatch_minimap.match_count);
+    REQUIRE(ordered_mismatch_bioseq.tuple_accepted == 0);
+    REQUIRE(ordered_mismatch_minimap.tuple_accepted == 0);
+    REQUIRE(ordered_mismatch_bioseq.tuple_rejection_reason.find(
+        "ordered_index=0 field=primary_match_count") != std::string::npos);
+    REQUIRE(ordered_mismatch_minimap.tuple_rejection_reason
+        == ordered_mismatch_bioseq.tuple_rejection_reason);
+}
+
+TEST_CASE("E2E full Vulkan tuple remains complete with MAPQ projection",
+          "[component:benchmark][layer:contract][feature:e2e_driver]") {
+    e2e_input input{};
+    input.cigar_projection = true;
+    input.mapq_projection = true;
+
+    e2e_output output{};
+    output.requested_minimizer_algorithm = "vulkan_minimap_integer";
+    output.requested_chaining_algorithm =
+        "vulkan_tiled_dynamic_programming";
+    output.requested_base_alignment_algorithm = "block_aligner";
+
+    REQUIRE(is_complete_vulkan_algorithm_matrix_tuple(input, output));
+
+    output.requested_chaining_algorithm = "simd_minimap2";
+    REQUIRE_FALSE(is_complete_vulkan_algorithm_matrix_tuple(input, output));
+}
+
+TEST_CASE("E2E labels Vulkan simple CIGAR as a visible behavior difference",
+          "[component:benchmark][layer:contract][feature:reporting]") {
+    e2e_input input{};
+    input.mapq_projection = true;
+    e2e_output output{};
+    output.actual_backend = "vulkan_gpu";
+    output.requested_minimizer_algorithm = "vulkan_minimap_integer";
+    output.requested_chaining_algorithm =
+        "vulkan_tiled_dynamic_programming";
+    output.requested_base_alignment_algorithm = "block_aligner";
+    output.observed_base_alignment_algorithm = "vulkan_simple_cigar";
+    output.mapq_execution_available = 1;
+    output.mapq_executed = 1;
+
+    annotate_behavior_differences(input, output);
+
+    REQUIRE(output.tuple_accepted == 1);
+    REQUIRE(output.cell_disposition == "accepted_behavior_difference");
+    REQUIRE(output.behavior_difference_comment.find(
+        "distinct Vulkan-native CIGAR implementation") != std::string::npos);
+    REQUIRE(output.behavior_difference_comment.find(
+        "rather than a fallback") != std::string::npos);
+    REQUIRE(output.behavior_difference_comment.find(
+        "Vulkan MAPQ was physically executed") != std::string::npos);
+    REQUIRE(output.behavior_difference_comment.find(
+        "does not claim minimap2 MAPQ semantics") != std::string::npos);
+}
+
+TEST_CASE("Persisted GPU operation evidence pins the MAPQ schema-33 suffix",
+          "[component:benchmark][layer:contract][feature:reporting]") {
+    const auto keys = persisted_gpu_operation_keys();
+    REQUIRE(keys.size() == 33);
+    REQUIRE(keys[13] == "alignment_submission_count");
+    REQUIRE(keys[14] == "mapq_pipeline_receipt_count");
+    REQUIRE(keys[15] == "mapq_submission_count");
+    REQUIRE(keys[16] == "mapq_result_count");
+    REQUIRE(keys[17] == "mapq_published_count");
+    REQUIRE(keys[18] == "mapq_result_digest");
+    REQUIRE(keys[19] == "submission_count");
+
+    e2e_output hybrid{};
+    hybrid.persisted_gpu_operation_stats_schema_valid = 1;
+    hybrid.persisted_gpu_operation_stats_accepted = 0;
+    hybrid.persisted_gpu_operation_stats_complete = 1;
+    hybrid.persisted_gpu_operation_stats_saturated = 0;
+    hybrid.persisted_gpu_dropped_operation_count = 0;
+    hybrid.persisted_gpu_operation_count = 0;
+    hybrid.persisted_gpu_accepted_operation_count = 0;
+    hybrid.persisted_gpu_job_count = 0;
+    hybrid.persisted_gpu_accepted_job_count = 0;
+    REQUIRE(hybrid.has_exact_empty_persisted_gpu_operation_ledger());
+    REQUIRE_FALSE(
+        hybrid.has_accepted_legacy_persisted_gpu_operation_ledger(7));
+
+    SECTION("hybrid rejects malformed or nonempty legacy ledger state") {
+        auto malformed = hybrid;
+        malformed.persisted_gpu_operation_stats_schema_valid = 0;
+        REQUIRE_FALSE(
+            malformed.has_exact_empty_persisted_gpu_operation_ledger());
+        malformed = hybrid;
+        malformed.persisted_gpu_operation_stats_complete = 0;
+        REQUIRE_FALSE(
+            malformed.has_exact_empty_persisted_gpu_operation_ledger());
+        malformed = hybrid;
+        malformed.persisted_gpu_operation_stats_saturated = 1;
+        REQUIRE_FALSE(
+            malformed.has_exact_empty_persisted_gpu_operation_ledger());
+
+        auto leaked = hybrid;
+        leaked.persisted_gpu_operation_count = 1;
+        leaked.persisted_gpu_accepted_operation_count = 1;
+        REQUIRE_FALSE(
+            leaked.has_exact_empty_persisted_gpu_operation_ledger());
+        leaked = hybrid;
+        leaked.persisted_gpu_operation_stats_accepted = 1;
+        REQUIRE_FALSE(
+            leaked.has_exact_empty_persisted_gpu_operation_ledger());
+    }
+
+    SECTION("legacy all-GPU route retains its positive ledger contract") {
+        auto legacy = hybrid;
+        legacy.persisted_gpu_operation_stats_accepted = 1;
+        legacy.persisted_gpu_operation_count = 2;
+        legacy.persisted_gpu_accepted_operation_count = 2;
+        legacy.persisted_gpu_job_count = 7;
+        legacy.persisted_gpu_accepted_job_count = 7;
+        REQUIRE(
+            legacy.has_accepted_legacy_persisted_gpu_operation_ledger(7));
+        REQUIRE_FALSE(
+            legacy.has_accepted_legacy_persisted_gpu_operation_ledger(8));
+        REQUIRE_FALSE(
+            legacy.has_exact_empty_persisted_gpu_operation_ledger());
+    }
+}
+
+TEST_CASE("E2E logical query chunks preserve one canonical ordered query set",
+          "[component:benchmark][layer:contract][feature:reporting]") {
+    const auto exact = make_logical_query_chunks(1024, 128);
+    REQUIRE(exact.size() == 8);
+    for (std::size_t ordinal = 0; ordinal < exact.size(); ++ordinal) {
+        REQUIRE(exact[ordinal].begin == ordinal * 128);
+        REQUIRE(exact[ordinal].end == (ordinal + 1) * 128);
+    }
+
+    const auto tail = make_logical_query_chunks(10, 4);
+    REQUIRE(tail.size() == 3);
+    REQUIRE(tail[0].begin == 0);
+    REQUIRE(tail[0].end == 4);
+    REQUIRE(tail[1].begin == 4);
+    REQUIRE(tail[1].end == 8);
+    REQUIRE(tail[2].begin == 8);
+    REQUIRE(tail[2].end == 10);
+
+    REQUIRE_THROWS_AS(make_logical_query_chunks(0, 1), std::invalid_argument);
+    REQUIRE_THROWS_AS(make_logical_query_chunks(8, 0), std::invalid_argument);
+    REQUIRE_THROWS_AS(make_logical_query_chunks(8, 9), std::invalid_argument);
+}
+
 TEST_CASE("cold grouped-SoA stats require receipt-backed CRC counters",
           "[component:benchmark][layer:contract][feature:reporting]") {
     REQUIRE(cold_index_stats_keys().size() == 59);
@@ -949,4 +1482,42 @@ TEST_CASE("cold grouped-SoA stats require receipt-backed CRC counters",
     REQUIRE(std::ranges::find(
         cold_index_stats_keys(), "extent_crc_combine_rows")
         != cold_index_stats_keys().end());
+}
+
+TEST_CASE("E2E Python aggregation and append authority contracts",
+          "[component:benchmark][layer:contract]") {
+    const auto contract_dir = std::filesystem::path{BIOSEQ_E2E_DATA_DIR}
+        / "tests" / "contract";
+    const std::array<std::filesystem::path, 2> script_paths{
+        contract_dir / "test_algorithm_matrix_aggregation_authority.py",
+        contract_dir / "test_algorithm_matrix_q1024_packed_partition.py",
+    };
+    for (const auto& script_path : script_paths) {
+        CAPTURE(script_path.string());
+        REQUIRE(std::filesystem::is_regular_file(script_path));
+        std::string executable = "python3";
+        std::string no_bytecode = "-B";
+        std::string script = script_path.string();
+        std::array<char*, 4> arguments{
+            executable.data(), no_bytecode.data(), script.data(), nullptr};
+
+#if defined(__APPLE__)
+        char** environment = *_NSGetEnviron();
+#else
+        char** environment = environ;
+#endif
+
+        pid_t child = 0;
+        const int spawn_status = ::posix_spawnp(
+            &child, executable.c_str(), nullptr, nullptr, arguments.data(), environment);
+        REQUIRE(spawn_status == 0);
+        int child_status = 0;
+        pid_t waited = 0;
+        do {
+            waited = ::waitpid(child, &child_status, 0);
+        } while (waited < 0 && errno == EINTR);
+        REQUIRE(waited == child);
+        REQUIRE(WIFEXITED(child_status));
+        REQUIRE(WEXITSTATUS(child_status) == EXIT_SUCCESS);
+    }
 }

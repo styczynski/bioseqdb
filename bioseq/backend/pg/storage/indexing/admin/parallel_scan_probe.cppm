@@ -26,6 +26,7 @@ extern "C" {
 export module bioseq.postgres.storage.indexing.admin.parallel_scan_probe;
 
 import std;
+import bioseq.pipeline.runtime_contract;
 import bioseq.common.logging;
 import bioseq.postgres.storage.indexing.admin.diagnostic_support;
 import bioseq.postgres.storage.indexing.admin.index_sketch_backend_policy;
@@ -79,11 +80,15 @@ inspect_hash_major_minimizer_generation(Oid rel_oid,
         ready_minimizer_error_as_cpp(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
                                      "bioseq hash-major inspection query key exceeds BIGINT");
     }
-    if (bioseq::aligner::settings::minimizer::kmer_size != 15 ||
-        bioseq::aligner::settings::minimizer::window_size != 10) {
+    if (bioseq::aligner::settings::minimizer::kmer_size <= 0 ||
+        bioseq::aligner::settings::minimizer::window_size <= 0 ||
+        bioseq::aligner::settings::minimizer::kmer_size >
+            static_cast<int>((std::numeric_limits<std::uint16_t>::max)()) ||
+        bioseq::aligner::settings::minimizer::window_size >
+            static_cast<int>((std::numeric_limits<std::uint16_t>::max)())) {
         ready_minimizer_error_as_cpp(
             ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-            "bioseq hash-major inspection requires the registered k=15,w=10 profile");
+            "bioseq hash-major inspection cannot select the configured k/w profile");
     }
 
     const std::int16_t seq_attno = single_seq_attno_for_inspection(rel_oid);
@@ -135,11 +140,26 @@ inspect_hash_major_minimizer_generation(Oid rel_oid,
                                          "bioseq hash-major inspection identity name is too long");
         }
 
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_runtime(
+                static_cast<bioseq::simd::minimizer_algorithm>(static_cast<int>(
+                    bioseq::aligner::settings::minimizer::algorithm.get_value())),
+                inspected.source.locator.logical_length,
+                inspected.source.alphabet_code,
+                static_cast<std::uint8_t>(inspected.source.storage_unit_byte_width * 8u),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::kmer_size),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::window_size));
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq hash-major inspection algorithm identity is not READY");
+        }
+        const auto expected_backend =
+            resolve_index_sketch_backend(algorithm_identity->effective_algorithm);
         const auto expected_profile = bioseq::indexing::hash_major_minimizer_profile_for_backend(
-            resolve_index_sketch_backend_from_gucs(),
+            expected_backend,
+            *algorithm_identity,
             inspected.source.alphabet_code,
-            15u,
-            10u,
             inspected.source.locator.logical_length);
         if (!expected_profile || inspected.manifest.storage_profile != *expected_profile ||
             inspected.head.query_key != sequence_rowno ||
@@ -297,11 +317,15 @@ hash_major_minimizer_parallel_scan_probe_impl(Oid rel_oid,
             fmt::format(
                 "sequence_rowno={} requested_workers={}", sequence_rowno, requested_workers));
     }
-    if (bioseq::aligner::settings::minimizer::kmer_size != 15 ||
-        bioseq::aligner::settings::minimizer::window_size != 10) {
+    if (bioseq::aligner::settings::minimizer::kmer_size <= 0 ||
+        bioseq::aligner::settings::minimizer::window_size <= 0 ||
+        bioseq::aligner::settings::minimizer::kmer_size >
+            static_cast<int>((std::numeric_limits<std::uint16_t>::max)()) ||
+        bioseq::aligner::settings::minimizer::window_size >
+            static_cast<int>((std::numeric_limits<std::uint16_t>::max)())) {
         ready_minimizer_error_as_cpp(
             ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-            "bioseq hash-major parallel scan probe requires the registered k=15,w=10 profile");
+            "bioseq hash-major parallel scan probe cannot select the configured k/w profile");
     }
 
     const std::int16_t seq_attno = single_seq_attno_for_inspection(rel_oid);
@@ -339,6 +363,31 @@ hash_major_minimizer_parallel_scan_probe_impl(Oid rel_oid,
         minimizer_generation_catalog_source_authorization authorization =
             authorize_minimizer_generation_catalog_source_pg(
                 identity, sequence_rowno, registered_snapshot);
+        const auto source = authorization.source_for_diagnostics();
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_runtime(
+                static_cast<bioseq::simd::minimizer_algorithm>(static_cast<int>(
+                    bioseq::aligner::settings::minimizer::algorithm.get_value())),
+                source.locator.logical_length,
+                source.alphabet_code,
+                static_cast<std::uint8_t>(source.storage_unit_byte_width * 8u),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::kmer_size),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::window_size));
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq hash-major parallel scan probe algorithm identity is not READY");
+        }
+        const auto expected_profile = bioseq::indexing::hash_major_minimizer_profile_for_backend(
+            resolve_index_sketch_backend(algorithm_identity->effective_algorithm),
+            *algorithm_identity,
+            source.alphabet_code,
+            source.locator.logical_length);
+        if (!expected_profile) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq hash-major parallel scan probe has no generated storage profile");
+        }
         hash_major_minimizer_parallel_scan_stats result =
             probe_ready_hash_major_minimizer_parallel_scan_pg(identity,
                                                               sequence_rowno,

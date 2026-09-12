@@ -417,9 +417,15 @@ export {
                 if (list_length(tag) == 4 &&
                     intVal(list_nth(tag, 0)) == k_bioseq_locator_passthrough_magic &&
                     intVal(list_nth(tag, 1)) == k_bioseq_batch_join_plan_version) {
+                    /* Upper owners may append identity/helper columns after the
+                     * locator placeholder. Its recorded ordinal remains stable. */
+                    const int rowno_resno = intVal(list_nth(tag, 3));
                     TargetEntry* rowno_entry =
-                        reinterpret_cast<TargetEntry*>(llast(cscan->scan.plan.targetlist));
-                    if (rowno_entry == nullptr ||
+                        rowno_resno > 0 && rowno_resno <= list_length(cscan->scan.plan.targetlist)
+                            ? reinterpret_cast<TargetEntry*>(
+                                  list_nth(cscan->scan.plan.targetlist, rowno_resno - 1))
+                            : nullptr;
+                    if (rowno_entry == nullptr || rowno_entry->resno != rowno_resno ||
                         exprType(reinterpret_cast<Node*>(rowno_entry->expr)) != INT8OID) {
                         ereport(
                             ERROR,

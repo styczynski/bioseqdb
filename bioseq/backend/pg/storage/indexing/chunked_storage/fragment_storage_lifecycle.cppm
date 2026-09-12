@@ -111,6 +111,7 @@ void fragment_index_storage::steal_(fragment_index_storage&& o) noexcept {
     sorted_runs_.swap(o.sorted_runs_);
     segment_sorted_runs_.swap(o.segment_sorted_runs_);
     segment_sorted_runs_metadata_permit_ = std::move(o.segment_sorted_runs_metadata_permit_);
+    active_segment_write_buffer_owner_ = o.active_segment_write_buffer_owner_;
     segment_spill_binding_ = o.segment_spill_binding_;
     segment_spill_pg_poisoned_ = o.segment_spill_pg_poisoned_;
 
@@ -143,6 +144,7 @@ void fragment_index_storage::steal_(fragment_index_storage&& o) noexcept {
     o.scratch_units_ = 0;
     o.run_buffer_override_bytes_ = 0;
     o.chunk_payload_bytes_.clear();
+    o.active_segment_write_buffer_owner_.reset();
     o.segment_spill_binding_ = {};
     o.segment_spill_pg_poisoned_ = true;
     o.sorted_runs_.reset();

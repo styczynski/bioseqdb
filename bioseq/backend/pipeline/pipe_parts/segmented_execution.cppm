@@ -82,8 +82,15 @@ export {
     [[nodiscard]] match_result_collection
     minimap_port_segmented_impl(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                                 bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                                const minimap2_parameters& params = minimap2_parameters{},
+                                pipe::statement_execution_plan_owner execution_plan,
                                 p_fragment_index_storage* fragment_index_out = nullptr) {
+        if (!execution_plan) {
+            throw std::invalid_argument("segmented execution requires its statement plan");
+        }
+        const auto& params = execution_plan->frozen_parameters;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        const auto benchmark_e2e_operation = current_benchmark_e2e_operation_binding();
+#endif
         using p_minimizer = minimap_sketch_data;
         static const auto* _desc =
             bioseq::instrumentation::register_static_region("minimap_port_segmented");
@@ -129,12 +136,15 @@ export {
         //     `collect_seed_hits` matches identically. The helper sketches on the GPU
         //     when vulkan_minimap_integer is selected (byte-identical
         //     minimizers) and otherwise uses the scalar CPU sketch.
-        auto query_sketch = sketch_query_for_index_selection<p_minimizer>(query_seq, params, w, k);
-        const pipe::minimizer_batch_view<p_minimizer> query_minimizers{
-            .host = std::span<const p_minimizer>{query_sketch.minimizers.data(),
-                                                 query_sketch.minimizers.size()},
-            .device = query_sketch.device,
-        };
+        using query_sketch_type = decltype(
+            sketch_query_for_index_selection<p_minimizer>(query_seq, params, w, k));
+        const auto query_owner = std::make_shared<query_sketch_type>(
+            sketch_query_for_index_selection<p_minimizer>(query_seq, params, w, k));
+        const auto& query_sketch = *query_owner;
+        const std::shared_ptr<const std::vector<p_minimizer>> host_owner{
+            query_owner, &query_owner->minimizers};
+        const auto query_minimizers = pipe::minimizer_batch_view<p_minimizer>::from_shared_host(
+            host_owner, 0u, host_owner->size(), query_sketch.device);
         const bool exact_simd_segmented_route =
             target_sketch_backend == minimizer_sketch_backend::exact_simd;
         const bool bounded_nthash_segmented_route =
@@ -185,6 +195,13 @@ export {
             };
         /// Attach the once-per-query sketch stats to the merged segment result.
         auto finalize_segmented_stats = [&query_sketch,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                         execution_plan,
+                                     &params,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                     benchmark_e2e_operation,
+#endif
+#endif
                                          exact_simd_segmented_route,
                                          bounded_nthash_segmented_route,
                                          scalar_segmented_route](
@@ -247,6 +264,10 @@ export {
                     "scalar/Vulkan segmented route emitted CPU simd sketch stats");
                 std::abort();
             }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            collection.record_completed_minimizer_algorithm_identity(
+                scalar_segmented_route ? minimizer_algorithm::scalar : params.minimizer_algorithm);
+#endif
             return collection;
         };
         boost::unordered_flat_set<std::uint64_t> query_kmer_filter;
@@ -396,10 +417,14 @@ export {
                                      k,
                                      &target_seq,
                                      &query_seq,
-                                     &query_minimizers,
+                                     query_minimizers,
                                      &query_kmer_filter,
                                      &query_gate,
+                                     execution_plan,
                                      &params,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                     benchmark_e2e_operation,
+#endif
                                      fragment_index_out,
                                      target_sketch_backend,
                                      segmented_gpu_index_cache_ptr,
@@ -408,7 +433,7 @@ export {
                                      &record_target_range_stats,
                                      &finalize_segmented_stats]() -> match_result_collection {
             match_result_collection merged_collection;
-            std::vector<match_result>& merged = merged_collection.results;
+            auto& merged = merged_collection.results;
             basic_sketch_collector<p_minimizer> seg_collector;
             minimizer_hashmap_fragment_index seg_index;
             std::vector<filtered_minimizer_pair> filtered_pairs;
@@ -477,9 +502,16 @@ export {
                                 target_seq,
                                 query_minimizers,
                                 seg_index,
-                                params,
+                                execution_plan,
                                 segmented_gpu_index_cache_ptr,
-                                segment_gpu_identity(segment_index));
+                                segment_gpu_identity(segment_index)
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                , benchmark_e2e_operation
+#endif
+                               );
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                        merged_collection.prepare_result_append(seg_res.results.size());
+#endif
                         merged_collection.combine_execution_stats(seg_res);
                         for (auto& result : seg_res.results) {
                             if (result.target_start >= range.core_lo_bp &&
@@ -526,9 +558,16 @@ export {
                                                                     target_seq,
                                                                     query_minimizers,
                                                                     seg_index,
-                                                                    params,
+                                                                    execution_plan,
                                                                     segmented_gpu_index_cache_ptr,
-                                                                    gpu_identity);
+                                                                    gpu_identity
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                , benchmark_e2e_operation
+#endif
+                               );
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    merged_collection.prepare_result_append(seg_res.results.size());
+#endif
                     merged_collection.combine_execution_stats(seg_res);
                     seg_result_count = seg_res.results.size();
                     for (auto& result : seg_res.results) {
@@ -565,9 +604,16 @@ export {
                                                                     target_seq,
                                                                     query_minimizers,
                                                                     seg_index,
-                                                                    params,
+                                                                    execution_plan,
                                                                     segmented_gpu_index_cache_ptr,
-                                                                    gpu_identity);
+                                                                    gpu_identity
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                , benchmark_e2e_operation
+#endif
+                               );
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    merged_collection.prepare_result_append(seg_res.results.size());
+#endif
                     merged_collection.combine_execution_stats(seg_res);
                     seg_result_count = seg_res.results.size();
                     for (auto& result : seg_res.results) {
@@ -598,13 +644,17 @@ export {
                                                     query_len,
                                                     lpu,
                                                     target_sketch_backend,
-                                                    &query_minimizers,
+                                                    query_minimizers,
                                                     &query_gate,
                                                     &target_seq,
                                                     w,
                                                     k,
                                                     &segment_gpu_identity,
-                                                    &params]() -> match_result_collection {
+                                                    execution_plan, &params
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                                    , benchmark_e2e_operation
+#endif
+                                                   ]() -> match_result_collection {
             auto& runtime = bioseq::gpu::vulkan::runtime::instance();
             if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
                 pipe::throw_vulkan_declined("vulkan_segment resident coordinate batch");
@@ -723,8 +773,12 @@ export {
                 cp.min_seed_count,
                 16u);
 
-            std::vector<match_result> merged;
-            merged.reserve(coords.size());
+            match_result_collection merged_collection;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            merged_collection.prepare_result_append(coords.size());
+#else
+            merged_collection.results.reserve(coords.size());
+#endif
             for (std::size_t job_index = 0; job_index < coords.size(); ++job_index) {
                 const auto& coord = coords[job_index];
                 if (coord.is_valid == 0u) {
@@ -734,11 +788,11 @@ export {
                     ranges[job_segment_indices[job_index]];
                 if (coord.target_start >= range.core_lo_bp &&
                     coord.target_start < range.core_hi_bp) {
-                    merged.push_back(
+                    merged_collection.results.push_back(
                         pipe::gpu_coordinate_to_match_result(coord, query_len, target_len));
                 }
             }
-            return match_result_collection{std::move(merged)};
+            return merged_collection;
         };
 
         if (target_sketch_backend == minimizer_sketch_backend::vulkan_segment &&
@@ -764,6 +818,7 @@ export {
             std::size_t estimated_segments = 0;
             std::size_t estimated_waves = 0;
             std::uint64_t peak_per_segment = 0;
+            std::uint64_t packed_range_peak_per_segment = 0;
             bioseq::parallelism::memory_permit permit;
             bool is_admitted = false;
         };
@@ -782,11 +837,27 @@ export {
             return std::min<std::uint64_t>(collected, static_cast<std::uint64_t>(target_len));
         };
 
-        /// Estimate the peak host bytes for one admitted segment core.
-        auto peak_for_segment_core_bp = [&collected_bp_upper_bound](sequence_size_t core_bp) {
-            return bioseq::parallelism::minimizer_index_peak_bytes_for_bp(
-                       collected_bp_upper_bound(core_bp)) +
-                   context_reserve;
+        /// Bound the nested packed-range owner required by bounded ntHash.
+        auto packed_range_peak_for_segment_core_bp =
+            [bounded_nthash_segmented_route,
+             &collected_bp_upper_bound](sequence_size_t core_bp) -> std::uint64_t {
+            if (!bounded_nthash_segmented_route) {
+                return 0u;
+            }
+            return bioseq::storage::packed_sequence_admission_bytes<p_alphabet>(
+                collected_bp_upper_bound(core_bp), sizeof(std::uint32_t));
+        };
+
+        /// Estimate the full peak for one segment, including the nested packed range.
+        auto peak_for_segment_core_bp = [&collected_bp_upper_bound,
+                                         &packed_range_peak_for_segment_core_bp](
+                                            sequence_size_t core_bp) {
+            const std::uint64_t untracked_peak = bioseq::common::saturating_add(
+                bioseq::parallelism::minimizer_index_peak_bytes_for_bp(
+                    collected_bp_upper_bound(core_bp)),
+                context_reserve);
+            return bioseq::common::saturating_add(untracked_peak,
+                                                  packed_range_peak_for_segment_core_bp(core_bp));
         };
 
         struct segment_wave_candidate {
@@ -796,6 +867,7 @@ export {
             std::size_t estimated_segments = 0;
             std::size_t estimated_waves = 0;
             std::uint64_t peak_per_segment = 0;
+            std::uint64_t packed_range_peak_per_segment = 0;
             std::uint64_t reserve_bytes = 0;
             std::uint64_t estimated_work_bp = 0;
         };
@@ -804,6 +876,7 @@ export {
         auto try_admit_segment_geometry = [&pool,
                                            target_len,
                                            &collected_bp_upper_bound,
+                                           &packed_range_peak_for_segment_core_bp,
                                            &peak_for_segment_core_bp]() -> segment_wave_admission {
             auto& admission = bioseq::parallelism::memory_admission_controller::instance();
             const unsigned max_fanout = pool.maximum_concurrency();
@@ -816,18 +889,28 @@ export {
             candidates.reserve(static_cast<std::size_t>(max_fanout));
 
             for (unsigned fanout = max_fanout; fanout > 1; --fanout) {
-                const unsigned geometry_divisor = fanout;
-                const sequence_size_t bp = pipe::segment_bp_from_budget_divided(geometry_divisor);
-                const std::uint64_t collected_bp = collected_bp_upper_bound(bp);
-                const std::size_t estimated_segments = static_cast<std::size_t>(
-                    (target_len + bp - 1) / std::max<sequence_size_t>(bp, 1));
-                const std::uint64_t peak = peak_for_segment_core_bp(bp);
-
-                const std::uint64_t reserve_bytes =
-                    bioseq::common::saturating_mul(static_cast<std::uint64_t>(fanout), peak);
+                unsigned geometry_divisor = fanout;
+                sequence_size_t bp = 0u;
+                std::uint64_t peak = 0u;
+                std::uint64_t reserve_bytes = 0u;
+                for (;;) {
+                    bp = pipe::segment_bp_from_budget_divided(geometry_divisor);
+                    peak = peak_for_segment_core_bp(bp);
+                    reserve_bytes =
+                        bioseq::common::saturating_mul(static_cast<std::uint64_t>(fanout), peak);
+                    if (reserve_bytes <= allocatable || bp == pipe::k_segment_min_bp ||
+                        geometry_divisor == (std::numeric_limits<unsigned>::max)()) {
+                        break;
+                    }
+                    ++geometry_divisor;
+                }
                 if (reserve_bytes > allocatable) {
                     continue;
                 }
+                const std::uint64_t collected_bp = collected_bp_upper_bound(bp);
+                const std::size_t estimated_segments = static_cast<std::size_t>(
+                    (target_len + bp - 1) / std::max<sequence_size_t>(bp, 1));
+                const std::uint64_t packed_range_peak = packed_range_peak_for_segment_core_bp(bp);
 
                 const std::size_t estimated_waves = (estimated_segments + fanout - 1) / fanout;
                 const std::uint64_t estimated_work = bioseq::common::saturating_mul(
@@ -838,6 +921,7 @@ export {
                                                             estimated_segments,
                                                             estimated_waves,
                                                             peak,
+                                                            packed_range_peak,
                                                             reserve_bytes,
                                                             estimated_work});
             }
@@ -865,6 +949,7 @@ export {
                                                   candidate.estimated_segments,
                                                   candidate.estimated_waves,
                                                   candidate.peak_per_segment,
+                                                  candidate.packed_range_peak_per_segment,
                                                   std::move(*permit),
                                                   true};
                 }
@@ -883,6 +968,7 @@ export {
                 "[minimap_port_segmented] admitted parallel geometry fanout={} "
                 "divisor={} segment_bp={} estimated_segments={} "
                 "estimated_waves={} peak_per_segment={}MB reserve={}MB "
+                "packed_range_peak_per_segment={}MB "
                 "| footprint={}MB avail={}MB",
                 first_wave.fanout,
                 first_wave.geometry_divisor,
@@ -891,18 +977,52 @@ export {
                 first_wave.estimated_waves,
                 first_wave.peak_per_segment >> 20,
                 first_wave.permit.bytes() >> 20,
+                first_wave.packed_range_peak_per_segment >> 20,
                 bioseq::common::memory::process_footprint_bytes() >> 20,
                 bioseq::common::memory::system_available_bytes() >> 20);
         });
 
         const unsigned geometry_divisor = first_wave.geometry_divisor;
         auto ranges = pipe::segment_unit_ranges(target_len, query_len, lpu, geometry_divisor);
-        std::vector<match_result_collection> seg_out(ranges.size());
+        match_result_collection_vector seg_out;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        seg_out.set_logical_bounds(ranges.size(), ranges.size());
+#endif
+        seg_out.resize(ranges.size());
         bioseq::parallelism::task_parallel_scope scope(
             bioseq::parallelism::task_parallel_region::segment_recompute);
         if (!scope.is_acquired()) {
+            first_wave.permit.release();
             return run_serial_segmented();
         }
+
+        /// Transfer exact nested packed-range admission out of a full wave permit.
+        auto split_packed_range_permits = [&ranges,
+                                           target_len,
+                                           lpu,
+                                           bounded_nthash_segmented_route](
+                                              std::size_t wave_lo,
+                                              std::size_t wave_count,
+                                              bioseq::parallelism::memory_permit& wave_permit) {
+            std::vector<bioseq::parallelism::memory_permit> permits(wave_count);
+            if (!bounded_nthash_segmented_route) {
+                return permits;
+            }
+            for (std::size_t rel = 0; rel < wave_count; ++rel) {
+                const auto [segment_lo_bp, segment_hi_bp] =
+                    pipe::validated_segment_bp_bounds(ranges[wave_lo + rel], lpu, target_len);
+                const std::uint64_t exact_bytes =
+                    bioseq::storage::packed_sequence_admission_bytes<p_alphabet>(
+                        segment_hi_bp - segment_lo_bp, sizeof(std::uint32_t));
+                auto permit = wave_permit.split_off(exact_bytes);
+                if (!permit) {
+                    throw std::logic_error(
+                        "segmented wave packed-range admission is smaller than its exact ranges");
+                }
+                permits[rel] = std::move(permit);
+            }
+            return permits;
+        };
 
         if constexpr (!std::is_same_v<p_fragment_index_storage, std::nullptr_t>) {
             if (fragment_index_out != nullptr) {
@@ -910,14 +1030,18 @@ export {
                 fragment_persist_accumulator<p_fragment_index_storage, p_minimizer> acc{
                     *fragment_index_out, target_len, frag_bp};
                 match_result_collection merged_collection;
-                std::vector<match_result>& merged = merged_collection.results;
+                auto& merged = merged_collection.results;
 
                 /// Materialize and persist one fragment-producing segment serially.
                 auto process_segment_serial = [&ranges,
                                                &target_seq,
                                                &query_seq,
-                                               &query_minimizers,
-                                               &params,
+                                               query_minimizers,
+                                               execution_plan,
+                                     &params,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                     benchmark_e2e_operation,
+#endif
                                                &acc,
                                                &merged_collection,
                                                &merged,
@@ -967,9 +1091,16 @@ export {
                         target_seq,
                         query_minimizers,
                         index,
-                        params,
+                        execution_plan,
                         segmented_gpu_index_cache_ptr,
-                        segment_gpu_identity(segment_index));
+                        segment_gpu_identity(segment_index)
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                , benchmark_e2e_operation
+#endif
+                               );
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    merged_collection.prepare_result_append(seg_res.results.size());
+#endif
                     merged_collection.combine_execution_stats(seg_res);
                     for (auto& result : seg_res.results) {
                         if (result.target_start >= range.core_lo_bp &&
@@ -985,6 +1116,8 @@ export {
                     bioseq::parallelism::memory_permit wave_permit;
                     if (wave_lo == 0) {
                         wave_permit = std::move(first_wave.permit);
+                        wave_permit.shrink_to(bioseq::common::saturating_mul(
+                            static_cast<std::uint64_t>(wave_count), first_wave.peak_per_segment));
                     } else if (auto permit =
                                    bioseq::parallelism::memory_admission_controller::instance()
                                        .try_reserve(bioseq::common::saturating_mul(
@@ -1003,7 +1136,13 @@ export {
 
                     const std::size_t current_wave_lo = wave_lo;
                     const std::size_t wave_hi = wave_lo + wave_count;
-                    std::vector<match_result_collection> wave_seg_out(wave_count);
+                    auto packed_range_permits =
+                        split_packed_range_permits(wave_lo, wave_count, wave_permit);
+                    match_result_collection_vector wave_seg_out;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    wave_seg_out.set_logical_bounds(wave_count, wave_count);
+#endif
+                    wave_seg_out.resize(wave_count);
                     std::vector<std::vector<segment_fragment_emission<p_minimizer>>> wave_frag_out(
                         wave_count);
                     pool.parallel_for_with_context_tracked(
@@ -1014,10 +1153,15 @@ export {
                             [&ranges,
                              &wave_seg_out,
                              &wave_frag_out,
+                             &packed_range_permits,
                              &target_seq,
                              &query_seq,
-                             &query_minimizers,
-                             &params,
+                             query_minimizers,
+                             execution_plan,
+                                     &params,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                     benchmark_e2e_operation,
+#endif
                              current_wave_lo,
                              target_len,
                              frag_bp,
@@ -1051,7 +1195,9 @@ export {
                                             k,
                                             target_sketch_backend,
                                             pipe::exact_simd_range_route::require_continuation,
-                                            params.highway_kernels);
+                                            params.highway_kernels,
+                                            pipe::exact_simd_input_storage::preserve_native_width,
+                                            &packed_range_permits[rel]);
                                     const std::vector<p_minimizer>& minimizers =
                                         collector.extract_sketches_data();
                                     wave_frag_out[rel] = collect_fragment_emissions_for_segment(
@@ -1068,9 +1214,13 @@ export {
                                         target_seq,
                                         query_minimizers,
                                         index,
-                                        params,
+                                        execution_plan,
                                         segmented_gpu_index_cache_ptr,
-                                        segment_gpu_identity(segment_index));
+                                        segment_gpu_identity(segment_index)
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                , benchmark_e2e_operation
+#endif
+                               );
                                     record_target_range_stats(wave_seg_out[rel], range_stats);
                                 }
                             }},
@@ -1082,6 +1232,10 @@ export {
                         acc.ingest(std::span<const segment_fragment_emission<p_minimizer>>(
                             wave_frag_out[rel].data(), wave_frag_out[rel].size()));
                         acc.flush_ready(range.core_hi_bp);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                        merged_collection.prepare_result_append(
+                            wave_seg_out[rel].results.size());
+#endif
                         merged_collection.combine_execution_stats(wave_seg_out[rel]);
                         for (auto& result : wave_seg_out[rel].results) {
                             if (result.target_start >= range.core_lo_bp &&
@@ -1106,11 +1260,15 @@ export {
                                        &seg_out,
                                        &target_seq,
                                        &query_seq,
-                                       &query_minimizers,
+                                       query_minimizers,
                                        &segment_minimizer_counts,
                                        &segment_filtered_counts,
                                        &build_query_filtered_segment_index,
-                                       &params,
+                                       execution_plan,
+                                     &params,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                     benchmark_e2e_operation,
+#endif
                                        target_len,
                                        w,
                                        k,
@@ -1148,9 +1306,13 @@ export {
                                                             target_seq,
                                                             query_minimizers,
                                                             index,
-                                                            params,
+                                                            execution_plan,
                                                             segmented_gpu_index_cache_ptr,
-                                                            segment_gpu_identity(segment_index));
+                                                            segment_gpu_identity(segment_index)
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                , benchmark_e2e_operation
+#endif
+                               );
             record_target_range_stats(seg_out[segment_index], range_stats);
             bioseq_log_lazy<logging_level::debug>([&range, &seg_out, segment_index] {
                 bioseq_log_progress<logging_level::debug>(
@@ -1216,6 +1378,9 @@ export {
             }
 
             const std::size_t wave_hi = wave_lo + wave_count;
+            const std::size_t current_wave_lo = wave_lo;
+            auto packed_range_permits =
+                split_packed_range_permits(wave_lo, wave_count, wave_permit);
             pool.parallel_for_with_context_tracked(
                 wave_lo,
                 wave_hi,
@@ -1224,11 +1389,17 @@ export {
                                                  &seg_out,
                                                  &target_seq,
                                                  &query_seq,
-                                                 &query_minimizers,
+                                                 query_minimizers,
                                                  &segment_minimizer_counts,
                                                  &segment_filtered_counts,
+                                                 &packed_range_permits,
                                                  &build_query_filtered_segment_index,
-                                                 &params,
+                                                 execution_plan,
+                                     &params,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                     benchmark_e2e_operation,
+#endif
+                                                 current_wave_lo,
                                                  target_len,
                                                  w,
                                                  k,
@@ -1257,7 +1428,9 @@ export {
                             k,
                             target_sketch_backend,
                             pipe::exact_simd_range_route::require_continuation,
-                            params.highway_kernels);
+                            params.highway_kernels,
+                            pipe::exact_simd_input_storage::preserve_native_width,
+                            &packed_range_permits[segment_index - current_wave_lo]);
                         const std::vector<p_minimizer>& minimizers =
                             collector.extract_sketches_data();
                         segment_minimizer_counts[segment_index] = minimizers.size();
@@ -1271,9 +1444,13 @@ export {
                             target_seq,
                             query_minimizers,
                             index,
-                            params,
+                            execution_plan,
                             segmented_gpu_index_cache_ptr,
-                            segment_gpu_identity(segment_index));
+                            segment_gpu_identity(segment_index)
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                , benchmark_e2e_operation
+#endif
+                               );
                         record_target_range_stats(seg_out[segment_index], range_stats);
                     }
                 }},
@@ -1301,9 +1478,12 @@ export {
             });
 
         match_result_collection merged_collection;
-        std::vector<match_result>& merged = merged_collection.results;
+        auto& merged = merged_collection.results;
         for (std::size_t segment_index = 0; segment_index < ranges.size(); ++segment_index) {
             const ::bioseq::indexing::segment_unit_range& range = ranges[segment_index];
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            merged_collection.prepare_result_append(seg_out[segment_index].results.size());
+#endif
             merged_collection.combine_execution_stats(seg_out[segment_index]);
             for (auto& result : seg_out[segment_index].results) {
                 if (result.target_start >= range.core_lo_bp &&

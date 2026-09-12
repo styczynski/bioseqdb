@@ -14,6 +14,7 @@ export module bioseq.postgres.table:custom_scan_scan_runtime_state_contracts;
 
 import bioseq.indexing.type;
 import bioseq.pipeline.minimap_parameters_contract;
+import bioseq.pipeline.pipe;
 import bioseq.pipeline.runtime_contract;
 import bioseq.postgres.scheduler.dispatch_buffer.runtime_contract;
 import bioseq.postgres.storage.scanner.source_provider_contract;
@@ -29,19 +30,16 @@ export {
     /**
      * @brief Retains the exact alignment policy and pipeline description used by one scan.
      *
-     * Stores the plan-level minimap2_parameters and feature flags.
-     * Stored here (rather than inside buffer) so BioseqColumnScan_ExplainCustomScan
-     * can print the *exact* parameters that were fed to the batch processor —
-     * including any aligner_options() overrides — without a second plan walk.
-     * The minimap2_parameters struct lives in bioseq::simd::active_target.
+     * Shares the executor's immutable plan with the dispatch buffer. EXPLAIN
+     * reads that same control block, including all aligner_options overrides;
+     * it neither copies parameters nor takes a second executor snapshot.
      */
     struct per_scan_aligner_state {
-        bioseq::simd::minimap2_parameters params{};
+        bioseq::simd::pipe::statement_execution_plan_owner execution_plan{};
         scan_feature_flags features{};
         bioseq::indexing::index_read_requirement index_read_requirement =
             bioseq::indexing::index_read_requirement::allow;
         bool read_sequence_index = false;
-        bool params_captured = false;
 
         /*
          * Structured pipeline description captured at BeginCustomScan via

@@ -118,6 +118,17 @@ minimizer_position_segments_for_bp_range(const minimizer_generation_manifest& ma
     crc.update_little_endian(manifest.gpu_abi_revision);
     crc.update_little_endian(static_cast<std::uint8_t>(manifest.producer_backend_id));
     crc.update_little_endian(manifest.producer_identity_revision);
+    crc.update_little_endian(
+        static_cast<std::uint8_t>(manifest.algorithm_identity.requested_algorithm));
+    crc.update_little_endian(
+        static_cast<std::uint8_t>(manifest.algorithm_identity.effective_algorithm));
+    crc.update_little_endian(
+        static_cast<std::uint16_t>(manifest.algorithm_identity.physical_record_id));
+    crc.update_little_endian(
+        static_cast<std::uint16_t>(manifest.algorithm_identity.highway_owner_id));
+    crc.update_little_endian(manifest.algorithm_identity.record_position_log2);
+    crc.update_little_endian(manifest.algorithm_identity.physical_kmer_size);
+    crc.update_little_endian(manifest.algorithm_identity.payload_layout_abi_revision);
     // Named schemes extend the checksum with their frozen wire
     // identity so otherwise identical indexes cannot cross scheme boundaries.
     if (manifest.minimizer_scheme_id != k_minimap_scheme_id ||
@@ -148,13 +159,24 @@ validate_minimizer_generation_storage_contract(
         return std::unexpected(*error);
     }
     const auto manifest_profile = derive_grouped_soa_minimizer_profile(manifest);
-    const auto expected_profile = manifest_profile;
     const minimizer_producer_identity expected_producer_backend{
         .id = expected.producer_backend_id,
         .revision = expected.producer_identity_revision,
     };
+    const minimizer_scheme_identity expected_scheme{
+        .id = expected.minimizer_scheme_id,
+        .revision = expected.minimizer_scheme_revision,
+    };
+    const auto expected_profile = derive_grouped_soa_minimizer_profile(
+        expected_scheme,
+        expected.alphabet_code,
+        expected.kmer_size,
+        manifest.position_segment_span_bp == 0u ? 1u : manifest.position_segment_span_bp,
+        expected.max_occ_cap.value_or((std::numeric_limits<std::uint64_t>::max)()));
     if (!manifest_profile || !expected_profile ||
         !is_supported_minimizer_producer_backend_identity(expected_producer_backend) ||
+        !is_valid_minimizer_generation_algorithm_identity(expected.algorithm_identity,
+                                                          expected_producer_backend) ||
         minimizer_scheme_identity_for_producer_backend(expected_producer_backend) !=
             expected_profile->minimizer_scheme ||
         *manifest_profile != *expected_profile ||
@@ -168,6 +190,7 @@ validate_minimizer_generation_storage_contract(
         manifest.minimizer_scheme_revision != expected.minimizer_scheme_revision ||
         manifest.producer_backend_id != expected.producer_backend_id ||
         manifest.producer_identity_revision != expected.producer_identity_revision ||
+        manifest.algorithm_identity != expected.algorithm_identity ||
         !expected.max_occ_cap || *expected.max_occ_cap != manifest_profile->max_occ_cap) {
         return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }

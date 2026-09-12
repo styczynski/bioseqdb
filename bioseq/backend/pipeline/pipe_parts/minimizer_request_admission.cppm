@@ -102,6 +102,10 @@ export {
     /// `bioseq.chaining.scalar`.
     template <> struct algorithm_traits<::bioseq::simd::chaining_algorithm::scalar_minimap2> {
         struct kernel_type {
+            [[nodiscard]] static constexpr auto storage_requirements(
+                std::size_t anchor_count, const chaining_parameters& params) noexcept {
+                return ::bioseq::chaining::derive_scalar_chaining_storage_plan(anchor_count, params);
+            }
             static constexpr bool emits_scalar_chaining_execution_stats = true;
             static constexpr bool emits_simd_chaining_execution_stats = false;
             static constexpr bool emits_partial_vulkan_execution_stats = false;
@@ -139,6 +143,10 @@ export {
     /// the selected fixed-target chaining table.
     template <> struct algorithm_traits<::bioseq::simd::chaining_algorithm::simd_minimap2> {
         struct kernel_type {
+            [[nodiscard]] static constexpr auto storage_requirements(
+                std::size_t anchor_count, const chaining_parameters& params) noexcept {
+                return ::bioseq::chaining::derive_simd_chaining_storage_plan(anchor_count, params);
+            }
             static constexpr bool emits_scalar_chaining_execution_stats = false;
             static constexpr bool emits_simd_chaining_execution_stats = true;
             static constexpr bool emits_partial_vulkan_execution_stats = false;
@@ -190,6 +198,10 @@ export {
     /// `bioseq.chaining.rmq`.
     template <> struct algorithm_traits<::bioseq::simd::chaining_algorithm::range_minimum_query> {
         struct kernel_type {
+            [[nodiscard]] static constexpr auto storage_requirements(
+                std::size_t anchor_count, const chaining_parameters& params) noexcept {
+                return ::bioseq::chaining::derive_rmq_chaining_storage_plan(anchor_count, params);
+            }
             static constexpr bool emits_scalar_chaining_execution_stats = false;
             static constexpr bool emits_simd_chaining_execution_stats = false;
             static constexpr bool emits_partial_vulkan_execution_stats = false;
@@ -233,9 +245,18 @@ export {
             call(std::span<const anchor> anchors,
                  const chaining_parameters& params,
                  arena_slab<chain>& chains_out,
-                 arena_slab<anchor>& reordered_anchors_out) {
+                 arena_slab<anchor>& reordered_anchors_out,
+                 ::bioseq::parallelism::operation_memory_retention* attempt_retention = nullptr
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                 , ::bioseq::gpu::vulkan::runtime_pipeline_operation_token* completed_operation = nullptr
+#endif
+                 ) {
                 return ::bioseq::chaining::chain_anchors_vulkan(
-                    anchors, params, chains_out, reordered_anchors_out);
+                    anchors, params, chains_out, reordered_anchors_out, attempt_retention
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    , completed_operation
+#endif
+                    );
             }
             [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
                 return ::bioseq::simd::chaining_algorithm_name(

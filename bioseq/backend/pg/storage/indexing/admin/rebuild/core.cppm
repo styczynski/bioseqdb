@@ -24,6 +24,7 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <fmt/format.h>
 #include <limits>
 #include <optional>
 #include <span>
@@ -34,6 +35,7 @@ extern "C" {
 
 export module bioseq.postgres.storage.indexing.admin:rebuild_core;
 import bioseq.common.logging;
+import bioseq.pipeline.runtime_contract;
 import bioseq.postgres.support;
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
@@ -59,6 +61,7 @@ import bioseq.postgres.storage.indexing.index_relation_identity;
 import bioseq.postgres.column.table_access;
 import bioseq.postgres.storage.metadata; // column_table_row_count
 import bioseq.postgres.storage.indexing.admin.index_build_runtime;
+import bioseq.postgres.storage.indexing.admin.diagnostic_support;
 import bioseq.postgres.storage.indexing.admin.index_sketch_backend_policy;
 import bioseq.postgres.storage.indexing.admin.minimizer_kernel_selection;
 import bioseq.postgres.storage.indexing.admin.scheme_untagged_fragment_guard;
@@ -424,16 +427,72 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     }
     const relation_identity rid = index_relation_identity(rel_oid);
     const sequence_index_layout layout = registered_index_layout<p_supported_indexes>(name);
-    const auto backend = resolve_index_sketch_backend_from_gucs();
+    const auto frozen_minimizer_algorithm =
+        static_cast<bioseq::simd::minimizer_algorithm>(
+            static_cast<int>(bioseq::aligner::settings::minimizer::algorithm.get_value()));
+    const auto backend = resolve_index_sketch_backend(frozen_minimizer_algorithm);
     const bool is_minimizer_index =
         name == bioseq::indexing::k_minimizers_per_fragment_index_name ||
         name == bioseq::indexing::k_minimizers_per_sequence_index_name;
+    const bool use_grouped_soa_generation =
+        is_minimizer_index && bioseq::aligner::settings::grouped_soa_generation::enabled;
+    if (is_minimizer_index &&
+        frozen_minimizer_algorithm ==
+            bioseq::simd::minimizer_algorithm::simd_minimap2_reference &&
+        (!use_grouped_soa_generation || layout == sequence_index_layout::sequence_inline)) {
+        bioseq::postgres::support::invoke_pg_as_cpp([] {
+            ereport(ERROR,
+                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                     errmsg("minimap2-reference index generation requires READY identity storage"),
+                     errhint("Enable grouped-SoA generation for a fragmented minimizer index and "
+                             "rebuild.")));
+        });
+        pg_unreachable();
+    }
     const bioseq::minimizers::minimizer_kernels* const minimizer_kernels =
         is_minimizer_index
             ? bind_selected_minimizer_kernels_for_operation(backend, "bioseq.update_index")
             : nullptr;
-    const bool use_grouped_soa_generation =
-        is_minimizer_index && bioseq::aligner::settings::grouped_soa_generation::enabled;
+    const int configured_kmer_size = bioseq::aligner::settings::minimizer::kmer_size;
+    const int configured_window_size = bioseq::aligner::settings::minimizer::window_size;
+    const bool runtime_profile_fields_encodable =
+        configured_kmer_size > 0 &&
+        configured_kmer_size <= static_cast<int>((std::numeric_limits<std::uint16_t>::max)()) &&
+        configured_window_size > 0 &&
+        configured_window_size <= static_cast<int>((std::numeric_limits<std::uint16_t>::max)());
+    bool registered_minimizer_profile = false;
+    if (runtime_profile_fields_encodable) {
+        const auto runtime_kmer_size = static_cast<std::uint16_t>(configured_kmer_size);
+        const auto runtime_window_size = static_cast<std::uint16_t>(configured_window_size);
+        for (const auto& candidate :
+             bioseq::minimizers::registered_minimizer_runtime_profiles()) {
+            if (bioseq::minimizers::find_minimizer_runtime_profile(
+                    frozen_minimizer_algorithm,
+                    candidate.alphabet_id,
+                    runtime_kmer_size,
+                    runtime_window_size,
+                    candidate.minimum_position_log2,
+                    candidate.packed_storage_bits) != nullptr) {
+                registered_minimizer_profile = true;
+                break;
+            }
+        }
+    }
+    if (use_grouped_soa_generation && !registered_minimizer_profile) {
+        bioseq::postgres::support::invoke_pg_as_cpp(
+            [configured_kmer_size, configured_window_size] {
+                ereport(ERROR,
+                        (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                         errmsg("READY minimizer generation profile is unavailable"),
+                         errdetail("k=%d w=%d", configured_kmer_size, configured_window_size),
+                         errhint("Use k/w values admitted by the generated profile registry; the "
+                                 "exact source alphabet, packing, and physical capacity are "
+                                 "validated before generation.")));
+            });
+        pg_unreachable();
+    }
+    const std::uint16_t frozen_kmer_size = static_cast<std::uint16_t>(configured_kmer_size);
+    const std::uint16_t frozen_window_size = static_cast<std::uint16_t>(configured_window_size);
     if (is_minimizer_index) {
         // Cold fail-closed gate before generation-id allocation, relation/file
         // creation, payload writes, or descriptor/head publication.
@@ -468,7 +527,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         bioseq::minimizers::minimizer_sketch_backend_name(backend),
         bioseq::aligner::settings::vulkan::enabled,
         bioseq::aligner::settings::vulkan::index_build::enabled,
-        static_cast<int>(bioseq::aligner::settings::minimizer::algorithm.get_value()),
+        static_cast<int>(frozen_minimizer_algorithm),
         use_grouped_soa_generation);
 
     // Locate every bioseq.seq column: the index covers each sequence column;
@@ -742,6 +801,53 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         source_provider, seq_attno, PointerGetDatum(hdr), inner);
                     if (use_grouped_soa_generation &&
                         layout != sequence_index_layout::sequence_inline) {
+                        const std::uint64_t algorithm_position_extent_bp =
+                            name == bioseq::indexing::k_minimizers_per_fragment_index_name
+                                ? bioseq::indexing::
+                                      k_minimizer_fragment_algorithm_position_extent_bp
+                                : loc.logical_length;
+                        const auto algorithm_identity =
+                            bioseq::indexing::
+                                select_minimizer_generation_algorithm_identity_runtime(
+                                    frozen_minimizer_algorithm,
+                                    algorithm_position_extent_bp,
+                                    alpha,
+                                    static_cast<std::uint8_t>(bw * 8u),
+                                    frozen_kmer_size,
+                                    frozen_window_size);
+                        if (!algorithm_identity) {
+                            ready_minimizer_error_as_cpp(
+                                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                                "READY minimizer generated algorithm identity is unavailable",
+                                fmt::format("index={} backend={} alphabet={} storage_bits={} k={} w={}",
+                                            name,
+                                            bioseq::minimizers::minimizer_sketch_backend_name(
+                                                backend),
+                                            alpha,
+                                            static_cast<unsigned>(bw) * 8u,
+                                            frozen_kmer_size,
+                                            frozen_window_size));
+                        }
+                        const auto generation_backend = resolve_index_sketch_backend(
+                            algorithm_identity->effective_algorithm);
+                        const auto generation_producer =
+                            bioseq::indexing::minimizer_producer_backend_identity_for_backend(
+                                generation_backend);
+                        if (!bioseq::indexing::is_valid_minimizer_generation_algorithm_identity(
+                                *algorithm_identity, generation_producer)) {
+                            ready_minimizer_error_as_cpp(
+                                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                                "READY minimizer effective producer identity is unavailable");
+                        }
+                        const bioseq::minimizers::minimizer_kernels* const generation_kernels =
+                            bind_selected_minimizer_kernels_for_operation(
+                                generation_backend, "bioseq.update_index READY generation");
+                        if (!bioseq::indexing::minimizer_generation_kernel_binding_is_valid(
+                                generation_backend, *algorithm_identity, generation_kernels)) {
+                            ready_minimizer_error_as_cpp(
+                                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                                "READY minimizer effective kernel binding is unavailable");
+                        }
                         rebuild_detail::build_and_verify_locator_minimizer_generation(
                             rebuild_detail::locator_generation_rebuild_request{
                                 .user_relation_oid = rel_oid,
@@ -759,8 +865,9 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                 .sequence_rowno = rowno,
                                 .storage_width = bw,
                                 .alphabet_code = alpha,
-                                .backend = backend,
-                                .kernels = minimizer_kernels});
+                                .backend = generation_backend,
+                                .algorithm_identity = *algorithm_identity,
+                                .kernels = generation_kernels});
                     } else {
                         bioseq::pg_types::seq::dispatch_instance(
                             alpha,

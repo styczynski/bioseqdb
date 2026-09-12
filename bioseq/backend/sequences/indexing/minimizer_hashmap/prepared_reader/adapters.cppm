@@ -163,6 +163,52 @@ class prepared_grouped_soa_query_reader
     prepared_grouped_soa_query_reader(const prepared_grouped_soa_query_reader&) = delete;
     prepared_grouped_soa_query_reader& operator=(const prepared_grouped_soa_query_reader&) = delete;
 
+    /// Begin a reader for a sorted unique 32-bit canonical query-hash set.
+    [[nodiscard]] static std::expected<prepared_grouped_soa_query_reader,
+                                       minimizer_generation_encoding_error>
+    begin(bioseq::parallelism::memory_admission_controller& admission,
+          const minimizer_generation_head& head,
+          const minimizer_generation_manifest& manifest,
+          const expected_minimizer_generation_identity& expected,
+          std::span<const std::byte> encoded_directory,
+          std::span<const std::uint32_t> query_hashes,
+          std::uint64_t max_occ,
+          grouped_soa_query_admission_stats* admission_failure_stats = nullptr,
+          grouped_soa_query_reader_options test_options = {}) {
+        if (admission_failure_stats != nullptr) {
+            *admission_failure_stats = {};
+        }
+        if (manifest.layout != minimizer_generation_layout::grouped_soa_segment_local ||
+            expected.layout != minimizer_generation_layout::grouped_soa_segment_local) {
+            return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
+        }
+        const auto profile = derive_grouped_soa_minimizer_profile(manifest);
+        if (!profile || profile->hash_width != minimizer_scalar_width::u32 ||
+            !expected.max_occ_cap || *expected.max_occ_cap != profile->max_occ_cap ||
+            profile->max_occ_cap == (std::numeric_limits<std::uint64_t>::max)() ||
+            max_occ > profile->max_occ_cap) {
+            return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
+        }
+        prepared_grouped_soa_query_reader reader;
+        if (auto initialized = reader.initialize_query_protocol(admission,
+                                                                head,
+                                                                manifest,
+                                                                expected,
+                                                                *profile,
+                                                                encoded_directory,
+                                                                query_hashes,
+                                                                max_occ,
+                                                                test_options,
+                                                                true);
+            !initialized) {
+            if (admission_failure_stats != nullptr) {
+                *admission_failure_stats = reader.protocol_admission_failure_stats();
+            }
+            return std::unexpected(initialized.error());
+        }
+        return reader;
+    }
+
     /// Begin a reader for a sorted unique query-hash set.
     [[nodiscard]] static std::expected<prepared_grouped_soa_query_reader,
                                        minimizer_generation_encoding_error>
@@ -183,7 +229,8 @@ class prepared_grouped_soa_query_reader
             return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const auto profile = derive_grouped_soa_minimizer_profile(manifest);
-        if (!profile || !expected.max_occ_cap || *expected.max_occ_cap != profile->max_occ_cap ||
+        if (!profile || !expected.max_occ_cap ||
+            *expected.max_occ_cap != profile->max_occ_cap ||
             profile->max_occ_cap == (std::numeric_limits<std::uint64_t>::max)() ||
             max_occ > profile->max_occ_cap) {
             return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
@@ -197,7 +244,8 @@ class prepared_grouped_soa_query_reader
                                                                 encoded_directory,
                                                                 query_hashes,
                                                                 max_occ,
-                                                                test_options);
+                                                                test_options,
+                                                                true);
             !initialized) {
             if (admission_failure_stats != nullptr) {
                 *admission_failure_stats = reader.protocol_admission_failure_stats();
@@ -207,10 +255,10 @@ class prepared_grouped_soa_query_reader
         return reader;
     }
 
-    /// Direct canonical-query overload used by the scheduler. The input must
+    /// Legacy fixed-K15 canonical-query overload. The input must
     /// already be strictly sorted and unique by `kmer()`. It is validated while
     /// copying once into the reader-owned compact hash image, avoiding the
-    /// scheduler's temporary u64 vector, permit, and a second sort/unique.
+    /// caller's temporary vector, permit, and a second sort/unique.
     [[nodiscard]] static std::expected<prepared_grouped_soa_query_reader,
                                        minimizer_generation_encoding_error>
     begin(bioseq::parallelism::memory_admission_controller& admission,
@@ -230,7 +278,8 @@ class prepared_grouped_soa_query_reader
             return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const auto profile = derive_grouped_soa_minimizer_profile(manifest);
-        if (!profile || !expected.max_occ_cap || *expected.max_occ_cap != profile->max_occ_cap ||
+        if (!profile || profile->hash_width != minimizer_scalar_width::u32 ||
+            !expected.max_occ_cap || *expected.max_occ_cap != profile->max_occ_cap ||
             max_occ > profile->max_occ_cap) {
             return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
         }
@@ -327,6 +376,11 @@ class prepared_grouped_soa_query_reader
     /// Return the authenticated target length.
     [[nodiscard]] std::uint64_t target_length() const noexcept {
         return this->manifest_.target_length;
+    }
+
+    /// Return the authenticated generation identity without copying it.
+    [[nodiscard]] const minimizer_generation_manifest& generation_manifest() const noexcept {
+        return this->manifest_;
     }
 
     /// Return bytes retained by the active memory permit.

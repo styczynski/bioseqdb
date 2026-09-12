@@ -68,7 +68,13 @@ void run_simd_chaining(
     simd_chaining_execution_stats* stats,
     simd_chaining_route_stats* route_summary)
 {
-    const std::size_t count = anchors.size();
+    const auto storage_plan = bioseq::chaining::derive_simd_chaining_storage_plan(
+        anchors.size(), params);
+    if (!storage_plan || !storage_plan->logical_scratch_bytes(hn::Lanes(d))) {
+        reject(stats, simd_chaining_status::workspace_overflow,
+               "SIMD chaining storage plan exceeds its addressable domain");
+    }
+    const std::size_t count = storage_plan->output.anchor_count;
     auto soa = create_soa_anchors(d, anchors);
     auto best_scores =
         context::current().alloc_chain_array<std::int32_t>(count);
@@ -222,11 +228,7 @@ void chain_anchors_simd(
             simd_chaining_status::anchor_count_overflow,
             "anchor indices do not fit the exact int32 SIMD ABI");
     }
-    if (!anchors.empty()
-        && anchors.size()
-            > static_cast<std::size_t>(
-                  std::numeric_limits<std::int32_t>::max())
-                  / lanes)
+    if (!bioseq::chaining::simd_chaining_path_elements(anchors.size(), lanes))
     {
         chaining_simd_detail::reject(
             stats,

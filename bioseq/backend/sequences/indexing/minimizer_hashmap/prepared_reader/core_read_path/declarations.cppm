@@ -955,6 +955,9 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     /// Return an already canonical scalar query hash.
     [[nodiscard]] static constexpr std::uint64_t query_hash_value_(std::uint64_t hash) noexcept;
 
+    /// Widen one already canonical 32-bit query hash without changing its value.
+    [[nodiscard]] static constexpr std::uint64_t query_hash_value_(std::uint32_t hash) noexcept;
+
     /// Extract the canonical hash from one minimizer sketch record.
     [[nodiscard]] static std::uint64_t
     query_hash_value_(const minimap_sketch_data& minimizer) noexcept;

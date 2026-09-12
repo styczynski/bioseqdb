@@ -64,7 +64,8 @@ inline constexpr int16_t k_block_score_bias = static_cast<int16_t>(1 << 14);
 inline constexpr int16_t k_block_score_minimum = 0;
 
 /// SIMD tag capped at the validated eight- or sixteen-lane geometry.
-using block_aligner_simd_tag = hn::CappedTag<int16_t, 16>;
+using block_aligner_simd_tag = hn::CappedTag<block_aligner_score_type, 16>;
+static_assert(std::same_as<hn::TFromD<block_aligner_simd_tag>, block_aligner_score_type>);
 
 /** Exact work counters collected by one adaptive-block execution. */
 struct block_core_stats {
@@ -139,6 +140,19 @@ HWY_INLINE hn::Vec<p_simd_tag> shift_block_vector_half(
     return hn::ConcatLowerUpper(simd_tag, lower_source, upper_source);
 }
 
+/** Resolve the same pure geometry consumed by the owning allocation sites. */
+[[nodiscard]] inline block_aligner_storage_plan require_block_storage_plan(
+    size_t query_length, size_t reference_length,
+    size_t maximum_block_size, bool is_trace_enabled) {
+    const auto plan = derive_block_aligner_storage_plan(
+        query_length, reference_length, maximum_block_size,
+        hn::Lanes(block_aligner_simd_tag{}), is_trace_enabled);
+    if (!plan) {
+        abort_block_aligner_invariant("Block storage geometry overflow");
+    }
+    return *plan;
+}
+
 // =============================================================================
 // block_padded_bytes — internal padded byte buffer for SIMD-safe access
 // =============================================================================
@@ -162,9 +176,15 @@ public:
             size_t region_begin,
             size_t region_end,
             size_t block_size) {
+        if (region_end < region_begin) {
+            abort_block_aligner_invariant("padded region endpoints are unordered");
+        }
         length_ = region_end - region_begin;
-        const size_t storage_size = 1 + length_ + block_size;
-        data_ = context::current().alloc_align_array<uint8_t, 64>(storage_size + 64);
+        const auto storage_elements = block_padded_storage_elements(length_, block_size);
+        if (!storage_elements) {
+            abort_block_aligner_invariant("padded storage extent overflow");
+        }
+        data_ = context::current().alloc_align_array<uint8_t, 64>(*storage_elements);
         const uint8_t null_byte = static_cast<uint8_t>(p_alphabet_dimension);
         data_[0] = null_byte;
         sequence.template copy_ranks<
@@ -180,6 +200,9 @@ public:
     [[nodiscard]] const uint8_t* data_at(size_t index) const {
         return data_.data() + index;
     }
+
+    /// Exact logical element request supplied to the alignment arena.
+    [[nodiscard]] size_t storage_elements() const noexcept { return data_.size(); }
 
     /// Original (unpadded) sequence length.
     [[nodiscard]] size_t length() const { return length_; }
@@ -201,7 +224,7 @@ public:
 
     /** Allocate the requested scalar capacity from the alignment arena. */
     explicit block_aligned_buffer(size_t capacity)
-        : storage_(context::current().alloc_align_array<int16_t, 64>(capacity))
+        : storage_(context::current().alloc_align_array<block_aligner_score_type, 64>(capacity))
         , capacity_(capacity) {}
 
     /// Fill the active prefix with the DP minimum score.
@@ -251,7 +274,7 @@ public:
     [[nodiscard]] const int16_t* data() const { return storage_.data(); }
 
 private:
-    std::span<int16_t> storage_;
+    std::span<block_aligner_score_type> storage_;
     size_t capacity_ = 0;
 };
 
@@ -273,40 +296,32 @@ public:
     /** Construct an empty trace buffer for score-only alignment. */
     block_trace() = default;
 
-    /** Allocate trace storage for one admitted alignment geometry. */
-    block_trace(
-            size_t query_length,
-            size_t reference_length,
-            size_t maximum_block_size)
+    /** Allocate trace storage using the shared checked constructor geometry. */
+    block_trace(size_t query_length, size_t reference_length, size_t maximum_block_size)
+        : block_trace(query_length, reference_length,
+            require_block_storage_plan(query_length, reference_length, maximum_block_size, true)) {}
+
+    /** Consume the exact element requests from the caller's already derived plan. */
+    block_trace(size_t query_length, size_t reference_length,
+                const block_aligner_storage_plan& plan)
         : query_length_(query_length), reference_length_(reference_length) {
-        const size_t combined_length = query_length + reference_length + 2;
-        const size_t lane_count = hn::Lanes(block_aligner_simd_tag{});
-        if (maximum_block_size > (std::numeric_limits<size_t>::max)() / 2
-            || combined_length > (std::numeric_limits<size_t>::max)()
-                - maximum_block_size * 2) {
-            abort_block_aligner_invariant("trace capacity arithmetic overflow");
+        if (!plan.is_trace_enabled) {
+            abort_block_aligner_invariant("trace constructor requires traced storage geometry");
         }
-        const size_t trace_columns = combined_length + maximum_block_size * 2;
-        const size_t trace_rows = maximum_block_size / lane_count;
-        if (trace_rows != 0
-            && trace_columns > (std::numeric_limits<size_t>::max)() / trace_rows) {
-            abort_block_aligner_invariant("trace capacity arithmetic overflow");
-        }
-        trace_capacity_ = trace_rows * trace_columns;
-        if (trace_capacity_
-                > (std::numeric_limits<size_t>::max)() - 64) {
-            abort_block_aligner_invariant("trace capacity guard overflow");
-        }
-        const size_t trace_storage_capacity = trace_capacity_ + 64;
-        const size_t direction_word_capacity = divide_block_extent_round_up(combined_length * 2, 64);
-        const size_t block_coordinate_capacity = combined_length * 4;
+        trace_capacity_ = plan.trace_capacity;
         auto& alignment_context = context::current();
-        primary_trace_words_       = alignment_context.alloc_align_array<trace_type>(trace_storage_capacity);
-        secondary_trace_words_      = alignment_context.alloc_align_array<trace_type>(trace_storage_capacity);
-        block_directions_       = alignment_context.alloc_align_array<uint64_t>(direction_word_capacity);
-        block_origins_ = alignment_context.alloc_align_array<uint32_t>(block_coordinate_capacity);
-        block_extents_  = alignment_context.alloc_align_array<uint16_t>(block_coordinate_capacity);
-        std::memset(block_directions_.data(), 0, direction_word_capacity * sizeof(uint64_t));
+        primary_trace_words_ = alignment_context.alloc_align_array<trace_type>(
+            plan.trace_word_elements);
+        secondary_trace_words_ = alignment_context.alloc_align_array<trace_type>(
+            plan.trace_word_elements);
+        block_directions_ = alignment_context.alloc_align_array<uint64_t>(
+            plan.direction_word_elements);
+        block_origins_ = alignment_context.alloc_align_array<uint32_t>(
+            plan.coordinate_elements);
+        block_extents_ = alignment_context.alloc_align_array<uint16_t>(
+            plan.coordinate_elements);
+        std::memset(block_directions_.data(), 0,
+            plan.direction_word_elements * sizeof(uint64_t));
     }
 
     /** Reset counters and dimensions while retaining allocated storage. */
@@ -516,24 +531,28 @@ struct block_aligner_scratch {
     block_aligned_buffer diagonal_column_checkpoint, gap_column_checkpoint, diagonal_row_checkpoint, gap_row_checkpoint;  ///< Restorable borders.
     block_aligned_buffer diagonal_shift_buffer, gap_shift_buffer;  ///< SIMD shift scratch.
 
-    /** Allocate working storage for an admitted block geometry. */
-    block_aligner_scratch(
-            size_t query_length,
-            size_t reference_length,
-            size_t maximum_block_size,
-            bool is_trace_enabled)
-        : trace(is_trace_enabled
-            ? block_trace(query_length, reference_length, maximum_block_size)
+    /** Preserve existing callers while deriving their geometry only once. */
+    block_aligner_scratch(size_t query_length, size_t reference_length,
+                          size_t maximum_block_size, bool is_trace_enabled)
+        : block_aligner_scratch(query_length, reference_length,
+            require_block_storage_plan(
+                query_length, reference_length, maximum_block_size, is_trace_enabled)) {}
+
+    /** Allocate the exact element requests from the shared pure storage plan. */
+    block_aligner_scratch(size_t query_length, size_t reference_length,
+                          const block_aligner_storage_plan& plan)
+        : trace(plan.is_trace_enabled
+            ? block_trace(query_length, reference_length, plan)
             : block_trace())
-        , diagonal_column(maximum_block_size)
-        , gap_column(maximum_block_size)
-        , diagonal_row(maximum_block_size)
-        , gap_row(maximum_block_size)
-        , diagonal_column_checkpoint(maximum_block_size)
-        , gap_column_checkpoint(maximum_block_size)
-        , diagonal_row_checkpoint(maximum_block_size)
-        , gap_row_checkpoint(maximum_block_size)
-        , diagonal_shift_buffer(64), gap_shift_buffer(64) {}
+        , diagonal_column(plan.border_elements)
+        , gap_column(plan.border_elements)
+        , diagonal_row(plan.border_elements)
+        , gap_row(plan.border_elements)
+        , diagonal_column_checkpoint(plan.border_elements)
+        , gap_column_checkpoint(plan.border_elements)
+        , diagonal_row_checkpoint(plan.border_elements)
+        , gap_row_checkpoint(plan.border_elements)
+        , diagonal_shift_buffer(plan.shift_elements), gap_shift_buffer(plan.shift_elements) {}
 
     /** Reset all active borders and optional trace positions. */
     template<class p_simd_tag>

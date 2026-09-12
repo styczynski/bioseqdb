@@ -66,6 +66,9 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
         return reject_output_layout();
     }
 
+    // Typed record projection is part of the existing minimizer semantics.
+    // The selected driver verifies both invocation masks against its record;
+    // index/query compatibility remains the generated planner's responsibility.
     bool is_internally_consistent = false;
     switch (invocation.output_layout) {
         case minimizer_output_layout::sequence_log2_15_kmer_15_uint64:
@@ -81,6 +84,29 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
         case minimizer_output_layout::sequence_log2_33_kmer_15_uint64:
             is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
                 minimizer_representation<33u, 15u>, p_alphabet, p_storage_unit>(
+                    invocation, result);
+            break;
+        // Reuse existing wider-hash physical records with the unchanged
+        // runtime-generic driver. Their names describe storage geometry;
+        // they do not restrict the biological K/W to a campaign pair.
+        case minimizer_output_layout::sequence_log2_20_kmer_20_uint64:
+            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
+                minimizer_representation<20u, 20u>, p_alphabet, p_storage_unit>(
+                    invocation, result);
+            break;
+        case minimizer_output_layout::sequence_log2_23_kmer_20_uint64:
+            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
+                minimizer_representation<23u, 20u>, p_alphabet, p_storage_unit>(
+                    invocation, result);
+            break;
+        case minimizer_output_layout::sequence_log2_63_kmer_15_uint128:
+            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
+                minimizer_representation<63u, 15u>, p_alphabet, p_storage_unit>(
+                    invocation, result);
+            break;
+        case minimizer_output_layout::sequence_log2_63_kmer_20_uint128:
+            is_internally_consistent = coarse_two_stack_detail::run_selected_output_layout<
+                minimizer_representation<63u, 20u>, p_alphabet, p_storage_unit>(
                     invocation, result);
             break;
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
@@ -100,11 +126,10 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
     return result;
 }
 
-/** Source-topology-owned exact two-stack case. */
+/** Source-topology-owned exact two-stack case for registered nucleotides. */
 template<sequence_alphabet p_alphabet, class p_storage_unit>
 requires (
-    (std::same_as<p_alphabet, seq::dna4>
-        || std::same_as<p_alphabet, seq::dna5>)
+    seqan3::nucleotide_alphabet<p_alphabet>
     && (std::same_as<p_storage_unit, std::uint8_t>
         || std::same_as<p_storage_unit, std::uint16_t>
         || std::same_as<p_storage_unit, std::uint32_t>

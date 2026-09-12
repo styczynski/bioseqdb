@@ -5,6 +5,7 @@
 export module bioseq.indexing.minimizer_sequence.generation:replay_contract;
 
 import std;
+import bioseq.pipeline.runtime_contract;
 import bioseq.indexing.minimizer_sequence.admitted_runs;
 import bioseq.indexing.minimizer_sequence.bucket_codec;
 import bioseq.common.checked_arithmetic;
@@ -82,6 +83,7 @@ class minimizer_sequence_generation_execution_receipt {
   public:
     minimizer_sketch_backend selected_backend = minimizer_sketch_backend::scalar;
     minimizer_scheme_identity minimizer_scheme{};
+    minimizer_generation_algorithm_identity algorithm_identity{};
     std::uint64_t target_length = 0;
     std::uint16_t window_size = 0;
     std::uint16_t kmer_size = 0;
@@ -103,6 +105,8 @@ class minimizer_sequence_generation_execution_receipt {
     std::uint64_t vulkan_core_runs = 0;
     exact_simd_index_execution_stats exact_simd_stats{};
     bool exact_simd_stats_available = false;
+    reference_simd_index_execution_stats reference_simd_stats{};
+    bool reference_simd_stats_available = false;
     packed_bounded_nthash_index_status packed_bounded_status =
         packed_bounded_nthash_index_status::invalid_state;
     packed_bounded_nthash_index_execution_stats packed_bounded_stats{};
@@ -170,6 +174,11 @@ class minimizer_sequence_generation_execution_receipt {
         if (!route_snapshot_matches_() || !spill_complete || !backend_bound || saturated ||
             window_size == 0 || kmer_size == 0 || configured_core_span_bp == 0 ||
             peak_core_span_bp > configured_core_span_bp ||
+            !is_valid_minimizer_generation_algorithm_identity(
+                algorithm_identity,
+                minimizer_producer_backend_identity_for_backend(selected_backend)) ||
+            algorithm_identity.runtime_kmer_size != kmer_size ||
+            algorithm_identity.runtime_window_size != window_size ||
             minimizer_scheme != minimizer_scheme_identity_for_backend(selected_backend) ||
             (spilled_event_count == 0) != (spill_run_count == 0) ||
             spill_qualification_scan_count != 1 ||
@@ -181,7 +190,8 @@ class minimizer_sequence_generation_execution_receipt {
             spill_content_digest != authority_content_digest_) {
             return false;
         }
-        const bool no_exact = exact_simd_core_runs == 0 && !exact_simd_stats_available;
+        const bool no_exact = exact_simd_core_runs == 0 && !exact_simd_stats_available &&
+                              !reference_simd_stats_available;
         const bool no_bounded = bounded_nthash_core_runs == 0 && !packed_bounded_stats_available;
         const bool no_vulkan = vulkan_core_runs == 0 && vulkan_stats.completed_roundtrips == 0 &&
                                vulkan_stats.downloaded_minimizers == 0 &&
@@ -201,10 +211,21 @@ class minimizer_sequence_generation_execution_receipt {
                    bounded_nthash_core_runs == 0 && vulkan_core_runs == 0 && no_exact &&
                    no_bounded && no_vulkan;
         case minimizer_sketch_backend::exact_simd:
-            return scalar_core_runs == 0 && exact_simd_core_runs != 0 &&
-                   bounded_nthash_core_runs == 0 && vulkan_core_runs == 0 &&
-                   exact_simd_stats_available && exact_simd_stats.is_internally_consistent(true) &&
-                   no_bounded && no_vulkan;
+            if (scalar_core_runs != 0 || exact_simd_core_runs == 0 ||
+                bounded_nthash_core_runs != 0 || vulkan_core_runs != 0 || !no_bounded ||
+                !no_vulkan) {
+                return false;
+            }
+            if (algorithm_identity.effective_algorithm ==
+                bioseq::simd::minimizer_algorithm::simd_minimap2_reference) {
+                return !exact_simd_stats_available && reference_simd_stats_available &&
+                       reference_simd_stats.is_internally_consistent(
+                           true, algorithm_identity.packed_storage_bits / 8u);
+            }
+            return algorithm_identity.effective_algorithm ==
+                       bioseq::simd::minimizer_algorithm::two_stack_nthash &&
+                   exact_simd_stats_available && !reference_simd_stats_available &&
+                   exact_simd_stats.is_internally_consistent(true);
         case minimizer_sketch_backend::bounded_nthash_simd:
             return scalar_core_runs == 0 && exact_simd_core_runs == 0 &&
                    bounded_nthash_core_runs != 0 && vulkan_core_runs == 0 && no_exact &&
@@ -309,6 +330,7 @@ class minimizer_sequence_generation_execution_receipt {
     struct route_snapshot {
         minimizer_sketch_backend selected_backend = minimizer_sketch_backend::scalar;
         minimizer_scheme_identity minimizer_scheme{};
+        minimizer_generation_algorithm_identity algorithm_identity{};
         std::uint64_t target_length = 0;
         std::uint16_t window_size = 0;
         std::uint16_t kmer_size = 0;
@@ -330,6 +352,8 @@ class minimizer_sequence_generation_execution_receipt {
         std::uint64_t vulkan_core_runs = 0;
         exact_simd_index_execution_stats exact_simd_stats{};
         bool exact_simd_stats_available = false;
+        reference_simd_index_execution_stats reference_simd_stats{};
+        bool reference_simd_stats_available = false;
         packed_bounded_nthash_index_status packed_bounded_status =
             packed_bounded_nthash_index_status::invalid_state;
         packed_bounded_nthash_index_execution_stats packed_bounded_stats{};
@@ -381,6 +405,7 @@ class minimizer_sequence_generation_execution_receipt {
         route_snapshot_ = route_snapshot{
             .selected_backend = selected_backend,
             .minimizer_scheme = minimizer_scheme,
+            .algorithm_identity = algorithm_identity,
             .target_length = target_length,
             .window_size = window_size,
             .kmer_size = kmer_size,
@@ -402,6 +427,8 @@ class minimizer_sequence_generation_execution_receipt {
             .vulkan_core_runs = vulkan_core_runs,
             .exact_simd_stats = exact_simd_stats,
             .exact_simd_stats_available = exact_simd_stats_available,
+            .reference_simd_stats = reference_simd_stats,
+            .reference_simd_stats_available = reference_simd_stats_available,
             .packed_bounded_status = packed_bounded_status,
             .packed_bounded_stats = packed_bounded_stats,
             .packed_bounded_stats_available = packed_bounded_stats_available,
@@ -417,7 +444,9 @@ class minimizer_sequence_generation_execution_receipt {
     [[nodiscard]] bool route_snapshot_matches_() const noexcept {
         const route_snapshot& value = route_snapshot_;
         return route_snapshot_present_ && selected_backend == value.selected_backend &&
-               minimizer_scheme == value.minimizer_scheme && target_length == value.target_length &&
+               minimizer_scheme == value.minimizer_scheme &&
+               algorithm_identity == value.algorithm_identity &&
+               target_length == value.target_length &&
                window_size == value.window_size && kmer_size == value.kmer_size &&
                configured_core_span_bp == value.configured_core_span_bp &&
                peak_core_span_bp == value.peak_core_span_bp &&
@@ -437,6 +466,8 @@ class minimizer_sequence_generation_execution_receipt {
                vulkan_core_runs == value.vulkan_core_runs &&
                exact_simd_stats == value.exact_simd_stats &&
                exact_simd_stats_available == value.exact_simd_stats_available &&
+               reference_simd_stats == value.reference_simd_stats &&
+               reference_simd_stats_available == value.reference_simd_stats_available &&
                packed_bounded_status == value.packed_bounded_status &&
                packed_bounded_stats == value.packed_bounded_stats &&
                packed_bounded_stats_available == value.packed_bounded_stats_available &&
@@ -534,7 +565,8 @@ class minimizer_sequence_generation_execution_receipt {
     /** @brief Derives and stores the immutable publication binding from one encoded generation. */
     void bind_publication_authority(const encoded_grouped_soa_generation& generation) noexcept {
         publication_binding_ = make_minimizer_generation_publication_binding(generation);
-        publication_binding_present_ = publication_binding_.valid();
+        publication_binding_present_ = publication_binding_.valid() &&
+                                       generation.manifest.algorithm_identity == algorithm_identity;
     }
 
     /** @brief Allocates the next nonzero spill operation epoch, or zero on exhaustion. */
@@ -587,6 +619,7 @@ template <class p_storage> class direct_minimizer_spill_authority {
     std::uint64_t operation_epoch_ = 0;
     std::uint64_t authority_seal_ = 0;
     minimizer_scheme_identity minimizer_scheme_{};
+    minimizer_generation_algorithm_identity algorithm_identity_{};
 
     /** @brief Constructs one immutable spill authority from a sealed qualification pass. */
     direct_minimizer_spill_authority(p_storage& storage,
@@ -598,11 +631,14 @@ template <class p_storage> class direct_minimizer_spill_authority {
                                      direct_minimizer_spill_storage_binding storage_binding,
                                      std::uint64_t operation_epoch,
                                      std::uint64_t authority_seal,
-                                     minimizer_scheme_identity minimizer_scheme) noexcept
+                                     minimizer_scheme_identity minimizer_scheme,
+                                     minimizer_generation_algorithm_identity algorithm_identity)
+        noexcept
         : storage_(&storage), target_length_(target_length), initial_span_bp_(initial_span_bp),
           run_count_(run_count), event_count_(event_count), content_digest_(content_digest),
           storage_binding_(storage_binding), operation_epoch_(operation_epoch),
-          authority_seal_(authority_seal), minimizer_scheme_(minimizer_scheme) {}
+          authority_seal_(authority_seal), minimizer_scheme_(minimizer_scheme),
+          algorithm_identity_(algorithm_identity) {}
 
   public:
     /** @brief Copying would duplicate a unique spill authority identity. */
@@ -621,6 +657,7 @@ template <class p_storage> class direct_minimizer_external_spill_replay_producer
   private:
     p_storage* storage_ = nullptr;
     minimizer_scheme_identity minimizer_scheme_{};
+    minimizer_generation_algorithm_identity algorithm_identity_{};
     std::uint64_t target_length_ = 0;
     std::uint64_t qualified_span_ = 0;
     minimizer_generation_layout generation_layout_ = minimizer_generation_layout::invalid;
@@ -701,6 +738,7 @@ template <class p_storage> class direct_minimizer_external_spill_replay_producer
         : storage_(&storage), minimizer_scheme_(minimizer_scheme), target_length_(target_length),
           qualified_span_(qualified_span), spill_receipt_(spill_receipt),
           authority_(std::move(authority)), storage_binding_(storage_binding) {
+        algorithm_identity_ = spill_receipt_.algorithm_identity;
         if (!storage_binding_.valid()) {
             storage_binding_ = storage.segment_spill_storage_binding();
         }
@@ -755,6 +793,11 @@ template <class p_storage> class direct_minimizer_external_spill_replay_producer
                    : minimizer_producer_identity{};
     }
 
+    /// Return the registry identity sealed by the native spill receipt.
+    [[nodiscard]] minimizer_generation_algorithm_identity algorithm_identity() const noexcept {
+        return algorithm_identity_;
+    }
+
     /**
      * @brief Replays one canonical sorted spill scan at the requested segment span.
      * @return Success, or an encoding error that also marks the producer terminal
@@ -783,6 +826,7 @@ template <class p_storage> class direct_minimizer_external_spill_replay_producer
                  authority_->operation_epoch_ == 0 ||
                  authority_->storage_binding_ != storage_binding_ ||
                  authority_->minimizer_scheme_ != minimizer_scheme_ ||
+                 authority_->algorithm_identity_ != algorithm_identity_ ||
                  !spill_receipt_.authority_matches(authority_->authority_seal_,
                                                    0,
                                                    empty_digest,
@@ -920,6 +964,7 @@ template <class p_storage> class direct_minimizer_external_spill_replay_producer
             (authority_->storage_ != storage_ || authority_->target_length_ != target_length_ ||
              authority_->event_count_ != scan_event_count || authority_->operation_epoch_ == 0 ||
              authority_->minimizer_scheme_ != minimizer_scheme_ ||
+             authority_->algorithm_identity_ != algorithm_identity_ ||
              !spill_receipt_.authority_matches(authority_->authority_seal_,
                                                authority_->event_count_,
                                                authority_->content_digest_,
@@ -1070,6 +1115,10 @@ template <class p_storage> class direct_minimizer_unbound_external_spill_replay_
     /** @brief Returns the producer backend identity from the wrapped bound producer. */
     [[nodiscard]] minimizer_producer_identity producer_backend_identity() const noexcept {
         return producer_.producer_backend_identity();
+    }
+    /** @brief Returns the intentionally unbound algorithm identity. */
+    [[nodiscard]] minimizer_generation_algorithm_identity algorithm_identity() const noexcept {
+        return producer_.algorithm_identity();
     }
     /** @brief Forwards one replay scan to the wrapped bound producer. */
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>

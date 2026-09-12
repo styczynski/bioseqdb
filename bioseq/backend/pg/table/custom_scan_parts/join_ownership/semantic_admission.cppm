@@ -30,6 +30,7 @@ import :custom_scan_oid_expression_support_oid_catalog;
 import :custom_scan_oid_expression_support_expression_analysis;
 import :custom_scan_slice_path_expression_contract;
 import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_join_ownership_alphabet_mismatch_contracts;
 import :custom_scan_join_ownership_sequence_typmod_contract;
 import :custom_scan_join_ownership_expression_signature_contract;
 export import :custom_scan_join_ownership_target_contracts;
@@ -708,7 +709,10 @@ export {
         };
     }
 
-    /** @brief Resolves an mmsearch call that a base relation can own without semantic movement. */
+    /**
+     * @brief Resolves an mmsearch call that a base relation can own without semantic movement.
+     * @throws PostgreSQL ERROR for a supported, non-NULL constant with a different bound alphabet.
+     */
     [[nodiscard]] std::optional<base_local_mmsearch_ownership>
     resolve_base_local_mmsearch_ownership(FuncExpr* function,
                                           RelOptInfo* rel,
@@ -732,10 +736,15 @@ export {
         Node* query = arguments.second_argument;
         if (Const* constant = try_cast_pg_node<Const>(query)) {
             if (constant->consttype != oids.bioseq_seq_type_oid || constant->consttypmod < 0 ||
-                !batch_join_typmod_is_supported(constant->consttypmod) ||
-                (!constant->constisnull &&
-                 !mmsearch_typmods_share_alphabet(target->typmod, constant->consttypmod))) {
+                !batch_join_typmod_is_supported(constant->consttypmod)) {
                 return std::nullopt;
+            }
+            if (!constant->constisnull &&
+                !mmsearch_typmods_share_alphabet(target->typmod, constant->consttypmod)) {
+                raise_mmsearch_alphabet_mismatch(
+                    compact_sequence_stdc_type_params::decode(target->typmod),
+                    compact_sequence_stdc_type_params::decode(constant->consttypmod),
+                    "column scan planning");
             }
             result.query_is_const = true;
             return result;

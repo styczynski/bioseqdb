@@ -7,6 +7,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <type_traits>
 #include <vector>
@@ -86,10 +87,57 @@ struct alignment_region {
     std::int32_t mapq = 0;
 
     /** Traceback operations for the aligned region. */
-    std::vector<cigar_operation> cigar;
+    alignment_result_vector<cigar_operation> cigar;
     /** Exact unit-cost edit distance represented by cigar. */
     sequence_size_t edit_distance = 0;
 };
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+static_assert(!std::is_copy_constructible_v<alignment_region>);
+static_assert(std::is_nothrow_move_constructible_v<alignment_region>);
+#endif
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+/** Source-derived logical element bounds for the region-to-result tail. */
+struct alignment_tail_storage_plan {
+    std::size_t region_count = 0u;
+    std::size_t primary_index_capacity = 0u;
+    std::size_t coverage_interval_capacity = 0u;
+    std::size_t filter_marker_count = 0u;
+    std::size_t mapq_region_count = 0u;
+    std::size_t result_count = 0u;
+    std::size_t block_stats_count = 0u;
+    std::size_t scalar_stats_count = 0u;
+};
+
+/**
+ * @brief Bound the unchanged one-region-per-chain tail without allocating.
+ *
+ * Region identifiers and parents are signed 32-bit values in the existing
+ * algorithms, so a larger count is not representable even when size_t is.
+ */
+[[nodiscard]] constexpr std::optional<alignment_tail_storage_plan>
+derive_alignment_tail_storage_plan(
+    const std::size_t region_count,
+    const bool collect_block_stats = false,
+    const bool collect_scalar_stats = false) noexcept {
+    constexpr std::size_t maximum_region_count =
+        static_cast<std::size_t>((std::numeric_limits<std::int32_t>::max)());
+    if (region_count > maximum_region_count) {
+        return std::nullopt;
+    }
+    return alignment_tail_storage_plan{
+        .region_count = region_count,
+        .primary_index_capacity = region_count,
+        .coverage_interval_capacity = region_count,
+        .filter_marker_count = region_count,
+        .mapq_region_count = region_count,
+        .result_count = region_count,
+        .block_stats_count = collect_block_stats ? region_count : 0u,
+        .scalar_stats_count = collect_scalar_stats ? region_count : 0u,
+    };
+}
+#endif
 
 /** @brief Saturating counters describing scalar minimizer execution. */
 struct scalar_minimizer_execution_stats {

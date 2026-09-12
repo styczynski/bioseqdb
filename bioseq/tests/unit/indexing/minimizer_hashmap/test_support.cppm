@@ -255,6 +255,22 @@ void require_wire_error(
     REQUIRE(value.error() == expected);
 }
 
+/// Select one complete generated algorithm identity for a test producer.
+template <sequence_alphabet p_alphabet = seq::dna4, class p_storage_unit = std::uint64_t>
+[[nodiscard]] constexpr bioseq::indexing::minimizer_generation_algorithm_identity
+test_generation_algorithm_identity(
+    bioseq::simd::minimizer_algorithm algorithm = bioseq::simd::minimizer_algorithm::scalar,
+    std::uint64_t maximum_position_extent_bp = 32'768u,
+    std::uint16_t kmer_size = 15u,
+    std::uint16_t window_size = 10u) {
+    const auto selection =
+        bioseq::minimizers::select_minimizer_physical_layout<p_alphabet, p_storage_unit>(
+            algorithm, maximum_position_extent_bp, kmer_size, window_size);
+    const auto identity =
+        bioseq::indexing::make_minimizer_generation_algorithm_identity(selection);
+    return *identity;
+}
+
 /// Construct the byte-pinned grouped-SoA manifest fixture.
 [[nodiscard]] constexpr bioseq::indexing::minimizer_generation_manifest
 golden_generation_manifest() noexcept {
@@ -273,46 +289,66 @@ golden_generation_manifest() noexcept {
         .position_segment_count = 3,
         .extent_count = 0x11223344U,
         .directory_chunk_count = 0x55667788U,
-        .alphabet_code = 0x1122U,
-        .storage_unit_byte_width = 0x3344U,
-        .kmer_size = 0x5566U,
-        .window_size = 0x7788U,
-        .gpu_abi_revision = 0x99AABBCCU,
+        .alphabet_code = bioseq::indexing::k_minimizer_persisted_dna4_alphabet_code,
+        .storage_unit_byte_width = sizeof(std::uint64_t),
+        .kmer_size = 15u,
+        .window_size = 10u,
+        .gpu_abi_revision = bioseq::indexing::k_grouped_soa_gpu_abi_revision,
         .position_segment_span_bp = 8,
         .segment_geometry_revision =
             bioseq::indexing::minimizer_generation_manifest::uniform_segment_geometry_revision,
         .producer_backend_id = bioseq::indexing::minimizer_producer_backend::scalar,
         .producer_identity_revision = bioseq::indexing::k_minimizer_producer_identity_revision,
+        .algorithm_identity = test_generation_algorithm_identity(),
     };
     assign_grouped_soa_profile(manifest, k_test_grouped_soa_profile);
     return manifest;
 }
 
 /// Construct baseline grouped-SoA generation options for one target length.
+template <sequence_alphabet p_alphabet = seq::dna4, class p_storage_unit = std::uint64_t>
 [[nodiscard]] constexpr bioseq::indexing::grouped_soa_generation_options
-test_generation_options(std::uint64_t target_length) noexcept {
+test_generation_options(
+    std::uint64_t target_length,
+    bioseq::simd::minimizer_algorithm algorithm = bioseq::simd::minimizer_algorithm::scalar,
+    std::uint64_t maximum_position_extent_bp = 32'768u,
+    std::uint16_t kmer_size = 15u,
+    std::uint16_t window_size = 10u) noexcept {
+    constexpr auto alphabet_id =
+        bioseq::minimizers::minimizer_profile_alphabet_id<p_alphabet>();
+    const auto scheme = algorithm == bioseq::simd::minimizer_algorithm::bounded_nthash_simd
+        ? bioseq::indexing::k_bounded_nthash_u32_r7_sum_scheme_identity
+        : bioseq::indexing::k_minimap_scheme_identity;
     return {
         .layout = bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
         .generation_id = 37,
         .source_identity = 0x1122334455667788ULL,
         .source_content_checksum = 0x8877665544332211ULL,
         .target_length = target_length,
-        .alphabet_code = bioseq::indexing::k_minimizer_persisted_dna4_alphabet_code,
-        .storage_unit_byte_width = 8,
-        .kmer_size = 15,
-        .window_size = 10,
-        .minimizer_scheme_id = bioseq::indexing::k_minimap_scheme_id,
-        .minimizer_scheme_revision = bioseq::indexing::k_minimap_scheme_revision,
+        .alphabet_code = alphabet_id,
+        .storage_unit_byte_width = static_cast<std::uint16_t>(sizeof(p_storage_unit)),
+        .kmer_size = kmer_size,
+        .window_size = window_size,
+        .minimizer_scheme_id = scheme.id,
+        .minimizer_scheme_revision = scheme.revision,
+        .algorithm_identity = test_generation_algorithm_identity<p_alphabet, p_storage_unit>(
+            algorithm, maximum_position_extent_bp, kmer_size, window_size),
     };
 }
 
 /// Construct grouped-SoA generation options with an explicit occurrence cap.
+template <sequence_alphabet p_alphabet = seq::dna4, class p_storage_unit = std::uint64_t>
 [[nodiscard]] constexpr bioseq::indexing::grouped_soa_generation_options
-test_grouped_soa_generation_options(std::uint64_t target_length,
-                                    std::uint64_t max_occ_cap = 65'534u) noexcept {
-    auto options = test_generation_options(target_length);
+test_grouped_soa_generation_options(
+    std::uint64_t target_length,
+    std::uint64_t max_occ_cap = 65'534u,
+    bioseq::simd::minimizer_algorithm algorithm = bioseq::simd::minimizer_algorithm::scalar,
+    std::uint64_t maximum_position_extent_bp = 32'768u,
+    std::uint16_t kmer_size = 15u,
+    std::uint16_t window_size = 10u) noexcept {
+    auto options = test_generation_options<p_alphabet, p_storage_unit>(
+        target_length, algorithm, maximum_position_extent_bp, kmer_size, window_size);
     options.layout = bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local;
-    options.alphabet_code = bioseq::indexing::k_minimizer_persisted_dna4_alphabet_code;
     options.max_occ_cap = max_occ_cap;
     return options;
 }
@@ -331,6 +367,7 @@ test_expected_storage_contract() noexcept {
         .minimizer_scheme_revision = bioseq::indexing::k_minimap_scheme_revision,
         .producer_backend_id = bioseq::indexing::minimizer_producer_backend::scalar,
         .producer_identity_revision = bioseq::indexing::k_minimizer_producer_identity_revision,
+        .algorithm_identity = test_generation_algorithm_identity(),
         .max_occ_cap = k_test_grouped_soa_profile.max_occ_cap,
     };
 }
@@ -516,7 +553,7 @@ void require_encoded_generations_equal_normalized(
     // This helper compares canonical biological payloads across physical
     // producers. Producer identity is independently attested by each original
     // head/manifest and is therefore an intentional difference for scalar
-    // versus Exact SIMD comparisons.
+    // versus Exact SIMD and fragment-position versus sequence-position comparisons.
     REQUIRE(lhs.head.storage_contract_checksum ==
             compute_minimizer_generation_storage_contract_checksum(lhs.manifest));
     REQUIRE(rhs.head.storage_contract_checksum ==
@@ -527,6 +564,8 @@ void require_encoded_generations_equal_normalized(
         bioseq::indexing::k_minimizer_producer_identity_revision;
     rhs_manifest.producer_identity_revision =
         bioseq::indexing::k_minimizer_producer_identity_revision;
+    lhs_manifest.algorithm_identity = {};
+    rhs_manifest.algorithm_identity = {};
     REQUIRE(lhs_manifest == rhs_manifest);
     REQUIRE(lhs.head.source_identity == rhs.head.source_identity);
     REQUIRE(compute_minimizer_generation_storage_contract_checksum(lhs_manifest) ==

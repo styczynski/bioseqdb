@@ -16,6 +16,7 @@ module;
 export module bioseq.postgres.table:custom_scan_per_row_join_runtime_contracts;
 
 import bioseq.pipeline.minimap_parameters_contract;
+import bioseq.pipeline.pipe;
 import bioseq.pipeline.runtime_contract;
 import bioseq.pipeline.stats;
 import bioseq.postgres.scheduler.dispatch_buffer.runtime_contract;
@@ -39,6 +40,8 @@ export {
         std::vector<batch_join_placeholder_site> placeholder_sites{};
         AttrNumber target_slot_resno = InvalidAttrNumber;
         AttrNumber query_slot_resno = InvalidAttrNumber;
+        AttrNumber target_source_tid_resno = InvalidAttrNumber;
+        AttrNumber target_source_tableoid_resno = InvalidAttrNumber;
         int child_column_count = 0;
         std::uint8_t alphabet_code = 0;
         std::uint8_t storage_unit_byte_width = 0;
@@ -52,8 +55,7 @@ export {
         Cost honest_startup_cost = 0;
         Cost honest_total_cost = 0;
         Cost incumbent_cost_floor = 0;
-        bioseq::simd::minimap2_parameters aligner_params{};
-        bool aligner_params_captured = false;
+        bioseq::simd::pipe::statement_execution_plan_owner execution_plan{};
         std::optional<bioseq::simd::pipe::pipeline_description> pipeline_desc{};
         bioseq::pipeline_stats::pipeline_execution_stats aggregate_stats{};
         MemoryContextCallback cleanup_callback{};

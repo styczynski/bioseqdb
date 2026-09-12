@@ -181,28 +181,33 @@ set(BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS
   "sequence_ops|${CMAKE_CURRENT_SOURCE_DIR}/backend/common/simd/highway_test_probes/sequence_ops.cppm.in"
   "simd_utils|${CMAKE_CURRENT_SOURCE_DIR}/backend/common/simd/highway_test_probes/simd_utils.cppm.in"
   "two_stack|${CMAKE_CURRENT_SOURCE_DIR}/backend/common/simd/highway_test_probes/two_stack.cppm.in")
-# One bounded ordinary owner per admitted result representation prevents every
-# coarse input-width wrapper from instantiating the complete result-layout
-# switch. Baseline k-mer profiles have 7 owners / 14 typed instantiations;
-# extended-k-mer profiles add K7/K27 identities for exactly 13 owners / 24
-# instantiations per target.
-set(BIOSEQ_HIGHWAY_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
-  "minimap2_reference_l15_k15|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<15u,15u>|u32,u64"
-  "minimap2_reference_l28_k15|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<28u,15u>|u32,u64"
-  "minimap2_reference_l33_k15|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<33u,15u>|u32,u64"
-  "minimap2_reference_l63_k15|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<63u,15u>|u32,u64"
-  "bounded_nthash_l15_k15|bounded_nthash|minimizer_bounded_nthash|::bioseq::minimizers::minimizer_representation<15u,15u>|u32,u64"
-  "bounded_nthash_l28_k15|bounded_nthash|minimizer_bounded_nthash|::bioseq::minimizers::minimizer_representation<28u,15u>|u32,u64"
-  "bounded_nthash_l63_k15|bounded_nthash|minimizer_bounded_nthash|::bioseq::minimizers::minimizer_representation<63u,15u>|u32,u64")
 if(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
-  list(APPEND BIOSEQ_HIGHWAY_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
-    "minimap2_reference_l7_k7|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<7u,7u>|u32,u64"
-    "minimap2_reference_l17_k7|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<17u,7u>|u32,u64"
-    "minimap2_reference_l49_k7|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<49u,7u>|u32,u64"
-    "minimap2_reference_l63_k7|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<63u,7u>|u32,u64"
-    "minimap2_reference_l27_k27|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<27u,27u>|u64"
-    "minimap2_reference_l63_k27|minimap2_reference|minimizer_minimap2_reference|::bioseq::minimizers::minimizer_representation<63u,27u>|u64")
+  set(BIOSEQ_MINIMIZER_REGISTRY_PROFILE extended)
+else()
+  set(BIOSEQ_MINIMIZER_REGISTRY_PROFILE baseline)
 endif()
+
+# The early target-neutral modules are generated before representation.cppm is
+# compiled. The later visitor may import representation, while representation
+# imports only the records module, so the codegen-output graph stays acyclic.
+set(BIOSEQ_MINIMIZER_REGISTRY_GENERATED_ROOT
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/minimizer_registry")
+bioseq_add_minimizer_registry_codegen(
+  TARGET bioseq_minimizer_registry_modules
+  OUTPUT_ROOT "${BIOSEQ_MINIMIZER_REGISTRY_GENERATED_ROOT}"
+  PROFILE "${BIOSEQ_MINIMIZER_REGISTRY_PROFILE}"
+  OUTPUT_RECORDS_MODULE BIOSEQ_MINIMIZER_PHYSICAL_RECORDS_MODULE
+  OUTPUT_VISITOR_MODULE BIOSEQ_MINIMIZER_PHYSICAL_VISITOR_MODULE
+  OUTPUT_MANIFEST BIOSEQ_MINIMIZER_REGISTRY_MANIFEST
+  OUTPUT_STAMP BIOSEQ_MINIMIZER_REGISTRY_STAMP)
+target_sources(bioseq_modules_nopg
+  PUBLIC FILE_SET bioseq_minimizer_registry_modules
+    TYPE CXX_MODULES
+    BASE_DIRS "${BIOSEQ_MINIMIZER_REGISTRY_GENERATED_ROOT}"
+    FILES
+      "${BIOSEQ_MINIMIZER_PHYSICAL_RECORDS_MODULE}"
+      "${BIOSEQ_MINIMIZER_PHYSICAL_VISITOR_MODULE}")
+add_dependencies(bioseq_modules_nopg bioseq_minimizer_registry_modules)
 
 bioseq_add_highway_codegen(
   REQUIRE_COMPLETE_TABLE
@@ -223,6 +228,8 @@ bioseq_add_highway_codegen(
   SIGNATURE_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/backend/common/simd/highway_dispatch_contract.cppm"
   PCM_ROOT "${BIOSEQ_HIGHWAY_GENERATED_ROOT}/pcm"
+  MINIMIZER_PROFILE "${BIOSEQ_MINIMIZER_REGISTRY_PROFILE}"
+  MINIMIZER_REGISTRY_MANIFEST "${BIOSEQ_MINIMIZER_REGISTRY_MANIFEST}"
   SOURCE_RECORDS
     "simd_utils|${CMAKE_CURRENT_SOURCE_DIR}/backend/common/simd/highway_utils.cppm|bioseq.highway.sources.simd_utils|simd_utils|simd_utils|"
     "vector_stream_operations|${CMAKE_CURRENT_SOURCE_DIR}/backend/common/simd/highway_vector_stream_operations.cppm|bioseq.highway.sources.vector_stream_operations|vector_stream_operations|vector_stream|"
@@ -267,8 +274,6 @@ bioseq_add_highway_codegen(
     "common|sneaky_snake_simd_batch"
     "chaining|chain_anchors_simd"
   UNIT_PROBE_RECORDS ${BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS}
-  MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
-    ${BIOSEQ_HIGHWAY_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS}
   OUTPUT_MODULES BIOSEQ_HIGHWAY_GENERATED_MODULES
   OUTPUT_PRIMARY_MODULES BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES
   OUTPUT_TARGET_IMPLEMENTATIONS
@@ -290,31 +295,21 @@ list(LENGTH BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS
   _bioseq_highway_unit_probe_record_count)
 list(LENGTH BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS
   _bioseq_highway_unit_probe_output_count)
-list(LENGTH BIOSEQ_HIGHWAY_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
-  _bioseq_highway_representation_owner_count)
 list(LENGTH BIOSEQ_HIGHWAY_COMPILED_TARGET_RECORDS
   _bioseq_highway_compiled_target_count)
 list(LENGTH BIOSEQ_HIGHWAY_GENERATED_MINIMIZER_REPRESENTATION_INSTANCE_IMPLEMENTATIONS
   _bioseq_highway_representation_output_count)
-math(EXPR _bioseq_highway_expected_representation_output_count
-  "${_bioseq_highway_representation_owner_count} * ${_bioseq_highway_compiled_target_count}")
+set(_bioseq_highway_expected_representation_output_count
+  "${_bioseq_highway_compiled_target_count}")
 if(NOT _bioseq_highway_unit_probe_record_count EQUAL 4
     OR NOT _bioseq_highway_unit_probe_output_count EQUAL 4)
   message(FATAL_ERROR
     "Fixed-target generation requires exactly four unit validation owners/outputs")
 endif()
-if(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
-  set(_bioseq_highway_expected_representation_owner_count 13)
-else()
-  set(_bioseq_highway_expected_representation_owner_count 7)
-endif()
-if(NOT _bioseq_highway_representation_owner_count EQUAL
-      _bioseq_highway_expected_representation_owner_count
-    OR NOT _bioseq_highway_representation_output_count EQUAL
+if(NOT _bioseq_highway_representation_output_count EQUAL
       _bioseq_highway_expected_representation_output_count)
   message(FATAL_ERROR
-    "Minimizer representation owner/output closure diverged: "
-    "owners=${_bioseq_highway_representation_owner_count}, "
+    "Minimizer representation output closure diverged: "
     "outputs=${_bioseq_highway_representation_output_count}, "
     "targets=${_bioseq_highway_compiled_target_count}")
 endif()
@@ -349,11 +344,9 @@ unset(_bioseq_highway_probe_outputs)
 unset(_bioseq_highway_unique_probe_outputs)
 unset(_bioseq_highway_probe_output_count)
 unset(_bioseq_highway_unique_probe_output_count)
-unset(_bioseq_highway_expected_representation_owner_count)
 unset(_bioseq_highway_expected_representation_output_count)
 unset(_bioseq_highway_representation_output_count)
 unset(_bioseq_highway_compiled_target_count)
-unset(_bioseq_highway_representation_owner_count)
 unset(_bioseq_highway_unit_probe_output_count)
 unset(_bioseq_highway_unit_probe_record_count)
 

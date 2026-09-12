@@ -109,6 +109,7 @@ set(BIOSEQ_GPU_ARCHIVE_MODULE_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive/builder.cppm")
 set(BIOSEQ_GPU_ARCHIVE_ORDINARY_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive/implementation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive/command_capture.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive/main.cppm")
 
 file(GLOB_RECURSE SRC_MOD_FILES CONFIGURE_DEPENDS
@@ -225,7 +226,82 @@ find_package(VulkanUtilityLibraries CONFIG REQUIRED)
 # CMake's FindVulkan only materialises Vulkan::glslang when the glslang
 # component is requested, so it is listed explicitly. The shader is GLSL and
 # does not require DXC, preserving valid MoltenVK and non-Windows configurations.
+if(APPLE AND BIOSEQ_BENCHMARK_E2E_INTERVALS)
+  if(NOT DEFINED VCPKG_INSTALLED_DIR
+      OR NOT IS_ABSOLUTE "${VCPKG_INSTALLED_DIR}"
+      OR NOT DEFINED VCPKG_TARGET_TRIPLET
+      OR "${VCPKG_TARGET_TRIPLET}" STREQUAL "")
+    message(FATAL_ERROR
+      "Optimized Apple E2E receipts require one absolute vcpkg installation root")
+  endif()
+  set(_bioseq_e2e_vulkan_release_candidate
+    "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/libvulkan.dylib")
+  if(NOT EXISTS "${_bioseq_e2e_vulkan_release_candidate}")
+    message(FATAL_ERROR
+      "Optimized Apple E2E Vulkan release loader is absent: "
+      "${_bioseq_e2e_vulkan_release_candidate}")
+  endif()
+  file(REAL_PATH "${_bioseq_e2e_vulkan_release_candidate}"
+    _bioseq_e2e_vulkan_release_loader)
+  file(REAL_PATH "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}"
+    _bioseq_e2e_vulkan_receipt_root)
+  cmake_path(IS_PREFIX _bioseq_e2e_vulkan_receipt_root
+    "${_bioseq_e2e_vulkan_release_loader}" NORMALIZE
+    _bioseq_e2e_vulkan_release_is_receipt_owned)
+  string(FIND "${_bioseq_e2e_vulkan_release_loader}" "/debug/lib/"
+    _bioseq_e2e_vulkan_debug_offset)
+  if(NOT _bioseq_e2e_vulkan_release_is_receipt_owned
+      OR NOT _bioseq_e2e_vulkan_debug_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Optimized Apple E2E Vulkan loader is not the receipt-owned release image: "
+      "${_bioseq_e2e_vulkan_release_loader}")
+  endif()
+  set(Vulkan_LIBRARY "${_bioseq_e2e_vulkan_release_loader}"
+    CACHE FILEPATH
+    "Receipt-owned release Vulkan loader for optimized Apple E2E builds"
+    FORCE)
+endif()
 find_package(Vulkan REQUIRED COMPONENTS glslang)
+
+if(APPLE AND BIOSEQ_BENCHMARK_E2E_INTERVALS)
+  if(NOT TARGET Vulkan::Vulkan)
+    message(FATAL_ERROR
+      "FindVulkan did not create Vulkan::Vulkan for optimized Apple E2E")
+  endif()
+  get_target_property(_bioseq_e2e_vulkan_imported_loader
+    Vulkan::Vulkan IMPORTED_LOCATION)
+  if(NOT _bioseq_e2e_vulkan_imported_loader)
+    message(FATAL_ERROR
+      "Vulkan::Vulkan has no imported location for optimized Apple E2E")
+  endif()
+  file(REAL_PATH "${Vulkan_LIBRARY}"
+    _bioseq_e2e_vulkan_selected_loader)
+  file(REAL_PATH "${_bioseq_e2e_vulkan_imported_loader}"
+    _bioseq_e2e_vulkan_imported_loader)
+  string(FIND "${_bioseq_e2e_vulkan_selected_loader}" "/debug/lib/"
+    _bioseq_e2e_vulkan_selected_debug_offset)
+  string(FIND "${_bioseq_e2e_vulkan_imported_loader}" "/debug/lib/"
+    _bioseq_e2e_vulkan_imported_debug_offset)
+  if(NOT "${_bioseq_e2e_vulkan_selected_loader}" STREQUAL
+         "${_bioseq_e2e_vulkan_release_loader}"
+      OR NOT "${_bioseq_e2e_vulkan_imported_loader}" STREQUAL
+             "${_bioseq_e2e_vulkan_release_loader}"
+      OR NOT _bioseq_e2e_vulkan_selected_debug_offset EQUAL -1
+      OR NOT _bioseq_e2e_vulkan_imported_debug_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Optimized Apple E2E Vulkan_LIBRARY and Vulkan::Vulkan must select the "
+      "same receipt-owned release loader")
+  endif()
+  unset(_bioseq_e2e_vulkan_imported_debug_offset)
+  unset(_bioseq_e2e_vulkan_selected_debug_offset)
+  unset(_bioseq_e2e_vulkan_imported_loader)
+  unset(_bioseq_e2e_vulkan_selected_loader)
+  unset(_bioseq_e2e_vulkan_debug_offset)
+  unset(_bioseq_e2e_vulkan_release_is_receipt_owned)
+  unset(_bioseq_e2e_vulkan_receipt_root)
+  unset(_bioseq_e2e_vulkan_release_loader)
+  unset(_bioseq_e2e_vulkan_release_candidate)
+endif()
 
 if(NOT TARGET Vulkan::glslang)
   message(FATAL_ERROR
@@ -278,10 +354,13 @@ list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
   ${BIOSEQ_GPU_ARCHIVE_ORDINARY_UNITS})
 # Fail closed on authored additions until their target and generator ownership
 # has been reviewed and the exact inventory count is advanced deliberately.
+# DOC0433 adds pure minimizer layout geometry and the shared native heap
+# allocation helper. The heap module belongs to the small runtime-core closure.
+# The generic bounded ntHash seed policy is one shared, target-neutral module.
 list(LENGTH BIOSEQ_NOPG_MODULES _bioseq_nopg_module_count)
-if(NOT _bioseq_nopg_module_count EQUAL 346)
+if(NOT _bioseq_nopg_module_count EQUAL 349)
   message(FATAL_ERROR
-        "Domain-neutral module inventory must contain exactly 346 authored units; "
+        "Domain-neutral module inventory must contain exactly 349 authored units; "
     "got ${_bioseq_nopg_module_count}")
 endif()
 unset(_bioseq_nopg_module_count)
@@ -789,6 +868,7 @@ foreach(_bioseq_pipeline_dispatch_owned_entry IN ITEMS
     minimap_port_raw_owned
     minimap_port_segmented_owned
     minimap_port_fragment_index_vector_owned
+    minimap_port_fragment_index_physical_owned
     minimap_port_hash_major_owned
     minimap_port_grouped_soa_owned
     minimap_port_fragment_query_owned)
@@ -957,6 +1037,7 @@ set(BIOSEQ_RUNTIME_CORE_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/fmtlog_backend/runtime.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/formatters.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/context.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/heap_allocation.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/clock.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concurrency_mode.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concepts.cppm
@@ -1106,6 +1187,8 @@ target_include_directories(bioseq_runtime_core PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt")
 target_link_libraries(bioseq_runtime_core PUBLIC
+  bioseq_checked_arithmetic_core
+  ${CMAKE_DL_LIBS}
   fmt
   reflectcpp::reflectcpp
   foonathan_memory
@@ -1190,6 +1273,41 @@ endif()
 target_compile_definitions(bioseq_modules_nopg PRIVATE NO_POSTGRES=1)
 target_compile_definitions(bioseq_modules_nopg PUBLIC
   POSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
+if(APPLE)
+  if(NOT DEFINED Vulkan_LIBRARY OR NOT IS_ABSOLUTE "${Vulkan_LIBRARY}"
+      OR NOT DEFINED VCPKG_INSTALLED_DIR
+      OR NOT IS_ABSOLUTE "${VCPKG_INSTALLED_DIR}"
+      OR NOT DEFINED VCPKG_TARGET_TRIPLET
+      OR "${VCPKG_TARGET_TRIPLET}" STREQUAL "")
+    message(FATAL_ERROR
+      "Apple Vulkan runtime requires one absolute CMake-selected vcpkg loader")
+  endif()
+  file(REAL_PATH "${Vulkan_LIBRARY}"
+    _bioseq_receipt_owned_vulkan_loader)
+  file(REAL_PATH
+    "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}"
+    _bioseq_receipt_owned_vulkan_root)
+  cmake_path(IS_PREFIX _bioseq_receipt_owned_vulkan_root
+    "${_bioseq_receipt_owned_vulkan_loader}" NORMALIZE
+    _bioseq_vulkan_loader_is_receipt_owned)
+  string(FIND "${_bioseq_receipt_owned_vulkan_loader}" "/debug/lib/"
+    _bioseq_vulkan_loader_debug_offset)
+  if(NOT _bioseq_vulkan_loader_is_receipt_owned
+      OR NOT EXISTS "${_bioseq_receipt_owned_vulkan_loader}"
+      OR (BIOSEQ_BENCHMARK_E2E_INTERVALS
+          AND NOT _bioseq_vulkan_loader_debug_offset EQUAL -1))
+    message(FATAL_ERROR
+      "CMake-selected Vulkan loader is outside the permitted receipt-owned "
+      "vcpkg tree or is a debug image in an optimized E2E receipt: "
+      "${_bioseq_receipt_owned_vulkan_loader}")
+  endif()
+  target_compile_definitions(bioseq_modules_nopg PUBLIC
+    "BIOSEQ_RECEIPT_OWNED_VULKAN_LOADER_PATH=\"${_bioseq_receipt_owned_vulkan_loader}\"")
+  unset(_bioseq_vulkan_loader_is_receipt_owned)
+  unset(_bioseq_vulkan_loader_debug_offset)
+  unset(_bioseq_receipt_owned_vulkan_root)
+  unset(_bioseq_receipt_owned_vulkan_loader)
+endif()
 target_compile_options(bioseq_modules_nopg PRIVATE
   "$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=bioseq_sql::>"
   "$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>")
@@ -1413,6 +1531,7 @@ if(APPLE)
       CXX_SCAN_FOR_MODULES ON
       COMPILE_OPTIONS "-x;c++")
   target_compile_features(bioseq_gpu_archive_builder PRIVATE cxx_std_26)
+  target_link_libraries(bioseq_gpu_archive_builder PRIVATE Vulkan::Headers)
   if(DEFINED PostgreSQL_PKG_LIBRARY_DIR)
     install(TARGETS bioseq_gpu_archive_builder
       RUNTIME DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"

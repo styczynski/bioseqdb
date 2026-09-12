@@ -4,6 +4,12 @@
  */
 
 #include <cstring>
+#if defined(__linux__)
+#include <features.h>
+#if defined(__GLIBC__)
+#include <unistd.h>
+#endif
+#endif
 #ifndef __has_feature
 #define __has_feature(feature) 0
 #endif
@@ -29,6 +35,33 @@ import bioseq.indexing.symbol_counts;
 using namespace seq::literals;
 
 namespace {
+
+/** Deterministic observation of the existing two-sample materialization boundary. */
+struct packed_transaction_probe {
+    inline static thread_local packed_transaction_probe* active = nullptr;
+    bioseq::parallelism::memory_permit* pending;
+    bool reflect;
+    std::size_t calls = 0u;
+    std::array<std::uint64_t, 2> sampled_permit_bytes{};
+    std::array<bool, 2> sampled_permit_live{};
+
+    explicit packed_transaction_probe(bioseq::parallelism::memory_permit& permit,
+                                      bool should_reflect)
+        : pending(std::addressof(permit)), reflect(should_reflect) {
+        active = this;
+    }
+    ~packed_transaction_probe() { active = nullptr; }
+
+    static std::uint64_t read() noexcept {
+        auto& probe = *active;
+        const auto slot = probe.calls++;
+        if (slot < probe.sampled_permit_bytes.size()) {
+            probe.sampled_permit_bytes[slot] = probe.pending->bytes();
+            probe.sampled_permit_live[slot] = static_cast<bool>(*probe.pending);
+        }
+        return probe.reflect && slot == 1u ? 100u + probe.pending->bytes() : 100u;
+    }
+};
 
 // The mixed-libc++ ASAN lane waives the entire libc++ container-poison
 // category. This contract validates only the independent ordinary
@@ -211,6 +244,7 @@ struct mock_lazy_state {
     std::size_t bulk_copy_attempt_count{};
     std::size_t bulk_copy_success_count{};
     bool bulk_copy_enabled{};
+    bool bulk_copy_throw_after_touch{};
     bool worker_shareable{};
 };
 
@@ -292,6 +326,9 @@ mock_resident_probe(void const* opaque, sequence_size_t, sequence_size_t, std::u
     }
     auto units = std::span<std::uint64_t>{static_cast<std::uint64_t*>(destination), unit_count};
     std::fill(units.begin(), units.end(), std::uint64_t{});
+    if (state.bulk_copy_throw_after_touch) {
+        throw std::runtime_error{"packed copy callback failed after touching its destination"};
+    }
     for (std::size_t index = 0u; index < state.ranks.size(); ++index) {
         units[index / letters_per_unit] |= static_cast<std::uint64_t>(state.ranks[index])
                                            << (2u * (index % letters_per_unit));
@@ -448,7 +485,9 @@ void require_materialized_width(facade_t source,
     {
         auto owner = bioseq::storage::materialize_packed_sequence(
             source, 3u, 3u + expected.size(), width, std::move(*permit));
-        REQUIRE(admission.reserved_bytes() == before + 4096u);
+        REQUIRE(owner.test_admission_bytes() <=
+                bioseq::storage::packed_sequence_admission_bytes<seq::dna4>(expected.size(), width));
+        REQUIRE(admission.reserved_bytes() == before + owner.test_admission_bytes());
         REQUIRE(owner.descriptor().storage_unit_width == sizeof(p_unit));
         REQUIRE(owner.descriptor().leading_symbol_offset == 0u);
         REQUIRE(owner.descriptor().logical_length == expected.size());
@@ -1067,7 +1106,8 @@ TEST_CASE("payload observer is bijective across copied views and failed admissio
         REQUIRE(probe.events[0].input_symbols == moved.bp_size());
         REQUIRE(probe.events[0].output_symbols == moved.bp_size());
         REQUIRE(probe.events[0].payload_bytes == payload_bytes);
-        REQUIRE(probe.events[0].retained_bytes == retained_bytes);
+        REQUIRE(probe.events[0].retained_bytes <= retained_bytes);
+        REQUIRE(probe.events[0].retained_bytes > payload_bytes);
         REQUIRE(probe.events[0].kind ==
                 bioseq::storage::sequence_payload_allocation_kind::admitted_packed_sequence);
     }
@@ -1091,7 +1131,8 @@ TEST_CASE("payload observer is bijective across copied views and failed admissio
     REQUIRE(probe.events[1].allocation_id != 0u);
     REQUIRE(probe.events[1].allocation_id != probe.events[0].allocation_id);
     REQUIRE(probe.events[1].payload_bytes == probe.events[0].payload_bytes);
-    REQUIRE(probe.events[1].retained_bytes == probe.events[0].retained_bytes);
+    REQUIRE(probe.events[1].retained_bytes <= retained_bytes);
+    REQUIRE(probe.events[1].retained_bytes > probe.events[1].payload_bytes);
 }
 
 TEST_CASE("admitted packed move construction holds a saturated budget and backing",
@@ -1128,10 +1169,16 @@ TEST_CASE("admitted packed move construction holds a saturated budget and backin
 
     {
         owner_type initial = bioseq::storage::materialize_packed_sequence(
-            source, 0u, source.bp_size(), 8u, std::move(*permit));
+            source, 0u, source.bp_size(), 8u, std::move(*permit),
+            bioseq::storage::packed_materialization_policy::allow_rank_repack,
+            /*no footprint reflection=*/nullptr);
         const auto* const backing = initial.descriptor().units;
         REQUIRE(backing != nullptr);
-        REQUIRE(admission.reserved_bytes() == saturated_cap);
+        const auto exact_retained = initial.test_admission_bytes();
+        REQUIRE(exact_retained > 0u);
+        REQUIRE(exact_retained <= saturated_cap);
+        REQUIRE(admission.reserved_bytes() == exact_retained);
+        admission.set_index_memory_cap_bytes(exact_retained);
 
         // First move happens before any facade is issued.
         owner_type moved_before_view{std::move(initial)};
@@ -1141,7 +1188,7 @@ TEST_CASE("admitted packed move construction holds a saturated budget and backin
         // The second move happens after the facade captured stable_state.
         owner_type moved_after_view{std::move(moved_before_view)};
         REQUIRE(moved_after_view.descriptor().units == backing);
-        REQUIRE(admission.reserved_bytes() == saturated_cap);
+        REQUIRE(admission.reserved_bytes() == exact_retained);
         REQUIRE_FALSE(admission.try_reserve(1u));
 
         std::vector<std::uint8_t> observed(data.size());
@@ -1150,10 +1197,11 @@ TEST_CASE("admitted packed move construction holds a saturated budget and backin
             REQUIRE(observed[index] == static_cast<std::uint8_t>(data[index].to_rank()));
         }
         REQUIRE(moved_after_view.view().bp_size() == source.bp_size());
-        REQUIRE(admission.reserved_bytes() == saturated_cap);
+        REQUIRE(admission.reserved_bytes() == exact_retained);
     }
 
     REQUIRE(admission.reserved_bytes() == 0u);
+    admission.set_index_memory_cap_bytes(saturated_cap);
     auto reused = admission.try_reserve(admitted_bytes);
     REQUIRE(reused.has_value());
     REQUIRE(admission.reserved_bytes() == saturated_cap);
@@ -1362,12 +1410,190 @@ TEST_CASE("streaming consumers never probe poison resident storage",
     {
         auto owner = bioseq::storage::materialize_packed_sequence(
             view, 0u, view.bp_size(), 4u, std::move(*permit));
-        REQUIRE(admission.reserved_bytes() == reserved_before + resident.admission_bytes);
+        REQUIRE(owner.test_admission_bytes() <= resident.admission_bytes);
+        REQUIRE(admission.reserved_bytes() == reserved_before + owner.test_admission_bytes());
         REQUIRE(owner.descriptor().logical_length == view.bp_size());
         REQUIRE(owner.descriptor().leading_symbol_offset == 0u);
         REQUIRE(state.resident_probe_count == 1u);
     }
     REQUIRE(admission.reserved_bytes() == reserved_before);
+}
+
+TEST_CASE("packed materialization retains its child through both physical footprint samples",
+          "[component:bioseq][layer:unit][feature:storage]") {
+    auto data = make_dna4(257u);
+    range_t range(data);
+    auto lazy = make_resident_lazy_sequence(range);
+    const facade_t source = make_lazy_sequence_view(lazy);
+    const auto physical_plan =
+        bioseq::storage::plan_packed_sequence_allocation<seq::dna4>(source.bp_size(), 8u);
+    const auto bound = physical_plan.total_allocation_requirement_bytes;
+    REQUIRE(bound == bioseq::storage::packed_sequence_admission_bytes<seq::dna4>(
+                         source.bp_size(), 8u));
+    REQUIRE(physical_plan.logical_payload_bytes > 0u);
+    REQUIRE(physical_plan.payload_highway_request_bound_bytes >=
+            physical_plan.logical_payload_bytes);
+    REQUIRE(physical_plan.payload_allocator_request_bytes >=
+            physical_plan.payload_highway_request_bound_bytes);
+    REQUIRE(physical_plan.payload_allocation_requirement_bytes >=
+            physical_plan.payload_allocator_request_bytes);
+    REQUIRE(physical_plan.control_object_bytes > 0u);
+    REQUIRE(physical_plan.control_allocator_request_bytes >=
+            physical_plan.control_object_bytes);
+    REQUIRE(physical_plan.control_allocation_requirement_bytes >=
+            physical_plan.control_allocator_request_bytes);
+    REQUIRE(bound == physical_plan.payload_allocation_requirement_bytes +
+                         physical_plan.control_allocation_requirement_bytes);
+#if defined(__GLIBC__) && defined(__x86_64__) && defined(__LP64__)
+    const long reported_page_size = ::sysconf(_SC_PAGESIZE);
+    REQUIRE(reported_page_size > 0);
+    const auto page_size = static_cast<std::uint64_t>(reported_page_size);
+    const auto glibc_requirement = [page_size](std::uint64_t bytes) {
+        const auto maximum_page = std::max(page_size, bytes + 4u * sizeof(std::size_t));
+        return bytes + std::max<std::uint64_t>(
+            4u * sizeof(std::size_t), 2u * sizeof(std::size_t) + maximum_page - 1u);
+    };
+    REQUIRE(physical_plan.payload_allocation_requirement_bytes ==
+            glibc_requirement(physical_plan.payload_allocator_request_bytes));
+    REQUIRE(physical_plan.control_allocation_requirement_bytes ==
+            glibc_requirement(physical_plan.control_allocator_request_bytes));
+#endif
+    for (const bool reflect : {false, true}) {
+        bioseq::parallelism::memory_admission_controller admission;
+        admission.set_index_memory_cap_bytes(bound);
+        auto permit = admission.try_reserve(bound);
+        REQUIRE(permit.has_value());
+        packed_transaction_probe probe{*permit, reflect};
+        {
+            auto initial = bioseq::storage::materialize_packed_sequence(
+                source, 0u, source.bp_size(), 8u, std::move(*permit),
+                bioseq::storage::packed_materialization_policy::allow_rank_repack,
+                &packed_transaction_probe::read);
+            REQUIRE(probe.calls == 2u);
+            REQUIRE(probe.sampled_permit_live[0]);
+            REQUIRE(probe.sampled_permit_live[1]);
+            REQUIRE(probe.sampled_permit_bytes[0] == bound);
+            REQUIRE(probe.sampled_permit_bytes[1] <= bound);
+            const auto payload_allocation = initial.test_payload_allocation_bytes();
+            const auto control_allocation = initial.test_control_allocation_bytes();
+            const auto physical_allocation = payload_allocation + control_allocation;
+            REQUIRE(payload_allocation >= physical_plan.payload_allocator_request_bytes);
+            REQUIRE(payload_allocation <=
+                    physical_plan.payload_allocation_requirement_bytes);
+            REQUIRE(control_allocation >= physical_plan.control_allocator_request_bytes);
+            REQUIRE(control_allocation <=
+                    physical_plan.control_allocation_requirement_bytes);
+            REQUIRE(probe.sampled_permit_bytes[1] == physical_allocation);
+#if defined(__APPLE__)
+            REQUIRE(physical_plan.payload_allocation_requirement_bytes ==
+                    2u * physical_plan.payload_allocator_request_bytes - 1u);
+            REQUIRE(physical_plan.control_allocation_requirement_bytes ==
+                    2u * physical_plan.control_allocator_request_bytes - 1u);
+#endif
+            const auto payload = initial.descriptor().unit_count *
+                                 initial.descriptor().storage_unit_width;
+            REQUIRE(probe.sampled_permit_bytes[1] > payload);
+            REQUIRE_FALSE(*permit);
+            REQUIRE(initial.test_admission_bytes() ==
+                    (reflect ? 0u : probe.sampled_permit_bytes[1]));
+            REQUIRE(admission.reserved_bytes() == initial.test_admission_bytes());
+            auto issued = initial.view();
+            auto moved = std::move(initial);
+            REQUIRE(admission.reserved_bytes() == moved.test_admission_bytes());
+            std::vector<std::uint8_t> observed(data.size());
+            issued.template copy_ranks<false, false>(observed, 0u, observed.size());
+            for (std::size_t index = 0u; index < observed.size(); ++index) {
+                REQUIRE(observed[index] == static_cast<std::uint8_t>(data[index].to_rank()));
+            }
+        }
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+}
+
+TEST_CASE("packed materialization short admission and native-copy failure publish no owner",
+          "[component:bioseq][layer:unit][feature:storage]") {
+    mock_lazy_state state;
+    state.ranks.resize(257u);
+    state.bulk_copy_enabled = false;
+    const auto source = make_mock_view(state);
+    const auto bound = bioseq::storage::packed_sequence_admission_bytes<seq::dna4>(
+        source.bp_size(), 8u);
+    bioseq::parallelism::memory_admission_controller admission;
+    admission.set_index_memory_cap_bytes(bound);
+    {
+        auto permit = admission.try_reserve(bound - 1u);
+        REQUIRE(permit.has_value());
+        packed_transaction_probe probe{*permit, false};
+        REQUIRE_THROWS_AS(bioseq::storage::materialize_packed_sequence(
+            source, 0u, source.bp_size(), 8u, std::move(*permit),
+            bioseq::storage::packed_materialization_policy::allow_rank_repack,
+            &packed_transaction_probe::read), std::length_error);
+        REQUIRE(probe.calls == 0u);
+        REQUIRE(admission.reserved_bytes() == bound - 1u);
+        REQUIRE(state.callback_count == 0u);
+    }
+    REQUIRE(admission.reserved_bytes() == 0u);
+    {
+        auto permit = admission.try_reserve(bound);
+        REQUIRE(permit.has_value());
+        packed_transaction_probe probe{*permit, false};
+        REQUIRE_THROWS_AS(bioseq::storage::materialize_packed_sequence(
+            source, 0u, source.bp_size(), 8u, std::move(*permit),
+            bioseq::storage::packed_materialization_policy::require_native_copy,
+            &packed_transaction_probe::read), bioseq::storage::native_packed_materialization_unavailable);
+        REQUIRE(probe.calls == 2u);
+        REQUIRE(probe.sampled_permit_live[1]);
+        REQUIRE_FALSE(*permit);
+        REQUIRE(admission.reserved_bytes() == 0u);
+        REQUIRE(state.callback_count == 0u);
+    }
+}
+
+TEST_CASE("packed materialization callback failure unwinds touched storage before retry",
+          "[component:bioseq][layer:unit][feature:storage]") {
+    mock_lazy_state state;
+    state.ranks.resize(257u);
+    state.bulk_copy_enabled = true;
+    state.bulk_copy_throw_after_touch = true;
+    const auto source = make_mock_view(state);
+    const auto bound = bioseq::storage::packed_sequence_admission_bytes<seq::dna4>(
+        source.bp_size(), 8u);
+    bioseq::parallelism::memory_admission_controller admission;
+    admission.set_index_memory_cap_bytes(bound);
+    {
+        auto permit = admission.try_reserve(bound);
+        REQUIRE(permit.has_value());
+        packed_transaction_probe probe{*permit, false};
+        REQUIRE_THROWS_AS(bioseq::storage::materialize_packed_sequence(
+            source, 0u, source.bp_size(), 8u, std::move(*permit),
+            bioseq::storage::packed_materialization_policy::require_native_copy,
+            &packed_transaction_probe::read), std::runtime_error);
+        REQUIRE(probe.calls == 2u);
+        REQUIRE(probe.sampled_permit_live[0]);
+        REQUIRE(probe.sampled_permit_live[1]);
+        REQUIRE_FALSE(*permit);
+        REQUIRE(state.bulk_copy_attempt_count == 1u);
+        REQUIRE(state.bulk_copy_success_count == 0u);
+        REQUIRE(state.callback_count == 0u);
+        REQUIRE(admission.reserved_bytes() == 0u);
+    }
+
+    // Retry at exactly the same cap: the failed attempt must not retain a lease.
+    state.bulk_copy_throw_after_touch = false;
+    {
+        auto permit = admission.try_reserve(bound);
+        REQUIRE(permit.has_value());
+        packed_transaction_probe probe{*permit, false};
+        auto owner = bioseq::storage::materialize_packed_sequence(
+            source, 0u, source.bp_size(), 8u, std::move(*permit),
+            bioseq::storage::packed_materialization_policy::require_native_copy,
+            &packed_transaction_probe::read);
+        REQUIRE(owner.descriptor().logical_length == source.bp_size());
+        REQUIRE(owner.test_admission_bytes() == admission.reserved_bytes());
+        REQUIRE(state.bulk_copy_attempt_count == 2u);
+        REQUIRE(state.bulk_copy_success_count == 1u);
+    }
+    REQUIRE(admission.reserved_bytes() == 0u);
 }
 
 TEST_CASE("full packed materialization uses one optional bulk copy",

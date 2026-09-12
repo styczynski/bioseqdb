@@ -179,6 +179,32 @@ export {
         required_vars = list_concat(required_vars, list_copy(owner_setrefs_carrier_vars));
         required_vars = list_concat(required_vars, pull_var_clause(query_expression, pull_flags));
         required_vars = list_concat(required_vars, list_copy(owner_support.passthrough_vars));
+        /* A transformed result slot does not retain the source scan's physical
+         * slot identity.  For a direct relation, carry both components explicitly:
+         * ctid is unique only within the relation named by tableoid.  A parent
+         * inheritance RTE can place different physical relations below one Append;
+         * retaining its existing host-only owner avoids forging one parent identity
+         * or widening every append child.  A leaf child RTE has inh=false and is
+         * therefore authenticated independently.  These remain private child
+         * requirements and never widen the public owner target. */
+        if (!target_rte->inh) {
+            per_row_append_unique_expression(
+                required_vars,
+                reinterpret_cast<Node*>(makeVar(target_source->varno,
+                                                 SelfItemPointerAttributeNumber,
+                                                 TIDOID,
+                                                 -1,
+                                                 InvalidOid,
+                                                 0)));
+            per_row_append_unique_expression(
+                required_vars,
+                reinterpret_cast<Node*>(makeVar(target_source->varno,
+                                                 TableOidAttributeNumber,
+                                                 OIDOID,
+                                                 -1,
+                                                 InvalidOid,
+                                                 0)));
+        }
         for (Node* required : postgres_list<Node>(required_vars)) {
             Var* var = try_cast_pg_node<Var>(required);
             const bool row_identity = per_row_is_exact_row_identity_var(var);

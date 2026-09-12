@@ -95,9 +95,19 @@ struct minimizer_fragment_fixture {
         std::uint64_t segment_span,
         std::uint64_t max_occ_cap,
         idx::minimizer_scheme_identity scheme,
-        idx::minimizer_producer_identity producer,
+        bioseq::minimizers::minimizer_sketch_backend backend,
         std::uint16_t kmer_size,
         std::span<const fragment_spec> fragments) {
+    const idx::minimizer_producer_identity producer =
+        idx::minimizer_producer_backend_identity_for_backend(backend);
+    const auto algorithm_identity =
+        idx::select_minimizer_generation_algorithm_identity_for_backend(
+            backend,
+            idx::k_minimizer_fragment_algorithm_position_extent_bp,
+            idx::k_minimizer_persisted_dna4_alphabet_code,
+            64u,
+            kmer_size,
+            10u);
     const auto profile = idx::derive_grouped_soa_minimizer_profile(
         scheme,
         idx::k_minimizer_persisted_dna4_alphabet_code,
@@ -105,6 +115,7 @@ struct minimizer_fragment_fixture {
         segment_span,
         max_occ_cap);
     REQUIRE(profile.has_value());
+    REQUIRE(algorithm_identity.has_value());
 
     minimizer_fragment_fixture fixture;
     fixture.manifest = idx::minimizer_generation_manifest{
@@ -115,9 +126,9 @@ struct minimizer_fragment_fixture {
         .source_content_checksum = 0x3456789au,
         .target_length = target_length,
         .alphabet_code = idx::k_minimizer_persisted_dna4_alphabet_code,
-        .storage_unit_byte_width = 1u,
+        .storage_unit_byte_width = sizeof(std::uint64_t),
         .kmer_size = kmer_size,
-        .window_size = 2u,
+        .window_size = 10u,
         .gpu_abi_revision = profile->gpu_abi_revision,
         .position_segment_span_bp = segment_span,
         .segment_geometry_revision =
@@ -127,6 +138,7 @@ struct minimizer_fragment_fixture {
         .minimizer_scheme_revision = scheme.revision,
         .producer_backend_id = producer.id,
         .producer_identity_revision = producer.revision,
+        .algorithm_identity = *algorithm_identity,
         .hash_width = profile->hash_width,
         .position_width = profile->position_width,
         .count_width = profile->count_width,
@@ -458,11 +470,8 @@ TEST_CASE(
         segment_span,
         10u,
         idx::k_minimap_scheme_identity,
-        idx::minimizer_producer_identity{
-            .id = idx::minimizer_producer_backend::scalar,
-            .revision = idx::k_minimizer_producer_identity_revision,
-        },
-        5u,
+        bioseq::minimizers::minimizer_sketch_backend::scalar,
+        15u,
         fragments);
     auto adapter = idx::minimizer_fragment_compact_hash32_adapter::open(
         idx::opened_minimizer_fragment_generation_view{
@@ -479,8 +488,9 @@ TEST_CASE(
     REQUIRE(adapter->ready());
     const auto build_options = adapter->compact_build_options(3u);
     REQUIRE(build_options.has_value());
-    CHECK(build_options->geometry.hash_domain_bits == 10u);
-    CHECK(build_options->geometry.max_hash == 1'023u);
+    // This fixture uses the registered scalar k15 profile (a 30-bit hash domain).
+    CHECK(build_options->geometry.hash_domain_bits == 30u);
+    CHECK(build_options->geometry.max_hash == 1'073'741'823u);
 
     auto source = adapter->sorted_run_source();
     const auto image = idx::build_compact_hash32_direct_index(
@@ -579,11 +589,8 @@ TEST_CASE(
         16u,
         10u,
         idx::k_minimap_scheme_identity,
-        idx::minimizer_producer_identity{
-            .id = idx::minimizer_producer_backend::scalar,
-            .revision = idx::k_minimizer_producer_identity_revision,
-        },
-        5u,
+        bioseq::minimizers::minimizer_sketch_backend::scalar,
+        15u,
         fragments);
     auto adapter = idx::minimizer_fragment_compact_hash32_adapter::open(
         idx::opened_minimizer_fragment_generation_view{
@@ -653,10 +660,7 @@ TEST_CASE(
         segment_span,
         10u,
         idx::k_bounded_nthash_u32_r7_sum_scheme_identity,
-        idx::minimizer_producer_identity{
-            .id = idx::minimizer_producer_backend::bounded_nthash_simd,
-            .revision = idx::k_minimizer_producer_identity_revision,
-        },
+        bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd,
         15u,
         fragments);
     auto adapter = idx::minimizer_fragment_compact_hash32_adapter::open(

@@ -269,8 +269,8 @@ enum class shared_join_target_outcome_topology : std::uint8_t {
 
 /* Requested-backend identity is an attestation result, not a dispatch-shape
  * discriminator. A deliberately unattested mixed CPU tuple still emits one
- * raw target outcome per target-query pair, whereas the complete Vulkan tuple
- * emits one already-shared target outcome. Derive that topology from the
+ * raw target outcome per target-query pair. The Vulkan dispatcher also records
+ * one outcome per completed query, even when its target is shared. Derive topology from the
  * immutable selected params and keep the backend identity only as a coherence
  * check. */
 [[nodiscard]] constexpr shared_join_target_outcome_topology
@@ -316,10 +316,16 @@ shared_join_raw_target_shape_valid(const shared_join_target_outcome_topology top
         expected = query_count;
         break;
     case shared_join_target_outcome_topology::gpu_shared_target:
-        if (backend != ::bioseq::pipeline_stats::executed_backend::vulkan_gpu) {
+        if (backend != ::bioseq::pipeline_stats::executed_backend::vulkan_gpu
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            && backend != ::bioseq::pipeline_stats::executed_backend::hybrid_cpu_vulkan
+#elif defined(BIOSEQ_TEST_INDEXES)
+            && backend != ::bioseq::pipeline_stats::executed_backend::mixed_invalid
+#endif
+        ) {
             return false;
         }
-        expected = 1;
+        expected = query_count;
         break;
     case shared_join_target_outcome_topology::invalid:
         return false;
@@ -343,7 +349,7 @@ static_assert(
                                        ::bioseq::pipeline_stats::executed_backend::vulkan_gpu,
                                        16,
                                        16,
-                                       1));
+                                       16));
 /* Later waves must still carry native raw target/source stats.  Only the
  * batch join owner suppresses their normalized publication. */
 static_assert(
@@ -358,12 +364,42 @@ static_assert(
                                         1,
                                         1,
                                         0));
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+static_assert(
+    shared_join_raw_target_shape_valid(
+        shared_join_target_outcome_topology::gpu_shared_target,
+        ::bioseq::pipeline_stats::executed_backend::hybrid_cpu_vulkan,
+        16,
+        16,
+        16));
 static_assert(
     !shared_join_raw_target_shape_valid(shared_join_target_outcome_topology::gpu_shared_target,
                                         ::bioseq::pipeline_stats::executed_backend::mixed_invalid,
                                         16,
                                         16,
                                         1));
+#elif defined(BIOSEQ_TEST_INDEXES)
+static_assert(
+    shared_join_raw_target_shape_valid(shared_join_target_outcome_topology::gpu_shared_target,
+                                       ::bioseq::pipeline_stats::executed_backend::mixed_invalid,
+                                       16,
+                                       16,
+                                       16));
+static_assert(
+    !shared_join_raw_target_shape_valid(
+        shared_join_target_outcome_topology::gpu_shared_target,
+        ::bioseq::pipeline_stats::executed_backend::hybrid_cpu_vulkan,
+        16,
+        16,
+        1));
+#else
+static_assert(
+    !shared_join_raw_target_shape_valid(shared_join_target_outcome_topology::gpu_shared_target,
+                                        ::bioseq::pipeline_stats::executed_backend::mixed_invalid,
+                                        16,
+                                        16,
+                                        1));
+#endif
 static_assert(
     !shared_join_raw_target_shape_valid(shared_join_target_outcome_topology::cpu_per_pair,
                                         ::bioseq::pipeline_stats::executed_backend::vulkan_gpu,
@@ -489,7 +525,7 @@ normalize_shared_join_target_outcomes(::bioseq::pipeline_stats::pipeline_executi
         expected_raw_target_rows = query_count_u64;
         break;
     case shared_join_target_outcome_topology::gpu_shared_target:
-        expected_raw_target_rows = 1;
+        expected_raw_target_rows = query_count_u64;
         break;
     case shared_join_target_outcome_topology::invalid:
         ereport(

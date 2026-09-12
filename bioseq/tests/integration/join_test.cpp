@@ -483,7 +483,13 @@ TEST_CASE("JOIN with insert maintenance and sequence-index reads disabled "
     auto ctx = fresh_context({k_hoe_join});
     // Disable bioseq.index.insert_maintenance.enabled before seeding so the sidecar
     // stays empty; seed_hoe_fixture flips it on by default.
-    exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
+    exec_sql(ctx,
+             "SET bioseq.index.insert_maintenance.enabled = off;"
+             "SET bioseq.aligner.chaining.minimum_score = 10;"
+             "SET bioseq.aligner.chaining.minimum_seed_count = 1;");
+    // Statement plans retain the configured k/w and chain thresholds.  The
+    // canonical 29 bp probe therefore needs the same explicit chain admission
+    // used by seed_hoe_fixture without enabling insert maintenance.
     create_seq_table(ctx,
                      seq_table_spec{
                          .name = std::string(k_hoe_join),

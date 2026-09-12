@@ -1,0 +1,48 @@
+{
+  "schema": "bioseq.e2e.algorithm-matrix-q1024-extended-timeout-authority",
+  "version": 1,
+  "authority": {
+    "authority_id": "bioseq-e2e-q1024-singleton0058-extended-timeout-v1",
+    "authority_digest_algorithm": "sha256-canonical-json-without-authority_digest",
+    "authority_digest": "64a9d461d3bcafd8715891fbc92c7dd8a0f0da552b092499e3fc10c947351bd2"
+  },
+  "campaign_binding": {
+    "campaign_id": "bioseq-e2e-algorithm-matrix-local-v1",
+    "campaign_digest": "011fbb1ef33a214ab80d3568c2341e8d0f8311f82e21a5955bdcb93b3c63b979",
+    "singleton_partition_manifest": "bench/bench_e2e_algorithm_matrix_q1024_singleton_partition_manifest.json",
+    "singleton_partition_manifest_sha256": "6bfe0681b46087860b7d873cd868da8e70be5ecab85b817e6979a29fce6f2c3a",
+    "child_ordinal": 58
+  },
+  "runtime_contract": {
+    "mode": "benchmark-e2e",
+    "run_only_required": true,
+    "exact_benchmark_filter": {
+      "benchmarks": [
+        "bench_e2e"
+      ]
+    },
+    "normal_timeout_seconds": 14400,
+    "extended_timeout_seconds": 172800,
+    "selected_config_count": 1,
+    "benchmark_only": true
+  },
+  "selected_config": {
+    "path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_singleton_0058_15aceb88564a0756.json",
+    "config_sha256": "92d84607060b0fe7225f4b7d0f146b47777668f70d96db1c3127c929481e6af0",
+    "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_fragment\",\"bounded_nthash_simd\",\"simd_minimap2\",\"block_aligner\"]",
+    "stable_key_sha256": "15aceb88564a07568553f1e73a271786d919737f9f3c93653657d1847ef5322a",
+    "query_count": 1024,
+    "repetitions": 5,
+    "expected_records": 5,
+    "cigar_projection": true,
+    "mapq_projection": true,
+    "prefilter_enabled": false,
+    "ksw2_batched_excluded": true
+  },
+  "preservation": {
+    "existing_deadline_v1_manifest_unchanged": true,
+    "existing_deadline_v2_manifest_unchanged": true,
+    "existing_results_and_artifact_seals_unchanged": true,
+    "nonselected_configs_keep_normal_timeout": true
+  }
+}

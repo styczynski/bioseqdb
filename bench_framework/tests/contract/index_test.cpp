@@ -52,9 +52,14 @@ import bioseq.bench.prefilter_algorithm_selection;
 namespace {
 
 using bioseq::bench::framework::config_value;
+using bioseq::bench::framework::create_benchmark_with_iteration_boundaries;
+using bioseq::bench::framework::iteration_boundary_callbacks;
+using bioseq::bench::framework::iteration_measurement_window;
 using bioseq::bench::framework::parameter_map;
 using bioseq::bench::framework::paired_schedule_evidence_fault;
 using bioseq::bench::framework::raw_evidence_io_fault;
+using bioseq::bench::framework::repeat_finalization_callbacks;
+using bioseq::bench::framework::repeat_output_reference;
 using bioseq::bench::framework::run_constraints;
 using bioseq::bench::framework::create_benchmark;
 using bioseq::bench::framework::run;
@@ -1659,7 +1664,6 @@ TEST_CASE("worker exceptions fail through the explicit join and retain partial s
         std::span<const algorithm_specification>{algorithms},
         std::span<const test_case_data_specification>{test_cases},
         std::span<const benchmark_specification>{benches});
-
     temporary_report_directory report_dir;
     std::atomic<std::size_t> calls{0};
     const auto on_run = [&calls](std::string_view, const parameter_map&,
@@ -4514,6 +4518,389 @@ struct small_seed_rule_output {
 }
 
 }  // namespace
+
+TEST_CASE("logical-repeat finalization is post-timing and pre-publication",
+          "[component:benchmark_framework][layer:contract][feature:reporting][resource:filesystem]") {
+    test_log_silencer silence_mlogging;
+    static constexpr std::array<algorithm_specification, 2> algorithms{{
+        {"logical_a", std::span<const algorithm_parameter_specification>{
+            k_dummy_parameters}},
+        {"logical_b", std::span<const algorithm_parameter_specification>{
+            k_dummy_parameters}},
+    }};
+    static constexpr std::array<test_case_data_specification, 1> test_cases{{
+        {"PAIR", "logical repeat", R"({})", 1},
+    }};
+    static constexpr std::array<iteration_count_entry, 1> for_entries{{
+        {"PAIR", 1},
+    }};
+    static constexpr std::array<algorithm_parameter_matrix_entry, 2>
+        over_entries{{{"logical_a", "{}"}, {"logical_b", "{}"}}};
+    const std::array<metric_specification, 4> metrics{{
+        {"wall_clock_ns", "builtin", "", "", "[]"},
+        {"tuple_accepted", "evaluation", "", "", "[]"},
+        {"repeat_finalized", "evaluation", "", "", "[]"},
+        {"measured_region_ns_manual", "evaluation", "", "", "[]"},
+    }};
+    const std::array<benchmark_specification, 1> benches{{
+        benchmark_specification{
+            .key = "bench_logical_repeat_finalization",
+            .description = "logical repeat finalization",
+            .bench_lock = true,
+            .concurrency = false,
+            .iteration_order_mode = "interleaved_seeded",
+            .iteration_order_seed = 370,
+            .for_entries = std::span<const iteration_count_entry>{for_entries},
+            .over_entries =
+                std::span<const algorithm_parameter_matrix_entry>{over_entries},
+            .metrics = std::span<const metric_specification>{metrics},
+        },
+    }};
+    const std::string config_text = render_config(
+        std::span<const algorithm_specification>{algorithms},
+        std::span<const test_case_data_specification>{test_cases},
+        std::span<const benchmark_specification>{benches});
+
+    temporary_report_directory report_dir;
+    const std::string config_path = write_config_file(report_dir, config_text);
+    std::atomic<int> finalization_calls{0};
+    std::atomic<bool> finalizer_saw_complete_repeat{false};
+    auto benchmark = create_benchmark<toy_input, toy_output>(
+        "logical repeat finalization",
+        "bench_logical_repeat_finalization",
+        config_path,
+        [](std::string_view, std::string_view,
+           simdjson::dom::element) noexcept { return run_constraints{}; },
+        [](std::string_view, std::string_view, simdjson::dom::element,
+           const run_constraints&) { return toy_input{}; },
+        [](std::string_view algorithm, const parameter_map&,
+           const toy_input&) {
+            const auto begin = bioseq::instrumentation::clock::now_ns();
+            while (bioseq::instrumentation::clock::now_ns() - begin < 50'000) {
+                /* Ensure the selected published duration is contained. */
+            }
+            return toy_output{
+                .sum = algorithm == "logical_a" ? 1'000 : 2'000,
+                .parity_count = 0,
+            };
+        },
+        [](std::string_view, const parameter_map&, const toy_input&,
+           const toy_output& output) {
+            return std::map<std::string, double>{
+                {"tuple_accepted", 1.0},
+                {"repeat_finalized",
+                    output.parity_count == 3'000 ? 1.0 : 0.0},
+                {"measured_region_ns_manual", static_cast<double>(output.sum)},
+            };
+        },
+        {},
+        [](std::string_view, const parameter_map&, const toy_input&,
+           const toy_output& output) {
+            return nlohmann::json{
+                {"payload_schema", "bioseq.e2e.raw-sample"},
+                {"payload_schema_version", 11},
+                {"tuple_status", nlohmann::json{
+                    {"accepted", 1}, {"disposition", "accepted"}}},
+                {"e2e_interval_metric_contract", nlohmann::json{
+                    {"schema", "bioseq.e2e.interval-metrics"},
+                    {"version", 2},
+                    {"framework_finalize_adjusted_metric", false}}},
+                {"index_and_map_ns", output.sum},
+                {"repeat_finalized", output.parity_count == 3'000},
+                {"peer_sum", output.parity_count},
+            }.dump();
+        },
+        {},
+        repeat_finalization_callbacks<toy_input, toy_output>{
+            .enabled = [](const toy_input&) noexcept { return true; },
+            .published_wall_clock_ns = [](
+                    std::string_view, const parameter_map&, const toy_input&,
+                    const toy_output& output) {
+                return static_cast<std::uint64_t>(output.sum);
+            },
+            .finalize_repeat = [
+                    &finalization_calls,
+                    &finalizer_saw_complete_repeat](
+                    const toy_input&, const std::size_t repeat,
+                    std::span<repeat_output_reference<toy_output>> outputs) {
+                std::int64_t sum = 0;
+                bool complete = repeat == 0 && outputs.size() == 2;
+                for (auto& reference : outputs) {
+                    complete = complete && reference.output != nullptr;
+                    if (reference.output != nullptr) {
+                        sum += reference.output->sum;
+                    }
+                }
+                complete = complete && sum == 3'000;
+                finalizer_saw_complete_repeat.store(
+                    complete, std::memory_order_relaxed);
+                for (auto& reference : outputs) {
+                    if (reference.output != nullptr) {
+                        reference.output->parity_count = sum;
+                    }
+                }
+                finalization_calls.fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds{20});
+            },
+        });
+
+    const auto outcome = run_with_args(
+        report_dir, std::span<const std::string>{}, std::move(benchmark));
+    INFO(outcome.captured_stderr);
+    REQUIRE(outcome.exit_code == 0);
+    REQUIRE(finalization_calls.load(std::memory_order_relaxed) == 1);
+    REQUIRE(finalizer_saw_complete_repeat.load(std::memory_order_relaxed));
+    REQUIRE(stat_at(
+        outcome.report, "bench_logical_repeat_finalization", "logical_a",
+        "PAIR", "all_regions", "wall_clock_ns", "min") == 1'000.0);
+    REQUIRE(stat_at(
+        outcome.report, "bench_logical_repeat_finalization", "logical_b",
+        "PAIR", "all_regions", "wall_clock_ns", "min") == 2'000.0);
+    const auto& raw_samples = outcome.report["benchmarks"]
+        ["bench_logical_repeat_finalization"]["raw_samples"];
+    REQUIRE(raw_samples.size() == 2);
+    for (const auto& raw : raw_samples) {
+        REQUIRE(raw["repeat_finalized"] == true);
+        REQUIRE(raw["peer_sum"] == 3'000);
+        REQUIRE(raw["published_wall_clock_ns"] == raw["index_and_map_ns"]);
+        REQUIRE(raw["outer_e2e_ns"].get<std::uint64_t>()
+            >= raw["published_wall_clock_ns"].get<std::uint64_t>());
+    }
+}
+
+TEST_CASE("iteration boundaries isolate immediate and deferred measurement",
+          "[component:benchmark_framework][layer:contract][feature:reporting][resource:filesystem]") {
+    test_log_silencer silence_mlogging;
+    static constexpr std::array<algorithm_specification, 2> algorithms{{
+        {"boundary_a", std::span<const algorithm_parameter_specification>{
+            k_dummy_parameters}},
+        {"boundary_b", std::span<const algorithm_parameter_specification>{
+            k_dummy_parameters}},
+    }};
+    static constexpr std::array<test_case_data_specification, 1> test_cases{{
+        {"BOUNDARY", "iteration boundary", R"({})", 1},
+    }};
+    static constexpr std::array<iteration_count_entry, 1> for_entries{{
+        {"BOUNDARY", 1},
+    }};
+    static constexpr std::array<algorithm_parameter_matrix_entry, 2>
+        over_entries{{{"boundary_a", "{}"}, {"boundary_b", "{}"}}};
+    static constexpr std::array<metric_specification, 2> metrics{{
+        {"wall_clock_ns", "builtin", "", "", "[]"},
+        {"post_mutated", "evaluation", "", "", "[]"},
+    }};
+    const std::array<benchmark_specification, 1> benches{{
+        benchmark_specification{
+            .key = "bench_iteration_boundaries",
+            .description = "iteration boundaries",
+            .bench_lock = true,
+            .concurrency = false,
+            .iteration_order_mode = "interleaved_seeded",
+            .iteration_order_seed = 370,
+            .for_entries = std::span<const iteration_count_entry>{for_entries},
+            .over_entries =
+                std::span<const algorithm_parameter_matrix_entry>{over_entries},
+            .metrics = std::span<const metric_specification>{metrics},
+        },
+    }};
+    const std::string config_text = render_config(
+        std::span<const algorithm_specification>{algorithms},
+        std::span<const test_case_data_specification>{test_cases},
+        std::span<const benchmark_specification>{benches});
+
+    temporary_report_directory report_dir;
+    const std::string config_path = write_config_file(report_dir, config_text);
+
+    struct move_only_preparation {
+        void* outer_profiler = nullptr;
+        std::int64_t before_end_ns = 0;
+        move_only_preparation() = default;
+        move_only_preparation(const move_only_preparation&) = delete;
+        move_only_preparation& operator=(const move_only_preparation&) = delete;
+        move_only_preparation(move_only_preparation&&) = default;
+        move_only_preparation& operator=(move_only_preparation&&) = default;
+    };
+    struct move_only_output {
+        std::int64_t inner_begin_ns = 0;
+        std::int64_t inner_end_ns = 0;
+        std::uint64_t measured_elapsed_ns = 0;
+        bool post_mutated = false;
+        move_only_output() = default;
+        move_only_output(const move_only_output&) = delete;
+        move_only_output& operator=(const move_only_output&) = delete;
+        move_only_output(move_only_output&&) = default;
+        move_only_output& operator=(move_only_output&&) = default;
+    };
+
+    bool boundaries_enabled = true;
+    bool deferred_publication = false;
+    SECTION("immediate publication") {}
+    SECTION("deferred logical-repeat publication") {
+        deferred_publication = true;
+    }
+    SECTION("disabled predicate preserves on_run") {
+        boundaries_enabled = false;
+    }
+
+    std::map<std::string, int> stage{{"boundary_a", 0}, {"boundary_b", 0}};
+    bool ordering_valid = true;
+    bool profiler_scope_valid = true;
+    bool window_valid = true;
+    bool post_mutation_visible = true;
+    std::size_t fallback_calls = 0;
+    std::size_t finalization_calls = 0;
+    using benchmark_profile =
+        bioseq::instrumentation::benchmark_profiling_configuration;
+
+    iteration_boundary_callbacks<
+        toy_input, move_only_preparation, move_only_output> boundaries{
+        .enabled = [&boundaries_enabled](
+                std::string_view, const parameter_map&, const toy_input&) {
+            return boundaries_enabled;
+        },
+        .before_iteration = [&stage, &ordering_valid](
+                std::string_view algorithm, const parameter_map&,
+                const toy_input&, std::size_t) {
+            ordering_valid = ordering_valid && stage.at(std::string{algorithm}) == 0;
+            stage.at(std::string{algorithm}) = 1;
+            move_only_preparation preparation;
+            preparation.outer_profiler =
+                bioseq::instrumentation::active_thread_profiler<benchmark_profile>;
+            preparation.before_end_ns =
+                bioseq::instrumentation::clock::now_ns();
+            return preparation;
+        },
+        .measured_iteration = [
+                &stage, &ordering_valid, &profiler_scope_valid](
+                std::string_view algorithm, const parameter_map&,
+                const toy_input&, move_only_preparation& preparation) {
+            ordering_valid = ordering_valid && stage.at(std::string{algorithm}) == 1;
+            stage.at(std::string{algorithm}) = 2;
+            profiler_scope_valid = profiler_scope_valid
+                && bioseq::instrumentation::active_thread_profiler<benchmark_profile>
+                    != preparation.outer_profiler;
+            move_only_output output;
+            output.inner_begin_ns = bioseq::instrumentation::clock::now_ns();
+            output.inner_end_ns = bioseq::instrumentation::clock::now_ns();
+            return output;
+        },
+        .after_iteration = [
+                &stage, &ordering_valid, &profiler_scope_valid, &window_valid](
+                std::string_view algorithm, const parameter_map&,
+                const toy_input&, move_only_preparation& preparation,
+                move_only_output& output,
+                const iteration_measurement_window& window) {
+            ordering_valid = ordering_valid && stage.at(std::string{algorithm}) == 2;
+            stage.at(std::string{algorithm}) = 3;
+            profiler_scope_valid = profiler_scope_valid
+                && bioseq::instrumentation::active_thread_profiler<benchmark_profile>
+                    == preparation.outer_profiler;
+            window_valid = window_valid
+                && window.begin_ns >= preparation.before_end_ns
+                && window.begin_ns <= output.inner_begin_ns
+                && window.end_ns >= output.inner_end_ns
+                && window.end_ns >= window.begin_ns
+                && window.elapsed_ns == static_cast<std::uint64_t>(
+                    window.end_ns - window.begin_ns);
+            output.measured_elapsed_ns = window.elapsed_ns;
+            output.post_mutated = true;
+        },
+    };
+
+    auto benchmark = create_benchmark_with_iteration_boundaries<
+        toy_input, move_only_preparation, move_only_output>(
+        "iteration boundaries", "bench_iteration_boundaries",
+        config_path,
+        [](std::string_view, std::string_view,
+           simdjson::dom::element) noexcept { return run_constraints{}; },
+        [](std::string_view, std::string_view, simdjson::dom::element,
+           const run_constraints&) { return toy_input{}; },
+        [&stage, &ordering_valid, &fallback_calls](
+                std::string_view algorithm, const parameter_map&,
+                const toy_input&) {
+            ordering_valid = ordering_valid && stage.at(std::string{algorithm}) == 0;
+            stage.at(std::string{algorithm}) = 1;
+            ++fallback_calls;
+            return move_only_output{};
+        },
+        [&stage, &ordering_valid, &post_mutation_visible,
+         boundaries_enabled, deferred_publication](
+                std::string_view algorithm, const parameter_map&,
+                const toy_input&, const move_only_output& output) {
+            const int expected_stage = boundaries_enabled
+                ? (deferred_publication ? 4 : 3)
+                : 1;
+            ordering_valid = ordering_valid
+                && stage.at(std::string{algorithm}) == expected_stage;
+            stage.at(std::string{algorithm}) = expected_stage + 1;
+            if (boundaries_enabled) {
+                post_mutation_visible = post_mutation_visible
+                    && output.post_mutated;
+            }
+            return std::map<std::string, double>{
+                {"post_mutated", output.post_mutated ? 1.0 : 0.0},
+            };
+        },
+        std::move(boundaries), {},
+        [](std::string_view, const parameter_map&, const toy_input&,
+           const move_only_output& output) {
+            return nlohmann::json{
+                {"post_mutated", output.post_mutated},
+                {"observed_window_ns", output.measured_elapsed_ns},
+            }.dump();
+        }, {},
+        repeat_finalization_callbacks<toy_input, move_only_output>{
+            .enabled = [deferred_publication](const toy_input&) {
+                return deferred_publication;
+            },
+            .published_wall_clock_ns = [](
+                    std::string_view, const parameter_map&, const toy_input&,
+                    const move_only_output& output) {
+                return output.measured_elapsed_ns;
+            },
+            .finalize_repeat = [
+                    &stage, &ordering_valid, &post_mutation_visible,
+                    &finalization_calls](
+                    const toy_input&, std::size_t,
+                    std::span<repeat_output_reference<move_only_output>> outputs) {
+                ++finalization_calls;
+                for (auto& reference : outputs) {
+                    const std::string algorithm{reference.algorithm_name};
+                    ordering_valid = ordering_valid && stage.at(algorithm) == 3;
+                    stage.at(algorithm) = 4;
+                    post_mutation_visible = post_mutation_visible
+                        && reference.output != nullptr
+                        && reference.output->post_mutated;
+                }
+            },
+        });
+
+    const auto outcome = run_with_args(
+        report_dir, std::span<const std::string>{}, std::move(benchmark));
+    INFO(outcome.captured_stderr);
+    REQUIRE(outcome.exit_code == 0);
+    REQUIRE(ordering_valid);
+    REQUIRE(profiler_scope_valid);
+    REQUIRE(window_valid);
+    REQUIRE(post_mutation_visible);
+    REQUIRE(fallback_calls == (boundaries_enabled ? 0u : 2u));
+    REQUIRE(finalization_calls == (deferred_publication ? 1u : 0u));
+    const int expected_final_stage = boundaries_enabled
+        ? (deferred_publication ? 5 : 4)
+        : 2;
+    REQUIRE(stage.at("boundary_a") == expected_final_stage);
+    REQUIRE(stage.at("boundary_b") == expected_final_stage);
+    const auto& raw_samples = outcome.report["benchmarks"]
+        ["bench_iteration_boundaries"]["raw_samples"];
+    REQUIRE(raw_samples.size() == 2u);
+    for (const auto& raw : raw_samples) {
+        REQUIRE(raw["post_mutated"] == boundaries_enabled);
+        if (boundaries_enabled) {
+            REQUIRE(raw["outer_e2e_ns"] == raw["observed_window_ns"]);
+            REQUIRE(raw["published_wall_clock_ns"] == raw["observed_window_ns"]);
+        }
+    }
+}
 
 TEST_CASE("GateKeeper small-seed config binds fixed keys to E and exact rules",
           "[component:benchmark_framework][layer:contract][feature:configuration][resource:filesystem]") {

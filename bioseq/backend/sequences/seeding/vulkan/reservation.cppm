@@ -32,6 +32,7 @@ export module bioseq.seeding.vulkan:reservation;
 export import :diagnostics;
 import bioseq.common.checked_arithmetic;
 import bioseq.sequences.kmers.vulkan_minimizers;
+import bioseq.chaining.core;
 import bioseq.gpu.vulkan.abi;
 import bioseq.gpu.vulkan.runtime;
 
@@ -155,6 +156,8 @@ inline constexpr VkBufferUsageFlags k_vulkan_seed_buffer_usage =
  * @param sort_plan Validated anchor-count and selected-sort geometry.
  * @param has_device_minimizers Whether query minimizers already reside on the device.
  * @param anchors_out_capacity Existing retained anchor capacity, in anchor records.
+ * @param context_backing_is_admitted Whether physical context blocks already
+ *        have allocation-hook admission and must not be charged as logical slabs.
  * @return Exact component plan, marked invalid when any size arithmetic saturates.
  *
  * The driver is queried independently for every nonempty buffer because its
@@ -166,7 +169,8 @@ template <class p_minimizer_type>
     std::uint64_t minimizer_count,
     const bioseq::gpu::vulkan::seed_anchor_sort_plan& sort_plan,
     bool has_device_minimizers,
-    std::uint64_t anchors_out_capacity)
+    std::uint64_t anchors_out_capacity,
+    bool context_backing_is_admitted)
 {
     using bioseq::common::saturating_mul;
     const std::uint64_t min_buffer_bytes = has_device_minimizers
@@ -181,9 +185,13 @@ template <class p_minimizer_type>
         saturating_mul(prefix_count, sizeof(std::uint32_t));
     const std::uint64_t prefix_buffer_bytes =
         std::max<std::uint64_t>(host_prefix_bytes, 4u);
+    const std::uint64_t canonical_anchor_bytes = saturating_mul(
+        sort_plan.anchor_count, sizeof(bioseq::chaining::anchor));
     const std::uint64_t anchors_out_growth =
-        anchors_out_capacity < sort_plan.anchor_count
-            ? sort_plan.anchor_bytes : 0u;
+        !context_backing_is_admitted
+            && anchors_out_capacity < sort_plan.anchor_count
+            ? canonical_anchor_bytes
+            : 0u;
     const auto requirement = [&vulkan_runtime](std::uint64_t bytes) {
         // Query driver allocation requirements for each nonempty buffer size.
         return bytes == 0u ? 0u : vulkan_runtime.buffer_allocation_requirement(

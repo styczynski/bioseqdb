@@ -188,6 +188,17 @@ struct inspect_ready_minimizer_generation_row final {
     std::int16_t storage_unit_byte_width;
     std::int16_t kmer_size;
     std::int16_t window_size;
+    std::int32_t requested_algorithm_id;
+    std::int32_t effective_algorithm_id;
+    std::int32_t physical_record_id;
+    std::int32_t highway_owner_id;
+    std::int16_t record_position_log2;
+    std::int16_t physical_kmer_size;
+    std::int16_t hash_width_bytes;
+    std::int16_t packed_storage_bits;
+    std::int32_t payload_layout_abi_revision;
+    std::int32_t producer_backend_id;
+    std::int32_t producer_identity_revision;
     std::int32_t gpu_abi_revision;
     std::int16_t segment_geometry_revision;
     std::int64_t position_segment_span_bp;

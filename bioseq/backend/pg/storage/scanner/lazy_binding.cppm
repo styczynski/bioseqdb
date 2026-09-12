@@ -271,6 +271,48 @@ template <class p_sequence_config>
         requested_width);
 }
 
+/// Copy a bounded packed-unit window through the observed facade.
+template <class p_sequence_config>
+[[nodiscard]] bool observed_call_state_copy_packed_window(void const* opaque,
+                                                          void* destination,
+                                                          std::size_t first_unit,
+                                                          std::size_t unit_count,
+                                                          std::uint8_t requested_width) {
+    auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
+    const std::size_t destination_bytes =
+        requested_width == 0u ||
+                unit_count > (std::numeric_limits<std::size_t>::max)() / requested_width
+            ? 0u
+            : unit_count * requested_width;
+    const std::size_t letters_per_unit = bioseq::storage::packed_letters_per_unit(
+        requested_width,
+        static_cast<std::uint8_t>(
+            bioseq::storage::lazy_sequence_traits<typename postgres_lazy_sequence_binding<
+                p_sequence_config>::alphabet_type>::k_logical_bits_per_symbol));
+    if (letters_per_unit == 0u ||
+        first_unit > (std::numeric_limits<sequence_size_t>::max)() / letters_per_unit ||
+        unit_count > (std::numeric_limits<sequence_size_t>::max)() / letters_per_unit) {
+        return false;
+    }
+    const sequence_size_t from = static_cast<sequence_size_t>(first_unit * letters_per_unit);
+    const sequence_size_t logical_capacity =
+        static_cast<sequence_size_t>(unit_count * letters_per_unit);
+    const auto logical_end = bioseq::common::checked_add(from, logical_capacity);
+    if (!logical_end.has_value()) {
+        return false;
+    }
+    const sequence_size_t to = std::min(state.view().bp_size(), *logical_end);
+    note_pg_sequence_facade_contiguous_access();
+    note_pg_sequence_facade_source_stream_callback();
+    const auto copied = state.view().try_copy_packed_window(
+        std::span<std::uint8_t>{static_cast<std::uint8_t*>(destination), destination_bytes},
+        from,
+        to,
+        requested_width);
+    return copied.has_value() && copied->unit_count == unit_count &&
+           copied->leading_symbol_offset == 0u;
+}
+
 /// Report whether the concrete lazy view may be consumed by worker tasks.
 /// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
 /// @return Worker-sharing capability of the concrete view.
@@ -299,6 +341,7 @@ template <class p_sequence_config> struct observed_call_state_adapter final {
             },
         .try_resident_packed = &observed_call_state_resident_probe<p_sequence_config>,
         .copy_packed_sequence = &observed_call_state_copy_packed_sequence<p_sequence_config>,
+        .copy_packed_window = &observed_call_state_copy_packed_window<p_sequence_config>,
         .worker_shareable = &observed_call_state_worker_shareable<p_sequence_config>,
     };
 };

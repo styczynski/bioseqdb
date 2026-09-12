@@ -67,9 +67,18 @@ void sorted_pair_run_store::merge_sorted_file_runs_to_writer_(std::span<buffer_f
         reader_headroom == (std::numeric_limits<std::uint64_t>::max)()) {
         report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
     }
-    auto reader_permit =
-        bioseq::parallelism::memory_admission_controller::instance().try_reserve(reader_headroom);
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    bioseq::parallelism::memory_admission_failure admission_failure{};
+    auto reader_permit = admission.try_reserve(reader_headroom, &admission_failure);
+#else
+    auto reader_permit = admission.try_reserve(reader_headroom);
+#endif
     if (!reader_permit) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        emit_terminal_merge_admission_failure(
+            sorted_run_merge_admission_site::compaction_readers, admission_failure);
+#endif
         report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
     }
     resources.reader_budget_permit = std::move(*reader_permit);
@@ -321,6 +330,75 @@ void sorted_pair_run_store::merge_runs_erased_impl_(sorted_pair_kmer_sink sink,
 }
 
 /**
+ * @brief Releases a completed spill writer without changing immutable runs.
+ *
+ * The checked lifecycle boundary rejects stores whose preceding operation did
+ * not complete. A later spill reacquires the reusable buffer through
+ * `try_ensure_write_buffer_`.
+ */
+void sorted_pair_run_store::release_completed_write_buffer() {
+    if (poisoned_) {
+        report_sorted_run_error(sorted_run_error::poisoned_store_reused);
+    }
+    if (finalized_) {
+        report_sorted_run_error(sorted_run_error::finalized_store_reused);
+    }
+    bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+        write_buffer_, write_buffer_permit_);
+}
+
+/**
+ * @brief Transfers one completed reusable writer without reallocating it.
+ *
+ * Both stores are checked before either is modified. An empty source is valid:
+ * the destination will lazily acquire a writer on its next spill. The vector
+ * moves first while the source permit remains live, then the exact matching
+ * permit follows it.
+ *
+ * @param[in,out] destination Active store that must not already own a writer.
+ * @return `true` when ownership is valid and was transferred, otherwise `false`.
+ */
+bool sorted_pair_run_store::try_transfer_completed_write_buffer_to(
+    sorted_pair_run_store& destination) noexcept {
+    const auto writer_capacity_bytes = [](const sorted_pair_run_store& store) noexcept {
+        return bioseq::common::saturating_mul(
+            static_cast<std::uint64_t>(store.write_buffer_.capacity()),
+            static_cast<std::uint64_t>(sizeof(sorted_pair_wire)));
+    };
+    const auto writer_ownership_is_valid = [&writer_capacity_bytes](
+                                               const sorted_pair_run_store& store) noexcept {
+        const std::uint64_t capacity_bytes = writer_capacity_bytes(store);
+        if (capacity_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
+            return false;
+        }
+        const bool has_capacity = store.write_buffer_.capacity() != 0u;
+        const bool has_permit = static_cast<bool>(store.write_buffer_permit_);
+        return store.write_buffer_.size() <= store.write_buffer_.capacity() &&
+               has_capacity == has_permit &&
+               (!has_permit || store.write_buffer_permit_.bytes() == capacity_bytes);
+    };
+
+    if (poisoned_ || finalized_ || destination.poisoned_ || destination.finalized_ ||
+        !writer_ownership_is_valid(*this) || !writer_ownership_is_valid(destination)) {
+        return false;
+    }
+    if (this == std::addressof(destination)) {
+        return true;
+    }
+    if (destination.write_buffer_.capacity() != 0u || destination.write_buffer_permit_) {
+        return false;
+    }
+    if (!write_buffer_permit_) {
+        return true;
+    }
+
+    write_buffer_.clear();
+    destination.write_buffer_.swap(write_buffer_);
+    destination.write_buffer_permit_ = std::move(write_buffer_permit_);
+    return true;
+}
+
+/**
  * @brief Executes a rewindable merge through a type-erased hash callback.
  *
  * A successful merge leaves immutable file handles open for later replay.
@@ -329,12 +407,12 @@ void sorted_pair_run_store::merge_runs_erased_impl_(sorted_pair_kmer_sink sink,
  * @param[in] sink Callback whose position cursor is valid only during the call.
  */
 void sorted_pair_run_store::merge_runs_erased(sorted_pair_kmer_sink sink) {
-    if (poisoned_) {
-        report_sorted_run_error(sorted_run_error::poisoned_store_reused);
-    }
-    if (finalized_) {
-        report_sorted_run_error(sorted_run_error::finalized_store_reused);
-    }
+    // The reusable spill writer is dead storage while immutable runs are
+    // replayed.  Segment-qualified generation owns one store per position
+    // segment, so retaining every writer until terminal cleanup can consume
+    // the admission needed by even the minimum merge reader.  A later spill
+    // safely reacquires this buffer through try_ensure_write_buffer_.
+    release_completed_write_buffer();
     poisoned_ = true;
     auto resources = std::make_unique<merge_resources>();
     try {

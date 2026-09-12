@@ -61,6 +61,7 @@ export namespace bioseq::storage::indexing {
  * @param storage PostgreSQL generation storage authority.
  * @param sequence Snapshot-bound lazy sequence view.
  * @param source_binding Locator and source-snapshot binding.
+ * @param algorithm_identity Generated identity frozen before publication starts.
  * @param backend Exact producer backend.
  * @param kernels Required backend kernel table.
  * @return Published generation identity and execution receipt.
@@ -80,6 +81,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
         typename bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>::alphabet_type>
         sequence,
     bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range> source_binding,
+    const bioseq::indexing::minimizer_generation_algorithm_identity& algorithm_identity,
     bioseq::minimizers::minimizer_sketch_backend backend,
     const bioseq::minimizers::minimizer_kernels* kernels) {
     using source_binding_type = bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>;
@@ -117,8 +119,8 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
         ready_minimizer_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE,
                                      "READY minimizer generation backend is invalid");
     }
-    constexpr std::uint16_t k_window_size = 10u;
-    constexpr std::uint16_t k_kmer_size = 15u;
+    const std::uint16_t window_size = algorithm_identity.runtime_window_size;
+    const std::uint16_t kmer_size = algorithm_identity.runtime_kmer_size;
     constexpr std::uint64_t k_max_occ_cap =
         bioseq::indexing::k_grouped_soa_default_max_occurrence_cap;
     constexpr std::uint16_t k_alphabet_code = source_binding_type::alphabet_code();
@@ -127,6 +129,28 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
     const std::uint64_t persisted_segment_span_bp =
         is_fragment_index ? k_fragment_span_bp
                           : bioseq::indexing::k_minimizer_preferred_segment_span_bp;
+    const std::uint64_t algorithm_position_extent_bp =
+        is_fragment_index ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                          : locator.logical_length;
+    const auto selected_algorithm_identity =
+        bioseq::indexing::select_minimizer_generation_algorithm_identity_runtime(
+            algorithm_identity.requested_algorithm,
+            algorithm_position_extent_bp,
+            k_alphabet_code,
+            static_cast<std::uint8_t>(source_binding_type::storage_unit_byte_width() * 8u),
+            kmer_size,
+            window_size);
+    if (!selected_algorithm_identity ||
+        *selected_algorithm_identity != algorithm_identity ||
+        !bioseq::indexing::is_valid_minimizer_generation_algorithm_identity(
+            algorithm_identity,
+            bioseq::indexing::minimizer_producer_backend_identity_for_backend(backend)) ||
+        !bioseq::indexing::minimizer_generation_kernel_binding_is_valid(
+            backend, algorithm_identity, kernels)) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "READY minimizer generation algorithm identity is unavailable");
+    }
     if (static_cast<std::uint64_t>(sequence.bp_size()) != locator.logical_length) {
         ready_minimizer_error_as_cpp(
             ERRCODE_DATA_CORRUPTED,
@@ -149,16 +173,6 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                                      "READY minimizer storage identity disagrees with its source");
     }
 
-    if constexpr (k_alphabet_code != bioseq::indexing::k_minimizer_persisted_dna4_alphabet_code) {
-        if (backend == backend_type::bounded_nthash_simd) {
-            // Preserve the selected producer's typed capability reason before
-            // the grouped-SoA registry reports the broader profile mismatch.
-            throw bioseq::indexing::packed_bounded_nthash_index_runtime_error{
-                bioseq::indexing::packed_bounded_nthash_index_status::unsupported_alphabet,
-                "grouped minimizer generation preflight"};
-        }
-    }
-
     const bioseq::indexing::minimizer_scheme_identity scheme =
         bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
     const bioseq::indexing::minimizer_producer_identity producer_backend =
@@ -166,7 +180,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
     bioseq::indexing::grouped_soa_minimizer_profile profile{};
     {
         const auto derived_profile = bioseq::indexing::derive_grouped_soa_minimizer_profile(
-            scheme, k_alphabet_code, k_kmer_size, persisted_segment_span_bp, k_max_occ_cap);
+            scheme, k_alphabet_code, kmer_size, persisted_segment_span_bp, k_max_occ_cap);
         if (!derived_profile) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -275,10 +289,11 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
             .position_segment_span_bp = persisted_segment_span_bp,
             .alphabet_code = state->source.alphabet_code,
             .storage_unit_byte_width = state->source.storage_unit_byte_width,
-            .kmer_size = k_kmer_size,
-            .window_size = k_window_size,
+            .kmer_size = kmer_size,
+            .window_size = window_size,
             .minimizer_scheme_id = scheme.id,
             .minimizer_scheme_revision = scheme.revision,
+            .algorithm_identity = algorithm_identity,
             .max_occ_cap = k_max_occ_cap,
         };
         if (is_fragment_index) {
@@ -304,6 +319,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                 sequence,
                 backend,
                 kernels,
+                algorithm_identity,
                 /*core_span_bp=*/0,
                 bioseq::indexing::k_minimizer_preferred_segment_span_bp,
                 &state->sequence_execution,
@@ -390,7 +406,8 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                 !execution->publication_accepted(result.binding) || !is_fragment_index ||
                 execution->selected_backend != backend || execution->minimizer_scheme != scheme ||
                 execution->target_length != locator.logical_length ||
-                execution->window_size != k_window_size || execution->kmer_size != k_kmer_size;
+                execution->window_size != window_size || execution->kmer_size != kmer_size ||
+                execution->algorithm_identity != algorithm_identity;
             producer_scans = execution->producer_scan_count;
             geometry_retries = execution->geometry_retry_count;
             scalar_runs = execution->scalar_core_runs;
@@ -405,7 +422,8 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                 !execution->matches_publication(result.binding) || !is_sequence_index ||
                 execution->selected_backend != backend || execution->minimizer_scheme != scheme ||
                 execution->target_length != locator.logical_length ||
-                execution->window_size != k_window_size || execution->kmer_size != k_kmer_size ||
+                execution->window_size != window_size || execution->kmer_size != kmer_size ||
+                execution->algorithm_identity != algorithm_identity ||
                 !result.minimizer_sequence_spill_resources_released;
             producer_scans = execution->replay_scan_count;
             geometry_retries = execution->replay_reroute_pass_count;
@@ -450,11 +468,12 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
             manifest.target_length != locator.logical_length ||
             manifest.alphabet_code != state->source.alphabet_code ||
             manifest.storage_unit_byte_width != state->source.storage_unit_byte_width ||
-            manifest.kmer_size != k_kmer_size || manifest.window_size != k_window_size ||
+            manifest.kmer_size != kmer_size || manifest.window_size != window_size ||
             manifest.minimizer_scheme_id != scheme.id ||
             manifest.minimizer_scheme_revision != scheme.revision ||
             manifest.producer_backend_id != producer_backend.id ||
             manifest.producer_identity_revision != producer_backend.revision ||
+            manifest.algorithm_identity != algorithm_identity ||
             manifest.gpu_abi_revision != profile.gpu_abi_revision ||
             manifest.max_occ_cap != k_max_occ_cap || manifest.position_segment_span_bp == 0 ||
             (is_fragment_index ? manifest.position_segment_span_bp != k_fragment_span_bp
@@ -494,10 +513,11 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
                 backend,
+                algorithm_identity,
                 state->source.alphabet_code,
                 state->source.storage_unit_byte_width,
-                k_kmer_size,
-                k_window_size,
+                kmer_size,
+                window_size,
                 k_max_occ_cap);
         if (!reread_expected) {
             ready_minimizer_error_as_cpp(ERRCODE_DATA_CORRUPTED,
@@ -588,6 +608,7 @@ inline void build_and_verify_grouped_soa_minimizer_generation_pg(
         typename bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>::alphabet_type>
         sequence,
     bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range> source_binding,
+    const bioseq::indexing::minimizer_generation_algorithm_identity& algorithm_identity,
     bioseq::minimizers::minimizer_sketch_backend backend,
     const bioseq::minimizers::minimizer_kernels* kernels) {
     const ready_minimizer_generation_publication publication =
@@ -598,6 +619,7 @@ inline void build_and_verify_grouped_soa_minimizer_generation_pg(
                                                               storage,
                                                               sequence,
                                                               source_binding,
+                                                              algorithm_identity,
                                                               backend,
                                                               kernels);
     const bool execution_kind_matches =
@@ -644,6 +666,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg<
     fragment_index_storage&,
     ready_minimizer_generation_compile_contract_detail::sequence_view,
     ready_minimizer_generation_compile_contract_detail::source_binding,
+    const bioseq::indexing::minimizer_generation_algorithm_identity&,
     bioseq::minimizers::minimizer_sketch_backend,
     const bioseq::minimizers::minimizer_kernels*);
 

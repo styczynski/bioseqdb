@@ -20,7 +20,7 @@ namespace {
 constexpr std::string_view k_substring_table = "substring_alignment";
 constexpr std::string_view k_substring_self_table = "self_alignment";
 
-/// A 30 bp probe that seeds through the short-input heuristic.
+/// A 30 bp probe admitted by the fixture's explicit frozen chain thresholds.
 constexpr std::string_view k_probe_sequence = "CTATCATTCATACTTCTATCATTCATACTT"; // 30 bp
 
 /// A padded target whose probe begins after 23 bases.
@@ -39,7 +39,10 @@ constexpr std::string_view k_self_sequence = k_padded_target;
 
 /** @brief Seeds one target and its embedded probe. */
 void seed_substring_table(const connection_test_context& ctx, std::string_view table_name) {
-    exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
+    exec_sqlf(ctx,
+              "SET bioseq.index.insert_maintenance.enabled = on;"
+              "SET bioseq.aligner.chaining.minimum_score = 10;"
+              "SET bioseq.aligner.chaining.minimum_seed_count = 1;");
     create_seq_table(
         ctx,
         seq_table_spec{

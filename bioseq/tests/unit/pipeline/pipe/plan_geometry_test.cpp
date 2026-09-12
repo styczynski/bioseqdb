@@ -58,7 +58,9 @@ TEST_CASE("mapq_stage emits exactly one batch per upstream batch",
 
     ::bioseq::simd::minimap2_parameters params;
     params.compute_mapq = false;
-    mapq_stage stage{{}, params, /*enabled=*/false};
+    bind_fixed_highway(params);
+    const auto plan = make_statement_execution_plan(std::move(params));
+    mapq_stage stage{{}, plan, /*enabled=*/false};
     auto bound = stage.template attach<cep_type>(probe);
 
     std::vector<alignment_region> regions(1);
@@ -77,7 +79,9 @@ TEST_CASE("mapq_stage::process_pair delegates exactly once",
     probe_batch_sink probe{&on_batch_count, &on_completed_count};
 
     ::bioseq::simd::minimap2_parameters params;
-    mapq_stage stage{{}, params, /*enabled=*/false};
+    bind_fixed_highway(params);
+    const auto plan = make_statement_execution_plan(std::move(params));
+    mapq_stage stage{{}, plan, /*enabled=*/false};
     auto bound = stage.template attach<cep_type>(probe);
 
     std::vector<alignment_region> regions(2);
@@ -100,7 +104,9 @@ TEST_CASE("exact_edit_filter_stage applies strict bounds and resets classificati
     std::vector<alignment_region> observed;
     int on_batch_count = 0;
     exact_filter_probe_sink probe{&observed, &on_batch_count};
-    exact_edit_filter_stage stage{{}, params};
+    bind_fixed_highway(params);
+    const auto plan = make_statement_execution_plan(std::move(params));
+    exact_edit_filter_stage stage{{}, plan};
     auto bound = stage.template attach<cep_type>(probe);
 
     std::vector<alignment_region> regions(4);
@@ -153,7 +159,9 @@ TEST_CASE("exact_edit_filter_stage rejects nonpositive bounds and missing traceb
         std::vector<alignment_region> observed;
         int on_batch_count = 0;
         exact_filter_probe_sink probe{&observed, &on_batch_count};
-        exact_edit_filter_stage stage{{}, params};
+        bind_fixed_highway(params);
+        const auto plan = make_statement_execution_plan(std::move(params));
+        exact_edit_filter_stage stage{{}, plan};
         auto bound = stage.template attach<cep_type>(probe);
         std::vector<alignment_region> regions(1);
         regions[0].has_alignment = true;
@@ -174,7 +182,9 @@ TEST_CASE("exact_edit_filter_stage rejects nonpositive bounds and missing traceb
         std::vector<alignment_region> observed;
         int on_batch_count = 0;
         exact_filter_probe_sink probe{&observed, &on_batch_count};
-        exact_edit_filter_stage stage{{}, params};
+        bind_fixed_highway(params);
+        const auto plan = make_statement_execution_plan(std::move(params));
+        exact_edit_filter_stage stage{{}, plan};
         auto bound = stage.template attach<cep_type>(probe);
         std::vector<alignment_region> regions(1);
         regions[0].has_alignment = false;
@@ -197,7 +207,9 @@ TEST_CASE("SingleEmissionInvariant — N=8 queries one emission each",
     probe_batch_sink probe{&on_batch_count, &on_completed_count};
 
     ::bioseq::simd::minimap2_parameters params;
-    mapq_stage stage{{}, params, /*enabled=*/false};
+    bind_fixed_highway(params);
+    const auto plan = make_statement_execution_plan(std::move(params));
+    mapq_stage stage{{}, plan, /*enabled=*/false};
     auto bound = stage.template attach<cep_type>(probe);
 
     constexpr int num_queries = 8;
@@ -788,6 +800,44 @@ TEST_CASE("partial Vulkan stats requires the exact positive stage mask",
     combined.combine_execution_stats(tiled_chain);
     REQUIRE(combined.has_any_algorithm_execution_stats());
 }
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+TEST_CASE("GPU seed frontend proof is source-bound and seed-fields-only",
+          "[component:bioseq][layer:unit][feature:pipeline]") {
+    using ::bioseq::simd::vulkan_seed_frontend_completion_kind;
+    using ::bioseq::simd::vulkan_seed_frontend_job_execution;
+    using ::bioseq::simd::vulkan_seed_target_completion_kind;
+
+    vulkan_seed_frontend_job_execution proof{};
+    proof.completion = vulkan_seed_frontend_completion_kind::mpf_empty_target;
+    proof.seed_stats.seed_anchor_stats_operations = 1u;
+    proof.seed_stats.seed_canonical_anchor_order_checks = 1u;
+    proof.seed_stats.seed_canonical_anchor_order_accepts = 1u;
+    proof.seed_stats.seed_anchor_digest_lane0 =
+        ::bioseq::gpu::vulkan::k_seed_anchor_digest_seed_low;
+    proof.seed_stats.seed_anchor_digest_lane1 =
+        ::bioseq::gpu::vulkan::k_seed_anchor_digest_seed_high;
+    proof.query_authority_identity = 17u;
+    proof.query_ordinal = 3u;
+    proof.minimizer_count = 9u;
+    proof.target_len = 127u;
+    proof.target_completion =
+        vulkan_seed_target_completion_kind::mpf_runtime_generated;
+    proof.target_operation_identity = 23u;
+    REQUIRE(proof.is_internally_consistent());
+    REQUIRE(proof.target_source() ==
+            ::bioseq::pipeline_stats::target_index_source::recomputed);
+
+    auto wrong_source = proof;
+    wrong_source.target_completion =
+        vulkan_seed_target_completion_kind::mpf_persisted;
+    REQUIRE_FALSE(wrong_source.is_internally_consistent());
+
+    auto stray_chain = proof;
+    stray_chain.seed_stats.chain_score_dispatches = 1u;
+    REQUIRE_FALSE(stray_chain.is_internally_consistent());
+}
+#endif
 
 TEST_CASE("ordered sketch batch target-build stats is not inflated by query count",
           "[component:bioseq][layer:unit][feature:pipeline]") {

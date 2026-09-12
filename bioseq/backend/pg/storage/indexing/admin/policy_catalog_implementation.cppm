@@ -28,6 +28,7 @@ extern "C" {
 module bioseq.postgres.storage.indexing.admin.policy_catalog;
 
 import bioseq.indexing.type;
+import bioseq.pipeline.runtime_contract;
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.storage.indexing.chunked_storage;
@@ -102,7 +103,36 @@ void index_build_on_insert(Oid user_relid,
             }
         }
     }
-    const auto backend = resolve_index_sketch_backend_from_gucs();
+    const auto requested_algorithm =
+        static_cast<bioseq::simd::minimizer_algorithm>(
+            static_cast<int>(bioseq::aligner::settings::minimizer::algorithm.get_value()));
+    if (requested_algorithm ==
+        bioseq::simd::minimizer_algorithm::simd_minimap2_reference) {
+        constexpr auto k_index_types = pg_supported_indexes::list_types();
+        for (std::size_t i = 0; i < k_index_types.size(); ++i) {
+            const bool minimizer =
+                k_index_types[i].first == k_minimizers_per_fragment_index_name ||
+                k_index_types[i].first == k_minimizers_per_sequence_index_name;
+            if (minimizer && idx.enabled[i] &&
+                idx.policy[i] == bioseq::indexing::index_update_policy::update_on_insert) {
+                bioseq::postgres::support::invoke_pg_as_cpp(
+                    [index_name = k_index_types[i].first] {
+                        ereport(
+                            ERROR,
+                            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                             errmsg("minimap2-reference INSERT index generation is not READY"),
+                             errdetail("index %.*s has no algorithm-identity-bearing INSERT "
+                                       "storage route",
+                                       static_cast<int>(index_name.size()),
+                                       index_name.data()),
+                             errhint("Disable INSERT maintenance and publish this index with "
+                                     "bioseq.update_index using grouped-SoA generation.")));
+                    });
+                pg_unreachable();
+            }
+        }
+    }
+    const auto backend = resolve_index_sketch_backend(requested_algorithm);
     const bioseq::minimizers::minimizer_kernels* const minimizer_kernels =
         selected_minimizer_kernels_for_operation(backend, "bioseq INSERT index build");
     if (backend == bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd) {

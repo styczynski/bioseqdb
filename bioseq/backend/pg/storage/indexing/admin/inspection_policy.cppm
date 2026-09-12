@@ -21,6 +21,7 @@ extern "C" {
 }
 export module bioseq.postgres.storage.indexing.admin:inspection_policy;
 import std;
+import bioseq.pipeline.runtime_contract;
 import :inspection_storage_support;
 import :grouped_soa;
 import :hash_major;
@@ -226,10 +227,31 @@ export namespace bioseq::storage::indexing {
 
         minimizer_generation_head preliminary_head{};
         std::uint64_t expected_source_identity = 0;
+        const auto requested_algorithm =
+            static_cast<bioseq::simd::minimizer_algorithm>(
+                static_cast<int>(bioseq::aligner::settings::minimizer::algorithm.get_value()));
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_runtime(
+                requested_algorithm,
+                index_name == bioseq::indexing::k_minimizers_per_fragment_index_name
+                    ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                    : result.source.locator.logical_length,
+                result.source.alphabet_code,
+                static_cast<std::uint8_t>(result.source.storage_unit_byte_width * 8u),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::kmer_size),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::window_size));
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq minimizer generation algorithm identity is not READY");
+        }
+        const auto backend =
+            resolve_index_sketch_backend(algorithm_identity->effective_algorithm);
         const auto discovery_expected =
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
-                resolve_index_sketch_backend_from_gucs(),
+                backend,
+                *algorithm_identity,
                 result.source.alphabet_code,
                 result.source.storage_unit_byte_width,
                 static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::kmer_size),
@@ -258,7 +280,8 @@ export namespace bioseq::storage::indexing {
         const auto expected =
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 preliminary_head.layout,
-                resolve_index_sketch_backend_from_gucs(),
+                backend,
+                *algorithm_identity,
                 result.source.alphabet_code,
                 result.source.storage_unit_byte_width,
                 static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::kmer_size),

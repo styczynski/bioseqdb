@@ -247,8 +247,9 @@ TEST_CASE("prefilter_stage composes reverse, unequal, aggregate, and stable rout
         std::vector<alignment_region> observed;
         int on_batch_count = 0;
         prefilter_probe_sink probe{&observed, &on_batch_count};
+        const auto plan = make_statement_execution_plan(std::move(params));
         prefilter_stage<seq::dna4> stage{
-            {}, params, query_view, target_view, &stats};
+            {}, plan, query_view, target_view, &stats};
         auto bound = stage.template attach<cep_type>(probe);
         bound.on_batch_pair(
             std::span<alignment_region>{regions},
@@ -328,6 +329,34 @@ TEST_CASE("reference SIMD pipe runtime and constexpr dispatch use fixed target t
         normalized_raw_minimizers(scalar_collector);
     REQUIRE_FALSE(normalized_runtime.empty());
     REQUIRE(normalized_runtime == normalized_scalar);
+
+    const auto execution_layout =
+        select_minimizer_execution_layout_prefer_native<seq::dna4>(
+            minimizer_algorithm::simd_minimap2_reference,
+            std::uint64_t{1u} << 16u,
+            15u,
+            10u,
+            64u);
+    REQUIRE(minimizer_execution_layout_matches_record<minimap_sketch_data, seq::dna4>(
+        execution_layout, 15u, 10u));
+    collector_type range_collector;
+    const auto range_stats = minimizer_dispatch_indexed_query_whole<minimap_sketch_data>(
+        range_collector,
+        view,
+        10u,
+        15u,
+        minimizer_sketch_backend::exact_simd,
+        table,
+        std::addressof(execution_layout));
+    REQUIRE_FALSE(minimizer_range_stats_matches_effective_algorithm(
+        minimizer_algorithm::simd_minimap2_reference,
+        minimizer_range_execution_stats{}));
+    REQUIRE(minimizer_range_stats_matches_effective_algorithm(
+        minimizer_algorithm::simd_minimap2_reference, range_stats));
+    REQUIRE_FALSE(minimizer_range_stats_matches_effective_algorithm(
+        minimizer_algorithm::two_stack_nthash, range_stats));
+    REQUIRE_FALSE(minimizer_range_stats_matches_backend(
+        minimizer_sketch_backend::exact_simd, range_stats));
 }
 
 TEST_CASE("neutral minimizer sink projects active K15 layouts without truncation",
@@ -547,7 +576,7 @@ TEST_CASE("production minimizer sink keeps protocol faults distinct from collect
     }
 }
 
-TEST_CASE("reference SIMD preserves DNA4 topology and scalar-routes DNA5",
+TEST_CASE("reference SIMD uses the registered native DNA4 and DNA5 routes",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     check_reference_minimizer_topology_case<seq::dna4, std::uint32_t>();
     check_reference_minimizer_topology_case<seq::dna4, std::uint64_t>();
@@ -817,8 +846,10 @@ TEST_CASE("Indexed dna4 u64 queries use admitted typed u32 B8 continuation with 
                 query_view.bp_size(),
                 sizeof(std::uint32_t),
                 std::move(*permit));
+            const auto retained = typed_owner.test_admission_bytes();
+            REQUIRE(retained <= access.admission_bytes);
             REQUIRE(admission.reserved_bytes()
-                == admission_baseline + access.admission_bytes);
+                == admission_baseline + retained);
             REQUIRE(typed_owner.descriptor().storage_unit_width
                 == sizeof(std::uint32_t));
             REQUIRE(typed_owner.descriptor().unit_count
@@ -934,16 +965,16 @@ TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty stats",
     REQUIRE_FALSE(tampered.is_ksw2_batched_execution_consistent(true));
 }
 
-TEST_CASE("bounded ntHash materializes DNA4 slices and rejects every DNA5 width",
+TEST_CASE("bounded ntHash materializes DNA4 slices and supports DNA5 packed widths",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     check_fragmented_bounded_nthash_range_materialization<seq::dna4, std::uint8_t>();
     check_fragmented_bounded_nthash_range_materialization<seq::dna4, std::uint16_t>();
     check_fragmented_bounded_nthash_range_materialization<seq::dna4, std::uint32_t>();
     check_fragmented_bounded_nthash_range_materialization<seq::dna4, std::uint64_t>();
-    check_bounded_nthash_rejects_dna5_coordinate<std::uint8_t>();
-    check_bounded_nthash_rejects_dna5_coordinate<std::uint16_t>();
-    check_bounded_nthash_rejects_dna5_coordinate<std::uint32_t>();
-    check_bounded_nthash_rejects_dna5_coordinate<std::uint64_t>();
+    check_bounded_nthash_dna5_coordinate<std::uint8_t>();
+    check_bounded_nthash_dna5_coordinate<std::uint16_t>();
+    check_bounded_nthash_dna5_coordinate<std::uint32_t>();
+    check_bounded_nthash_dna5_coordinate<std::uint64_t>();
 }
 
 TEST_CASE("fragmented bounded ntHash unwinds its vector and memory permit for every scanner PostgreSQL leaf failure",

@@ -1187,7 +1187,7 @@ inline constexpr std::array<std::string_view, 8U>
         "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna5::width_w8",
     };
 
-inline void verify_production_scheduler_golden() {
+[[nodiscard]] inline generation_plan verify_production_scheduler_golden() {
     generation_plan plan = production_scheduler_plan();
     require(
         plan.topology.topology_digest
@@ -1371,6 +1371,7 @@ inline void verify_production_scheduler_golden() {
                 && inside_support == expected.support_member,
             "production scheduler support/role map drifted");
     }
+    return plan;
 }
 
 inline void verify_production_pipe_owner_golden() {
@@ -1486,13 +1487,15 @@ inline void verify_production_pipe_owner_golden() {
             "minimap_port_fragment_index_batch_owned", "fragment_index"},
         owner_golden{
             "minimap_port_fragment_index_vector_owned", "fragment_index"},
+        owner_golden{
+            "minimap_port_fragment_index_physical_owned", "fragment_index"},
         owner_golden{"minimap_port_hash_major_owned", "hash_major"},
         owner_golden{"minimap_port_grouped_soa_owned", "grouped_soa"},
         owner_golden{"minimap_port_fragment_query_owned", "fragment_query"},
     };
     require(
         plan.topology.region.controlled_declarations.size() == owners.size(),
-        "pipe owns seven external definitions across six routes");
+        "pipe owns eight external definitions across six routes");
     for (std::size_t index = 0U; index < owners.size(); ++index) {
         const owned_declaration& declaration =
             plan.topology.region.controlled_declarations[index];
@@ -1560,9 +1563,9 @@ inline void verify_production_pipe_owner_golden() {
         }
     }
     require(
-        rendered_definitions == 14U,
-        "twelve pipe units own fourteen definitions because each alphabet's "
-        "fragment-index coordinate owns batch then vector");
+        rendered_definitions == 16U,
+        "twelve pipe units own sixteen definitions because each alphabet's "
+        "fragment-index coordinate owns batch, vector, then physical owner");
 
     generation_plan dna4 = production_pipe_plan("dna4_uint64");
     const generation_result dna4_generated = render_generation(dna4, false);
@@ -1574,38 +1577,39 @@ inline void verify_production_pipe_owner_golden() {
         "dna4 pipe profile has exactly six body-bearing owner units");
 }
 
-inline void verify_production_declaration_heads_and_probes() {
-    generation_plan plan = production_scheduler_plan();
+inline void verify_production_declaration_heads_and_probes(
+    const generation_plan& plan) {
     const generation_result generated = render_generation(plan, false);
     constexpr std::array expected_heads{
         std::pair{
             std::string_view{"process_scanner_pg_row"},
             std::string_view{
-                "300c0cbac4ea28744b51893ad1688fb17bfee0df9c78bbcd64751f764967b3ca"}},
+                "31bebd238b7abefabf70085641e760eb5f454bb346240be32dd818ec89d49cd9"}},
         std::pair{
             std::string_view{"process_inmemory_row"},
             std::string_view{
-                "e5ac396d95e4783b3efc99d38053f9a700b2088b5af85dee19879c875a742736"}},
+                "26c211282b95daf7199c1f9e3eb204ae6b31c2c89e265bb36c759db7e63f6361"}},
         std::pair{
             std::string_view{"process_inmemory_standard_row"},
             std::string_view{
-                "53c8202eeb1f468660e70c26e9ca33247ed989718ac8c866dea76b191cd3c06b"}},
+                "186df63124f8fdea161df9d7cf75b20c47b2ee3bdb58b8a80e8f239c17b1eae7"}},
         std::pair{
             std::string_view{"process_inmemory_segmented_row"},
             std::string_view{
-                "0c3dcbabc2cb6be1376a20c95afc014c08662d312b86af5d19adef5a5fc8e88a"}},
+                "c7d632d3df7211c8bf58d08e07ac2af313a1bdb9db25be380b5a016e1c37385a"}},
         std::pair{
             std::string_view{"process_inmemory_chunked_row"},
             std::string_view{
-                "b9e3562bed804b67f4529e8f404cc8c85ef3e3c7a8157fab27a19181bf93d700"}},
+                "9bcf0c3782ffdd11880c4eba121e6e76941a2b56d06daad9d7bf637c8ca6d73e"}},
         std::pair{
             std::string_view{"process_inmemory_chunked_segmented_row"},
             std::string_view{
-                "955fc7b563c8d3de235ebcde6f4d81e6ae83ccc54847a65cea82713e550f9325"}},
+                "dec1a2dbf332dae9888dd6f934cd80493e168716942f5d75309ac55716506ab2"}},
         std::pair{
             std::string_view{"process_sequences"},
             std::string_view{
-                "0e2611246a40e4734b730623f55ea29ec3c0005d51904e4fe28f20514c4a2558"}},
+                // The public root retains the immutable statement plan by value.
+                "2b8488a4dfa3ef6a978bff59121302342476f9d765d3a4ca65cf666442a7c071"}},
     };
     require(
         generated.artifacts.size() == 66U,
@@ -1710,9 +1714,12 @@ inline void verify_production_declaration_heads_and_probes() {
             "scheduler declaration-head golden entry is missing");
         const std::string source_head = render_entry_head(
             plan, *source_entry, representative, false);
+        const std::string actual_digest = normalized_token_digest(source_head);
         require(
-            normalized_token_digest(source_head) == expected_digest,
-            "authored scheduler declaration-head digest drifted");
+            actual_digest == expected_digest,
+            "authored scheduler declaration-head digest drifted: "
+                + std::string{name} + " expected=" + std::string{expected_digest}
+                + " actual=" + actual_digest);
 
         std::set<std::string, std::less<>> api_qualified_names;
         for (const structural_analysis::declaration_record& declaration :
@@ -1874,8 +1881,10 @@ inline void verify_production_declaration_heads_and_probes() {
         }
         require(implementation.content.contains("#include <new>\n") &&
                     occurrences(implementation.content, "typed_support_detail::root_std::") ==
-                        (root_shape ? 65U : 0U) &&
-                    (!root_shape || occurrences(implementation.content, "std::") == 65U),
+                        // match_result_map removes four qualifiers; the plan-owner
+                        // guard adds one logic_error qualifier.
+                        (root_shape ? 62U : 0U) &&
+                    (!root_shape || occurrences(implementation.content, "std::") == 62U),
                 "scheduler root must retain the allocator anchor and bind exactly "
                 "the reviewed standard entities through root_std");
         require(
@@ -3536,9 +3545,11 @@ inline void run_namespace_materialization_contract_tests() {
     detail::verify_configure_structural_digest_mutations();
     detail::verify_scheduler_highway_separation();
     detail::verify_scheduler_profile_policy();
-    detail::verify_production_scheduler_golden();
+    const generation_plan validated_scheduler_plan =
+        detail::verify_production_scheduler_golden();
     detail::verify_production_pipe_owner_golden();
-    detail::verify_production_declaration_heads_and_probes();
+    detail::verify_production_declaration_heads_and_probes(
+        validated_scheduler_plan);
     detail::verify_exact_edits();
     detail::verify_coordinate_axis_domains();
     detail::verify_record_probe_provenance_placement();

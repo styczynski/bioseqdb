@@ -10,6 +10,252 @@ import bioseq.tests.unit.pipeline.pipe_support;
 
 using namespace bioseq::tests::pipeline::pipe_support;
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+TEST_CASE("selected component validation keeps Vulkan chaining separate from CPU seeding",
+          "[component:bioseq][layer:unit][feature:pipeline]") {
+    using namespace bioseq::simd;
+    const auto make_fixture = [] {
+        match_result_collection collection;
+        scalar_pipeline_execution_stats scalar{};
+        scalar.query_minimizers.record_input(4096u);
+        scalar.record_seed_lookup(128u);
+        scalar.record_ksw2_call(scalar_ksw2_stage::left, 64u, 64u);
+        collection.record_scalar_pipeline_execution_stats(scalar);
+        partial_vulkan_execution_stats gpu{};
+        gpu.chain_score_dispatches = 1u;
+        collection.record_partial_vulkan_execution_stats(gpu);
+        return collection;
+    };
+    const auto accepts = [](const match_result_collection& collection,
+                            const chaining_algorithm observed_chaining =
+                                chaining_algorithm::vulkan_tiled_dynamic_programming) {
+        return collection.is_selected_components_execution_consistent_for_observed(
+            minimizer_algorithm::scalar, chaining_algorithm::vulkan_tiled_dynamic_programming,
+            base_alignment_algorithm::ksw2,
+            bioseq::chaining::simd_chaining_policy::exact_visited, false, true,
+            minimizer_algorithm::scalar, observed_chaining,
+            base_alignment_algorithm::ksw2);
+    };
+    auto valid = make_fixture();
+    REQUIRE(accepts(valid));
+    // The old CPU-only contract remains CPU-only; GPU statistics are never cleared.
+    REQUIRE_FALSE(valid.is_selected_scalar_sketch_execution_consistent(false, true));
+    REQUIRE(valid.partial_vulkan_stats.chain_score_dispatches == 1u);
+    auto missing_gpu = make_fixture();
+    missing_gpu.partial_vulkan_stats = {};
+    REQUIRE_FALSE(accepts(missing_gpu));
+    auto stray_seed = make_fixture();
+    stray_seed.partial_vulkan_stats.seed_lookup_dispatches = 1u;
+    REQUIRE_FALSE(accepts(stray_seed));
+    auto stray_resident = make_fixture();
+    stray_resident.partial_vulkan_stats.gpu_index_materializations = 1u;
+    REQUIRE_FALSE(accepts(stray_resident));
+    auto scalar_fallback = make_fixture();
+    scalar_fallback.scalar_pipeline_stats.record_scalar_chain(128u);
+    scalar_fallback.scalar_pipeline_stats.record_scalar_chain_stage_completion(128u);
+    REQUIRE_FALSE(accepts(scalar_fallback));
+    auto missing_alignment = make_fixture();
+    missing_alignment.scalar_pipeline_stats.ksw2_left_calls = 0u;
+    missing_alignment.scalar_pipeline_stats.ksw2_input_cell_area = 0u;
+    REQUIRE_FALSE(accepts(missing_alignment));
+    auto mislabeled = make_fixture();
+    REQUIRE_FALSE(accepts(mislabeled, chaining_algorithm::range_minimum_query));
+}
+
+TEST_CASE("selected component validation preserves GPU seeding and the chosen host suffix",
+          "[component:bioseq][layer:unit][feature:pipeline]") {
+    using namespace bioseq::simd;
+    const auto make_fixture = [](chaining_algorithm chaining) {
+        match_result_collection collection;
+        scalar_pipeline_execution_stats scalar{};
+        if (chaining == chaining_algorithm::scalar_minimap2) {
+            scalar.record_scalar_chain(128u);
+            scalar.record_scalar_chain_stage_completion(128u);
+        }
+        scalar.record_ksw2_call(scalar_ksw2_stage::gap, 64u, 64u);
+        collection.record_scalar_pipeline_execution_stats(scalar);
+        partial_vulkan_execution_stats gpu{};
+        if (chaining == chaining_algorithm::vulkan_tiled_dynamic_programming) {
+            gpu.chain_score_dispatches = 1u;
+        }
+        collection.record_partial_vulkan_execution_stats(gpu);
+        return collection;
+    };
+    const auto make_seed_proof = [] {
+        vulkan_seed_frontend_job_execution proof{};
+        proof.completion = vulkan_seed_frontend_completion_kind::mps_runtime;
+        proof.seed_stats.seed_lookup_dispatches = 1u;
+        proof.seed_stats.seed_sorted_dense_lookup_dispatches = 1u;
+        proof.seed_stats.seed_anchor_stats_operations = 1u;
+        proof.seed_stats.seed_canonical_anchor_count = 128u;
+        proof.seed_stats.seed_canonical_anchor_order_checks = 1u;
+        proof.seed_stats.seed_canonical_anchor_order_accepts = 1u;
+        proof.operation_identity = 41u;
+        proof.query_authority_identity = 17u;
+        proof.query_ordinal = 0u;
+        proof.minimizer_count = 64u;
+        proof.target_len = 4096u;
+        proof.anchor_count = 128u;
+        proof.target_completion =
+            vulkan_seed_target_completion_kind::mps_runtime_generated;
+        proof.target_operation_identity = 23u;
+        return proof;
+    };
+    const auto accepts = [](const match_result_collection& collection,
+                            chaining_algorithm chaining,
+                            const vulkan_seed_frontend_job_execution& seed_proof) {
+        return collection.is_selected_components_execution_consistent_for_observed(
+            minimizer_algorithm::vulkan_minimap_integer, chaining,
+            base_alignment_algorithm::ksw2,
+            bioseq::chaining::simd_chaining_policy::exact_visited, false, true,
+            minimizer_algorithm::vulkan_minimap_integer, chaining,
+            base_alignment_algorithm::ksw2, std::addressof(seed_proof));
+    };
+    for (const auto chaining : {chaining_algorithm::scalar_minimap2,
+                                chaining_algorithm::range_minimum_query,
+                                chaining_algorithm::vulkan_tiled_dynamic_programming}) {
+        auto valid = make_fixture(chaining);
+        const auto valid_seed = make_seed_proof();
+        REQUIRE(accepts(valid, chaining, valid_seed));
+        auto missing_seed = make_fixture(chaining);
+        auto missing_seed_proof = make_seed_proof();
+        missing_seed_proof.seed_stats.seed_lookup_dispatches = 0u;
+        REQUIRE_FALSE(accepts(missing_seed, chaining, missing_seed_proof));
+        auto wrong_representation = make_fixture(chaining);
+        auto wrong_representation_proof = make_seed_proof();
+        wrong_representation_proof.seed_stats.seed_open_addressed_lookup_dispatches = 1u;
+        REQUIRE_FALSE(accepts(wrong_representation, chaining, wrong_representation_proof));
+        auto scalar_seed = make_fixture(chaining);
+        scalar_seed.scalar_pipeline_stats.record_seed_lookup(128u);
+        REQUIRE_FALSE(accepts(scalar_seed, chaining, valid_seed));
+        auto host_sort_fallback = make_fixture(chaining);
+        auto host_sort_proof = make_seed_proof();
+        host_sort_proof.seed_stats.seed_host_sort_fallbacks = 1u;
+        REQUIRE_FALSE(accepts(host_sort_fallback, chaining, host_sort_proof));
+        auto rejected_order = make_fixture(chaining);
+        auto rejected_order_proof = make_seed_proof();
+        rejected_order_proof.seed_stats.seed_canonical_anchor_order_accepts = 0u;
+        REQUIRE_FALSE(accepts(rejected_order, chaining, rejected_order_proof));
+        auto target_rebuild = make_fixture(chaining);
+        target_rebuild.partial_vulkan_stats.target_index_build_dispatches = 1u;
+        REQUIRE_FALSE(accepts(target_rebuild, chaining, valid_seed));
+    }
+}
+
+TEST_CASE("hybrid CPU Vulkan stage proof preserves selected engines and the host tail",
+          "[component:bioseq][layer:unit][feature:pipeline]") {
+    using namespace bioseq::pipeline_stats;
+    using seed = minimizer_algorithm_identity;
+    using chain = chaining_algorithm_identity;
+    using base = base_alignment_algorithm_identity;
+    REQUIRE(static_cast<std::uint8_t>(executed_backend::none) == 0u);
+    REQUIRE(static_cast<std::uint8_t>(executed_backend::vulkan_gpu) == 3u);
+    REQUIRE(static_cast<std::uint8_t>(executed_backend::mixed_invalid) == 4u);
+    REQUIRE(static_cast<std::uint8_t>(executed_backend::mixed_cpu) == 5u);
+    REQUIRE(static_cast<std::uint8_t>(executed_backend::hybrid_cpu_vulkan) == 6u);
+    REQUIRE(executed_backend_name(executed_backend::hybrid_cpu_vulkan) == "hybrid_cpu_vulkan");
+    REQUIRE(merge_backend_identity(executed_backend::hybrid_cpu_vulkan,
+                                  executed_backend::hybrid_cpu_vulkan) ==
+            executed_backend::hybrid_cpu_vulkan);
+    // Different whole-job backends must not be laundered into a hybrid job.
+    REQUIRE(merge_backend_identity(executed_backend::scalar_cpu, executed_backend::vulkan_gpu) ==
+            executed_backend::mixed_invalid);
+    REQUIRE(merge_backend_identity(executed_backend::hybrid_cpu_vulkan,
+                                  executed_backend::vulkan_gpu) == executed_backend::mixed_invalid);
+    REQUIRE(is_environment_valid_for_backend(make_gpu_environment(),
+                                             executed_backend::hybrid_cpu_vulkan));
+    auto missing_gpu = make_gpu_environment();
+    missing_gpu.is_gpu_environment_available = false;
+    REQUIRE_FALSE(is_environment_valid_for_backend(missing_gpu,
+                                                   executed_backend::hybrid_cpu_vulkan));
+
+    const auto one = [](execution_engine engine) {
+        stage_coverage coverage{};
+        coverage.eligible_jobs = 1u;
+        coverage.executed_jobs[engine_index(engine)] = 1u;
+        return coverage;
+    };
+    const auto accepts = [](const stage_coverage& coverage, pipeline_stage stage,
+                            seed minimizer, chain chaining, base alignment,
+                            std::uint64_t maximum = 1u) {
+        return is_hybrid_stage_coverage_exclusive(coverage,
+            target_index_source::recomputed, stage, minimizer, chaining, alignment, maximum);
+    };
+    const auto gpu = one(execution_engine::vulkan_gpu);
+    const auto scalar = one(execution_engine::scalar_cpu);
+    const auto simd = one(execution_engine::simd_cpu);
+    REQUIRE(accepts(simd, pipeline_stage::query_sketch, seed::bounded_nthash_simd,
+                    chain::vulkan_tiled_dynamic_programming, base::block_aligner));
+    REQUIRE_FALSE(accepts(scalar, pipeline_stage::query_sketch, seed::bounded_nthash_simd,
+                          chain::vulkan_tiled_dynamic_programming, base::block_aligner));
+    REQUIRE(accepts(gpu, pipeline_stage::chain_score, seed::bounded_nthash_simd,
+                    chain::vulkan_tiled_dynamic_programming, base::block_aligner));
+    REQUIRE(accepts(scalar, pipeline_stage::chain_backtrack, seed::bounded_nthash_simd,
+                    chain::vulkan_tiled_dynamic_programming, base::block_aligner));
+    REQUIRE_FALSE(accepts(gpu, pipeline_stage::chain_backtrack, seed::bounded_nthash_simd,
+                          chain::vulkan_tiled_dynamic_programming, base::block_aligner));
+    for (const auto selected_chain : {chain::scalar_minimap2, chain::range_minimum_query,
+                                     chain::simd_minimap2, chain::vulkan_tiled_dynamic_programming}) {
+        CAPTURE(selected_chain);
+        REQUIRE(accepts(gpu, pipeline_stage::seed_lookup, seed::vulkan_minimap_integer,
+                        selected_chain, base::ksw2));
+        REQUIRE_FALSE(accepts(scalar, pipeline_stage::seed_lookup, seed::vulkan_minimap_integer,
+                              selected_chain, base::ksw2));
+        REQUIRE(accepts(scalar, pipeline_stage::mapq, seed::vulkan_minimap_integer,
+                        selected_chain, base::ksw2));
+        REQUIRE_FALSE(accepts(gpu, pipeline_stage::mapq, seed::vulkan_minimap_integer,
+                              selected_chain, base::ksw2));
+    }
+    REQUIRE(accepts(simd, pipeline_stage::gap_extension, seed::vulkan_minimap_integer,
+                    chain::simd_minimap2, base::block_aligner));
+    REQUIRE_FALSE(accepts(scalar, pipeline_stage::gap_extension, seed::vulkan_minimap_integer,
+                          chain::simd_minimap2, base::block_aligner));
+    REQUIRE_FALSE(accepts(gpu, pipeline_stage::gap_extension, seed::vulkan_minimap_integer,
+                          chain::vulkan_tiled_dynamic_programming, base::vulkan_simple_cigar));
+    REQUIRE_FALSE(accepts(simd, pipeline_stage::query_sketch, seed::two_stack_nthash,
+                          chain::simd_minimap2, base::block_aligner));
+    REQUIRE_FALSE(accepts(gpu, pipeline_stage::query_sketch, seed::none,
+                          chain::vulkan_tiled_dynamic_programming, base::ksw2));
+    auto fallback = gpu;
+    fallback.fallback_jobs = 1u;
+    REQUIRE_FALSE(accepts(fallback, pipeline_stage::query_sketch, seed::vulkan_minimap_integer,
+                          chain::simd_minimap2, base::block_aligner));
+    auto mixed_stage = gpu;
+    mixed_stage.executed_jobs[engine_index(execution_engine::scalar_cpu)] = 1u;
+    REQUIRE_FALSE(accepts(mixed_stage, pipeline_stage::query_sketch, seed::vulkan_minimap_integer,
+                          chain::simd_minimap2, base::block_aligner));
+    auto aggregate = gpu;
+    aggregate.eligible_jobs = 5u;
+    aggregate.executed_jobs[engine_index(execution_engine::vulkan_gpu)] = 5u;
+    REQUIRE(accepts(aggregate, pipeline_stage::query_sketch, seed::vulkan_minimap_integer,
+                    chain::simd_minimap2, base::block_aligner, 5u));
+    REQUIRE_FALSE(accepts(aggregate, pipeline_stage::query_sketch, seed::vulkan_minimap_integer,
+                          chain::simd_minimap2, base::block_aligner, 4u));
+
+    pipeline_job_execution_stats zero_query{};
+    zero_query.requested_backend = executed_backend::hybrid_cpu_vulkan;
+    zero_query.actual_backend = executed_backend::hybrid_cpu_vulkan;
+    zero_query.requested_target_index_source = target_index_source::recomputed;
+    zero_query.actual_target_index_source = target_index_source::recomputed;
+    zero_query.environment = make_gpu_environment();
+    zero_query.stages.coverage[stage_index(pipeline_stage::query_sketch)] = gpu;
+    REQUIRE_FALSE(is_job_execution_stats_valid(
+        zero_query, seed::vulkan_minimap_integer, chain::scalar_minimap2, base::ksw2));
+    REQUIRE(is_job_execution_stats_valid(
+        zero_query, seed::vulkan_minimap_integer, chain::scalar_minimap2, base::ksw2,
+        /*authenticated_query_empty_recomputed_bypass=*/true));
+    auto fabricated_target_work = zero_query;
+    fabricated_target_work.stages.coverage[
+        stage_index(pipeline_stage::target_sketch)] = gpu;
+    REQUIRE_FALSE(is_job_execution_stats_valid(
+        fabricated_target_work, seed::vulkan_minimap_integer, chain::scalar_minimap2,
+        base::ksw2, /*authenticated_query_empty_recomputed_bypass=*/true));
+    REQUIRE_FALSE(is_job_execution_stats_valid(
+        zero_query, seed::scalar, chain::scalar_minimap2, base::ksw2,
+        /*authenticated_query_empty_recomputed_bypass=*/true));
+}
+#endif
+
 TEST_CASE("Highway execution stats merges preserve exact target observations",
           "[component:bioseq][layer:unit][feature:pipeline][resource:highway]") {
     constexpr std::int64_t target_a = std::int64_t{1} << 20u;

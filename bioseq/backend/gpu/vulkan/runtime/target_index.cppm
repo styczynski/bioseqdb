@@ -31,7 +31,7 @@ void runtime::prepare_target_index_pipelines_locked(const vulkan_sketch_params& 
     // under the operation's transient allocation permit.
     (void)get_compute_pipeline_locked(shader_kind::ordered_sketch_tile,
                                       k_sketch_local_size,
-                                      std::max<std::uint32_t>(params.window_size, 1u));
+                                      choose_ordered_sketch_window_capacity(params.window_size));
     (void)get_compute_pipeline_locked(shader_kind::prefix_scan_block, 1u, 1u);
     (void)get_compute_pipeline_locked(shader_kind::prefix_scan_add, 128u, 1u);
     (void)get_compute_pipeline_locked(shader_kind::radix_sort_histogram, 1u, 1u);
@@ -302,7 +302,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
         shader_kind::ordered_sketch_tile,
         k_sketch_local_size,
-        std::max<std::uint32_t>(window_size, 1u));
+        choose_ordered_sketch_window_capacity(window_size));
     const compute_pipeline scan_block_pipe =
         get_compute_pipeline_locked(shader_kind::prefix_scan_block, 1u, 1u);
     const compute_pipeline scan_add_pipe =
@@ -1191,7 +1191,7 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
     const compute_pipeline sketch_pipe =
         get_compute_pipeline_locked(shader_kind::ordered_sketch_tile,
                                     k_sketch_local_size,
-                                    std::max<std::uint32_t>(window_size, 1u));
+                                    choose_ordered_sketch_window_capacity(window_size));
 
     const std::uint64_t capacity = max_target_minimizers;
     buffer keys = create_device_buffer(capacity * 8u, k_compute_buffer_usage);

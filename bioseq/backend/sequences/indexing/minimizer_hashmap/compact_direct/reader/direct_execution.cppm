@@ -56,9 +56,13 @@ prepared_minimizer_fragment_reader::emit_compact_direct_anchor_(
         return minimizer_generation_encoding_error::partition_id;
     }
     const std::size_t query_ordinal = occurrence.batch_query_ordinal;
+    const auto position_strand = query_position_strand_(occurrence, context.queries);
+    if (!position_strand) {
+        return position_strand.error();
+    }
     const auto anchor =
         make_fragment_anchor_(packed_target_position,
-                              context.queries[query_ordinal].minimizers[occurrence.query_ordinal],
+                              *position_strand,
                               context.queries[query_ordinal].query_length,
                               static_cast<std::uint8_t>(context.queries[query_ordinal].kmer_size));
     if (!anchor || anchor->ref_position >= context.batch->target_length_) {
@@ -265,6 +269,11 @@ prepared_minimizer_fragment_reader::visit_compact_direct_emission_selection_(
                 }
 
                 const std::size_t query_ordinal = occurrence.batch_query_ordinal;
+                const auto position_strand =
+                    query_position_strand_(occurrence, emission_context.queries);
+                if (!position_strand) {
+                    return position_strand.error();
+                }
                 if (emission_context.layout_base >
                         emission_context.scratch->block_query_layouts_.size() ||
                     query_ordinal >= emission_context.scratch->block_query_layouts_.size() -
@@ -273,7 +282,6 @@ prepared_minimizer_fragment_reader::visit_compact_direct_emission_selection_(
                     return minimizer_generation_encoding_error::arithmetic_overflow;
                 }
                 const fragment_seed_query& query = emission_context.queries[query_ordinal];
-                const minimap_sketch_data& minimizer = query.minimizers[occurrence.query_ordinal];
                 prepared_query_anchors& output = emission_context.batch->queries_[query_ordinal];
                 block_query_anchor_layout& layout =
                     emission_context.scratch
@@ -290,7 +298,7 @@ prepared_minimizer_fragment_reader::visit_compact_direct_emission_selection_(
                     // below supplies only the changing reference position.
                     const auto prepared_anchor =
                         make_fragment_anchor_(static_cast<std::uint64_t>(span.target_strand_one),
-                                              minimizer,
+                                              *position_strand,
                                               query.query_length,
                                               static_cast<std::uint8_t>(query.kmer_size));
                     if (!prepared_anchor)

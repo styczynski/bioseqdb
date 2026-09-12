@@ -7,8 +7,9 @@
  * the target-neutral `bioseq::simd` namespace and provides:
  *
  *   - Compile-time parameter packs
- * (`static_aligner_parameters<p_window_size,p_kmer_size,p_bucket_width>` /
- *     `fallback_aligner_parameters<p_bucket_width>`).
+ * (`static_aligner_parameters<p_window_size,p_runtime_kmer_size,p_bucket_width,
+ *                            p_physical_kmer_size>` /
+ *     `fallback_aligner_parameters<p_bucket_width,p_physical_kmer_size>`).
  *   - stage skeletons (`bare_stage<p_self>`, `stage_base<p_self,p_output>`,
  *     `stage<p_aligner_parameters,p_self,p_sink>`).
  *   - `make_pipeline<p_aligner_parameters>` variadic composer.
@@ -75,6 +76,7 @@ import bioseq.common.memory_budget;
 import bioseq.highway.dispatch_contract;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.minimizer_physical_registry;
 import bioseq.sequences.kmers.two_stack_minimizers;
 import bioseq.sequences.cigar;
 import bioseq.alignment;
@@ -87,6 +89,7 @@ import bioseq.chaining.simd;
 import bioseq.chaining.rmq;
 import bioseq.chaining.vulkan;
 import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.minimizer_execution_contract;
 import bioseq.prefilter.types;
 import bioseq.prefilter.sneaky_snake;
 import bioseq.prefilter.sneaky_snake.vulkan;
@@ -162,18 +165,19 @@ export {
         call(const ::bioseq::simd::minimap2_parameters& params,
              bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
              bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-             const p_query_minimizers& query_minimizers,
+             p_query_minimizers query_minimizers,
              const p_index& target_index,
+             statement_execution_plan_owner execution_plan,
              bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
              bioseq::indexing::gpu_index_cache_identity gpu_index_identity,
              bool allow_gpu_target_index_build,
              transient_target_index_release_authorization transient_target_index_owner = {}) {
             using specialized_parameters =
-                static_aligner_parameters<10u, p_kmer_size, p_bucket_width>;
+                static_aligner_parameters<10u, p_kmer_size, p_bucket_width, p_kmer_size>;
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS)
-            using fallback_parameters = fallback_aligner_parameters<63>;
+            using fallback_parameters = fallback_aligner_parameters<63, p_kmer_size>;
 #else
-            using fallback_parameters = fallback_aligner_parameters<p_bucket_width>;
+            using fallback_parameters = fallback_aligner_parameters<p_bucket_width, p_kmer_size>;
 #endif
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
@@ -192,7 +196,7 @@ export {
                                                              target_seq,
                                                              query_minimizers,
                                                              target_index,
-                                                             params,
+                                                             execution_plan,
                                                              gpu_index_cache,
                                                              gpu_index_identity,
                                                              allow_gpu_target_index_build,
@@ -211,7 +215,7 @@ export {
                                                          target_seq,
                                                          query_minimizers,
                                                          target_index,
-                                                         params,
+                                                         execution_plan,
                                                          gpu_index_cache,
                                                          gpu_index_identity,
                                                          allow_gpu_target_index_build,
@@ -238,6 +242,68 @@ export {
                                        p_alignment_algorithm,
                                        p_chaining_algorithm,
                                        p_minimizer_algorithm>;
+    };
+
+    /** @brief Selects only the existing suffix algorithms for a canonical seed job. */
+    template <sequence_alphabet p_alphabet, class p_minimizer,
+              base_alignment_algorithm p_alignment_algorithm,
+              chaining_algorithm p_chaining_algorithm>
+    struct post_seed_run_leaf {
+        static void call(
+            const minimap2_parameters& params,
+            const canonical_seed_batch& seeds,
+            std::size_t job_index,
+            std::uint32_t expected_ordinal,
+            bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+            bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+            minimizer_batch_view<p_minimizer> query_minimizers,
+            statement_execution_plan_owner execution_plan,
+            match_result_collection& output,
+            route_attempt_memory& attempt
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            , ::bioseq::gpu::vulkan::runtime_pipeline_operation_token*
+                  completed_chaining
+#endif
+            ) {
+            using layout = typename p_minimizer::layout_type;
+            constexpr std::size_t position_bits = layout::k_position_bits;
+            constexpr std::size_t physical_k = layout::k_physical_kmer_size;
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
+            if (params.window_size == 10 &&
+                params.kmer_size == static_cast<std::int32_t>(physical_k)) {
+                using specialized = static_aligner_parameters<10u, physical_k,
+                    position_bits, physical_k>;
+                return run_minimap_post_seed_job<specialized, p_alignment_algorithm,
+                    p_chaining_algorithm, p_alphabet, p_minimizer>(seeds, job_index,
+                        expected_ordinal, query_seq, target_seq, std::move(query_minimizers),
+                        std::move(execution_plan), output, attempt
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                        , completed_chaining
+#endif
+                        );
+            }
+#endif
+#if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS)
+            using fallback = fallback_aligner_parameters<63, physical_k>;
+#else
+            using fallback = fallback_aligner_parameters<position_bits, physical_k>;
+#endif
+            return run_minimap_post_seed_job<fallback, p_alignment_algorithm,
+                p_chaining_algorithm, p_alphabet, p_minimizer>(seeds, job_index,
+                    expected_ordinal, query_seq, target_seq, std::move(query_minimizers),
+                    std::move(execution_plan), output, attempt
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    , completed_chaining
+#endif
+                    );
+        }
+    };
+
+    template <sequence_alphabet p_alphabet, class p_minimizer>
+    struct post_seed_run_traits {
+        template <auto p_alignment_algorithm, auto p_chaining_algorithm>
+        using leaf = post_seed_run_leaf<p_alphabet, p_minimizer,
+            p_alignment_algorithm, p_chaining_algorithm>;
     };
 
     // Scheduler-owned raw entries have already selected the representation from
@@ -277,19 +343,22 @@ export {
     [[nodiscard]] pipeline_description
     describe_pipeline_leaf(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                            bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                           const ::bioseq::simd::minimap2_parameters& params,
+                           statement_execution_plan_owner execution_plan,
                            sequence_size_t query_len,
                            sequence_size_t target_len,
                            const query_sketch_route query_sketch_route) {
+        if (!execution_plan) {
+            throw std::invalid_argument("pipeline description requires statement plan ownership");
+        }
+        const auto& params = execution_plan->frozen_parameters;
         using p_minimizer = typename p_aligner_parameters::minimizer_repr_t;
-        const std::vector<p_minimizer> empty_minimizers{};
+        const auto empty_minimizers = minimizer_batch_view<p_minimizer>::from_shared_host(
+            std::make_shared<const std::vector<p_minimizer>>(), 0u, 0u);
         minimizer_hashmap_fragment_index empty_index{};
         match_result_collection ignored_out{};
         const auto& sm = thread_local_scoring_matrix<p_alphabet>(params);
-        /* Description construction inspects selected stage traits and frozen
-         * parameters. It never executes a kernel. Keep the runtime Highway table
-         * out of this cold metadata path so plain EXPLAIN can describe an unbound
-         * GUC snapshot before BatchProcessor performs the one allowed dispatch. */
+        // Cold metadata construction does not execute a kernel or touch Vulkan.
+        // The statement already owns its neutral Highway binding.
         const ::bioseq::simd::alignment_kernels<p_alphabet> description_alignment_kernels{};
 
         auto pipeline =
@@ -307,23 +376,10 @@ export {
                                                                     sm,
                                                                     description_alignment_kernels,
                                                                     ignored_out,
-                                                                    params,
+                                                                    execution_plan,
                                                                     query_len,
                                                                     target_len);
         auto description = describe_with_params<p_aligner_parameters>(pipeline);
-        if (complete_all_gpu_tuple_selected(params)) {
-            /* The scheduler admits this exact tuple only to the dedicated
-             * resident GPU route and returns before constructing the generic
-             * CPU/simd pipeline. In particular, bounded CIGAR is produced by the
-             * Vulkan extension, not by the selected block_aligner trait. Keep the
-             * generic stage skeleton for EXPLAIN, but do not advertise any of its
-             * bypassed Highway entry points as planned work. */
-            for (auto& stage : description.stages) {
-                if (stage.algorithm.has_value()) {
-                    stage.algorithm->highway_kernels.reset();
-                }
-            }
-        }
         auto query_sketch = describe_query_sketch_stage(params, query_sketch_route);
         if (!query_sketch.has_value()) {
             throw std::invalid_argument{
@@ -363,13 +419,14 @@ export {
                                          bioseq::storage::lazy_sequence_view<p_alphabet> t,
                                          const std::int32_t& query_len,
                                          const std::int32_t& target_len,
-                                         const query_sketch_route& query_sketch_route) {
+                                         const query_sketch_route& query_sketch_route,
+                                         statement_execution_plan_owner execution_plan) {
             using specialized_parameters =
-                static_aligner_parameters<10u, p_kmer_size, p_bucket_width>;
+                static_aligner_parameters<10u, p_kmer_size, p_bucket_width, p_kmer_size>;
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS)
-            using fallback_parameters = fallback_aligner_parameters<63>;
+            using fallback_parameters = fallback_aligner_parameters<63, p_kmer_size>;
 #else
-            using fallback_parameters = fallback_aligner_parameters<p_bucket_width>;
+            using fallback_parameters = fallback_aligner_parameters<p_bucket_width, p_kmer_size>;
 #endif
 
             constexpr auto describe_entry_point = pipeline_entry_point::with_prebuilt_minimizers;
@@ -388,7 +445,7 @@ export {
                                               describe_minimizer_algorithm,
                                               describe_entry_point,
                                               p_alphabet>(
-                    q, t, params, query_len, target_len, query_sketch_route);
+                    q, t, execution_plan, query_len, target_len, query_sketch_route);
             }
 #endif
             return describe_pipeline_leaf<fallback_parameters,
@@ -397,7 +454,7 @@ export {
                                           describe_minimizer_algorithm,
                                           describe_entry_point,
                                           p_alphabet>(
-                q, t, params, query_len, target_len, query_sketch_route);
+                q, t, execution_plan, query_len, target_len, query_sketch_route);
         }
     };
 
@@ -423,30 +480,73 @@ export {
     // The runtime cascade is one `dispatch_chain<...>::run<>(...)` over the
     // bucket-width, k-mer-size, alignment, chaining, and minimizer dimensions.
 
+    /**
+     * @brief Dispatches one owned canonical seed job through the shared suffix.
+     *
+     * Physical minimizer geometry is already fixed by the input owner. This
+     * boundary adds neither a minimizer/entry/index axis nor a second stage graph.
+     */
+    template <sequence_alphabet p_alphabet, class p_minimizer>
+    inline void dispatch_post_seed_job(
+        const canonical_seed_batch& seeds,
+        std::size_t job_index,
+        std::uint32_t expected_ordinal,
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        minimizer_batch_view<p_minimizer> query_minimizers,
+        statement_execution_plan_owner execution_plan,
+        match_result_collection& output,
+        route_attempt_memory& attempt
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        , ::bioseq::gpu::vulkan::runtime_pipeline_operation_token*
+              completed_chaining = nullptr
+#endif
+        ) {
+        if (!execution_plan || !query_minimizers.has_host_owner()) {
+            throw std::invalid_argument{"canonical suffix dispatch requires its real owners"};
+        }
+        using traits = detail::post_seed_run_traits<p_alphabet, p_minimizer>;
+        const auto& params = execution_plan->frozen_parameters;
+        detail::dispatch_chain<void, traits::template leaf,
+            detail::baa_step, detail::ca_step>::template run<>(params,
+                seeds, job_index, expected_ordinal, query_seq, target_seq,
+                query_minimizers, execution_plan, output, attempt
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                , completed_chaining
+#endif
+                );
+    }
+
     /// Resolve every dynamic pipeline axis and execute its compile-time leaf.
     template <pipeline_entry_point p_entry_point,
               sequence_alphabet p_alphabet,
               class p_minimizer,
               class p_index,
-              class p_query_minimizers = std::vector<p_minimizer>>
+              class p_query_minimizers = minimizer_batch_view<p_minimizer>>
     BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR match_result_collection dispatch_pipeline(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-        const p_query_minimizers& query_minimizers,
+        p_query_minimizers query_minimizers,
         const p_index& target_index,
-        const ::bioseq::simd::minimap2_parameters& params,
+        statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false,
         transient_target_index_release_authorization transient_target_index_owner = {}) {
-        using traits_type =
-            detail::pipeline_run_traits<p_entry_point, p_alphabet, p_minimizer, p_index>;
-        // Pin p_kmer_size before p_bucket_width so only relevant breakpoints run.
+        static_assert(std::same_as<p_query_minimizers, minimizer_batch_view<p_minimizer>>);
+        if (!execution_plan || !query_minimizers.has_host_owner()) {
+            throw std::invalid_argument("pipeline dispatch requires plan and query ownership");
+        }
+        const auto& params = execution_plan->frozen_parameters;
+        using record_layout = typename p_minimizer::layout_type;
+        using traits_type = detail::pipeline_run_pinned_shape_traits<
+            p_entry_point, p_alphabet, p_minimizer, p_index,
+            record_layout::k_position_bits, record_layout::k_physical_kmer_size>;
+        // The caller already owns typed records. Never redispatch their physical
+        // K from biological k/w, which may intentionally describe another shape.
         return detail::dispatch_chain<
             match_result_collection,
             traits_type::template leaf,
-            detail::kmer_size_step,
-            detail::seq_len_log2_step_per_k,
             detail::baa_step,
             detail::ca_step,
             detail::guarded_step<detail::ma_step,
@@ -457,6 +557,7 @@ export {
                            target_seq,
                            query_minimizers,
                            target_index,
+                           execution_plan,
                            gpu_index_cache,
                            gpu_index_identity,
                            allow_gpu_target_index_build,
@@ -476,18 +577,23 @@ export {
               sequence_alphabet p_alphabet,
               class p_minimizer,
               class p_index,
-              class p_query_minimizers = std::vector<p_minimizer>>
+              class p_query_minimizers = minimizer_batch_view<p_minimizer>>
     BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR match_result_collection
     dispatch_pipeline_pinned_shape(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-        const p_query_minimizers& query_minimizers,
+        p_query_minimizers query_minimizers,
         const p_index& target_index,
-        const ::bioseq::simd::minimap2_parameters& params,
+        statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false,
         transient_target_index_release_authorization transient_target_index_owner = {}) {
+        static_assert(std::same_as<p_query_minimizers, minimizer_batch_view<p_minimizer>>);
+        if (!execution_plan || !query_minimizers.has_host_owner()) {
+            throw std::invalid_argument("pipeline dispatch requires plan and query ownership");
+        }
+        const auto& params = execution_plan->frozen_parameters;
         static_assert(p_kmer_size > 0u);
         static_assert(p_bucket_width >= p_kmer_size);
         using traits_type = detail::pipeline_run_pinned_shape_traits<p_entry_point,
@@ -509,6 +615,7 @@ export {
                            target_seq,
                            query_minimizers,
                            target_index,
+                           execution_plan,
                            gpu_index_cache,
                            gpu_index_identity,
                            allow_gpu_target_index_build,
@@ -527,10 +634,14 @@ export {
     /// Describe the typed pipeline selected for representative query and target values.
     template <sequence_alphabet p_alphabet>
     BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR pipeline_description describe_pipeline_for(
-        const ::bioseq::simd::minimap2_parameters& params,
+        statement_execution_plan_owner execution_plan,
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_proto,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq_proto,
         const query_sketch_route query_sketch_route = query_sketch_route::recompute_capable) {
+        if (!execution_plan) {
+            throw std::invalid_argument("pipeline description requires statement plan ownership");
+        }
+        const auto& params = execution_plan->frozen_parameters;
         const sequence_size_t query_len = query_seq_proto.bp_size();
         const sequence_size_t target_len = target_seq_proto.bp_size();
 
@@ -546,7 +657,8 @@ export {
                                                                        target_seq_proto,
                                                                        query_len,
                                                                        target_len,
-                                                                       query_sketch_route);
+                                                                       query_sketch_route,
+                                                                       execution_plan);
     }
 
     /**
@@ -556,9 +668,13 @@ export {
      */
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] inline pipeline_description describe_pipeline_for(
-        const ::bioseq::simd::minimap2_parameters& params,
+        statement_execution_plan_owner execution_plan,
         const std::uint8_t alphabet_code,
         const query_sketch_route query_sketch_route = query_sketch_route::recompute_capable) {
+        if (!execution_plan) {
+            throw std::invalid_argument("pipeline description requires statement plan ownership");
+        }
+        const auto& params = execution_plan->frozen_parameters;
         if (params.highway_kernels != nullptr) {
             const auto* identity =
                 params.highway_kernels->is_complete()
@@ -575,12 +691,36 @@ export {
         compact_sequence_range<sequence_type> empty_target_proto{};
         auto empty_query_owner = bioseq::storage::make_resident_lazy_sequence(empty_query_proto);
         auto empty_target_owner = bioseq::storage::make_resident_lazy_sequence(empty_target_proto);
-        auto typed_params = params;
-        typed_params.alphabet_code = alphabet_code;
-        return describe_pipeline_for(typed_params,
+        if (params.alphabet_code != alphabet_code) {
+            throw std::invalid_argument("pipeline description changed its statement alphabet");
+        }
+        return describe_pipeline_for(execution_plan,
                                      bioseq::storage::make_lazy_sequence_view(empty_query_owner),
                                      bioseq::storage::make_lazy_sequence_view(empty_target_owner),
                                      query_sketch_route);
+    }
+
+
+    /// Synchronous non-executor metadata facade: freeze before any preparation.
+    template <sequence_alphabet p_alphabet>
+    [[nodiscard]] inline pipeline_description describe_pipeline_for(
+        const minimap2_parameters& params,
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_proto,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq_proto,
+        const query_sketch_route route = query_sketch_route::recompute_capable) {
+        return describe_pipeline_for(make_statement_execution_plan(params),
+                                     query_seq_proto, target_seq_proto, route);
+    }
+
+    /// Synchronous typed metadata facade for callers without an executor owner.
+    template <sequence_alphabet p_alphabet>
+    [[nodiscard]] inline pipeline_description describe_pipeline_for(
+        minimap2_parameters params,
+        const std::uint8_t alphabet_code,
+        const query_sketch_route route = query_sketch_route::recompute_capable) {
+        params.alphabet_code = alphabet_code;
+        return describe_pipeline_for<p_alphabet>(
+            make_statement_execution_plan(std::move(params)), alphabet_code, route);
     }
 
     } // namespace bioseq::simd::pipe
@@ -602,12 +742,19 @@ export {
     [[nodiscard]] match_result_collection
     minimap2_port_with_index(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                              bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                             const std::vector<p_minimizer>& query_minimizers,
+                             std::shared_ptr<const std::vector<p_minimizer>> query_minimizers_owner,
                              const p_index& prebuilt_target_index,
-                             const minimap2_parameters& params = minimap2_parameters{},
+                             ::bioseq::simd::pipe::statement_execution_plan_owner execution_plan,
                              bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
                              bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
                              bool allow_gpu_target_index_build = false) {
+        if (!query_minimizers_owner) {
+            throw std::invalid_argument("pipeline entry requires real query ownership");
+        }
+        const auto count = query_minimizers_owner->size();
+        auto query_minimizers =
+            ::bioseq::simd::pipe::minimizer_batch_view<p_minimizer>::from_shared_host(
+                std::move(query_minimizers_owner), 0u, count);
         static const auto* _desc =
             bioseq::instrumentation::register_static_region("minimap2_port_with_index");
         auto _scope = bioseq::instrumentation::region(_desc);
@@ -619,7 +766,7 @@ export {
                      target_seq,
                      query_minimizers,
                      prebuilt_target_index,
-                     params,
+                     execution_plan,
                      gpu_index_cache,
                      gpu_index_identity,
                      allow_gpu_target_index_build);
@@ -632,9 +779,9 @@ export {
     [[nodiscard]] match_result_collection minimap2_port_with_index(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-        const ::bioseq::simd::pipe::minimizer_batch_view<p_minimizer>& query_minimizers,
+        ::bioseq::simd::pipe::minimizer_batch_view<p_minimizer> query_minimizers,
         const p_index& prebuilt_target_index,
-        const minimap2_parameters& params = minimap2_parameters{},
+        ::bioseq::simd::pipe::statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false) {
@@ -649,7 +796,7 @@ export {
                      target_seq,
                      query_minimizers,
                      prebuilt_target_index,
-                     params,
+                     execution_plan,
                      gpu_index_cache,
                      gpu_index_identity,
                      allow_gpu_target_index_build);
@@ -668,9 +815,9 @@ export {
         BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR static match_result_collection
         call(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
              bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-             const p_query_minimizers& query_minimizers,
+             p_query_minimizers query_minimizers,
              const p_index& target_index,
-             const minimap2_parameters& params,
+             ::bioseq::simd::pipe::statement_execution_plan_owner execution_plan,
              bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
              bioseq::indexing::gpu_index_cache_identity gpu_index_identity,
              bool allow_gpu_target_index_build,
@@ -685,7 +832,7 @@ export {
                 target_seq,
                 query_minimizers,
                 target_index,
-                params,
+                execution_plan,
                 gpu_index_cache,
                 gpu_index_identity,
                 allow_gpu_target_index_build,
@@ -705,9 +852,9 @@ export {
         BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR static match_result_collection
         call(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
              bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-             const p_query_minimizers& query_minimizers,
+             p_query_minimizers query_minimizers,
              const p_index& target_index,
-             const minimap2_parameters& params,
+             ::bioseq::simd::pipe::statement_execution_plan_owner execution_plan,
              bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
              bioseq::indexing::gpu_index_cache_identity gpu_index_identity,
              bool allow_gpu_target_index_build,
@@ -728,7 +875,7 @@ export {
                 target_seq,
                 query_minimizers,
                 target_index,
-                params,
+                execution_plan,
                 gpu_index_cache,
                 gpu_index_identity,
                 allow_gpu_target_index_build,
@@ -743,14 +890,21 @@ export {
     [[nodiscard]] match_result_collection
     minimap2_port(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                   bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                  const std::vector<p_minimizer>& query_minimizers,
+                  std::shared_ptr<const std::vector<p_minimizer>> query_minimizers_owner,
                   std::vector<p_minimizer> target_minimizers,
                   const minimap2_parameters& params = minimap2_parameters{}) {
+        auto execution_plan = pipe::make_statement_execution_plan(params);
+        if (!query_minimizers_owner) {
+            throw std::invalid_argument("pipeline entry requires real query ownership");
+        }
+        const auto count = query_minimizers_owner->size();
+        auto query_minimizers = pipe::minimizer_batch_view<p_minimizer>::from_shared_host(
+            std::move(query_minimizers_owner), 0u, count);
         return pipe_entry_detail::minimap2_port_impl<
             pipe_entry_detail::dynamic_shape_pipeline_dispatch,
             p_minimizer,
             p_alphabet>(
-            query_seq, target_seq, query_minimizers, std::move(target_minimizers), params);
+            query_seq, target_seq, query_minimizers, std::move(target_minimizers), execution_plan);
     }
 
     namespace pipe_entry_detail {
@@ -760,13 +914,13 @@ export {
     [[nodiscard]] match_result_collection minimap2_port_with_fixed_vulkan_target_handoff(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-        const std::vector<p_minimizer>& query_minimizers,
+        pipe::minimizer_batch_view<p_minimizer> query_minimizers,
         fixed_vulkan_target_host_owner<p_minimizer> target_host,
-        const minimap2_parameters& params) {
+        pipe::statement_execution_plan_owner execution_plan) {
         return minimap2_port_with_fixed_vulkan_target_handoff_impl<dynamic_shape_pipeline_dispatch,
                                                                    p_minimizer,
                                                                    p_alphabet>(
-            query_seq, target_seq, query_minimizers, std::move(target_host), params);
+            query_seq, target_seq, query_minimizers, std::move(target_host), execution_plan);
     }
 
     /// Dispatch one requested minimizer algorithm into its trait-owned kernel.
@@ -793,18 +947,30 @@ export {
                     .scalar = p_kernel::template call<p_minimizer>(
                         params, collector, range, window_len, kmer_len),
                     .scalar_available = true,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    .observed_algorithm = minimizer_algorithm::scalar,
+                    .observed_algorithm_available = true,
+#endif
                 };
             } else if constexpr (p_kernel::emits_exact_simd_execution_stats) {
                 return {
                     .exact_simd = p_kernel::template call<p_minimizer>(
                         params, collector, range, window_len, kmer_len),
                     .exact_simd_available = true,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    .observed_algorithm = minimizer_algorithm::two_stack_nthash,
+                    .observed_algorithm_available = true,
+#endif
                 };
             } else if constexpr (p_kernel::emits_bounded_nthash_execution_stats) {
                 return {
                     .bounded_nthash = p_kernel::template call<p_minimizer>(
                         params, collector, range, window_len, kmer_len),
                     .bounded_nthash_available = true,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    .observed_algorithm = minimizer_algorithm::bounded_nthash_simd,
+                    .observed_algorithm_available = true,
+#endif
                 };
             } else if constexpr (p_kernel::emits_partial_vulkan_execution_stats) {
                 const auto token = p_kernel::template call<p_minimizer>(
@@ -815,11 +981,27 @@ export {
                 }
                 minimizer_sketch_execution_stats stats{};
                 stats.partial_vulkan.sketch_dispatches = token.completed_roundtrips;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                stats.observed_algorithm = minimizer_algorithm::vulkan_minimap_integer;
+                stats.observed_algorithm_available = true;
+#endif
                 return stats;
             } else {
                 p_kernel::template call<p_minimizer>(
                     params, collector, range, window_len, kmer_len);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                minimizer_sketch_execution_stats stats{};
+                using range_type = std::remove_cvref_t<p_range>;
+                using range_traits = typename range_type::traits;
+                stats.observed_algorithm =
+                    range_traits::k_logical_bits_per_symbol == 2u
+                        ? minimizer_algorithm::simd_minimap2_reference
+                        : minimizer_algorithm::scalar;
+                stats.observed_algorithm_available = true;
+                return stats;
+#else
                 return {};
+#endif
             }
         }
     };
@@ -876,7 +1058,11 @@ export {
     [[nodiscard]] match_result_collection
     minimap_port_with_repr_impl(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                                 bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                                const minimap2_parameters& params) {
+                                pipe::statement_execution_plan_owner execution_plan) {
+        if (!execution_plan) {
+            throw std::invalid_argument("raw pipeline requires statement plan ownership");
+        }
+        const auto& params = execution_plan->frozen_parameters;
         static const auto* _desc = bioseq::instrumentation::register_static_region("minimap_port");
         auto _scope = bioseq::instrumentation::region(_desc);
 
@@ -929,7 +1115,10 @@ export {
         const minimizer_sketch_execution_stats query_sketch_stats =
             sketch_into_collector<p_minimizer>(
                 query_collector, query_seq, window_len, kmer_len, params);
-        const auto query_minimizers = std::move(query_collector).extract_sketches_data();
+        auto query_owner = std::make_shared<const std::vector<p_minimizer>>(
+            std::move(query_collector).extract_sketches_data());
+        const auto query_minimizers = pipe::minimizer_batch_view<p_minimizer>::from_shared_host(
+            query_owner, 0u, query_owner->size());
         const std::uint64_t query_sketch_host_wall_ns =
             pipe::elapsed_host_stage_ns(query_sketch_started_ns);
         const bool query_route_valid = minimizer_sketch_stats_matches_selected_route(
@@ -943,7 +1132,18 @@ export {
             (query_sketch_stats.exact_simd_available && target_sketch_stats.exact_simd_available &&
              pipe::exact_simd_stats_share_selection_route(query_sketch_stats.exact_simd,
                                                           target_sketch_stats.exact_simd));
-        if (!query_route_valid || !target_route_valid || !exact_simd_pair_route_compatible) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        const bool observed_identity_pair_compatible =
+            is_gpu_target_index_build ||
+            (query_sketch_stats.observed_algorithm_available &&
+             target_sketch_stats.observed_algorithm_available &&
+             query_sketch_stats.observed_algorithm == target_sketch_stats.observed_algorithm);
+#endif
+        if (!query_route_valid || !target_route_valid || !exact_simd_pair_route_compatible
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            || !observed_identity_pair_compatible
+#endif
+        ) {
             bioseq_log<logging_level::error>(
                 "Selected minimizer route returned mismatched execution stats or "
                 "incompatible exact_simd selection schemes");
@@ -961,13 +1161,13 @@ export {
                       target_seq,
                       query_minimizers,
                       std::move(fixed_target_sketch->host),
-                      params)
+                      execution_plan)
                 : minimap2_port_impl<p_pipeline_dispatch, p_minimizer, p_alphabet>(
                       query_seq,
                       target_seq,
                       query_minimizers,
                       std::move(owned_target_minimizers),
-                      params);
+                      execution_plan);
         result.record_query_sketch_host_time(query_sketch_host_wall_ns);
         record_minimizer_sketch_execution_stats(
             result, query_sketch_stats, minimizer_sketch_role::query);
@@ -975,6 +1175,13 @@ export {
             record_minimizer_sketch_execution_stats(
                 result, target_sketch_stats, minimizer_sketch_role::target);
         }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        // Both sketch operations and the selected consuming pipeline returned
+        // normally. Retain the identity emitted by the completed query sketch;
+        // route validation above already required the target sketch to agree.
+        result.record_completed_minimizer_algorithm_identity(
+            query_sketch_stats.observed_algorithm);
+#endif
         return result;
     }
 
@@ -983,10 +1190,10 @@ export {
     [[nodiscard]] match_result_collection
     minimap_port_with_repr(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                            bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                           const minimap2_parameters& params) {
+                           pipe::statement_execution_plan_owner execution_plan) {
         return minimap_port_with_repr_impl<dynamic_shape_pipeline_dispatch,
                                            p_minimizer,
-                                           p_alphabet>(query_seq, target_seq, params);
+                                           p_alphabet>(query_seq, target_seq, execution_plan);
     }
 
     // =============================================================================
@@ -1011,10 +1218,11 @@ export {
         BIOSEQ_PIPELINE_INLINE_ATTR
         static match_result_collection call(const minimap2_parameters& params,
                                             bioseq::storage::lazy_sequence_view<p_alphabet> q,
-                                            bioseq::storage::lazy_sequence_view<p_alphabet> t) {
+                                            bioseq::storage::lazy_sequence_view<p_alphabet> t,
+                                            pipe::statement_execution_plan_owner execution_plan) {
             using p_minimizer =
                 ::bioseq::minimizers::minimizer_representation<p_bucket_width, p_kmer_size>;
-            return minimap_port_with_repr<p_minimizer, p_alphabet>(q, t, params);
+            return minimap_port_with_repr<p_minimizer, p_alphabet>(q, t, execution_plan);
         }
     };
 
@@ -1034,12 +1242,13 @@ export {
         static match_result_collection
         call(const minimap2_parameters& params,
              bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
-             bioseq::storage::lazy_sequence_view<p_alphabet> target_seq) {
+             bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+             pipe::statement_execution_plan_owner execution_plan) {
             using p_minimizer =
                 ::bioseq::minimizers::minimizer_representation<p_bucket_width, p_kmer_size>;
             using pipeline_dispatch = pinned_shape_pipeline_dispatch<p_bucket_width, p_kmer_size>;
             return minimap_port_with_repr_impl<pipeline_dispatch, p_minimizer, p_alphabet>(
-                query_seq, target_seq, params);
+                query_seq, target_seq, execution_plan);
         }
     };
 
@@ -1049,12 +1258,53 @@ export {
         using leaf = minimap_port_owned_repr_leaf<p_alphabet, p_bucket_width, p_kmer_size>;
     };
 
+    /** Resolve generated runtime capabilities before entering the typed pipeline. */
+    template <sequence_alphabet p_alphabet>
+    [[nodiscard]] match_result_collection minimap_port_registered_shape(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        pipe::statement_execution_plan_owner execution_plan) {
+        const auto& params = execution_plan->frozen_parameters;
+        const auto maximum_bp = std::max(query_seq.bp_size(), target_seq.bp_size());
+        if (params.kmer_size <= 0 || params.window_size <= 0 ||
+            static_cast<std::uint64_t>(params.kmer_size) >
+                (std::numeric_limits<std::uint16_t>::max)() ||
+            static_cast<std::uint64_t>(params.window_size) >
+                (std::numeric_limits<std::uint16_t>::max)()) {
+            throw std::invalid_argument("minimizer runtime shape is outside registry capacity");
+        }
+        const auto k = static_cast<std::uint16_t>(params.kmer_size);
+        const auto w = static_cast<std::uint16_t>(params.window_size);
+        // The ordinary adapter prefers u32; a generated u64-only capability
+        // selects its matching input owner without hard-coding a biological K.
+        const auto selection = pipe::select_minimizer_execution_layout_prefer_native<p_alphabet>(
+            params.minimizer_algorithm, maximum_bp, k, w, 32u);
+        return ::bioseq::minimizers::visit_minimizer_physical_layout(
+            selection, [query_seq, target_seq, execution_plan]<class p_minimizer>() {
+                using layout = typename p_minimizer::layout_type;
+                using pipeline_dispatch = pinned_shape_pipeline_dispatch<
+                    layout::k_position_bits, layout::k_physical_kmer_size>;
+                return minimap_port_with_repr_impl<pipeline_dispatch, p_minimizer, p_alphabet>(
+                    query_seq, target_seq, execution_plan);
+            });
+    }
+
     /// Execute the raw generated-owner route without repeating shape dispatch.
     template <sequence_alphabet p_alphabet>
     BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR match_result_collection
     minimap_port_owned_pinned_shape(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                                     bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                                    const minimap2_parameters& params) {
+                                    pipe::statement_execution_plan_owner execution_plan) {
+        if (!execution_plan) {
+            throw std::invalid_argument("owned raw pipeline requires its statement plan");
+        }
+        const auto& params = execution_plan->frozen_parameters;
+        if constexpr (::bioseq::minimizers::minimizer_profile_has_alphabet<p_alphabet>()) {
+            if (!pipe::use_generic_raw_optional_scalar_minimizer_route<p_alphabet>(
+                    params, ::bioseq::indexing::index_read_requirement::allow)) {
+                return minimap_port_registered_shape(query_seq, target_seq, execution_plan);
+            }
+        }
         using traits_type = minimap_port_owned_traits<p_alphabet>;
         return ::bioseq::simd::pipe::detail::dispatch_chain<
             match_result_collection,
@@ -1062,7 +1312,7 @@ export {
             ::bioseq::simd::pipe::detail::kmer_size_step,
             ::bioseq::simd::pipe::detail::seq_len_log2_step_per_k>::template run<>(params,
                                                                                    query_seq,
-                                                                                   target_seq);
+                                                                                   target_seq, execution_plan);
     }
 
     } // namespace pipe_entry_detail
@@ -1082,7 +1332,17 @@ export {
     BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR match_result_collection
     minimap_port(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                  bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                 const minimap2_parameters& params = minimap2_parameters{}) {
+                 pipe::statement_execution_plan_owner execution_plan) {
+        if (!execution_plan) {
+            throw std::invalid_argument("raw pipeline requires statement plan ownership");
+        }
+        const auto& params = execution_plan->frozen_parameters;
+        if constexpr (::bioseq::minimizers::minimizer_profile_has_alphabet<p_alphabet>()) {
+            if (!pipe::use_generic_raw_optional_scalar_minimizer_route<p_alphabet>(
+                    params, ::bioseq::indexing::index_read_requirement::allow)) {
+                return pipe_entry_detail::minimap_port_registered_shape(query_seq, target_seq, execution_plan);
+            }
+        }
         using traits_type = pipe_entry_detail::minimap_port_traits<p_alphabet>;
         // Pin p_kmer_size before the dependent p_bucket_width step.
         return ::bioseq::simd::pipe::detail::dispatch_chain<
@@ -1091,7 +1351,17 @@ export {
             ::bioseq::simd::pipe::detail::kmer_size_step,
             ::bioseq::simd::pipe::detail::seq_len_log2_step_per_k>::template run<>(params,
                                                                                    query_seq,
-                                                                                   target_seq);
+                                                                                   target_seq,
+                                                                                   execution_plan);
+    }
+
+    /// Freeze one non-executor request before sketching or index preparation.
+    template <sequence_alphabet p_alphabet>
+    [[nodiscard]] inline match_result_collection minimap_port(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        const minimap2_parameters& params = minimap2_parameters{}) {
+        return minimap_port(query_seq, target_seq, pipe::make_statement_execution_plan(params));
     }
 
     namespace pipe_entry_detail {
@@ -1103,16 +1373,23 @@ export {
         BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR static match_result_collection
         call(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
              bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-             const pipe::minimizer_batch_view<minimap_sketch_data>& query_minimizers,
+             pipe::minimizer_batch_view<minimap_sketch_data> query_minimizers,
              const minimizer_hashmap_fragment_index& target_index,
-             const minimap2_parameters& params,
+             pipe::statement_execution_plan_owner execution_plan,
              bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
-             bioseq::indexing::gpu_index_cache_identity gpu_index_identity) {
+             bioseq::indexing::gpu_index_cache_identity gpu_index_identity
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+             , benchmark_e2e_operation_binding benchmark_e2e_operation
+#endif
+            ) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            const benchmark_e2e_operation_scope benchmark_e2e_scope{benchmark_e2e_operation};
+#endif
             return minimap2_port_with_index(query_seq,
                                             target_seq,
                                             query_minimizers,
                                             target_index,
-                                            params,
+                                            execution_plan,
                                             gpu_index_cache,
                                             gpu_index_identity);
         }
@@ -1125,16 +1402,23 @@ export {
         BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR static match_result_collection
         call(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
              bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-             const pipe::minimizer_batch_view<minimap_sketch_data>& query_minimizers,
+             pipe::minimizer_batch_view<minimap_sketch_data> query_minimizers,
              const minimizer_hashmap_fragment_index& target_index,
-             const minimap2_parameters& params,
+             pipe::statement_execution_plan_owner execution_plan,
              bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
-             bioseq::indexing::gpu_index_cache_identity gpu_index_identity) {
+             bioseq::indexing::gpu_index_cache_identity gpu_index_identity
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+             , benchmark_e2e_operation_binding benchmark_e2e_operation
+#endif
+            ) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            const benchmark_e2e_operation_scope benchmark_e2e_scope{benchmark_e2e_operation};
+#endif
             return minimap_port_fragment_index_batch_owned(query_seq,
                                                            target_seq,
                                                            query_minimizers,
                                                            target_index,
-                                                           params,
+                                                           execution_plan,
                                                            gpu_index_cache,
                                                            gpu_index_identity);
         }
@@ -1147,12 +1431,23 @@ export {
     [[nodiscard]] match_result_collection
     minimap_port_segmented(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                            bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                           const minimap2_parameters& params = minimap2_parameters{},
+                           pipe::statement_execution_plan_owner execution_plan,
                            p_fragment_index_storage* fragment_index_out = nullptr) {
         return minimap_port_segmented_impl<pipe_entry_detail::segmented_dynamic_index_dispatch,
                                            p_alphabet,
                                            p_fragment_index_storage>(
-            query_seq, target_seq, params, fragment_index_out);
+            query_seq, target_seq, execution_plan, fragment_index_out);
+    }
+
+    /// Freeze one synchronous non-executor segmented request before preparation.
+    template <sequence_alphabet p_alphabet, class p_fragment_index_storage = std::nullptr_t>
+    [[nodiscard]] inline match_result_collection minimap_port_segmented(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        const minimap2_parameters& params = minimap2_parameters{},
+        p_fragment_index_storage* fragment_index_out = nullptr) {
+        return minimap_port_segmented(query_seq, target_seq,
+            pipe::make_statement_execution_plan(params), fragment_index_out);
     }
 
     namespace pipe_entry_detail {
@@ -1162,10 +1457,10 @@ export {
     [[nodiscard]] match_result_collection minimap_port_segmented_owned_dispatch(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-        const minimap2_parameters& params) {
+        pipe::statement_execution_plan_owner execution_plan) {
         return minimap_port_segmented_impl<segmented_owned_index_dispatch,
                                            p_alphabet,
-                                           std::nullptr_t>(query_seq, target_seq, params, nullptr);
+                                           std::nullptr_t>(query_seq, target_seq, execution_plan, nullptr);
     }
 
     } // namespace pipe_entry_detail
@@ -1176,12 +1471,12 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection
     minimap_port_segmented_owned(bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
                                  bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-                                 const minimap2_parameters& params = minimap2_parameters{});
+                                 pipe::statement_execution_plan_owner execution_plan);
 
     [[nodiscard, gnu::noinline]] match_result_collection
     minimap_port_segmented_owned(bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
                                  bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-                                 const minimap2_parameters& params = minimap2_parameters{});
+                                 pipe::statement_execution_plan_owner execution_plan);
 
     } // namespace bioseq::simd
 

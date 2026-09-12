@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from build_presets import (
+    ALL_ALPHABETS_UNIT_INTEGRATION_MODE,
     BENCH_CLI_MODES,
     CATCH_FILTER_MODES,
     FIXED_BUILD_ONLY_MODES,
@@ -277,6 +278,17 @@ TOOL_DEFINITIONS = [
                 }
             },
             "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "mode": {"const": ALL_ALPHABETS_UNIT_INTEGRATION_MODE},
+                        },
+                        "required": ["mode"],
+                    },
+                    "then": {
+                        "properties": {"debug": {"const": False}},
+                    },
+                },
                 {
                     "if": {
                         "properties": {
@@ -644,9 +656,25 @@ TOOL_DEFINITIONS = [
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Select and validate the exact successful debug build "
-                        "tree instead of auto-discovering a recent tree. The "
-                        "receipt mode must own the requested target."
+                        "Select and validate an exact successful build tree "
+                        "instead of auto-discovering a recent tree. A debug "
+                        "receipt is required unless historical_artifact_only "
+                        "is true. The receipt mode must own the requested "
+                        "target."
+                    ),
+                },
+                "historical_artifact_only": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Inspect only the exact artifact pinned by "
+                        "reuse_build_receipt, without requiring its recorded "
+                        "source graph to match the current worktree. This "
+                        "read-only historical mode is required for a "
+                        "non-debug receipt, disables .bc-to-.s synthesis, "
+                        "and never proves the current worktree. Receipt seal, "
+                        "commit, configuration, target ownership, and exact "
+                        "artifact hashes remain validated."
                     ),
                 },
             },

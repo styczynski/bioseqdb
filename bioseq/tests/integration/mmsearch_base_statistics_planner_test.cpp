@@ -423,68 +423,69 @@ TEST_CASE("persisted GPU SQL statistics are exact-empty and immutable for comple
         "last_alignment_persisted_gpu_operation_stats()::text;");
     REQUIRE(second == first);
 
-    const row_t diagnostics = query_one(ctx,
-        "WITH gpu_stats AS MATERIALIZED ("
-        " SELECT bioseq."
-        "last_alignment_persisted_gpu_operation_stats() AS value"
-        "), stats AS ("
-        " SELECT execution_id, backend_pid, database_oid, is_completed, is_partial,"
-        "        is_fully_drained"
-        " FROM bioseq.last_alignment_execution_stats()"
-        " WHERE stage='query_sketch'"
-        ") SELECT "
-        "jsonb_typeof(value)='object', "
-        "(SELECT count(*) FROM jsonb_object_keys(value))=19 "
-        "AND value ?& ARRAY["
-        " 'schema','revision','execution_id','backend_pid','database_oid',"
-        " 'is_completed','is_partial','is_fully_drained','is_consistent','is_complete',"
-        " 'is_saturated','dropped_operation_count','operation_count',"
-        " 'accepted_operation_count','complete_operation_count','job_count',"
-        " 'accepted_job_count','cache_validation','operations']::text[], "
-        "value->>'schema'='bioseq.persisted_gpu_operation_stats' "
-        "AND (value->>'revision')::bigint=2 "
-        "AND jsonb_typeof(value->'schema')='string' "
-        "AND jsonb_typeof(value->'revision')='number', "
-        "(value->>'execution_id')::bigint=stats.execution_id "
-        "AND (value->>'backend_pid')::bigint=stats.backend_pid "
-        "AND (value->>'database_oid')::bigint=stats.database_oid, "
-        "(value->>'is_completed')::boolean=stats.is_completed "
-        "AND (value->>'is_partial')::boolean=stats.is_partial "
-        "AND (value->>'is_fully_drained')::boolean=stats.is_fully_drained "
-        "AND stats.is_completed AND NOT stats.is_partial "
-        "AND stats.is_fully_drained, "
-        "NOT (value->>'is_consistent')::boolean "
-        "AND (value->>'is_complete')::boolean "
-        "AND NOT (value->>'is_saturated')::boolean, "
-        "(value->>'dropped_operation_count')::bigint=0 "
-        "AND (value->>'operation_count')::bigint=0 "
-        "AND (value->>'accepted_operation_count')::bigint=0 "
-        "AND (value->>'complete_operation_count')::bigint=0 "
-        "AND (value->>'job_count')::bigint=0 "
-        "AND (value->>'accepted_job_count')::bigint=0, "
-        "jsonb_typeof(value->'operations')='array' "
-        "AND jsonb_array_length(value->'operations')=0, "
-        "jsonb_typeof(value->'cache_validation')='null', "
-        "NOT EXISTS ("
-        " SELECT 1 FROM jsonb_each(value) AS entry"
-        " WHERE entry.key IN ("
-        "  'revision','execution_id','backend_pid','database_oid',"
-        "  'dropped_operation_count','operation_count',"
-        "  'accepted_operation_count','complete_operation_count',"
-        "  'job_count','accepted_job_count'"
-        " ) AND jsonb_typeof(entry.value)<>'number'"
-        "), "
-        "NOT EXISTS ("
-        " SELECT 1 FROM jsonb_each(value) AS entry"
-        " WHERE entry.key IN ("
-        "  'is_completed','is_partial','is_fully_drained','is_consistent',"
-        "  'is_complete','is_saturated'"
-        " ) AND jsonb_typeof(entry.value)<>'boolean'"
-        "), "
-        "(SELECT provolatile='v' AND proparallel='r' "
-        " FROM pg_proc WHERE oid='bioseq."
-        "last_alignment_persisted_gpu_operation_stats()'::regprocedure) "
-        "FROM gpu_stats CROSS JOIN stats;");
+    const row_t diagnostics =
+        query_one(ctx,
+                  "WITH gpu_stats AS MATERIALIZED ("
+                  " SELECT bioseq."
+                  "last_alignment_persisted_gpu_operation_stats() AS value"
+                  "), stats AS ("
+                  " SELECT execution_id, backend_pid, database_oid, is_completed, is_partial,"
+                  "        is_fully_drained"
+                  " FROM bioseq.last_alignment_execution_stats()"
+                  " WHERE stage='query_sketch'"
+                  ") SELECT "
+                  "jsonb_typeof(value)='object', "
+                  "(SELECT count(*) FROM jsonb_object_keys(value))=19 "
+                  "AND value ?& ARRAY["
+                  " 'schema','revision','execution_id','backend_pid','database_oid',"
+                  " 'is_completed','is_partial','is_fully_drained','is_consistent','is_complete',"
+                  " 'is_saturated','dropped_operation_count','operation_count',"
+                  " 'accepted_operation_count','complete_operation_count','job_count',"
+                  " 'accepted_job_count','cache_validation','operations']::text[], "
+                  "value->>'schema'='bioseq.persisted_gpu_operation_stats' "
+                  "AND (value->>'revision')::bigint=3 "
+                  "AND jsonb_typeof(value->'schema')='string' "
+                  "AND jsonb_typeof(value->'revision')='number', "
+                  "(value->>'execution_id')::bigint=stats.execution_id "
+                  "AND (value->>'backend_pid')::bigint=stats.backend_pid "
+                  "AND (value->>'database_oid')::bigint=stats.database_oid, "
+                  "(value->>'is_completed')::boolean=stats.is_completed "
+                  "AND (value->>'is_partial')::boolean=stats.is_partial "
+                  "AND (value->>'is_fully_drained')::boolean=stats.is_fully_drained "
+                  "AND stats.is_completed AND NOT stats.is_partial "
+                  "AND stats.is_fully_drained, "
+                  "NOT (value->>'is_consistent')::boolean "
+                  "AND (value->>'is_complete')::boolean "
+                  "AND NOT (value->>'is_saturated')::boolean, "
+                  "(value->>'dropped_operation_count')::bigint=0 "
+                  "AND (value->>'operation_count')::bigint=0 "
+                  "AND (value->>'accepted_operation_count')::bigint=0 "
+                  "AND (value->>'complete_operation_count')::bigint=0 "
+                  "AND (value->>'job_count')::bigint=0 "
+                  "AND (value->>'accepted_job_count')::bigint=0, "
+                  "jsonb_typeof(value->'operations')='array' "
+                  "AND jsonb_array_length(value->'operations')=0, "
+                  "jsonb_typeof(value->'cache_validation')='null', "
+                  "NOT EXISTS ("
+                  " SELECT 1 FROM jsonb_each(value) AS entry"
+                  " WHERE entry.key IN ("
+                  "  'revision','execution_id','backend_pid','database_oid',"
+                  "  'dropped_operation_count','operation_count',"
+                  "  'accepted_operation_count','complete_operation_count',"
+                  "  'job_count','accepted_job_count'"
+                  " ) AND jsonb_typeof(entry.value)<>'number'"
+                  "), "
+                  "NOT EXISTS ("
+                  " SELECT 1 FROM jsonb_each(value) AS entry"
+                  " WHERE entry.key IN ("
+                  "  'is_completed','is_partial','is_fully_drained','is_consistent',"
+                  "  'is_complete','is_saturated'"
+                  " ) AND jsonb_typeof(entry.value)<>'boolean'"
+                  "), "
+                  "(SELECT provolatile='v' AND proparallel='r' "
+                  " FROM pg_proc WHERE oid='bioseq."
+                  "last_alignment_persisted_gpu_operation_stats()'::regprocedure) "
+                  "FROM gpu_stats CROSS JOIN stats;");
     REQUIRE(diagnostics.size() == 12u);
     for (const auto& diagnostic_result : diagnostics) {
         REQUIRE(diagnostic_result.value_or("") == "t");
@@ -1193,6 +1194,12 @@ TEST_CASE("BioseqBatchJoin resumes after 8192 and merges the one-row tail",
         1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar");
     require_batch_join_aligned_query_rows(ctx, sql, 8193, "t");
     require_batch_join_stats(ctx, 1, 8193);
+    // This TEST build checks the broad timing receipt. Automatic exact-owner
+    // checkpoint proof is E2E-only and is qualified by the real campaign SQL.
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT (simd_execution_stats->>'downstream_active_wall_available')::boolean "
+        "FROM bioseq.last_alignment_execution_stats() LIMIT 1;") == "t");
     REQUIRE(reserved_bytes() == admission_baseline);
 
     const auto analyzed = explain_text<true>(ctx, sql);
@@ -1306,3 +1313,140 @@ TEST_CASE("plain EXPLAIN exposes live CPU just-index BatchJoin before missing-ge
     require_no_current_compatible_persisted_index(
         ctx, "EXPLAIN (ANALYZE, COSTS OFF) " + sql + ";");
 }
+
+#ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE("no-index BatchJoin prepares native queries once and reuses one transient target",
+          "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
+    struct route_case {
+        std::string_view suffix;
+        std::string_view alphabet;
+        int storage_width = 0;
+        int kmer_size = 0;
+        int window_size = 0;
+        std::string_view minimizer_algorithm;
+        std::string_view index_name;
+    };
+    constexpr std::array cases{
+        // SQL campaign profiles use uint64 storage; native u32/fragmented
+        // adapters are covered by the direct minimizer producer contracts.
+        route_case{"dna4_k15_mpf", "dna4", 64, 15, 10, "two_stack_nthash",
+                   "minimizers_per_fragment"},
+        route_case{"dna4_k15_mps", "dna4", 64, 15, 10, "simd_minimap2_reference",
+                   "minimizers_per_sequence"},
+        route_case{"dna4_k20_mpf", "dna4", 64, 20, 15, "simd_minimap2_reference",
+                   "minimizers_per_fragment"},
+        route_case{"dna4_k20_mps", "dna4", 64, 20, 15, "bounded_nthash_simd",
+                   "minimizers_per_sequence"},
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
+        route_case{"dna5_k15_mpf", "dna5", 64, 15, 10, "simd_minimap2_reference",
+                   "minimizers_per_fragment"},
+        route_case{"dna5_k15_mps", "dna5", 64, 15, 10, "bounded_nthash_simd",
+                   "minimizers_per_sequence"},
+        route_case{"dna5_k20_mpf", "dna5", 64, 20, 15, "bounded_nthash_simd",
+                   "minimizers_per_fragment"},
+        route_case{"dna5_k20_mps", "dna5", 64, 20, 15, "simd_minimap2_reference",
+                   "minimizers_per_sequence"},
+#endif
+    };
+    auto ctx = fresh_context({"noindex_dna4_k15_mpf_target",
+                              "noindex_dna4_k15_mpf_query",
+                              "noindex_dna4_k15_mps_target",
+                              "noindex_dna4_k15_mps_query",
+                              "noindex_dna4_k20_mpf_target",
+                              "noindex_dna4_k20_mpf_query",
+                              "noindex_dna4_k20_mps_target",
+                              "noindex_dna4_k20_mps_query",
+                              "noindex_dna5_k15_mpf_target",
+                              "noindex_dna5_k15_mpf_query",
+                              "noindex_dna5_k15_mps_target",
+                              "noindex_dna5_k15_mps_query",
+                              "noindex_dna5_k20_mpf_target",
+                              "noindex_dna5_k20_mpf_query",
+                              "noindex_dna5_k20_mps_target",
+                              "noindex_dna5_k20_mps_query"});
+    exec_sql(ctx,
+             "SET max_parallel_workers_per_gather=0;"
+             "SET bioseq.index.insert_maintenance.enabled=off;"
+             "SET bioseq.index.sequence_read.enabled=off;"
+             "SET bioseq.index.async_persistence.enabled=off;"
+             "SET bioseq.index.recompute_async_persistence.enabled=off;"
+             "SET bioseq.aligner.vulkan.enabled=off;"
+             "SET bioseq.aligner.chaining.algorithm='scalar_minimap2';"
+             "SET bioseq.aligner.base_alignment.algorithm='ksw2';"
+             "SET bioseq.aligner.chaining.minimum_score=20;");
+    const std::string target = high_entropy_sequence(768u);
+    const std::string query = target.substr(192u, 160u);
+    for (const route_case& route : cases) {
+        CAPTURE(route.suffix,
+                route.alphabet,
+                route.storage_width,
+                route.kmer_size,
+                route.window_size,
+                route.minimizer_algorithm,
+                route.index_name);
+        const std::string target_table =
+            fmt::format("noindex_{}_target", route.suffix);
+        const std::string query_table =
+            fmt::format("noindex_{}_query", route.suffix);
+        const seq_typmod typmod{.alphabet = route.alphabet,
+                               .width = route.storage_width};
+        create_seq_table(ctx,
+                         seq_table_spec{.name = target_table,
+                                        .typmod = typmod,
+                                        .seq_columns = 1,
+                                        .using_bioseq = true},
+                         {seq_row{.pk = 1, .sequences = {target}}});
+        create_seq_table(ctx,
+                         seq_table_spec{.name = query_table,
+                                        .typmod = typmod,
+                                        .seq_columns = 1,
+                                        .using_bioseq = true},
+                         {seq_row{.pk = 1, .sequences = {query}},
+                          seq_row{.pk = 2, .sequences = {query}},
+                          seq_row{.pk = 3, .sequences = {query}}});
+        exec_sqlf(ctx,
+                  "SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
+                  target_table,
+                  route.index_name);
+        exec_sqlf(ctx,
+                  "SET bioseq.aligner.minimizer.kmer_size={};"
+                  "SET bioseq.aligner.minimizer.window_size={};"
+                  "SET bioseq.aligner.minimizer.algorithm='{}';",
+                  route.kmer_size,
+                  route.window_size,
+                  route.minimizer_algorithm);
+        const std::string sql = fmt::format(
+            "SELECT DISTINCT q.pk, t.pk FROM {} t JOIN {} q "
+            "ON mmsearch(t.seq0, q.seq0, "
+            "aligner_options(index_read_requirement=>1))",
+            target_table,
+            query_table);
+        const auto plan = explain_text<false>(ctx, sql);
+        REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
+        const auto rows = query_rows(ctx, sql + " ORDER BY q.pk;");
+        REQUIRE(rows.size() == 3u);
+        for (std::size_t ordinal = 0u; ordinal < rows.size(); ++ordinal) {
+            REQUIRE(rows[ordinal].size() == 2u);
+            REQUIRE(rows[ordinal][0].has_value());
+            REQUIRE(std::stoll(*rows[ordinal][0]) ==
+                    static_cast<long long>(ordinal + 1u));
+            REQUIRE(rows[ordinal][1].value_or("") == "1");
+        }
+        const auto stats = last_alignment_stats(ctx);
+        REQUIRE(stats.size() == 20u);
+        const auto& operation = stats.front();
+        REQUIRE(stats_i64(operation, 38) == 1);
+        REQUIRE(stats_i64(operation, 39) == 2);
+        REQUIRE(stats_i64(operation, 40) > 0);
+        REQUIRE(stats_i64(operation, 41) == 0);
+        REQUIRE(operation[42].has_value());
+        REQUIRE(operation[43] == operation[42]);
+        REQUIRE(stats_i64(operation, 45) == 0);
+        REQUIRE(stats_i64(operation, 46) == 0);
+        REQUIRE(stats_i64(operation, 47) == 1);
+        REQUIRE(stats_i64(operation, 48) == 0);
+        REQUIRE(stats_i64(operation, 49) == 0);
+        REQUIRE(stats_i64(operation, 50) == 0);
+    }
+}
+#endif

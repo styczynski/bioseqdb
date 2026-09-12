@@ -402,6 +402,12 @@ struct module_graph {
     std::string compilation_signature;
 };
 
+/// Structural and active module-edge results produced from one Clang AST.
+struct structural_module_graph_scan {
+    structural_index structural;
+    module_graph graph;
+};
+
 /// Stable module identity used to join dependency scans to the PCM manifest.
 struct dependency_module_identity {
     std::string module_name;

@@ -234,8 +234,7 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
             spirv = compile_shader_spirv(shader_compile_request{
                 shader_kind::chain_tiled_dp_u64, key.tile_size, key.local_size});
         } catch (const std::exception& exception) {
-            throw vulkan_runtime_error(
-                fmt::format("shader compile failed: {}", exception.what()));
+            throw vulkan_runtime_error(fmt::format("shader compile failed: {}", exception.what()));
         }
 
         // Validate the direct-anchor ABI in the emitted SPIR-V before trusting the
@@ -270,9 +269,19 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
 
     VkPipeline& pipeline = candidate.handles.pipeline;
     metal_archive_pipeline_create_scope archive_scope{
-        archive_receipt_required, features_.device_uuid, shader_key, entry_name};
+        archive_receipt_required,
+        runtime_vulkan_device_identity{
+            .device_uuid = features_.device_uuid,
+            .api_version = features_.api_version,
+            .driver_version = features_.driver_version,
+            .vendor_id = features_.vendor_id,
+            .device_id = features_.device_id,
+            .pipeline_cache_uuid = features_.pipeline_cache_uuid,
+        },
+        shader_key,
+        entry_name};
     if (!archive_scope.is_ready_for_pipeline_call()) {
-        auto rejected = archive_scope.finish(VK_ERROR_INITIALIZATION_FAILED);
+        auto rejected = archive_scope.finish(VK_ERROR_INITIALIZATION_FAILED, 0u);
         throw vulkan_runtime_error(fmt::format(
             "immutable Metal archive scope rejected chaining pipeline before creation: {}",
             rejected ? "missing required receipt" : rejected.error()));
@@ -285,7 +294,7 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
                                     .count();
     candidate.pipeline_create_ns = std::max<std::uint64_t>(
         1u, create_elapsed > 0 ? static_cast<std::uint64_t>(create_elapsed) : 1u);
-    auto archive_verdict = archive_scope.finish(pr);
+    auto archive_verdict = archive_scope.finish(pr, candidate.pipeline_create_ns);
     if (!archive_verdict) {
         throw vulkan_runtime_error(
             fmt::format("immutable Metal archive receipt failed for chaining pipeline: {}",
@@ -306,12 +315,6 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
 
     if (archive_verdict->has_value()) {
         runtime_metal_archive_pipeline_audit& audit = **archive_verdict;
-        audit.api_version = features_.api_version;
-        audit.driver_version = features_.driver_version;
-        audit.vendor_id = features_.vendor_id;
-        audit.device_id = features_.device_id;
-        audit.pipeline_cache_uuid = features_.pipeline_cache_uuid;
-        audit.pipeline_create_ns = candidate.pipeline_create_ns;
         candidate.metal_archive_receipt.reset(
             new runtime_metal_archive_pipeline_receipt(std::move(audit)));
     }
@@ -489,6 +492,19 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
         // Pin the SSBO wire ABI: a sort-range-stride mismatch would silently
         // corrupt direct sort_range_wire reads.
         const spirv_layout_scan scan = scan_spirv_layout(spirv);
+        const auto binding_scalar = [&scan](const std::uint32_t binding,
+                                            const std::uint32_t stride) {
+            return scan.has_binding_array_stride(0u, binding, stride);
+        };
+        const auto binding_struct = [&scan](const std::uint32_t binding,
+                                            const std::uint32_t stride,
+                                            const std::initializer_list<std::uint32_t> offsets) {
+            return scan.has_binding_array_stride(0u, binding, stride) &&
+                   scan.has_binding_struct_offsets(
+                       0u,
+                       binding,
+                       std::span<const std::uint32_t>{offsets.begin(), offsets.size()});
+        };
         if (kind == shader_kind::seed_lookup_anchors &&
             (!scan.has_binding(0) || !scan.has_binding(1) || !scan.has_binding(2) ||
              !scan.has_binding(3) || !scan.has_binding(4) || !scan.has_binding(5) ||
@@ -503,6 +519,98 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
                                                     !scan.has_array_stride(max_span / 8u))) {
             throw vulkan_runtime_error("SPIR-V generate_units layout mismatch");
         }
+        if ((kind == shader_kind::grouped_soa_seed_count ||
+             kind == shader_kind::grouped_soa_seed_emit) &&
+            (!binding_scalar(0u, 4u) ||
+             !binding_struct(1u,
+                             104u,
+                             {0u,
+                              4u,
+                              8u,
+                              12u,
+                              16u,
+                              24u,
+                              32u,
+                              40u,
+                              48u,
+                              52u,
+                              56u,
+                              60u,
+                              64u,
+                              68u,
+                              72u,
+                              80u,
+                              88u,
+                              96u}) ||
+             !binding_scalar(2u, 4u) || !binding_scalar(3u, 4u) ||
+             !binding_struct(4u, 16u, {0u, 4u, 8u, 12u}) || !binding_scalar(5u, 4u) ||
+             !binding_scalar(6u, 4u) || !binding_struct(7u, 24u, {0u, 8u, 16u, 20u}) ||
+             !binding_scalar(8u, 8u) || !binding_scalar(9u, 4u) ||
+             !scan.has_push_constant_offsets(std::array<std::uint32_t, 27>{
+                 0u,  4u,  8u,  12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u,  48u, 52u,
+                 56u, 60u, 64u, 68u, 72u, 76u, 80u, 84u, 88u, 92u, 96u, 100u, 104u}))) {
+            throw vulkan_runtime_error("SPIR-V grouped-SoA seed ABI mismatch");
+        }
+        if (kind == shader_kind::chain_candidate_reduce &&
+            (!binding_struct(0u, 24u, {0u, 8u, 16u, 20u}) || !binding_scalar(1u, 4u) ||
+             !binding_scalar(2u, 8u) || !binding_scalar(3u, 4u) || !binding_scalar(4u, 4u) ||
+             !binding_struct(5u, 64u, {0u, 8u, 16u, 24u, 32u, 40u, 48u, 52u, 56u, 60u}) ||
+             !binding_struct(6u, 40u, {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u}) ||
+             !binding_struct(7u,
+                             96u,
+                             {0u,
+                              8u,
+                              16u,
+                              24u,
+                              32u,
+                              40u,
+                              48u,
+                              52u,
+                              56u,
+                              60u,
+                              64u,
+                              68u,
+                              72u,
+                              76u,
+                              80u,
+                              84u,
+                              88u,
+                              92u}) ||
+             !binding_scalar(8u, 4u) || !binding_scalar(9u, 4u) ||
+             !scan.has_push_constant_offsets(std::array<std::uint32_t, 20>{
+                 0u,  4u,  8u,  12u, 16u, 20u, 24u, 28u, 32u, 36u,
+                 40u, 44u, 48u, 52u, 56u, 60u, 64u, 68u, 72u, 76u}))) {
+            throw vulkan_runtime_error("SPIR-V chain-candidate reducer ABI mismatch");
+        }
+        if (kind == shader_kind::mapping_quality_reduce &&
+            (!binding_struct(0u, 40u, {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u}) ||
+             !binding_struct(1u,
+                             96u,
+                             {0u,
+                              8u,
+                              16u,
+                              24u,
+                              32u,
+                              40u,
+                              48u,
+                              52u,
+                              56u,
+                              60u,
+                              64u,
+                              68u,
+                              72u,
+                              76u,
+                              80u,
+                              84u,
+                              88u,
+                              92u}) ||
+             !binding_struct(2u, 8u, {0u, 4u}) ||
+             !binding_struct(3u, 48u, {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u}) ||
+             !binding_struct(4u, 32u, {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u}) ||
+             !scan.has_push_constant_offsets(std::array<std::uint32_t, 15>{
+                 0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 48u, 52u, 56u}))) {
+            throw vulkan_runtime_error("SPIR-V mapping-quality reducer ABI mismatch");
+        }
         if (kind == shader_kind::align_extend_banded_affine &&
             (!scan.has_binding(0) || !scan.has_binding(1) || !scan.has_binding(2) ||
              !scan.has_binding(3) || !scan.has_array_stride(4) || !scan.has_array_stride(16) ||
@@ -510,10 +618,23 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
             throw vulkan_runtime_error("SPIR-V alignment extension layout mismatch");
         }
         if (kind == shader_kind::align_extend_simple_cigar &&
-            (!scan.has_binding(0) || !scan.has_binding(1) || !scan.has_binding(2) ||
-             !scan.has_binding(3) || !scan.has_binding(4) || !scan.has_binding(5) ||
-             !scan.has_array_stride(4) || !scan.has_array_stride(40) ||
-             !scan.has_array_stride(48))) {
+            (!scan.has_binding_array_stride(0u, 0u, 4u) ||
+             !scan.has_binding_array_stride(0u, 1u, 4u) ||
+             !scan.has_binding_array_stride(0u, 2u, 80u) ||
+             !scan.has_binding_struct_offsets(
+                 0u, 2u, std::array<std::uint32_t, 20>{0u,  4u,  8u,  12u, 16u, 20u, 24u,
+                                                       28u, 32u, 36u, 40u, 44u, 48u, 52u,
+                                                       56u, 60u, 64u, 68u, 72u, 76u}) ||
+             !scan.has_binding_array_stride(0u, 3u, 48u) ||
+             !scan.has_binding_struct_offsets(
+                 0u,
+                 3u,
+                 std::array<std::uint32_t, 12>{
+                     0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u}) ||
+             !scan.has_binding_array_stride(0u, 4u, 4u) ||
+             !scan.has_binding_array_stride(0u, 5u, 4u) ||
+             !scan.has_push_constant_offsets(std::array<std::uint32_t, 16>{
+                 0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 48u, 52u, 56u, 60u}))) {
             throw vulkan_runtime_error("SPIR-V alignment CIGAR extension layout mismatch");
         }
         if ((kind == shader_kind::sneaky_snake_rank_batch || is_gatekeeper_rank_batch_kind(kind)) &&
@@ -547,9 +668,19 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
     pipeline_info.stage = stage;
     pipeline_info.layout = entry.handles.pipeline_layout;
     metal_archive_pipeline_create_scope archive_scope{
-        archive_receipt_required, features_.device_uuid, shader_key, entry.entry_name};
+        archive_receipt_required,
+        runtime_vulkan_device_identity{
+            .device_uuid = features_.device_uuid,
+            .api_version = features_.api_version,
+            .driver_version = features_.driver_version,
+            .vendor_id = features_.vendor_id,
+            .device_id = features_.device_id,
+            .pipeline_cache_uuid = features_.pipeline_cache_uuid,
+        },
+        shader_key,
+        entry.entry_name};
     if (!archive_scope.is_ready_for_pipeline_call()) {
-        auto rejected = archive_scope.finish(VK_ERROR_INITIALIZATION_FAILED);
+        auto rejected = archive_scope.finish(VK_ERROR_INITIALIZATION_FAILED, 0u);
         throw vulkan_runtime_error(fmt::format(
             "immutable Metal archive scope rejected compute pipeline before creation: {}",
             rejected ? "missing required receipt" : rejected.error()));
@@ -562,7 +693,7 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
                                     .count();
     entry.pipeline_create_ns = std::max<std::uint64_t>(
         1u, create_elapsed > 0 ? static_cast<std::uint64_t>(create_elapsed) : 1u);
-    auto archive_verdict = archive_scope.finish(pr);
+    auto archive_verdict = archive_scope.finish(pr, entry.pipeline_create_ns);
     if (!archive_verdict) {
         throw vulkan_runtime_error(
             fmt::format("immutable Metal archive receipt failed for compute pipeline: {}",
@@ -574,12 +705,6 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
     }
     if (archive_verdict->has_value()) {
         runtime_metal_archive_pipeline_audit& audit = **archive_verdict;
-        audit.api_version = features_.api_version;
-        audit.driver_version = features_.driver_version;
-        audit.vendor_id = features_.vendor_id;
-        audit.device_id = features_.device_id;
-        audit.pipeline_cache_uuid = features_.pipeline_cache_uuid;
-        audit.pipeline_create_ns = entry.pipeline_create_ns;
         entry.metal_archive_receipt.reset(
             new runtime_metal_archive_pipeline_receipt(std::move(audit)));
     }

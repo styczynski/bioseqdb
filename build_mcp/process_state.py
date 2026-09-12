@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Dict, Set, Optional, Any, Mapping
+from typing import List, Dict, Set, Optional, Any, Callable, Mapping
 
 import argparse
 import base64
@@ -212,6 +212,7 @@ def _store_build_receipt(receipt: Mapping[str, object]) -> None:
         receipts[receipt_id] = dict(receipt)
         _save_build_receipts_locked(receipts)
 
+
 def _get_build_receipt(receipt_id: str) -> dict[str, object] | None:
     if not isinstance(receipt_id, str) or not receipt_id:
         return None
@@ -236,7 +237,13 @@ def _is_pid_alive(pid) -> bool:
         return True
     return True
 
-def _refresh(state: dict, mode: str) -> dict | None:
+def _refresh(
+        state: dict,
+        mode: str,
+        *,
+        service_boundary_provider: (
+            _GuardedServiceBoundaryProvider | None) = None,
+) -> dict | None:
     """Reconcile the recorded status of one mode with reality.
 
     A "running" entry whose pid is dead means the worker was killed without
@@ -248,6 +255,32 @@ def _refresh(state: dict, mode: str) -> dict | None:
     entry = state.get(mode)
     if not entry:
         return None
+    watchdog_value = entry.get("q1024_watchdog_process_identity")
+    if (entry.get("q1024_watchdog_status") in {"armed", "monitoring"}
+            and isinstance(watchdog_value, dict)):
+        try:
+            watchdog_identity = _ProcessIdentity(**watchdog_value)
+        except (TypeError, ValueError):
+            watchdog_identity = None
+        observed_watchdog = (
+            _capture_process_identity(watchdog_identity.pid)
+            if watchdog_identity is not None else None)
+        if not _same_process(observed_watchdog, watchdog_identity):
+            entry = dict(entry)
+            entry.update({
+                "q1024_watchdog_status": "unexpected_death",
+                "q1024_watchdog_evidence": {
+                    "cleanup_verified": False,
+                    "reason": (
+                        "independent q1024 watchdog identity disappeared or "
+                        "was replaced"),
+                    "observed_at": time.time(),
+                },
+                "cleanup_unverified": True,
+                "process_cleanup_unverified": True,
+            })
+            state[mode] = entry
+            _save_state(state)
     worker_identity_value = entry.get("worker_process_identity")
     worker_identity: _ProcessIdentity | None = None
     if isinstance(worker_identity_value, dict):
@@ -270,14 +303,35 @@ def _refresh(state: dict, mode: str) -> dict | None:
         worker_identity_mismatch or not worker_pid_alive
     ):
         entry = dict(entry)
+        postgres_cleanup_unverified = (
+            entry.get("postgres_cleanup_unverified") is True)
         entry["status"] = "aborted"
         entry["step"] = "aborted"
         if entry.get("build_timeout_sec") is not None:
             recovery_evidence, cleanup_unverified = (
-                _recover_guarded_worker_descendants(entry)
+                _recover_guarded_worker_descendants(
+                    entry,
+                    service_boundary_provider=(
+                        service_boundary_provider
+                        or _persisted_guarded_service_boundary_provider(entry)),
+                )
             )
             entry["termination_evidence"] = recovery_evidence
-            entry["cleanup_unverified"] = cleanup_unverified
+            entry["cleanup_unverified"] = (
+                cleanup_unverified or postgres_cleanup_unverified)
+        if postgres_cleanup_unverified:
+            cleanup_evidence = entry.get("postgres_cleanup_evidence")
+            cleanup_evidence = (
+                dict(cleanup_evidence)
+                if isinstance(cleanup_evidence, dict) else {})
+            cleanup_evidence["cleanup_verified"] = False
+            cleanup_evidence["unexpected_worker_exit"] = True
+            cleanup_evidence.setdefault(
+                "reason",
+                "worker exited before exact PostgreSQL owner cleanup was verified",
+            )
+            entry["postgres_cleanup_evidence"] = cleanup_evidence
+            entry["cleanup_unverified"] = True
         if worker_identity_mismatch:
             entry["notes"] = (
                 "recorded worker PID no longer has the reserved start identity"
@@ -297,31 +351,71 @@ class _ProcessIdentity:
     started: str
     command: str
 
-def _process_snapshot() -> dict[int, _ProcessIdentity]:
+
+@dataclass(frozen=True)
+class _GuardedServiceBoundary:
+    """One exact long-lived service root separated from a guarded client."""
+
+    verified_root: _ProcessIdentity | None
+    quarantined_root: _ProcessIdentity | None
+    evidence: Mapping[str, object]
+    quarantined_roots: tuple[_ProcessIdentity, ...] = ()
+
+
+_GuardedServiceBoundaryProvider = Callable[
+    [
+        Mapping[int, _ProcessIdentity],
+        _ProcessIdentity,
+        str,
+        float | None,
+        Set[int],
+    ],
+    _GuardedServiceBoundary,
+]
+
+def _process_snapshot(
+        deadline: float | None = None,
+        *,
+        require_complete: bool = False,
+) -> dict[int, _ProcessIdentity]:
     """Capture one bounded process table used for identity-safe termination."""
-    completed = subprocess.run(
-        [
-            "ps", "-axo",
-            "pid=,ppid=,pgid=,sess=,lstart=,command=",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        text=True,
-        timeout=10,
-    )
+    timeout = 10.0
+    if deadline is not None:
+        remaining = deadline - time.time()
+        if remaining <= 0.0:
+            raise RuntimeError("process identity snapshot deadline was reached")
+        timeout = min(timeout, remaining)
+    try:
+        completed = subprocess.run(
+            [
+                "ps", "-axo",
+                "pid=,ppid=,pgid=,sess=,lstart=,command=",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("process identity snapshot timed out") from exc
     if completed.returncode != 0:
         raise RuntimeError(
             "could not capture process identities: "
             + completed.stderr.strip())
     snapshot: dict[int, _ProcessIdentity] = {}
-    for line in completed.stdout.splitlines():
+    errors: list[str] = []
+    for line_number, line in enumerate(completed.stdout.splitlines(), 1):
         fields = line.strip().split(None, 9)
         if len(fields) != 10:
+            if require_complete and line.strip():
+                errors.append(f"line {line_number}: malformed ps record")
             continue
         try:
             pid, ppid, parsed_pgid, parsed_session = map(int, fields[:4])
         except ValueError:
+            if require_complete:
+                errors.append(f"line {line_number}: malformed process ids")
             continue
         try:
             # BSD/macOS `ps -o sess` reports zero for ordinary processes.
@@ -329,7 +423,18 @@ def _process_snapshot() -> dict[int, _ProcessIdentity]:
             # to validate start_new_session=True.
             pgid = os.getpgid(pid)
             session = os.getsid(pid)
-        except (ProcessLookupError, PermissionError, OSError):
+        except ProcessLookupError:
+            # ``ps`` can report a process which exits before this bounded
+            # kernel identity query (including the ``ps`` process itself).
+            # ESRCH proves that exact listed PID is no longer live; it is not
+            # a parse or permission gap in the remaining live snapshot.
+            continue
+        except (PermissionError, OSError) as exc:
+            if require_complete:
+                errors.append(
+                    f"pid {pid}: kernel process identity unavailable: "
+                    f"{type(exc).__name__}: {exc}")
+                continue
             if parsed_pgid <= 0 or parsed_session <= 0:
                 continue
             pgid = parsed_pgid
@@ -342,11 +447,16 @@ def _process_snapshot() -> dict[int, _ProcessIdentity]:
             started=" ".join(fields[4:9]),
             command=fields[9],
         )
+    if errors:
+        raise RuntimeError(
+            "process identity snapshot was incomplete: "
+            + "; ".join(errors[:16]))
     return snapshot
 
-def _capture_process_identity(pid: int) -> _ProcessIdentity | None:
+def _capture_process_identity(
+        pid: int, *, deadline: float | None = None) -> _ProcessIdentity | None:
     try:
-        return _process_snapshot().get(pid)
+        return _process_snapshot(deadline).get(pid)
     except RuntimeError:
         return None
 
@@ -361,6 +471,35 @@ def _same_process(
         and expected is not None
         and observed.pid == expected.pid
         and observed.started == expected.started
+    )
+
+
+def _process_is_zombie(
+        expected: _ProcessIdentity,
+        *, deadline: float | None = None) -> bool:
+    """Return true only for the same exact process observed in zombie state."""
+    observed = _capture_process_identity(expected.pid, deadline=deadline)
+    if not _same_process(observed, expected):
+        return False
+    timeout = 10.0
+    if deadline is not None:
+        remaining = deadline - time.time()
+        if remaining <= 0.0:
+            return False
+        timeout = min(timeout, remaining)
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(expected.pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (
+        result.returncode == 0
+        and result.stdout.strip().upper().startswith("Z")
     )
 
 def _same_process_context(
@@ -387,6 +526,345 @@ def _valid_detached_worker_identity(
         and identity.session == child_pid
         and bool(identity.started)
     )
+
+
+def _await_q1024_watchdog_arm(
+        mode: str, run_token: str) -> dict[str, object]:
+    """Require the independently detached q1024 watchdog before setup."""
+    deadline = time.monotonic() + BUILD_GUARD_WORKER_ARM_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        entry = _load_state().get(mode)
+        if not isinstance(entry, dict):
+            raise RuntimeError("q1024 state disappeared before watchdog arm")
+        if entry.get("status") != "running":
+            raise RuntimeError("q1024 worker was cancelled before watchdog arm")
+        value = entry.get("q1024_watchdog_process_identity")
+        if (entry.get("q1024_run_token") == run_token
+                and entry.get("q1024_watchdog_status")
+                    in {"armed", "monitoring"}
+                and isinstance(value, dict)):
+            try:
+                expected = _ProcessIdentity(**value)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"q1024 watchdog identity is malformed: {exc}") from exc
+            observed = _capture_process_identity(expected.pid)
+            if not _same_process_context(observed, expected):
+                raise RuntimeError(
+                    "q1024 watchdog pid/start/session does not match its arm")
+            return dict(entry)
+        time.sleep(0.02)
+    raise RuntimeError("q1024 watchdog identity arm timed out")
+
+
+def _claim_q1024_postgresql_cleanup(
+        mode: str, run_token: str, *, actor: str,
+) -> tuple[str, dict[str, object]] | None:
+    """Atomically claim owner cleanup without holding the lock while doing it.
+
+    A dead exact claimant may be replaced.  A live claimant, malformed state,
+    or a different run token is fail-closed and produces no claim.
+    """
+    if actor not in {"worker", "watchdog"}:
+        raise RuntimeError("invalid q1024 PostgreSQL cleanup actor")
+    claimant_identity = _capture_process_identity(os.getpid())
+    if claimant_identity is None:
+        raise RuntimeError("cannot capture q1024 cleanup claimant identity")
+    with _global_lock():
+        state = _load_state()
+        entry = state.get(mode)
+        if (not isinstance(entry, dict)
+                or entry.get("q1024_run_token") != run_token
+                or entry.get("postgres_backend_owner_started") is not True):
+            return None
+        actor_identity_value = entry.get(
+            "worker_process_identity"
+            if actor == "worker" else "q1024_watchdog_process_identity")
+        try:
+            actor_identity = (
+                _ProcessIdentity(**actor_identity_value)
+                if isinstance(actor_identity_value, dict) else None)
+        except (TypeError, ValueError):
+            actor_identity = None
+        if (actor_identity is None
+                or not _same_process_context(
+                    claimant_identity, actor_identity)):
+            return None
+        previous = entry.get("postgres_cleanup_claim")
+        if isinstance(previous, dict):
+            previous_value = previous.get("process_identity")
+            previous_identity: _ProcessIdentity | None = None
+            if isinstance(previous_value, dict):
+                try:
+                    previous_identity = _ProcessIdentity(**previous_value)
+                except (TypeError, ValueError):
+                    previous_identity = None
+            previous_live = (
+                previous_identity is not None
+                and _same_process(
+                    _capture_process_identity(previous_identity.pid),
+                    previous_identity)
+                and not _process_is_zombie(previous_identity)
+            )
+            if previous_live:
+                if (_same_process(previous_identity, claimant_identity)
+                        and previous.get("actor") == actor
+                        and isinstance(previous.get("claim_token"), str)):
+                    return str(previous["claim_token"]), dict(entry)
+                return None
+        claim_token = secrets.token_hex(16)
+        entry = dict(entry)
+        entry["postgres_cleanup_claim"] = {
+            "actor": actor,
+            "claim_token": claim_token,
+            "claimed_at": time.time(),
+            "process_identity": claimant_identity.__dict__,
+        }
+        state[mode] = entry
+        _save_state_locked(state)
+        return claim_token, dict(entry)
+
+
+def _claim_q1024_postgresql_revalidation(
+        mode: str,
+        run_token: str,
+        *,
+        deadline: float,
+) -> tuple[str, dict[str, object]] | None:
+    """Claim terminal legacy cleanup without impersonating worker/watchdog."""
+    if (
+        mode != "benchmark-e2e"
+        or re.fullmatch(r"[0-9a-f]{32}", run_token) is None
+    ):
+        return None
+    snapshot = _process_snapshot(deadline, require_complete=True)
+    claimant_identity = snapshot.get(os.getpid())
+    if claimant_identity is None:
+        raise RuntimeError(
+            "cannot capture server cleanup revalidator identity")
+    with _global_lock():
+        state = _load_state()
+        entry = state.get(mode)
+        if (
+            not isinstance(entry, dict)
+            or entry.get("status") not in {
+                "completed", "failed", "aborted", "killed_timeout"}
+            or entry.get("q1024_run_token") != run_token
+            or entry.get("postgres_application_name")
+                != f"bioseq-q1024-{run_token}"
+            or entry.get("postgres_backend_owner_started") is not True
+            or entry.get("postgres_cleanup_unverified") is not True
+            or entry.get("postgres_service_boundary") is not None
+        ):
+            return None
+        for field_name in (
+                "worker_process_identity",
+                "active_process_identity",
+                "q1024_watchdog_process_identity"):
+            value = entry.get(field_name)
+            try:
+                expected = (
+                    _ProcessIdentity(**value)
+                    if isinstance(value, dict) else None)
+            except (TypeError, ValueError):
+                return None
+            if expected is None:
+                return None
+            if _same_process(snapshot.get(expected.pid), expected):
+                return None
+        previous = entry.get("postgres_cleanup_claim")
+        if isinstance(previous, dict):
+            previous_value = previous.get("process_identity")
+            try:
+                previous_identity = (
+                    _ProcessIdentity(**previous_value)
+                    if isinstance(previous_value, dict) else None)
+            except (TypeError, ValueError):
+                previous_identity = None
+            if previous_identity is not None and _same_process(
+                    snapshot.get(previous_identity.pid), previous_identity):
+                if (
+                    _same_process(previous_identity, claimant_identity)
+                    and previous.get("actor") == "server_revalidator"
+                    and isinstance(previous.get("claim_token"), str)
+                ):
+                    return str(previous["claim_token"]), dict(entry)
+                return None
+        claim_token = secrets.token_hex(16)
+        entry = dict(entry)
+        entry["postgres_cleanup_claim"] = {
+            "actor": "server_revalidator",
+            "claim_token": claim_token,
+            "claimed_at": time.time(),
+            "process_identity": claimant_identity.__dict__,
+        }
+        state[mode] = entry
+        _save_state_locked(state)
+        return claim_token, dict(entry)
+
+
+def _finish_q1024_postgresql_cleanup(
+        mode: str,
+        run_token: str,
+        claim_token: str,
+        evidence: Mapping[str, object],
+) -> bool:
+    """Publish cleanup evidence iff this exact run still owns the claim."""
+    with _global_lock():
+        state = _load_state()
+        entry = state.get(mode)
+        claim = (
+            entry.get("postgres_cleanup_claim")
+            if isinstance(entry, dict) else None)
+        if (not isinstance(entry, dict)
+                or entry.get("q1024_run_token") != run_token
+                or not isinstance(claim, dict)
+                or claim.get("claim_token") != claim_token):
+            return False
+        verified = evidence.get("cleanup_verified") is True
+        termination_evidence = entry.get("termination_evidence")
+        process_unverified = bool(
+            entry.get("cleanup_unverified_before_postgres_owner")
+            or entry.get("process_cleanup_unverified"))
+        if termination_evidence is not None:
+            process_unverified = (
+                process_unverified
+                or not isinstance(termination_evidence, dict)
+                or termination_evidence.get("cleanup_verified") is not True
+                or any(
+                    not isinstance(termination_evidence.get(field, []), list)
+                    or bool(termination_evidence.get(field, []))
+                    for field in (
+                        "survivor_pids",
+                        "marker_survivor_pids",
+                        "survivor_identities",
+                    )
+                )
+            )
+        entry = dict(entry)
+        entry.update({
+            "postgres_backend_owner_started": not verified,
+            "postgres_cleanup_evidence": dict(evidence),
+            "postgres_cleanup_unverified": not verified,
+            "cleanup_unverified": process_unverified or not verified,
+            "postgres_cleanup_claim": {
+                **claim,
+                "finished_at": time.time(),
+                "cleanup_verified": verified,
+            },
+        })
+        state[mode] = entry
+        _save_state_locked(state)
+        return verified
+
+
+def _finish_q1024_postgresql_revalidation(
+        mode: str,
+        run_token: str,
+        claim_token: str,
+        evidence: Mapping[str, object],
+) -> bool:
+    """Publish separate terminal revalidation evidence under the exact claim."""
+    with _global_lock():
+        state = _load_state()
+        entry = state.get(mode)
+        claim = (
+            entry.get("postgres_cleanup_claim")
+            if isinstance(entry, dict) else None)
+        if (
+            not isinstance(entry, dict)
+            or entry.get("status") == "running"
+            or entry.get("q1024_run_token") != run_token
+            or not isinstance(claim, dict)
+            or claim.get("actor") != "server_revalidator"
+            or claim.get("claim_token") != claim_token
+        ):
+            return False
+        verified = evidence.get("cleanup_verified") is True
+        entry = dict(entry)
+        entry["postgres_cleanup_revalidation_evidence"] = dict(evidence)
+        entry["postgres_cleanup_claim"] = {
+            **claim,
+            "finished_at": time.time(),
+            "cleanup_verified": verified,
+        }
+        if verified:
+            entry["postgres_backend_owner_started"] = False
+            entry["postgres_cleanup_unverified"] = False
+            # Process-tree uncertainty remains until the existing exact
+            # build-root ownership sweep proves it empty.
+            entry["cleanup_unverified"] = True
+        state[mode] = entry
+        _save_state_locked(state)
+        return verified
+
+
+def _update_q1024_watchdog_state(
+        mode: str, run_token: str, **fields: object) -> bool:
+    """Merge watchdog evidence only while the same reserved run is current."""
+    with _global_lock():
+        state = _load_state()
+        entry = state.get(mode)
+        if (not isinstance(entry, dict)
+                or entry.get("q1024_run_token") != run_token):
+            return False
+        entry = dict(entry)
+        entry.update(fields)
+        state[mode] = entry
+        _save_state_locked(state)
+        return True
+
+
+def _publish_q1024_postgresql_service_boundary(
+        mode: str,
+        run_token: str,
+        client_identity: _ProcessIdentity,
+        guard_marker: str,
+        boundary: Mapping[str, object],
+) -> bool:
+    """CAS-publish a runtime proof for the exact active q1024 client."""
+    if (
+        mode != "benchmark-e2e"
+        or re.fullmatch(r"[0-9a-f]{32}", run_token) is None
+        or re.fullmatch(r"[0-9a-f]{32}", guard_marker) is None
+        or boundary.get("schema_version") != 1
+        or boundary.get("mode") != mode
+        or boundary.get("run_token") != run_token
+        or boundary.get("application_name")
+            != f"bioseq-q1024-{run_token}"
+        or boundary.get("client_process_identity")
+            != client_identity.__dict__
+        or boundary.get("guard_marker") != guard_marker
+        or boundary.get("runtime_identity_verified") is not True
+    ):
+        return False
+    with _global_lock():
+        state = _load_state()
+        entry = state.get(mode)
+        active_value = (
+            entry.get("active_process_identity")
+            if isinstance(entry, dict) else None)
+        try:
+            active_identity = (
+                _ProcessIdentity(**active_value)
+                if isinstance(active_value, dict) else None)
+        except (TypeError, ValueError):
+            active_identity = None
+        if (
+            not isinstance(entry, dict)
+            or entry.get("status") != "running"
+            or entry.get("q1024_run_token") != run_token
+            or entry.get("postgres_application_name")
+                != f"bioseq-q1024-{run_token}"
+            or entry.get("active_guard_marker") != guard_marker
+            or not _same_process(active_identity, client_identity)
+        ):
+            return False
+        entry = dict(entry)
+        entry["postgres_service_boundary"] = dict(boundary)
+        state[mode] = entry
+        _save_state_locked(state)
+        return True
 
 class _GuardedTerminationError(RuntimeError):
     """A guarded subprocess could not prove that all descendants exited."""
@@ -455,6 +933,8 @@ def _path_is_within(path: Path, root: Path) -> bool:
 def _guarded_process_snapshot(
         marker: str,
         ownership_root: Path | None = None,
+        *, strict_marker_only: bool = False,
+        include_commands: bool = False,
 ) -> tuple[dict[int, _ProcessIdentity], set[int]]:
     """Capture identities plus processes inheriting one private guard marker.
 
@@ -504,7 +984,9 @@ def _guarded_process_snapshot(
             pgid=pgid,
             session=session,
             started=" ".join(fields[4:9]),
-            command="<redacted guarded process>",
+            command=(
+                fields[9]
+                if include_commands else "<redacted guarded process>"),
         )
         owned_by_command = (
             ownership_root is not None
@@ -519,11 +1001,245 @@ def _guarded_process_snapshot(
         if (
             marker_text in fields[9]
             or _process_inherits_guard_marker(pid, marker)
-            or owned_by_command
-            or owned_by_cwd
+            or (not strict_marker_only and owned_by_command)
+            or (not strict_marker_only and owned_by_cwd)
         ):
             marked.add(pid)
     return snapshot, marked
+
+
+def _process_descendant_closure(
+        snapshot: Mapping[int, _ProcessIdentity],
+        root: _ProcessIdentity | None,
+        *,
+        require_context: bool = False,
+) -> set[int]:
+    """Return only identities connected to one exact root by current PPIDs."""
+    observed_root = snapshot.get(root.pid) if root is not None else None
+    root_matches = (
+        _same_process_context(observed_root, root)
+        if root is not None and require_context
+        else _same_process(observed_root, root)
+    )
+    if not root_matches:
+        return set()
+    descendants = {root.pid}
+    changed = True
+    while changed:
+        changed = False
+        for process in snapshot.values():
+            if process.pid not in descendants and process.ppid in descendants:
+                descendants.add(process.pid)
+                changed = True
+    return descendants
+
+
+def _guarded_boundary_file_identity_valid(value: object) -> bool:
+    """Cheaply rebind a descriptor-sealed file proof without rehashing it."""
+    if not isinstance(value, dict) or set(value) != {
+        "path", "device", "inode", "size", "sha256",
+    }:
+        return False
+    path = value.get("path")
+    if (
+        not isinstance(path, str)
+        or not Path(path).is_absolute()
+        or type(value.get("device")) is not int
+        or type(value.get("inode")) is not int
+        or type(value.get("size")) is not int
+        or not isinstance(value.get("sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", str(value["sha256"])) is None
+    ):
+        return False
+    try:
+        resolved = Path(path).resolve(strict=True)
+        metadata = resolved.stat()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return (
+        resolved == Path(path)
+        and stat.S_ISREG(metadata.st_mode)
+        and metadata.st_dev == value["device"]
+        and metadata.st_ino == value["inode"]
+        and metadata.st_size == value["size"]
+    )
+
+
+def _guarded_service_partition(
+        snapshot: Mapping[int, _ProcessIdentity],
+        boundary: _GuardedServiceBoundary | None,
+) -> tuple[set[int], set[int]]:
+    """Partition a proven service and an unproven candidate by exact ancestry."""
+    if boundary is None:
+        return set(), set()
+    preserved = _process_descendant_closure(
+        snapshot, boundary.verified_root, require_context=True)
+    quarantine_roots = [*boundary.quarantined_roots]
+    if boundary.quarantined_root is not None:
+        quarantine_roots.append(boundary.quarantined_root)
+    quarantined: set[int] = set()
+    for root in quarantine_roots:
+        quarantined.update(_process_descendant_closure(snapshot, root))
+    quarantined.difference_update(preserved)
+    return preserved, quarantined
+
+
+def _provider_exception_quarantine_roots(
+        snapshot: Mapping[int, _ProcessIdentity],
+        candidate_pids: Set[int],
+        control_root: _ProcessIdentity,
+) -> tuple[_ProcessIdentity, ...]:
+    """Quarantine uncertainty while retaining one exact signalable root."""
+    return tuple(
+        snapshot[pid]
+        for pid in sorted(candidate_pids)
+        if (
+            pid in snapshot
+            and not _same_process_context(snapshot[pid], control_root)
+        )
+    )
+
+
+def _persisted_guarded_service_boundary_provider(
+        entry: Mapping[str, object],
+) -> _GuardedServiceBoundaryProvider | None:
+    """Revalidate one token-bound persisted service root without PostgreSQL I/O."""
+    value = entry.get("postgres_service_boundary")
+    if not isinstance(value, dict):
+        return None
+    root_value = value.get("postmaster_process_identity")
+    try:
+        persisted_root = (
+            _ProcessIdentity(**root_value)
+            if isinstance(root_value, dict) else None)
+    except (TypeError, ValueError):
+        persisted_root = None
+    expected_client = entry.get("active_process_identity")
+    expected_worker = entry.get("worker_process_identity")
+    try:
+        persisted_client = (
+            _ProcessIdentity(**expected_client)
+            if isinstance(expected_client, dict) else None)
+        persisted_worker = (
+            _ProcessIdentity(**expected_worker)
+            if isinstance(expected_worker, dict) else None)
+    except (TypeError, ValueError):
+        persisted_client = None
+        persisted_worker = None
+    static_bindings_valid: bool | None = None
+
+    def provider(
+            snapshot: Mapping[int, _ProcessIdentity],
+            client_root: _ProcessIdentity,
+            guard_marker: str,
+            deadline: float | None,
+            candidate_pids: Set[int],
+    ) -> _GuardedServiceBoundary:
+        del deadline, candidate_pids
+        observed_root = (
+            snapshot.get(persisted_root.pid)
+            if persisted_root is not None else None)
+        evidence = {
+            "source": "persisted_q1024_postgresql_service_boundary",
+            "boundary": dict(value),
+        }
+        expected_token = entry.get("q1024_run_token")
+        expected_application = entry.get("postgres_application_name")
+        nonlocal static_bindings_valid
+        if static_bindings_valid is None:
+            data_directory = value.get("data_directory")
+            data_directory_valid = False
+            if isinstance(data_directory, dict) and set(data_directory) == {
+                    "path", "device", "inode"}:
+                path = data_directory.get("path")
+                try:
+                    metadata = Path(str(path)).stat()
+                    data_directory_valid = (
+                        isinstance(path, str)
+                        and Path(path).is_absolute()
+                        and Path(path).resolve(strict=True) == Path(path)
+                        and stat.S_ISDIR(metadata.st_mode)
+                        and metadata.st_dev == data_directory.get("device")
+                        and metadata.st_ino == data_directory.get("inode")
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    data_directory_valid = False
+            static_bindings_valid = (
+                set(value) == {
+                    "schema_version", "mode", "run_token",
+                    "application_name", "client_process_identity",
+                    "guard_marker", "data_directory",
+                    "postgres_executable_identity", "bioseq_dso_identity",
+                    "postmaster_process_identity",
+                    "runtime_identity_verified", "verified_at",
+                }
+                and value.get("schema_version") == 1
+                and value.get("mode") == "benchmark-e2e"
+                and entry.get("mode") == "benchmark-e2e"
+                and isinstance(expected_token, str)
+                and re.fullmatch(r"[0-9a-f]{32}", expected_token) is not None
+                and value.get("run_token") == expected_token
+                and expected_application == f"bioseq-q1024-{expected_token}"
+                and value.get("application_name") == expected_application
+                and value.get("guard_marker") == entry.get(
+                    "active_guard_marker")
+                and isinstance(value.get("guard_marker"), str)
+                and re.fullmatch(
+                    r"[0-9a-f]{32}", str(value["guard_marker"])) is not None
+                and value.get("client_process_identity") == expected_client
+                and persisted_client is not None
+                and persisted_worker is not None
+                and persisted_root is not None
+                and value.get("runtime_identity_verified") is True
+                and type(value.get("verified_at")) in {int, float}
+                and data_directory_valid
+                and _guarded_boundary_file_identity_valid(
+                    value.get("postgres_executable_identity"))
+                and _guarded_boundary_file_identity_valid(
+                    value.get("bioseq_dso_identity"))
+            )
+        caller_bound = (
+            persisted_client is not None
+            and _same_process_context(client_root, persisted_client)
+        ) or (
+            persisted_worker is not None
+            and _same_process_context(client_root, persisted_worker)
+        ) or (
+            persisted_client is not None
+            and persisted_client.pid
+                in _process_descendant_closure(
+                    snapshot, client_root, require_context=True)
+        )
+        bindings_valid = (
+            static_bindings_valid
+            and value.get("guard_marker") == guard_marker
+            and caller_bound
+        )
+        evidence["bindings_valid"] = bindings_valid
+        if bindings_valid and persisted_root is not None and (
+            _same_process_context(observed_root, persisted_root)
+        ):
+            return _GuardedServiceBoundary(
+                verified_root=persisted_root,
+                quarantined_root=None,
+                evidence=evidence,
+            )
+        if persisted_root is not None and _same_process(
+                observed_root, persisted_root):
+            evidence["error"] = (
+                "live persisted PostgreSQL root failed boundary bindings")
+            return _GuardedServiceBoundary(
+                verified_root=None,
+                quarantined_root=persisted_root,
+                evidence=evidence,
+            )
+        return _GuardedServiceBoundary(
+            verified_root=None,
+            quarantined_root=None,
+            evidence=evidence,
+        )
+
+    return provider
 
 @dataclass
 class _GuardedProcessTracker:
@@ -532,11 +1248,21 @@ class _GuardedProcessTracker:
     root: _ProcessIdentity
     marker: str
     ownership_root: Path | None = None
+    strict_marker_only: bool = False
+    service_boundary_provider: _GuardedServiceBoundaryProvider | None = None
+    service_boundary_deadline: float | None = None
     members: dict[tuple[int, str], _ProcessIdentity] = field(
         default_factory=dict)
     last_snapshot: dict[int, _ProcessIdentity] = field(default_factory=dict)
     last_live: dict[tuple[int, str], _ProcessIdentity] = field(
         default_factory=dict)
+    last_preserved_service: dict[tuple[int, str], _ProcessIdentity] = field(
+        default_factory=dict)
+    last_quarantined_service: dict[tuple[int, str], _ProcessIdentity] = field(
+        default_factory=dict)
+    last_service_boundary_evidence: dict[str, object] = field(
+        default_factory=dict)
+    service_boundary_failed: bool = False
     snapshot_errors: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -548,8 +1274,59 @@ class _GuardedProcessTracker:
         self.last_live[key] = self.root
 
     def refresh(self) -> dict[tuple[int, str], _ProcessIdentity]:
-        snapshot, marked_pids = _guarded_process_snapshot(
-            self.marker, self.ownership_root)
+        snapshot_kwargs = {
+            "strict_marker_only": self.strict_marker_only,
+        }
+        if self.service_boundary_provider is not None:
+            snapshot_kwargs["include_commands"] = True
+        raw_snapshot, marked_pids = _guarded_process_snapshot(
+            self.marker, self.ownership_root, **snapshot_kwargs)
+        candidate_pids = set(marked_pids)
+        candidate_pids.update(_process_descendant_closure(
+            raw_snapshot, self.root, require_context=True))
+        for identity in self.members.values():
+            if _same_process(raw_snapshot.get(identity.pid), identity):
+                candidate_pids.add(identity.pid)
+        boundary: _GuardedServiceBoundary | None = None
+        if self.service_boundary_provider is not None:
+            try:
+                boundary = self.service_boundary_provider(
+                    raw_snapshot,
+                    self.root,
+                    self.marker,
+                    self.service_boundary_deadline,
+                    candidate_pids,
+                )
+            except Exception as exc:
+                self.record_snapshot_error(exc)
+                self.service_boundary_failed = True
+                self.last_service_boundary_evidence = {
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "provider_exception_quarantine": True,
+                }
+                boundary = _GuardedServiceBoundary(
+                    verified_root=None,
+                    quarantined_root=None,
+                    quarantined_roots=(
+                        _provider_exception_quarantine_roots(
+                            raw_snapshot, candidate_pids, self.root)),
+                    evidence=self.last_service_boundary_evidence,
+                )
+            else:
+                self.last_service_boundary_evidence = dict(boundary.evidence)
+        snapshot = {
+            pid: _ProcessIdentity(
+                pid=identity.pid,
+                ppid=identity.ppid,
+                pgid=identity.pgid,
+                session=identity.session,
+                started=identity.started,
+                command="<redacted guarded process>",
+            )
+            for pid, identity in raw_snapshot.items()
+        }
+        preserved_pids, quarantined_pids = _guarded_service_partition(
+            snapshot, boundary)
         selected: set[int] = set(marked_pids)
         for identity in self.members.values():
             if _same_process(snapshot.get(identity.pid), identity):
@@ -578,6 +1355,8 @@ class _GuardedProcessTracker:
                     selected.add(process.pid)
                     changed = True
 
+        selected.difference_update(preserved_pids | quarantined_pids)
+
         for pid in selected:
             process = snapshot.get(pid)
             if process is None:
@@ -591,10 +1370,22 @@ class _GuardedProcessTracker:
             if (
                 (observed := snapshot.get(identity.pid)) is not None
                 and _same_process(observed, identity)
+                and observed.pid not in preserved_pids
+                and observed.pid not in quarantined_pids
             )
         }
         self.last_snapshot = snapshot
         self.last_live = live
+        self.last_preserved_service = {
+            (snapshot[pid].pid, snapshot[pid].started): snapshot[pid]
+            for pid in preserved_pids
+            if pid in snapshot
+        }
+        self.last_quarantined_service = {
+            (snapshot[pid].pid, snapshot[pid].started): snapshot[pid]
+            for pid in quarantined_pids
+            if pid in snapshot
+        }
         return dict(live)
 
     def record_snapshot_error(self, exc: BaseException) -> None:
@@ -674,6 +1465,29 @@ def _signal_guarded_processes(
         "errors": errors,
     }
 
+
+def _guarded_service_evidence(
+        tracker: _GuardedProcessTracker) -> dict[str, object]:
+    return {
+        "service_boundary_failed": tracker.service_boundary_failed,
+        "service_boundary_evidence": dict(
+            tracker.last_service_boundary_evidence),
+        "preserved_service_identities": [
+            process.__dict__
+            for process in sorted(
+                tracker.last_preserved_service.values(),
+                key=lambda identity: identity.pid,
+            )
+        ],
+        "quarantined_service_identities": [
+            process.__dict__
+            for process in sorted(
+                tracker.last_quarantined_service.values(),
+                key=lambda identity: identity.pid,
+            )
+        ],
+    }
+
 def _terminate_guarded_process_tree(
         tracker: _GuardedProcessTracker,
         *,
@@ -717,7 +1531,11 @@ def _terminate_guarded_process_tree(
         try:
             live = tracker.refresh()
             latest_successful_refresh = True
-            if not live:
+            if (
+                not live
+                and not tracker.last_quarantined_service
+                and not tracker.service_boundary_failed
+            ):
                 if validate_worker and worker_error is not None:
                     worker_evidence, worker_error = (
                         _guarded_worker_validation(state_mode))
@@ -728,10 +1546,12 @@ def _terminate_guarded_process_tree(
                     evidence.update({
                         "kill": [],
                         "survivor_pids": [],
+                        "survivor_identities": [],
                         "snapshot_errors": list(tracker.snapshot_errors),
                         "completed_monotonic": clock(),
                         "within_hard_deadline": clock() <= hard_kill_deadline,
                         "cleanup_verified": True,
+                        **_guarded_service_evidence(tracker),
                     })
                     return evidence
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -749,7 +1569,12 @@ def _terminate_guarded_process_tree(
             tracker.record_snapshot_error(exc)
             latest_successful_refresh = False
             live = dict(tracker.last_live)
-        if not live and latest_successful_refresh:
+        if (
+            not live
+            and not tracker.last_quarantined_service
+            and not tracker.service_boundary_failed
+            and latest_successful_refresh
+        ):
             if validate_worker and worker_error is not None:
                 worker_evidence, worker_error = _guarded_worker_validation(
                     state_mode)
@@ -760,10 +1585,12 @@ def _terminate_guarded_process_tree(
                 evidence.update({
                     "kill": kill_records,
                     "survivor_pids": [],
+                    "survivor_identities": [],
                     "snapshot_errors": list(tracker.snapshot_errors),
                     "completed_monotonic": clock(),
                     "within_hard_deadline": True,
                     "cleanup_verified": True,
+                    **_guarded_service_evidence(tracker),
                 })
                 return evidence
         if live:
@@ -778,19 +1605,25 @@ def _terminate_guarded_process_tree(
             break
         sleeper(min(0.1, remaining))
 
+    quarantined = list(tracker.last_quarantined_service.values())
+    survivor_identities = [
+        *tracker.last_live.values(),
+        *quarantined,
+    ]
     evidence.update({
         "kill": kill_records,
         "survivor_pids": sorted(
-            process.pid for process in tracker.last_live.values()),
+            {process.pid for process in survivor_identities}),
         "survivor_identities": [
             process.__dict__
             for process in sorted(
-                tracker.last_live.values(), key=lambda value: value.pid)
+                survivor_identities, key=lambda value: value.pid)
         ],
         "snapshot_errors": list(tracker.snapshot_errors),
         "completed_monotonic": clock(),
         "within_hard_deadline": clock() <= hard_kill_deadline,
         "cleanup_verified": False,
+        **_guarded_service_evidence(tracker),
     })
     if worker_error is not None:
         evidence["worker_validation_error"] = worker_error
@@ -801,16 +1634,29 @@ def _terminate_guarded_process_tree(
 
 def _recover_guarded_worker_descendants(
         entry: Mapping[str, object],
+        *, strict_marker_only: bool = False,
+        hard_kill_deadline: float | None = None,
+        service_boundary_provider: (
+            _GuardedServiceBoundaryProvider | None) = None,
 ) -> tuple[dict[str, object], bool]:
     """Sweep a dead guarded worker's unique fresh build directory."""
     build_dir_value = entry.get("build_dir")
     if not isinstance(build_dir_value, str) or not build_dir_value:
         return ({"recovery_error": "guarded entry has no build directory"}, True)
     ownership_root = Path(build_dir_value).resolve(strict=False)
-    recovery_marker = "worker-death-ownership-sweep"
+    recorded_marker = entry.get("active_guard_marker")
+    recovery_marker = (
+        str(recorded_marker)
+        if (isinstance(recorded_marker, str)
+            and re.fullmatch(r"[0-9a-f]{32}", recorded_marker) is not None)
+        else "worker-death-ownership-sweep"
+    )
     try:
         snapshot, owned_pids = _guarded_process_snapshot(
-            recovery_marker, ownership_root)
+            recovery_marker,
+            ownership_root,
+            strict_marker_only=strict_marker_only,
+        )
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         return ({
             "recovery_error": f"{type(exc).__name__}: {exc}",
@@ -835,13 +1681,33 @@ def _recover_guarded_worker_descendants(
     if isinstance(active_value, dict):
         try:
             candidate = _ProcessIdentity(**active_value)
-            if any(_same_process(process, candidate) for process in owned):
+            if (
+                service_boundary_provider is not None
+                or any(_same_process(process, candidate) for process in owned)
+            ):
                 active_identity = candidate
         except (TypeError, ValueError):
             pass
+    if service_boundary_provider is not None and active_identity is None:
+        return ({
+            "recovery_error": (
+                "persisted service boundary has no exact recorded client "
+                "identity; no process was signalled"),
+            "ownership_root": str(ownership_root),
+            "survivor_pids": sorted(process.pid for process in owned),
+            "survivor_identities": [
+                process.__dict__ for process in owned],
+            "cleanup_verified": False,
+        }, True)
     root = active_identity or owned[0]
     tracker = _GuardedProcessTracker(
-        root, recovery_marker, ownership_root)
+        root,
+        recovery_marker,
+        ownership_root,
+        strict_marker_only=strict_marker_only,
+        service_boundary_provider=service_boundary_provider,
+        service_boundary_deadline=hard_kill_deadline,
+    )
     tracker.last_snapshot = dict(snapshot)
     tracker.last_live = {}
     for process in owned:
@@ -849,10 +1715,25 @@ def _recover_guarded_worker_descendants(
         tracker.members[key] = process
         tracker.last_live[key] = process
     try:
+        remaining = (
+            2 * BUILD_TIMEOUT_TERM_GRACE_SEC
+            if hard_kill_deadline is None
+            else max(0.0, hard_kill_deadline - time.time())
+        )
+        if remaining <= 0.0:
+            raise _GuardedTerminationError(
+                "worker-death cleanup deadline was reached",
+                {
+                    "cleanup_verified": False,
+                    "survivor_pids": sorted(
+                        process.pid for process in owned),
+                },
+            )
         evidence = _terminate_guarded_process_tree(
             tracker,
             hard_kill_deadline=(
-                time.monotonic() + 2 * BUILD_TIMEOUT_TERM_GRACE_SEC),
+                time.monotonic()
+                + min(2 * BUILD_TIMEOUT_TERM_GRACE_SEC, remaining)),
             state_mode=None,
             validate_worker=False,
         )
@@ -896,9 +1777,18 @@ def _await_guarded_worker_arm(mode: str) -> dict[str, object]:
 
 def _validated_process_tree(
         root: _ProcessIdentity,
+        *, deadline: float | None = None,
+        guard_marker: str = "",
+        service_boundary_provider: (
+            _GuardedServiceBoundaryProvider | None) = None,
 ) -> tuple[dict[int, list[_ProcessIdentity]], dict[str, object]]:
-    snapshot = _process_snapshot()
-    if not _same_process(snapshot.get(root.pid), root):
+    snapshot = _process_snapshot(deadline)
+    root_matches = (
+        _same_process_context(snapshot.get(root.pid), root)
+        if service_boundary_provider is not None
+        else _same_process(snapshot.get(root.pid), root)
+    )
+    if not root_matches:
         raise RuntimeError(
             "subprocess identity changed before timeout termination")
     descendants = {root.pid}
@@ -912,6 +1802,26 @@ def _validated_process_tree(
             ):
                 descendants.add(process.pid)
                 changed = True
+    boundary: _GuardedServiceBoundary | None = None
+    service_boundary_failed = False
+    if service_boundary_provider is not None:
+        try:
+            boundary = service_boundary_provider(
+                snapshot, root, guard_marker, deadline, set(descendants))
+        except Exception as exc:
+            service_boundary_failed = True
+            boundary = _GuardedServiceBoundary(
+                verified_root=None,
+                quarantined_root=None,
+                quarantined_roots=_provider_exception_quarantine_roots(
+                    snapshot, set(descendants), root),
+                evidence={
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "provider_exception_quarantine": True,
+                },
+            )
+    preserved, quarantined = _guarded_service_partition(snapshot, boundary)
+    descendants.difference_update(preserved | quarantined)
     groups: dict[int, list[_ProcessIdentity]] = {}
     for pid in descendants:
         process = snapshot[pid]
@@ -920,6 +1830,17 @@ def _validated_process_tree(
         "root": root.__dict__,
         "descendant_pids": sorted(descendants),
         "process_groups": sorted(groups),
+        "service_boundary_evidence": (
+            dict(boundary.evidence) if boundary is not None else {}),
+        "service_boundary_failed": service_boundary_failed,
+        "preserved_service_identities": [
+            snapshot[pid].__dict__ for pid in sorted(preserved)
+            if pid in snapshot
+        ],
+        "quarantined_service_identities": [
+            snapshot[pid].__dict__ for pid in sorted(quarantined)
+            if pid in snapshot
+        ],
     }
     return groups, evidence
 
@@ -927,42 +1848,81 @@ def _terminate_validated_process_tree(
         root: _ProcessIdentity,
         *,
         hard_kill_deadline: float,
+        guard_marker: str = "",
+        service_boundary_provider: (
+            _GuardedServiceBoundaryProvider | None) = None,
 ) -> dict[str, object]:
     """TERM every validated descendant group, then KILL exact survivors."""
-    groups, evidence = _validated_process_tree(root)
-    term_groups: list[int] = []
-    for pgid in sorted(groups, reverse=True):
-        try:
-            os.killpg(pgid, signal.SIGTERM)
-            term_groups.append(pgid)
-        except ProcessLookupError:
-            continue
-    evidence["term_groups"] = term_groups
+    groups, evidence = _validated_process_tree(
+        root,
+        deadline=hard_kill_deadline,
+        guard_marker=guard_marker,
+        service_boundary_provider=service_boundary_provider,
+    )
+    quarantined = list(evidence["quarantined_service_identities"])
+    if service_boundary_provider is None:
+        term_groups: list[int] = []
+        for pgid in sorted(groups, reverse=True):
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+                term_groups.append(pgid)
+            except ProcessLookupError:
+                continue
+        evidence["term_groups"] = term_groups
+    else:
+        # Re-snapshot before signaling.  _signal_guarded_processes declines a
+        # whole-group signal whenever the group also contains a preserved or
+        # quarantined service identity, then uses exact descendants instead.
+        term_snapshot = _process_snapshot(hard_kill_deadline)
+        term_live = {
+            (process.pid, process.started): observed
+            for processes in groups.values()
+            for process in processes
+            if (
+                (observed := term_snapshot.get(process.pid)) is not None
+                and _same_process(observed, process)
+            )
+        }
+        term_record = _signal_guarded_processes(
+            term_live, signal.SIGTERM, snapshot=term_snapshot)
+        evidence["term_groups"] = term_record["groups"]
+        evidence["term_direct_pids"] = term_record["direct_pids"]
+        evidence["term_skipped_unowned_groups"] = term_record[
+            "skipped_unowned_groups"]
+        evidence["term_errors"] = term_record["errors"]
 
     grace_deadline = min(
-        hard_kill_deadline,
+        max(time.time(), hard_kill_deadline - 1.0),
         time.time() + BUILD_TIMEOUT_TERM_GRACE_SEC,
     )
     while time.time() < grace_deadline:
         try:
-            snapshot = _process_snapshot()
+            snapshot = _process_snapshot(hard_kill_deadline)
         except RuntimeError:
             break
-        if not any(
-            _same_process(snapshot.get(process.pid), process)
-            for processes in groups.values()
-            for process in processes
+        if (
+            not evidence["service_boundary_failed"]
+            and not quarantined
+            and not any(
+                _same_process(snapshot.get(process.pid), process)
+                for processes in groups.values()
+                for process in processes
+            )
         ):
             evidence["kill_groups"] = []
             evidence["survivor_pids"] = []
+            evidence["survivor_identities"] = []
+            evidence["cleanup_verified"] = True
             evidence["completed_at"] = time.time()
             return evidence
         time.sleep(min(0.1, max(0.0, grace_deadline - time.time())))
 
+    snapshot_error: str | None = None
     try:
-        snapshot = _process_snapshot()
-    except RuntimeError:
+        snapshot = _process_snapshot(hard_kill_deadline)
+    except RuntimeError as exc:
         snapshot = {}
+        snapshot_error = str(exc)
     kill_groups: list[int] = []
     survivor_pids: list[int] = []
     for pgid, processes in sorted(groups.items(), reverse=True):
@@ -977,13 +1937,64 @@ def _terminate_validated_process_tree(
         if not exact_survivors:
             continue
         survivor_pids.extend(process.pid for process in exact_survivors)
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-            kill_groups.append(pgid)
-        except ProcessLookupError:
-            continue
+        if service_boundary_provider is None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+                kill_groups.append(pgid)
+            except ProcessLookupError:
+                continue
+        else:
+            kill_record = _signal_guarded_processes(
+                {
+                    (process.pid, process.started): process
+                    for process in exact_survivors
+                },
+                signal.SIGKILL,
+                snapshot=snapshot,
+            )
+            kill_groups.extend(kill_record["groups"])
+            evidence.setdefault("kill_direct_pids", []).extend(
+                kill_record["direct_pids"])
+            evidence.setdefault("kill_skipped_unowned_groups", []).extend(
+                kill_record["skipped_unowned_groups"])
+            evidence.setdefault("kill_errors", []).extend(kill_record["errors"])
     evidence["kill_groups"] = kill_groups
-    evidence["survivor_pids"] = sorted(survivor_pids)
+    final_snapshot = snapshot
+    while survivor_pids and time.time() < hard_kill_deadline:
+        try:
+            final_snapshot = _process_snapshot(hard_kill_deadline)
+            survivor_pids = [
+                process.pid
+                for processes in groups.values()
+                for process in processes
+                if _same_process(final_snapshot.get(process.pid), process)
+            ]
+            if not survivor_pids:
+                break
+        except RuntimeError as exc:
+            snapshot_error = str(exc)
+            break
+        time.sleep(min(0.05, max(0.0, hard_kill_deadline - time.time())))
+    quarantined_pids = [
+        value.get("pid") for value in quarantined
+        if isinstance(value, dict) and isinstance(value.get("pid"), int)
+    ]
+    evidence["survivor_pids"] = sorted(
+        set(survivor_pids + quarantined_pids))
+    evidence["survivor_identities"] = [
+        process.__dict__
+        for processes in groups.values()
+        for process in processes
+        if process.pid in survivor_pids
+    ] + quarantined
+    if snapshot_error is not None:
+        evidence["verification_error"] = snapshot_error
+    evidence["cleanup_verified"] = (
+        snapshot_error is None
+        and not evidence["service_boundary_failed"]
+        and not survivor_pids
+        and not quarantined
+    )
     evidence["completed_at"] = time.time()
     evidence["within_hard_deadline"] = time.time() <= hard_kill_deadline
     return evidence
@@ -1005,7 +2016,11 @@ def _latest_ninja_edge(log_handle) -> str | None:
         None,
     )
 
-def _kill_pgroup(pid: int) -> None:
+def _kill_pgroup(
+        pid: int,
+        *,
+        hard_kill_deadline: float | None = None,
+        clock=None) -> None:
     """SIGTERM then SIGKILL the entire process group rooted at pid.
 
     Cmake spawns ninja which spawns clang++; killing only the cmake pid
@@ -1016,14 +2031,23 @@ def _kill_pgroup(pid: int) -> None:
         pgid = os.getpgid(pid)
     except (ProcessLookupError, OSError):
         return
+    active_clock = clock or time.time
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pgid, sig)
         except (ProcessLookupError, OSError):
             return
+        if sig == signal.SIGKILL:
+            return
         # Give children a moment to exit before escalating.
+        grace_deadline = active_clock() + 2.0
+        if hard_kill_deadline is not None:
+            grace_deadline = min(grace_deadline, hard_kill_deadline)
         for _ in range(20):
-            time.sleep(0.1)
+            remaining = grace_deadline - active_clock()
+            if remaining <= 0.0:
+                break
+            time.sleep(min(0.1, remaining))
             try:
                 os.killpg(pgid, 0)
             except (ProcessLookupError, OSError):
@@ -1115,6 +2139,10 @@ def _stream_subprocess(
         state_mode: str | None = None,
         phase: str | None = None,
         require_verified_termination: bool = False,
+        service_boundary_provider: (
+            _GuardedServiceBoundaryProvider | None) = None,
+        initial_service_boundary_provider: (
+            _GuardedServiceBoundaryProvider | None) = None,
         deadline_clock=None,
 ) -> int:
     """Run cmd, tee combined stdout/stderr to log_handle and stderr, enforce
@@ -1140,6 +2168,13 @@ def _stream_subprocess(
     ):
         raise RuntimeError(
             "guarded subprocess requires a hard deadline after TERM")
+    if (
+        require_verified_termination
+        and service_boundary_provider is not None
+        and initial_service_boundary_provider is None
+    ):
+        raise RuntimeError(
+            "guarded service client requires a pre-arm classification provider")
 
     guard_marker: str | None = None
     guard_ownership_root: Path | None = None
@@ -1206,6 +2241,8 @@ def _stream_subprocess(
             process_identity,
             guard_marker,
             guard_ownership_root,
+            service_boundary_provider=initial_service_boundary_provider,
+            service_boundary_deadline=hard_kill_deadline,
         )
         if (
             require_verified_termination
@@ -1263,7 +2300,10 @@ def _stream_subprocess(
                 process_identity.__dict__
                 if process_identity is not None else None
             ),
+            active_guard_marker=guard_marker,
         )
+    if tracker is not None:
+        tracker.service_boundary_provider = service_boundary_provider
 
     fd = proc.stdout.fileno()
     cleanup_attempted = False
@@ -1314,16 +2354,25 @@ def _stream_subprocess(
                         ),
                     )
                 else:
-                    _kill_pgroup(proc.pid)
+                    _kill_pgroup(
+                        proc.pid,
+                        hard_kill_deadline=hard_kill_deadline,
+                        clock=clock,
+                    )
                     termination_evidence = {
                         "fallback_process_group": proc.pid,
                         "reason": "process identity capture unavailable",
                     }
                 if state_mode is not None:
-                    _update_entry(
-                        state_mode,
-                        termination_evidence=termination_evidence,
-                    )
+                    termination_update: dict[str, object] = {
+                        "termination_evidence": termination_evidence,
+                    }
+                    if termination_evidence.get("cleanup_verified") is not True:
+                        # Never overwrite a pre-existing uncertainty with a
+                        # weaker process-group termination observation.
+                        termination_update["cleanup_unverified"] = True
+                        termination_update["process_cleanup_unverified"] = True
+                    _update_entry(state_mode, **termination_update)
                 raise TimeoutError(f"hard timeout reached during: {pretty}")
 
             select_timeout = min(remaining, 1.0)
@@ -1380,7 +2429,11 @@ def _stream_subprocess(
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 tracker.record_snapshot_error(exc)
                 live = dict(tracker.last_live)
-            if live:
+            if (
+                live
+                or tracker.last_quarantined_service
+                or tracker.service_boundary_failed
+            ):
                 cleanup_attempted = True
                 cleanup_deadline = min(
                     hard_kill_deadline,
@@ -1407,6 +2460,15 @@ def _stream_subprocess(
                     raise
                 raise RuntimeError(
                     "guarded subprocess exited while descendants remained")
+            if service_boundary_provider is not None and state_mode is not None:
+                evidence = {
+                    "root": tracker.root.__dict__,
+                    "cleanup_verified": True,
+                    "survivor_pids": [],
+                    "survivor_identities": [],
+                    **_guarded_service_evidence(tracker),
+                }
+                _update_entry(state_mode, termination_evidence=evidence)
             cleanup_verified = True
         return return_code
     finally:
@@ -1437,21 +2499,64 @@ def _stream_subprocess(
         elif tracker is None and proc.poll() is None:
             if process_identity is not None:
                 try:
-                    _terminate_validated_process_tree(
+                    final_evidence = _terminate_validated_process_tree(
                         process_identity,
-                        hard_kill_deadline=time.time()
-                        + BUILD_TIMEOUT_TERM_GRACE_SEC,
+                        hard_kill_deadline=(
+                            hard_kill_deadline
+                            if hard_kill_deadline is not None
+                            else time.time()
+                                + BUILD_TIMEOUT_TERM_GRACE_SEC
+                        ),
                     )
-                except RuntimeError:
+                    if state_mode is not None:
+                        final_update: dict[str, object] = {
+                            "termination_evidence": final_evidence,
+                        }
+                        if final_evidence.get("cleanup_verified") is not True:
+                            final_update["cleanup_unverified"] = True
+                            final_update["process_cleanup_unverified"] = True
+                        _update_entry(state_mode, **final_update)
+                except RuntimeError as exc:
                     # Identity changed: fail closed rather than signaling an
                     # unverified process. The caller's timeout/failure record
                     # preserves the diagnostic.
-                    pass
+                    if state_mode is not None:
+                        _update_entry(
+                            state_mode,
+                            termination_evidence={
+                                "cleanup_verified": False,
+                                "error": str(exc),
+                            },
+                            cleanup_unverified=True,
+                            process_cleanup_unverified=True,
+                        )
             else:
-                _kill_pgroup(proc.pid)
+                _kill_pgroup(
+                    proc.pid,
+                    hard_kill_deadline=hard_kill_deadline,
+                    clock=clock,
+                )
+                if state_mode is not None:
+                    _update_entry(
+                        state_mode,
+                        termination_evidence={
+                            "cleanup_verified": False,
+                            "fallback_process_group": proc.pid,
+                            "reason": "process identity capture unavailable",
+                        },
+                        cleanup_unverified=True,
+                        process_cleanup_unverified=True,
+                    )
         if proc.poll() is None:
             try:
-                proc.wait(timeout=5)
+                wait_timeout = 5.0
+                if hard_kill_deadline is not None:
+                    wait_timeout = min(
+                        wait_timeout,
+                        max(0.0, hard_kill_deadline - clock()),
+                    )
+                if wait_timeout > 0.0:
+                    proc.wait(timeout=wait_timeout)
             except subprocess.TimeoutExpired:
                 if tracker is not None:
                     raise _GuardedTerminationError(

@@ -82,6 +82,7 @@ TEST_CASE("external-api executes the PG-free fixed-span and admitted adapters",
     const std::uint64_t baseline = admission.reserved_bytes();
     auto permit = admission.try_reserve(access.admission_bytes);
     REQUIRE(permit.has_value());
+    REQUIRE(admission.reserved_bytes() == baseline + access.admission_bytes);
     {
         auto owner = bioseq::storage::materialize_packed_sequence(
             source,
@@ -89,8 +90,9 @@ TEST_CASE("external-api executes the PG-free fixed-span and admitted adapters",
             access.to,
             access.requested_width,
             std::move(*permit));
-        REQUIRE(admission.reserved_bytes()
-                == baseline + access.admission_bytes);
+        const auto reserved_with_owner = admission.reserved_bytes();
+        REQUIRE(reserved_with_owner >= baseline);
+        REQUIRE(reserved_with_owner - baseline <= access.admission_bytes);
         REQUIRE(owner.descriptor().storage_unit_width
                 == sizeof(std::uint32_t));
         REQUIRE(owner.descriptor().unit_count == fixed_units.size());

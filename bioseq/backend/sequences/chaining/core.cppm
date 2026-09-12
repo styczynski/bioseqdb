@@ -15,6 +15,7 @@ module;
 #include <cmath>
 #include <bit>
 #include <new>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string_view>
@@ -29,6 +30,7 @@ export module bioseq.chaining.core;
 import bioseq.common.logging;
 import bioseq.common.context;
 import bioseq.common.radix_sort;
+import bioseq.common.checked_arithmetic;
 
 export {
 namespace bioseq::chaining {
@@ -830,6 +832,72 @@ struct scored_anchor_index {
 };
 static_assert(sizeof(scored_anchor_index) == 16u);
 
+/// Logical output counts only; arena backing admission belongs to the context.
+struct chaining_output_storage_plan {
+    std::size_t anchor_count;
+    std::size_t initial_chain_capacity;
+    std::size_t reordered_anchor_capacity;
+};
+
+/// Preserve the existing initial chain-capacity heuristic with checked arithmetic.
+[[nodiscard]] constexpr std::optional<chaining_output_storage_plan>
+derive_chaining_output_storage_plan(std::size_t count, std::int32_t min_seed_count) noexcept {
+    if (count > static_cast<std::size_t>((std::numeric_limits<std::int64_t>::max)()) ||
+        !bioseq::common::checked_mul(count, sizeof(anchor))) {
+        return std::nullopt;
+    }
+    const auto chains = min_seed_count <= 0
+        ? std::optional<std::size_t>{count}
+        : bioseq::common::checked_add(count / static_cast<std::size_t>(min_seed_count),
+                                      std::size_t{1u});
+    if (!chains || !bioseq::common::checked_mul(*chains, sizeof(chain))) {
+        return std::nullopt;
+    }
+    return chaining_output_storage_plan{count, *chains, count};
+}
+
+/// Three shared backtracking arrays, each with one element per input anchor.
+struct scalar_backtracking_storage_plan {
+    std::size_t anchor_scratch_count;
+    std::size_t logical_scratch_bytes;
+};
+
+[[nodiscard]] constexpr std::optional<scalar_backtracking_storage_plan>
+derive_scalar_backtracking_storage_plan(std::size_t count) noexcept {
+    constexpr std::size_t bytes_per_anchor = sizeof(scored_anchor_index) +
+        sizeof(std::int32_t) + sizeof(std::int64_t);
+    const auto bytes = bioseq::common::checked_mul(count, bytes_per_anchor);
+    if (!bytes || count > static_cast<std::size_t>((std::numeric_limits<std::int64_t>::max)())) {
+        return std::nullopt;
+    }
+    return scalar_backtracking_storage_plan{count, *bytes};
+}
+
+/// Scalar DP arrays and the unchanged shared backtracking workspace coexist.
+struct scalar_chaining_storage_plan {
+    chaining_output_storage_plan output;
+    scalar_backtracking_storage_plan backtracking;
+    std::size_t forward_anchor_count;
+    std::size_t logical_scratch_bytes;
+};
+
+[[nodiscard]] constexpr std::optional<scalar_chaining_storage_plan>
+derive_scalar_chaining_storage_plan(std::size_t count, const chaining_parameters& params) noexcept {
+    const auto output = derive_chaining_output_storage_plan(count, params.min_seed_count);
+    const auto backtracking = derive_scalar_backtracking_storage_plan(count);
+    const auto forward_bytes = bioseq::common::checked_mul(count,
+        3u * sizeof(std::int32_t) + sizeof(std::int64_t));
+    if (!output || !backtracking || !forward_bytes) {
+        return std::nullopt;
+    }
+    const auto total = bioseq::common::checked_add(*forward_bytes,
+        backtracking->logical_scratch_bytes);
+    if (!total) {
+        return std::nullopt;
+    }
+    return scalar_chaining_storage_plan{*output, *backtracking, count, *total};
+}
+
 /// @brief Orders scored anchor indices by score and then anchor position.
 struct score_ascending {
     /// @brief Compares two scored indices for ascending backtracking order.
@@ -868,14 +936,19 @@ inline void backtrack_chains(
     arena_slab<anchor>& reordered_anchors_out)
 {
     (void)peak_scores;  // Retained by the chaining contract; unused here.
-    const int64_t anchor_count = static_cast<int64_t>(anchors.size());
+    const auto storage_plan = derive_scalar_backtracking_storage_plan(anchors.size());
+    if (!storage_plan) {
+        throw std::length_error{"shared chain backtracking storage exceeds its addressable domain"};
+    }
+    const auto scratch_count = storage_plan->anchor_scratch_count;
+    const int64_t anchor_count = static_cast<int64_t>(scratch_count);
 
     // Allocate the maximum scored-index population once in the chain arena;
     // scored_count tracks the filtered live prefix.
     auto& bt_ctx = context::current();
 
     auto scored = bt_ctx.alloc_chain_array<scored_anchor_index>(
-        static_cast<std::size_t>(anchor_count));
+        scratch_count);
     std::size_t scored_count = 0;
     for (int64_t anchor_idx = 0; anchor_idx < anchor_count; ++anchor_idx) {
         if (best_scores[anchor_idx] >= min_score) {
@@ -889,13 +962,13 @@ inline void backtrack_chains(
     // The visited bitmap shares the caller-owned chain arena and remains valid
     // until backtracking returns.
     auto visited = bt_ctx.alloc_chain_array<int32_t>(
-        static_cast<std::size_t>(anchor_count));
+        scratch_count);
     std::memset(visited.data(), 0,
                 static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
 
     // Reuse one maximum-length chain-index scratch span for every rank.
     auto chain_idx = bt_ctx.alloc_chain_array<int64_t>(
-        static_cast<std::size_t>(anchor_count));
+        scratch_count);
 
     // Process from highest to lowest score
     for (int64_t rank_idx = static_cast<int64_t>(scored_count) - 1;

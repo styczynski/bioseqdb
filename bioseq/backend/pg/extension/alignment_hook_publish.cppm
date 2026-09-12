@@ -69,6 +69,20 @@ void publish_alignment_root(alignment_executor_frame* frame)
 	if (frame->collector.is_lifecycle_counter_saturated) {
 		statement_stats.operational.are_stats_saturated = true;
 	}
+	// ExecutorFinish is the first boundary at which every node, wave, segment,
+	// and tracked worker has joined. Finalize the statement-owned union exactly
+	// once here, never in a per-query result collection.
+	auto downstream_active_wall =
+		frame->collector.downstream_active_wall.finalize();
+	statement_stats.operational.record_downstream_active_wall(
+		downstream_active_wall.elapsed_ns,
+		downstream_active_wall.available);
+	#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+		statement_stats.operational.record_benchmark_e2e_interval_union(
+			downstream_active_wall.benchmark_e2e_intervals.interval_union);
+		auto benchmark_e2e_interval_origins =
+			downstream_active_wall.benchmark_e2e_intervals.origins;
+#endif
 	frame->collector.persisted_gpu_operations.freeze();
 	const bool are_persisted_gpu_stats_required =
 		statement_stats.actual_backend
@@ -115,6 +129,10 @@ void publish_alignment_root(alignment_executor_frame* frame)
 			.is_partial = !fully_drained,
 			.is_fully_drained = fully_drained,
 			.pipeline = statement_stats,
+	#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+				.benchmark_e2e_interval_origins =
+					benchmark_e2e_interval_origins,
+	#endif
 		};
 	last_alignment_execution_id = execution_id;
 }

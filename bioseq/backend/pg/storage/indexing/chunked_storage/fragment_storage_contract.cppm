@@ -298,6 +298,9 @@ struct fragment_index_storage {
     // Reverse destruction drops stores/vector nodes before metadata admission.
     bioseq::parallelism::memory_permit segment_sorted_runs_metadata_permit_;
     std::vector<segment_run_entry_type> segment_sorted_runs_;
+    // Ordinal, never an iterator: segment-store insertion may relocate every entry.
+    // The named store is the only one allowed to own the reusable spill writer.
+    std::optional<std::uint32_t> active_segment_write_buffer_owner_;
     inline static std::atomic<std::uint64_t> next_segment_spill_generation_token_{1u};
     direct_minimizer_spill_storage_binding segment_spill_binding_{};
     bool segment_spill_pg_poisoned_ = false;
@@ -826,6 +829,14 @@ inline void fragment_index_storage::merge_segment_runs(p_callback&& on_segment_k
     }
     g_last_index_merge_run_count = std::max(g_last_index_merge_run_count, total_runs);
     try {
+        // Every segment spill has completed before replay begins. Release all
+        // reusable writers as one phase so the first store's readers do not
+        // compete with later stores' dead writer capacities.
+        for (auto& [segment, runs] : segment_sorted_runs_) {
+            (void)segment;
+            runs.release_completed_write_buffer();
+        }
+        active_segment_write_buffer_owner_.reset();
         for (auto& [segment, runs] : segment_sorted_runs_) {
             bool first_callback = true;
             runs.merge_runs(
@@ -844,6 +855,7 @@ inline void fragment_index_storage::merge_segment_runs(p_callback&& on_segment_k
             (void)segment;
             runs.abandon_after_pg_error_noexcept();
         }
+        active_segment_write_buffer_owner_.reset();
         segment_spill_binding_ = {};
         segment_spill_pg_poisoned_ = true;
         throw;

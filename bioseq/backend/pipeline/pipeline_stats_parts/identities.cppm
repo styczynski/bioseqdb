@@ -16,6 +16,11 @@ enum class executed_backend : std::uint8_t {
     simd_cpu,
     vulkan_gpu,
     mixed_invalid,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    mixed_cpu = 5,
+    /// Selected Vulkan seed/chain prefix with the required host suffix.
+    hybrid_cpu_vulkan = 6,
+#endif
 };
 
 /// Proven origin of the target minimizer index consumed by a job.
@@ -47,6 +52,138 @@ enum class simd_alignment_algorithm_identity : std::uint8_t {
     mixed_invalid,
 };
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+/// Statement-stable requested/operation-observed minimizer identity.
+enum class minimizer_algorithm_identity : std::uint8_t {
+    none,
+    scalar,
+    simd_minimap2_reference,
+    two_stack_nthash,
+    vulkan_minimap_integer,
+    bounded_nthash_simd,
+    mixed_invalid,
+};
+
+/// Statement-stable requested/operation-observed chaining identity.
+enum class chaining_algorithm_identity : std::uint8_t {
+    none,
+    scalar_minimap2,
+    simd_minimap2,
+    range_minimum_query,
+    vulkan_tiled_dynamic_programming,
+    mixed_invalid,
+};
+
+/// Statement-stable requested/operation-observed base-alignment identity.
+/// Vulkan simple-CIGAR is a distinct completed operation, not a Block Aligner
+/// execution merely because the public selector uses the block-alignment slot.
+enum class base_alignment_algorithm_identity : std::uint8_t {
+    none,
+    ksw2,
+    block_aligner,
+    vulkan_simple_cigar,
+    mixed_invalid,
+};
+
+/// Return the stable public spelling of a minimizer identity.
+[[nodiscard]] constexpr std::string_view
+minimizer_algorithm_identity_name(minimizer_algorithm_identity algorithm) noexcept {
+    switch (algorithm) {
+    case minimizer_algorithm_identity::none:
+        return "none";
+    case minimizer_algorithm_identity::scalar:
+        return "scalar";
+    case minimizer_algorithm_identity::simd_minimap2_reference:
+        return "simd_minimap2_reference";
+    case minimizer_algorithm_identity::two_stack_nthash:
+        return "two_stack_nthash";
+    case minimizer_algorithm_identity::vulkan_minimap_integer:
+        return "vulkan_minimap_integer";
+    case minimizer_algorithm_identity::bounded_nthash_simd:
+        return "bounded_nthash_simd";
+    case minimizer_algorithm_identity::mixed_invalid:
+        return "mixed_invalid";
+    }
+    return "mixed_invalid";
+}
+
+/// Return the stable public spelling of a chaining identity.
+[[nodiscard]] constexpr std::string_view
+chaining_algorithm_identity_name(chaining_algorithm_identity algorithm) noexcept {
+    switch (algorithm) {
+    case chaining_algorithm_identity::none:
+        return "none";
+    case chaining_algorithm_identity::scalar_minimap2:
+        return "scalar_minimap2";
+    case chaining_algorithm_identity::simd_minimap2:
+        return "simd_minimap2";
+    case chaining_algorithm_identity::range_minimum_query:
+        return "range_minimum_query";
+    case chaining_algorithm_identity::vulkan_tiled_dynamic_programming:
+        return "vulkan_tiled_dynamic_programming";
+    case chaining_algorithm_identity::mixed_invalid:
+        return "mixed_invalid";
+    }
+    return "mixed_invalid";
+}
+
+/// Return the stable public spelling of a base-alignment identity.
+[[nodiscard]] constexpr std::string_view
+base_alignment_algorithm_identity_name(base_alignment_algorithm_identity algorithm) noexcept {
+    switch (algorithm) {
+    case base_alignment_algorithm_identity::none:
+        return "none";
+    case base_alignment_algorithm_identity::ksw2:
+        return "ksw2";
+    case base_alignment_algorithm_identity::block_aligner:
+        return "block_aligner";
+    case base_alignment_algorithm_identity::vulkan_simple_cigar:
+        return "vulkan_simple_cigar";
+    case base_alignment_algorithm_identity::mixed_invalid:
+        return "mixed_invalid";
+    }
+    return "mixed_invalid";
+}
+
+/// Merge repeated observations, retaining concrete disagreement explicitly.
+[[nodiscard]] constexpr minimizer_algorithm_identity
+merge_minimizer_algorithm_identity(minimizer_algorithm_identity lhs,
+                                   minimizer_algorithm_identity rhs) noexcept {
+    if (lhs == minimizer_algorithm_identity::none)
+        return rhs;
+    if (rhs == minimizer_algorithm_identity::none)
+        return lhs;
+    if (lhs == rhs)
+        return lhs;
+    return minimizer_algorithm_identity::mixed_invalid;
+}
+
+/// Merge repeated observations, retaining concrete disagreement explicitly.
+[[nodiscard]] constexpr chaining_algorithm_identity
+merge_chaining_algorithm_identity(chaining_algorithm_identity lhs,
+                                  chaining_algorithm_identity rhs) noexcept {
+    if (lhs == chaining_algorithm_identity::none)
+        return rhs;
+    if (rhs == chaining_algorithm_identity::none)
+        return lhs;
+    if (lhs == rhs)
+        return lhs;
+    return chaining_algorithm_identity::mixed_invalid;
+}
+
+/// Merge repeated base-alignment observations without concealing disagreement.
+[[nodiscard]] constexpr base_alignment_algorithm_identity
+merge_base_alignment_algorithm_identity(base_alignment_algorithm_identity lhs,
+                                        base_alignment_algorithm_identity rhs) noexcept {
+    if (lhs == base_alignment_algorithm_identity::none)
+        return rhs;
+    if (rhs == base_alignment_algorithm_identity::none)
+        return lhs;
+    if (lhs == rhs)
+        return lhs;
+    return base_alignment_algorithm_identity::mixed_invalid;
+}
+#endif
 /// @brief Return the stable public spelling used by PostgreSQL and reporting.
 ///
 /// Keep this on the aggregate identity rather than translating through the algorithm-local enum:
@@ -145,6 +282,12 @@ inline constexpr std::uint32_t k_sql_integer_value_max =
         return "scalar_cpu";
     case executed_backend::simd_cpu:
         return "simd_cpu";
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    case executed_backend::mixed_cpu:
+        return "mixed_cpu";
+    case executed_backend::hybrid_cpu_vulkan:
+        return "hybrid_cpu_vulkan";
+#endif
     case executed_backend::vulkan_gpu:
         return "vulkan_gpu";
     case executed_backend::mixed_invalid:

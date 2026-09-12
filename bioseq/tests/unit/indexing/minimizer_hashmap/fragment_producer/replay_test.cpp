@@ -97,14 +97,16 @@ TEST_CASE("bounded ntHash fragment replay matches one checked resident execution
 
     lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
     const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
+    auto options = test_generation_options(
+        range.bp_size(), bioseq::simd::minimizer_algorithm::bounded_nthash_simd);
     auto producer =
         index_type::make_generation_replay_producer(lazy_view,
                                                     minimizer_sketch_backend::bounded_nthash_simd,
                                                     fixed_minimizer_kernels(),
+                                                    options.algorithm_identity,
+                                                    options.window_size,
+                                                    options.kmer_size,
                                                     fixed_alphabet_code<::seq::dna4>());
-    auto options = test_generation_options(range.bp_size());
-    options.minimizer_scheme_id = k_bounded_nthash_u32_r7_sum_scheme_id;
-    options.minimizer_scheme_revision = k_bounded_nthash_u32_r7_sum_scheme_revision;
     collecting_minimizer_row_sink sink;
     const auto encoded = encode_minimizer_generation(producer, sink, options);
     REQUIRE(encoded.has_value());
@@ -120,7 +122,7 @@ TEST_CASE("bounded ntHash fragment replay matches one checked resident execution
     REQUIRE(execution.packed_bounded_status == packed_bounded_nthash_index_status::ok);
     REQUIRE(execution.packed_bounded_stats.is_internally_consistent(true));
     REQUIRE(execution.packed_bounded_stats.fallback_calls == 0);
-    REQUIRE(execution.packed_bounded_stats.source_storage_unit_bytes == sizeof(std::uint32_t));
+    REQUIRE(execution.packed_bounded_stats.source_storage_unit_bytes == sizeof(std::uint64_t));
     REQUIRE(producer.scheme_identity() == k_bounded_nthash_u32_r7_sum_scheme_identity);
     REQUIRE(producer.packed_bounded_stats_present());
     REQUIRE(producer.packed_bounded_status() == packed_bounded_nthash_index_status::ok);
@@ -196,10 +198,16 @@ TEST_CASE("bounded ntHash fragment canonicalizes tied periodic events identicall
 
     lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
     const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
+    const auto bounded_identity =
+        test_generation_algorithm_identity<::seq::dna4, std::uint64_t>(
+            bioseq::simd::minimizer_algorithm::bounded_nthash_simd);
     auto replay =
         index_type::make_generation_replay_producer(lazy_view,
                                                     minimizer_sketch_backend::bounded_nthash_simd,
                                                     fixed_minimizer_kernels(),
+                                                    bounded_identity,
+                                                    10u,
+                                                    15u,
                                                     fixed_alphabet_code<::seq::dna4>());
     const auto collect_replay = [](void* context, const canonical_minimizer_event& event)
         -> std::expected<void, minimizer_generation_encoding_error> {
@@ -232,10 +240,12 @@ TEST_CASE("bounded ntHash fragment canonicalizes tied periodic events identicall
         index_type::make_generation_replay_producer(lazy_view,
                                                     minimizer_sketch_backend::bounded_nthash_simd,
                                                     fixed_minimizer_kernels(),
+                                                    bounded_identity,
+                                                    10u,
+                                                    15u,
                                                     fixed_alphabet_code<::seq::dna4>());
-    auto options = test_generation_options(range.bp_size());
-    options.minimizer_scheme_id = k_bounded_nthash_u32_r7_sum_scheme_id;
-    options.minimizer_scheme_revision = k_bounded_nthash_u32_r7_sum_scheme_revision;
+    auto options = test_generation_options(
+        range.bp_size(), bioseq::simd::minimizer_algorithm::bounded_nthash_simd);
     collecting_minimizer_row_sink sink;
     const auto encoded = encode_minimizer_generation(encoder_replay, sink, options);
     REQUIRE(encoded.has_value());
@@ -252,7 +262,7 @@ TEST_CASE("bounded ntHash fragment replay canonicalizes storage and rejects inco
     using namespace bioseq::indexing;
     using index_type = minimizers_per_fragment_index<fake_fragment_storage<>>;
 
-    SECTION("DNA5 fails closed without scalar substitution") {
+    SECTION("DNA5 rejects a mismatched manifest alphabet identity") {
         using chunked = chunked_span_sequence_scanner<std::uint64_t, 64>;
         std::vector<seq::dna5> data(4096);
         for (std::size_t index = 0; index < data.size(); ++index) {
@@ -261,10 +271,16 @@ TEST_CASE("bounded ntHash fragment replay canonicalizes storage and rejects inco
         dna5_range_t range(data);
         lazy_sequence<dna5_u64, chunked> lazy{chunked::from_range(range)};
         const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
+        const auto bounded_identity =
+            test_generation_algorithm_identity<::seq::dna5, std::uint64_t>(
+                bioseq::simd::minimizer_algorithm::bounded_nthash_simd);
         auto producer = index_type::make_generation_replay_producer(
             lazy_view,
             minimizer_sketch_backend::bounded_nthash_simd,
             fixed_minimizer_kernels(),
+            bounded_identity,
+            10u,
+            15u,
             fixed_alphabet_code<::seq::dna5>());
         auto options = test_generation_options(range.bp_size());
         options.alphabet_code = 5;
@@ -283,33 +299,33 @@ TEST_CASE("bounded ntHash fragment replay canonicalizes storage and rejects inco
                 admission_before);
     }
 
-    SECTION("u16 packed storage is admitted into one canonical u32 bounded ntHash window") {
+    SECTION("u16 packed storage has no generated READY identity") {
         using chunked = chunked_span_sequence_scanner<std::uint16_t, 64>;
         auto data = make_dna4(4096, 0x16B17u);
         dna4_u16_range_t range(data);
         lazy_sequence<dna4_u16, chunked> lazy{chunked::from_range(range)};
         const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
+        const auto native_identity =
+            test_generation_algorithm_identity<::seq::dna4, std::uint64_t>(
+                bioseq::simd::minimizer_algorithm::bounded_nthash_simd);
         auto producer = index_type::make_generation_replay_producer(
             lazy_view,
             minimizer_sketch_backend::bounded_nthash_simd,
             fixed_minimizer_kernels(),
+            native_identity,
+            10u,
+            15u,
             fixed_alphabet_code<::seq::dna4>());
-        auto options = test_generation_options(range.bp_size());
+        auto options = test_generation_options(
+            range.bp_size(), bioseq::simd::minimizer_algorithm::bounded_nthash_simd);
         options.storage_unit_byte_width = sizeof(std::uint16_t);
-        options.minimizer_scheme_id = k_bounded_nthash_u32_r7_sum_scheme_id;
-        options.minimizer_scheme_revision = k_bounded_nthash_u32_r7_sum_scheme_revision;
         collecting_minimizer_row_sink sink;
         const auto encoded = encode_minimizer_generation(producer, sink, options);
-        REQUIRE(encoded.has_value());
-        REQUIRE_FALSE(sink.rows.empty());
-        REQUIRE(producer.packed_bounded_stats_present());
-        REQUIRE(producer.packed_bounded_status() == packed_bounded_nthash_index_status::ok);
-        REQUIRE(producer.packed_bounded_stats().is_internally_consistent(true));
-        REQUIRE(producer.packed_bounded_stats().fallback_calls == 0u);
-        REQUIRE(producer.peak_bounded_materialized_window_bp() > 0u);
-        REQUIRE(producer.execution_stats().is_accepted());
+        REQUIRE_FALSE(encoded.has_value());
+        REQUIRE(encoded.error() == minimizer_generation_encoding_error::storage_contract_mismatch);
+        REQUIRE(sink.rows.empty());
+        REQUIRE_FALSE(producer.packed_bounded_stats_present());
         REQUIRE_FALSE(producer.exact_simd_stats_present());
-        require_complete_generation_rows(*encoded, sink.rows);
     }
 
     SECTION("a local position wider than minimap_sketch_data fails before dereference") {
@@ -378,9 +394,14 @@ TEST_CASE("actual producers cross the persisted 8MiB core edge bounded",
     lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
     const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
 
-    auto fragment_producer = index_type::make_generation_replay_producer(
-        lazy_view, minimizer_sketch_backend::scalar, nullptr);
     const auto options = test_generation_options(range.bp_size());
+    auto fragment_producer = index_type::make_generation_replay_producer(
+        lazy_view,
+        minimizer_sketch_backend::scalar,
+        nullptr,
+        options.algorithm_identity,
+        options.window_size,
+        options.kmer_size);
     const auto fragment_plan = plan_minimizer_generation(fragment_producer, options);
     REQUIRE(fragment_plan.has_value());
     REQUIRE(fragment_plan->position_segment_count == 2);
@@ -388,8 +409,18 @@ TEST_CASE("actual producers cross the persisted 8MiB core edge bounded",
     REQUIRE(fragment_producer.scan_count() == 1);
 
     fake_fragment_storage<> spill_storage;
+    const auto spill_options = test_grouped_soa_generation_options(
+        range.bp_size(),
+        65'534u,
+        bioseq::simd::minimizer_algorithm::scalar,
+        range.bp_size());
     auto spilled = spill_run_index_type::spill_generation_replay_runs_serial(
-        spill_storage, lazy_view, minimizer_sketch_backend::scalar, nullptr, fragment_bp);
+        spill_storage,
+        lazy_view,
+        minimizer_sketch_backend::scalar,
+        nullptr,
+        spill_options.algorithm_identity,
+        fragment_bp);
     REQUIRE(spilled.has_value());
     REQUIRE(spilled->run_count() > 256);
     REQUIRE(spill_storage.runs_.empty());
@@ -419,7 +450,7 @@ TEST_CASE("actual producers cross the persisted 8MiB core edge bounded",
         spill_storage,
         spill_sink,
         std::move(*spilled),
-        test_grouped_soa_generation_options(range.bp_size()),
+        spill_options,
         one_half_per_segment,
         &execution);
     REQUIRE(encoded.has_value());
@@ -486,7 +517,7 @@ TEST_CASE("actual producers preserve DNA5 N reset and packed tail",
     lazy_sequence<dna5_u64, chunked> lazy{chunked::from_range(range)};
     const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
     const auto collection_range = spill_run_index_type::make_generation_collection_range(
-        lazy_view, fragment_bp, fragment_bp + 100u);
+        lazy_view, fragment_bp, fragment_bp + 100u, 10u, 15u);
     REQUIRE(collection_range.has_value());
     constexpr std::uint64_t halo = 10u + 15u - 2u;
     REQUIRE(collection_range->cs_u == fragment_bp - halo);
@@ -497,6 +528,13 @@ TEST_CASE("actual producers preserve DNA5 N reset and packed tail",
         index_type::make_generation_replay_producer(lazy_view,
                                                     minimizer_sketch_backend::exact_simd,
                                                     fixed_minimizer_kernels(),
+                                                    test_generation_algorithm_identity<
+                                                        ::seq::dna5,
+                                                        std::uint64_t>(
+                                                        bioseq::simd::minimizer_algorithm::
+                                                            two_stack_nthash),
+                                                    10u,
+                                                    15u,
                                                     fixed_alphabet_code<::seq::dna5>());
     const auto collect_replay = [](void* context, const canonical_minimizer_event& event)
         -> std::expected<void, minimizer_generation_encoding_error> {
@@ -515,6 +553,8 @@ TEST_CASE("actual producers preserve DNA5 N reset and packed tail",
         lazy_view,
         minimizer_sketch_backend::exact_simd,
         fixed_minimizer_kernels(),
+        test_generation_algorithm_identity<::seq::dna5, std::uint64_t>(
+            bioseq::simd::minimizer_algorithm::two_stack_nthash, range.bp_size()),
         fragment_bp,
         k_minimizer_preferred_segment_span_bp,
         nullptr,
@@ -775,13 +815,19 @@ TEST_CASE("grouped-SoA fragment and external-spill replays are identical",
         range_t range(data);
         lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
         const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
+        auto fragment_options = test_grouped_soa_generation_options(
+            range.bp_size(),
+            65'534u,
+            bioseq::simd::minimizer_algorithm::two_stack_nthash);
         auto fragment_producer =
             index_type::make_generation_replay_producer(lazy_view,
                                                         minimizer_sketch_backend::exact_simd,
                                                         fixed_minimizer_kernels(),
+                                                        fragment_options.algorithm_identity,
+                                                        fragment_options.window_size,
+                                                        fragment_options.kmer_size,
                                                         fixed_alphabet_code<::seq::dna4>());
         collecting_minimizer_row_sink fragment_sink;
-        auto fragment_options = test_grouped_soa_generation_options(range.bp_size(), 65'534u);
         const auto fragment_generation =
             encode_minimizer_generation(fragment_producer, fragment_sink, fragment_options);
         REQUIRE(fragment_generation.has_value());
@@ -806,11 +852,17 @@ TEST_CASE("grouped-SoA fragment and external-spill replays are identical",
 
         fake_fragment_storage<> spill_storage;
         minimizer_sequence_generation_execution_receipt spill_execution;
+        auto spill_options = test_grouped_soa_generation_options(
+            range.bp_size(),
+            65'534u,
+            bioseq::simd::minimizer_algorithm::two_stack_nthash,
+            range.bp_size());
         auto spill = spill_run_index_type::spill_generation_replay_runs_serial(
             spill_storage,
             lazy_view,
             minimizer_sketch_backend::exact_simd,
             fixed_minimizer_kernels(),
+            spill_options.algorithm_identity,
             fragment_bp,
             k_minimizer_preferred_segment_span_bp,
             &spill_execution,
@@ -828,7 +880,6 @@ TEST_CASE("grouped-SoA fragment and external-spill replays are identical",
         auto spill_producer = spill_run_index_type::make_generation_replay_producer(
             spill_storage, range.bp_size(), std::move(*spill));
         collecting_minimizer_row_sink spill_sink;
-        auto spill_options = fragment_options;
         ++spill_options.generation_id;
         const auto spill_generation =
             encode_minimizer_generation(spill_producer, spill_sink, spill_options);
@@ -886,6 +937,93 @@ TEST_CASE("grouped-SoA fragment and external-spill replays are identical",
             base.assign_rank(0u);
         verify(std::move(tandem), true);
     }
+}
+
+TEST_CASE("registered transient fragment build binds K20 DNA5 reference request to native owner",
+          "[component:bioseq][layer:unit][feature:storage][resource:highway]") {
+    using namespace bioseq::indexing;
+    constexpr std::size_t fragment_units = 64u;
+    using chunked = chunked_span_sequence_scanner<std::uint64_t, fragment_units>;
+    using index_type = minimizers_per_fragment_index<fake_fragment_storage<>>;
+
+    const auto unambiguous = make_dna4(1024u, 0x484153484F574E52ULL);
+    std::vector<seq::dna5> data(unambiguous.size());
+    for (std::size_t index = 0u; index < data.size(); ++index) {
+        data[index].assign_char(unambiguous[index].to_char());
+    }
+    // Keep long nonempty sketchable regions on both sides of sparse ambiguity.
+    // A repeated A/C/G/N/T fixture only exercises the empty-index success path.
+    data[127u].assign_char('N');
+    data[769u].assign_char('N');
+    dna5_range_t range(data);
+    lazy_sequence<dna5_u64, chunked> lazy{chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
+    const auto identity = test_generation_algorithm_identity<::seq::dna5, std::uint64_t>(
+        bioseq::simd::minimizer_algorithm::simd_minimap2_reference,
+        k_minimizer_fragment_algorithm_position_extent_bp,
+        20u,
+        15u);
+    REQUIRE(identity.requested_algorithm ==
+            bioseq::simd::minimizer_algorithm::simd_minimap2_reference);
+    REQUIRE(identity.effective_algorithm ==
+            bioseq::simd::minimizer_algorithm::simd_minimap2_reference);
+    REQUIRE(identity.hash_width == minimizer_scalar_width::u64);
+    REQUIRE(identity.packed_storage_bits == 64u);
+
+    fake_fragment_storage<> storage;
+    const auto built = index_type::build_registered(storage,
+                                                    lazy_view,
+                                                    minimizer_sketch_backend::exact_simd,
+                                                    fixed_minimizer_kernels(),
+                                                    identity,
+                                                    15u,
+                                                    20u,
+                                                    fixed_alphabet_code<::seq::dna5>());
+    REQUIRE(built.has_value());
+    REQUIRE(built->direct_build_accepted());
+    REQUIRE(built->algorithm_identity == identity);
+    REQUIRE(built->selected_backend == minimizer_sketch_backend::exact_simd);
+    REQUIRE(built->producer_scan_count == 1u);
+    REQUIRE(built->scalar_core_runs == 0u);
+    REQUIRE(built->exact_simd_core_runs > 0u);
+    REQUIRE(built->bounded_nthash_core_runs == 0u);
+    REQUIRE_FALSE(built->exact_simd_stats_present);
+    REQUIRE(built->reference_simd_stats_present);
+    REQUIRE(built->reference_simd_stats.is_internally_consistent(
+        true, sizeof(std::uint64_t)));
+    REQUIRE(storage.number_of_chunks(k_directory_sub_key) == 1u);
+    REQUIRE(storage.number_of_sub_keys() == 1u);
+    REQUIRE(*storage.template read_chunk<std::int64_t>(k_directory_sub_key, 0u) == 1);
+
+    std::size_t emitted_positions = 0u;
+    bool has_wide_hash = false;
+    const auto* blob = storage.template read_chunk<char>(0, 0u);
+    wire_for_each_entry(blob, storage.chunk_byte_size(0, 0u),
+        [&emitted_positions, &has_wide_hash, target_length = data.size()](
+            std::uint64_t hash, std::uint64_t position) {
+            REQUIRE((position >> 1u) < target_length);
+            has_wide_hash = has_wide_hash ||
+                hash > (std::numeric_limits<std::uint32_t>::max)();
+            ++emitted_positions;
+        });
+    REQUIRE(emitted_positions > 0u);
+    REQUIRE(has_wide_hash);
+
+    auto invalid_identity = identity;
+    invalid_identity.runtime_window_size = 10u;
+    fake_fragment_storage<> rejected_storage;
+    const auto rejected = index_type::build_registered(
+        rejected_storage,
+        lazy_view,
+        minimizer_sketch_backend::exact_simd,
+        fixed_minimizer_kernels(),
+        invalid_identity,
+        15u,
+        20u,
+        fixed_alphabet_code<::seq::dna5>());
+    require_wire_error(rejected,
+                       minimizer_generation_encoding_error::storage_contract_mismatch);
+    REQUIRE(rejected_storage.number_of_sub_keys() == 0u);
 }
 
 } // namespace bioseq::simd::HWY_NAMESPACE

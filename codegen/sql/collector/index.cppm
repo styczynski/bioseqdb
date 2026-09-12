@@ -1951,12 +1951,15 @@ collect_direct_import_enum_authorities(
             "validated dependency-module closure");
     }
     try {
+        structural_analysis::structural_module_graph_scan combined =
+            structural_analysis::
+                scan_translation_units_and_module_graph_from_database(
+                    source_paths,
+                    environment.compile_database,
+                    environment.compiler_profile,
+                    environment.pcm_root);
         structural_analysis::module_graph module_graph =
-            structural_analysis::scan_module_graph_from_database(
-                source_paths,
-                environment.compile_database,
-                environment.compiler_profile,
-                environment.pcm_root);
+            std::move(combined.graph);
         if (module_graph.units.size() != source_paths.size()) {
             throw std::runtime_error(
                 "Clang module-graph pass did not cover every registered "
@@ -1978,11 +1981,7 @@ collect_direct_import_enum_authorities(
             }
         }
         structural_analysis::structural_index index =
-            structural_analysis::scan_translation_units_from_database(
-                source_paths,
-                environment.compile_database,
-                environment.compiler_profile,
-                environment.pcm_root);
+            std::move(combined.structural);
         if (module_graph.clang_release != index.clang_release
             || module_graph.compilation_signature
                 != index.compilation_signature) {

@@ -77,6 +77,37 @@ template<class p_simd_tag>
     return minimum;
 }
 
+/** Construct and append only the split records retained by SIMD compression. */
+template<class p_minimizer_type, class p_collector_type>
+requires wide_simd_minimizer_representation<p_minimizer_type>
+[[nodiscard]] inline bool append_wide_minimizer_records(
+    p_collector_type& collector,
+    const std::uint64_t* HWY_RESTRICT hashes,
+    const std::uint64_t* HWY_RESTRICT position_strands,
+    std::size_t count,
+    std::size_t runtime_k)
+{
+    static_assert(requires (
+        p_collector_type& output,
+        p_minimizer_type record) {
+            output.collect(std::move(record));
+        });
+    for (std::size_t index = 0; index < count; ++index) {
+        const std::uint64_t position_strand = position_strands[index];
+        collector.collect(p_minimizer_type{
+            hashes[index],
+            position_strand >> 1u,
+            position_strand & std::uint64_t{1u},
+            static_cast<std::uint64_t>(runtime_k)});
+    }
+    if constexpr (requires (const p_collector_type& output) {
+                      { output.is_ok() } -> std::convertible_to<bool>;
+                  }) {
+        return collector.is_ok();
+    }
+    return true;
+}
+
 /** Run one SIMD batch through rolling k-mers, window reduction, tie handling, and emission. */
 template<
     bool p_invalid_only,
@@ -91,16 +122,30 @@ process_chronological_candidate_block(
     p_collector_type& collector,
     std::size_t active_lanes)
 {
-    using storage_type = typename p_minimizer_type::storage_type;
-    static_assert(std::is_same_v<storage_type, std::uint64_t>);
+    constexpr bool k_native_output =
+        exact_simd_minimizer_representation<p_minimizer_type>;
+    constexpr bool k_wide_output =
+        wide_simd_minimizer_representation<p_minimizer_type>;
+    static_assert(two_stack_simd_minimizer_representation<p_minimizer_type>);
     static_assert(std::is_trivially_copyable_v<p_minimizer_type>);
-    static_assert(sizeof(p_minimizer_type) == sizeof(storage_type));
-    static_assert(requires (
-        p_collector_type& output,
-        const storage_type* raw,
-        std::size_t count) {
-            { output.append_raw_storage(raw, count) } -> std::same_as<bool>;
-        });
+    if constexpr (k_native_output) {
+        using storage_type = typename p_minimizer_type::storage_type;
+        static_assert(std::is_same_v<storage_type, std::uint64_t>);
+        static_assert(sizeof(p_minimizer_type) == sizeof(storage_type));
+        static_assert(requires (
+            p_collector_type& output,
+            const storage_type* raw,
+            std::size_t count) {
+                { output.append_raw_storage(raw, count) } -> std::same_as<bool>;
+            });
+    } else {
+        static_assert(k_wide_output);
+        static_assert(requires (
+            p_collector_type& output,
+            p_minimizer_type record) {
+                output.collect(std::move(record));
+            });
+    }
 
     if (state.status != two_stack_continuation_status::ok) return state.status;
 
@@ -146,8 +191,15 @@ process_chronological_candidate_block(
         std::numeric_limits<std::uint64_t>::max();
 
     const std::uint64_t max_hash = p_minimizer_type::maximum().kmer();
-    const std::uint64_t max_raw = p_minimizer_type::maximum().raw_value();
-    const std::uint64_t raw_hash_mask = p_minimizer_type::k_hash_mask;
+    const std::uint64_t max_raw = []() constexpr {
+        if constexpr (exact_simd_minimizer_representation<p_minimizer_type>) {
+            return static_cast<std::uint64_t>(
+                p_minimizer_type::maximum().raw_value());
+        } else {
+            return static_cast<std::uint64_t>(
+                p_minimizer_type::maximum().pos_strand_encoded());
+        }
+    }();
     const std::uint64_t kmer_mask =
         (std::uint64_t{1} << (2 * k)) - 1;
 
@@ -257,17 +309,28 @@ process_chronological_candidate_block(
             hn::Lt(kmer_vectors.reverse, kmer_vectors.forward),
             hn::Set(d, std::uint64_t{1}),
             hn::Zero(d));
-        candidate_raw = hn::Or(
-            hn::ShiftLeftSame(
-                candidate_hash, static_cast<int>(p_minimizer_type::k_hash_shift)),
-            hn::Or(
+        if constexpr (k_native_output) {
+            candidate_raw = hn::Or(
                 hn::ShiftLeftSame(
+                    candidate_hash,
+                    static_cast<int>(p_minimizer_type::k_hash_shift)),
+                hn::Or(
+                    hn::ShiftLeftSame(
+                        hn::And(
+                            output_position,
+                            hn::Set(d, static_cast<std::uint64_t>(
+                                p_minimizer_type::k_position_field_mask))),
+                        static_cast<int>(p_minimizer_type::k_position_shift)),
+                    strand));
+        } else {
+            candidate_raw = hn::Or(
+                hn::ShiftLeft<1>(
                     hn::And(
                         output_position,
                         hn::Set(d, static_cast<std::uint64_t>(
-                            p_minimizer_type::k_position_field_mask))),
-                    static_cast<int>(p_minimizer_type::k_position_shift)),
-                strand));
+                            p_minimizer_type::k_position_field_mask)))),
+                strand);
+        }
         candidate_raw = hn::IfThenElse(
             live_non_palindrome, candidate_raw, hn::Set(d, max_raw));
     }
@@ -386,10 +449,7 @@ process_chronological_candidate_block(
     std::uint64_t expiry_tie_events = 0;
     const vector_type v_max_raw = hn::Set(d, max_raw);
 
-    HWY_ALIGN std::array<std::uint64_t, event_capacity + max_lanes>
-        compressed_raw;
     std::size_t compressed_count = 0;
-    const vector_type v_raw_hash_mask = hn::Set(d, raw_hash_mask);
 
     // Equal packed minimizer hashes are rare (the XXL production layout has a
     // 30-bit hash field), so prove their absence before constructing the
@@ -421,96 +481,234 @@ process_chronological_candidate_block(
         }
     }
 
-    if (hn::CountTrue(d, actual_tie_lanes) == 0) [[likely]] {
-        compressed_count = hn::CompressStore(
-            previous_raw,
-            hn::And(
-                emit_old,
-                hn::Ne(
-                    hn::And(previous_raw, v_raw_hash_mask),
-                    v_raw_hash_mask)),
-            d,
-            compressed_raw.data());
-        add_stats_counter(state.stats.stable_compress_batches, 1);
-        add_stats_counter(state.stats.direct_event_compress_batches, 1);
-        add_stats_counter(state.stats.scalar_orchestration_steps, 1);
-    } else {
-        add_stats_counter(state.stats.tie_matrix_event_batches, 1);
-        // Build B columns, transpose the BxB tile in registers, then
-        // vector-store each row chunk. This is the rare exact-tie route.
-        for (std::size_t column_block = 0;
-             column_block < row_stride;
-             column_block += lanes) {
-            for (std::size_t column = 0; column < lanes; ++column) {
-                const std::size_t event_slot = column_block + column;
-                if (event_slot == 0) {
-                    event_columns[column] = hn::IfThenElse(
-                        emit_old, previous_raw, v_max_raw);
-                } else if (event_slot <= w) {
-                    const std::size_t candidate_slot = event_slot - 1;
-                    const vector_type slot_hash =
-                        hn::LoadU(d, combined_hash.data() + candidate_slot);
-                    const vector_type slot_raw =
-                        hn::LoadU(d, combined_raw.data() + candidate_slot);
-                    const mask_type special_match = hn::And(
-                        special_ties,
-                        hn::And(
-                            hn::Eq(slot_hash, previous_hash),
-                            hn::Ne(slot_raw, previous_raw)));
-                    const mask_type expiry_match = hn::And(
-                        expiry_ties,
-                        hn::And(
-                            hn::Eq(slot_hash, window_minimum.hash),
-                            hn::Ne(slot_raw, window_minimum.raw)));
-                    first_window_tie_events +=
-                        hn::CountTrue(d, special_match);
-                    expiry_tie_events += hn::CountTrue(d, expiry_match);
-                    event_columns[column] = hn::IfThenElse(
-                        hn::Or(special_match, expiry_match),
-                        slot_raw,
-                        v_max_raw);
-                } else {
-                    event_columns[column] = v_max_raw;
-                }
-            }
-            if (!transpose_u64_lane_matrix(d, event_columns.data())) {
-                return reject_continuation(
-                    state,
-                    two_stack_continuation_status::unsupported_vector_shape);
-            }
-            for (std::size_t row = 0; row < lanes; ++row) {
-                hn::StoreU(
-                    event_columns[row],
-                    d,
-                    event_raw.data() + row * row_stride + column_block);
-            }
-            add_stats_counter(state.stats.row_transpose_batches, 1);
-            add_stats_counter(state.stats.row_vector_stores, lanes);
-            add_stats_counter(
-                state.stats.scalar_orchestration_steps, 2 * lanes);
-        }
-
-        const std::size_t active_event_slots = active_lanes * row_stride;
-        for (std::size_t offset = 0;
-             offset < active_event_slots;
-             offset += lanes) {
-            const vector_type events = hn::LoadU(d, event_raw.data() + offset);
-            const mask_type valid_events = hn::Ne(
-                hn::And(events, v_raw_hash_mask), v_raw_hash_mask);
-            compressed_count += hn::CompressStore(
-                events,
-                valid_events,
+    if constexpr (k_native_output) {
+        HWY_ALIGN std::array<std::uint64_t, event_capacity + max_lanes>
+            compressed_raw;
+        const vector_type v_raw_hash_mask = hn::Set(
+            d, static_cast<std::uint64_t>(p_minimizer_type::k_hash_mask));
+        if (hn::CountTrue(d, actual_tie_lanes) == 0) [[likely]] {
+            compressed_count = hn::CompressStore(
+                previous_raw,
+                hn::And(
+                    emit_old,
+                    hn::Ne(
+                        hn::And(previous_raw, v_raw_hash_mask),
+                        v_raw_hash_mask)),
                 d,
-                compressed_raw.data() + compressed_count);
+                compressed_raw.data());
             add_stats_counter(state.stats.stable_compress_batches, 1);
+            add_stats_counter(state.stats.direct_event_compress_batches, 1);
             add_stats_counter(state.stats.scalar_orchestration_steps, 1);
+        } else {
+            add_stats_counter(state.stats.tie_matrix_event_batches, 1);
+            // Build B columns, transpose the BxB tile in registers, then
+            // vector-store each row chunk. This is the rare exact-tie route.
+            for (std::size_t column_block = 0;
+                 column_block < row_stride;
+                 column_block += lanes) {
+                for (std::size_t column = 0; column < lanes; ++column) {
+                    const std::size_t event_slot = column_block + column;
+                    if (event_slot == 0) {
+                        event_columns[column] = hn::IfThenElse(
+                            emit_old, previous_raw, v_max_raw);
+                    } else if (event_slot <= w) {
+                        const std::size_t candidate_slot = event_slot - 1;
+                        const vector_type slot_hash = hn::LoadU(
+                            d, combined_hash.data() + candidate_slot);
+                        const vector_type slot_raw = hn::LoadU(
+                            d, combined_raw.data() + candidate_slot);
+                        const mask_type special_match = hn::And(
+                            special_ties,
+                            hn::And(
+                                hn::Eq(slot_hash, previous_hash),
+                                hn::Ne(slot_raw, previous_raw)));
+                        const mask_type expiry_match = hn::And(
+                            expiry_ties,
+                            hn::And(
+                                hn::Eq(slot_hash, window_minimum.hash),
+                                hn::Ne(slot_raw, window_minimum.raw)));
+                        first_window_tie_events +=
+                            hn::CountTrue(d, special_match);
+                        expiry_tie_events += hn::CountTrue(d, expiry_match);
+                        event_columns[column] = hn::IfThenElse(
+                            hn::Or(special_match, expiry_match),
+                            slot_raw,
+                            v_max_raw);
+                    } else {
+                        event_columns[column] = v_max_raw;
+                    }
+                }
+                if (!transpose_u64_lane_matrix(d, event_columns.data())) {
+                    return reject_continuation(
+                        state,
+                        two_stack_continuation_status::unsupported_vector_shape);
+                }
+                for (std::size_t row = 0; row < lanes; ++row) {
+                    hn::StoreU(
+                        event_columns[row],
+                        d,
+                        event_raw.data() + row * row_stride + column_block);
+                }
+                add_stats_counter(state.stats.row_transpose_batches, 1);
+                add_stats_counter(state.stats.row_vector_stores, lanes);
+                add_stats_counter(
+                    state.stats.scalar_orchestration_steps, 2 * lanes);
+            }
+
+            const std::size_t active_event_slots = active_lanes * row_stride;
+            for (std::size_t offset = 0;
+                 offset < active_event_slots;
+                 offset += lanes) {
+                const vector_type events = hn::LoadU(
+                    d, event_raw.data() + offset);
+                const mask_type valid_events = hn::Ne(
+                    hn::And(events, v_raw_hash_mask), v_raw_hash_mask);
+                compressed_count += hn::CompressStore(
+                    events,
+                    valid_events,
+                    d,
+                    compressed_raw.data() + compressed_count);
+                add_stats_counter(state.stats.stable_compress_batches, 1);
+                add_stats_counter(state.stats.scalar_orchestration_steps, 1);
+            }
         }
-    }
-    if (compressed_count != 0
-        && !collector.append_raw_storage(
-            compressed_raw.data(), compressed_count)) {
-        return reject_continuation(
-            state, two_stack_continuation_status::collector_overflow);
+        if (compressed_count != 0
+            && !collector.append_raw_storage(
+                compressed_raw.data(), compressed_count)) {
+            return reject_continuation(
+                state, two_stack_continuation_status::collector_overflow);
+        }
+    } else {
+        // Split records retain hash validity separately from position/strand.
+        // Both streams use the same mask and only compressed lanes become
+        // concrete record objects in the typed sink.
+        HWY_ALIGN std::array<std::uint64_t, event_capacity + max_lanes>
+            compressed_hash;
+        HWY_ALIGN std::array<std::uint64_t, event_capacity + max_lanes>
+            compressed_position_strand;
+        if (hn::CountTrue(d, actual_tie_lanes) == 0) [[likely]] {
+            const mask_type valid_old = hn::And(
+                emit_old, hn::Ne(previous_hash, v_max_hash));
+            const std::size_t hash_count = hn::CompressStore(
+                previous_hash, valid_old, d, compressed_hash.data());
+            compressed_count = hn::CompressStore(
+                previous_raw,
+                valid_old,
+                d,
+                compressed_position_strand.data());
+            if (hash_count != compressed_count) {
+                return reject_continuation(
+                    state, two_stack_continuation_status::invalid_state);
+            }
+            add_stats_counter(state.stats.stable_compress_batches, 1);
+            add_stats_counter(state.stats.direct_event_compress_batches, 1);
+            add_stats_counter(state.stats.scalar_orchestration_steps, 1);
+        } else {
+            add_stats_counter(state.stats.tie_matrix_event_batches, 1);
+            HWY_ALIGN std::array<std::uint64_t, event_capacity> event_hash;
+            HWY_ALIGN std::array<vector_type, max_lanes> event_hash_columns{};
+            for (std::size_t column_block = 0;
+                 column_block < row_stride;
+                 column_block += lanes) {
+                for (std::size_t column = 0; column < lanes; ++column) {
+                    const std::size_t event_slot = column_block + column;
+                    if (event_slot == 0) {
+                        event_columns[column] = hn::IfThenElse(
+                            emit_old, previous_raw, v_max_raw);
+                        event_hash_columns[column] = hn::IfThenElse(
+                            emit_old, previous_hash, v_max_hash);
+                    } else if (event_slot <= w) {
+                        const std::size_t candidate_slot = event_slot - 1;
+                        const vector_type slot_hash = hn::LoadU(
+                            d, combined_hash.data() + candidate_slot);
+                        const vector_type slot_raw = hn::LoadU(
+                            d, combined_raw.data() + candidate_slot);
+                        const mask_type special_match = hn::And(
+                            special_ties,
+                            hn::And(
+                                hn::Eq(slot_hash, previous_hash),
+                                hn::Ne(slot_raw, previous_raw)));
+                        const mask_type expiry_match = hn::And(
+                            expiry_ties,
+                            hn::And(
+                                hn::Eq(slot_hash, window_minimum.hash),
+                                hn::Ne(slot_raw, window_minimum.raw)));
+                        const mask_type emit_tie = hn::Or(
+                            special_match, expiry_match);
+                        first_window_tie_events +=
+                            hn::CountTrue(d, special_match);
+                        expiry_tie_events += hn::CountTrue(d, expiry_match);
+                        event_columns[column] = hn::IfThenElse(
+                            emit_tie, slot_raw, v_max_raw);
+                        event_hash_columns[column] = hn::IfThenElse(
+                            emit_tie, slot_hash, v_max_hash);
+                    } else {
+                        event_columns[column] = v_max_raw;
+                        event_hash_columns[column] = v_max_hash;
+                    }
+                }
+                if (!transpose_u64_lane_matrix(d, event_columns.data())
+                    || !transpose_u64_lane_matrix(
+                        d, event_hash_columns.data())) {
+                    return reject_continuation(
+                        state,
+                        two_stack_continuation_status::unsupported_vector_shape);
+                }
+                for (std::size_t row = 0; row < lanes; ++row) {
+                    const std::size_t event_offset =
+                        row * row_stride + column_block;
+                    hn::StoreU(
+                        event_columns[row], d, event_raw.data() + event_offset);
+                    hn::StoreU(
+                        event_hash_columns[row],
+                        d,
+                        event_hash.data() + event_offset);
+                }
+                add_stats_counter(state.stats.row_transpose_batches, 1);
+                add_stats_counter(state.stats.row_vector_stores, lanes);
+                add_stats_counter(
+                    state.stats.scalar_orchestration_steps, 2 * lanes);
+            }
+
+            const std::size_t active_event_slots = active_lanes * row_stride;
+            for (std::size_t offset = 0;
+                 offset < active_event_slots;
+                 offset += lanes) {
+                const vector_type event_hashes = hn::LoadU(
+                    d, event_hash.data() + offset);
+                const vector_type event_positions = hn::LoadU(
+                    d, event_raw.data() + offset);
+                const mask_type valid_events = hn::Ne(
+                    event_hashes, v_max_hash);
+                const std::size_t hash_count = hn::CompressStore(
+                    event_hashes,
+                    valid_events,
+                    d,
+                    compressed_hash.data() + compressed_count);
+                const std::size_t position_count = hn::CompressStore(
+                    event_positions,
+                    valid_events,
+                    d,
+                    compressed_position_strand.data() + compressed_count);
+                if (hash_count != position_count) {
+                    return reject_continuation(
+                        state, two_stack_continuation_status::invalid_state);
+                }
+                compressed_count += hash_count;
+                add_stats_counter(state.stats.stable_compress_batches, 1);
+                add_stats_counter(state.stats.scalar_orchestration_steps, 1);
+            }
+        }
+        if (compressed_count != 0
+            && !append_wide_minimizer_records<p_minimizer_type>(
+                collector,
+                compressed_hash.data(),
+                compressed_position_strand.data(),
+                compressed_count,
+                k)) {
+            return reject_continuation(
+                state, two_stack_continuation_status::collector_overflow);
+        }
     }
 
     state.current_min = {
@@ -686,25 +884,64 @@ template<class p_minimizer_type, class p_continuation_state, class p_collector_t
     p_continuation_state& state,
     p_collector_type& collector)
 {
-    using storage_type = typename p_minimizer_type::storage_type;
     using simd_tag_type = hn::ScalableTag<std::uint64_t>;
     simd_tag_type d;
-    const auto current_raw = hn::Set(
-        d, static_cast<std::uint64_t>(state.current_min.raw));
-    const auto raw_hash_mask = hn::Set(
-        d, static_cast<std::uint64_t>(p_minimizer_type::k_hash_mask));
-    const auto current_valid = hn::Ne(
-        hn::And(current_raw, raw_hash_mask), raw_hash_mask);
-    HWY_ALIGN std::array<storage_type, p_continuation_state::max_vector_lanes> final_raw{};
-    const std::size_t final_count = hn::CompressStore(
-        current_raw,
-        hn::And(current_valid, hn::FirstN(d, 1)),
-        d,
-        final_raw.data());
-    if (final_count != 0
-        && !collector.append_raw_storage(final_raw.data(), final_count)) {
-        return reject_continuation(
-            state, two_stack_continuation_status::collector_overflow);
+    std::size_t final_count = 0u;
+    if constexpr (exact_simd_minimizer_representation<p_minimizer_type>) {
+        using storage_type = typename p_minimizer_type::storage_type;
+        const auto current_raw = hn::Set(
+            d, static_cast<std::uint64_t>(state.current_min.raw));
+        const auto raw_hash_mask = hn::Set(
+            d, static_cast<std::uint64_t>(p_minimizer_type::k_hash_mask));
+        const auto current_valid = hn::Ne(
+            hn::And(current_raw, raw_hash_mask), raw_hash_mask);
+        HWY_ALIGN std::array<storage_type, p_continuation_state::max_vector_lanes>
+            final_raw{};
+        final_count = hn::CompressStore(
+            current_raw,
+            hn::And(current_valid, hn::FirstN(d, 1)),
+            d,
+            final_raw.data());
+        if (final_count != 0
+            && !collector.append_raw_storage(final_raw.data(), final_count)) {
+            return reject_continuation(
+                state, two_stack_continuation_status::collector_overflow);
+        }
+    } else {
+        static_assert(wide_simd_minimizer_representation<p_minimizer_type>);
+        const auto current_hash = hn::Set(
+            d, static_cast<std::uint64_t>(state.current_min.hash));
+        const auto current_position_strand = hn::Set(
+            d, static_cast<std::uint64_t>(state.current_min.raw));
+        const auto maximum_hash = hn::Set(
+            d, static_cast<std::uint64_t>(p_minimizer_type::maximum().kmer()));
+        const auto current_valid = hn::Ne(current_hash, maximum_hash);
+        const auto final_mask = hn::And(current_valid, hn::FirstN(d, 1));
+        HWY_ALIGN std::array<std::uint64_t, p_continuation_state::max_vector_lanes>
+            final_hash{};
+        HWY_ALIGN std::array<std::uint64_t, p_continuation_state::max_vector_lanes>
+            final_position_strand{};
+        const std::size_t hash_count = hn::CompressStore(
+            current_hash, final_mask, d, final_hash.data());
+        final_count = hn::CompressStore(
+            current_position_strand,
+            final_mask,
+            d,
+            final_position_strand.data());
+        if (hash_count != final_count) {
+            return reject_continuation(
+                state, two_stack_continuation_status::invalid_state);
+        }
+        if (final_count != 0
+            && !append_wide_minimizer_records<p_minimizer_type>(
+                collector,
+                final_hash.data(),
+                final_position_strand.data(),
+                final_count,
+                state.kmer_size())) {
+            return reject_continuation(
+                state, two_stack_continuation_status::collector_overflow);
+        }
     }
     add_stats_counter(state.stats.minimizers_emitted, final_count);
     add_stats_counter(state.stats.final_flush_records, final_count);

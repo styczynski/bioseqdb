@@ -54,7 +54,7 @@ export struct pg_sequence_source_identity {
                            pg_sequence_source_identity const&) = default;
 };
 
-/// No-throw lifetime and rank-read callbacks for opaque source state.
+/// No-throw lifetime plus logical-rank and optional native-packed reads.
 export struct pg_sequence_source_backend_ops {
     void (*retain)(void*) noexcept;
     void (*release)(void*) noexcept;
@@ -66,6 +66,21 @@ export struct pg_sequence_source_backend_ops {
         bioseq::storage::sequence_locator const&,
         compact_sequence_stdc_type_params,
         bioseq::storage::sequence_transform,
+        std::uint64_t,
+        std::span<std::uint8_t>);
+    /**
+     * Copy identity-oriented native storage units without decoding ranks.
+     *
+     * This optional capability is intentionally expressed in physical units:
+     * callers that need complementing, reversing, repacking, or a composed
+     * logical view must use another route rather than disguising biological
+     * work as source I/O.
+     */
+    pg_sequence_source_read_status (*read_packed_units)(
+        void const*,
+        pg_sequence_read_session&,
+        bioseq::storage::sequence_locator const&,
+        compact_sequence_stdc_type_params,
         std::uint64_t,
         std::span<std::uint8_t>);
 };

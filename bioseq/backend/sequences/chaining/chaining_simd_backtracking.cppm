@@ -127,8 +127,12 @@ void backtrack_chains_simd(
     // Lane zero is also the primary path scratch. Reusing the eventual
     // lane-batched matrix avoids retaining a separate N-element allocation
     // for the dominant path.
-    const std::size_t matrix_elements =
-        anchors.size() * static_cast<std::size_t>(lanes);
+    const auto matrix_plan = bioseq::chaining::simd_chaining_path_elements(
+        anchors.size(), static_cast<std::size_t>(lanes));
+    if (!matrix_plan) {
+        throw std::length_error{"SIMD chaining backtracking path storage overflowed"};
+    }
+    const std::size_t matrix_elements = *matrix_plan;
     auto paths = ctx.alloc_chain_array<std::int32_t, 64>(
         matrix_elements);
 

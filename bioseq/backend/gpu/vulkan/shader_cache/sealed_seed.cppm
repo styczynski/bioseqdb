@@ -144,7 +144,7 @@ parse_manifest(std::span<const std::byte> bytes) {
         }
         if (*raw_kind >
                 static_cast<std::uint32_t>(
-                    sealed_shader_cache_artifact_kind::metal_binary_archive_qualification) ||
+                    sealed_shader_cache_artifact_kind::moltenvk_command_library) ||
             *filename_size == 0u || *filename_size > k_maximum_manifest_filename_bytes ||
             *reserved != 0u || *size == 0u) {
             return std::unexpected("sealed shader cache artifact record is invalid");
@@ -180,6 +180,10 @@ parse_manifest(std::span<const std::byte> bytes) {
     }
     return manifest;
 }
+
+[[nodiscard]] inline std::expected<std::vector<std::byte>, std::string>
+load_validated_artifact_bytes(const std::filesystem::path& cache_dir,
+                              const sealed_shader_cache_artifact& artifact);
 
 /// @brief Validates manifest digest, key membership, artifact order, and seed identity.
 /// @param[in] cache_dir Shader-cache directory.
@@ -224,6 +228,33 @@ validate_shape(const std::filesystem::path& cache_dir,
                 "sealed shader cache artifact membership mismatch at ordinal ", index));
         }
     }
+    const auto command_artifact = std::find_if(
+        manifest.artifacts.begin(),
+        manifest.artifacts.end(),
+        [](const sealed_shader_cache_artifact& artifact) {
+            return artifact.kind ==
+                       sealed_shader_cache_artifact_kind::moltenvk_command_library &&
+                   artifact.key_index == (std::numeric_limits<std::uint32_t>::max)() &&
+                   artifact.filename == "moltenvk_command.sealed";
+        });
+    if (command_artifact == manifest.artifacts.end())
+        return std::unexpected("sealed shader cache has no exact MoltenVK command library");
+    auto command_bytes = load_validated_artifact_bytes(cache_dir, *command_artifact);
+    if (!command_bytes)
+        return std::unexpected(command_bytes.error());
+    auto command_bundle = parse_moltenvk_command_library_bundle(*command_bytes);
+    if (!command_bundle || !command_bundle->qualification.is_production_accepted()) {
+        return std::unexpected(shader_cache_message(
+            "sealed MoltenVK command library is invalid: ",
+            command_bundle ? "not production-qualified" : command_bundle.error()));
+    }
+#if defined(__APPLE__)
+    if (auto current = validate_moltenvk_command_receipt_against_process_helper(
+            command_bundle->qualification);
+        !current) {
+        return std::unexpected(current.error());
+    }
+#endif
     auto seed = seed_identity(manifest.cache_digest, manifest.keys, manifest.artifacts);
     if (!seed)
         return std::unexpected(seed.error());
@@ -298,6 +329,22 @@ validate_all_artifacts(const std::filesystem::path& cache_dir,
         if (auto valid = validate_artifact(cache_dir, artifact); !valid) {
             return valid;
         }
+    }
+    const auto command_artifact = std::find_if(
+        manifest.artifacts.begin(),
+        manifest.artifacts.end(),
+        [](const sealed_shader_cache_artifact& artifact) {
+            return artifact.kind ==
+                   sealed_shader_cache_artifact_kind::moltenvk_command_library;
+        });
+    if (command_artifact == manifest.artifacts.end())
+        return std::unexpected("sealed shader cache has no command-library artifact");
+    auto command_bytes = load_validated_artifact_bytes(cache_dir, *command_artifact);
+    if (!command_bytes)
+        return std::unexpected(command_bytes.error());
+    auto command_bundle = parse_moltenvk_command_library_bundle(*command_bytes);
+    if (!command_bundle || !command_bundle->qualification.is_production_accepted()) {
+        return std::unexpected("sealed command-library qualification is invalid");
     }
     for (const shader_variant_key& key : manifest.keys) {
         if (auto status = cache_entry_status(cache_dir, key); !status) {
@@ -429,6 +476,18 @@ validate_all_artifacts(const std::filesystem::path& cache_dir,
     if (!common_negative_error || !common_helper) {
         return std::unexpected("sealed shader cache has no Metal archive qualification receipt");
     }
+    helper_identity command_helper{
+        command_bundle->qualification.helper_wire_revision,
+        command_bundle->qualification.helper_build_identity,
+        command_bundle->qualification.helper_source,
+        command_bundle->qualification.helper_executable_size,
+        command_bundle->qualification.helper_executable_sha256,
+        command_bundle->qualification.helper_metal_registry_id,
+    };
+    if (*common_helper != command_helper) {
+        return std::unexpected(
+            "MoltenVK command and pipeline archives disagree on helper/device provenance");
+    }
     return {};
 }
 
@@ -474,6 +533,30 @@ validate_all_artifact_images(const std::filesystem::path& cache_dir,
                 "sealed shader cache seed image mismatch at ordinal ", ordinal));
         }
     }
+
+    const auto command_image = std::find_if(
+        images.begin(), images.end(), [](const sealed_shader_cache_artifact_image& artifact) {
+            return artifact.descriptor.kind ==
+                       sealed_shader_cache_artifact_kind::moltenvk_command_library &&
+                   artifact.descriptor.key_index ==
+                       (std::numeric_limits<std::uint32_t>::max)() &&
+                   artifact.descriptor.filename == "moltenvk_command.sealed";
+        });
+    if (command_image == images.end())
+        return std::unexpected("sealed seed image has no exact MoltenVK command library");
+    auto command_bundle = parse_moltenvk_command_library_bundle(command_image->bytes);
+    if (!command_bundle || !command_bundle->qualification.is_production_accepted()) {
+        return std::unexpected(shader_cache_message(
+            "sealed seed MoltenVK command library is invalid: ",
+            command_bundle ? "not production-qualified" : command_bundle.error()));
+    }
+#if defined(__APPLE__)
+    if (auto current = validate_moltenvk_command_receipt_against_process_helper(
+            command_bundle->qualification);
+        !current) {
+        return std::unexpected(current.error());
+    }
+#endif
 
     for (std::size_t key_ordinal = 0u; key_ordinal < manifest.keys.size(); ++key_ordinal) {
         const shader_variant_key& key = manifest.keys[key_ordinal];
@@ -626,6 +709,18 @@ validate_all_artifact_images(const std::filesystem::path& cache_dir,
     if (!common_negative_error || !common_helper) {
         return std::unexpected(
             "sealed shader cache seed has no Metal archive qualification receipt");
+    }
+    seed_helper_identity command_helper{
+        command_bundle->qualification.helper_wire_revision,
+        command_bundle->qualification.helper_build_identity,
+        command_bundle->qualification.helper_source,
+        command_bundle->qualification.helper_executable_size,
+        command_bundle->qualification.helper_executable_sha256,
+        command_bundle->qualification.helper_metal_registry_id,
+    };
+    if (*common_helper != command_helper) {
+        return std::unexpected(
+            "MoltenVK command and pipeline archives disagree on helper/device provenance");
     }
     return {};
 }
@@ -1372,6 +1467,7 @@ load_sealed_shader_cache_key_image(const std::filesystem::path& cache_dir,
             break;
         case sealed_shader_cache_artifact_kind::metal_binary_archive:
         case sealed_shader_cache_artifact_kind::metal_binary_archive_qualification:
+        case sealed_shader_cache_artifact_kind::moltenvk_command_library:
             break;
         case sealed_shader_cache_artifact_kind::reserved_command_metallib:
             return std::unexpected(

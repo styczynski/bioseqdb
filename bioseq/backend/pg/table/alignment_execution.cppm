@@ -13,6 +13,7 @@ module;
 export module bioseq.postgres.table.alignment_execution;
 
 import bioseq.pipeline.stats;
+import bioseq.pipeline.minimap_parameters_contract;
 
 export namespace bioseq::postgres::table::alignment_execution {
 
@@ -35,12 +36,13 @@ struct alignment_execution_collector {
     bool is_lifecycle_counter_saturated = false;
     std::vector<alignment_node_stats> alignment_nodes{};
     bioseq::pipeline_stats::persisted_gpu_operation_accumulator persisted_gpu_operations{};
+    bioseq::simd::downstream_active_wall_tracker downstream_active_wall{};
 };
 
 /**
- * @brief Pointer-free value published after a statement finishes.
+ * @brief Self-contained value published after a statement finishes.
  *
- * Executor and query-context addresses must never escape into this snapshot.
+ * Borrowed executor and query-context addresses must never escape into this snapshot.
  */
 struct alignment_execution_snapshot {
     std::int64_t execution_id = 0;
@@ -53,6 +55,12 @@ struct alignment_execution_snapshot {
     bool is_fully_drained = false;
     bioseq::pipeline_stats::pipeline_execution_stats pipeline{};
     bioseq::pipeline_stats::persisted_gpu_operation_accumulator persisted_gpu_operations{};
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    // Fixed-layout E2E proof stays outside the GPU/statistics ABI. Its producer
+    // rejects capacity overflow instead of publishing truncated origin evidence.
+    bioseq::simd::benchmark_e2e_interval_origin_buffer
+        benchmark_e2e_interval_origins{};
+#endif
 };
 
 /**
@@ -207,6 +215,18 @@ borrow_persisted_gpu_operation_accumulator(alignment_node_registration_handle& h
                  errmsg("bioseq persisted GPU operation accumulator is unavailable")));
     }
     return &handle.binding->root_collector->persisted_gpu_operations;
+}
+
+/** Borrow the sole statement-owned downstream active-wall union tracker. */
+[[nodiscard]] inline bioseq::simd::downstream_active_wall_tracker*
+borrow_downstream_active_wall_tracker(alignment_node_registration_handle& handle) {
+    if (!handle.is_bound() || handle.binding->is_retired ||
+        handle.binding->root_collector == nullptr) {
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq downstream active-wall tracker is unavailable")));
+    }
+    return &handle.binding->root_collector->downstream_active_wall;
 }
 
 /** Merge one successfully completed, non-empty dispatch batch exactly once. */

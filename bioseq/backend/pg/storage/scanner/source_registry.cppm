@@ -90,6 +90,9 @@ struct source_scanner_entry {
     /// Type-erased logical-rank read callback.
     void (*read_ranks)(source_scanner_entry&, sequence_transform,
                        std::uint64_t, std::span<std::uint8_t>) = nullptr;
+    /// Type-erased identity-oriented native packed-unit read callback.
+    void (*read_packed_units)(source_scanner_entry&, std::uint64_t,
+                              std::span<std::uint8_t>) = nullptr;
     /// Checked successful-finalization callback.
     void (*finish)(source_scanner_entry&) = nullptr;
     /// Failure cleanup callback that does not propagate errors.

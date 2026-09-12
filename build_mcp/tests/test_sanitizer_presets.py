@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -121,14 +122,18 @@ class SanitizerPresetContractTest(unittest.TestCase):
 
     def test_only_tsan_selects_instrumented_tbb_overlay(self) -> None:
         overlay_key = "VCPKG_OVERLAY_PORTS"
+        tsan_overlay = "${sourceDir}/cmake/ports-tsan"
         self.assertEqual(
-            self.resolved_cache_variables("test-opt-tsan")[overlay_key],
-            "${sourceDir}/cmake/ports-tsan",
+            self.resolved_cache_variables("test-opt-tsan")[overlay_key]
+                .split(";").count(tsan_overlay),
+            1,
         )
         for name in ("test-opt", "test-opt-asan", "test-opt-ubsan"):
             with self.subTest(name=name):
                 self.assertNotIn(
-                    overlay_key, self.resolved_cache_variables(name))
+                    tsan_overlay,
+                    self.resolved_cache_variables(name)
+                        .get(overlay_key, "").split(";"))
 
         overlay = REPOSITORY_ROOT / "cmake" / "ports-tsan" / "tbb"
         portfile = (overlay / "portfile.cmake").read_text()
@@ -193,8 +198,8 @@ class SanitizerPresetContractTest(unittest.TestCase):
     def test_postgresql_nls_dependency_is_target_scoped(self) -> None:
         module = (REPOSITORY_ROOT / "cmake" / "FindPostgreSQL.cmake").read_text()
         self.assertIn(
-            'file(STRINGS "${_PostgreSQL_CONFIG_HEADER}" '
-            "_PostgreSQL_ENABLE_NLS",
+            'file(STRINGS "${_postgresql_config_header}" '
+            "_postgresql_enable_nls",
             module,
         )
         self.assertIn("find_package(Intl REQUIRED)", module)
@@ -503,16 +508,22 @@ if Path(runtime.__file__).resolve() != expected_helper.resolve():
     def test_restart_argv_preserves_homebrew_dyld_environment(self) -> None:
         data_dir = "/tmp/private-pg-data"
         homebrew = "/opt/homebrew/opt/postgresql@17/bin/pg_ctl"
+        homebrew_postgres = "/opt/homebrew/opt/postgresql@17/bin/postgres"
         postgres_app = (
             "/Applications/Postgres.app/Contents/Versions/17/bin/pg_ctl")
+        postgres_app_server = (
+            "/Applications/Postgres.app/Contents/Versions/17/bin/postgres")
         self.assertEqual(
-            postgres_runtime._darwin_postgresql_restart_argv(homebrew, data_dir),
-            [homebrew, "-D", data_dir, "restart"],
+            postgres_runtime._darwin_postgresql_restart_argv(
+                homebrew, homebrew_postgres, data_dir),
+            [homebrew, "-D", data_dir, "restart",
+             "-p", homebrew_postgres],
         )
         self.assertEqual(
-            postgres_runtime._darwin_postgresql_restart_argv(postgres_app, data_dir),
+            postgres_runtime._darwin_postgresql_restart_argv(
+                postgres_app, postgres_app_server, data_dir),
             ["arch", "-arm64", postgres_app,
-             "-D", data_dir, "restart"],
+             "-D", data_dir, "restart", "-p", postgres_app_server],
         )
 
     def test_builder_restart_environment_strips_ambient_preload(self) -> None:
@@ -731,12 +742,16 @@ if Path(runtime.__file__).resolve() != expected_helper.resolve():
             build_dir = Path(temporary)
             pg_config = "/usr/lib/postgresql/17/bin/pg_config"
             bindir = "/usr/lib/postgresql/17/bin"
+            pkglibdir = "/usr/lib/postgresql/17/lib"
             (build_dir / "CMakeCache.txt").write_text(
                 f"PostgreSQL_CONFIG:FILEPATH={pg_config}\n",
                 encoding="utf-8")
             bindir_result = subprocess.CompletedProcess(
                 args=[pg_config, "--bindir"], returncode=0,
                 stdout=f"{bindir}\n", stderr="")
+            pkglibdir_result = subprocess.CompletedProcess(
+                args=[pg_config, "--pkglibdir"], returncode=0,
+                stdout=f"{pkglibdir}\n", stderr="")
             log = mock.Mock()
             order = mock.Mock()
             with mock.patch.object(
@@ -745,7 +760,7 @@ if Path(runtime.__file__).resolve() != expected_helper.resolve():
                 postgres_runtime, "_is_aws_preset", return_value=True,
             ), mock.patch.object(
                 postgres_runtime.subprocess, "run",
-                return_value=bindir_result,
+                side_effect=(bindir_result, pkglibdir_result),
             ), mock.patch.object(
                 postgres_runtime.os.path, "isfile", return_value=True,
             ), mock.patch.object(
@@ -788,7 +803,11 @@ if Path(runtime.__file__).resolve() != expected_helper.resolve():
                 ["sudo", "-n", "/usr/bin/systemctl", "restart",
                  "postgresql"],
                 log,
-                env={"PATH": "/usr/bin"}),
+                env={"PATH": "/usr/bin"},
+                data_dir="/var/lib/postgresql/17/main",
+                active_preset="aws-test-opt",
+                expected_postgres=f"{bindir}/postgres",
+                expected_bioseq_dso=f"{pkglibdir}/bioseq.so"),
             mock.call.verify_preload(psql, "aws-test-opt"),
             mock.call.verify_prepared(psql, "aws-test-opt"),
         ])
@@ -836,7 +855,10 @@ if Path(runtime.__file__).resolve() != expected_helper.resolve():
         create_argv = run.call_args_list[1].args[0]
         self.assertEqual(create_argv[:2], ["/bin/bash", "-lc"])
         self.assertIn(str(bindir / "createdb"), create_argv[2])
-        self.assertIn("WHERE datname = 'bioseq'", create_argv[2])
+        self.assertIn(
+            "SELECT 1 FROM pg_database WHERE datname = 'bioseq';",
+            shlex.split(create_argv[2]),
+        )
         self.assertNotIn("DROP DATABASE", create_argv[2])
 
     def test_local_postgresql_test_database_propagates_role_failure(self) -> None:

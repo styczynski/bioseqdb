@@ -2,8 +2,8 @@
  * @file statistics_receipts_test.cpp
  * @brief Exercises pipeline statistics and receipts.
  */
-#include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
 
 import std;
 import bioseq.tests.unit.pipeline.pipe_support;
@@ -20,10 +20,8 @@ TEST_CASE("canonical pipeline stages have stable ordinals and names",
     static_assert(static_cast<std::uint8_t>(pipeline_stage::right_extension) == 19);
     static_assert(static_cast<std::uint8_t>(pipeline_stage::count) == 20);
     static_assert(bioseq::pipeline_stats::k_pipeline_stage_count == 20);
-    static_assert(std::is_trivially_copyable_v<
-        bioseq::pipeline_stats::pipeline_execution_stats>);
-    static_assert(std::is_standard_layout_v<
-        bioseq::pipeline_stats::pipeline_execution_stats>);
+    static_assert(std::is_trivially_copyable_v<bioseq::pipeline_stats::pipeline_execution_stats>);
+    static_assert(std::is_standard_layout_v<bioseq::pipeline_stats::pipeline_execution_stats>);
 
     constexpr std::array<std::string_view, 20> expected_names{
         "query_sketch",
@@ -52,7 +50,7 @@ TEST_CASE("canonical pipeline stages have stable ordinals and names",
     }
 }
 
-TEST_CASE("unbound pipeline description owns exact Highway kernels by stage",
+TEST_CASE("explicitly bound pipeline description owns exact Highway kernels by stage",
           "[component:bioseq][layer:unit][feature:planner][resource:highway]") {
     using bioseq::simd::base_alignment_algorithm;
     using bioseq::simd::chaining_algorithm;
@@ -63,52 +61,44 @@ TEST_CASE("unbound pipeline description owns exact Highway kernels by stage",
     using bioseq::simd_dispatch::highway_kernel_mask_for;
 
     minimap2_parameters params{};
-    const auto& table =
-        ::bioseq::simd_dispatch::highway_test_kernel_table();
-    const auto* alphabet_identity = table.is_complete()
-        ? table.resolve_alphabet_identity<::seq::dna4>() : nullptr;
+    const auto& table = ::bioseq::simd_dispatch::highway_test_kernel_table();
+    const auto* alphabet_identity =
+        table.is_complete() ? table.resolve_alphabet_identity<::seq::dna4>() : nullptr;
     REQUIRE(alphabet_identity != nullptr);
     params.alphabet_code = alphabet_identity->alphabet_code;
-    params.minimizer_algorithm =
-        minimizer_algorithm::bounded_nthash_simd;
+    params.minimizer_algorithm = minimizer_algorithm::bounded_nthash_simd;
     params.chaining_algorithm = chaining_algorithm::simd_minimap2;
     params.prefilter_enabled = true;
-    params.prefilter_backend =
-        bioseq::prefilter::prefilter_backend::simd;
-    params.base_alignment_algorithm =
-        base_alignment_algorithm::ksw2_batched;
+    params.prefilter_backend = bioseq::prefilter::prefilter_backend::simd;
+    params.base_alignment_algorithm = base_alignment_algorithm::ksw2_batched;
     params.do_cigar = true;
     REQUIRE(params.highway_kernels == nullptr);
+    bind_fixed_highway<::seq::dna4>(params);
+    REQUIRE(params.highway_kernels == fixed_highway_kernels());
 
-    const auto description = bioseq::simd::pipe::describe_pipeline_for<
-        ::seq::dna4>(
-        params, params.alphabet_code,
-        query_sketch_route::recompute_capable);
-    REQUIRE(bioseq::simd::pipe::query_sketch_stage_owner_count(
-                description) == 1u);
+    const auto description = bioseq::simd::pipe::describe_pipeline_for<::seq::dna4>(
+        params, params.alphabet_code, query_sketch_route::recompute_capable);
+    REQUIRE(bioseq::simd::pipe::query_sketch_stage_owner_count(description) == 1u);
 
     const auto stage_kernels = [&description](const std::string_view name) {
         const auto found = std::ranges::find(
-            description.stages, name,
-            &bioseq::simd::pipe::stage_description::stage_name);
+            description.stages, name, &bioseq::simd::pipe::stage_description::stage_name);
         REQUIRE(found != description.stages.end());
         REQUIRE(found->algorithm.has_value());
         return found->algorithm->highway_kernels;
     };
-    REQUIRE(stage_kernels("QuerySketchStage") == highway_kernel_mask_for(
-        highway_kernel::minimizer_bounded_nthash));
-    REQUIRE(stage_kernels("chain_stage") == highway_kernel_mask_for(
-        highway_kernel::chaining_chain_anchors_simd));
-    REQUIRE(stage_kernels("prefilter_stage") == highway_kernel_mask_for(
-        highway_kernel::prefilter_sneaky_snake_simd_batch));
-    auto alignment_kernels = highway_kernel_mask_for(
-        highway_kernel::alignment_ksw2_batched);
-    alignment_kernels |= highway_kernel_mask_for(
-        highway_kernel::alignment_ksw2);
+    REQUIRE(stage_kernels("QuerySketchStage") ==
+            highway_kernel_mask_for(highway_kernel::minimizer_bounded_nthash));
+    REQUIRE(stage_kernels("chain_stage") ==
+            highway_kernel_mask_for(highway_kernel::chaining_chain_anchors_simd));
+    REQUIRE(stage_kernels("prefilter_stage") ==
+            highway_kernel_mask_for(highway_kernel::prefilter_sneaky_snake_simd_batch));
+    auto alignment_kernels = highway_kernel_mask_for(highway_kernel::alignment_ksw2_batched);
+    alignment_kernels |= highway_kernel_mask_for(highway_kernel::alignment_ksw2);
     REQUIRE(stage_kernels("align_stage") == alignment_kernels);
 }
 
-TEST_CASE("all-GPU bounded CIGAR description advertises no Highway kernel",
+TEST_CASE("GPU-selected tuple description exposes only the host Block Aligner Highway kernel",
           "[component:bioseq][layer:unit][feature:planner][resource:highway]") {
     using bioseq::simd::base_alignment_algorithm;
     using bioseq::simd::chaining_algorithm;
@@ -117,19 +107,16 @@ TEST_CASE("all-GPU bounded CIGAR description advertises no Highway kernel",
     using bioseq::simd::pipe::query_sketch_route;
 
     minimap2_parameters params{};
-    const auto& table =
-        ::bioseq::simd_dispatch::highway_test_kernel_table();
-    const auto* alphabet_identity = table.is_complete()
-        ? table.resolve_alphabet_identity<::seq::dna4>() : nullptr;
+    const auto& table = ::bioseq::simd_dispatch::highway_test_kernel_table();
+    const auto* alphabet_identity =
+        table.is_complete() ? table.resolve_alphabet_identity<::seq::dna4>() : nullptr;
     REQUIRE(alphabet_identity != nullptr);
     params.alphabet_code = alphabet_identity->alphabet_code;
     params.kmer_size = 15;
     params.window_size = 10;
-    params.minimizer_algorithm =
-        minimizer_algorithm::vulkan_minimap_integer;
+    params.minimizer_algorithm = minimizer_algorithm::vulkan_minimap_integer;
     params.chaining_algorithm = chaining_algorithm::vulkan_tiled_dynamic_programming;
-    params.base_alignment_algorithm =
-        base_alignment_algorithm::block_aligner;
+    params.base_alignment_algorithm = base_alignment_algorithm::block_aligner;
     params.vulkan_enabled = true;
     params.vulkan_seed_hits_enabled = true;
     params.vulkan_fused_frontend_enabled = true;
@@ -145,22 +132,25 @@ TEST_CASE("all-GPU bounded CIGAR description advertises no Highway kernel",
 
     REQUIRE(bioseq::simd::pipe::complete_all_gpu_tuple_selected(params));
     REQUIRE(params.highway_kernels == nullptr);
+    bind_fixed_highway<::seq::dna4>(params);
+    REQUIRE(params.highway_kernels == fixed_highway_kernels());
 
-    const auto description = bioseq::simd::pipe::describe_pipeline_for<
-        ::seq::dna4>(
-        params, params.alphabet_code,
-        query_sketch_route::recompute_capable);
+    const auto description = bioseq::simd::pipe::describe_pipeline_for<::seq::dna4>(
+        params, params.alphabet_code, query_sketch_route::recompute_capable);
     const auto align_stage = std::ranges::find(
-        description.stages, "align_stage",
-        &bioseq::simd::pipe::stage_description::stage_name);
+        description.stages, "align_stage", &bioseq::simd::pipe::stage_description::stage_name);
     REQUIRE(align_stage != description.stages.end());
     REQUIRE(align_stage->algorithm.has_value());
-    REQUIRE(align_stage->algorithm->highway_kernels.none());
+    const auto alignment_kernels = ::bioseq::simd_dispatch::highway_kernel_mask_for(
+        ::bioseq::simd_dispatch::highway_kernel::alignment_block_aligner);
+    REQUIRE(align_stage->algorithm->highway_kernels == alignment_kernels);
     REQUIRE(std::ranges::all_of(
         description.stages,
-        [](const bioseq::simd::pipe::stage_description& stage) {
-            return !stage.algorithm.has_value()
-                || stage.algorithm->highway_kernels.none();
+        [alignment_kernels](const bioseq::simd::pipe::stage_description& stage) {
+            return !stage.algorithm.has_value() ||
+                   (stage.stage_name == "align_stage"
+                        ? stage.algorithm->highway_kernels == alignment_kernels
+                        : stage.algorithm->highway_kernels.none());
         }));
 }
 
@@ -178,8 +168,7 @@ TEST_CASE("persisted grouped-SoA publication rejects burned fully-consumed stats
         .pending_jobs = 0,
         .staged_jobs = 2,
     };
-    static_assert(is_persisted_grouped_soa_coordinate_publication_consistent(
-        accepted));
+    static_assert(is_persisted_grouped_soa_coordinate_publication_consistent(accepted));
     REQUIRE(is_persisted_grouped_soa_coordinate_publication_consistent(accepted));
 
     /* This fail-open fixture has consume() mark both records
@@ -193,14 +182,13 @@ TEST_CASE("persisted grouped-SoA publication rejects burned fully-consumed stats
         .pending_jobs = 0,
         .staged_jobs = 1,
     };
-    static_assert(!is_persisted_grouped_soa_coordinate_publication_consistent(
-        burned_but_fully_consumed));
-    REQUIRE_FALSE(is_persisted_grouped_soa_coordinate_publication_consistent(
-        burned_but_fully_consumed));
+    static_assert(
+        !is_persisted_grouped_soa_coordinate_publication_consistent(burned_but_fully_consumed));
+    REQUIRE_FALSE(
+        is_persisted_grouped_soa_coordinate_publication_consistent(burned_but_fully_consumed));
 
     const auto rejected = [](counts_type counts) {
-        REQUIRE_FALSE(
-            is_persisted_grouped_soa_coordinate_publication_consistent(counts));
+        REQUIRE_FALSE(is_persisted_grouped_soa_coordinate_publication_consistent(counts));
     };
     auto malformed = accepted;
     malformed.expected_jobs = 0;
@@ -234,60 +222,47 @@ TEST_CASE("persisted grouped-SoA environment binding maps without inference",
     binding.gpu_device_uuid[0] = 0x61u;
     binding.gpu_driver_identity[0] = 'v';
     binding.gpu_driver_identity[1] = 'k';
-    binding.cache_policy = gv::runtime_pipeline_cache_policy::
-        immutable_preseed_all_hit;
+    binding.cache_policy = gv::runtime_pipeline_cache_policy::immutable_preseed_all_hit;
     binding.seed_sha256[0] = 0xa5u;
     binding.seed_size = 4096u;
     binding.manifest_checksum = 0x12345678u;
     binding.pipeline_cache_all_hit = true;
     REQUIRE(binding.is_internally_consistent());
-    static_assert(noexcept(make_persisted_grouped_soa_gpu_environment_snapshot(
-        binding, 4u)));
+    static_assert(noexcept(make_persisted_grouped_soa_gpu_environment_snapshot(binding, 4u)));
 
-    const auto mapped = make_persisted_grouped_soa_gpu_environment_snapshot(
-        binding, 4u);
+    const auto mapped = make_persisted_grouped_soa_gpu_environment_snapshot(binding, 4u);
     REQUIRE(mapped.has_value());
     REQUIRE(mapped->effective_cpu_workers == 4u);
     REQUIRE(mapped->is_gpu_environment_available);
     REQUIRE(mapped->gpu_device_uuid == binding.gpu_device_uuid);
     REQUIRE(mapped->gpu_driver_identity == binding.gpu_driver_identity);
-    REQUIRE(mapped->gpu_pipeline_cache_policy
-            == pipeline_cache_policy::immutable_preseed_all_hit);
+    REQUIRE(mapped->gpu_pipeline_cache_policy == pipeline_cache_policy::immutable_preseed_all_hit);
     REQUIRE(mapped->gpu_pipeline_cache_seed_sha256 == binding.seed_sha256);
     REQUIRE(mapped->gpu_pipeline_cache_seed_size == binding.seed_size);
-    REQUIRE(mapped->gpu_pipeline_cache_manifest_checksum
-            == binding.manifest_checksum);
+    REQUIRE(mapped->gpu_pipeline_cache_manifest_checksum == binding.manifest_checksum);
     REQUIRE(mapped->gpu_pipeline_cache_hit == optional_observation_bool::true_value);
-    REQUIRE(is_environment_valid_for_backend(
-        *mapped, executed_backend::vulkan_gpu));
-    REQUIRE(is_persisted_grouped_soa_gpu_environment_consistent(
-        binding, binding));
+    REQUIRE(is_environment_valid_for_backend(*mapped, executed_backend::vulkan_gpu));
+    REQUIRE(is_persisted_grouped_soa_gpu_environment_consistent(binding, binding));
     auto drifted_binding = binding;
     drifted_binding.gpu_driver_identity[1] = 'x';
-    REQUIRE_FALSE(is_persisted_grouped_soa_gpu_environment_consistent(
-        drifted_binding, binding));
+    REQUIRE_FALSE(is_persisted_grouped_soa_gpu_environment_consistent(drifted_binding, binding));
 
+    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_environment_snapshot(binding, 0u).has_value());
     REQUIRE_FALSE(make_persisted_grouped_soa_gpu_environment_snapshot(
-        binding, 0u).has_value());
-    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_environment_snapshot(
-        binding,
-        static_cast<std::size_t>(k_sql_integer_value_max) + 1u).has_value());
+                      binding, static_cast<std::size_t>(k_sql_integer_value_max) + 1u)
+                      .has_value());
     auto invalid = binding;
     invalid.gpu_device_uuid = {};
-    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_environment_snapshot(
-        invalid, 4u).has_value());
+    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_environment_snapshot(invalid, 4u).has_value());
     invalid = binding;
     invalid.cache_policy = gv::runtime_pipeline_cache_policy::invalid;
-    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_environment_snapshot(
-        invalid, 4u).has_value());
+    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_environment_snapshot(invalid, 4u).has_value());
     invalid = binding;
     invalid.pipeline_cache_all_hit = false;
-    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_environment_snapshot(
-        invalid, 4u).has_value());
+    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_environment_snapshot(invalid, 4u).has_value());
     invalid = binding;
     invalid.seed_size = k_sql_bigint_value_max + 1u;
-    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_environment_snapshot(
-        invalid, 4u).has_value());
+    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_environment_snapshot(invalid, 4u).has_value());
 
     gv::runtime_gpu_cache_metrics_audit cache_metrics{
         .token_identity = 0x999u,
@@ -298,10 +273,8 @@ TEST_CASE("persisted grouped-SoA environment binding maps without inference",
         .gpu_pipeline_creation_ns = 91u,
         .saturated = false,
     };
-    static_assert(noexcept(
-        make_persisted_grouped_soa_gpu_cache_metrics_delta(cache_metrics)));
-    const auto cache_delta =
-        make_persisted_grouped_soa_gpu_cache_metrics_delta(cache_metrics);
+    static_assert(noexcept(make_persisted_grouped_soa_gpu_cache_metrics_delta(cache_metrics)));
+    const auto cache_delta = make_persisted_grouped_soa_gpu_cache_metrics_delta(cache_metrics);
     REQUIRE(cache_delta.has_value());
     REQUIRE(cache_delta->gpu_pipeline_cache_loads == 1u);
     REQUIRE(cache_delta->gpu_pipeline_cache_seed_bytes == binding.seed_size);
@@ -312,49 +285,44 @@ TEST_CASE("persisted grouped-SoA environment binding maps without inference",
     cache_metrics_preview.gpu_pipeline_cache_load_ns = 50u;
     cache_metrics_preview.gpu_pipeline_creates = 15u;
     cache_metrics_preview.gpu_pipeline_creation_ns = 120u;
-    REQUIRE(is_persisted_grouped_soa_gpu_cache_metrics_bounded_by(
-        cache_metrics, cache_metrics_preview));
+    REQUIRE(is_persisted_grouped_soa_gpu_cache_metrics_bounded_by(cache_metrics,
+                                                                  cache_metrics_preview));
     auto out_of_bounds = cache_metrics;
     out_of_bounds.gpu_pipeline_creates = 16u;
-    REQUIRE_FALSE(is_persisted_grouped_soa_gpu_cache_metrics_bounded_by(
-        out_of_bounds, cache_metrics_preview));
+    REQUIRE_FALSE(is_persisted_grouped_soa_gpu_cache_metrics_bounded_by(out_of_bounds,
+                                                                        cache_metrics_preview));
     auto wrong_token = cache_metrics;
     wrong_token.token_identity += 1u;
-    REQUIRE_FALSE(is_persisted_grouped_soa_gpu_cache_metrics_bounded_by(
-        wrong_token, cache_metrics_preview));
+    REQUIRE_FALSE(
+        is_persisted_grouped_soa_gpu_cache_metrics_bounded_by(wrong_token, cache_metrics_preview));
     const gv::runtime_gpu_cache_metrics_audit already_reported{
         .token_identity = 0x1000u,
     };
     REQUIRE(already_reported.is_internally_consistent());
-    const auto zero_delta =
-        make_persisted_grouped_soa_gpu_cache_metrics_delta(already_reported);
+    const auto zero_delta = make_persisted_grouped_soa_gpu_cache_metrics_delta(already_reported);
     REQUIRE(zero_delta.has_value());
     REQUIRE(zero_delta->gpu_pipeline_cache_loads == 0u);
     REQUIRE(zero_delta->gpu_pipeline_creates == 0u);
     const gv::runtime_gpu_cache_metrics_audit zero_for_same_operation{
         .token_identity = cache_metrics.token_identity,
     };
-    REQUIRE(is_persisted_grouped_soa_gpu_cache_metrics_bounded_by(
-        zero_for_same_operation, cache_metrics_preview));
+    REQUIRE(is_persisted_grouped_soa_gpu_cache_metrics_bounded_by(zero_for_same_operation,
+                                                                  cache_metrics_preview));
     cache_metrics.saturated = true;
-    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_cache_metrics_delta(
-        cache_metrics).has_value());
+    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_cache_metrics_delta(cache_metrics).has_value());
     cache_metrics.saturated = false;
     cache_metrics.token_identity = 0u;
-    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_cache_metrics_delta(
-        cache_metrics).has_value());
+    REQUIRE_FALSE(make_persisted_grouped_soa_gpu_cache_metrics_delta(cache_metrics).has_value());
 }
 
 TEST_CASE("persisted grouped-SoA prospective publication is exact across waves",
           "[component:bioseq][layer:unit][feature:pipeline]") {
     using namespace bioseq::pipeline_stats;
-    const auto make_wave = [](const std::size_t jobs,
-                              const std::uint64_t first_query) {
+    const auto make_wave = [](const std::size_t jobs, const std::uint64_t first_query) {
         pipeline_execution_stats wave{};
         for (std::size_t i = 0; i < jobs; ++i) {
-            auto job = make_attested_job(
-                executed_backend::vulkan_gpu,
-                target_index_source::persisted);
+            auto job =
+                make_attested_job(executed_backend::vulkan_gpu, target_index_source::persisted);
             job.logical_target_row = 73;
             job.query_ordinal = first_query + i;
             wave.merge_job(job);
@@ -369,10 +337,7 @@ TEST_CASE("persisted grouped-SoA prospective publication is exact across waves",
         auto prospective = before;
         prospective.merge(staged);
         REQUIRE(is_persisted_grouped_soa_coordinate_prospective_stats_consistent(
-            before,
-            staged,
-            prospective,
-            static_cast<std::uint64_t>(jobs)));
+            before, staged, prospective, static_cast<std::uint64_t>(jobs)));
     }
 
     auto staged_with_cache_metrics = make_wave(1, 150);
@@ -384,10 +349,7 @@ TEST_CASE("persisted grouped-SoA prospective publication is exact across waves",
     pipeline_execution_stats cache_metrics_prospective{};
     cache_metrics_prospective.merge(staged_with_cache_metrics);
     REQUIRE(is_persisted_grouped_soa_coordinate_prospective_stats_consistent(
-        pipeline_execution_stats{},
-        staged_with_cache_metrics,
-        cache_metrics_prospective,
-        1u));
+        pipeline_execution_stats{}, staged_with_cache_metrics, cache_metrics_prospective, 1u));
 
     const auto before = make_wave(1, 200);
     const auto staged = make_wave(1, 201);
@@ -422,13 +384,10 @@ TEST_CASE("persisted grouped-SoA prospective publication is exact across waves",
 TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable across waves",
           "[component:bioseq][layer:unit][feature:sql_api]") {
     using namespace bioseq::pipeline_stats;
-    static_assert(!std::is_copy_constructible_v<
-        persisted_gpu_operation_accumulator>);
-    static_assert(std::is_nothrow_move_constructible_v<
-        persisted_gpu_operation_accumulator>);
-    static_assert(noexcept(std::declval<
-        persisted_gpu_operation_chunk&>().publish_cache_metrics(
-            std::declval<const persisted_gpu_cache_metrics&>())));
+    static_assert(!std::is_copy_constructible_v<persisted_gpu_operation_accumulator>);
+    static_assert(std::is_nothrow_move_constructible_v<persisted_gpu_operation_accumulator>);
+    static_assert(noexcept(std::declval<persisted_gpu_operation_chunk&>().publish_cache_metrics(
+        std::declval<const persisted_gpu_cache_metrics&>())));
 
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
@@ -436,25 +395,25 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
     struct restore_cap {
         bioseq::parallelism::memory_admission_controller& admission;
         std::uint64_t previous = 0u;
-        ~restore_cap() { admission.set_index_memory_cap_bytes(previous); }
+        ~restore_cap() {
+            admission.set_index_memory_cap_bytes(previous);
+        }
     } restore{admission, previous_cap};
-    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
-        previous_cap, baseline + (std::uint64_t{1} << 23u)));
+    admission.set_index_memory_cap_bytes(
+        std::max<std::uint64_t>(previous_cap, baseline + (std::uint64_t{1} << 23u)));
     constexpr std::uint64_t two_job_chunk_retained_bytes =
-        sizeof(persisted_gpu_operation_chunk)
-        + 2u * sizeof(persisted_gpu_job_stats);
+        sizeof(persisted_gpu_operation_chunk) + 2u * sizeof(persisted_gpu_job_stats);
 
     REQUIRE(persisted_gpu_operation_chunk::prepare(0u) == nullptr);
     REQUIRE(persisted_gpu_operation_chunk::prepare(
-        static_cast<std::size_t>(
-            k_persisted_gpu_operation_capacity + 1u)) == nullptr);
+                static_cast<std::size_t>(k_persisted_gpu_operation_capacity + 1u)) == nullptr);
 
-    const auto make_chunk = [](
-            const std::uint64_t shape_operation_identity,
-            const std::uint64_t query_operation_identity,
-            const std::uint64_t first_logical_query) {
+    const auto make_chunk = [](const std::uint64_t shape_operation_identity,
+                               const std::uint64_t query_operation_identity,
+                               const std::uint64_t first_logical_query) {
         auto chunk = persisted_gpu_operation_chunk::prepare(2u);
-        if (chunk == nullptr) return chunk;
+        if (chunk == nullptr)
+            return chunk;
         persisted_gpu_environment_snapshot environment{};
         environment.device_uuid[0] = 0x41u;
         environment.api_version = 0x00402000u;
@@ -477,19 +436,13 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
         qualification.private_files_created = 2u;
         qualification.private_files_unlinked = 2u;
         qualification.helper_wire_revision = 2u;
-        constexpr std::string_view helper_build =
-            "bioseq_gpu_archive_builder";
+        constexpr std::string_view helper_build = "bioseq_gpu_archive_builder";
         std::copy(
-            helper_build.begin(), helper_build.end(),
-            qualification.helper_build_identity.begin());
-        qualification.helper_build_identity_size =
-            static_cast<std::uint32_t>(helper_build.size());
+            helper_build.begin(), helper_build.end(), qualification.helper_build_identity.begin());
+        qualification.helper_build_identity_size = static_cast<std::uint32_t>(helper_build.size());
         constexpr std::string_view helper_source = "installed-sibling";
-        std::copy(
-            helper_source.begin(), helper_source.end(),
-            qualification.helper_source.begin());
-        qualification.helper_source_size =
-            static_cast<std::uint32_t>(helper_source.size());
+        std::copy(helper_source.begin(), helper_source.end(), qualification.helper_source.begin());
+        qualification.helper_source_size = static_cast<std::uint32_t>(helper_source.size());
         qualification.helper_executable_size = 8192u;
         qualification.helper_executable_sha256[0] = 0x73u;
         qualification.helper_metal_registry_id = 0x7474u;
@@ -498,8 +451,7 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
         qualification.driver_version = environment.driver_version;
         qualification.vendor_id = environment.vendor_id;
         qualification.device_id = environment.device_id;
-        qualification.pipeline_cache_uuid =
-            environment.pipeline_cache_uuid;
+        qualification.pipeline_cache_uuid = environment.pipeline_cache_uuid;
         qualification.seed_receipt_identity = 0x8888u;
         qualification.seed_sha256 = environment.seed_sha256;
         qualification.seed_size = environment.seed_size;
@@ -507,15 +459,16 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
         REQUIRE(qualification.is_internally_consistent());
         chunk->operation() = persisted_gpu_operation_stats{
             .operation_identity = shape_operation_identity,
-            .publication = {
-                .expected_jobs = 2u,
-                .validated_jobs = 2u,
-                .consumed_jobs = 2u,
-                .accepted_jobs = 2u,
-                .burned_jobs = 0u,
-                .pending_jobs = 0u,
-                .staged_jobs = 2u,
-            },
+            .publication =
+                {
+                    .expected_jobs = 2u,
+                    .validated_jobs = 2u,
+                    .consumed_jobs = 2u,
+                    .accepted_jobs = 2u,
+                    .burned_jobs = 0u,
+                    .pending_jobs = 0u,
+                    .staged_jobs = 2u,
+                },
             .published_jobs = 2u,
             .publication_commits = 1u,
             .query_pipeline_receipt_count = 3u,
@@ -530,14 +483,15 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
             .cold_load_identity = 0xaaaau,
             .environment = environment,
             .cache_qualification = qualification,
-            .cache_metrics = {
-                .token_identity = shape_operation_identity,
-                .pipeline_cache_loads = 1u,
-                .pipeline_cache_seed_bytes = 4096u,
-                .pipeline_cache_load_ns = 31u,
-                .pipeline_creates = 4u,
-                .pipeline_creation_ns = 47u,
-            },
+            .cache_metrics =
+                {
+                    .token_identity = shape_operation_identity,
+                    .pipeline_cache_loads = 1u,
+                    .pipeline_cache_seed_bytes = 4096u,
+                    .pipeline_cache_load_ns = 31u,
+                    .pipeline_creates = 4u,
+                    .pipeline_creation_ns = 47u,
+                },
         };
         for (std::size_t i = 0u; i < chunk->jobs().size(); ++i) {
             auto& job = chunk->jobs()[i];
@@ -564,14 +518,10 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
                 .chain_backtrack_dispatches = 1u,
                 .coordinate_dispatches = 1u,
                 .submissions = {{
-                    persisted_gpu_submission_stats{
-                        shape_operation_identity, 10u, 0x5010u},
-                    persisted_gpu_submission_stats{
-                        shape_operation_identity, 11u, 0x5011u},
-                    persisted_gpu_submission_stats{
-                        shape_operation_identity, 12u, 0x5012u},
-                    persisted_gpu_submission_stats{
-                        shape_operation_identity, 13u, 0x5013u},
+                    persisted_gpu_submission_stats{shape_operation_identity, 10u, 0x5010u},
+                    persisted_gpu_submission_stats{shape_operation_identity, 11u, 0x5011u},
+                    persisted_gpu_submission_stats{shape_operation_identity, 12u, 0x5012u},
+                    persisted_gpu_submission_stats{shape_operation_identity, 13u, 0x5013u},
                 }},
                 .count_status_checks = 1u,
                 .emit_status_checks = 1u,
@@ -581,24 +531,24 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
                 .cpu_or_simd_biological_calls = 0u,
                 .recompute_calls = 0u,
                 .fallback_calls = 0u,
-                .coordinate = {
-                    .query_start = 1u,
-                    .query_end = 100u,
-                    .target_start = 200u + i,
-                    .target_end = 299u + i,
-                    .match_length = 90u,
-                    .block_length = 99u,
-                    .chain_score = 42,
-                    .seed_count = 10,
-                    .is_reverse = false,
-                    .is_valid = true,
-                },
+                .coordinate =
+                    {
+                        .query_start = 1u,
+                        .query_end = 100u,
+                        .target_start = 200u + i,
+                        .target_end = 299u + i,
+                        .match_length = 90u,
+                        .block_length = 99u,
+                        .chain_score = 42,
+                        .seed_count = 10,
+                        .is_reverse = false,
+                        .is_valid = true,
+                    },
             };
         }
         return chunk;
     };
-    const auto publish_final_cache = [](
-            persisted_gpu_operation_chunk& chunk) {
+    const auto publish_final_cache = [](persisted_gpu_operation_chunk& chunk) {
         const persisted_gpu_cache_metrics final_metrics{
             .token_identity = chunk.operation().operation_identity,
         };
@@ -621,65 +571,101 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
 
         auto wrong_shape_domain = make_chunk(0x1000u, 0x2000u, 30u);
         REQUIRE(wrong_shape_domain != nullptr);
-        wrong_shape_domain->operation().shape_pipeline_operation_identity =
-            0x3000u;
+        wrong_shape_domain->operation().shape_pipeline_operation_identity = 0x3000u;
         REQUIRE_FALSE(wrong_shape_domain->seal());
+
+        auto alignment_present = make_chunk(0x1000u, 0x2000u, 30u);
+        REQUIRE(alignment_present != nullptr);
+        alignment_present->operation().alignment_pipeline_receipt_count = 1u;
+        alignment_present->operation().alignment_submission_count = 2u;
+        alignment_present->operation().submission_count += 2u;
+        REQUIRE(alignment_present->seal());
+
+        auto missing_alignment_submissions = make_chunk(0x1000u, 0x2000u, 30u);
+        REQUIRE(missing_alignment_submissions != nullptr);
+        missing_alignment_submissions->operation().alignment_pipeline_receipt_count = 1u;
+        REQUIRE_FALSE(missing_alignment_submissions->seal());
+
+        auto missing_alignment_receipt = make_chunk(0x1000u, 0x2000u, 30u);
+        REQUIRE(missing_alignment_receipt != nullptr);
+        missing_alignment_receipt->operation().alignment_submission_count = 1u;
+        missing_alignment_receipt->operation().submission_count += 1u;
+        REQUIRE_FALSE(missing_alignment_receipt->seal());
+
+        auto mapq_present = make_chunk(0x1000u, 0x2000u, 30u);
+        REQUIRE(mapq_present != nullptr);
+        mapq_present->operation().mapq_pipeline_receipt_count = 1u;
+        mapq_present->operation().mapq_submission_count = 1u;
+        mapq_present->operation().mapq_result_count = 4u;
+        mapq_present->operation().mapq_published_count = 2u;
+        mapq_present->operation().mapq_result_digest = 0xbbccu;
+        mapq_present->operation().submission_count += 1u;
+        REQUIRE(mapq_present->seal());
+
+        auto missing_mapq_submission = make_chunk(0x1000u, 0x2000u, 30u);
+        REQUIRE(missing_mapq_submission != nullptr);
+        missing_mapq_submission->operation().mapq_pipeline_receipt_count = 1u;
+        missing_mapq_submission->operation().mapq_result_count = 1u;
+        missing_mapq_submission->operation().mapq_published_count = 1u;
+        missing_mapq_submission->operation().mapq_result_digest = 0xbbccu;
+        REQUIRE_FALSE(missing_mapq_submission->seal());
+
+        auto missing_mapq_digest = make_chunk(0x1000u, 0x2000u, 30u);
+        REQUIRE(missing_mapq_digest != nullptr);
+        missing_mapq_digest->operation().mapq_pipeline_receipt_count = 1u;
+        missing_mapq_digest->operation().mapq_submission_count = 1u;
+        missing_mapq_digest->operation().mapq_result_count = 1u;
+        missing_mapq_digest->operation().mapq_published_count = 1u;
+        missing_mapq_digest->operation().submission_count += 1u;
+        REQUIRE_FALSE(missing_mapq_digest->seal());
+
+        auto excessive_mapq_publication = make_chunk(0x1000u, 0x2000u, 30u);
+        REQUIRE(excessive_mapq_publication != nullptr);
+        excessive_mapq_publication->operation().mapq_pipeline_receipt_count = 1u;
+        excessive_mapq_publication->operation().mapq_submission_count = 1u;
+        excessive_mapq_publication->operation().mapq_result_count = 1u;
+        excessive_mapq_publication->operation().mapq_published_count = 2u;
+        excessive_mapq_publication->operation().mapq_result_digest = 0xbbccu;
+        excessive_mapq_publication->operation().submission_count += 1u;
+        REQUIRE_FALSE(excessive_mapq_publication->seal());
     }
     REQUIRE(admission.reserved_bytes() == baseline);
 
-    const auto require_qualification_rejection = [&make_chunk](
-            const auto& mutate) {
+    const auto require_qualification_rejection = [&make_chunk](const auto& mutate) {
         auto chunk = make_chunk(0x1050u, 0x2050u, 35u);
         REQUIRE(chunk != nullptr);
         mutate(chunk->operation().cache_qualification);
         REQUIRE_FALSE(chunk->seal());
     };
-    require_qualification_rejection([](auto& qualification) {
-        qualification.hash_passes = 2u;
-    });
-    require_qualification_rejection([](auto& qualification) {
-        --qualification.hashed_bytes;
-    });
-    require_qualification_rejection([](auto& qualification) {
-        --qualification.private_files_unlinked;
-    });
-    require_qualification_rejection([](auto& qualification) {
-        qualification.live_private_paths = 1u;
-    });
-    require_qualification_rejection([](auto& qualification) {
-        qualification.pipeline_filesystem_hash_passes = 1u;
-    });
-    require_qualification_rejection([](auto& qualification) {
-        qualification.helper_source[0] = 'x';
-    });
-    require_qualification_rejection([](auto& qualification) {
-        qualification.helper_build_identity[0] = 'x';
-    });
-    require_qualification_rejection([](auto& qualification) {
-        qualification.helper_executable_sha256 = {};
-    });
-    require_qualification_rejection([](auto& qualification) {
-        qualification.device_uuid[0] ^= 1u;
-    });
-    require_qualification_rejection([](auto& qualification) {
-        ++qualification.seed_receipt_identity;
-    });
-    require_qualification_rejection([](auto& qualification) {
-        qualification.is_saturated = true;
-    });
+    require_qualification_rejection([](auto& qualification) { qualification.hash_passes = 2u; });
+    require_qualification_rejection([](auto& qualification) { --qualification.hashed_bytes; });
+    require_qualification_rejection(
+        [](auto& qualification) { --qualification.private_files_unlinked; });
+    require_qualification_rejection(
+        [](auto& qualification) { qualification.live_private_paths = 1u; });
+    require_qualification_rejection(
+        [](auto& qualification) { qualification.pipeline_filesystem_hash_passes = 1u; });
+    require_qualification_rejection(
+        [](auto& qualification) { qualification.helper_source[0] = 'x'; });
+    require_qualification_rejection(
+        [](auto& qualification) { qualification.helper_build_identity[0] = 'x'; });
+    require_qualification_rejection(
+        [](auto& qualification) { qualification.helper_executable_sha256 = {}; });
+    require_qualification_rejection(
+        [](auto& qualification) { qualification.device_uuid[0] ^= 1u; });
+    require_qualification_rejection(
+        [](auto& qualification) { ++qualification.seed_receipt_identity; });
+    require_qualification_rejection([](auto& qualification) { qualification.is_saturated = true; });
     REQUIRE(admission.reserved_bytes() == baseline);
 
     {
         auto zero_numeric_device_ids = make_chunk(0x1060u, 0x2060u, 36u);
         REQUIRE(zero_numeric_device_ids != nullptr);
-        REQUIRE(admission.reserved_bytes()
-                == baseline + two_job_chunk_retained_bytes);
+        REQUIRE(admission.reserved_bytes() == baseline + two_job_chunk_retained_bytes);
         zero_numeric_device_ids->operation().environment.vendor_id = 0u;
         zero_numeric_device_ids->operation().environment.device_id = 0u;
-        zero_numeric_device_ids->operation().cache_qualification.vendor_id =
-            0u;
-        zero_numeric_device_ids->operation().cache_qualification.device_id =
-            0u;
+        zero_numeric_device_ids->operation().cache_qualification.vendor_id = 0u;
+        zero_numeric_device_ids->operation().cache_qualification.device_id = 0u;
         REQUIRE(zero_numeric_device_ids->seal());
     }
     REQUIRE(admission.reserved_bytes() == baseline);
@@ -713,12 +699,12 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
         REQUIRE(frozen.is_complete());
         std::vector<std::uint64_t> first_read;
         std::vector<std::uint64_t> second_read;
-        for (const persisted_gpu_operation_chunk* chunk = frozen.head();
-             chunk != nullptr; chunk = chunk->next()) {
+        for (const persisted_gpu_operation_chunk* chunk = frozen.head(); chunk != nullptr;
+             chunk = chunk->next()) {
             first_read.push_back(chunk->operation().operation_identity);
         }
-        for (const persisted_gpu_operation_chunk* chunk = frozen.head();
-             chunk != nullptr; chunk = chunk->next()) {
+        for (const persisted_gpu_operation_chunk* chunk = frozen.head(); chunk != nullptr;
+             chunk = chunk->next()) {
             second_read.push_back(chunk->operation().operation_identity);
         }
         REQUIRE(first_read == std::vector<std::uint64_t>{0x1000u, 0x1001u});
@@ -727,7 +713,7 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
     REQUIRE(admission.reserved_bytes() == baseline);
 
     const auto require_cross_operation_rejection = [&make_chunk,
-            &publish_final_cache](const auto& mutate) {
+                                                    &publish_final_cache](const auto& mutate) {
         persisted_gpu_operation_accumulator state{};
         auto first = make_chunk(0x1100u, 0x2100u, 40u);
         REQUIRE(first != nullptr);
@@ -743,22 +729,17 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
         REQUIRE(second->seal());
         REQUIRE_FALSE(state.prepare_append(second).is_valid());
     };
-    require_cross_operation_rejection([](auto& operation) {
-        operation.query_pipeline_operation_identity = 0x2100u;
-    });
-    require_cross_operation_rejection([](auto& operation) {
-        operation.query_pipeline_operation_identity = 0x1100u;
-    });
+    require_cross_operation_rejection(
+        [](auto& operation) { operation.query_pipeline_operation_identity = 0x2100u; });
+    require_cross_operation_rejection(
+        [](auto& operation) { operation.query_pipeline_operation_identity = 0x1100u; });
     require_cross_operation_rejection([](auto& operation) {
         operation.seed_receipt_identity += 1u;
         operation.cache_qualification.seed_receipt_identity += 1u;
     });
-    require_cross_operation_rejection([](auto& operation) {
-        operation.cache_qualification.identity += 1u;
-    });
-    require_cross_operation_rejection([](auto& operation) {
-        operation.cold_load_identity += 1u;
-    });
+    require_cross_operation_rejection(
+        [](auto& operation) { operation.cache_qualification.identity += 1u; });
+    require_cross_operation_rejection([](auto& operation) { operation.cold_load_identity += 1u; });
 
     REQUIRE(admission.reserved_bytes() == baseline);
 }
@@ -769,64 +750,120 @@ TEST_CASE("measured modes match the literal exclusive-engine matrix",
     using execution_engine_type = execution_engine;
     constexpr execution_engine_type forbidden = execution_engine_type::count;
     constexpr std::array<execution_engine_type, 20> simd_recomputed{
-        execution_engine_type::simd_cpu, execution_engine_type::simd_cpu, execution_engine_type::scalar_cpu, forbidden, forbidden,
-        forbidden, execution_engine_type::scalar_cpu, execution_engine_type::simd_cpu, execution_engine_type::simd_cpu, execution_engine_type::scalar_cpu,
-        execution_engine_type::scalar_cpu, execution_engine_type::scalar_cpu, execution_engine_type::scalar_cpu, execution_engine_type::scalar_cpu, execution_engine_type::host_io,
-        forbidden, execution_engine_type::scalar_cpu, execution_engine_type::simd_cpu, execution_engine_type::simd_cpu, execution_engine_type::simd_cpu,
+        execution_engine_type::simd_cpu,
+        execution_engine_type::simd_cpu,
+        execution_engine_type::scalar_cpu,
+        forbidden,
+        forbidden,
+        forbidden,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::simd_cpu,
+        execution_engine_type::simd_cpu,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::host_io,
+        forbidden,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::simd_cpu,
+        execution_engine_type::simd_cpu,
+        execution_engine_type::simd_cpu,
     };
     constexpr std::array<execution_engine_type, 20> simd_persisted{
-        execution_engine_type::simd_cpu, forbidden, forbidden, execution_engine_type::host_io, execution_engine_type::scalar_cpu,
-        forbidden, execution_engine_type::scalar_cpu, execution_engine_type::simd_cpu, execution_engine_type::simd_cpu, execution_engine_type::scalar_cpu,
-        execution_engine_type::scalar_cpu, execution_engine_type::scalar_cpu, execution_engine_type::scalar_cpu, execution_engine_type::scalar_cpu, execution_engine_type::host_io,
-        forbidden, execution_engine_type::scalar_cpu, execution_engine_type::simd_cpu, execution_engine_type::simd_cpu, execution_engine_type::simd_cpu,
+        execution_engine_type::simd_cpu,
+        forbidden,
+        forbidden,
+        execution_engine_type::host_io,
+        execution_engine_type::scalar_cpu,
+        forbidden,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::simd_cpu,
+        execution_engine_type::simd_cpu,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::host_io,
+        forbidden,
+        execution_engine_type::scalar_cpu,
+        execution_engine_type::simd_cpu,
+        execution_engine_type::simd_cpu,
+        execution_engine_type::simd_cpu,
     };
     constexpr std::array<execution_engine_type, 20> gpu_recomputed{
-        execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, forbidden, forbidden,
-        forbidden, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu,
-        execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::host_io,
-        execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        forbidden,
+        forbidden,
+        forbidden,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::host_io,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
     };
     constexpr std::array<execution_engine_type, 20> gpu_persisted{
-        execution_engine_type::vulkan_gpu, forbidden, forbidden, execution_engine_type::host_io, execution_engine_type::vulkan_gpu,
-        execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu,
-        execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::host_io,
-        execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu, execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        forbidden,
+        forbidden,
+        execution_engine_type::host_io,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::host_io,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
+        execution_engine_type::vulkan_gpu,
     };
-    const auto require_matrix = [](
-        executed_backend backend,
-        target_index_source source,
-        const std::array<execution_engine_type, 20>& expected) {
+    const auto require_matrix = [](executed_backend backend,
+                                   target_index_source source,
+                                   const std::array<execution_engine_type, 20>& expected) {
         for (std::size_t i = 0; i < expected.size(); ++i) {
-            REQUIRE(expected_execution_engine(
-                        backend, source, static_cast<pipeline_stage>(i))
-                    == expected[i]);
+            REQUIRE(expected_execution_engine(backend, source, static_cast<pipeline_stage>(i)) ==
+                    expected[i]);
         }
     };
-    require_matrix(
-        executed_backend::simd_cpu, target_index_source::recomputed, simd_recomputed);
-    require_matrix(
-        executed_backend::simd_cpu, target_index_source::persisted, simd_persisted);
-    require_matrix(
-        executed_backend::vulkan_gpu, target_index_source::recomputed, gpu_recomputed);
-    require_matrix(
-        executed_backend::vulkan_gpu, target_index_source::persisted, gpu_persisted);
+    require_matrix(executed_backend::simd_cpu, target_index_source::recomputed, simd_recomputed);
+    require_matrix(executed_backend::simd_cpu, target_index_source::persisted, simd_persisted);
+    require_matrix(executed_backend::vulkan_gpu, target_index_source::recomputed, gpu_recomputed);
+    require_matrix(executed_backend::vulkan_gpu, target_index_source::persisted, gpu_persisted);
 
     constexpr std::array<bool, 20> recomputed_required{
-        true, true, true, false, false, false, false, false, false, false,
+        true,  true,  true,  false, false, false, false, false, false, false,
         false, false, false, false, false, false, false, false, false, false,
     };
     constexpr std::array<bool, 20> persisted_required{
-        true, false, false, true, true, false, false, false, false, false,
+        true,  false, false, true,  true,  false, false, false, false, false,
         false, false, false, false, false, false, false, false, false, false,
     };
     for (std::size_t i = 0; i < k_pipeline_stage_count; ++i) {
         const auto stage = static_cast<pipeline_stage>(i);
-        REQUIRE(is_front_end_eligibility_required(
-                    target_index_source::recomputed, stage)
-                == recomputed_required[i]);
-        REQUIRE(is_front_end_eligibility_required(
-                    target_index_source::persisted, stage)
-                == persisted_required[i]);
+        REQUIRE(is_front_end_eligibility_required(target_index_source::recomputed, stage) ==
+                recomputed_required[i]);
+        REQUIRE(is_front_end_eligibility_required(target_index_source::persisted, stage) ==
+                persisted_required[i]);
     }
 }
 
@@ -836,15 +873,14 @@ TEST_CASE("stats merges saturate and identities fail closed",
 
     stage_coverage coverage{};
     coverage.eligible_jobs = k_sql_bigint_value_max;
-    coverage.executed_jobs[engine_index(execution_engine::simd_cpu)] =
-        k_sql_bigint_value_max;
+    coverage.executed_jobs[engine_index(execution_engine::simd_cpu)] = k_sql_bigint_value_max;
     stage_coverage increment{};
     increment.eligible_jobs = 1;
     increment.executed_jobs[engine_index(execution_engine::simd_cpu)] = 1;
     REQUIRE(coverage.merge(increment));
     REQUIRE(coverage.eligible_jobs == k_sql_bigint_value_max);
-    REQUIRE(coverage.executed_jobs[engine_index(execution_engine::simd_cpu)]
-            == k_sql_bigint_value_max);
+    REQUIRE(coverage.executed_jobs[engine_index(execution_engine::simd_cpu)] ==
+            k_sql_bigint_value_max);
 
     std::uint64_t exact_boundary = k_sql_bigint_value_max - 1;
     REQUIRE_FALSE(merge_counter(exact_boundary, 1));
@@ -854,28 +890,24 @@ TEST_CASE("stats merges saturate and identities fail closed",
     REQUIRE(oversized == k_sql_bigint_value_max);
 
     pipeline_operational_stats stage_timing_delta{};
-    stage_timing_delta.timing[
-        stage_index(pipeline_stage::query_sketch)].host_wall_ns = 7u;
-    stage_timing_delta.timing[
-        stage_index(pipeline_stage::seed_lookup)].host_wall_ns = 11u;
-    stage_timing_delta.timing[
-        stage_index(pipeline_stage::chain_score)].host_wall_ns = 13u;
-    stage_timing_delta.timing[
-        stage_index(pipeline_stage::region_generation)].host_wall_ns = 17u;
-    stage_timing_delta.timing[
-        stage_index(pipeline_stage::left_extension)].host_wall_ns = 19u;
+    stage_timing_delta.timing[stage_index(pipeline_stage::query_sketch)].host_wall_ns = 7u;
+    stage_timing_delta.timing[stage_index(pipeline_stage::seed_lookup)].host_wall_ns = 11u;
+    stage_timing_delta.timing[stage_index(pipeline_stage::chain_score)].host_wall_ns = 13u;
+    stage_timing_delta.timing[stage_index(pipeline_stage::region_generation)].host_wall_ns = 17u;
+    stage_timing_delta.timing[stage_index(pipeline_stage::left_extension)].host_wall_ns = 19u;
     pipeline_operational_stats stage_timing_aggregate{};
     stage_timing_aggregate.merge(stage_timing_delta);
-    REQUIRE(stage_timing_aggregate.timing[
-        stage_index(pipeline_stage::query_sketch)].host_wall_ns == 7u);
-    REQUIRE(stage_timing_aggregate.timing[
-        stage_index(pipeline_stage::seed_lookup)].host_wall_ns == 11u);
-    REQUIRE(stage_timing_aggregate.timing[
-        stage_index(pipeline_stage::chain_score)].host_wall_ns == 13u);
-    REQUIRE(stage_timing_aggregate.timing[
-        stage_index(pipeline_stage::region_generation)].host_wall_ns == 17u);
-    REQUIRE(stage_timing_aggregate.timing[
-        stage_index(pipeline_stage::left_extension)].host_wall_ns == 19u);
+    REQUIRE(stage_timing_aggregate.timing[stage_index(pipeline_stage::query_sketch)].host_wall_ns ==
+            7u);
+    REQUIRE(stage_timing_aggregate.timing[stage_index(pipeline_stage::seed_lookup)].host_wall_ns ==
+            11u);
+    REQUIRE(stage_timing_aggregate.timing[stage_index(pipeline_stage::chain_score)].host_wall_ns ==
+            13u);
+    REQUIRE(stage_timing_aggregate.timing[stage_index(pipeline_stage::region_generation)]
+                .host_wall_ns == 17u);
+    REQUIRE(
+        stage_timing_aggregate.timing[stage_index(pipeline_stage::left_extension)].host_wall_ns ==
+        19u);
     REQUIRE_FALSE(stage_timing_aggregate.are_stats_saturated);
 
     pipeline_operational_stats operational{};
@@ -886,31 +918,31 @@ TEST_CASE("stats merges saturate and identities fail closed",
     REQUIRE(operational.target_rows == k_sql_bigint_value_max);
     REQUIRE(operational.are_stats_saturated);
 
-    REQUIRE(merge_backend_identity(executed_backend::none, executed_backend::simd_cpu)
-            == executed_backend::simd_cpu);
-    REQUIRE(merge_backend_identity(executed_backend::simd_cpu, executed_backend::simd_cpu)
-            == executed_backend::simd_cpu);
-    REQUIRE(merge_backend_identity(executed_backend::simd_cpu, executed_backend::vulkan_gpu)
-            == executed_backend::mixed_invalid);
+    REQUIRE(merge_backend_identity(executed_backend::none, executed_backend::simd_cpu) ==
+            executed_backend::simd_cpu);
+    REQUIRE(merge_backend_identity(executed_backend::simd_cpu, executed_backend::simd_cpu) ==
+            executed_backend::simd_cpu);
+    REQUIRE(merge_backend_identity(executed_backend::simd_cpu, executed_backend::vulkan_gpu) ==
+            executed_backend::mixed_invalid);
     REQUIRE(merge_target_index_identity(target_index_source::recomputed,
-                                        target_index_source::persisted)
-            == target_index_source::mixed_invalid);
+                                        target_index_source::persisted) ==
+            target_index_source::mixed_invalid);
     REQUIRE(merge_simd_chaining_policy_identity(
                 simd_chaining_policy_identity::none,
-                simd_chaining_policy_identity::bounded_batch_approximate)
-            == simd_chaining_policy_identity::bounded_batch_approximate);
+                simd_chaining_policy_identity::bounded_batch_approximate) ==
+            simd_chaining_policy_identity::bounded_batch_approximate);
     REQUIRE(merge_simd_chaining_policy_identity(
                 simd_chaining_policy_identity::exact_visited,
-                simd_chaining_policy_identity::bounded_batch_approximate)
-            == simd_chaining_policy_identity::mixed_invalid);
-    REQUIRE(merge_simd_alignment_algorithm_identity(
-                simd_alignment_algorithm_identity::none,
-                simd_alignment_algorithm_identity::block_aligner)
-            == simd_alignment_algorithm_identity::block_aligner);
-    REQUIRE(merge_simd_alignment_algorithm_identity(
-                simd_alignment_algorithm_identity::block_aligner,
-                simd_alignment_algorithm_identity::mixed_invalid)
-            == simd_alignment_algorithm_identity::mixed_invalid);
+                simd_chaining_policy_identity::bounded_batch_approximate) ==
+            simd_chaining_policy_identity::mixed_invalid);
+    REQUIRE(
+        merge_simd_alignment_algorithm_identity(simd_alignment_algorithm_identity::none,
+                                                simd_alignment_algorithm_identity::block_aligner) ==
+        simd_alignment_algorithm_identity::block_aligner);
+    REQUIRE(
+        merge_simd_alignment_algorithm_identity(simd_alignment_algorithm_identity::block_aligner,
+                                                simd_alignment_algorithm_identity::mixed_invalid) ==
+        simd_alignment_algorithm_identity::mixed_invalid);
 
     execution_environment_snapshot merged{};
     const execution_environment_snapshot cpu = make_cpu_environment(3);

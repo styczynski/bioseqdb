@@ -1016,15 +1016,9 @@ export {
         }
 
         /*
-         * Build the per-scan minimap2_parameters from the planner-authored semantic
-         * payload, then flip conditional-pipeline flags based on which bioseq.*
-         * projections the finalized target list references.  The only live
-         * aligner GUC read here is performance-only profiling.
-         *
-         * The resulting struct is pushed into the tuple_dispatch_buffer so every
-         * batch row inherits the same parameters, and copied into the per-scan
-         * runtime.aligner_state so EXPLAIN can reproduce the user-visible
-         * decision tree without re-walking the plan.
+         * Resolve one executor request. Planner semantic payloads remain
+         * value-only; provider scans without mmsearch take no aligner snapshot.
+         * Freeze after options, policy, alphabet and projected-output flags.
          */
         scan_feature_flags features = detect_feature_flags(
             cscan->scan.plan.targetlist, cscan->scan.plan.qual, scan_stub_oids);
@@ -1044,7 +1038,21 @@ export {
                      errdetail("statement execution attestation is backend-local and DSM "
                                "aggregation is not implemented")));
         }
-        bioseq::simd::minimap2_parameters aligner_params = frozen_semantics.params;
+        bioseq::simd::minimap2_parameters pending_parameters =
+            features.has_mmsearch ? build_params_from_gucs()
+                                  : bioseq::simd::minimap2_parameters{};
+        auto index_read_requirement = bioseq::indexing::index_read_requirement::allow;
+        bool primary_vulkan_enabled_explicit = false;
+        if (features.has_mmsearch) {
+            (void)apply_aligner_options_override(primary_mmsearch_fe,
+                                                 pending_parameters,
+                                                 index_read_requirement,
+                                                 scan_stub_oids,
+                                                 &primary_vulkan_enabled_explicit);
+            finalize_simd_chaining_policy(pending_parameters);
+        }
+        const bool executor_read_sequence_index =
+            bioseq::settings::index::sequence_read::enabled;
         if (features.has_mmsearch) {
             if (runtime.match_target_typmod < 0) {
                 ereport(ERROR,
@@ -1060,64 +1068,67 @@ export {
                          errdetail("alphabet_code=%u",
                                    static_cast<unsigned>(match_target_type.alphabet_code))));
             }
-            aligner_params.alphabet_code = match_target_type.alphabet_code;
+            pending_parameters.alphabet_code = match_target_type.alphabet_code;
         }
-        /* Profiling is diagnostic/performance-only and deliberately remains live. */
-        aligner_params.enable_profiling = bioseq::aligner::settings::profiling::enabled;
-        /*
-         * The explicitness bit selects only the prefilter execution backend and is
-         * not a result-semantic field.  Recover it from the already-frozen
-         * aligner_options Const without consulting any GUC; discard the decoded
-         * semantic values because semantic_payload is authoritative.
-         */
-        bool primary_vulkan_enabled_explicit = false;
-        auto explicitness_probe_params = aligner_params;
-        auto explicitness_probe_requirement = frozen_semantics.index_read_requirement;
-        (void)apply_aligner_options_override(primary_mmsearch_fe,
-                                             explicitness_probe_params,
-                                             explicitness_probe_requirement,
-                                             scan_stub_oids,
-                                             &primary_vulkan_enabled_explicit);
-        finalize_simd_chaining_policy(aligner_params);
-        const bioseq::indexing::index_read_requirement index_read_requirement =
-            frozen_semantics.index_read_requirement;
-        if (runtime.match_evaluated_submission &&
-            index_read_requirement != bioseq::indexing::index_read_requirement::require_absent) {
-            ereport(ERROR,
-                    (errcode(ERRCODE_DATA_CORRUPTED),
-                     errmsg("BioseqScan semantic payload has an invalid evaluated-target index "
-                            "policy")));
+        if (runtime.match_evaluated_submission) {
+            if (index_read_requirement ==
+                bioseq::indexing::index_read_requirement::require_compatible_persisted) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                         errmsg("transformed mmsearch target cannot require a persisted index")));
+            }
+            index_read_requirement = bioseq::indexing::index_read_requirement::require_absent;
         }
-        aligner_params.do_cigar = features.uses_cigar || features.uses_edit;
-        aligner_params.compute_divergence = features.uses_divergence;
-        aligner_params.compute_mapq = features.uses_mapq;
-        aligner_params.compute_edit_distance = features.uses_edit;
-        aligner_params.exact_edit_filter_enabled = runtime.edit_predicate_active;
-        aligner_params.exact_edit_filter_exclusive_upper_bound = runtime.edit_exclusive_upper_bound;
+        if (features.has_mmsearch) {
+            const int plan_node_id = cscan->scan.plan.plan_node_id;
+            if (plan_node_id < 0) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_INTERNAL_ERROR),
+                         errmsg("bioseq alignment scan has an invalid plan node id")));
+            }
+            runtime.alignment_registration =
+                bioseq::postgres::table::alignment_execution::bind_alignment_node(
+                    estate, static_cast<std::uint32_t>(plan_node_id));
+        }
+        pending_parameters.downstream_active_wall = features.has_mmsearch
+            ? bioseq::postgres::table::alignment_execution::
+                borrow_downstream_active_wall_tracker(runtime.alignment_registration) : nullptr;
+        pending_parameters.do_cigar = features.uses_cigar || features.uses_edit;
+        pending_parameters.compute_divergence = features.uses_divergence;
+        pending_parameters.compute_mapq = features.uses_mapq;
+        pending_parameters.compute_edit_distance = features.uses_edit;
+        pending_parameters.exact_edit_filter_enabled = runtime.edit_predicate_active;
+        pending_parameters.exact_edit_filter_exclusive_upper_bound = runtime.edit_exclusive_upper_bound;
         if (runtime.edit_predicate_active && runtime.edit_exclusive_upper_bound > 0 &&
             static_cast<std::uint64_t>(runtime.edit_exclusive_upper_bound - 1) <=
                 (std::numeric_limits<std::uint32_t>::max)()) {
-            aligner_params.prefilter_enabled = true;
-            aligner_params.prefilter_max_edits =
+            pending_parameters.prefilter_enabled = true;
+            pending_parameters.prefilter_max_edits =
                 static_cast<std::uint32_t>(runtime.edit_exclusive_upper_bound - 1);
             const bool existing_vulkan_route =
-                aligner_params.chaining_algorithm ==
+                pending_parameters.chaining_algorithm ==
                     bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming ||
-                aligner_params.minimizer_algorithm ==
+                pending_parameters.minimizer_algorithm ==
                     bioseq::simd::minimizer_algorithm::vulkan_minimap_integer ||
-                aligner_params.vulkan_seed_hits_enabled ||
-                aligner_params.vulkan_fused_frontend_enabled ||
-                aligner_params.vulkan_gpu_index_build_enabled ||
-                aligner_params.vulkan_extend_enabled;
+                pending_parameters.vulkan_seed_hits_enabled ||
+                pending_parameters.vulkan_fused_frontend_enabled ||
+                pending_parameters.vulkan_gpu_index_build_enabled ||
+                pending_parameters.vulkan_extend_enabled;
             const bool standalone_vulkan_prefilter_requested =
-                primary_vulkan_enabled_explicit && aligner_params.vulkan_enabled;
-            aligner_params.prefilter_backend =
+                primary_vulkan_enabled_explicit && pending_parameters.vulkan_enabled;
+            pending_parameters.prefilter_backend =
                 (existing_vulkan_route || standalone_vulkan_prefilter_requested)
                     ? bioseq::prefilter::prefilter_backend::vulkan
                     : (bioseq::settings::vectorization::enabled
                            ? bioseq::prefilter::prefilter_backend::simd
                            : bioseq::prefilter::prefilter_backend::scalar);
         }
+        if (features.has_mmsearch) {
+            runtime.aligner_state.execution_plan =
+                bioseq::scheduler::make_postgres_statement_execution_plan(std::move(pending_parameters));
+        }
+        const auto& aligner_params = runtime.aligner_state.execution_plan
+            ? runtime.aligner_state.execution_plan->frozen_parameters : pending_parameters;
         const bool selected_vulkan =
             bioseq::simd::pipe::vulkan_components_requested(aligner_params);
         const bool selected_vulkan_accelerator =
@@ -1190,11 +1201,9 @@ export {
             }
         }
 
-        runtime.aligner_state.params = aligner_params;
         runtime.aligner_state.features = features;
         runtime.aligner_state.index_read_requirement = index_read_requirement;
-        runtime.aligner_state.read_sequence_index = frozen_semantics.read_sequence_index;
-        runtime.aligner_state.params_captured = true;
+        runtime.aligner_state.read_sequence_index = executor_read_sequence_index;
 
         /*
          * Capture the structured pipeline description for EXPLAIN.  Walks the
@@ -1205,7 +1214,7 @@ export {
          */
         if (features.has_mmsearch) {
             runtime.aligner_state.pipeline_desc = describe_pipeline_for_pg_alphabet(
-                aligner_params,
+                runtime.aligner_state.execution_plan,
                 aligner_params.alphabet_code,
                 query_sketch_plan_route_for(index_read_requirement));
         }
@@ -1232,10 +1241,10 @@ export {
             scan_spc_oid = cscanstate->ss.ss_currentRelation->rd_locator.spcOid;
             scan_relfile = cscanstate->ss.ss_currentRelation->rd_locator.relNumber;
         }
-        runtime.buffer.configure_params(aligner_params,
+        runtime.buffer.configure_params(runtime.aligner_state.execution_plan,
                                         index_read_requirement,
                                         features.has_mmsearch &&
-                                            frozen_semantics.read_sequence_index &&
+                                            executor_read_sequence_index &&
                                             !runtime.match_evaluated_submission,
                                         resolved_user_relid,
                                         scan_db_oid,
@@ -1245,18 +1254,23 @@ export {
                                         bioseq_scan_state->snapshot,
                                         estate->es_query_cxt);
         if (features.has_mmsearch) {
-            const int plan_node_id = cscan->scan.plan.plan_node_id;
-            if (plan_node_id < 0) {
-                ereport(ERROR,
-                        (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("bioseq alignment scan has an invalid plan node id")));
-            }
-            runtime.alignment_registration =
-                bioseq::postgres::table::alignment_execution::bind_alignment_node(
-                    estate, static_cast<std::uint32_t>(plan_node_id));
             runtime.buffer.bind_persisted_gpu_operation_stats_sink(
                 *bioseq::postgres::table::alignment_execution::
                     borrow_persisted_gpu_operation_accumulator(runtime.alignment_registration));
+            runtime.buffer.bind_downstream_active_wall_tracker(
+                *bioseq::postgres::table::alignment_execution::
+                    borrow_downstream_active_wall_tracker(runtime.alignment_registration));
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            if (runtime.aligner_state.execution_plan->frozen_parameters.downstream_active_wall ==
+                    nullptr ||
+                !runtime.aligner_state.execution_plan->frozen_parameters.downstream_active_wall
+                     ->begin_benchmark_e2e_statement_plan_proof(
+                         runtime.aligner_state.execution_plan,
+                         bioseq::simd::benchmark_e2e_statement_plan_shape::column_scan)) {
+                throw std::logic_error{
+                    "BioseqColumnScan admission changed its statement-plan control block"};
+            }
+#endif
         }
 
         bioseq_log<logging_level::debug>(

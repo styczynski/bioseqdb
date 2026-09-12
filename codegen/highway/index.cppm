@@ -1,6 +1,7 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdio>
 #include <exception>
@@ -187,6 +188,27 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
     };
 }
 
+[[nodiscard]] inline minimizer_registry_command_line
+parse_minimizer_registry_command_line(
+    std::span<std::string_view const> args) {
+    static const std::set<std::string_view, std::less<>> allowed{
+        "--manifest-output",
+        "--profile",
+        "--records-output",
+        "--stamp",
+        "--visitor-output",
+    };
+    const parsed_options parsed = parse_options(args, allowed);
+    const auto& options = parsed.singleton;
+    return minimizer_registry_command_line{
+        .profile = parse_minimizer_registry_profile(options.at("--profile")),
+        .records_output = options.at("--records-output"),
+        .visitor_output = options.at("--visitor-output"),
+        .manifest_output = options.at("--manifest-output"),
+        .stamp = options.at("--stamp"),
+    };
+}
+
 [[nodiscard]] inline std::string depfile_escape(
     const std::filesystem::path& path) {
     std::string result;
@@ -295,6 +317,10 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
             "core");
     prepared.dependencies.push_back(command.source_manifest_path);
     prepared.dependencies.push_back(command.signature_source);
+    if (!sources.minimizer_registry_manifest_path.empty()) {
+        prepared.dependencies.push_back(
+            sources.minimizer_registry_manifest_path);
+    }
     for (const domain_topology_provenance& topology : domain_topologies) {
         prepared.dependencies.push_back(topology.path);
     }
@@ -324,6 +350,53 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
             + prepared.relocatable_pcm_manifest_sha256 + "\n"
         "domain_topologies_sha256="
             + domain_topology_identity(domain_topologies) + "\n");
+    mark_artifact_complete(command.stamp);
+    return 0;
+}
+
+[[nodiscard]] inline int execute_minimizer_registry(
+    minimizer_registry_command_line command) {
+    const std::array outputs{
+        command.records_output,
+        command.visitor_output,
+        command.manifest_output,
+        command.stamp,
+    };
+    std::set<std::filesystem::path> unique_outputs;
+    for (const std::filesystem::path& output : outputs) {
+        if (!output.is_absolute() || output.empty()
+            || !unique_outputs.insert(output.lexically_normal()).second) {
+            throw std::runtime_error(
+                "minimizer registry outputs must be distinct absolute paths");
+        }
+    }
+    if (command.records_output.extension() != ".cppm"
+        || command.visitor_output.extension() != ".cppm"
+        || command.manifest_output.extension() != ".tsv") {
+        throw std::runtime_error(
+            "minimizer registry requires .cppm module outputs and a .tsv manifest");
+    }
+
+    const minimizer_registry_spec registry =
+        make_minimizer_registry(command.profile);
+    validate_minimizer_registry(registry);
+    const std::string manifest = render_minimizer_registry_manifest(registry);
+    const std::string identity = bioseq::common::sha256_hex(manifest);
+    const std::string records = render_minimizer_physical_records_module(
+        registry, identity);
+    const std::string visitor = render_minimizer_physical_registry_module(
+        registry, identity);
+    publish_artifact_if_changed(command.records_output, records);
+    publish_artifact_if_changed(command.visitor_output, visitor);
+    publish_artifact_if_changed(command.manifest_output, manifest);
+    publish_artifact_if_changed(
+        command.stamp,
+        "bioseq_minimizer_registry_stamp\n"
+        "revision=1\n"
+        "profile=" + std::string{minimizer_registry_profile_name(command.profile)}
+            + "\nmanifest_identity=" + identity
+            + "\nrecords_sha256=" + bioseq::common::sha256_hex(records)
+            + "\nvisitor_sha256=" + bioseq::common::sha256_hex(visitor) + "\n");
     mark_artifact_complete(command.stamp);
     return 0;
 }
@@ -510,10 +583,13 @@ inline int self_test() {
 }
 
 inline int run(std::span<std::string_view const> args) {
-    if (args.empty() || (args.front() != "prepare" && args.front() != "generate")) {
+    if (args.empty()
+        || (args.front() != "prepare" && args.front() != "generate"
+            && args.front() != "minimizer-registry")) {
         std::println(
             stderr,
-            "usage: bioseq_codegen highway <prepare|generate> [options] "
+            "usage: bioseq_codegen highway "
+            "<minimizer-registry|prepare|generate> [options] "
             "[--domain-topology-manifest <name>=<absolute-path>]...");
         return 2;
     }
@@ -521,6 +597,11 @@ inline int run(std::span<std::string_view const> args) {
         if (args.front() == "prepare") {
             return detail::execute_prepare(
                 detail::parse_prepare_command_line(args.subspan(1)));
+        }
+        if (args.front() == "minimizer-registry") {
+            return detail::execute_minimizer_registry(
+                detail::parse_minimizer_registry_command_line(
+                    args.subspan(1)));
         }
         return detail::execute(
             detail::parse_generate_command_line(args.subspan(1)));

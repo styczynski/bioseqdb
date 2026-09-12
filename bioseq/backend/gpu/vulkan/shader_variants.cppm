@@ -8,8 +8,32 @@ export module bioseq.gpu.vulkan.shader_variants;
 
 import std;
 import bioseq.gpu.vulkan.shader_compiler;
+import bioseq.gpu.vulkan.abi;
 
 export namespace bioseq::gpu::vulkan {
+
+/// @brief Grouped-SoA shader-layout revision encoded in serialized cache keys.
+inline constexpr std::uint32_t k_grouped_soa_seed_cache_abi_revision = 5u;
+
+/// @brief Process-independent ordered-sketch capacity families sealed into the AOT cache.
+///
+/// The established W=10 key remains exact. Other supported runtime windows use the
+/// smallest bounded family that can hold their ring, so PostgreSQL session GUCs never
+/// change the supervisor/backend manifest membership contract.
+inline constexpr std::array<std::uint32_t, 6> k_ordered_sketch_window_capacities{
+    10u, 16u, 32u, 64u, 128u, 256u};
+
+/// @brief Selects the smallest sealed ordered-sketch ring capacity for a runtime window.
+/// @param[in] window_size Runtime minimizer window length.
+/// @return A sealed capacity, or zero when the runtime window is unsupported.
+[[nodiscard]] inline constexpr std::uint32_t
+choose_ordered_sketch_window_capacity(std::uint32_t window_size) noexcept {
+    for (const std::uint32_t capacity : k_ordered_sketch_window_capacities) {
+        if (window_size != 0u && window_size <= capacity)
+            return capacity;
+    }
+    return 0u;
+}
 
 /// @brief Pipeline selector result for the tiled-DP chaining shader.
 struct chaining_pipeline_key {
@@ -70,6 +94,8 @@ struct chaining_pipeline_key {
     case static_cast<std::uint32_t>(shader_kind::gatekeeper_rank_batch_l32_e4):
     case static_cast<std::uint32_t>(shader_kind::gatekeeper_rank_batch_l64_e2):
     case static_cast<std::uint32_t>(shader_kind::gatekeeper_rank_batch_l64_e4):
+    case static_cast<std::uint32_t>(shader_kind::chain_candidate_reduce):
+    case static_cast<std::uint32_t>(shader_kind::mapping_quality_reduce):
         return static_cast<shader_kind>(raw);
     default:
         throw shader_compile_error("unknown shader kind " + std::to_string(raw));
@@ -109,7 +135,6 @@ static_assert(std::is_standard_layout_v<shader_variant_key>);
 struct vulkan_static_variant_inputs {
     std::uint32_t max_workgroup_invocations = 0;
     std::uint32_t max_shared_memory_bytes = 0;
-    std::uint32_t default_window_size = 10;
 };
 
 /// @brief Select the fixed subgroup-owned tiled-chaining variant.
@@ -214,13 +239,20 @@ is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
     case shader_kind::grouped_soa_seed_emit:
         // max_span selects the grouped-SoA layout in the serialized cache
         // identity. It is not a biological seed span.
-        return key.tile_size == 384u && key.local_size == 128u && key.max_span == 3u;
+        return key.tile_size == 384u && key.local_size == 128u &&
+               key.max_span == k_grouped_soa_seed_cache_abi_revision;
     case shader_kind::chain_range_build:
         return key.tile_size == 384u && key.local_size == 1u && key.max_span == 1u;
     case shader_kind::coordinate_reduce:
     case shader_kind::coordinate_vote_reduce:
     case shader_kind::coordinate_vote_reduce_batch:
         return key.tile_size == 384u && key.local_size == 128u && key.max_span == 1u;
+    case shader_kind::chain_candidate_reduce:
+        return key.tile_size == 384u && key.local_size == 128u &&
+               key.max_span == k_gpu_persisted_mapq_candidate_capacity;
+    case shader_kind::mapping_quality_reduce:
+        return key.tile_size == 384u && key.local_size == 1u &&
+               key.max_span == k_gpu_persisted_mapq_candidate_capacity;
     case shader_kind::generate_units:
         return key.tile_size == 384u && key.local_size == 256u &&
                (key.max_span == 32u || key.max_span == 64u);
@@ -277,6 +309,7 @@ is_shader_variant_key_valid(const shader_variant_key& key) noexcept {
 template <class p_visitor>
 inline void for_each_static_shader_variant(const vulkan_static_variant_inputs& inputs,
                                            p_visitor&& visitor) {
+    (void)inputs;
     // Publishes only selector tuples accepted by the shared cache-key validator.
     const auto emit = [&visitor](shader_variant_key key) {
         if (is_shader_variant_key_valid(key)) {
@@ -290,16 +323,17 @@ inline void for_each_static_shader_variant(const vulkan_static_variant_inputs& i
     emit(make_shader_key(shader_kind::sort_anchors_bitonic, 384u, 256u, 256u));
     emit(make_shader_key(shader_kind::sort_anchors_bitonic, 384u, 512u, 256u));
     emit(make_shader_key(shader_kind::sort_anchors_bitonic, 384u, 1024u, 256u));
-    emit(make_shader_key(shader_kind::ordered_sketch_tile,
-                         384u,
-                         64u,
-                         inputs.default_window_size == 0 ? 1u : inputs.default_window_size));
+    for (const std::uint32_t capacity : k_ordered_sketch_window_capacities) {
+        emit(make_shader_key(shader_kind::ordered_sketch_tile, 384u, 64u, capacity));
+    }
     emit(make_shader_key(shader_kind::prefix_scan_block, 384u, 1u, 1u));
     emit(make_shader_key(shader_kind::prefix_scan_add, 384u, 128u, 1u));
     emit(make_shader_key(shader_kind::seed_count, 384u, 128u, 1u));
     emit(make_shader_key(shader_kind::seed_emit, 384u, 128u, 1u));
-    emit(make_shader_key(shader_kind::grouped_soa_seed_count, 384u, 128u, 3u));
-    emit(make_shader_key(shader_kind::grouped_soa_seed_emit, 384u, 128u, 3u));
+    emit(make_shader_key(
+        shader_kind::grouped_soa_seed_count, 384u, 128u, k_grouped_soa_seed_cache_abi_revision));
+    emit(make_shader_key(
+        shader_kind::grouped_soa_seed_emit, 384u, 128u, k_grouped_soa_seed_cache_abi_revision));
     emit(make_shader_key(shader_kind::radix_sort_histogram, 384u, 1u, 1u));
     emit(make_shader_key(shader_kind::radix_sort_scan, 384u, 1u, 1u));
     emit(make_shader_key(shader_kind::radix_sort_scatter, 384u, 1u, 1u));
@@ -309,6 +343,10 @@ inline void for_each_static_shader_variant(const vulkan_static_variant_inputs& i
     emit(make_shader_key(shader_kind::coordinate_reduce, 384u, 128u, 1u));
     emit(make_shader_key(shader_kind::coordinate_vote_reduce, 384u, 128u, 1u));
     emit(make_shader_key(shader_kind::coordinate_vote_reduce_batch, 384u, 128u, 1u));
+    emit(make_shader_key(
+        shader_kind::chain_candidate_reduce, 384u, 128u, k_gpu_persisted_mapq_candidate_capacity));
+    emit(make_shader_key(
+        shader_kind::mapping_quality_reduce, 384u, 1u, k_gpu_persisted_mapq_candidate_capacity));
     emit(make_shader_key(shader_kind::generate_units, 384u, 256u, 32u));
     emit(make_shader_key(shader_kind::generate_units, 384u, 256u, 64u));
     emit(make_shader_key(shader_kind::seq_sort_extract_key_dna4, 384u, 256u, 0u));

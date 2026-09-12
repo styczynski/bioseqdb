@@ -5,6 +5,9 @@
 export module bioseq.pipeline.minimap_port.match_result_contract;
 
 import std;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+import bioseq.alignment.contracts;
+#endif
 import bioseq.sequences.cigar;
 import bioseq.storage.size;
 
@@ -42,8 +45,47 @@ struct match_result {
     float divergence = -1.f;                ///< sequence divergence estimate
     bool is_primary = true;                  ///< primary mapping flag
     bool has_cigar = false;                  ///< whether CIGAR alignment was performed
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    alignment_result_vector<cigar_operation> cigar;  ///< CIGAR string and campaign lease
+#else
     std::vector<cigar_operation> cigar;      ///< CIGAR string
+#endif
     sequence_size_t edit_distance = 0;      ///< exact unit-cost edits in the reported alignment
 };
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+static_assert(!std::is_copy_constructible_v<match_result>);
+static_assert(std::is_nothrow_move_constructible_v<match_result>);
+#endif
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+/** Independently admitted owner for ordered result payloads. */
+using match_result_vector = admitted_alignment_result_vector<match_result, false>;
+#else
+/** Ordinary builds retain the original zero-overhead result representation. */
+using match_result_vector = std::vector<match_result>;
+#endif
+
+/** Campaign nodes and mapped vectors each retain their own physical permit. */
+template <class p_key_type>
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+using basic_match_result_map = std::map<
+    p_key_type, match_result_vector, std::less<p_key_type>,
+    admitted_alignment_node_allocator<std::pair<const p_key_type, match_result_vector>>>;
+#else
+using basic_match_result_map = std::map<p_key_type, match_result_vector>;
+#endif
+
+using match_result_map = basic_match_result_map<std::int32_t>;
+
+#if defined(BIOSEQ_TEST_INDEXES)
+/** Direct unit-test owners without changing the test-opt pipeline ABI. */
+using test_match_result_vector = test_outer_alignment_result_vector<match_result>;
+template <class p_key_type>
+using test_match_result_map = std::map<
+    p_key_type, test_match_result_vector, std::less<p_key_type>,
+    admitted_alignment_node_allocator<std::pair<const p_key_type, test_match_result_vector>>>;
+static_assert(std::is_nothrow_move_constructible_v<match_result>);
+#endif
 
 } // namespace bioseq::simd

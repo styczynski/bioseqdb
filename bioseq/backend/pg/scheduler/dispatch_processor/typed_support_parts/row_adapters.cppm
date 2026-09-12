@@ -196,13 +196,31 @@ attach_retained_hash_major_query_stats(match_result_collection& collection,
     }
     if (stats.exact_simd_available) {
         collection.record_exact_simd_query_execution_stats(stats.exact_simd);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        collection.record_completed_minimizer_algorithm_identity(
+            minimizer_algorithm::two_stack_nthash);
+#endif
     }
     if (stats.bounded_nthash_available) {
         collection.record_bounded_nthash_query_execution_stats(stats.bounded_nthash);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        collection.record_completed_minimizer_algorithm_identity(
+            minimizer_algorithm::bounded_nthash_simd);
+#endif
     }
     if (stats.scalar_available) {
         collection.record_scalar_query_minimizer_execution_stats(stats.scalar);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        collection.record_completed_minimizer_algorithm_identity(minimizer_algorithm::scalar);
+#endif
     }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    // The checked bridge attests nonempty reference work before this attachment.
+    if (stats.checked_reference_simd_bridge_completed) {
+        collection.record_completed_minimizer_algorithm_identity(
+            minimizer_algorithm::simd_minimap2_reference);
+    }
+#endif
 }
 
 } // namespace bioseq::simd::typed_dispatch::typed_support_detail

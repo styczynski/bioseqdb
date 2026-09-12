@@ -8,10 +8,15 @@ module;
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <filesystem>
 #include <libassert/assert.hpp>
 
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
+
+#if defined(__APPLE__) && !defined(BIOSEQ_RECEIPT_OWNED_VULKAN_LOADER_PATH)
+#error "Apple Vulkan runtime requires one receipt-owned loader path"
+#endif
 
 module bioseq.gpu.vulkan.runtime:support;
 
@@ -343,13 +348,14 @@ void reset_vulkan_submission_test_seam() noexcept {
 #endif
 
 /// @brief Resolves every Vulkan entry point required by the synchronous runtime.
-void load_vulkan_runtime_functions() {
+void load_vulkan_runtime_functions(void* loader_handle) {
+    if (loader_handle == nullptr) {
+        throw vulkan_runtime_error("Vulkan loader handle is null");
+    }
     std::string missing;
 #define BIOSEQ_LOAD_VULKAN_FUNCTION(name)                                                          \
     do {                                                                                           \
-        if (name == nullptr) {                                                                     \
-            name = reinterpret_cast<PFN_##name>(::dlsym(RTLD_DEFAULT, #name));                     \
-        }                                                                                          \
+        name = reinterpret_cast<PFN_##name>(::dlsym(loader_handle, #name));                        \
         if (name == nullptr) {                                                                     \
             if (!missing.empty())                                                                  \
                 missing += ", ";                                                                   \
@@ -364,30 +370,40 @@ void load_vulkan_runtime_functions() {
     }
 }
 
-/// @brief Loads a process-visible Vulkan loader when needed, then resolves its entry points.
+/// @brief Loads the configured Vulkan loader, then resolves its entry points from that handle.
 void ensure_vulkan_loader_loaded_for_runtime() {
-    if (::dlsym(RTLD_DEFAULT, "vkCreateInstance") == nullptr) {
 #if defined(__APPLE__)
-        constexpr std::array candidates = {
-            "@rpath/libvulkan.1.4.341.dylib",
-            "@rpath/libvulkan.1.dylib",
-            "@rpath/libvulkan.dylib",
-            "/opt/homebrew/lib/libvulkan.dylib",
-            "/usr/local/lib/libvulkan.dylib",
-        };
+    std::error_code error;
+    const std::filesystem::path required_loader_path = std::filesystem::canonical(
+        BIOSEQ_RECEIPT_OWNED_VULKAN_LOADER_PATH, error);
+    if (error || !required_loader_path.is_absolute()) {
+        throw vulkan_runtime_error("receipt-owned Vulkan loader path is not canonical");
+    }
+    void* loader_handle = ::dlopen(required_loader_path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    void* create_instance =
+        loader_handle == nullptr ? nullptr : ::dlsym(loader_handle, "vkCreateInstance");
+    Dl_info loader_info{};
+    if (create_instance == nullptr || ::dladdr(create_instance, &loader_info) == 0 ||
+        loader_info.dli_fname == nullptr) {
+        throw vulkan_runtime_error(
+            "receipt-owned Vulkan loader does not own vkCreateInstance");
+    }
+    error.clear();
+    const std::filesystem::path observed_loader_path =
+        std::filesystem::canonical(loader_info.dli_fname, error);
+    if (error || observed_loader_path != required_loader_path) {
+        throw vulkan_runtime_error(
+            "resolved vkCreateInstance image differs from the receipt-owned Vulkan loader");
+    }
 #else
-        constexpr std::array candidates = {
-            "libvulkan.so.1",
-            "libvulkan.so",
-        };
-#endif
+    void* loader_handle = RTLD_DEFAULT;
+    if (::dlsym(loader_handle, "vkCreateInstance") == nullptr) {
+        constexpr std::array candidates = {"libvulkan.so.1", "libvulkan.so"};
         std::string errors;
-        bool loaded = false;
         for (const char* path : candidates) {
             ::dlerror();
-            if (void* handle = ::dlopen(path, RTLD_NOW | RTLD_GLOBAL); handle != nullptr) {
-                (void)handle;
-                loaded = true;
+            if (void* loaded = ::dlopen(path, RTLD_NOW | RTLD_GLOBAL); loaded != nullptr) {
+                loader_handle = loaded;
                 break;
             }
             if (const char* err = ::dlerror(); err != nullptr) {
@@ -398,13 +414,14 @@ void ensure_vulkan_loader_loaded_for_runtime() {
                 errors += err;
             }
         }
-        if (!loaded && ::dlsym(RTLD_DEFAULT, "vkCreateInstance") == nullptr) {
+        if (::dlsym(loader_handle, "vkCreateInstance") == nullptr) {
             throw vulkan_runtime_error(
                 fmt::format("Vulkan loader unavailable for backend runtime initialization: {}",
                             errors.empty() ? "no dlopen diagnostics" : errors));
         }
     }
-    load_vulkan_runtime_functions();
+#endif
+    load_vulkan_runtime_functions(loader_handle);
 }
 
 /// @brief Resolves the image that owns a loaded symbol on platforms that expose it.
@@ -492,8 +509,9 @@ struct seed_lookup_push_constants {
     std::uint32_t bucket_count;
     std::uint32_t exact_anchor_count;
     std::uint32_t target_ref_bits;
+    std::uint32_t query_minimizer_record_offset;
 };
-static_assert(sizeof(seed_lookup_push_constants) == 44);
+static_assert(sizeof(seed_lookup_push_constants) == 48);
 
 /// Usage shared by host-visible compute buffers that may also participate in transfers.
 constexpr VkBufferUsageFlags k_compute_buffer_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
@@ -534,8 +552,9 @@ struct alignment_cigar_push_constants {
     std::int32_t end_bonus = 0;
     std::uint32_t flags = 0;
     std::uint32_t reserved = 0;
+    std::array<std::uint32_t, 8> complement_rank_words{};
 };
-static_assert(sizeof(alignment_cigar_push_constants) == 60);
+static_assert(sizeof(alignment_cigar_push_constants) == 92);
 static_assert(std::is_standard_layout_v<alignment_cigar_push_constants>);
 
 /// @brief Encodes alignment-extension parameters into the shader push layout.
@@ -578,7 +597,8 @@ alignment_cigar_push(std::uint32_t job_count, const gpu_alignment_cigar_params& 
                                           params.z_drop,
                                           params.end_bonus,
                                           params.flags,
-                                          params.reserved};
+                                          params.reserved,
+                                          params.complement_rank_words};
 }
 
 /// @brief Rejects an alignment-extension score outside the shader domain.
@@ -950,23 +970,27 @@ void validate_alignment_cigar_inputs(std::span<const std::uint32_t> query_symbol
     if (params.match_score == 0) {
         throw vulkan_runtime_error("alignment CIGAR extension match_score must be positive");
     }
-    if (params.flags != 0 || params.reserved != 0) {
+    if (params.flags != 0 || params.reserved != 0 ||
+        std::ranges::any_of(params.complement_rank_words,
+                            [](const std::uint32_t word) { return word != 0u; })) {
         throw vulkan_runtime_error("alignment CIGAR extension params flags/reserved must be zero");
     }
     if (packed_cigar_capacity == 0) {
         throw vulkan_runtime_error("alignment CIGAR extension packed CIGAR capacity is zero");
     }
 
+    std::uint64_t prior_cigar_end = 0u;
     for (std::size_t i = 0; i < jobs.size(); ++i) {
         const gpu_alignment_cigar_job_wire& job = jobs[i];
-        if (job.query_len > k_gpu_alignment_simple_cigar_max_len ||
-            job.target_len > k_gpu_alignment_simple_cigar_max_len) {
+        if (job.query_len == 0u || job.target_len == 0u ||
+            job.query_len > k_gpu_alignment_cigar_operation_max_len ||
+            job.target_len > k_gpu_alignment_cigar_operation_max_len) {
             throw vulkan_runtime_error(
                 fmt::format("alignment CIGAR extension job {} length {}x{} exceeds {}",
                             i,
                             job.query_len,
                             job.target_len,
-                            k_gpu_alignment_simple_cigar_max_len));
+                            k_gpu_alignment_cigar_operation_max_len));
         }
         if (job.band_width > params.max_band_width) {
             throw vulkan_runtime_error(fmt::format(
@@ -975,19 +999,43 @@ void validate_alignment_cigar_inputs(std::span<const std::uint32_t> query_symbol
                 job.band_width,
                 params.max_band_width));
         }
+        const std::uint32_t length_delta = job.query_len > job.target_len
+                                               ? job.query_len - job.target_len
+                                               : job.target_len - job.query_len;
+        if (length_delta > job.band_width) {
+            throw vulkan_runtime_error(fmt::format(
+                "alignment CIGAR extension job {} length delta {} exceeds band_width {}",
+                i,
+                length_delta,
+                job.band_width));
+        }
         if (job.cigar_capacity == 0) {
             throw vulkan_runtime_error(
                 fmt::format("alignment CIGAR extension job {} CIGAR capacity is zero", i));
+        }
+        if (job.flags != 0u || job.query_packed_byte_count != 0u ||
+            job.target_packed_byte_count != 0u || job.query_leading_symbol_offset != 0u ||
+            job.target_leading_symbol_offset != 0u || job.query_storage_unit_width != 0u ||
+            job.target_storage_unit_width != 0u || job.bits_per_symbol != 0u ||
+            job.problem_index != 0u) {
+            throw vulkan_runtime_error(fmt::format(
+                "alignment CIGAR extension legacy job {} contains packed-input metadata", i));
         }
         const bool bounded_dp_candidate = job.query_len <= k_gpu_alignment_extension_max_len &&
                                           job.target_len <= k_gpu_alignment_extension_max_len;
         const std::uint64_t traceback_cells =
             bounded_dp_candidate ? (static_cast<std::uint64_t>(job.query_len) + 1u) *
                                        (static_cast<std::uint64_t>(job.target_len) + 1u)
-                                 : 0u;
+                                 : gpu_alignment_cigar_gridded_traceback_words(job.query_len,
+                                                                               job.target_len,
+                                                                               params.tile_query,
+                                                                               params.tile_target,
+                                                                               job.band_width);
         const std::uint64_t traceback_end = static_cast<std::uint64_t>(job.traceback_tile_offset) +
                                             static_cast<std::uint64_t>(job.traceback_tile_count);
-        if (bounded_dp_candidate && job.traceback_tile_count < traceback_cells) {
+        if (traceback_cells == 0u ||
+            traceback_cells > (std::numeric_limits<std::uint32_t>::max)() ||
+            (job.traceback_tile_count != 0u && job.traceback_tile_count < traceback_cells)) {
             throw vulkan_runtime_error(fmt::format(
                 "alignment CIGAR extension job {} traceback capacity {} below required {}",
                 i,
@@ -1003,14 +1051,19 @@ void validate_alignment_cigar_inputs(std::span<const std::uint32_t> query_symbol
         }
         const std::uint64_t cigar_end = static_cast<std::uint64_t>(job.cigar_offset) +
                                         static_cast<std::uint64_t>(job.cigar_capacity);
-        if (cigar_end > packed_cigar_capacity) {
+        if (job.cigar_offset != prior_cigar_end || cigar_end > packed_cigar_capacity ||
+            job.query_global_start > (std::numeric_limits<std::uint32_t>::max)() - job.query_len ||
+            job.target_global_start >
+                (std::numeric_limits<std::uint32_t>::max)() - job.target_len) {
             throw vulkan_runtime_error(fmt::format(
-                "alignment CIGAR extension job {} CIGAR range [{}, {}) exceeds capacity {}",
+                "alignment CIGAR extension job {} has invalid CIGAR/coordinate geometry [{}, {}) "
+                "for capacity {}",
                 i,
                 job.cigar_offset,
                 cigar_end,
                 packed_cigar_capacity));
         }
+        prior_cigar_end = cigar_end;
         validate_alignment_extension_symbols(query_symbols,
                                              job.query_symbol_offset,
                                              job.query_len,
@@ -1023,6 +1076,141 @@ void validate_alignment_cigar_inputs(std::span<const std::uint32_t> query_symbol
                                              params.alphabet_size,
                                              "target",
                                              i);
+    }
+}
+
+/// @brief Validates native packed windows without decoding any biological symbols on the host.
+void validate_alignment_packed_cigar_inputs(std::span<const std::byte> query_packed,
+                                            std::span<const std::byte> target_packed,
+                                            std::span<const gpu_alignment_cigar_job_wire> jobs,
+                                            const gpu_alignment_cigar_params& params,
+                                            std::uint32_t packed_cigar_capacity) {
+    if (jobs.empty() || jobs.size() > std::numeric_limits<std::uint32_t>::max() ||
+        query_packed.empty() || target_packed.empty() ||
+        query_packed.size() > std::numeric_limits<std::uint32_t>::max() ||
+        target_packed.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw vulkan_runtime_error("packed alignment CIGAR batch shape is invalid");
+    }
+    if (params.alphabet_size == 0u || params.alphabet_size > 32u ||
+        params.max_band_width > k_gpu_alignment_extension_max_band_width ||
+        params.tile_query == 0u || params.tile_query > k_gpu_alignment_extension_max_len ||
+        params.tile_target == 0u || params.tile_target > k_gpu_alignment_extension_max_len ||
+        params.match_score == 0 || params.flags != 0u || params.reserved != 0u ||
+        packed_cigar_capacity == 0u) {
+        throw vulkan_runtime_error("packed alignment CIGAR parameters are invalid");
+    }
+    validate_alignment_cigar_score("match_score", params.match_score);
+    validate_alignment_cigar_score("mismatch_penalty", params.mismatch_penalty);
+    validate_alignment_cigar_score("gap_open_short", params.gap_open_short);
+    validate_alignment_cigar_score("gap_extend_short", params.gap_extend_short);
+    validate_alignment_cigar_score("gap_open_long", params.gap_open_long);
+    validate_alignment_cigar_score("gap_extend_long", params.gap_extend_long);
+    validate_alignment_cigar_score("z_drop", params.z_drop);
+    validate_alignment_cigar_score("end_bonus", params.end_bonus);
+    for (std::uint32_t rank = 0u; rank < params.alphabet_size; ++rank) {
+        const std::uint32_t word = params.complement_rank_words[rank / 4u];
+        const std::uint32_t complement = (word >> ((rank % 4u) * 8u)) & 0xffu;
+        if (complement >= params.alphabet_size) {
+            throw vulkan_runtime_error("packed alignment CIGAR complement table is invalid");
+        }
+    }
+
+    const auto validate_window = [](const std::span<const std::byte> payload,
+                                    const std::uint32_t offset,
+                                    const std::uint32_t byte_count,
+                                    const std::uint32_t leading,
+                                    const std::uint32_t unit_width,
+                                    const std::uint32_t bits_per_symbol,
+                                    const std::uint32_t logical_length,
+                                    const std::size_t job_index,
+                                    const char* side) {
+        const bool width_valid =
+            unit_width == 1u || unit_width == 2u || unit_width == 4u || unit_width == 8u;
+        const std::uint32_t letters_per_unit =
+            !width_valid || bits_per_symbol == 0u || bits_per_symbol > 8u
+                ? 0u
+                : (unit_width * 8u) / bits_per_symbol;
+        const std::uint64_t occupied = static_cast<std::uint64_t>(leading) + logical_length;
+        const std::uint64_t units =
+            letters_per_unit == 0u
+                ? 0u
+                : bioseq::common::ceil_div(occupied, static_cast<std::uint64_t>(letters_per_unit));
+        const std::uint64_t expected_bytes = units * unit_width;
+        const std::uint64_t end = static_cast<std::uint64_t>(offset) + byte_count;
+        if (logical_length == 0u || letters_per_unit == 0u || leading >= letters_per_unit ||
+            expected_bytes == 0u || expected_bytes != byte_count || end > payload.size()) {
+            throw vulkan_runtime_error(fmt::format(
+                "packed alignment CIGAR job {} has invalid {} window geometry", job_index, side));
+        }
+    };
+
+    std::uint32_t prior_problem_index = 0u;
+    std::uint64_t prior_cigar_end = 0u;
+    bool have_prior_problem_index = false;
+    for (std::size_t i = 0u; i < jobs.size(); ++i) {
+        const gpu_alignment_cigar_job_wire& job = jobs[i];
+        const std::uint32_t length_delta = job.query_len > job.target_len
+                                               ? job.query_len - job.target_len
+                                               : job.target_len - job.query_len;
+        if ((job.flags & k_gpu_alignment_cigar_job_flag_packed_inputs) == 0u ||
+            (job.flags & ~k_gpu_alignment_cigar_job_flags) != 0u || job.query_len == 0u ||
+            job.target_len == 0u || job.query_len > k_gpu_alignment_cigar_operation_max_len ||
+            job.target_len > k_gpu_alignment_cigar_operation_max_len ||
+            length_delta > job.band_width || job.band_width > params.max_band_width ||
+            job.cigar_capacity == 0u ||
+            (have_prior_problem_index && job.problem_index <= prior_problem_index)) {
+            throw vulkan_runtime_error(
+                fmt::format("packed alignment CIGAR job {} metadata is invalid", i));
+        }
+        prior_problem_index = job.problem_index;
+        have_prior_problem_index = true;
+        validate_window(query_packed,
+                        job.query_symbol_offset,
+                        job.query_packed_byte_count,
+                        job.query_leading_symbol_offset,
+                        job.query_storage_unit_width,
+                        job.bits_per_symbol,
+                        job.query_len,
+                        i,
+                        "query");
+        validate_window(target_packed,
+                        job.target_symbol_offset,
+                        job.target_packed_byte_count,
+                        job.target_leading_symbol_offset,
+                        job.target_storage_unit_width,
+                        job.bits_per_symbol,
+                        job.target_len,
+                        i,
+                        "target");
+        const std::uint64_t required_traceback =
+            job.query_len <= k_gpu_alignment_extension_max_len &&
+                    job.target_len <= k_gpu_alignment_extension_max_len
+                ? (static_cast<std::uint64_t>(job.query_len) + 1u) *
+                      (static_cast<std::uint64_t>(job.target_len) + 1u)
+                : gpu_alignment_cigar_gridded_traceback_words(job.query_len,
+                                                              job.target_len,
+                                                              params.tile_query,
+                                                              params.tile_target,
+                                                              job.band_width);
+        const std::uint64_t traceback_end =
+            static_cast<std::uint64_t>(job.traceback_tile_offset) + job.traceback_tile_count;
+        const std::uint64_t cigar_end =
+            static_cast<std::uint64_t>(job.cigar_offset) + job.cigar_capacity;
+        if (required_traceback == 0u ||
+            required_traceback > (std::numeric_limits<std::uint32_t>::max)() ||
+            job.traceback_tile_offset != 0u || job.traceback_tile_count != required_traceback ||
+            traceback_end > std::numeric_limits<std::uint32_t>::max() ||
+            job.cigar_offset != prior_cigar_end || cigar_end > packed_cigar_capacity ||
+            job.query_global_start > (std::numeric_limits<std::uint32_t>::max)() - job.query_len ||
+            job.target_global_start >
+                (std::numeric_limits<std::uint32_t>::max)() - job.target_len) {
+            throw vulkan_runtime_error(
+                fmt::format("packed alignment CIGAR job {} output geometry is invalid", i));
+        }
+        prior_cigar_end = cigar_end;
+    }
+    if (prior_cigar_end != packed_cigar_capacity) {
+        throw vulkan_runtime_error("packed alignment CIGAR capacity is not fully partitioned");
     }
 }
 

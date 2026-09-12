@@ -13,6 +13,9 @@
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+#include <limits>
+#endif
 #include "kthread.h"
 #include "kvec.h"
 
@@ -838,17 +841,42 @@ static void worker_for(void *_data, long i, int tid) // kt_for() callback
 		fprintf(stderr, "QT\t%s\t%d\t%.6f\n", s->seq[off].name, tid, realtime() - t);
 }
 
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+static int merge_hits(step_t *s)
+#else
 static void merge_hits(step_t *s)
+#endif
 {
 	int f, i, k0, k, max_seg = 0, *n_reg_part, *rep_len_part, *frag_gap_part, *qlens;
 	void *km;
 	FILE **fp = s->p->fp_parts;
 	const mm_mapopt_t *opt = s->p->opt;
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	int failed_k = -1;
+	if (bioseq_minimap2_e2e_io_error_seen()) return -1;
+#endif
 
 	km = km_init();
 	for (f = 0; f < s->n_frag; ++f)
 		max_seg = max_seg > s->n_seg[f]? max_seg : s->n_seg[f];
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	if (s->p->n_parts < 0 ||
+		s->p->n_parts > ((std::numeric_limits<int>::max)() - max_seg) / 3) {
+		bioseq_minimap2_e2e_io_error_mark();
+		km_destroy(km);
+		return -1;
+	}
+	qlens = CALLOC(int, static_cast<size_t>(max_seg) +
+		static_cast<size_t>(s->p->n_parts) * 3u);
+#else
 	qlens = CALLOC(int, max_seg + s->p->n_parts * 3);
+#endif
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	if (qlens == 0) {
+		bioseq_minimap2_e2e_io_error_mark();
+		goto e2e_io_fail;
+	}
+#endif
 	n_reg_part = qlens + max_seg;
 	rep_len_part = n_reg_part + s->p->n_parts;
 	frag_gap_part = rep_len_part + s->p->n_parts;
@@ -856,27 +884,69 @@ static void merge_hits(step_t *s)
 		k0 = k;
 		for (i = 0; i < s->n_seg[f]; ++i, ++k) {
 			int j, l, t, rep_len = 0;
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+			failed_k = k;
+#endif
 			qlens[i] = s->seq[k].l_seq;
 			for (j = 0, s->n_reg[k] = 0; j < s->p->n_parts; ++j) {
 				mm_err_fread(&n_reg_part[j],    sizeof(int), 1, fp[j]);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+				if (bioseq_minimap2_e2e_io_error_seen()) goto e2e_io_fail;
+#endif
 				mm_err_fread(&rep_len_part[j],  sizeof(int), 1, fp[j]);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+				if (bioseq_minimap2_e2e_io_error_seen()) goto e2e_io_fail;
+#endif
 				mm_err_fread(&frag_gap_part[j], sizeof(int), 1, fp[j]);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+				if (bioseq_minimap2_e2e_io_error_seen()) goto e2e_io_fail;
+				if (n_reg_part[j] < 0 ||
+					s->n_reg[k] > (std::numeric_limits<int>::max)() - n_reg_part[j]) {
+					bioseq_minimap2_e2e_io_error_mark();
+					goto e2e_io_fail;
+				}
+#endif
 				s->n_reg[k] += n_reg_part[j];
 				if (rep_len < rep_len_part[j])
 					rep_len = rep_len_part[j];
 			}
 			s->reg[k] = CALLOC(mm_reg1_t, s->n_reg[k]);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+			if (s->n_reg[k] != 0 && s->reg[k] == 0) {
+				bioseq_minimap2_e2e_io_error_mark();
+				goto e2e_io_fail;
+			}
+#endif
 			for (j = 0, l = 0; j < s->p->n_parts; ++j) {
 				for (t = 0; t < n_reg_part[j]; ++t, ++l) {
 					mm_reg1_t *r = &s->reg[k][l];
 					uint32_t capacity;
 					mm_err_fread(r, sizeof(mm_reg1_t), 1, fp[j]);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+					if (bioseq_minimap2_e2e_io_error_seen()) {
+						r->p = 0;
+						goto e2e_io_fail;
+					}
+					r->p = 0;
+#endif
 					r->rid += s->p->rid_shift[j];
 					if (opt->flag & MM_F_CIGAR) {
 						mm_err_fread(&capacity, 4, 1, fp[j]);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+						if (bioseq_minimap2_e2e_io_error_seen()) goto e2e_io_fail;
+#endif
 						r->p = (mm_extra_t*)calloc(capacity, 4);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+						if (r->p == 0) {
+							bioseq_minimap2_e2e_io_error_mark();
+							goto e2e_io_fail;
+						}
+#endif
 						r->p->capacity = capacity;
 						mm_err_fread(r->p, r->p->capacity, 4, fp[j]);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+						if (bioseq_minimap2_e2e_io_error_seen()) goto e2e_io_fail;
+#endif
 					}
 				}
 			}
@@ -895,12 +965,31 @@ static void merge_hits(step_t *s)
 				mm_set_sam_pri(s->n_reg[k], s->reg[k]);
 			}
 			mm_set_mapq2(km, s->n_reg[k], s->reg[k], opt->min_chain_score, opt->a, rep_len, !!(opt->flag & (MM_F_SR|MM_F_SR_RNA)), !!(opt->flag & MM_F_SPLICE));
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+			failed_k = -1;
+#endif
 		}
 		if (s->n_seg[f] == 2 && opt->pe_ori >= 0 && (opt->flag&MM_F_CIGAR))
 			mm_pair(km, frag_gap_part[0], opt->pe_bonus, opt->a * 2 + opt->b, opt->a, qlens, &s->n_reg[k0], &s->reg[k0]);
 	}
 	free(qlens);
 	km_destroy(km);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	return 0;
+
+e2e_io_fail:
+	if (failed_k >= 0 && failed_k < s->n_seq && s->reg[failed_k] != 0) {
+		for (i = 0; i < s->n_reg[failed_k]; ++i)
+			free(s->reg[failed_k][i].p);
+		free(s->reg[failed_k]);
+		s->reg[failed_k] = 0;
+	}
+	if (failed_k >= 0 && failed_k < s->n_seq)
+		s->n_reg[failed_k] = 0;
+	free(qlens);
+	km_destroy(km);
+	return -1;
+#endif
 }
 
 static void *worker_pipeline(void *shared, int step, void *in)
@@ -908,6 +997,9 @@ static void *worker_pipeline(void *shared, int step, void *in)
 	int i, j, k;
     pipeline_t *p = (pipeline_t*)shared;
     if (step == 0) { // step 0: read sequences
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+		if (bioseq_minimap2_e2e_io_error_seen()) return 0;
+#endif
 		int with_qual = (!!(p->opt->flag & MM_F_OUT_SAM) && !(p->opt->flag & MM_F_NO_QUAL));
 		int with_comment = !!(p->opt->flag & MM_F_COPY_COMMENT);
 		int frag_mode = (p->n_fp > 1 || !!(p->opt->flag & MM_F_FRAG_MODE));
@@ -951,6 +1043,9 @@ static void *worker_pipeline(void *shared, int step, void *in)
 			int seg_st = s->seg_off[k], seg_en = s->seg_off[k] + s->n_seg[k];
 			for (i = seg_st; i < seg_en; ++i) {
 				mm_bseq1_t *t = &s->seq[i];
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+				if (!bioseq_minimap2_e2e_io_error_seen()) {
+#endif
 				if (p->opt->split_prefix && p->n_parts == 0) { // then write to temporary files
 					mm_err_fwrite(&s->n_reg[i],    sizeof(int), 1, p->fp_split);
 					mm_err_fwrite(&s->rep_len[i],  sizeof(int), 1, p->fp_split);
@@ -989,6 +1084,9 @@ static void *worker_pipeline(void *shared, int step, void *in)
 						mm_write_paf4(&p->str, mi, t, 0, 0, p->opt->flag, s->rep_len[i], s->n_seg[k], i - seg_st);
 					mm_err_puts(p->str.s);
 				}
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+				}
+#endif
 			}
 			for (i = seg_st; i < seg_en; ++i) {
 				for (j = 0; j < s->n_reg[i]; ++j) free(s->reg[i][j].p);
@@ -1012,6 +1110,12 @@ static mm_bseq_file_t **open_bseqs(int n, const char **fn)
 	mm_bseq_file_t **fp;
 	int i, j;
 	fp = (mm_bseq_file_t**)calloc(n, sizeof(mm_bseq_file_t*));
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	if (fp == 0) {
+		bioseq_minimap2_e2e_io_error_mark();
+		return 0;
+	}
+#endif
 	for (i = 0; i < n; ++i) {
 		if ((fp[i] = mm_bseq_open(fn[i])) == 0) {
 			if (mm_verbose >= 1)
@@ -1030,6 +1134,9 @@ int mm_map_file_frag(const mm_idx_t *idx, int n_segs, const char **fn, const mm_
 	int i, pl_threads;
 	pipeline_t pl;
 	if (n_segs < 1) return -1;
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	if (opt->split_prefix) bioseq_minimap2_e2e_io_error_reset();
+#endif
 	memset(&pl, 0, sizeof(pipeline_t));
 	pl.n_fp = n_segs;
 	pl.fp = open_bseqs(pl.n_fp, fn);
@@ -1037,17 +1144,37 @@ int mm_map_file_frag(const mm_idx_t *idx, int n_segs, const char **fn, const mm_
 	pl.opt = opt, pl.mi = idx;
 	pl.n_threads = n_threads > 1? n_threads : 1;
 	pl.mini_batch_size = opt->mini_batch_size;
-	if (opt->split_prefix)
+	if (opt->split_prefix) {
 		pl.fp_split = mm_split_init(opt->split_prefix, idx);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+		if (pl.fp_split == 0) {
+			for (i = 0; i < pl.n_fp; ++i)
+				mm_bseq_close(pl.fp[i]);
+			free(pl.fp);
+			return -1;
+		}
+#endif
+	}
 	pl_threads = n_threads == 1? 1 : (opt->flag&MM_F_2_IO_THREADS)? 3 : 2;
 	kt_pipeline(pl_threads, worker_pipeline, &pl, 3);
 
 	free(pl.str.s);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	if (pl.fp_split) {
+		bioseq_minimap2_e2e_close_split_output(pl.fp_split);
+		pl.fp_split = 0;
+	}
+#else
 	if (pl.fp_split) fclose(pl.fp_split);
+#endif
 	for (i = 0; i < pl.n_fp; ++i)
 		mm_bseq_close(pl.fp[i]);
 	free(pl.fp);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	return opt->split_prefix && bioseq_minimap2_e2e_io_error_seen()? -1 : 0;
+#else
 	return 0;
+#endif
 }
 
 int mm_map_file(const mm_idx_t *idx, const char *fn, const mm_mapopt_t *opt, int n_threads)
@@ -1061,6 +1188,9 @@ int mm_split_merge(int n_segs, const char **fn, const mm_mapopt_t *opt, int n_sp
 	pipeline_t pl;
 	mm_idx_t *mi;
 	if (n_segs < 1 || n_split_idx < 1) return -1;
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	bioseq_minimap2_e2e_io_error_reset();
+#endif
 	memset(&pl, 0, sizeof(pipeline_t));
 	pl.n_fp = n_segs;
 	pl.fp = open_bseqs(pl.n_fp, fn);
@@ -1071,8 +1201,30 @@ int mm_split_merge(int n_segs, const char **fn, const mm_mapopt_t *opt, int n_sp
 	pl.n_parts = n_split_idx;
 	pl.fp_parts  = CALLOC(FILE*, pl.n_parts);
 	pl.rid_shift = CALLOC(uint32_t, pl.n_parts);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	if (pl.fp_parts == 0 || pl.rid_shift == 0) {
+		bioseq_minimap2_e2e_io_error_mark();
+		for (i = 0; i < pl.n_fp; ++i)
+			mm_bseq_close(pl.fp[i]);
+		free(pl.fp);
+		free(pl.fp_parts);
+		free(pl.rid_shift);
+		return -1;
+	}
+#endif
 	pl.mi = mi = mm_split_merge_prep(opt->split_prefix, n_split_idx, pl.fp_parts, pl.rid_shift);
 	if (pl.mi == 0) {
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+		for (i = 0; i < n_split_idx; ++i) {
+			if (pl.fp_parts[i] != 0) {
+				bioseq_minimap2_e2e_close_split_input(pl.fp_parts[i]);
+				pl.fp_parts[i] = 0;
+			}
+		}
+		for (i = 0; i < pl.n_fp; ++i)
+			mm_bseq_close(pl.fp[i]);
+		free(pl.fp);
+#endif
 		free(pl.fp_parts);
 		free(pl.rid_shift);
 		return -1;
@@ -1090,12 +1242,25 @@ int mm_split_merge(int n_segs, const char **fn, const mm_mapopt_t *opt, int n_sp
 	free(pl.str.s);
 	mm_idx_destroy(mi);
 	free(pl.rid_shift);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	for (i = 0; i < n_split_idx; ++i) {
+		if (pl.fp_parts[i] != 0) {
+			bioseq_minimap2_e2e_close_split_input(pl.fp_parts[i]);
+			pl.fp_parts[i] = 0;
+		}
+	}
+#else
 	for (i = 0; i < n_split_idx; ++i)
 		fclose(pl.fp_parts[i]);
+#endif
 	free(pl.fp_parts);
 	for (i = 0; i < pl.n_fp; ++i)
 		mm_bseq_close(pl.fp[i]);
 	free(pl.fp);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	return bioseq_minimap2_e2e_io_error_seen()? -1 : 0;
+#else
 	mm_split_rm_tmp(opt->split_prefix, n_split_idx);
 	return 0;
+#endif
 }

@@ -69,43 +69,74 @@ export {
     [[nodiscard]] inline bool
     vulkan_components_requested(const ::bioseq::simd::minimap2_parameters& params) noexcept;
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    /// Pipeline description also constructs stages; only execution may attest work.
+    [[gnu::always_inline]] inline void attest_benchmark_e2e_pipeline_execution(
+        const statement_execution_plan_owner& execution_plan) {
+        const auto& params = execution_plan->frozen_parameters;
+        if (params.downstream_active_wall != nullptr &&
+            !params.downstream_active_wall->attest_benchmark_e2e_statement_plan_checkpoint(
+                execution_plan,
+                benchmark_e2e_statement_plan_checkpoint::pipeline)) {
+            throw std::logic_error{"post-seed observation changed the statement control block"};
+        }
+        const auto binding = current_benchmark_e2e_operation_binding();
+        if (binding.is_available) {
+            const auto observed_owner = binding.statement_owner.lock();
+            if (!observed_owner || observed_owner.get() != execution_plan.get() ||
+                observed_owner.owner_before(execution_plan) ||
+                execution_plan.owner_before(observed_owner)) {
+                throw std::logic_error{"post-seed job attribution belongs to a different statement"};
+            }
+        }
+    }
+#endif
+
     /**
-     * @brief Build the full minimap pipeline value for one (p_aligner_parameters,
-     * p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm, p_entry_point).
+     * @brief Construct the one selected chaining and ordinary host suffix.
      *
-     * All template parameters are fixed by the caller (the dispatcher cascade).
-     * The function is the single place both the run path and the describe path
-     * consult to learn what stages are is_available — adding or removing a stage edits
-     * only this function.
+     * Query storage and the immutable statement snapshot are retained by the
+     * graph even when divergence is disabled. This factor never seeds again.
      */
     template <is_constexpr_aligner_params p_aligner_parameters,
               ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
               ::bioseq::simd::chaining_algorithm p_chaining_algorithm,
-              ::bioseq::simd::minimizer_algorithm p_minimizer_algorithm,
-              pipeline_entry_point p_entry_point,
               sequence_alphabet p_alphabet,
-              class p_minimizer,
-              class p_index,
-              class p_query_minimizers = std::vector<p_minimizer>>
+              class p_minimizer>
     [[nodiscard, gnu::always_inline]] inline auto
-    make_minimap_pipeline(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
-                          bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                          const p_query_minimizers& query_minimizers,
-                          const p_index& target_index,
-                          const scoring_matrix<p_alphabet>& scoring_matrix,
-                          const ::bioseq::simd::alignment_kernels<p_alphabet>& alignment_kernels,
-                          match_result_collection& output_collection,
-                          const ::bioseq::simd::minimap2_parameters& params,
-                          sequence_size_t query_len,
-                          sequence_size_t target_len,
-                          bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-                          bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-                          post_seed_owned_lifetime* post_seed_owned_lifetime = nullptr) {
+    make_minimap_post_seed_pipeline(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        minimizer_batch_view<p_minimizer> query_minimizers,
+        const scoring_matrix<p_alphabet>& scoring_matrix,
+        const ::bioseq::simd::alignment_kernels<p_alphabet>& alignment_kernels,
+        match_result_collection& output_collection,
+        statement_execution_plan_owner execution_plan,
+        sequence_size_t query_len,
+        sequence_size_t target_len,
+        post_seed_owned_lifetime* owned_lifetime,
+        route_attempt_memory* attempt_memory
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        , ::bioseq::gpu::vulkan::runtime_pipeline_operation_token* completed_chaining = nullptr
+#endif
+        ) {
+        if (!execution_plan || !query_minimizers.has_host_owner()) {
+            throw std::invalid_argument("post-seed pipeline requires plan and query ownership");
+        }
+        const auto& params = execution_plan->frozen_parameters;
+        // The caller retains these owners beyond graph completion. Physical
+        // allocations use the installed context's backing hook, not a second
+        // logical-slab reservation at this construction boundary.
+        (void)owned_lifetime;
         match_result_collection* host_timing_dst =
-            vulkan_components_requested(params) ? nullptr : &output_collection;
+            &output_collection;
         match_result_collection* chaining_stats_dst = nullptr;
         if constexpr (p_chaining_algorithm == ::bioseq::simd::chaining_algorithm::scalar_minimap2 ||
                       p_chaining_algorithm == ::bioseq::simd::chaining_algorithm::simd_minimap2 ||
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                      p_chaining_algorithm ==
+                          ::bioseq::simd::chaining_algorithm::range_minimum_query ||
+#endif
                       p_chaining_algorithm ==
                           ::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming) {
             chaining_stats_dst = &output_collection;
@@ -116,56 +147,220 @@ export {
                       kernel_t<p_alignment_algorithm>::emits_ksw2_batched_execution_stats) {
             alignment_stats_dst = &output_collection;
         }
-        auto tail = make_pipeline<p_aligner_parameters>(
-            index_stage<p_index>{{}, &target_index, gpu_index_identity},
-            seed_hit_stage{{},
-                           params,
-                           query_len,
-                           gpu_index_cache,
-                           &output_collection,
-                           post_seed_owned_lifetime,
-                           host_timing_dst},
+        return make_pipeline<p_aligner_parameters>(
             chain_stage<kernel_t<p_chaining_algorithm>>{{},
                                                         params.make_chaining_parameters(),
                                                         query_len,
                                                         chaining_stats_dst,
                                                         host_timing_dst,
-                                                        params.highway_kernels},
+                                                        params.highway_kernels,
+                                                        attempt_memory
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                                        , completed_chaining
+#endif
+                                                        },
             region_stage{{}, query_len, host_timing_dst},
             primary_secondary_stage{{}, params.mask_level, params.mask_len, sub_diff(params)},
             secondary_filter_stage{{}, params.pri_ratio, min_diff(params), params.best_n},
-            divergence_stage<p_minimizer, p_query_minimizers>{{},
-                                                              &query_minimizers,
+            divergence_stage<p_minimizer, minimizer_batch_view<p_minimizer>>{{},
+                                                              std::move(query_minimizers),
                                                               query_len,
                                                               target_len,
                                                               params.kmer_size,
                                                               params.compute_divergence},
-            prefilter_stage<p_alphabet>{{}, params, query_seq, target_seq, &output_collection},
+            prefilter_stage<p_alphabet>{{}, execution_plan, query_seq, target_seq, &output_collection},
             align_stage<kernel_t<p_alignment_algorithm>, p_alphabet>{
                 {},
-                params,
+                execution_plan,
                 &scoring_matrix,
                 &alignment_kernels,
                 query_seq,
                 target_seq,
                 params.do_cigar || params.compute_edit_distance,
                 alignment_stats_dst,
-                host_timing_dst},
-            exact_edit_filter_stage{{}, params},
+                host_timing_dst,
+                attempt_memory},
+            exact_edit_filter_stage{{}, execution_plan},
             primary_secondary_stage{{}, params.mask_level, params.mask_len, sub_diff(params)},
             secondary_filter_stage{{}, params.pri_ratio, min_diff(params), params.best_n},
-            mapq_stage{{}, params, params.compute_mapq},
-            sink_stage{&output_collection, query_len, target_len, host_timing_dst});
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            mapq_stage{{}, execution_plan, params.compute_mapq, &output_collection},
+#else
+            mapq_stage{{}, execution_plan, params.compute_mapq},
+#endif
+            sink_stage{&output_collection, query_len, target_len, host_timing_dst,
+                       execution_plan});
+    }
 
+    /**
+     * @brief Runs exactly one authenticated canonical job through the shared suffix.
+     *
+     * The wave caller owns the canonical batch, query/target storage, physical
+     * attempt and result capacity. No index or seeding stage is constructed here.
+     * Empty jobs still enter the selected chaining stage exactly once.
+     */
+    template <is_constexpr_aligner_params p_aligner_parameters,
+              ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
+              ::bioseq::simd::chaining_algorithm p_chaining_algorithm,
+              sequence_alphabet p_alphabet,
+              class p_minimizer>
+    [[gnu::always_inline]] inline void run_minimap_post_seed_job(
+        const canonical_seed_batch& seeds,
+        std::size_t job_index,
+        std::uint32_t expected_ordinal,
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        minimizer_batch_view<p_minimizer> query_minimizers,
+        statement_execution_plan_owner execution_plan,
+        match_result_collection& output,
+        route_attempt_memory& attempt
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        , ::bioseq::gpu::vulkan::runtime_pipeline_operation_token* completed_chaining = nullptr
+#endif
+        ) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (completed_chaining != nullptr && completed_chaining->audit().kind !=
+            ::bioseq::gpu::vulkan::runtime_pipeline_operation_kind::invalid) {
+            throw std::invalid_argument{"post-seed completion output already has authority"};
+        }
+        if (output.completed_vulkan_chaining.audit().kind !=
+                ::bioseq::gpu::vulkan::runtime_pipeline_operation_kind::invalid ||
+            !output.additional_completed_vulkan_chaining.empty()) {
+            throw std::invalid_argument{"post-seed result already has chaining authority"};
+        }
+        ::bioseq::gpu::vulkan::runtime_pipeline_operation_token pending_chaining;
+#endif
+        if (!execution_plan || !query_minimizers.has_host_owner() ||
+            job_index >= seeds.jobs.size() || !output.results.empty() ||
+            context::current_or_null() != std::addressof(attempt.fresh_context)) {
+            throw std::invalid_argument{"post-seed job has no fresh owned execution scope"};
+        }
+        const auto& params = execution_plan->frozen_parameters;
+        const auto& job = seeds.jobs[job_index];
+        if (params.base_alignment_algorithm != p_alignment_algorithm ||
+            params.chaining_algorithm != p_chaining_algorithm ||
+            job.ordinal != expected_ordinal || job.offset > seeds.anchors.size() ||
+            job.count > seeds.anchors.size() - job.offset) {
+            throw std::invalid_argument{"post-seed job differs from its selected statement"};
+        }
+        const std::span<const anchor> all_anchors{seeds.anchors.data(), seeds.anchors.size()};
+        const auto job_anchors = all_anchors.subspan(job.offset, job.count);
+        const auto& scoring = thread_local_scoring_matrix<p_alphabet>(params);
+        const auto& alignment = detail::resolve_alignment_kernels<p_alphabet>(params);
+        auto chain_scope = context::current().push<context::arena::chain>();
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        // Preserve any caller-admitted capacity, but keep the entire suffix
+        // attempt private until its terminal callback succeeds.
+        static_assert(std::is_nothrow_move_assignable_v<match_result_collection>);
+        match_result_collection pending_output{std::move(output)};
+        output = match_result_collection{};
+        auto& suffix_output = pending_output;
+#else
+        auto& suffix_output = output;
+#endif
+        if (params.downstream_active_wall != nullptr) {
+            suffix_output.attach_downstream_active_wall_tracker(*params.downstream_active_wall);
+        }
+        try {
+            auto suffix = make_minimap_post_seed_pipeline<p_aligner_parameters,
+                p_alignment_algorithm, p_chaining_algorithm, p_alphabet, p_minimizer>(
+                    query_seq, target_seq, std::move(query_minimizers), scoring, alignment,
+                    suffix_output, execution_plan, query_seq.bp_size(), target_seq.bp_size(),
+                    nullptr, std::addressof(attempt)
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    , &pending_chaining
+#endif
+                    );
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            attest_benchmark_e2e_pipeline_execution(execution_plan);
+#endif
+            suffix.on_batch(job_anchors);
+            suffix.on_completed();
+        } catch (...) {
+            suffix_output.detach_downstream_active_wall_tracker();
+            throw;
+        }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (!suffix_output.mapq_execution_available) {
+            suffix_output.record_mapq_execution(false);
+        }
+        suffix_output.detach_downstream_active_wall_tracker();
+        output = std::move(pending_output);
+        if (completed_chaining != nullptr) {
+            // The caller receives this authority only after the entire selected
+            // host suffix succeeds. Empty/host-chain jobs retain an unissued token.
+            *completed_chaining = std::move(pending_chaining);
+        } else {
+            output.completed_vulkan_chaining = std::move(pending_chaining);
+        }
+#endif
+        output.detach_downstream_active_wall_tracker();
+    }
+
+    /** @brief Prepend existing index/seed work to the one post-seed pipeline. */
+    template <is_constexpr_aligner_params p_aligner_parameters,
+              ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
+              ::bioseq::simd::chaining_algorithm p_chaining_algorithm,
+              ::bioseq::simd::minimizer_algorithm p_minimizer_algorithm,
+              pipeline_entry_point p_entry_point,
+              sequence_alphabet p_alphabet,
+              class p_minimizer,
+              class p_index>
+    [[nodiscard, gnu::always_inline]] inline auto
+    make_minimap_pipeline(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        minimizer_batch_view<p_minimizer> query_minimizers,
+        const p_index& target_index,
+        const scoring_matrix<p_alphabet>& scoring_matrix,
+        const ::bioseq::simd::alignment_kernels<p_alphabet>& alignment_kernels,
+        match_result_collection& output_collection,
+        statement_execution_plan_owner execution_plan,
+        sequence_size_t query_len,
+        sequence_size_t target_len,
+        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
+        post_seed_owned_lifetime* owned_lifetime = nullptr,
+        route_attempt_memory* attempt_memory = nullptr
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        , ::bioseq::gpu::vulkan::runtime_pipeline_operation_token* completed_chaining = nullptr
+#endif
+        ) {
+        if (!execution_plan) {
+            throw std::invalid_argument("pipeline requires statement plan ownership");
+        }
+        const auto& params = execution_plan->frozen_parameters;
+        std::uint32_t submitted_query_ordinal = 0u;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        const auto operation_binding = current_benchmark_e2e_operation_binding();
+        if (operation_binding.is_available) {
+            if (operation_binding.origin.query_ordinal >
+                (std::numeric_limits<std::uint32_t>::max)()) {
+                throw std::length_error{"seed query ordinal exceeds the submitted wire domain"};
+            }
+            submitted_query_ordinal =
+                static_cast<std::uint32_t>(operation_binding.origin.query_ordinal);
+        }
+#endif
+        auto post_seed = make_minimap_post_seed_pipeline<p_aligner_parameters,
+            p_alignment_algorithm, p_chaining_algorithm, p_alphabet, p_minimizer>(
+                query_seq, target_seq, std::move(query_minimizers), scoring_matrix,
+                alignment_kernels, output_collection, execution_plan, query_len,
+                target_len, owned_lifetime, attempt_memory
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                , completed_chaining
+#endif
+                );
+        auto tail = make_pipeline<p_aligner_parameters>(
+            index_stage<p_index>{{}, &target_index, gpu_index_identity},
+            seed_hit_stage{{}, execution_plan, query_len, gpu_index_cache,
+                           &output_collection, owned_lifetime, &output_collection,
+                           attempt_memory, submitted_query_ordinal},
+            std::move(post_seed));
         if constexpr (p_entry_point == pipeline_entry_point::from_sequence) {
             minimizer_stage<p_minimizer, kernel_t<p_minimizer_algorithm>, p_alphabet> head{
-                {},
-                query_seq,
-                params.window_size,
-                params.kmer_size,
-                params,
-                &output_collection,
-                host_timing_dst};
+                {}, query_seq, params.window_size, params.kmer_size, execution_plan,
+                &output_collection, &output_collection};
             return head.template attach<p_aligner_parameters>(std::move(tail));
         } else {
             return tail;
@@ -193,15 +388,19 @@ export {
               sequence_alphabet p_alphabet,
               class p_minimizer,
               class p_index>
-    [[nodiscard]] std::vector<match_result_collection> pipeline_run_impl_batch(
+    [[nodiscard]] match_result_collection_vector pipeline_run_impl_batch(
         std::span<const bioseq::storage::lazy_sequence_view<p_alphabet>> query_seqs,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-        std::span<const std::vector<p_minimizer>> query_minimizers_per_query,
+        std::span<const minimizer_batch_view<p_minimizer>> query_minimizers_per_query,
         const p_index& target_index,
-        const ::bioseq::simd::minimap2_parameters& params,
+        statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* external_gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false) {
+        if (!execution_plan) {
+            throw std::invalid_argument("pipeline execution requires statement plan ownership");
+        }
+        const auto& params = execution_plan->frozen_parameters;
         std::optional<context::context> owned_context;
         std::optional<context::installed_context_scope> install;
         if (context::current_or_null() == nullptr) {
@@ -316,8 +515,8 @@ export {
         const p_index& effective_index = *effective_index_ptr;
 
         // Empty proto for the from_sequence path's unused minimizers argument.
-        static const std::vector<p_minimizer> empty_minimizers_proto{};
-
+        static const auto empty_minimizers_proto = minimizer_batch_view<p_minimizer>::from_shared_host(
+            std::make_shared<const std::vector<p_minimizer>>(), 0u, 0u);
         auto run_one_query = [target_len,
                               &query_seqs,
                               &query_minimizers_per_query,
@@ -325,12 +524,13 @@ export {
                               &effective_index,
                               &scoring_matrix,
                               &alignment_kernels,
-                              &params,
+                              execution_plan,
                               gpu_index_cache_ptr,
                               gpu_index_identity,
                               vulkan_target_index_built,
                               vulkan_target_index_ownership,
                               gpu_query_gate_identity](std::size_t qi) {
+            const auto& params = execution_plan->frozen_parameters;
             const auto query_seq = query_seqs[qi];
             const sequence_size_t query_len = query_seq.bp_size();
 
@@ -395,7 +595,9 @@ export {
                     vulkan_target_index_ownership.distinct_minimizer_count;
                 out.record_partial_vulkan_execution_stats(stats);
             }
+#if !defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
             out.results.reserve(detail::estimated_result_count(query_len, target_len, params));
+#endif
 
             const auto& mins_for_this_query =
                 (p_entry_point == pipeline_entry_point::with_prebuilt_minimizers)
@@ -407,6 +609,13 @@ export {
                 return out;
             }
 
+            if (params.downstream_active_wall != nullptr) {
+                out.attach_downstream_active_wall_tracker(*params.downstream_active_wall);
+            }
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            ::bioseq::gpu::vulkan::runtime_pipeline_operation_token pending_chaining;
+#endif
             auto pipeline = make_minimap_pipeline<p_aligner_parameters,
                                                   p_alignment_algorithm,
                                                   p_chaining_algorithm,
@@ -421,26 +630,56 @@ export {
                                                            scoring_matrix,
                                                            alignment_kernels,
                                                            out,
-                                                           params,
+                                                           execution_plan,
                                                            query_len,
                                                            target_len,
                                                            gpu_index_cache_ptr,
-                                                           gpu_index_identity);
+                                                           gpu_index_identity
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                                           , nullptr, nullptr,
+                                                           &pending_chaining
+#endif
+                                                           );
 
-            if constexpr (p_entry_point == pipeline_entry_point::with_prebuilt_minimizers) {
-                pipeline.on_batch(std::span<const p_minimizer>{mins_for_this_query.data(),
-                                                               mins_for_this_query.size()});
-            } else {
-                // from_sequence: minimizer_stage's process ignores the input and
-                // sketches the cached query_seq_ pointer instead; pass an empty
-                // span of bytes as a placeholder.
-                pipeline.on_batch(std::span<const std::byte>{});
+            try {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                attest_benchmark_e2e_pipeline_execution(execution_plan);
+#endif
+                if constexpr (p_entry_point == pipeline_entry_point::with_prebuilt_minimizers) {
+                    pipeline.on_batch(std::span<const p_minimizer>{mins_for_this_query.data(),
+                                                                   mins_for_this_query.size()});
+                } else {
+                    // from_sequence: minimizer_stage's process ignores the input and
+                    // sketches the cached query_seq_ pointer instead; pass an empty
+                    // span of bytes as a placeholder.
+                    pipeline.on_batch(std::span<const std::byte>{});
+                }
+                pipeline.on_completed();
+            } catch (...) {
+                out.detach_downstream_active_wall_tracker();
+                throw;
             }
-            pipeline.on_completed();
+            // Prebuilt minimizers are operation-owned by their producer. That
+            // producer publishes their exact identity only after this completed
+            // collection returns; the selected template is not evidence of how
+            // caller-supplied minimizers were made.
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            if (!out.mapq_execution_available) {
+                // A normally completed pipeline with no MAPQ-stage batch is an
+                // exact non-execution observation, not evidence that the
+                // selected flag ran an operation.
+                out.record_mapq_execution(false);
+            }
+            out.completed_vulkan_chaining = std::move(pending_chaining);
+#endif
+            out.detach_downstream_active_wall_tracker();
             return out;
         };
 
-        std::vector<match_result_collection> out_per_query;
+        match_result_collection_vector out_per_query;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        out_per_query.set_logical_bounds(query_seqs.size(), query_seqs.size());
+#endif
         const bool may_parallel_batch =
             !vulkan_accelerator_requested(params) &&
             bioseq::parallelism::has_parallel_tasks(
@@ -489,22 +728,40 @@ export {
               sequence_alphabet p_alphabet,
               class p_minimizer,
               class p_index,
-              class p_query_minimizers = std::vector<p_minimizer>>
+              class p_query_minimizers = minimizer_batch_view<p_minimizer>>
     [[nodiscard, gnu::always_inline]] inline match_result_collection pipeline_run_impl(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-        const p_query_minimizers& query_minimizers,
+        p_query_minimizers query_minimizers,
         const p_index& target_index,
-        const ::bioseq::simd::minimap2_parameters& params,
+        statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false,
         transient_target_index_release_authorization transient_target_index_owner = {}) {
+        if (!execution_plan) {
+            throw std::invalid_argument("pipeline execution requires statement plan ownership");
+        }
+        const auto& params = execution_plan->frozen_parameters;
         std::optional<context::context> owned_context;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        std::optional<route_attempt_memory> campaign_attempt;
+#endif
         std::optional<context::installed_context_scope> install;
+        route_attempt_memory* attempt_memory = nullptr;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        campaign_attempt.emplace();
+        attempt_memory = std::addressof(*campaign_attempt);
+        install.emplace(campaign_attempt->fresh_context);
+#else
         if (context::current_or_null() == nullptr) {
             owned_context.emplace();
             install.emplace(*owned_context);
+        }
+#endif
+        static_assert(std::same_as<p_query_minimizers, minimizer_batch_view<p_minimizer>>);
+        if (!query_minimizers.has_host_owner()) {
+            throw std::invalid_argument("pipeline execution requires real query ownership");
         }
         // The locally owned cache must outlive PostSeed's raw cache pointer, while
         // PostSeed itself must outlive every Arena::chain that backs an admitted
@@ -648,7 +905,9 @@ export {
                 vulkan_target_index_ownership.distinct_minimizer_count;
             out.record_partial_vulkan_execution_stats(stats);
         }
+#if !defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         out.results.reserve(detail::estimated_result_count(query_len, target_len, params));
+#endif
         direct_resident_operation_stats* const direct_ledger =
             transient_target_index_owner.direct_ledger;
         const bool direct_empty_bypass = direct_ledger != nullptr &&
@@ -665,14 +924,18 @@ export {
                 direct_ledger->zero_query_bypasses = 1u;
             }
         }
-        if (owned_gpu_index_cache || transient_target_index_owner.index != nullptr ||
+        if (execution_plan->route == seed_chain_route::vulkan_seed_host_chain ||
+            execution_plan->route == seed_chain_route::vulkan_seed_vulkan_chain ||
+            owned_gpu_index_cache || transient_target_index_owner.index != nullptr ||
             transient_target_index_owner.operation_owned_gpu_cache != nullptr ||
             transient_target_index_owner.direct_ledger != nullptr) {
             // CPU-index release authority is supplied only by `minimap2_port`,
             // which owns that transient value. GPU-cache release authority is
             // independent: even a borrowed persisted CPU index may use and then
             // retire the cache constructed by this invocation. An external cache
-            // is always borrowed and is never installed here.
+            // is always borrowed and is never installed here. With such a cache,
+            // the empty release authority still retains legacy anchor admission
+            // through the chain arena lifetime; it does not own the caller's index.
             post_seed_owned_lifetime.emplace(
                 actual_seed_consumers,
                 owned_gpu_index_cache ? &*owned_gpu_index_cache
@@ -770,6 +1033,9 @@ export {
                     cp.min_seed_count,
                     16u);
                 if (coord.is_valid != 0u) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    out.prepare_result_append(1u);
+#endif
                     out.results.push_back(
                         gpu_coordinate_to_match_result(coord, query_len, target_len));
                 }
@@ -781,6 +1047,12 @@ export {
             direct_ledger->pipeline_started = true;
         }
         auto per_query_chain_scope = context::current().push<context::arena::chain>();
+        if (params.downstream_active_wall != nullptr) {
+            out.attach_downstream_active_wall_tracker(*params.downstream_active_wall);
+        }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        ::bioseq::gpu::vulkan::runtime_pipeline_operation_token pending_chaining;
+#endif
         auto pipeline = make_minimap_pipeline<p_aligner_parameters,
                                               p_alignment_algorithm,
                                               p_chaining_algorithm,
@@ -788,8 +1060,7 @@ export {
                                               p_entry_point,
                                               p_alphabet,
                                               p_minimizer,
-                                              p_index,
-                                              p_query_minimizers>(
+                                              p_index>(
             query_seq,
             target_seq,
             query_minimizers,
@@ -797,19 +1068,39 @@ export {
             scoring_matrix,
             alignment_kernels,
             out,
-            params,
+            execution_plan,
             query_len,
             target_len,
             gpu_index_cache_ptr,
             gpu_index_identity,
-            post_seed_owned_lifetime ? &*post_seed_owned_lifetime : nullptr);
+            post_seed_owned_lifetime ? &*post_seed_owned_lifetime : nullptr,
+            attempt_memory
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            , &pending_chaining
+#endif
+            );
 
-        if constexpr (p_entry_point == pipeline_entry_point::with_prebuilt_minimizers) {
-            pipeline.on_batch(query_minimizers);
-        } else {
-            pipeline.on_batch(std::span<const std::byte>{});
+        try {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            attest_benchmark_e2e_pipeline_execution(execution_plan);
+#endif
+            if constexpr (p_entry_point == pipeline_entry_point::with_prebuilt_minimizers) {
+                pipeline.on_batch(query_minimizers);
+            } else {
+                pipeline.on_batch(std::span<const std::byte>{});
+            }
+            pipeline.on_completed();
+        } catch (...) {
+            out.detach_downstream_active_wall_tracker();
+            throw;
         }
-        pipeline.on_completed();
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (!out.mapq_execution_available) {
+            out.record_mapq_execution(false);
+        }
+        out.completed_vulkan_chaining = std::move(pending_chaining);
+#endif
+        out.detach_downstream_active_wall_tracker();
         if (direct_ledger != nullptr) {
             // Seed completion alone is insufficient: this bit is set only after
             // both the batch and the terminal pipeline callback returned normally.

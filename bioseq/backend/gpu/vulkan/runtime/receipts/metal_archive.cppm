@@ -60,6 +60,9 @@ struct runtime_metal_archive_spec {
 /// can never become eligible merely by appearing beside a listed one.
 struct runtime_metal_archive_configuration {
     std::shared_ptr<const sealed_shader_cache_seed_image> seed_image; ///< Accepted sealed shader-cache seed image.
+    std::uint32_t command_artifact_ordinal =
+        (std::numeric_limits<std::uint32_t>::max)(); ///< Exact command bundle ordinal.
+    moltenvk_command_library_bundle command_library; ///< Owned exact source/options/metallib evidence.
     /// @brief Optional external expectations.  Zero means runtime must seal the
     /// selected Vulkan/Metal identities before vkCreateDevice. A nonzero value
     /// is an additional equality constraint, never a value to trust blindly.
@@ -79,6 +82,9 @@ struct runtime_metal_archive_configuration {
     /// @return Whether the complete installed archive configuration is self-consistent.
     [[nodiscard]] bool is_valid() const noexcept {
         if (!seed_image || !seed_image->is_accepted() || archives.empty() ||
+            command_artifact_ordinal == (std::numeric_limits<std::uint32_t>::max)() ||
+            !command_library.is_accepted() ||
+            !command_library.qualification.is_production_accepted() ||
             qualification_wire_revision != 2u || qualification_receipt_count != archives.size() ||
             helper_wire_revision != 2u || helper_build_identity != "bioseq_gpu_archive_builder" ||
             helper_source != "installed-sibling" || helper_executable_size == 0u ||
@@ -86,12 +92,37 @@ struct runtime_metal_archive_configuration {
             std::all_of(helper_executable_sha256.begin(),
                         helper_executable_sha256.end(),
                         [](std::uint8_t value) { return value == 0u; }) ||
+            command_library.qualification.helper_wire_revision != helper_wire_revision ||
+            command_library.qualification.helper_build_identity != helper_build_identity ||
+            command_library.qualification.helper_source != helper_source ||
+            command_library.qualification.helper_executable_size != helper_executable_size ||
+            command_library.qualification.helper_executable_sha256 != helper_executable_sha256 ||
+            command_library.qualification.helper_metal_registry_id != helper_metal_registry_id ||
             (metal_device_registry_id != 0u &&
              metal_device_registry_id != helper_metal_registry_id) ||
+            (std::any_of(vulkan_device_uuid.begin(),
+                         vulkan_device_uuid.end(),
+                         [](std::uint8_t value) { return value != 0u; }) &&
+             vulkan_device_uuid != command_library.qualification.vulkan_device.device_uuid) ||
             !is_runtime_cache_digest_valid(seed_image->manifest().cache_digest)) {
             return false;
         }
         try {
+            const sealed_shader_cache_artifact_image* command_image =
+                seed_image->artifact(command_artifact_ordinal);
+            if (command_image == nullptr ||
+                command_image->descriptor.kind !=
+                    sealed_shader_cache_artifact_kind::moltenvk_command_library ||
+                command_image->descriptor.key_index !=
+                    (std::numeric_limits<std::uint32_t>::max)() ||
+                command_image->descriptor.filename != "moltenvk_command.sealed") {
+                return false;
+            }
+            auto parsed_command =
+                sealed_shader_cache_detail::parse_moltenvk_command_library_bundle(
+                    command_image->bytes);
+            if (!parsed_command || *parsed_command != command_library)
+                return false;
             for (std::size_t i = 0u; i < archives.size(); ++i) {
                 const runtime_metal_archive_spec& archive = archives[i];
                 const sealed_shader_cache_artifact_image* image =
@@ -218,6 +249,20 @@ class runtime_metal_archive_configuration_image {
             owned = saturating_add(
                 owned, static_cast<std::uint64_t>(archive.negative_error_domain.capacity()));
         }
+        owned = saturating_add(
+            owned,
+            static_cast<std::uint64_t>(configuration_.command_library.source.capacity()));
+        owned = saturating_add(
+            owned,
+            static_cast<std::uint64_t>(configuration_.command_library.metallib.capacity()));
+        owned = saturating_add(
+            owned,
+            static_cast<std::uint64_t>(configuration_.command_library.qualification
+                                           .helper_build_identity.capacity()));
+        owned = saturating_add(
+            owned,
+            static_cast<std::uint64_t>(
+                configuration_.command_library.qualification.helper_source.capacity()));
         owned = saturating_add(
             owned, static_cast<std::uint64_t>(configuration_.helper_build_identity.capacity()));
         owned = saturating_add(owned,

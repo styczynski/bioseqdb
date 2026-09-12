@@ -54,6 +54,7 @@ struct gpu_seed_coordinate_wave_state {
     gpu_arena_slice counts_s{};
     gpu_arena_slice prefix_s{};
     gpu_arena_slice blocks_s{};
+    gpu_arena_slice repetitive_s{};
     seed_push_constants seed_push{};
     gpu_grouped_soa_seed_push grouped_soa_seed_push{};
     std::uint64_t total_anchors = 0;
@@ -79,6 +80,8 @@ struct gpu_seed_coordinate_wave_state {
     buffer visited_buf;
     buffer trace_buf;
     buffer result_buf;
+    buffer candidate_header_buf;
+    buffer candidates_buf;
     bool skip_seed = false;
     bool has_anchors = false;
     bool has_ranges = false;
@@ -158,6 +161,56 @@ struct coordinate_minimizer_binding {
     std::uint64_t range = 0u;
 };
 
+/// @brief Derives shader-visible SSBO element extents from the exact
+/// descriptor ranges used by one grouped-SoA count, diagnostic, or emit pass.
+/// @throws vulkan_runtime_error When a descriptor is implicit, empty, or too large.
+inline void
+populate_grouped_soa_seed_descriptor_extents(gpu_grouped_soa_seed_push& push,
+                                             const std::array<VkDescriptorBufferInfo, 10>& infos,
+                                             std::uint64_t max_storage_buffer_range) {
+    constexpr std::array<std::uint64_t, 10> element_strides{
+        sizeof(std::uint32_t),
+        sizeof(gpu_grouped_soa_resident_partition_descriptor),
+        sizeof(std::uint32_t),
+        sizeof(std::uint32_t),
+        sizeof(gpu_seed_query_record_wire),
+        sizeof(std::uint32_t),
+        sizeof(std::uint32_t),
+        sizeof(gpu_anchor_wire),
+        sizeof(std::uint64_t),
+        sizeof(std::uint32_t),
+    };
+    std::array<std::uint32_t, 10> extents{};
+    for (std::size_t index = 0u; index < infos.size(); ++index) {
+        const VkDescriptorBufferInfo& info = infos[index];
+        if (info.buffer == VK_NULL_HANDLE || info.range == 0u || info.range == VK_WHOLE_SIZE ||
+            info.range > max_storage_buffer_range) {
+            throw vulkan_runtime_error(
+                "gpu grouped-SoA seed descriptor range is not explicit and bounded");
+        }
+        // This is the SSBO runtime-array element count: floor(range / stride).
+        // Count-mode anchor bindings are inert dummies and may retain a tail.
+        const std::uint64_t extent = info.range / element_strides[index];
+        if (extent > (std::numeric_limits<std::uint32_t>::max)()) {
+            throw vulkan_runtime_error(
+                "gpu grouped-SoA seed descriptor element extent exceeds push ABI");
+        }
+        extents[index] = static_cast<std::uint32_t>(extent);
+    }
+    push.minimizer_word_extent = extents[0];
+    push.partition_extent = extents[1];
+    push.control_word_extent = extents[2];
+    push.position_word_extent = extents[3];
+    push.query_record_extent = extents[4];
+    push.count_extent = extents[5];
+    push.prefix_extent = extents[6];
+    push.anchor_extent = extents[7];
+    push.anchor_key_extent = extents[8];
+    if (extents[9] < push.status_index) {
+        throw vulkan_runtime_error("gpu grouped-SoA repetitive-flag descriptor is undersized");
+    }
+}
+
 /// @brief Classifies a batch and validates its common target identity.
 /// @param[in] jobs Coordinate jobs that must share one index representation.
 /// @param[in] query_inputs Query records used to validate every job index.
@@ -179,31 +232,48 @@ struct coordinate_minimizer_binding {
 /// @param[in] probe_limit Maximum coordinate candidates examined.
 /// @return Uniform representation and grouped-SoA configuration identity.
 /// @throws vulkan_runtime_error When jobs mix representations or resident identities.
-[[nodiscard]] inline coordinate_batch_shape inspect_coordinate_batch_shape(
-    std::span<const gpu_seed_coordinate_job> jobs,
-    const gpu_seed_query_inputs& query_inputs,
-    bool coordinate_vote_selected,
-    const vulkan_feature_set& features,
-    std::uint32_t kmer_size,
-    std::int32_t max_occ,
-    gpu_seed_coordinate_algorithm coordinate_algorithm,
-    const chaining_pipeline_key& chain_key,
-    std::int32_t max_dist_x,
-    std::int32_t max_dist_y,
-    std::int32_t bandwidth,
-    std::int32_t max_iter,
-    float gap_penalty,
-    float skip_penalty,
-    std::int32_t max_chain_skip,
-    std::int32_t min_chain_score,
-    std::int32_t min_seed_count,
-    std::uint32_t probe_limit) {
+[[nodiscard]] inline coordinate_batch_shape
+inspect_coordinate_batch_shape(std::span<const gpu_seed_coordinate_job> jobs,
+                               const gpu_seed_query_inputs& query_inputs,
+                               bool coordinate_vote_selected,
+                               const vulkan_feature_set& features,
+                               std::uint32_t kmer_size,
+                               std::int32_t max_occ,
+                               gpu_seed_coordinate_algorithm coordinate_algorithm,
+                               const chaining_pipeline_key& chain_key,
+                               std::int32_t max_dist_x,
+                               std::int32_t max_dist_y,
+                               std::int32_t bandwidth,
+                               std::int32_t max_iter,
+                               float gap_penalty,
+                               float skip_penalty,
+                               std::int32_t max_chain_skip,
+                               std::int32_t min_chain_score,
+                               std::int32_t min_seed_count,
+                               std::uint32_t probe_limit,
+                               const gpu_persisted_mapq_config& mapq_config) {
     coordinate_batch_shape shape{
         .representation = jobs.empty() ? gpu_seed_index_representation::invalid
                                        : classify_gpu_seed_index_representation(jobs.front()),
     };
     shape.grouped_soa_selected =
         shape.representation == gpu_seed_index_representation::grouped_soa;
+    const bool mapq_selected = mapq_config.is_valid();
+    if (mapq_config != gpu_persisted_mapq_config{} && !mapq_selected) {
+        throw vulkan_runtime_error("gpu persisted MAPQ configuration identity is invalid");
+    }
+    if (mapq_selected && (!shape.grouped_soa_selected || coordinate_vote_selected)) {
+        throw vulkan_runtime_error("gpu persisted MAPQ requires grouped-SoA tiled-DP execution");
+    }
+    if (mapq_selected &&
+        (min_chain_score <= 0 || min_seed_count <= 0 || features.max_workgroup_invocations < 128u ||
+         features.max_workgroup_size_x < 128u ||
+         features.max_storage_buffer_range <
+             static_cast<std::uint64_t>(mapq_config.candidate_capacity) *
+                 sizeof(gpu_chain_candidate_wire))) {
+        throw vulkan_runtime_error(
+            "gpu persisted MAPQ device/configuration bounds are unsupported");
+    }
     if (shape.grouped_soa_selected && coordinate_vote_selected) {
         throw vulkan_runtime_error(
             "gpu grouped-SoA direct route requires Vulkan tiled-DP coordinate output");
@@ -211,21 +281,22 @@ struct coordinate_minimizer_binding {
     if (shape.grouped_soa_selected && features.software_device) {
         throw vulkan_runtime_error("gpu grouped-SoA direct route rejects software Vulkan devices");
     }
-    shape.operation_configuration = make_persisted_grouped_soa_coordinate_config_identity(
-        kmer_size,
-        max_occ,
-        coordinate_algorithm,
-        chain_key,
-        max_dist_x,
-        max_dist_y,
-        bandwidth,
-        max_iter,
-        gap_penalty,
-        skip_penalty,
-        max_chain_skip,
-        min_chain_score,
-        min_seed_count,
-        probe_limit);
+    shape.operation_configuration =
+        make_persisted_grouped_soa_coordinate_config_identity(kmer_size,
+                                                              max_occ,
+                                                              coordinate_algorithm,
+                                                              chain_key,
+                                                              max_dist_x,
+                                                              max_dist_y,
+                                                              bandwidth,
+                                                              max_iter,
+                                                              gap_penalty,
+                                                              skip_penalty,
+                                                              max_chain_skip,
+                                                              min_chain_score,
+                                                              min_seed_count,
+                                                              probe_limit,
+                                                              mapq_config);
     if (shape.grouped_soa_selected && !shape.operation_configuration.is_valid()) {
         throw vulkan_runtime_error("gpu grouped-SoA coordinate configuration identity is invalid");
     }
@@ -438,6 +509,10 @@ struct coordinate_minimizer_binding {
         minimizer_device_bytes(
             query_inputs.minimizer_word_kind, query_inputs.minimizer_words32_per_record, total_mc),
         4u);
+    if (layout.required_min_words_bytes > features.max_storage_buffer_range) {
+        throw vulkan_runtime_error(
+            "gpu seed-to-coordinate minimizer words exceed Vulkan descriptor range");
+    }
     if (query_inputs.device_minimizer_words != nullptr &&
         (!query_inputs.device_minimizer_words->is_valid() ||
          query_inputs.device_minimizer_words->owner != owner ||
@@ -505,7 +580,8 @@ has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
         per_wave_problem_bytes = bioseq::common::saturating_add(
             per_wave_problem_bytes,
             bioseq::common::saturating_add(
-                bioseq::common::saturating_add(std::uint64_t{qrec.minimizer_count} * 8u,
+                bioseq::common::saturating_add(std::uint64_t{qrec.minimizer_count} *
+                                                   (grouped_soa_selected ? 12u : 8u),
                                                grouped_soa_selected ? 4u : 0u),
                 std::uint64_t{qblocks} * 4u));
     }
@@ -527,20 +603,21 @@ has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
 /// @param[in] minimizer_slice Destination used only for host minimizer bytes.
 /// @param[in] query_inputs Host records and selected minimizer storage.
 /// @param[in] query_record_stride Destination stride in bytes.
+/// @param[in] required_minimizer_bytes Exact validated descriptor range.
 /// @return Descriptor binding for the selected minimizer storage.
-[[nodiscard]] inline coordinate_minimizer_binding prepare_coordinate_query_upload(
-    std::byte* base,
-    const gpu_arena_slice& query_record_slice,
-    const gpu_arena_slice& minimizer_slice,
-    const gpu_seed_query_inputs& query_inputs,
-    std::uint64_t query_record_stride) {
+[[nodiscard]] inline coordinate_minimizer_binding
+prepare_coordinate_query_upload(std::byte* base,
+                                const gpu_arena_slice& query_record_slice,
+                                const gpu_arena_slice& minimizer_slice,
+                                const gpu_seed_query_inputs& query_inputs,
+                                std::uint64_t query_record_stride,
+                                std::uint64_t required_minimizer_bytes) {
     const coordinate_minimizer_binding binding{
         .buffer = query_inputs.device_minimizer_words != nullptr
                       ? query_inputs.device_minimizer_words->buffer_handle
                       : minimizer_slice.buffer->buffer_handle,
         .offset = query_inputs.device_minimizer_words != nullptr ? 0u : minimizer_slice.offset,
-        .range = query_inputs.device_minimizer_words != nullptr ? VK_WHOLE_SIZE
-                                                                : minimizer_slice.size,
+        .range = required_minimizer_bytes,
     };
     if (query_inputs.device_minimizer_words == nullptr) {
         std::memset(base + minimizer_slice.offset,
@@ -674,7 +751,7 @@ inline void prepare_seed_push_constants(gpu_seed_coordinate_wave_state& state,
     if (grouped_soa_selected) {
         const gpu_grouped_soa_resident_view& view = *state.job.grouped_soa;
         state.grouped_soa_seed_push = gpu_grouped_soa_seed_push{
-            .abi_revision = k_gpu_grouped_soa_abi_revision,
+            .abi_revision = k_gpu_grouped_soa_seed_push_abi_revision,
             .words32_per_minimizer = query_inputs.minimizer_words32_per_record,
             .word_kind = query_inputs.minimizer_word_kind,
             .hash_shift = query_inputs.hash_shift,

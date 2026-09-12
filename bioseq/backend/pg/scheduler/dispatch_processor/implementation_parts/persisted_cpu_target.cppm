@@ -22,6 +22,7 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <expected>
 #include <limits>
 #include <new>
 #include <optional>
@@ -34,6 +35,7 @@ extern "C" {
 module bioseq.postgres.scheduler.dispatch_processor;
 
 import bioseq.common.checked_arithmetic;
+import bioseq.pipeline.runtime_contract;
 import bioseq.common.logging;
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_hashmap;
@@ -48,7 +50,6 @@ import bioseq.pipeline.stats;
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.hash_major_session_reader;
-import bioseq.postgres.storage.indexing.hash_major_session_admin;
 import bioseq.postgres.support;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.storage.lazy_sequence_view;
@@ -58,7 +59,7 @@ namespace bioseq::simd {
 /**
  * @brief Opens an authenticated persisted minimizer index and attaches a CPU target reader.
  *
- * Authorizes the minimizer-generation source, tries hash-major canonical-u32 preparation when the
+ * Authorizes the minimizer-generation source, tries hash-major canonical-hash preparation when the
  * READY head matches the CPU sketch backend and storage profile, otherwise opens grouped-SoA for
  * minimizer-fragment or minimizer-sequence indexes. Calls prepare_cpu_shared_query_unions with a
  * route-specific union storage mode, then retains the matching hash-major, fragment, or sequence
@@ -81,10 +82,14 @@ void batch_processor::prepare_cpu_persisted_native_target(
     pg_sequence_read_session* query_read_session,
     const bioseq::storage::sequence_payload_allocation_observer* query_payload_observer,
     const std::span<const std::uint64_t> query_ordinals,
-    const minimap2_parameters& base_params,
+    pipe::statement_execution_plan_owner execution_plan,
     const bioseq::storage::indexing::borrowed_executor_read_context& executor_read,
     const cpu_preparation_typmod_operations& typmod_ops,
     cpu_prepared_target& prepared_target) {
+    if (!execution_plan || !prepared_target.highway_binding_matches(execution_plan)) {
+        throw std::logic_error{"CPU preparation requires the exact statement plan owner"};
+    }
+    const minimap2_parameters& base_params = execution_plan->frozen_parameters;
     if (!typmod_ops.matches(alphabet_code, storage_unit_byte_width)) {
         throw std::logic_error{
             "persisted CPU preparation typmod operations disagree with the request"};
@@ -143,8 +148,17 @@ void batch_processor::prepare_cpu_persisted_native_target(
         fail("CPU native persisted prepared-target identity/lifecycle is invalid");
         return;
     }
-    const minimizer_sketch_backend sketch_backend =
-        pipe::target_index_sketch_backend_from_params(base_params);
+    if (base_params.kmer_size <= 0 || base_params.kmer_size >
+            static_cast<int>((std::numeric_limits<std::uint16_t>::max)()) ||
+        base_params.window_size <= 0 || base_params.window_size >
+            static_cast<int>((std::numeric_limits<std::uint16_t>::max)())) {
+        unavailable("frozen minimizer k/w cannot select a generated READY identity");
+        return;
+    }
+    const std::uint16_t runtime_kmer_size =
+        static_cast<std::uint16_t>(base_params.kmer_size);
+    const std::uint16_t runtime_window_size =
+        static_cast<std::uint16_t>(base_params.window_size);
 
     minimizer_generation_administration_identity identity{
         .database_oid = database_oid,
@@ -175,6 +189,34 @@ void batch_processor::prepare_cpu_persisted_native_target(
                                              column_attno,
                                              source.locator.bucket_index,
                                              source.locator.shard_index);
+    const std::uint64_t algorithm_position_extent_bp =
+        index_name == bioseq::indexing::k_minimizers_per_fragment_index_name
+            ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+            : target_bp_size;
+    const auto algorithm_identity =
+        bioseq::indexing::select_minimizer_generation_algorithm_identity_runtime(
+            base_params.minimizer_algorithm,
+            algorithm_position_extent_bp,
+            source.alphabet_code,
+            static_cast<std::uint8_t>(source.storage_unit_byte_width * 8u),
+            runtime_kmer_size,
+            runtime_window_size);
+    if (!algorithm_identity) {
+        unavailable("generated READY minimizer algorithm identity is unavailable");
+        return;
+    }
+    const auto selected_sketch_backend =
+        bioseq::indexing::minimizer_sketch_backend_for_effective_algorithm(
+            algorithm_identity->effective_algorithm);
+    if (!selected_sketch_backend ||
+        !bioseq::indexing::is_valid_minimizer_generation_algorithm_identity(
+            *algorithm_identity,
+            bioseq::indexing::minimizer_producer_backend_identity_for_backend(
+                *selected_sketch_backend))) {
+        unavailable("generated READY minimizer effective producer is unavailable");
+        return;
+    }
+    const minimizer_sketch_backend sketch_backend = *selected_sketch_backend;
 
     auto opened_hash_major = open_exact_hash_major_minimizer_read_session_pg(
         identity.table_name, index_name, sequence_rowno, executor_read);
@@ -216,9 +258,11 @@ void batch_processor::prepare_cpu_persisted_native_target(
         hash_major_profile_applicable =
             storage_profile.hash_scheme_identity == scheme.id &&
             storage_profile.hash_scheme_revision == scheme.revision &&
-            storage_profile.alphabet_code == alphabet_code && storage_profile.kmer_size == 15u &&
-            storage_profile.window_size == 10u &&
-            storage_profile.hash_width_bytes == sizeof(std::uint32_t) &&
+            storage_profile.alphabet_code == alphabet_code &&
+            storage_profile.kmer_size == runtime_kmer_size &&
+            storage_profile.window_size == runtime_window_size &&
+            storage_profile.hash_width_bytes ==
+                static_cast<std::uint8_t>(algorithm_identity->hash_width) &&
             storage_profile.producer_backend_identity == static_cast<std::uint16_t>(producer.id) &&
             storage_profile.producer_backend_revision == producer.revision;
         if (!hash_major_profile_applicable) {
@@ -249,9 +293,9 @@ void batch_processor::prepare_cpu_persisted_native_target(
                                             query_read_session,
                                             query_payload_observer,
                                             query_ordinals,
-                                            base_params,
+                                            execution_plan,
                                             /*include_persisted_parameter_group=*/true,
-                                            cpu_query_union_storage::canonical_u32,
+                                            cpu_query_union_storage::canonical_hashes,
                                             typmod_ops,
                                             prepared_target);
             if (!prepared_target.unions_ready || prepared_target.groups.size() != 1u) {
@@ -259,7 +303,8 @@ void batch_processor::prepare_cpu_persisted_native_target(
                 return;
             }
             cpu_prepared_index_group& hash_major_group = prepared_target.groups.front();
-            if (hash_major_group.kmer_size != 15 || hash_major_group.window_size != 10 ||
+            if (hash_major_group.kmer_size != base_params.kmer_size ||
+                hash_major_group.window_size != base_params.window_size ||
                 hash_major_group.max_occ < 0 || hash_major_group.sketch_backend != sketch_backend ||
                 !hash_major_group.query_hash_union.empty() ||
                 hash_major_group.query_hash_union.capacity() != 0u ||
@@ -270,14 +315,15 @@ void batch_processor::prepare_cpu_persisted_native_target(
                 fail("hash-major canonical query group violates exclusive ownership");
                 return;
             }
-            const bioseq::indexing::canonical_query_hash_view canonical_view{
-                .values32 =
-                    std::span<const std::uint32_t>{hash_major_group.canonical_query_hash_union_u32},
-                .width_bytes = sizeof(std::uint32_t),
-                .storage_width_bytes = sizeof(std::uint32_t),
-                .storage_profile_digest =
-                    bioseq::indexing::hash_major_minimizer_storage_profile_digest(storage_profile),
-            };
+            const bioseq::indexing::canonical_query_hash_view canonical_view =
+                hash_major_group.canonical_query_hash_view(
+                    bioseq::indexing::hash_major_minimizer_storage_profile_digest(
+                        storage_profile));
+            if (canonical_view.width_bytes != storage_profile.hash_width_bytes ||
+                canonical_view.storage_width_bytes != storage_profile.hash_width_bytes) {
+                fail("hash-major canonical query width disagrees with READY storage");
+                return;
+            }
             const std::uint64_t hash_major_load_started_ns =
                 static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
             auto hash_major_reader = bioseq::indexing::hash_major_minimizer_selective_reader::open(
@@ -434,10 +480,11 @@ void batch_processor::prepare_cpu_persisted_native_target(
     const auto expected = bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
         minimizer_generation_layout::grouped_soa_segment_local,
         sketch_backend,
+        *algorithm_identity,
         source.alphabet_code,
         source.storage_unit_byte_width,
-        15u,
-        10u,
+        runtime_kmer_size,
+        runtime_window_size,
         bioseq::indexing::k_grouped_soa_default_max_occurrence_cap);
     if (!expected) {
         fail(fmt::format("grouped-SoA storage contract rejected storage_error={}",
@@ -451,6 +498,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
         bioseq::aligner::fragment_minimizer_lookup_route::direct_compact_hash_lookup;
     const bool compact_h32_direct_requested =
         compact_h32_direct_configured &&
+        algorithm_identity->hash_width == ::bioseq::minimizers::minimizer_scalar_width::u32 &&
         index_name == bioseq::indexing::k_minimizers_per_fragment_index_name;
     auto opened = open_exact_minimizer_generation_read_session_pg(
         identity.table_name, index_name, sequence_rowno, executor_read, *expected);
@@ -503,7 +551,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
     session.consume_source_authorization(std::move(source_authorization));
     auto& query_prep_pool = bioseq::parallelism::global_pool::instance();
     /* This is the exact eligibility boundary of the typed full-batch native
-     * route. Outside it, preserve the synchronous canonical-u32 validation because
+     * route. Outside it, preserve synchronous physical-record validation because
      * no later complete query_hash_plan stream is guaranteed to exist. */
     const bool defer_compact_direct_query_set_validation =
         compact_h32_direct_requested && base_params.max_occ > 0 && !base_params.enable_profiling &&
@@ -522,13 +570,11 @@ void batch_processor::prepare_cpu_persisted_native_target(
                                     query_read_session,
                                     query_payload_observer,
                                     query_ordinals,
-                                    base_params,
+                                    execution_plan,
                                     /*include_persisted_parameter_group=*/true,
-                                    mapped_minimizer_fragment_grouped_soa
-                                        ? (defer_compact_direct_query_set_validation
-                                               ? cpu_query_union_storage::retained_sketch_only
-                                               : cpu_query_union_storage::canonical_u32)
-                                        : cpu_query_union_storage::minimizer_sketch,
+                                    defer_compact_direct_query_set_validation
+                                        ? cpu_query_union_storage::retained_sketch_only
+                                        : cpu_query_union_storage::canonical_hashes,
                                     typmod_ops,
                                     prepared_target);
     if (!prepared_target.unions_ready || prepared_target.groups.size() != 1u) {
@@ -536,16 +582,20 @@ void batch_processor::prepare_cpu_persisted_native_target(
         return;
     }
     cpu_prepared_index_group& group = prepared_target.groups.front();
-    if (group.kmer_size != 15 || group.window_size != 10 || group.max_occ < 0 ||
+    if (group.kmer_size != base_params.kmer_size ||
+        group.window_size != base_params.window_size || group.max_occ < 0 ||
         group.sketch_backend != sketch_backend ||
         (group.compact_direct_query_set_validation_pending &&
          (!defer_compact_direct_query_set_validation || group.max_occ <= 0 ||
           !group.canonical_query_hash_union_u32.empty() ||
-          group.canonical_query_hash_union_u32.capacity() != 0u)) ||
-        (mapped_minimizer_fragment_grouped_soa
-             ? (!group.query_hash_union.empty() || group.query_hash_union.capacity() != 0u)
-             : (!group.canonical_query_hash_union_u32.empty() ||
-                group.canonical_query_hash_union_u32.capacity() != 0u)) ||
+          group.canonical_query_hash_union_u32.capacity() != 0u ||
+          !group.canonical_query_hash_union_u64.empty() ||
+          group.canonical_query_hash_union_u64.capacity() != 0u ||
+          group.canonical_query_hash_width != 0u)) ||
+        !group.query_hash_union.empty() || group.query_hash_union.capacity() != 0u ||
+        (!group.compact_direct_query_set_validation_pending &&
+         group.canonical_query_hash_width_bytes() !=
+             static_cast<std::uint8_t>(algorithm_identity->hash_width)) ||
         group.persisted_fragment_mapping_guard || group.persisted_fragment_reader ||
         group.persisted_grouped_soa_reader || group.persisted_hash_major_reader ||
         group.target_index) {
@@ -717,6 +767,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
             manifest.minimizer_scheme_revision == scheme.revision &&
             manifest.producer_backend_id == producer_backend.id &&
             manifest.producer_identity_revision == producer_backend.revision &&
+            manifest.algorithm_identity == *algorithm_identity &&
             manifest.max_occ_cap == bioseq::indexing::k_grouped_soa_default_max_occurrence_cap &&
             head.generation_id != 0 && head.source_identity != 0 &&
             read_stats.relation_opens == 1 && read_stats.head_scans == 1 &&
@@ -784,14 +835,38 @@ void batch_processor::prepare_cpu_persisted_native_target(
         }
         const std::uint64_t grouped_soa_load_started_ns =
             static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
-        auto made = grouped_soa_reader_type::begin(
-            bioseq::parallelism::memory_admission_controller::instance(),
-            head,
-            manifest,
-            selected_expected,
-            *authenticated_grouped_soa_directory,
-            group.query_hash_union,
-            static_cast<std::uint64_t>(group.max_occ));
+        const auto canonical_hashes = group.canonical_query_hash_view();
+        const auto begin_reader = [&canonical_hashes,
+                                   &head,
+                                   &manifest,
+                                   &selected_expected,
+                                   &authenticated_grouped_soa_directory,
+                                   &group]()
+            -> std::expected<grouped_soa_reader_type, minimizer_generation_encoding_error> {
+            if (canonical_hashes.width_bytes == sizeof(std::uint32_t)) {
+                return grouped_soa_reader_type::begin(
+                    bioseq::parallelism::memory_admission_controller::instance(),
+                    head,
+                    manifest,
+                    selected_expected,
+                    *authenticated_grouped_soa_directory,
+                    canonical_hashes.values32,
+                    static_cast<std::uint64_t>(group.max_occ));
+            }
+            if (canonical_hashes.width_bytes == sizeof(std::uint64_t)) {
+                return grouped_soa_reader_type::begin(
+                    bioseq::parallelism::memory_admission_controller::instance(),
+                    head,
+                    manifest,
+                    selected_expected,
+                    *authenticated_grouped_soa_directory,
+                    canonical_hashes.values64,
+                    static_cast<std::uint64_t>(group.max_occ));
+            }
+            return std::unexpected{
+                minimizer_generation_encoding_error::storage_contract_mismatch};
+        };
+        auto made = begin_reader();
         if (!made) {
             fail(
                 fmt::format("minimizer-sequence grouped-SoA reader begin rejected storage_error={}",
@@ -801,7 +876,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
         std::optional<grouped_soa_reader_type> grouped_soa_reader{std::in_place, std::move(*made)};
         /* The reader owns the exact compact query-hash image from this point.
          * Release the scheduler copy before allocating retained payload state. */
-        if (!prepared_target.release_group_query_hash_union_noexcept(group)) {
+        if (!prepared_target.release_group_canonical_query_hashes_noexcept(group)) {
             fail("minimizer-sequence grouped-SoA canonical query-union release disagrees with "
                  "admission ownership");
             return;
@@ -859,6 +934,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
             manifest.minimizer_scheme_revision == scheme.revision &&
             manifest.producer_backend_id == producer_backend.id &&
             manifest.producer_identity_revision == producer_backend.revision &&
+            manifest.algorithm_identity == *algorithm_identity &&
             manifest.max_occ_cap == bioseq::indexing::k_grouped_soa_default_max_occurrence_cap &&
             head.generation_id != 0 && head.source_identity != 0 &&
             read_stats.relation_opens == 1 && read_stats.head_scans == 1 &&

@@ -264,13 +264,25 @@ class hash_major_minimizer_selective_reader {
                    : 0u;
     }
 
+    /// Select the high-16 radix bucket for the authenticated hash profile.
+    [[nodiscard]] std::size_t canonical_high16_bucket_(std::uint64_t hash) const noexcept {
+        // Four-byte profiles retain their existing high-16 split. The only
+        // authenticated eight-byte profile is K20's 40-bit minimap hash domain.
+        const unsigned shift =
+            manifest_.storage_profile.hash_width_bytes == sizeof(std::uint64_t) ? 24u : 16u;
+        return static_cast<std::size_t>(hash >> shift);
+    }
+
     /// Map a prepared hash to its canonical query ordinal using the retained radix table.
     [[nodiscard]] std::size_t canonical_ordinal_(std::uint64_t hash) const noexcept {
-        if (hash > (std::numeric_limits<std::uint32_t>::max)() ||
+        if (hash > hash_major_minimizer_max_hash(manifest_.storage_profile) ||
             canonical_radix_prefix_.size() != 65'537u) {
             return query_hashes_.size();
         }
-        const std::size_t radix = static_cast<std::size_t>(hash >> 16u);
+        const std::size_t radix = canonical_high16_bucket_(hash);
+        if (radix + 1u >= canonical_radix_prefix_.size()) {
+            return query_hashes_.size();
+        }
         const std::size_t begin = canonical_radix_prefix_[radix];
         const std::size_t end = canonical_radix_prefix_[radix + 1u];
         const std::size_t found = query_hashes_.lower_bound(begin, end, hash);
@@ -280,11 +292,14 @@ class hash_major_minimizer_selective_reader {
     /// Find a hash lower bound at or after `first` within its radix bucket.
     [[nodiscard]] std::size_t canonical_lower_bound_(std::size_t first,
                                                      std::uint64_t hash) const noexcept {
-        if (hash > (std::numeric_limits<std::uint32_t>::max)() ||
+        if (hash > hash_major_minimizer_max_hash(manifest_.storage_profile) ||
             canonical_radix_prefix_.size() != 65'537u) {
             return query_hashes_.size();
         }
-        const std::size_t radix = static_cast<std::size_t>(hash >> 16u);
+        const std::size_t radix = canonical_high16_bucket_(hash);
+        if (radix + 1u >= canonical_radix_prefix_.size()) {
+            return query_hashes_.size();
+        }
         const std::size_t bucket_begin = canonical_radix_prefix_[radix];
         const std::size_t bucket_end = canonical_radix_prefix_[radix + 1u];
         if (first >= bucket_end)

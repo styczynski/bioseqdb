@@ -156,11 +156,13 @@ prepared_minimizer_fragment_reader::open_compact_direct(
                                       : 0u);
     reader.query_membership_filter_shift_ = static_cast<std::uint8_t>(
         contract->hash_domain_bits > 21u ? contract->hash_domain_bits - 21u : 0u);
+    const std::uint8_t membership_mask_bits =
+        std::min<std::uint8_t>(reader.query_membership_filter_shift_, 11u);
     reader.query_membership_filter_mask_id_mask_ =
-        reader.query_membership_filter_shift_ == 0u
+        membership_mask_bits == 0u
             ? 0u
             : static_cast<std::uint16_t>(
-                  (std::uint32_t{1} << reader.query_membership_filter_shift_) - 1u);
+                  (std::uint32_t{1} << membership_mask_bits) - 1u);
     reader.wire_dispatch_ = reader.profile_.hash_width == minimizer_scalar_width::u32 &&
                                     reader.profile_.count_width == minimizer_scalar_width::u16 &&
                                     reader.profile_.position_width == minimizer_scalar_width::u16
@@ -197,15 +199,20 @@ prepared_minimizer_fragment_reader::open(
     std::uint64_t max_occ,
     mapped_payload_owner_type mapped_payload_owner,
     std::span<const std::byte> mapped_payload,
-    std::optional<owned_compact_hash32_direct_index_view> compact_direct) {
+    std::optional<owned_compact_hash32_direct_index_view> compact_direct,
+    prepared_minimizer_fragment_reader_mode mode) {
     using bioseq::common::saturating_add;
     using bioseq::common::saturating_mul;
     const auto profile = derive_grouped_soa_minimizer_profile(manifest);
-    if (!profile || manifest.layout != minimizer_generation_layout::grouped_soa_segment_local ||
+    const bool known_mode =
+        mode == prepared_minimizer_fragment_reader_mode::queryable_native ||
+        mode == prepared_minimizer_fragment_reader_mode::gpu_source_only;
+    if (!known_mode || !profile ||
+        manifest.layout != minimizer_generation_layout::grouped_soa_segment_local ||
         head.layout != manifest.layout || expected.layout != manifest.layout ||
         !expected.max_occ_cap || *expected.max_occ_cap != profile->max_occ_cap ||
         max_occ > profile->max_occ_cap ||
-        profile->max_hash > (std::numeric_limits<std::uint32_t>::max)() ||
+        (mode == prepared_minimizer_fragment_reader_mode::gpu_source_only && compact_direct) ||
         max_occ > static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)()) ||
         mapped_payload_owner == nullptr || mapped_payload.size() != manifest.payload_bytes ||
         encoded_directory.size() != manifest.directory_bytes) {
@@ -215,10 +222,14 @@ prepared_minimizer_fragment_reader::open(
         !validated) {
         return std::unexpected(validated.error());
     }
-    const std::uint32_t profile_max_hash = static_cast<std::uint32_t>(profile->max_hash);
+    const std::uint64_t profile_max_hash = profile->max_hash;
     const std::uint32_t profile_hash_bits = std::bit_width(profile_max_hash);
     const std::uint64_t expected_profile_max_hash =
-        profile_hash_bits == 0u ? 0u : (std::uint64_t{1} << profile_hash_bits) - 1u;
+        profile_hash_bits == 0u
+            ? 0u
+            : profile_hash_bits == 64u
+                ? (std::numeric_limits<std::uint64_t>::max)()
+                : (std::uint64_t{1} << profile_hash_bits) - 1u;
     if (profile_hash_bits == 0u || profile->max_hash != expected_profile_max_hash) {
         return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
@@ -230,10 +241,11 @@ prepared_minimizer_fragment_reader::open(
             .storage_contract_checksum = head.storage_contract_checksum,
             .target_length = manifest.target_length,
         };
-        if (direct_header.identity != expected_identity ||
+        if (profile_max_hash > (std::numeric_limits<std::uint32_t>::max)() ||
+            profile_hash_bits > 32u || direct_header.identity != expected_identity ||
             direct_header.max_occ_cap != profile->max_occ_cap ||
             direct_header.geometry.hash_domain_bits != profile_hash_bits ||
-            direct_header.geometry.max_hash != profile_max_hash ||
+            direct_header.geometry.max_hash != static_cast<std::uint32_t>(profile_max_hash) ||
             direct_header.image_bytes != compact_direct->view_.image.size() ||
             compact_direct->view_.image.empty() ||
             compact_direct->image_owner_.get() != compact_direct->view_.image.data()) {
@@ -268,15 +280,24 @@ prepared_minimizer_fragment_reader::open(
     reader.head_ = head;
     reader.manifest_ = manifest;
     reader.profile_ = *profile;
-    reader.query_radix_shift_ = static_cast<std::uint8_t>(
-        profile_hash_bits > query_radix_bits_ ? profile_hash_bits - query_radix_bits_ : 0u);
-    reader.query_membership_filter_shift_ =
-        static_cast<std::uint8_t>(profile_hash_bits > 21u ? profile_hash_bits - 21u : 0u);
-    reader.query_membership_filter_mask_id_mask_ =
-        reader.query_membership_filter_shift_ == 0u
-            ? 0u
-            : static_cast<std::uint16_t>(
-                  (std::uint32_t{1} << reader.query_membership_filter_shift_) - 1u);
+    reader.mode_ = mode;
+    if (mode == prepared_minimizer_fragment_reader_mode::queryable_native) {
+        reader.query_radix_shift_ = static_cast<std::uint8_t>(
+            profile_hash_bits > query_radix_bits_ ? profile_hash_bits - query_radix_bits_ : 0u);
+        reader.query_membership_filter_shift_ =
+            static_cast<std::uint8_t>(profile_hash_bits > 21u ? profile_hash_bits - 21u : 0u);
+        const std::uint8_t membership_mask_bits =
+            std::min<std::uint8_t>(reader.query_membership_filter_shift_, 11u);
+        reader.query_membership_filter_mask_id_mask_ =
+            membership_mask_bits == 0u
+                ? 0u
+                : static_cast<std::uint16_t>(
+                      (std::uint32_t{1} << membership_mask_bits) - 1u);
+    } else {
+        reader.query_radix_shift_ = 0u;
+        reader.query_membership_filter_shift_ = 0u;
+        reader.query_membership_filter_mask_id_mask_ = 0u;
+    }
     reader.mapped_payload_owner_ = std::move(mapped_payload_owner);
     reader.mapped_payload_ = mapped_payload;
     reader.compact_direct_ = std::move(compact_direct);

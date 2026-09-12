@@ -18,6 +18,7 @@ module;
 #include <mutex>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -32,11 +33,13 @@ import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.highway_minimizer_contract;
+import bioseq.sequences.kmers.minimizer_physical_registry;
 import bioseq.sequences.kmers.hashers.base;
 import bioseq.common.checked_arithmetic;
 import bioseq.gpu.vulkan.abi;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
+import bioseq.pipeline.runtime_contract;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
@@ -51,6 +54,86 @@ import :index_routes;
 import :segmented;
 
 export namespace bioseq::gpu::vulkan {
+
+/**
+ * @brief Selects an intermediate GPU pair record without truncating its hash.
+ *
+ * Preserve the established compact record whenever its generated capability
+ * and physical capacity fit. Other K/W and position shapes use the same
+ * generated registry as query execution; no numerical kernel is specialized
+ * here. Positions are local to the upload and are rebased by the caller.
+ * @tparam p_alphabet Registered logical nucleotide alphabet.
+ * @tparam p_callable Callable accepting a physical record template argument.
+ * @param window_size Runtime minimizer window size.
+ * @param kmer_size Runtime biological k-mer size.
+ * @param maximum_window_bp Upper bound for every upload in this operation.
+ * @param callable Operation instantiated with the admitted physical record.
+ * @return The callable's result, preserving its reference category.
+ * @throws vulkan_runtime_error When the shape has no admitted GPU record.
+ */
+template <sequence_alphabet p_alphabet, class p_callable>
+[[nodiscard]] auto with_vulkan_segment_pair_record(
+    std::size_t window_size,
+    std::size_t kmer_size,
+    std::uint64_t maximum_window_bp,
+    p_callable&& callable)
+    -> decltype(std::forward<p_callable>(callable).template operator()<
+        bioseq::minimizers::minimap_sketch_data>())
+{
+    namespace minimizers = bioseq::minimizers;
+    using legacy_record = minimizers::minimap_sketch_data;
+    constexpr auto algorithm =
+        ::bioseq::simd::minimizer_algorithm::vulkan_minimap_integer;
+    if (kmer_size == 0u || kmer_size > 32u
+        || !vulkan_minimizer_window_size_supported(window_size)
+        || window_size > (std::numeric_limits<std::uint16_t>::max)()) {
+        throw vulkan_runtime_error{
+            "Vulkan segment pair shape exceeds its runtime kernel capacity"};
+    }
+    if constexpr (!minimizers::minimizer_profile_has_alphabet<p_alphabet>()) {
+        throw vulkan_runtime_error{
+            "Vulkan segment pair alphabet has no generated record profile"};
+    } else {
+        const auto runtime_k = static_cast<std::uint16_t>(kmer_size);
+        const auto runtime_w = static_cast<std::uint16_t>(window_size);
+        constexpr auto alphabet_id =
+            minimizers::minimizer_profile_alphabet_id<p_alphabet>();
+        constexpr auto legacy_id =
+            minimizers::minimizer_physical_record_detail::record_id<legacy_record>();
+        const std::uint64_t required_hash_mask = kmer_size == 32u
+            ? (std::numeric_limits<std::uint64_t>::max)()
+            : (std::uint64_t{1u} << (2u * kmer_size)) - 1u;
+        const auto* legacy_descriptor =
+            minimizers::find_minimizer_physical_record(legacy_id);
+        if (legacy_descriptor != nullptr
+            && maximum_window_bp <= legacy_record::k_position_field_mask
+            && required_hash_mask <= legacy_record::k_hash_field_mask) {
+            const auto* profile = minimizers::find_minimizer_runtime_profile(
+                algorithm, alphabet_id, runtime_k, runtime_w,
+                legacy_descriptor->position_log2, 32u);
+            if (profile != nullptr && profile->record_id == legacy_id
+                && profile->effective_algorithm == algorithm) {
+                return std::forward<p_callable>(callable).
+                    template operator()<legacy_record>();
+            }
+        }
+        try {
+            const auto layout = minimizers::select_minimizer_physical_layout<
+                p_alphabet, std::uint32_t>(
+                    algorithm, maximum_window_bp, runtime_k, runtime_w);
+            if (layout.effective_algorithm != algorithm) {
+                throw vulkan_runtime_error{
+                    "Vulkan segment pair record selection changed the algorithm"};
+            }
+            return minimizers::visit_minimizer_physical_layout(
+                layout, std::forward<p_callable>(callable));
+        } catch (const std::invalid_argument& error) {
+            throw vulkan_runtime_error{
+                std::string{"Vulkan segment pair record selection failed: "}
+                    + error.what()};
+        }
+    }
+}
 
 /**
  * @brief Sketches a lazy sequence through its admitted contiguous window.
@@ -330,16 +413,22 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
         [emit_base_bp, core_lo_bp, core_hi_bp, window_size, kmer_size,
          execution_stats_out]
         <class p_range>(p_range& resident) {
-            return collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
-                resident,
-                0u,
-                static_cast<std::size_t>(resident.size()),
-                emit_base_bp,
-                core_lo_bp,
-                core_hi_bp,
-                window_size,
-                kmer_size,
-                execution_stats_out);
+            return with_vulkan_segment_pair_record<p_alphabet>(
+                window_size, kmer_size,
+                static_cast<std::uint64_t>(resident.bp_size()),
+                [&]<class p_minimizer_type>() {
+                    return collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw<
+                        p_minimizer_type>(
+                            resident,
+                            0u,
+                            static_cast<std::size_t>(resident.size()),
+                            emit_base_bp,
+                            core_lo_bp,
+                            core_hi_bp,
+                            window_size,
+                            kmer_size,
+                            execution_stats_out);
+                });
         });
 }
 

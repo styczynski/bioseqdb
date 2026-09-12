@@ -161,12 +161,17 @@ export import bioseq.common.seqan_adapter;
 export import bioseq.highway.kernel_table_contract;
 import bioseq.indexing.type;
 import bioseq.indexing.minimizer_hashmap;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+import bioseq.indexing.minimizer_sequence;
+#endif
 import bioseq.indexing.gpu_minimizer_index;
 import bioseq.postgres.storage.indexing.active_read_policy;
 import bioseq.postgres.storage.indexing.executor_read_context;
 import bioseq.postgres.storage.indexing.minimizer_fragment_mapping_lease;
 import bioseq.postgres.storage.indexing.minimizer_read_stats;
 export import bioseq.pipeline.minimap_parameters_contract;
+import bioseq.pipeline.runtime_contract;
+export import bioseq.pipeline.pipe;
 export import bioseq.pipeline.minimap_port.match_result_contract;
 export import bioseq.pipeline.minimap_port;
 export import bioseq.pipeline.minimizer_execution_contract;
@@ -217,8 +222,8 @@ export class batch_processor {
     /** @brief Selects the retained representation of a prepared CPU query union. */
     enum class cpu_query_union_storage : std::uint8_t {
         minimizer_sketch,
-        canonical_u32,
-        canonical_u32_sequential_fallback,
+        canonical_hashes,
+        canonical_hashes_sequential_fallback,
         retained_sketch_only,
     };
 
@@ -229,10 +234,55 @@ export class batch_processor {
         /* During parallel preparation each query owns an independent permit.
          * The backend thread absorbs it into the target aggregate before
          * publication.  It is declared before minimizers so exceptional
-         * teardown deallocates vector storage before releasing admission. */
+         * teardown deallocates both the concrete vector payload and its shared
+         * control/vector-object allocation before releasing admission. The
+         * erased owner is backed by a generated record tag and never by a
+         * no-op deleter. */
         std::optional<bioseq::parallelism::memory_permit> parallel_preparation_permit{};
-        std::vector<minimap_sketch_data> minimizers{};
+        ::bioseq::minimizers::minimizer_physical_batch_owner minimizers{};
         pipe::minimizer_range_execution_stats execution_stats{};
+
+        cpu_prepared_query_sketch() = default;
+        cpu_prepared_query_sketch(const cpu_prepared_query_sketch&) = delete;
+        cpu_prepared_query_sketch& operator=(const cpu_prepared_query_sketch&) = delete;
+
+        cpu_prepared_query_sketch(
+            const std::uint64_t ordinal,
+            const std::uint64_t bp_size,
+            std::optional<bioseq::parallelism::memory_permit> permit,
+            ::bioseq::minimizers::minimizer_physical_batch_owner physical_minimizers,
+            pipe::minimizer_range_execution_stats stats) noexcept
+            : query_ordinal(ordinal), query_bp_size(bp_size),
+              parallel_preparation_permit(std::move(permit)),
+              minimizers(std::move(physical_minimizers)), execution_stats(std::move(stats)) {}
+
+        cpu_prepared_query_sketch(cpu_prepared_query_sketch&& other) noexcept
+            : query_ordinal(std::exchange(other.query_ordinal, 0u)),
+              query_bp_size(std::exchange(other.query_bp_size, 0u)),
+              parallel_preparation_permit(std::move(other.parallel_preparation_permit)),
+              minimizers(std::move(other.minimizers)),
+              execution_stats(std::exchange(
+                  other.execution_stats, pipe::minimizer_range_execution_stats{})) {
+            other.parallel_preparation_permit.reset();
+        }
+
+        cpu_prepared_query_sketch& operator=(cpu_prepared_query_sketch&& other) noexcept {
+            if (this != std::addressof(other)) {
+                // The destination's physical storage must disappear while its
+                // old adjacent permit (or enclosing aggregate permit) is live.
+                minimizers.reset();
+                parallel_preparation_permit.reset();
+                query_ordinal = std::exchange(other.query_ordinal, 0u);
+                query_bp_size = std::exchange(other.query_bp_size, 0u);
+                parallel_preparation_permit =
+                    std::move(other.parallel_preparation_permit);
+                minimizers = std::move(other.minimizers);
+                execution_stats = std::exchange(
+                    other.execution_stats, pipe::minimizer_range_execution_stats{});
+                other.parallel_preparation_permit.reset();
+            }
+            return *this;
+        }
     };
 
     /** @brief Reports the terminal state of independent CPU query preparation. */
@@ -255,6 +305,7 @@ export class batch_processor {
                  std::int32_t,
                  std::int32_t,
                  minimizer_sketch_backend,
+                 const ::bioseq::minimizers::minimizer_physical_layout_selection&,
                  const ::bioseq::simd_dispatch::highway_kernel_table*,
                  std::vector<p_destination>&,
                  bioseq::parallelism::memory_permit&,
@@ -274,6 +325,7 @@ export class batch_processor {
                  std::int32_t,
                  std::int32_t,
                  minimizer_sketch_backend,
+                 const ::bioseq::minimizers::minimizer_physical_layout_selection&,
                  const ::bioseq::simd_dispatch::highway_kernel_table*,
                  std::vector<p_destination>&,
                  bioseq::parallelism::memory_permit&,
@@ -289,24 +341,36 @@ export class batch_processor {
                                    std::int32_t,
                                    std::int32_t,
                                    minimizer_sketch_backend,
+                                   const ::bioseq::minimizers::
+                                       minimizer_physical_layout_selection&,
                                    const ::bioseq::simd_dispatch::highway_kernel_table*,
                                    cpu_prepared_query_sketch&);
+
+    /** @brief Function signature for selecting one typmod-owned query layout. */
+    using cpu_select_query_layout_function =
+        ::bioseq::minimizers::minimizer_physical_layout_selection (*)(
+            minimizer_algorithm, std::uint64_t, std::int32_t, std::int32_t);
 
     /** @brief Binds typmod-specific query preparation callables without runtime erasure. */
     struct cpu_preparation_typmod_operations final {
         std::uint8_t alphabet_code = 0;
         std::uint8_t storage_unit_byte_width = 0;
+        cpu_select_query_layout_function select_query_layout = nullptr;
         cpu_append_header_function<minimap_sketch_data> append_header_sketch = nullptr;
         cpu_append_header_function<std::uint32_t> append_header_u32 = nullptr;
+        cpu_append_header_function<std::uint64_t> append_header_u64 = nullptr;
         cpu_append_recipe_function<minimap_sketch_data> append_recipe_sketch = nullptr;
         cpu_append_recipe_function<std::uint32_t> append_recipe_u32 = nullptr;
+        cpu_append_recipe_function<std::uint64_t> append_recipe_u64 = nullptr;
         cpu_prepare_independent_function prepare_independent = nullptr;
 
         /** @brief Returns whether every required typmod callable is bound. */
         [[nodiscard]] constexpr bool complete() const noexcept {
             return std::has_single_bit(storage_unit_byte_width) &&
-                   append_header_sketch != nullptr && append_header_u32 != nullptr &&
+                   select_query_layout != nullptr && append_header_sketch != nullptr &&
+                   append_header_u32 != nullptr && append_header_u64 != nullptr &&
                    append_recipe_sketch != nullptr && append_recipe_u32 != nullptr &&
+                   append_recipe_u64 != nullptr &&
                    prepare_independent != nullptr;
         }
 
@@ -326,18 +390,20 @@ export class batch_processor {
         std::int32_t window_size = 0;
         std::int32_t max_occ = 0;
         minimizer_sketch_backend sketch_backend = minimizer_sketch_backend::scalar;
+        ::bioseq::minimizers::minimizer_physical_layout_selection execution_layout{};
         std::vector<minimap_sketch_data> query_hash_union{};
-        /* Hash-major borrows this exact sorted-unique canonical image for its
+        /* Persisted readers borrow this exact sorted-unique canonical image for their
          * complete lifetime.  It is mutually exclusive with query_hash_union:
          * publication is authenticated before the scheduler chooses which
          * representation to construct, so there is never a second Q-sized
          * conversion owner or sort.  Declaring it before the reader makes
          * reverse destruction release the borrowing reader first. */
         std::vector<std::uint32_t> canonical_query_hash_union_u32{};
-        /* Hash-major preparation may retain the exact per-query sketch produced
-         * while filling canonical_query_hash_union_u32.  Missing ordinals are
-         * intentional admission fallbacks and are sketched by ensure_q in the
-         * typed row path. */
+        std::vector<std::uint64_t> canonical_query_hash_union_u64{};
+        std::uint8_t canonical_query_hash_width = 0u;
+        /* Canonical preparation retains the exact generated-record sketch produced
+         * while filling the active-width hash union. Every published ordinal has
+         * a concrete owner; typed row execution never substitutes a narrower record. */
         std::vector<cpu_prepared_query_sketch> retained_query_sketches{};
         /* Declared before target_index so destruction releases the owned
          * index storage before returning its admission reservation. */
@@ -365,8 +431,20 @@ export class batch_processor {
          * minimizer-fragment-only sidecar or fragment-native ownership validation. */
         std::optional<bioseq::indexing::prepared_grouped_soa_query_reader>
             persisted_grouped_soa_reader{};
+        /* No-index minimizer-sequence generation publishes one authenticated,
+         * query-union-filtered reader for the statement group. It owns copied
+         * selected positions and never borrows the temporary encoded payload. */
+        std::optional<bioseq::indexing::prepared_grouped_soa_query_reader>
+            transient_grouped_soa_reader{};
         std::optional<bioseq::indexing::hash_major_minimizer_selective_reader>
             persisted_hash_major_reader{};
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        /* Campaign and private test builds retain the producer receipt beside the shared
+         * target that consumed its spill. Ordinary builds pay no proof-owner
+         * storage or receipt-copy cost. */
+        std::optional<bioseq::indexing::minimizer_sequence_generation_execution_receipt>
+            transient_target_generation_receipt{};
+#endif
         ::bioseq::pipeline_stats::target_index_source target_index_source =
             ::bioseq::pipeline_stats::target_index_source::none;
         std::uint64_t key_set_checksum = 0;
@@ -392,6 +470,9 @@ export class batch_processor {
          * backend thread must resolve it exactly once before worker fanout or
          * materialize the admitted slow fallback before row execution. */
         bool compact_direct_query_set_validation_pending = false;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        bool transient_target_generation_stats_published = false;
+#endif
 
         /**
          * @brief Finds a retained sketch by query ordinal.
@@ -411,6 +492,210 @@ export class batch_processor {
                        ? &*retained_sketch
                        : nullptr;
         }
+
+        /** Return the one active canonical hash width, or zero for none/ambiguous. */
+        [[nodiscard]] std::uint8_t canonical_query_hash_width_bytes() const noexcept {
+            const bool valid_u32 = canonical_query_hash_width == sizeof(std::uint32_t) &&
+                                   canonical_query_hash_union_u64.capacity() == 0u;
+            const bool valid_u64 = canonical_query_hash_width == sizeof(std::uint64_t) &&
+                                   canonical_query_hash_union_u32.capacity() == 0u;
+            if (valid_u32 == valid_u64) {
+                return 0u;
+            }
+            return canonical_query_hash_width;
+        }
+
+        /** Borrow the active width-tagged canonical hash image. */
+        [[nodiscard]] bioseq::indexing::canonical_query_hash_view
+        canonical_query_hash_view(
+            const std::array<std::byte, 32>& storage_profile_digest = {}) const noexcept {
+            return {
+                .values32 = std::span<const std::uint32_t>{canonical_query_hash_union_u32},
+                .values64 = std::span<const std::uint64_t>{canonical_query_hash_union_u64},
+                .width_bytes = canonical_query_hash_width_bytes(),
+                .storage_width_bytes = canonical_query_hash_width_bytes(),
+                .storage_profile_digest = storage_profile_digest,
+            };
+        }
+    };
+
+    /**
+     * @brief Owns one MPF source and its query-independent Vulkan resident.
+     *
+     * A persisted owner retains the mmap lease and the source-only grouped-SoA
+     * reader until the resident has been materialized after physical minimizer
+     * selection.  A no-index owner starts as metadata-only and builds its
+     * complete target resident from the real target view exactly once.  Neither
+     * form owns a CPU hashmap or a host query sketch.
+     */
+    struct gpu_prepared_mpf_target {
+        pipe::statement_execution_plan_owner execution_plan{};
+        std::int64_t target_rowno = -1;
+        std::uint64_t target_bp_size = 0;
+        std::uint64_t query_count = 0;
+        /* Reverse destruction releases the borrowing reader before its mmap
+         * and PostgreSQL ResourceOwner lease. */
+        std::optional<bioseq::storage::indexing::mapped_minimizer_fragment_lease_guard>
+            persisted_fragment_mapping_guard{};
+        std::optional<bioseq::indexing::prepared_minimizer_fragment_reader>
+            persisted_fragment_reader{};
+        std::shared_ptr<bioseq::indexing::gpu_minimizer_index_cache> resident_cache{};
+        std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index> resident{};
+        bioseq::indexing::gpu_minimizer_index_cache_key resident_key{};
+        bioseq::storage::indexing::minimizer_generation_read_stats persisted_read_stats{};
+        std::uint64_t persisted_generation_id = 0;
+        std::uint64_t persisted_source_identity = 0;
+        std::uint64_t operation_identity = 0;
+        std::uint64_t dispatched_query_count = 0;
+        std::uint64_t dispatch_waves = 0;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        /* The no-index MPF producer remains Vulkan only through bounded target
+         * minimizer collection. Spill replay and exact sorted-dense construction
+         * are host work, so their receipts remain distinct and cannot be relabelled
+         * as the removed all-GPU index builder. */
+        std::optional<bioseq::indexing::minimizer_sequence_generation_execution_receipt>
+            transient_target_spill_receipt{};
+        std::optional<bioseq::indexing::minimizer_sequence_generation_execution_receipt>
+            transient_target_replay_receipt{};
+        /* Present for either persisted or transient nonempty source-direct
+         * materialization. The resident owns the live buffers/permit; this is its
+         * immutable physical receipt retained through whole-wave publication. */
+        std::optional<bioseq::indexing::gpu_source_direct_materialization_stats>
+            resident_materialization_stats{};
+#endif
+        bool persisted = false;
+        bool canonical_empty = false;
+        bool persisted_read_stats_published = false;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        bool target_physical_stats_published = false;
+#endif
+
+        gpu_prepared_mpf_target() = default;
+        gpu_prepared_mpf_target(const gpu_prepared_mpf_target&) = delete;
+        gpu_prepared_mpf_target& operator=(const gpu_prepared_mpf_target&) = delete;
+        gpu_prepared_mpf_target(gpu_prepared_mpf_target&&) noexcept = default;
+        gpu_prepared_mpf_target& operator=(gpu_prepared_mpf_target&& other) noexcept {
+            if (this != std::addressof(other)) {
+                // Default memberwise assignment would release the mapping guard
+                // before assigning (and therefore destroying) its borrowing
+                // reader. Rebuild through the move constructor so ordinary
+                // reverse destruction drops resident/cache/reader first.
+                std::destroy_at(this);
+                std::construct_at(this, std::move(other));
+            }
+            return *this;
+        }
+
+        /** @return True when the statement may materialize this source once. */
+        [[nodiscard]] bool source_ready() const noexcept {
+            const bool common = execution_plan && target_rowno >= 0 && target_bp_size != 0u &&
+                                query_count != 0u && operation_identity != 0u &&
+                                resident_cache != nullptr;
+            if (!common)
+                return false;
+            if (!persisted) {
+                return !persisted_fragment_mapping_guard && !persisted_fragment_reader &&
+                       persisted_generation_id == 0u && persisted_source_identity == 0u;
+            }
+            return persisted_generation_id != 0u && persisted_source_identity != 0u &&
+                   persisted_fragment_mapping_guard.has_value() &&
+                   persisted_fragment_reader.has_value() &&
+                   persisted_fragment_reader->gpu_source_ready();
+        }
+
+        /** @return True after exactly one resident or authenticated empty result exists. */
+        [[nodiscard]] bool ready() const noexcept {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            const bool has_spill = transient_target_spill_receipt.has_value();
+            const bool has_replay = transient_target_replay_receipt.has_value();
+            const bool has_materialization = resident_materialization_stats.has_value();
+            const bool transient_proof = persisted
+                ? !has_spill && !has_replay
+                : (!has_spill
+                       ? canonical_empty && !has_replay
+                       : transient_target_spill_receipt->is_spill_valid() &&
+                             transient_target_spill_receipt->selected_backend ==
+                                 minimizer_sketch_backend::vulkan_segment &&
+                             transient_target_spill_receipt->target_length == target_bp_size &&
+                             (canonical_empty
+                                  ? transient_target_spill_receipt->spilled_event_count == 0u &&
+                                        !has_replay
+                                  : has_replay &&
+                                        transient_target_replay_receipt->is_spill_valid() &&
+                                        transient_target_replay_receipt->spill_operation_epoch ==
+                                            transient_target_spill_receipt
+                                                ->spill_operation_epoch &&
+                                        transient_target_replay_receipt
+                                                ->spill_storage_binding ==
+                                            transient_target_spill_receipt
+                                                ->spill_storage_binding &&
+                                        transient_target_replay_receipt
+                                                ->spilled_event_count ==
+                                            transient_target_spill_receipt
+                                                ->spilled_event_count &&
+                                        transient_target_replay_receipt
+                                                ->spill_content_digest ==
+                                            transient_target_spill_receipt
+                                                ->spill_content_digest &&
+                                        transient_target_replay_receipt
+                                                ->replay_scan_count == 2u &&
+                                        transient_target_replay_receipt
+                                                ->replay_merge_pass_count == 2u &&
+                                        transient_target_replay_receipt
+                                                ->replay_completed_scan_count == 2u &&
+                                        transient_target_replay_receipt
+                                                ->replay_failed_scan_count == 0u &&
+                                        transient_target_replay_receipt
+                                                ->replay_illegal_span_transition_count == 0u));
+            if (!source_ready() || !transient_proof ||
+                (canonical_empty == (resident != nullptr)) ||
+                (resident != nullptr) != has_materialization)
+                return false;
+#else
+            if (!source_ready() || (canonical_empty == (resident != nullptr)))
+                return false;
+#endif
+            const auto& params = execution_plan->frozen_parameters;
+            const bool key_matches_statement =
+                resident_key.source_id == 0u &&
+                resident_key.caller_identity == operation_identity &&
+                resident_key.operation_identity == operation_identity &&
+                resident_key.target_len == target_bp_size &&
+                resident_key.kmer_size == static_cast<std::uint32_t>(params.kmer_size) &&
+                resident_key.window_size == static_cast<std::uint32_t>(params.window_size) &&
+                resident_key.source_direct_sorted_dense &&
+                resident_key.representation ==
+                    bioseq::indexing::gpu_index_representation::source_direct_sorted_dense;
+            if (!key_matches_statement)
+                return false;
+            if (canonical_empty)
+                return resident_key.table_size == 0u && resident_key.position_count == 0u;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            const auto& physical = *resident_materialization_stats;
+            const auto actual_bytes = bioseq::common::checked_add(
+                physical.actual_slot_allocation_bytes,
+                physical.actual_position_allocation_bytes);
+            return resident->target_len == target_bp_size && resident->key == resident_key &&
+                   resident_key.operation_identity == operation_identity && actual_bytes &&
+                   *actual_bytes == physical.actual_allocation_bytes &&
+                   physical.actual_slot_allocation_bytes == resident->slots.allocation_bytes &&
+                   physical.actual_position_allocation_bytes ==
+                       resident->positions.allocation_bytes &&
+                   physical.fully_touched_bytes == physical.actual_allocation_bytes &&
+                   physical.source_checksum == physical.mapped_checksum &&
+                   physical.source_checksum == resident->source_stream_checksum &&
+                   physical.mapped_checksum == resident->mapped_stream_checksum &&
+                   physical.shape.minimizer_count == resident->position_count &&
+                   physical.shape.distinct_count == resident->unique_key_count &&
+                   physical.complete_source_traversals ==
+                       resident->complete_source_traversals &&
+                   physical.complete_mapped_traversals ==
+                       resident->complete_mapped_traversals;
+#else
+            return resident->target_len == target_bp_size && resident->key == resident_key &&
+                   resident_key.operation_identity == operation_identity;
+#endif
+        }
     };
 
     /**
@@ -428,6 +713,7 @@ export class batch_processor {
          * storage duration; retaining its neutral pointer and exact plan here
          * lets every later query wave prove that it is reusing, rather than
          * reconstructing, that target binding. */
+        pipe::statement_execution_plan_owner execution_plan{};
         const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels = nullptr;
         ::bioseq::simd_dispatch::highway_dispatch_plan highway_dispatch{};
         std::int64_t highway_executed_target = 0;
@@ -476,11 +762,18 @@ export class batch_processor {
 
         /**
          * @brief Checks whether this target retains the dispatch selected by parameters.
-         * @param[in] params Parameters carrying the selected Highway table and plan.
+         * @param[in] requested_plan Owner carrying the statement's selected Highway table and plan.
          * @return True when the retained binding matches every dispatch field.
          */
         [[nodiscard]] bool
-        highway_binding_matches(const minimap2_parameters& params) const noexcept {
+        highway_binding_matches(const pipe::statement_execution_plan_owner& requested_plan) const noexcept {
+            if (!execution_plan || !requested_plan ||
+                execution_plan.get() != requested_plan.get() ||
+                execution_plan.owner_before(requested_plan) ||
+                requested_plan.owner_before(execution_plan)) {
+                return false;
+            }
+            const auto& params = execution_plan->frozen_parameters;
             return highway_kernels != nullptr && highway_kernels == params.highway_kernels &&
                    same_highway_dispatch_identity(highway_dispatch,
                                                   highway_executed_target,
@@ -493,7 +786,11 @@ export class batch_processor {
          * @param[in] params Parameters carrying the selected Highway table and plan.
          * @return True when a valid binding was installed or already matched.
          */
-        [[nodiscard]] bool bind_highway_dispatch_once(const minimap2_parameters& params) noexcept {
+        [[nodiscard]] bool bind_highway_dispatch_once(pipe::statement_execution_plan_owner requested_plan) noexcept {
+            if (!requested_plan) {
+                return false;
+            }
+            const auto& params = requested_plan->frozen_parameters;
             const auto& plan = params.highway_dispatch;
             if (params.highway_kernels == nullptr || plan.compiled_targets == 0 ||
                 plan.cpu_supported_targets == 0 ||
@@ -510,7 +807,8 @@ export class batch_processor {
                                highway_dispatch.runnable_targets == 0 &&
                                highway_dispatch.planned_target == 0 && highway_executed_target == 0;
             if (!empty)
-                return highway_binding_matches(params);
+                return highway_binding_matches(requested_plan);
+            execution_plan = std::move(requested_plan);
             highway_kernels = params.highway_kernels;
             highway_dispatch = params.highway_dispatch;
             highway_executed_target = params.highway_executed_target;
@@ -539,13 +837,43 @@ export class batch_processor {
             if (released_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
                 !query_union_permit.has_value() || query_union_admission_bytes < released_bytes ||
                 !group.canonical_query_hash_union_u32.empty() ||
-                group.canonical_query_hash_union_u32.capacity() != 0u) {
+                group.canonical_query_hash_union_u32.capacity() != 0u ||
+                !group.canonical_query_hash_union_u64.empty() ||
+                group.canonical_query_hash_union_u64.capacity() != 0u ||
+                group.canonical_query_hash_width != 0u) {
                 return false;
             }
             // The native persisted reader owns its canonical hash image now.
             // Deallocate the target-wide sketch union before shrinking the
             // aggregate permit so memory authority never trails ownership.
             std::vector<minimap_sketch_data>{}.swap(group.query_hash_union);
+            query_union_admission_bytes -= released_bytes;
+            query_union_permit->shrink_to(query_union_admission_bytes);
+            return true;
+        }
+
+        /** Release one width-tagged canonical query image after a copying reader opens. */
+        [[nodiscard]] bool release_group_canonical_query_hashes_noexcept(
+            cpu_prepared_index_group& group) noexcept {
+            const std::uint64_t u32_bytes = bioseq::common::saturating_mul(
+                group.canonical_query_hash_union_u32.capacity(), sizeof(std::uint32_t));
+            const std::uint64_t u64_bytes = bioseq::common::saturating_mul(
+                group.canonical_query_hash_union_u64.capacity(), sizeof(std::uint64_t));
+            const std::uint64_t released_bytes =
+                bioseq::common::saturating_add(u32_bytes, u64_bytes);
+            const bool one_width = group.canonical_query_hash_width_bytes() != 0u;
+            if (!one_width || !group.query_hash_union.empty() ||
+                group.query_hash_union.capacity() != 0u ||
+                u32_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
+                u64_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
+                released_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
+                !query_union_permit.has_value() ||
+                query_union_admission_bytes < released_bytes) {
+                return false;
+            }
+            std::vector<std::uint32_t>{}.swap(group.canonical_query_hash_union_u32);
+            std::vector<std::uint64_t>{}.swap(group.canonical_query_hash_union_u64);
+            group.canonical_query_hash_width = 0u;
             query_union_admission_bytes -= released_bytes;
             query_union_permit->shrink_to(query_union_admission_bytes);
             return true;
@@ -583,15 +911,29 @@ export class batch_processor {
      * has no independent publication or cache authority.
      */
     struct gpu_prepared_grouped_soa_target {
+        pipe::statement_execution_plan_owner execution_plan{};
         std::int64_t target_rowno = -1;
         std::uint64_t target_bp_size = 0;
         std::uint64_t query_count = 0;
         std::shared_ptr<const bioseq::indexing::gpu_grouped_soa_resident_target> resident{};
         bioseq::gpu::vulkan::gpu_grouped_soa_resident_view resident_view{};
         bioseq::storage::indexing::minimizer_generation_read_stats persisted_read_stats{};
+        std::uint64_t operation_identity = 0;
         std::uint64_t dispatched_query_count = 0;
         std::uint64_t dispatch_waves = 0;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        std::optional<bioseq::indexing::minimizer_fragment_generation_execution_receipt>
+            transient_generation_receipt{};
+        std::optional<bioseq::indexing::minimizer_generation_publication_binding>
+            transient_generation_publication{};
+#endif
+        bool persisted = false;
+        bool canonical_empty = false;
         bool persisted_read_stats_published = false;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        bool transient_generation_stats_published = false;
+#endif
+        bool resident_materialization_stats_published = false;
 
         gpu_prepared_grouped_soa_target() = default;
         gpu_prepared_grouped_soa_target(const gpu_prepared_grouped_soa_target&) = delete;
@@ -604,8 +946,26 @@ export class batch_processor {
          * @brief Validates retained ownership, buffer views, and source identity.
          * @return True when the target is ready for grouped-SoA GPU dispatch.
          */
+        [[nodiscard]] bool source_ready() const noexcept {
+            return execution_plan && target_rowno >= 0 && target_bp_size != 0u &&
+                   query_count != 0u && operation_identity != 0u &&
+                   (persisted ? resident != nullptr : true);
+        }
+
+        /** @brief Validates the completed transient or persisted target owner. */
         [[nodiscard]] bool ready() const noexcept {
-            return target_rowno >= 0 && target_bp_size != 0 && resident != nullptr &&
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            const bool generation_proof = persisted
+                ? !transient_generation_receipt.has_value() &&
+                      !transient_generation_publication.has_value()
+                : transient_generation_receipt.has_value() &&
+                      transient_generation_publication.has_value() &&
+                      transient_generation_receipt->publication_accepted(
+                          *transient_generation_publication);
+            if (!generation_proof)
+                return false;
+#endif
+            return source_ready() && resident != nullptr &&
                    resident->validated() && resident_view.descriptors == &resident->descriptors() &&
                    resident_view.controls == &resident->controls() &&
                    resident_view.positions == &resident->positions() &&
@@ -620,7 +980,8 @@ export class batch_processor {
                    resident_view.device_uuid == resident->identity().device_uuid &&
                    resident_view.generation_id == resident->identity().generation_id &&
                    resident_view.source_identity == resident->identity().source_identity &&
-                   resident_view.cold_load_identity == resident->identity().cold_load_identity;
+                   resident_view.cold_load_identity == resident->identity().cold_load_identity &&
+                   canonical_empty == (resident_view.position_count == 0u);
         }
     };
 
@@ -634,14 +995,44 @@ export class batch_processor {
      * @return True when move, validation, release, and reprepare checks pass.
      */
     [[nodiscard]] static bool cpu_prepared_target_same_object_reprepare_probe() {
+        /* A moved query-cache element must not retain receipt geometry or an
+         * engaged moved-empty permit in its source object. */
+        {
+            bioseq::parallelism::memory_admission_controller admission;
+            auto permit = admission.try_reserve(0u);
+            if (!permit) {
+                return false;
+            }
+            cpu_prepared_query_sketch source;
+            source.query_ordinal = 17u;
+            source.query_bp_size = 101u;
+            source.parallel_preparation_permit = std::move(*permit);
+            cpu_prepared_query_sketch moved{std::move(source)};
+            if (source.query_ordinal != 0u || source.query_bp_size != 0u ||
+                source.parallel_preparation_permit.has_value() || source.minimizers.valid() ||
+                source.minimizers.capacity_bytes() != 0u || moved.query_ordinal != 17u ||
+                moved.query_bp_size != 101u || !moved.parallel_preparation_permit.has_value()) {
+                return false;
+            }
+            cpu_prepared_query_sketch assigned;
+            assigned = std::move(moved);
+            if (moved.query_ordinal != 0u || moved.query_bp_size != 0u ||
+                moved.parallel_preparation_permit.has_value() || moved.minimizers.valid() ||
+                moved.minimizers.capacity_bytes() != 0u || assigned.query_ordinal != 17u ||
+                assigned.query_bp_size != 101u ||
+                !assigned.parallel_preparation_permit.has_value()) {
+                return false;
+            }
+        }
         /* The same existing SQL probe also guards the hash-major borrowed-view
          * lifetime: moving the target must transfer the group allocation
-         * without moving or duplicating its canonical u32 image. */
+         * without moving or duplicating its canonical hash image. */
         {
             cpu_prepared_target source;
             source.groups.emplace_back();
             auto& canonical = source.groups.front().canonical_query_hash_union_u32;
             canonical = {3u, 7u, 11u};
+            source.groups.front().canonical_query_hash_width = sizeof(std::uint32_t);
             const std::uint32_t* const borrowed = canonical.data();
             const bioseq::indexing::canonical_query_hash_view view{
                 .values32 = std::span<const std::uint32_t>{canonical},
@@ -684,6 +1075,7 @@ export class batch_processor {
             rejected.query_count = 1u;
             if (validation_target.query_set_validation_ready() ||
                 group.canonical_query_hash_union_u32.capacity() != 0u ||
+                group.canonical_query_hash_union_u64.capacity() != 0u ||
                 publish_compact_direct_query_set_stats(validation_target, group, rejected) ||
                 !group.compact_direct_query_set_validation_pending ||
                 !publish_compact_direct_query_set_stats(
@@ -691,6 +1083,7 @@ export class batch_processor {
                 publish_compact_direct_query_set_stats(validation_target, group, query_set_stats) ||
                 !validation_target.query_set_validation_ready() ||
                 group.canonical_query_hash_union_u32.capacity() != 0u ||
+                group.canonical_query_hash_union_u64.capacity() != 0u ||
                 validation_target.total_unique_keys != 0u ||
                 group.key_set_checksum != query_set_stats.group_key_set_checksum ||
                 !group.build_set_checksum_present ||
@@ -717,6 +1110,7 @@ export class batch_processor {
             }
             if (!fallback_target.query_set_validation_ready() ||
                 fallback_group.canonical_query_hash_union_u32.capacity() != 0u ||
+                fallback_group.canonical_query_hash_union_u64.capacity() != 0u ||
                 fallback_target.total_unique_keys != 0u ||
                 fallback_group.key_set_checksum != query_set_stats.group_key_set_checksum ||
                 fallback_target.key_set_checksum != validation_target.key_set_checksum) {
@@ -846,7 +1240,7 @@ export class batch_processor {
         pg_sequence_read_session* query_read_session,
         const bioseq::storage::sequence_payload_allocation_observer* query_payload_observer,
         std::span<const std::uint64_t> query_ordinals,
-        const minimap2_parameters& base_params,
+        pipe::statement_execution_plan_owner execution_plan,
         bool include_persisted_parameter_group,
         cpu_query_union_storage union_storage,
         const cpu_preparation_typmod_operations& typmod_ops,
@@ -875,7 +1269,7 @@ export class batch_processor {
         pg_sequence_read_session* query_read_session,
         const bioseq::storage::sequence_payload_allocation_observer* query_payload_observer,
         std::span<const std::uint64_t> query_ordinals,
-        const minimap2_parameters& base_params,
+        pipe::statement_execution_plan_owner execution_plan,
         const bioseq::storage::indexing::borrowed_executor_read_context& executor_read,
         const cpu_preparation_typmod_operations& typmod_ops,
         cpu_prepared_target& prepared_target);
@@ -910,9 +1304,28 @@ export class batch_processor {
         std::uint64_t query_count,
         std::uint8_t alphabet_code,
         std::uint8_t storage_unit_byte_width,
-        const minimap2_parameters& params,
+        pipe::statement_execution_plan_owner execution_plan,
         const bioseq::storage::indexing::borrowed_executor_read_context& executor_read,
         gpu_prepared_grouped_soa_target& prepared_target);
+
+    /**
+     * @brief Opens one authenticated persisted MPF mmap source for later typed GPU materialization.
+     */
+    void prepare_gpu_persisted_mpf_target(
+        Oid database_oid,
+        Oid tablespace_oid,
+        Oid main_relfilenode,
+        Oid user_relid,
+        std::int16_t column_attno,
+        std::string_view index_name,
+        std::uint64_t sequence_rowno,
+        std::uint64_t target_bp_size,
+        std::uint64_t query_count,
+        std::uint8_t alphabet_code,
+        std::uint8_t storage_unit_byte_width,
+        pipe::statement_execution_plan_owner execution_plan,
+        const bioseq::storage::indexing::borrowed_executor_read_context& executor_read,
+        gpu_prepared_mpf_target& prepared_target);
 
     /**
      * @brief Carries statement-owned PostgreSQL resources into per-row dispatch.
@@ -921,6 +1334,10 @@ export class batch_processor {
      * resident facades. A null context selects the in-memory baseline stage.
      */
     struct scanner_pg_context {
+        /// Retain the executor's exact immutable request across admitted waves.
+        pipe::statement_execution_plan_owner execution_plan{};
+        using gpu_mpf_target_owner = gpu_prepared_mpf_target;
+        using gpu_mps_target_owner = gpu_prepared_grouped_soa_target;
         /**
          * @brief Describes one synchronous cold-preparation callback.
          *
@@ -931,7 +1348,7 @@ export class batch_processor {
             /** @brief Function signature for statement-root cold preparation. */
             using callback_function = void (*)(void*,
                                                scanner_pg_context&,
-                                               const minimap2_parameters&,
+                                               pipe::statement_execution_plan_owner,
                                                const cpu_preparation_typmod_operations&);
 
             void* state = nullptr;
@@ -948,7 +1365,72 @@ export class batch_processor {
             }
         };
 
+        /**
+         * @brief Creates one row-local Vulkan target owner for an ordinary scan.
+         *
+         * BatchJoin supplies one statement target through the dedicated prepared
+         * pointers below.  An ordinary scan has a different logical target per
+         * row, so it instead installs these synchronous callbacks.  Each callback
+         * fills a caller-owned target object and returns only after all PostgreSQL
+         * resources needed by that object have been retained.  The caller keeps
+         * the object through canonical seed consumption and the complete host
+         * suffix, then destroys it before advancing to the next row.
+         */
+        struct ordinary_vulkan_target_preparation_hook final {
+            using mpf_callback_function = void (*)(
+                void*,
+                scanner_pg_context&,
+                std::size_t,
+                std::uint64_t,
+                std::uint8_t,
+                std::uint8_t,
+                pipe::statement_execution_plan_owner,
+                gpu_mpf_target_owner&);
+            using mps_callback_function = void (*)(
+                void*,
+                scanner_pg_context&,
+                std::size_t,
+                std::uint64_t,
+                std::uint8_t,
+                std::uint8_t,
+                pipe::statement_execution_plan_owner,
+                gpu_mps_target_owner&);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            using map_persisted_read_stats_function = void (*)(
+                ::bioseq::pipeline_stats::pipeline_operational_stats&,
+                const bioseq::storage::indexing::minimizer_generation_read_stats&) noexcept;
+#endif
+
+            void* state = nullptr;
+            mpf_callback_function prepare_mpf = nullptr;
+            mps_callback_function prepare_mps = nullptr;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            map_persisted_read_stats_function map_persisted_read_stats = nullptr;
+#endif
+
+            /** @return True when no ordinary-scan preparation callback is installed. */
+            [[nodiscard]] constexpr bool empty() const noexcept {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                return state == nullptr && prepare_mpf == nullptr && prepare_mps == nullptr &&
+                       map_persisted_read_stats == nullptr;
+#else
+                return state == nullptr && prepare_mpf == nullptr && prepare_mps == nullptr;
+#endif
+            }
+
+            /** @return True when the state and both layout callbacks are installed. */
+            [[nodiscard]] constexpr bool valid() const noexcept {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                return state != nullptr && prepare_mpf != nullptr && prepare_mps != nullptr &&
+                       map_persisted_read_stats != nullptr;
+#else
+                return state != nullptr && prepare_mpf != nullptr && prepare_mps != nullptr;
+#endif
+            }
+        };
+
         highway_preparation_hook highway_preparation{};
+        ordinary_vulkan_target_preparation_hook ordinary_vulkan_target_preparation{};
         /* Optional statement-root async ownership observer.  It is generic at
          * the pipeline boundary; the PostgreSQL trace owner supplies the
          * concrete enrollment/state-machine adapter. */
@@ -974,6 +1456,11 @@ export class batch_processor {
         // The facade adapter validates registered MVCC state and never
         // changes its registration count.
         Snapshot snapshot = nullptr;
+        // Borrowed beside `snapshot` for synchronous ordinary-scan Vulkan
+        // target preparation.  The dispatch buffer owns it through every wave,
+        // and no prepared target or callback retains this pointer after return.
+        const bioseq::storage::indexing::borrowed_executor_read_context*
+            executor_read_context = nullptr;
         // Borrowed from the bioseq scan that owns this dispatch. Locator-backed
         // targets must be promoted through this exact statement provider;
         // scanner_pg_context never closes or retains it independently.
@@ -982,6 +1469,9 @@ export class batch_processor {
         // persisted grouped-SoA Vulkan route and never owns through hot stats.
         ::bioseq::pipeline_stats::persisted_gpu_operation_accumulator*
             persisted_gpu_operation_stats_sink = nullptr;
+        // Borrowed from the same statement root and shared by every query,
+        // segment, wave, and worker until executor publication.
+        downstream_active_wall_tracker* downstream_active_wall = nullptr;
         // Per-row optional locator. nullopt means "use the inline bioseq::pg_types::seq at
         // target_hdrs[i]" — the target then uses an in-memory facade.
         std::array<std::optional<bioseq::storage::sequence_locator>, dispatch_batch_capacity>
@@ -1006,7 +1496,8 @@ export class batch_processor {
         bool explicit_query_ordinals = false;
         bool shared_target_batch = false;
         bool record_target_operational_outcomes = true;
-        cpu_prepared_target* cpu_prepared_target = nullptr;
+        std::shared_ptr<cpu_prepared_target> cpu_prepared_target{};
+        gpu_prepared_mpf_target* gpu_prepared_mpf_target = nullptr;
         gpu_prepared_grouped_soa_target* gpu_prepared_grouped_soa_target = nullptr;
         // Explicit per-row outcome written by the scanner helper. Match
         // production and index-source accounting must never infer one another.
@@ -1046,7 +1537,7 @@ export class batch_processor {
      *
      * @return Match rows grouped by scheduler query identifier.
      */
-    [[nodiscard]] std::map<int32_t, std::vector<match_result>> process_sequences(
+    [[nodiscard]] match_result_map process_sequences(
         size_t batch_size,
         uint8_t alphabet_code,
         uint8_t storage_unit_byte_width,
@@ -1054,7 +1545,7 @@ export class batch_processor {
         const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>* per_row_query_hdrs,
         const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>& target_hdrs,
         const std::array<int32_t, dispatch_batch_capacity>& query_ids,
-        const minimap2_parameters& base_params,
+        pipe::statement_execution_plan_owner execution_plan,
         batch_invocation_role invocation_role,
         std::uint64_t broadcast_query_ordinal,
         ::bioseq::pipeline_stats::pipeline_execution_stats& stats,

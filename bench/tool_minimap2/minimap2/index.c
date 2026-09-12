@@ -2,6 +2,10 @@
 
 #include <stdlib.h>
 #include <assert.h>
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+#include <errno.h>
+#include <sys/stat.h>
+#endif
 #if defined(WIN32) || defined(_WIN32)
 #include <io.h> // for open(2)
 #else
@@ -611,6 +615,112 @@ mm_idx_reader_t *mm_idx_reader_open(const char *fn, const mm_idxopt_t *opt, cons
 	return r;
 }
 
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+static int64_t bioseq_mm_idx_is_idx_fd(int fd)
+{
+	struct stat status;
+	char magic[4];
+	off_t current_offset;
+	ssize_t ret;
+	if (fstat(fd, &status) != 0) return -1;
+	if (status.st_size < 0) {
+		errno = EOVERFLOW;
+		return -1;
+	}
+	/* A pipe, device, or other nonregular object cannot prove that the bytes
+	 * classified here are the byte-zero stream later consumed by minimap2. */
+	if (!S_ISREG(status.st_mode)) {
+		errno = EINVAL;
+		return -1;
+	}
+	do {
+		current_offset = lseek(fd, 0, SEEK_CUR);
+	} while (current_offset < 0 && errno == EINTR);
+	/* Classification reads byte zero, so consumption must begin there too.
+	 * Reject a shared regular descriptor already advanced by its owner instead
+	 * of silently classifying different bytes from those later consumed. */
+	if (current_offset < 0) return -1;
+	if (current_offset != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (status.st_size < (off_t)sizeof(magic)) return 0;
+	do {
+		ret = pread(fd, magic, sizeof(magic), 0);
+	} while (ret < 0 && errno == EINTR);
+	if (ret < 0) return -1;
+	if (ret != (ssize_t)sizeof(magic)) {
+		errno = EIO;
+		return -1;
+	}
+	return strncmp(magic, MM_IDX_MAGIC, sizeof(magic)) == 0
+	           ? (int64_t)status.st_size
+	           : 0;
+}
+
+mm_idx_reader_t *mm_idx_reader_open_fd(int input_fd, const mm_idxopt_t *opt, int output_fd)
+{
+	int64_t is_idx;
+	mm_idx_reader_t *r;
+	int failure_errno = EIO;
+	if (input_fd < 0 || output_fd < 0 || input_fd == output_fd) {
+		failure_errno = EINVAL;
+		if (input_fd >= 0) close(input_fd);
+		if (output_fd >= 0 && output_fd != input_fd) close(output_fd);
+		errno = failure_errno;
+		return 0;
+	}
+	is_idx = bioseq_mm_idx_is_idx_fd(input_fd);
+	if (is_idx < 0) {
+		failure_errno = errno != 0? errno : EIO;
+		close(input_fd);
+		close(output_fd);
+		errno = failure_errno;
+		return 0;
+	}
+	errno = 0;
+	r = (mm_idx_reader_t*)calloc(1, sizeof(mm_idx_reader_t));
+	if (r == 0) {
+		failure_errno = errno != 0? errno : ENOMEM;
+		close(input_fd);
+		close(output_fd);
+		errno = failure_errno;
+		return 0;
+	}
+	r->is_idx = is_idx != 0;
+	if (opt) r->opt = *opt;
+	else mm_idxopt_init(&r->opt);
+	if (r->is_idx) {
+		errno = 0;
+		r->fp.idx = fdopen(input_fd, "rb");
+		r->idx_size = is_idx;
+		if (r->fp.idx == 0) {
+			failure_errno = errno != 0? errno : EIO;
+			close(input_fd);
+		}
+	} else {
+		r->fp.seq = mm_bseq_open_fd(input_fd);
+		if (r->fp.seq == 0) failure_errno = errno != 0? errno : EIO;
+	}
+	if ((r->is_idx && r->fp.idx == 0) || (!r->is_idx && r->fp.seq == 0)) {
+		close(output_fd);
+		free(r);
+		errno = failure_errno;
+		return 0;
+	}
+	/* fdopen associates the validated descriptor; it does not reopen or truncate it. */
+	errno = 0;
+	r->fp_out = fdopen(output_fd, "wb");
+	if (r->fp_out == 0) {
+		failure_errno = errno != 0? errno : EIO;
+		close(output_fd);
+		mm_idx_reader_close(r);
+		errno = failure_errno;
+		return 0;
+	}
+	return r;
+}
+#endif
 void mm_idx_reader_close(mm_idx_reader_t *r)
 {
 	if (r->is_idx) fclose(r->fp.idx);

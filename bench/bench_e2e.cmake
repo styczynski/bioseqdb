@@ -11,13 +11,11 @@ set(BIOSEQ_E2E_BENCHMARK_FRAMEWORK_DIR
   "${BIOSEQ_REPOSITORY_ROOT}/bench_framework")
 set(BIOSEQ_E2E_BENCHMARK_ROOT "${BIOSEQ_REPOSITORY_ROOT}/bench")
 
-# minimap2 CLI binary the bench shells out to. -D cache override wins; otherwise
-# default to PATH `minimap2`. The bench aborts at run time if the
-# binary is absent or any command exits non-zero.
-if(NOT DEFINED BIOSEQ_MINIMAP2_BIN OR BIOSEQ_MINIMAP2_BIN STREQUAL "")
-  set(BIOSEQ_MINIMAP2_BIN "minimap2")
-endif()
-# BIOSEQ_MINIMAP2_BIN defaults to the PATH-resolved executable above.
+# This helper is intentionally visible only to the E2E benchmark graph. It owns
+# the bundled minimap2 receipt ABI and cannot leak into ordinary benchmark or
+# production targets.
+include(
+  "${BIOSEQ_E2E_BENCHMARK_ROOT}/tool_minimap2/e2e_phase_receipt.cmake")
 
 # Module TUs the bench owns directly. The E2E driver lives in its primary
 # module; e2e/main.cppm is only the executable launcher. The shared
@@ -82,6 +80,10 @@ bioseq_add_postgresql_extension(
   CXX_MOD_FILES
     ${BIOSEQ_E2E_BENCHMARK_MODULES}
   HWY 1.3.0)
+
+add_dependencies(
+  bioseq_benchmark_e2e
+  bioseq_minimap2_e2e_phase_receipt)
 
 # Compile the production serializer itself into a dedicated Catch2 executable.
 # This is deliberately a separate target instead of bioseq_add_postgresql_extension(TESTS):
@@ -149,7 +151,7 @@ target_compile_definitions(bioseq_benchmark_e2e PRIVATE
   "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_REPOSITORY_ROOT}/reporting/bioseq_benchmark_e2e\""
   "BIOSEQ_E2E_DATA_DIR=\"${BIOSEQ_E2E_BENCHMARK_ROOT}\""
   "BIOSEQ_E2E_CONFIG_PATH=\"${BIOSEQ_E2E_BENCHMARK_ROOT}/bench_e2e_configuration.json\""
-  "BIOSEQ_E2E_MINIMAP2_BIN=\"${BIOSEQ_MINIMAP2_BIN}\"")
+  "BIOSEQ_E2E_MINIMAP2_BIN=\"$<TARGET_FILE:bioseq_minimap2_e2e_phase_receipt>\"")
 
 if(TARGET bioseq_benchmark_e2e_contract_tests)
   target_compile_definitions(bioseq_benchmark_e2e_contract_tests PRIVATE
@@ -157,7 +159,7 @@ if(TARGET bioseq_benchmark_e2e_contract_tests)
     "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_REPOSITORY_ROOT}/reporting/bioseq_benchmark_e2e\""
     "BIOSEQ_E2E_DATA_DIR=\"${BIOSEQ_E2E_BENCHMARK_ROOT}\""
     "BIOSEQ_E2E_CONFIG_PATH=\"${BIOSEQ_E2E_BENCHMARK_ROOT}/bench_e2e_configuration.json\""
-    "BIOSEQ_E2E_MINIMAP2_BIN=\"${BIOSEQ_MINIMAP2_BIN}\"")
+    "BIOSEQ_E2E_MINIMAP2_BIN=\"$<TARGET_FILE:bioseq_minimap2_e2e_phase_receipt>\"")
 endif()
 
 if(APPLE)

@@ -6,6 +6,7 @@ export module bioseq.pipeline.query_sketch_plan_contract;
 
 import std;
 import bioseq.highway.dispatch_contract;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.pipeline.runtime_contract;
 
@@ -35,7 +36,11 @@ planned_query_minimizer_highway_kernels(const ::bioseq::simd::minimap2_parameter
         return ::bioseq::simd_dispatch::highway_kernel_mask_for(
             p_kernel::minimizer_two_stack_nthash);
     case algorithm_type::bounded_nthash_simd:
-        if (params.window_size != 10 || params.kmer_size != 15) {
+        if (params.kmer_size <= 0 || params.window_size <= 0 ||
+            static_cast<std::size_t>(params.kmer_size) >
+                ::bioseq::minimizers::k_max_exact_two_stack_kmer ||
+            static_cast<std::size_t>(params.window_size) >
+                ::bioseq::minimizers::k_bounded_nthash_max_window) {
             return std::nullopt;
         }
         return ::bioseq::simd_dispatch::highway_kernel_mask_for(
@@ -69,10 +74,13 @@ static_assert(
             route_type::compatible_persisted_only);
         const auto bounded = planned_query_minimizer_highway_kernels(
             make_params(algorithm_type::bounded_nthash_simd), route_type::recompute_capable);
-        const auto bounded_wrong_window = planned_query_minimizer_highway_kernels(
+        const auto bounded_generic_window = planned_query_minimizer_highway_kernels(
             make_params(algorithm_type::bounded_nthash_simd, 9, 15),
             route_type::recompute_capable);
-        const auto bounded_wrong_kmer = planned_query_minimizer_highway_kernels(
+        const auto bounded_k20 = planned_query_minimizer_highway_kernels(
+            make_params(algorithm_type::bounded_nthash_simd, 15, 20),
+            route_type::recompute_capable);
+        const auto bounded_generic_kmer = planned_query_minimizer_highway_kernels(
             make_params(algorithm_type::bounded_nthash_simd, 10, 14),
             route_type::compatible_persisted_only);
         const auto scalar = planned_query_minimizer_highway_kernels(
@@ -89,7 +97,15 @@ static_assert(
                bounded.has_value() &&
                *bounded == ::bioseq::simd_dispatch::highway_kernel_mask_for(
                                p_kernel::minimizer_bounded_nthash) &&
-               !bounded_wrong_window.has_value() && !bounded_wrong_kmer.has_value() &&
+               bounded_k20.has_value() && *bounded_k20 == *bounded &&
+               bounded_generic_window.has_value() && *bounded_generic_window == *bounded &&
+               bounded_generic_kmer.has_value() && *bounded_generic_kmer == *bounded &&
+               !planned_query_minimizer_highway_kernels(
+                    make_params(algorithm_type::bounded_nthash_simd, 0, 15),
+                    route_type::recompute_capable).has_value() &&
+               !planned_query_minimizer_highway_kernels(
+                    make_params(algorithm_type::bounded_nthash_simd, 10, 0),
+                    route_type::compatible_persisted_only).has_value() &&
                scalar.has_value() && scalar->none() && vulkan.has_value() && vulkan->none() &&
                !planned_query_minimizer_highway_kernels(
                     make_params(algorithm_type::simd_minimap2_reference),

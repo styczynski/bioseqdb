@@ -75,6 +75,11 @@ export {
         const int version = private_integer(0);
         const Oid target_relation_oid = static_cast<Oid>(private_integer(1));
         const Index target_varno = static_cast<Index>(private_integer(2));
+        RangeTblEntry* target_rte =
+            bioseq_is_concrete_rte_varno(target_varno) && root->parse != nullptr &&
+                    target_varno <= static_cast<Index>(list_length(root->parse->rtable))
+                ? rt_fetch(target_varno, root->parse->rtable)
+                : nullptr;
         const AttrNumber target_storage_attno = static_cast<AttrNumber>(private_integer(3));
         Node* target_expression = reinterpret_cast<Node*>(list_nth(best_path->custom_private, 4));
         Node* query_expression = reinterpret_cast<Node*>(list_nth(best_path->custom_private, 5));
@@ -102,6 +107,8 @@ export {
                 .encode();
         if (version != k_bioseq_per_row_join_plan_version || !OidIsValid(target_relation_oid) ||
             !bioseq_is_concrete_rte_varno(target_varno) || target_storage_attno <= 0 ||
+            target_rte == nullptr || target_rte->rtekind != RTE_RELATION ||
+            target_rte->relid != target_relation_oid ||
             target_expression == nullptr || query_expression == nullptr || mmsearch == nullptr ||
             !is_mmsearch_funcid(mmsearch->funcid, oids) ||
             count_mmsearch_occurrences(reinterpret_cast<Node*>(mmsearch), oids) != 1u ||
@@ -123,6 +130,7 @@ export {
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("BioseqPerRowMmsearch private path ABI is invalid")));
         }
+        const bool target_source_identity_carried = !target_rte->inh;
         Plan* child_plan = reinterpret_cast<Plan*>(linitial(custom_plans));
         if (child_plan == nullptr) {
             ereport(ERROR,
@@ -162,6 +170,26 @@ export {
             find_plan_tlist_expression_resno(child_plan->targetlist, target_expression);
         const AttrNumber query_resno =
             find_plan_tlist_expression_resno(child_plan->targetlist, query_expression);
+        Var* target_source_tid = makeVar(target_varno,
+                                         SelfItemPointerAttributeNumber,
+                                         TIDOID,
+                                         -1,
+                                         InvalidOid,
+                                         0);
+        Var* target_source_tableoid = makeVar(target_varno,
+                                              TableOidAttributeNumber,
+                                              OIDOID,
+                                              -1,
+                                              InvalidOid,
+                                              0);
+        const AttrNumber target_source_tid_resno =
+            target_source_identity_carried
+                ? find_plan_tlist_expression_resno(child_plan->targetlist, target_source_tid)
+                : InvalidAttrNumber;
+        const AttrNumber target_source_tableoid_resno =
+            target_source_identity_carried
+                ? find_plan_tlist_expression_resno(child_plan->targetlist, target_source_tableoid)
+                : InvalidAttrNumber;
         if (target_resno <= 0 || query_resno <= 0) {
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
@@ -169,6 +197,40 @@ export {
                      errdetail("target_resno=%d query_resno=%d",
                                static_cast<int>(target_resno),
                                static_cast<int>(query_resno))));
+        }
+        const int child_targetlist_length = list_length(child_plan->targetlist);
+        TargetEntry* target_source_tid_entry =
+            target_source_tid_resno <= 0 || target_source_tid_resno > child_targetlist_length
+                ? nullptr
+                : reinterpret_cast<TargetEntry*>(
+                      list_nth(child_plan->targetlist, target_source_tid_resno - 1));
+        TargetEntry* target_source_tableoid_entry =
+            target_source_tableoid_resno <= 0 ||
+                    target_source_tableoid_resno > child_targetlist_length
+                ? nullptr
+                : reinterpret_cast<TargetEntry*>(
+                      list_nth(child_plan->targetlist, target_source_tableoid_resno - 1));
+        if (target_source_identity_carried &&
+            (target_source_tid_entry == nullptr ||
+             target_source_tid_entry->resno != target_source_tid_resno ||
+             !equal(target_source_tid_entry->expr, target_source_tid) ||
+             exprType(reinterpret_cast<Node*>(target_source_tid_entry->expr)) != TIDOID ||
+             exprTypmod(reinterpret_cast<Node*>(target_source_tid_entry->expr)) != -1 ||
+             OidIsValid(exprCollation(reinterpret_cast<Node*>(target_source_tid_entry->expr))) ||
+             target_source_tableoid_entry == nullptr ||
+             target_source_tableoid_entry->resno != target_source_tableoid_resno ||
+             !equal(target_source_tableoid_entry->expr, target_source_tableoid) ||
+             exprType(reinterpret_cast<Node*>(target_source_tableoid_entry->expr)) != OIDOID ||
+             exprTypmod(reinterpret_cast<Node*>(target_source_tableoid_entry->expr)) != -1 ||
+             OidIsValid(
+                 exprCollation(reinterpret_cast<Node*>(target_source_tableoid_entry->expr))))) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("BioseqPerRowMmsearch target source identity projection is invalid"),
+                     errdetail("ctid_resno=%d tableoid_resno=%d child_columns=%d",
+                               static_cast<int>(target_source_tid_resno),
+                               static_cast<int>(target_source_tableoid_resno),
+                               child_targetlist_length)));
         }
         /* required_target promised each raw carrier below SliceProject.  Validate
          * that contract before taking the child scan-tuple snapshot, then add only
@@ -321,6 +383,13 @@ export {
             combined_tlist = lappend(combined_tlist, copied);
         }
         const int child_column_count = list_length(combined_tlist);
+        if (target_source_identity_carried &&
+            (target_source_tid_resno > child_column_count ||
+             target_source_tableoid_resno > child_column_count)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("BioseqPerRowMmsearch target source identity left its child tuple")));
+        }
         const AttrNumber current_site_first_resno = static_cast<AttrNumber>(child_column_count + 1);
         List* placeholder_sites = NIL;
         List* output_tlist = NIL;
@@ -514,6 +583,12 @@ export {
         cscan->custom_private =
             lappend(cscan->custom_private,
                     make_match_owner_descriptor(target_expression, target_varno, oids));
+        cscan->custom_private =
+            lappend(cscan->custom_private,
+                    makeInteger(static_cast<int>(target_source_tid_resno)));
+        cscan->custom_private =
+            lappend(cscan->custom_private,
+                    makeInteger(static_cast<int>(target_source_tableoid_resno)));
         Assert(list_length(cscan->custom_private) == k_bioseq_per_row_join_private_fields);
         return reinterpret_cast<Plan*>(cscan);
     }

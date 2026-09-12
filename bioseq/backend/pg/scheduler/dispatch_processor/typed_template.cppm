@@ -59,7 +59,6 @@ import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.residency;
 import bioseq.postgres.storage.indexing.sorted_runs;
 import bioseq.sequences;
@@ -360,10 +359,9 @@ template <class p_sequence>
     const std::size_t i,
     const sequence_size_t target_bp_size,
     const std::size_t min_bp,
-    const minimap2_parameters& dispatch_params,
-    const minimap2_parameters& params,
+    pipe::statement_execution_plan_owner execution_plan,
     const bool per_row_query_mode,
-    std::optional<std::vector<minimap_sketch_data>>& cached_query_minimizers,
+    std::shared_ptr<const std::vector<minimap_sketch_data>>& cached_query_minimizers,
     std::optional<pipe::minimizer_range_execution_stats>&
         cached_query_minimizer_stats,
     bool& consumed_shared_cached_query_stats,
@@ -392,7 +390,7 @@ template <class p_sequence>
     };
     return typed_support_detail::process_scanner_pg_row_typed<p_sequence>(
         std::move(query_view), std::move(target_recipe_view), target_hdr, i,
-        target_bp_size, min_bp, dispatch_params, params, per_row_query_mode,
+        target_bp_size, min_bp, execution_plan, per_row_query_mode,
         cached_query_minimizers, cached_query_minimizer_stats,
         consumed_shared_cached_query_stats, alphabet_code,
         storage_unit_byte_width, scanner_pg_ctx, pool, active_read_session,
@@ -405,7 +403,7 @@ template <class p_sequence>
 [[nodiscard]] match_result_collection process_inmemory_standard_row_typed(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
-    const minimap2_parameters& params)
+    pipe::statement_execution_plan_owner execution_plan)
 {
     compact_sequence_range<p_sequence> query_seq{*row_query_hdr};
     compact_sequence_range<p_sequence> target_seq{*target_hdr};
@@ -414,7 +412,7 @@ template <class p_sequence>
     const auto lazy_target_view =
         bioseq::storage::make_lazy_sequence_view(target_seq);
     return minimap_port_raw_pg_checked(
-        lazy_query_view, lazy_target_view, params);
+        lazy_query_view, lazy_target_view, execution_plan);
 }
 
 template <class p_sequence>
@@ -422,7 +420,7 @@ template <class p_sequence>
 [[nodiscard]] match_result_collection process_inmemory_segmented_row_typed(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
-    const minimap2_parameters& params)
+    pipe::statement_execution_plan_owner execution_plan)
 {
     compact_sequence_range<p_sequence> query_seq{*row_query_hdr};
     compact_sequence_range<p_sequence> target_seq{*target_hdr};
@@ -431,7 +429,7 @@ template <class p_sequence>
     const auto lazy_target_view =
         bioseq::storage::make_lazy_sequence_view(target_seq);
     return minimap_port_segmented_pg_checked(
-        lazy_query_view, lazy_target_view, params);
+        lazy_query_view, lazy_target_view, execution_plan);
 }
 
 template <class p_sequence>
@@ -439,16 +437,16 @@ template <class p_sequence>
 [[nodiscard]] match_result_collection process_inmemory_chunked_row_typed(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
-    const minimap2_parameters& params)
+    pipe::statement_execution_plan_owner execution_plan)
 {
     compact_sequence_range<p_sequence> query_seq{*row_query_hdr};
     compact_sequence_range<p_sequence> target_seq{*target_hdr};
     match_result_collection collection;
     bioseq::storage::with_chunked_lazy_sequence(
         query_seq, target_seq,
-        [&collection, &params](auto query_view, auto target_view) {
+        [&collection, execution_plan](auto query_view, auto target_view) {
             collection = minimap_port_raw_pg_checked(
-                query_view, target_view, params);
+                query_view, target_view, execution_plan);
         });
     return collection;
 }
@@ -458,16 +456,16 @@ template <class p_sequence>
 [[nodiscard]] match_result_collection process_inmemory_chunked_segmented_row_typed(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
-    const minimap2_parameters& params)
+    pipe::statement_execution_plan_owner execution_plan)
 {
     compact_sequence_range<p_sequence> query_seq{*row_query_hdr};
     compact_sequence_range<p_sequence> target_seq{*target_hdr};
     match_result_collection collection;
     bioseq::storage::with_chunked_lazy_sequence(
         query_seq, target_seq,
-        [&collection, &params](auto query_view, auto target_view) {
+        [&collection, execution_plan](auto query_view, auto target_view) {
             collection = minimap_port_segmented_pg_checked(
-                query_view, target_view, params);
+                query_view, target_view, execution_plan);
         });
     return collection;
 }
@@ -478,22 +476,22 @@ template <class p_sequence>
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
     const sequence_size_t target_bp_size,
-    const minimap2_parameters& params,
+    pipe::statement_execution_plan_owner execution_plan,
     const bool chunked_scanner_forced)
 {
     const bool segmented = target_bp_size > postgres_segmentation_threshold_bp;
     if (chunked_scanner_forced) {
         return segmented
             ? process_inmemory_chunked_segmented_row(
-                row_query_hdr, target_hdr, params)
+                row_query_hdr, target_hdr, execution_plan)
             : process_inmemory_chunked_row(
-                row_query_hdr, target_hdr, params);
+                row_query_hdr, target_hdr, execution_plan);
     }
     return segmented
         ? process_inmemory_segmented_row(
-            row_query_hdr, target_hdr, params)
+            row_query_hdr, target_hdr, execution_plan)
         : process_inmemory_standard_row(
-            row_query_hdr, target_hdr, params);
+            row_query_hdr, target_hdr, execution_plan);
 }
 
 template <class p_sequence>
@@ -508,12 +506,12 @@ template <class p_sequence>
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>&
         target_hdrs,
     const std::array<int32_t, dispatch_batch_capacity>& query_ids,
-    const minimap2_parameters& base_params,
+    pipe::statement_execution_plan_owner execution_plan,
     const batch_invocation_role invocation_role,
     const std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     batch_processor::scanner_pg_context* scanner_pg_ctx)
-    -> std::map<int32_t, std::vector<match_result>>
+    -> match_result_map
 {
     using gpu_row_alphabet = typename compact_sequence_range<p_sequence>::traits::alphabet_type;
     using gpu_row_view = bioseq::storage::lazy_sequence_view<gpu_row_alphabet>;
@@ -680,7 +678,7 @@ template <class p_sequence>
         per_row_query_hdrs,
         target_hdrs,
         query_ids,
-        base_params,
+        execution_plan,
         invocation_role == batch_invocation_role::primary,
         broadcast_query_ordinal,
         stats,
@@ -704,10 +702,9 @@ process_scanner_pg_row(
     const std::size_t i,
     const sequence_size_t target_bp_size,
     const std::size_t min_bp,
-    const minimap2_parameters& dispatch_params,
-    const minimap2_parameters& params,
+    pipe::statement_execution_plan_owner execution_plan,
     const bool per_row_query_mode,
-    std::optional<std::vector<minimap_sketch_data>>& cached_query_minimizers,
+    std::shared_ptr<const std::vector<minimap_sketch_data>>& cached_query_minimizers,
     std::optional<pipe::minimizer_range_execution_stats>&
         cached_query_minimizer_stats,
     bool& consumed_shared_cached_query_stats,
@@ -728,8 +725,7 @@ process_scanner_pg_row(
         i,
         target_bp_size,
         min_bp,
-        dispatch_params,
-        params,
+        execution_plan,
         per_row_query_mode,
         cached_query_minimizers,
         cached_query_minimizer_stats,
@@ -748,7 +744,7 @@ process_inmemory_row(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
     const sequence_size_t target_bp_size,
-    const minimap2_parameters& params,
+    pipe::statement_execution_plan_owner execution_plan,
     const bool chunked_scanner_forced)
 {
     using sequence_type = compact_sequence_stdc_instance<
@@ -759,7 +755,7 @@ process_inmemory_row(
         row_query_hdr,
         target_hdr,
         target_bp_size,
-        params,
+        execution_plan,
         chunked_scanner_forced);
 }
 
@@ -769,7 +765,7 @@ process_inmemory_row(
 process_inmemory_standard_row(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
-    const minimap2_parameters& params)
+    pipe::statement_execution_plan_owner execution_plan)
 {
     using sequence_type = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
@@ -778,7 +774,7 @@ process_inmemory_standard_row(
     return process_inmemory_standard_row_typed<sequence_type>(
         row_query_hdr,
         target_hdr,
-        params);
+        execution_plan);
 }
 
 [[bioseq::template_flatten_when("shape", "inmemory_segmented")]]
@@ -787,7 +783,7 @@ process_inmemory_standard_row(
 process_inmemory_segmented_row(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
-    const minimap2_parameters& params)
+    pipe::statement_execution_plan_owner execution_plan)
 {
     using sequence_type = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
@@ -796,7 +792,7 @@ process_inmemory_segmented_row(
     return process_inmemory_segmented_row_typed<sequence_type>(
         row_query_hdr,
         target_hdr,
-        params);
+        execution_plan);
 }
 
 [[bioseq::template_flatten_when("shape", "inmemory_chunked")]]
@@ -805,7 +801,7 @@ process_inmemory_segmented_row(
 process_inmemory_chunked_row(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
-    const minimap2_parameters& params)
+    pipe::statement_execution_plan_owner execution_plan)
 {
     using sequence_type = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
@@ -814,7 +810,7 @@ process_inmemory_chunked_row(
     return process_inmemory_chunked_row_typed<sequence_type>(
         row_query_hdr,
         target_hdr,
-        params);
+        execution_plan);
 }
 
 [[bioseq::template_flatten_when("shape", "inmemory_chunked_segmented")]]
@@ -823,7 +819,7 @@ process_inmemory_chunked_row(
 process_inmemory_chunked_segmented_row(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
-    const minimap2_parameters& params)
+    pipe::statement_execution_plan_owner execution_plan)
 {
     using sequence_type = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
@@ -832,12 +828,12 @@ process_inmemory_chunked_segmented_row(
     return process_inmemory_chunked_segmented_row_typed<sequence_type>(
         row_query_hdr,
         target_hdr,
-        params);
+        execution_plan);
 }
 
 [[bioseq::template_flatten_when("shape", "root")]]
 [[bioseq::template_flatten_entry("root")]]
-[[nodiscard]] std::map<int32_t, std::vector<match_result>> process_sequences(
+[[nodiscard]] match_result_map process_sequences(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -845,7 +841,7 @@ process_inmemory_chunked_segmented_row(
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>& target_hdrs,
     const std::array<int32_t, dispatch_batch_capacity>& query_ids,
-    const minimap2_parameters& base_params,
+    pipe::statement_execution_plan_owner execution_plan,
     const batch_invocation_role invocation_role,
     const std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
@@ -855,6 +851,10 @@ process_inmemory_chunked_segmented_row(
         bioseq::pg_types::seq,
         alphabet,
         storage_width>;
+    if (!execution_plan) {
+        throw std::logic_error("generated root requires its immutable statement plan");
+    }
+    const auto& base_params = execution_plan->frozen_parameters;
     const auto& typmod_operations =
         cpu_preparation_detail::typmod_ops<alphabet, storage_width>();
     if (!typmod_operations.matches(
@@ -870,24 +870,24 @@ process_inmemory_chunked_segmented_row(
         preparation.function(
             preparation.state,
             *scanner_pg_ctx,
-            base_params,
+            execution_plan,
             typmod_operations);
-        if (scanner_pg_ctx->cpu_prepared_target == nullptr) {
+        if (!scanner_pg_ctx->cpu_prepared_target) {
             throw std::logic_error{
                 "Highway preparation hook did not publish a CPU target"};
         }
     }
     if (scanner_pg_ctx != nullptr
-        && scanner_pg_ctx->cpu_prepared_target != nullptr
+        && scanner_pg_ctx->cpu_prepared_target
         && (!scanner_pg_ctx->cpu_prepared_target->unions_ready
             || !scanner_pg_ctx->cpu_prepared_target
-                ->highway_binding_matches(base_params))) {
+                ->highway_binding_matches(execution_plan))) {
         throw std::logic_error{
             "prepared CPU target disagrees with the selected Highway binding"};
     }
 
     const auto run_pipeline = [&alphabet_code,
-                               &base_params,
+                               execution_plan,
                                &batch_size,
                                &broadcast_query_ordinal,
                                &invocation_role,
@@ -906,7 +906,7 @@ process_inmemory_chunked_segmented_row(
             per_row_query_hdrs,
             target_hdrs,
             query_ids,
-            base_params,
+            execution_plan,
             invocation_role,
             broadcast_query_ordinal,
             stats,

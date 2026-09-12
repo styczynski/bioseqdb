@@ -146,7 +146,8 @@ export {
                  const ::bioseq::simd::alignment_kernels<p_alphabet>& alignment_kernels,
                  const ::bioseq::simd::minimap2_parameters& params,
                  block_aligner_execution_stats* forbidden_block_stats,
-                 scalar_pipeline_execution_stats* scalar_execution_stats) {
+                 scalar_pipeline_execution_stats* scalar_execution_stats,
+                 bioseq::parallelism::worker_context_factory worker_factory = {}) {
                 if (forbidden_block_stats != nullptr) {
                     abort_forbidden_ksw2_fallback(*forbidden_block_stats);
                 }
@@ -159,7 +160,8 @@ export {
                     alignment_kernels,
                     params,
                     /*block_execution_stats=*/nullptr,
-                    scalar_execution_stats);
+                    scalar_execution_stats,
+                    worker_factory);
             }
 
             [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
@@ -205,7 +207,8 @@ export {
                  const ::bioseq::simd::alignment_kernels<p_alphabet>& alignment_kernels,
                  const ::bioseq::simd::minimap2_parameters& params,
                  block_aligner_execution_stats* block_execution_stats,
-                 scalar_pipeline_execution_stats* /*scalar_execution_stats*/) {
+                 scalar_pipeline_execution_stats* /*scalar_execution_stats*/,
+                 bioseq::parallelism::worker_context_factory worker_factory = {}) {
                 ::bioseq::simd::align_regions<
                     ::bioseq::simd::base_alignment_algorithm::block_aligner>(regions,
                                                                              anchors,
@@ -214,7 +217,9 @@ export {
                                                                              scoring_matrix,
                                                                              alignment_kernels,
                                                                              params,
-                                                                             block_execution_stats);
+                                                                             block_execution_stats,
+                                                                             nullptr,
+                                                                             worker_factory);
             }
 
             [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {

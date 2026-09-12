@@ -159,6 +159,7 @@ class ready_minimizer_generation_publication {
             typename bioseq::storage::postgres_lazy_sequence_binding<
                 p_sequence_range>::alphabet_type>,
         bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>,
+        const bioseq::indexing::minimizer_generation_algorithm_identity&,
         bioseq::minimizers::minimizer_sketch_backend,
         const bioseq::minimizers::minimizer_kernels*);
 
@@ -681,6 +682,7 @@ build_and_publish_hash_major_minimizer_generation_pg(
         typename bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>::alphabet_type>
         sequence,
     bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range> source_binding,
+    const bioseq::indexing::minimizer_generation_algorithm_identity& algorithm_identity,
     bioseq::minimizers::minimizer_sketch_backend backend,
     const bioseq::minimizers::minimizer_kernels* kernels) {
     using source_binding_type = bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>;
@@ -716,8 +718,26 @@ build_and_publish_hash_major_minimizer_generation_pg(
         ready_minimizer_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE,
                                      "hash-major minimizer generation backend is invalid");
     }
-    constexpr std::uint16_t k_window_size = 10u;
-    constexpr std::uint16_t k_kmer_size = 15u;
+    const std::uint16_t window_size = algorithm_identity.runtime_window_size;
+    const std::uint16_t kmer_size = algorithm_identity.runtime_kmer_size;
+    const auto selected_algorithm_identity =
+        bioseq::indexing::select_minimizer_generation_algorithm_identity_runtime(
+            algorithm_identity.requested_algorithm,
+            locator.logical_length,
+            source_binding_type::alphabet_code(),
+            static_cast<std::uint8_t>(source_binding_type::storage_unit_byte_width() * 8u),
+            kmer_size,
+            window_size);
+    if (!selected_algorithm_identity || *selected_algorithm_identity != algorithm_identity ||
+        !bioseq::indexing::is_valid_minimizer_generation_algorithm_identity(
+            algorithm_identity,
+            bioseq::indexing::minimizer_producer_backend_identity_for_backend(backend)) ||
+        !bioseq::indexing::minimizer_generation_kernel_binding_is_valid(
+            backend, algorithm_identity, kernels)) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "hash-major minimizer generation algorithm identity is not READY");
+    }
     if (static_cast<std::uint64_t>(sequence.bp_size()) != locator.logical_length) {
         ready_minimizer_error_as_cpp(
             ERRCODE_DATA_CORRUPTED,
@@ -796,9 +816,8 @@ build_and_publish_hash_major_minimizer_generation_pg(
 
         const auto derived_profile =
             bioseq::indexing::hash_major_minimizer_profile_for_backend(backend,
+                                                                       algorithm_identity,
                                                                        state->source.alphabet_code,
-                                                                       k_kmer_size,
-                                                                       k_window_size,
                                                                        locator.logical_length);
         if (!derived_profile) {
             ready_minimizer_error_as_cpp(
@@ -807,8 +826,8 @@ build_and_publish_hash_major_minimizer_generation_pg(
                 fmt::format("backend={} alphabet_code={} k={} w={} encoding_error={}",
                             bioseq::minimizers::minimizer_sketch_backend_name(backend),
                             state->source.alphabet_code,
-                            k_kmer_size,
-                            k_window_size,
+                            kmer_size,
+                            window_size,
                             static_cast<unsigned>(derived_profile.error())));
         }
         const bioseq::indexing::hash_major_minimizer_storage_profile profile = *derived_profile;
@@ -836,6 +855,7 @@ build_and_publish_hash_major_minimizer_generation_pg(
             sequence,
             backend,
             kernels,
+            algorithm_identity,
             /*core_span_bp=*/0u,
             /*position_segment_span_bp=*/locator.logical_length,
             &state->execution,
@@ -966,8 +986,9 @@ build_and_publish_hash_major_minimizer_generation_pg(
         if (!state->execution.is_spill_valid() || state->execution.selected_backend != backend ||
             state->execution.minimizer_scheme != scheme ||
             state->execution.target_length != locator.logical_length ||
-            state->execution.window_size != k_window_size ||
-            state->execution.kmer_size != k_kmer_size ||
+            state->execution.window_size != window_size ||
+            state->execution.kmer_size != kmer_size ||
+            state->execution.algorithm_identity != algorithm_identity ||
             state->execution.generation_layout !=
                 bioseq::indexing::minimizer_generation_layout::invalid ||
             state->execution.replay_scan_count != 2u ||

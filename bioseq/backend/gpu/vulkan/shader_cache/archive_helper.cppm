@@ -6,10 +6,18 @@ module;
 
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#define VK_NO_PROTOTYPES 1
+#include <vulkan/vulkan.h>
+
+#if defined(__APPLE__) && !defined(BIOSEQ_RECEIPT_OWNED_VULKAN_LOADER_PATH)
+#error "Apple command capture requires one receipt-owned Vulkan loader path"
+#endif
 
 export module bioseq.gpu.vulkan.shader_cache:archive_helper;
 
@@ -90,6 +98,183 @@ struct metal_archive_qualification_receipt {
     operator==(const metal_archive_qualification_receipt&) const noexcept = default;
 };
 
+/// @brief Canonical MoltenVK command-library MTLCompileOptions snapshot.
+struct moltenvk_command_compile_options {
+    std::uint64_t language_version = 0u;
+    std::uint64_t fast_math_enabled = 0u;
+    std::uint64_t math_mode_available = 0u;
+    std::uint64_t math_mode = 0u;
+    std::uint64_t math_fp_functions_available = 0u;
+    std::uint64_t math_fp_functions = 0u;
+    std::uint64_t optimization_level_available = 0u;
+    std::uint64_t optimization_level = 0u;
+    std::uint64_t preserve_invariance = 0u;
+    std::uint64_t library_type_available = 0u;
+    std::uint64_t library_type = 0u;
+    std::uint64_t compile_symbol_visibility_available = 0u;
+    std::uint64_t compile_symbol_visibility = 0u;
+    std::uint64_t allow_undefined_available = 0u;
+    std::uint64_t allow_undefined = 0u;
+    std::uint64_t max_total_threads_available = 0u;
+    std::uint64_t max_total_threads = 0u;
+    std::uint64_t enable_logging_available = 0u;
+    std::uint64_t enable_logging = 0u;
+    std::uint64_t preprocessor_macro_count = 0u;
+    std::uint64_t linked_library_count = 0u;
+    std::uint64_t install_name_bytes = 0u;
+
+    /// @brief Requires a complete option snapshot with a deterministic system-compiler mapping.
+    [[nodiscard]] bool is_accepted() const noexcept {
+        const auto boolean = [](std::uint64_t value) { return value <= 1u; };
+        return language_version != 0u && boolean(fast_math_enabled) &&
+               boolean(math_mode_available) && math_mode <= 2u &&
+               boolean(math_fp_functions_available) && math_fp_functions <= 1u &&
+               math_mode_available == math_fp_functions_available &&
+               boolean(optimization_level_available) && optimization_level <= 1u &&
+               boolean(preserve_invariance) && boolean(library_type_available) &&
+               library_type == 0u && boolean(compile_symbol_visibility_available) &&
+               compile_symbol_visibility == 0u && boolean(allow_undefined_available) &&
+               allow_undefined == 0u && boolean(max_total_threads_available) &&
+               max_total_threads == 0u && boolean(enable_logging_available) &&
+               enable_logging == 0u && preprocessor_macro_count == 0u &&
+               linked_library_count == 0u && install_name_bytes == 0u;
+    }
+
+    [[nodiscard]] bool operator==(const moltenvk_command_compile_options&) const noexcept = default;
+};
+
+/// @brief Exact Vulkan identity captured by the trusted command-source helper.
+struct moltenvk_command_vulkan_identity {
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
+    std::uint32_t api_version = 0u;
+    std::uint32_t driver_version = 0u;
+    std::uint32_t vendor_id = 0u;
+    std::uint32_t device_id = 0u;
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
+
+    [[nodiscard]] bool is_accepted() const noexcept {
+        const auto nonzero = [](const auto& bytes) {
+            return std::any_of(
+                bytes.begin(), bytes.end(), [](std::uint8_t byte) { return byte != 0u; });
+        };
+        return api_version != 0u && driver_version != 0u && nonzero(device_uuid) &&
+               nonzero(pipeline_cache_uuid);
+    }
+
+    [[nodiscard]] bool operator==(const moltenvk_command_vulkan_identity&) const noexcept = default;
+};
+
+/// @brief Computes the exact source/options fingerprint accepted by runtime interposition.
+[[nodiscard]] inline std::array<std::uint8_t, 32>
+moltenvk_command_source_options_fingerprint(
+    std::span<const std::byte> source,
+    const moltenvk_command_compile_options& options) noexcept {
+    sealed_shader_cache_detail::sha256_hasher hasher;
+    hasher.update("bioseq-moltenvk-command-source-options-v1");
+    hasher.update_little_endian(source.size());
+    hasher.update(source);
+    const std::array values{
+        options.language_version,
+        options.fast_math_enabled,
+        options.math_mode_available,
+        options.math_mode,
+        options.math_fp_functions_available,
+        options.math_fp_functions,
+        options.optimization_level_available,
+        options.optimization_level,
+        options.preserve_invariance,
+        options.library_type_available,
+        options.library_type,
+        options.compile_symbol_visibility_available,
+        options.compile_symbol_visibility,
+        options.allow_undefined_available,
+        options.allow_undefined,
+        options.max_total_threads_available,
+        options.max_total_threads,
+        options.enable_logging_available,
+        options.enable_logging,
+        options.preprocessor_macro_count,
+        options.linked_library_count,
+        options.install_name_bytes,
+    };
+    for (const std::uint64_t value : values)
+        hasher.update_little_endian(value);
+    return hasher.finalize();
+}
+
+/// @brief Provenance receipt for one exact precompiled MoltenVK command library.
+struct moltenvk_command_library_qualification_receipt {
+    std::uint32_t wire_revision = 0u;
+    std::uint64_t capture_count = 0u;
+    std::uint64_t source_size = 0u;
+    std::array<std::uint8_t, 32> source_sha256{};
+    moltenvk_command_compile_options compile_options{};
+    std::array<std::uint8_t, 32> source_options_sha256{};
+    std::uint64_t metallib_size = 0u;
+    std::array<std::uint8_t, 32> metallib_sha256{};
+    std::uint32_t helper_wire_revision = 0u;
+    std::string helper_build_identity;
+    std::string helper_source;
+    std::uint64_t helper_executable_size = 0u;
+    std::array<std::uint8_t, 32> helper_executable_sha256{};
+    std::uint64_t helper_metal_registry_id = 0u;
+    moltenvk_command_vulkan_identity vulkan_device{};
+    std::uint64_t loader_image_size = 0u;
+    std::array<std::uint8_t, 32> loader_image_sha256{};
+    std::uint64_t moltenvk_image_size = 0u;
+    std::array<std::uint8_t, 32> moltenvk_image_sha256{};
+
+    [[nodiscard]] bool is_accepted() const noexcept {
+        const auto nonzero = [](const auto& digest) {
+            return std::any_of(
+                digest.begin(), digest.end(), [](std::uint8_t byte) { return byte != 0u; });
+        };
+        return wire_revision == 1u && capture_count == 1u && source_size != 0u &&
+               nonzero(source_sha256) && compile_options.is_accepted() &&
+               nonzero(source_options_sha256) && metallib_size != 0u &&
+               nonzero(metallib_sha256) && helper_wire_revision == 2u &&
+               !helper_build_identity.empty() && helper_build_identity.size() <= 1024u &&
+               helper_build_identity.find('\0') == std::string::npos && !helper_source.empty() &&
+               helper_source.size() <= 64u && helper_source.find('\0') == std::string::npos &&
+               helper_executable_size != 0u && nonzero(helper_executable_sha256) &&
+               helper_metal_registry_id != 0u && vulkan_device.is_accepted() &&
+               loader_image_size != 0u && nonzero(loader_image_sha256) &&
+               moltenvk_image_size != 0u && nonzero(moltenvk_image_sha256);
+    }
+
+    [[nodiscard]] bool is_production_accepted() const noexcept {
+        return is_accepted() && helper_source == "installed-sibling" &&
+               helper_build_identity == "bioseq_gpu_archive_builder";
+    }
+
+    [[nodiscard]] bool operator==(
+        const moltenvk_command_library_qualification_receipt&) const noexcept = default;
+};
+
+/// @brief Self-contained exact command source, metallib, and qualification receipt.
+struct moltenvk_command_library_bundle {
+    moltenvk_command_library_qualification_receipt qualification{};
+    std::vector<std::byte> source;
+    std::vector<std::byte> metallib;
+
+    [[nodiscard]] bool is_accepted() const noexcept {
+        if (!qualification.is_accepted() || source.size() != qualification.source_size ||
+            metallib.size() != qualification.metallib_size || source.empty() || metallib.empty() ||
+            sealed_shader_cache_detail::sha256(source) != qualification.source_sha256 ||
+            sealed_shader_cache_detail::sha256(metallib) != qualification.metallib_sha256 ||
+            moltenvk_command_source_options_fingerprint(source, qualification.compile_options) !=
+                qualification.source_options_sha256) {
+            return false;
+        }
+        const std::string_view text{reinterpret_cast<const char*>(source.data()), source.size()};
+        return text.find('\0') == std::string_view::npos &&
+               text.find("cmdCopyBufferBytes") != std::string_view::npos &&
+               text.find("vtxCmdBlitImage") != std::string_view::npos;
+    }
+
+    [[nodiscard]] bool operator==(const moltenvk_command_library_bundle&) const noexcept = default;
+};
+
 /// @brief Validates every required Metal archive and qualification receipt.
 /// @param[in] cache_dir Shader-cache directory.
 /// @param[in] key Shader variant identity.
@@ -154,6 +339,12 @@ inline constexpr std::string_view k_archive_qualification_magic = "BAMISS01";
 inline constexpr std::uint32_t k_archive_qualification_wire_revision = 2u;
 /// @brief Maximum accepted archive qualification record size.
 inline constexpr std::size_t k_maximum_archive_qualification_bytes = 4096u;
+/// @brief Exact MoltenVK command-library bundle magic.
+inline constexpr std::string_view k_command_library_magic = "BMVKCMD1";
+/// @brief Current exact command-library bundle wire revision.
+inline constexpr std::uint32_t k_command_library_wire_revision = 1u;
+/// @brief Bounded exact MoltenVK source extent.
+inline constexpr std::uint64_t k_maximum_command_source_bytes = 64u << 20u;
 
 /// @brief Serializes one accepted Metal archive qualification receipt.
 /// @param[in] receipt Qualification receipt.
@@ -297,6 +488,234 @@ parse_metal_archive_qualification_receipt(std::span<const std::byte> bytes) {
         return std::unexpected("Metal archive qualification receipt values are invalid");
     }
     return receipt;
+}
+
+/// @brief Appends every command compile-option field in canonical wire order.
+inline void append_moltenvk_command_compile_options(
+    std::vector<std::byte>& bytes,
+    const moltenvk_command_compile_options& options) {
+    const std::array values{
+        options.language_version,
+        options.fast_math_enabled,
+        options.math_mode_available,
+        options.math_mode,
+        options.math_fp_functions_available,
+        options.math_fp_functions,
+        options.optimization_level_available,
+        options.optimization_level,
+        options.preserve_invariance,
+        options.library_type_available,
+        options.library_type,
+        options.compile_symbol_visibility_available,
+        options.compile_symbol_visibility,
+        options.allow_undefined_available,
+        options.allow_undefined,
+        options.max_total_threads_available,
+        options.max_total_threads,
+        options.enable_logging_available,
+        options.enable_logging,
+        options.preprocessor_macro_count,
+        options.linked_library_count,
+        options.install_name_bytes,
+    };
+    for (const std::uint64_t value : values)
+        append_u64(bytes, value);
+}
+
+/// @brief Reads every command compile-option field from canonical wire order.
+[[nodiscard]] inline std::expected<moltenvk_command_compile_options, std::string>
+read_moltenvk_command_compile_options(manifest_reader& reader) {
+    std::array<std::uint64_t, 22u> values{};
+    for (std::uint64_t& value : values) {
+        auto field = reader.u64();
+        if (!field)
+            return std::unexpected("MoltenVK command compile options are truncated");
+        value = *field;
+    }
+    moltenvk_command_compile_options options{
+        .language_version = values[0],
+        .fast_math_enabled = values[1],
+        .math_mode_available = values[2],
+        .math_mode = values[3],
+        .math_fp_functions_available = values[4],
+        .math_fp_functions = values[5],
+        .optimization_level_available = values[6],
+        .optimization_level = values[7],
+        .preserve_invariance = values[8],
+        .library_type_available = values[9],
+        .library_type = values[10],
+        .compile_symbol_visibility_available = values[11],
+        .compile_symbol_visibility = values[12],
+        .allow_undefined_available = values[13],
+        .allow_undefined = values[14],
+        .max_total_threads_available = values[15],
+        .max_total_threads = values[16],
+        .enable_logging_available = values[17],
+        .enable_logging = values[18],
+        .preprocessor_macro_count = values[19],
+        .linked_library_count = values[20],
+        .install_name_bytes = values[21],
+    };
+    if (!options.is_accepted())
+        return std::unexpected("MoltenVK command compile options are unsupported");
+    return options;
+}
+
+/// @brief Serializes one exact command source/metallib bundle and its provenance.
+[[nodiscard]] inline std::expected<std::vector<std::byte>, std::string>
+serialize_moltenvk_command_library_bundle(const moltenvk_command_library_bundle& bundle) {
+    if (!bundle.is_accepted())
+        return std::unexpected("MoltenVK command-library bundle is incomplete");
+    const auto& receipt = bundle.qualification;
+    const std::uint64_t payload_size = bioseq::common::saturating_add(
+        static_cast<std::uint64_t>(bundle.source.size()),
+        static_cast<std::uint64_t>(bundle.metallib.size()));
+    if (payload_size == (std::numeric_limits<std::uint64_t>::max)() ||
+        bundle.source.size() > k_maximum_command_source_bytes ||
+        payload_size > k_maximum_seed_artifact_bytes) {
+        return std::unexpected("MoltenVK command-library bundle exceeds artifact bounds");
+    }
+    std::vector<std::byte> bytes;
+    bytes.reserve(static_cast<std::size_t>(payload_size) + 1024u);
+    append_text(bytes, k_command_library_magic);
+    append_u32(bytes, k_command_library_wire_revision);
+    append_u32(bytes, 0u);
+    append_u64(bytes, receipt.capture_count);
+    append_u64(bytes, receipt.source_size);
+    append_digest(bytes, receipt.source_sha256);
+    append_u64(bytes, receipt.metallib_size);
+    append_digest(bytes, receipt.metallib_sha256);
+    append_digest(bytes, receipt.source_options_sha256);
+    append_moltenvk_command_compile_options(bytes, receipt.compile_options);
+    append_u32(bytes, receipt.helper_wire_revision);
+    append_u32(bytes, static_cast<std::uint32_t>(receipt.helper_build_identity.size()));
+    append_u32(bytes, static_cast<std::uint32_t>(receipt.helper_source.size()));
+    append_u32(bytes, 0u);
+    append_u64(bytes, receipt.helper_executable_size);
+    append_digest(bytes, receipt.helper_executable_sha256);
+    append_u64(bytes, receipt.helper_metal_registry_id);
+    const auto append_fixed = [&bytes](const auto& value) {
+        const auto view = std::as_bytes(std::span{value});
+        bytes.insert(bytes.end(), view.begin(), view.end());
+    };
+    append_fixed(receipt.vulkan_device.device_uuid);
+    append_u32(bytes, receipt.vulkan_device.api_version);
+    append_u32(bytes, receipt.vulkan_device.driver_version);
+    append_u32(bytes, receipt.vulkan_device.vendor_id);
+    append_u32(bytes, receipt.vulkan_device.device_id);
+    append_fixed(receipt.vulkan_device.pipeline_cache_uuid);
+    append_u64(bytes, receipt.loader_image_size);
+    append_digest(bytes, receipt.loader_image_sha256);
+    append_u64(bytes, receipt.moltenvk_image_size);
+    append_digest(bytes, receipt.moltenvk_image_sha256);
+    append_text(bytes, receipt.helper_build_identity);
+    append_text(bytes, receipt.helper_source);
+    bytes.insert(bytes.end(), bundle.source.begin(), bundle.source.end());
+    bytes.insert(bytes.end(), bundle.metallib.begin(), bundle.metallib.end());
+    append_u64(bytes, manifest_checksum(bytes));
+    if (bytes.size() > k_maximum_seed_artifact_bytes)
+        return std::unexpected("MoltenVK command-library wire image is too large");
+    return bytes;
+}
+
+/// @brief Parses and validates one exact command source/metallib bundle.
+[[nodiscard]] inline std::expected<moltenvk_command_library_bundle, std::string>
+parse_moltenvk_command_library_bundle(std::span<const std::byte> bytes) {
+    if (bytes.size() < 512u || bytes.size() > k_maximum_seed_artifact_bytes)
+        return std::unexpected("MoltenVK command-library bundle size is invalid");
+    const std::size_t checksum_offset = bytes.size() - sizeof(std::uint64_t);
+    manifest_reader reader(bytes);
+    auto magic = reader.text(k_command_library_magic.size());
+    auto wire_revision = reader.u32();
+    auto reserved = reader.u32();
+    auto capture_count = reader.u64();
+    auto source_size = reader.u64();
+    auto source_sha = reader.digest();
+    auto metallib_size = reader.u64();
+    auto metallib_sha = reader.digest();
+    auto source_options_sha = reader.digest();
+    if (!magic || !wire_revision || !reserved || !capture_count || !source_size || !source_sha ||
+        !metallib_size || !metallib_sha || !source_options_sha ||
+        *magic != k_command_library_magic || *wire_revision != k_command_library_wire_revision ||
+        *reserved != 0u || *source_size == 0u || *source_size > k_maximum_command_source_bytes ||
+        *metallib_size == 0u || *metallib_size > k_maximum_seed_artifact_bytes ||
+        *source_size > (std::numeric_limits<std::size_t>::max)() ||
+        *metallib_size > (std::numeric_limits<std::size_t>::max)()) {
+        return std::unexpected("MoltenVK command-library bundle header is invalid");
+    }
+    auto options = read_moltenvk_command_compile_options(reader);
+    auto helper_wire_revision = reader.u32();
+    auto helper_build_size = reader.u32();
+    auto helper_source_size = reader.u32();
+    auto reserved2 = reader.u32();
+    auto helper_executable_size = reader.u64();
+    auto helper_executable_sha = reader.digest();
+    auto helper_registry_id = reader.u64();
+    if (!options || !helper_wire_revision || !helper_build_size || !helper_source_size ||
+        !reserved2 || !helper_executable_size || !helper_executable_sha || !helper_registry_id ||
+        *reserved2 != 0u || *helper_build_size == 0u || *helper_build_size > 1024u ||
+        *helper_source_size == 0u || *helper_source_size > 64u) {
+        return std::unexpected("MoltenVK command-library helper provenance is invalid");
+    }
+    auto device_uuid = reader.take(VK_UUID_SIZE);
+    auto api_version = reader.u32();
+    auto driver_version = reader.u32();
+    auto vendor_id = reader.u32();
+    auto device_id = reader.u32();
+    auto pipeline_uuid = reader.take(VK_UUID_SIZE);
+    auto loader_size = reader.u64();
+    auto loader_sha = reader.digest();
+    auto moltenvk_size = reader.u64();
+    auto moltenvk_sha = reader.digest();
+    if (!device_uuid || !api_version || !driver_version || !vendor_id || !device_id ||
+        !pipeline_uuid || !loader_size || !loader_sha || !moltenvk_size || !moltenvk_sha) {
+        return std::unexpected("MoltenVK command-library device/loader provenance is truncated");
+    }
+    auto helper_build = reader.text(*helper_build_size);
+    auto helper_source = reader.text(*helper_source_size);
+    auto source = reader.take(static_cast<std::size_t>(*source_size));
+    auto metallib = reader.take(static_cast<std::size_t>(*metallib_size));
+    auto stored_checksum = reader.u64();
+    if (!helper_build || !helper_source || !source || !metallib || !stored_checksum ||
+        !reader.at_end()) {
+        return std::unexpected("MoltenVK command-library bundle payload is invalid");
+    }
+    if (*stored_checksum != manifest_checksum(bytes.first(checksum_offset)))
+        return std::unexpected("MoltenVK command-library bundle checksum mismatch");
+    moltenvk_command_library_bundle bundle{};
+    bundle.qualification.wire_revision = k_command_library_wire_revision;
+    bundle.qualification.capture_count = *capture_count;
+    bundle.qualification.source_size = *source_size;
+    bundle.qualification.source_sha256 = *source_sha;
+    bundle.qualification.compile_options = *options;
+    bundle.qualification.source_options_sha256 = *source_options_sha;
+    bundle.qualification.metallib_size = *metallib_size;
+    bundle.qualification.metallib_sha256 = *metallib_sha;
+    bundle.qualification.helper_wire_revision = *helper_wire_revision;
+    bundle.qualification.helper_build_identity = std::move(*helper_build);
+    bundle.qualification.helper_source = std::move(*helper_source);
+    bundle.qualification.helper_executable_size = *helper_executable_size;
+    bundle.qualification.helper_executable_sha256 = *helper_executable_sha;
+    bundle.qualification.helper_metal_registry_id = *helper_registry_id;
+    std::memcpy(bundle.qualification.vulkan_device.device_uuid.data(),
+                device_uuid->data(),
+                VK_UUID_SIZE);
+    bundle.qualification.vulkan_device.api_version = *api_version;
+    bundle.qualification.vulkan_device.driver_version = *driver_version;
+    bundle.qualification.vulkan_device.vendor_id = *vendor_id;
+    bundle.qualification.vulkan_device.device_id = *device_id;
+    std::memcpy(bundle.qualification.vulkan_device.pipeline_cache_uuid.data(),
+                pipeline_uuid->data(),
+                VK_UUID_SIZE);
+    bundle.qualification.loader_image_size = *loader_size;
+    bundle.qualification.loader_image_sha256 = *loader_sha;
+    bundle.qualification.moltenvk_image_size = *moltenvk_size;
+    bundle.qualification.moltenvk_image_sha256 = *moltenvk_sha;
+    bundle.source.assign(source->begin(), source->end());
+    bundle.metallib.assign(metallib->begin(), metallib->end());
+    if (!bundle.is_accepted())
+        return std::unexpected("MoltenVK command-library bundle evidence is inconsistent");
+    return bundle;
 }
 
 } // namespace sealed_shader_cache_detail
@@ -516,6 +935,28 @@ validate_metal_archive_receipt_against_process_helper(
     return {};
 }
 
+/// @brief Matches a command-library receipt to the once-qualified process helper.
+[[nodiscard]] inline std::expected<void, std::string>
+validate_moltenvk_command_receipt_against_process_helper(
+    const moltenvk_command_library_qualification_receipt& receipt) {
+    if (!receipt.is_production_accepted())
+        return std::unexpected("command-library receipt is not production-qualified");
+    auto helper = qualified_metal_archive_helper_process_store_instance().load_once();
+    if (!helper)
+        return std::unexpected(helper.error());
+    const qualified_metal_archive_helper& current = **helper;
+    if (current.source != receipt.helper_source ||
+        current.executable_size != receipt.helper_executable_size ||
+        current.executable_sha256 != receipt.helper_executable_sha256 || current.hash_passes != 1u ||
+        qualified_metal_archive_helper_process_store_instance().filesystem_hash_count() != 1u ||
+        qualified_metal_archive_helper_process_store_instance().qualification_attempt_count() !=
+            1u) {
+        return std::unexpected(
+            "command-library receipt does not match current once-qualified helper executable");
+    }
+    return {};
+}
+
 /// @brief Returns the once-qualified archive helper executable path.
 /// @return Qualified helper path or the qualification diagnostic.
 [[nodiscard]] inline std::expected<std::filesystem::path, std::string> metal_archive_helper_path() {
@@ -666,6 +1107,242 @@ parse_archive_helper_qualification(std::string_view transcript) {
     };
 }
 
+/// @brief Exact command-source helper transcript decoded for system compilation.
+struct moltenvk_command_capture_qualification {
+    std::uint32_t wire_revision = 0u;
+    std::string build_identity;
+    std::uint64_t capture_count = 0u;
+    std::uint64_t metal_registry_id = 0u;
+    moltenvk_command_compile_options compile_options{};
+    moltenvk_command_vulkan_identity vulkan_device{};
+    std::filesystem::path loader_image_path;
+    std::filesystem::path moltenvk_image_path;
+
+    [[nodiscard]] bool is_accepted() const noexcept {
+        return wire_revision == 1u && build_identity == "bioseq_gpu_archive_builder" &&
+               capture_count == 1u && metal_registry_id != 0u &&
+               compile_options.is_accepted() && vulkan_device.is_accepted() &&
+               loader_image_path.is_absolute() && moltenvk_image_path.is_absolute();
+    }
+};
+
+/// @brief Decodes bounded lowercase hexadecimal transcript bytes.
+[[nodiscard]] inline std::expected<std::vector<std::byte>, std::string>
+decode_command_capture_hex(std::string_view text, std::size_t maximum_bytes) {
+    if (text.empty() || (text.size() & 1u) != 0u || text.size() / 2u > maximum_bytes)
+        return std::unexpected("MoltenVK command capture hex field has invalid size");
+    const auto nibble = [](char value) -> int {
+        if (value >= '0' && value <= '9')
+            return value - '0';
+        if (value >= 'a' && value <= 'f')
+            return value - 'a' + 10;
+        return -1;
+    };
+    std::vector<std::byte> bytes;
+    bytes.reserve(text.size() / 2u);
+    for (std::size_t index = 0u; index < text.size(); index += 2u) {
+        const int high = nibble(text[index]);
+        const int low = nibble(text[index + 1u]);
+        if (high < 0 || low < 0)
+            return std::unexpected("MoltenVK command capture hex field is not lowercase hex");
+        bytes.push_back(static_cast<std::byte>((high << 4) | low));
+    }
+    return bytes;
+}
+
+/// @brief Parses the unique exact command-source qualification transcript line.
+[[nodiscard]] inline std::expected<moltenvk_command_capture_qualification, std::string>
+parse_moltenvk_command_capture_qualification(std::string_view transcript) {
+    constexpr std::string_view k_prefix = "COMMAND_CAPTURE ";
+    const std::size_t marker = transcript.find(k_prefix);
+    if (marker == std::string_view::npos ||
+        transcript.find(k_prefix, marker + k_prefix.size()) != std::string_view::npos ||
+        (marker != 0u && transcript[marker - 1u] != '\n')) {
+        return std::unexpected("MoltenVK command capture line is missing or repeated");
+    }
+    const std::size_t line_end = transcript.find('\n', marker);
+    if (line_end == std::string_view::npos)
+        return std::unexpected("MoltenVK command capture line is unterminated");
+    const std::string_view payload =
+        transcript.substr(marker + k_prefix.size(), line_end - marker - k_prefix.size());
+    std::map<std::string_view, std::string_view> fields;
+    std::size_t cursor = 0u;
+    while (cursor < payload.size()) {
+        const std::size_t end = payload.find(' ', cursor);
+        const std::string_view token = payload.substr(
+            cursor, end == std::string_view::npos ? payload.size() - cursor : end - cursor);
+        const std::size_t separator = token.find('=');
+        if (separator == std::string_view::npos || separator == 0u ||
+            separator + 1u == token.size() ||
+            !fields.emplace(token.substr(0u, separator), token.substr(separator + 1u)).second) {
+            return std::unexpected("MoltenVK command capture fields are malformed or repeated");
+        }
+        if (end == std::string_view::npos)
+            break;
+        cursor = end + 1u;
+    }
+    constexpr std::array required_fields{
+        "wire_revision",
+        "build",
+        "capture_count",
+        "registry_id",
+        "language_version",
+        "fast_math_enabled",
+        "math_mode_available",
+        "math_mode",
+        "math_fp_functions_available",
+        "math_fp_functions",
+        "optimization_level_available",
+        "optimization_level",
+        "preserve_invariance",
+        "library_type_available",
+        "library_type",
+        "compile_symbol_visibility_available",
+        "compile_symbol_visibility",
+        "allow_undefined_available",
+        "allow_undefined",
+        "max_total_threads_available",
+        "max_total_threads",
+        "enable_logging_available",
+        "enable_logging",
+        "preprocessor_macro_count",
+        "linked_library_count",
+        "install_name_bytes",
+        "api_version",
+        "driver_version",
+        "vendor_id",
+        "device_id",
+        "device_uuid_hex",
+        "pipeline_uuid_hex",
+        "loader_path_hex",
+        "moltenvk_path_hex",
+    };
+    if (fields.size() != required_fields.size() ||
+        std::any_of(required_fields.begin(), required_fields.end(), [&fields](const char* name) {
+            return !fields.contains(name);
+        })) {
+        return std::unexpected("MoltenVK command capture field membership is not exact");
+    }
+    const auto number = [&fields](const char* name) -> std::expected<std::uint64_t, std::string> {
+        const std::string_view text = fields.at(name);
+        std::uint64_t value = 0u;
+        const auto [end, error] =
+            std::from_chars(text.data(), text.data() + text.size(), value);
+        if (error != std::errc{} || end != text.data() + text.size())
+            return std::unexpected(shader_cache_message(
+                "MoltenVK command capture numeric field is invalid: ", name));
+        return value;
+    };
+    std::array<std::uint64_t, 28u> numbers{};
+    constexpr std::array numeric_fields{
+        "wire_revision",
+        "capture_count",
+        "registry_id",
+        "language_version",
+        "fast_math_enabled",
+        "math_mode_available",
+        "math_mode",
+        "math_fp_functions_available",
+        "math_fp_functions",
+        "optimization_level_available",
+        "optimization_level",
+        "preserve_invariance",
+        "library_type_available",
+        "library_type",
+        "compile_symbol_visibility_available",
+        "compile_symbol_visibility",
+        "allow_undefined_available",
+        "allow_undefined",
+        "max_total_threads_available",
+        "max_total_threads",
+        "enable_logging_available",
+        "enable_logging",
+        "preprocessor_macro_count",
+        "linked_library_count",
+        "install_name_bytes",
+        "api_version",
+        "driver_version",
+        "vendor_id",
+    };
+    for (std::size_t index = 0u; index < numeric_fields.size(); ++index) {
+        auto value = number(numeric_fields[index]);
+        if (!value)
+            return std::unexpected(value.error());
+        numbers[index] = *value;
+    }
+    auto raw_device_id = number("device_id");
+    if (!raw_device_id)
+        return std::unexpected(raw_device_id.error());
+    auto device_uuid = decode_command_capture_hex(fields.at("device_uuid_hex"), VK_UUID_SIZE);
+    auto pipeline_uuid = decode_command_capture_hex(fields.at("pipeline_uuid_hex"), VK_UUID_SIZE);
+    auto loader_path = decode_command_capture_hex(fields.at("loader_path_hex"), 4096u);
+    auto moltenvk_path = decode_command_capture_hex(fields.at("moltenvk_path_hex"), 4096u);
+    if (!device_uuid || !pipeline_uuid || !loader_path || !moltenvk_path ||
+        device_uuid->size() != VK_UUID_SIZE || pipeline_uuid->size() != VK_UUID_SIZE) {
+        return std::unexpected("MoltenVK command capture identity hex fields are invalid");
+    }
+    const auto path_from_bytes = [](const std::vector<std::byte>& bytes)
+        -> std::expected<std::filesystem::path, std::string> {
+        const std::string text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        const std::filesystem::path path(text);
+        if (text.empty() || text.find('\0') != std::string::npos || !path.is_absolute())
+            return std::unexpected("MoltenVK command capture image path is invalid");
+        return path;
+    };
+    auto loader = path_from_bytes(*loader_path);
+    auto moltenvk = path_from_bytes(*moltenvk_path);
+    if (!loader || !moltenvk)
+        return std::unexpected(loader ? moltenvk.error() : loader.error());
+    moltenvk_command_capture_qualification result{};
+    if (numbers[0] > (std::numeric_limits<std::uint32_t>::max)() ||
+        numbers[25] > (std::numeric_limits<std::uint32_t>::max)() ||
+        numbers[26] > (std::numeric_limits<std::uint32_t>::max)() ||
+        numbers[27] > (std::numeric_limits<std::uint32_t>::max)() ||
+        *raw_device_id > (std::numeric_limits<std::uint32_t>::max)()) {
+        return std::unexpected("MoltenVK command capture 32-bit field overflow");
+    }
+    result.wire_revision = static_cast<std::uint32_t>(numbers[0]);
+    result.build_identity = std::string(fields.at("build"));
+    result.capture_count = numbers[1];
+    result.metal_registry_id = numbers[2];
+    result.compile_options = moltenvk_command_compile_options{
+        .language_version = numbers[3],
+        .fast_math_enabled = numbers[4],
+        .math_mode_available = numbers[5],
+        .math_mode = numbers[6],
+        .math_fp_functions_available = numbers[7],
+        .math_fp_functions = numbers[8],
+        .optimization_level_available = numbers[9],
+        .optimization_level = numbers[10],
+        .preserve_invariance = numbers[11],
+        .library_type_available = numbers[12],
+        .library_type = numbers[13],
+        .compile_symbol_visibility_available = numbers[14],
+        .compile_symbol_visibility = numbers[15],
+        .allow_undefined_available = numbers[16],
+        .allow_undefined = numbers[17],
+        .max_total_threads_available = numbers[18],
+        .max_total_threads = numbers[19],
+        .enable_logging_available = numbers[20],
+        .enable_logging = numbers[21],
+        .preprocessor_macro_count = numbers[22],
+        .linked_library_count = numbers[23],
+        .install_name_bytes = numbers[24],
+    };
+    result.vulkan_device.api_version = static_cast<std::uint32_t>(numbers[25]);
+    result.vulkan_device.driver_version = static_cast<std::uint32_t>(numbers[26]);
+    result.vulkan_device.vendor_id = static_cast<std::uint32_t>(numbers[27]);
+    result.vulkan_device.device_id = static_cast<std::uint32_t>(*raw_device_id);
+    std::memcpy(result.vulkan_device.device_uuid.data(), device_uuid->data(), VK_UUID_SIZE);
+    std::memcpy(
+        result.vulkan_device.pipeline_cache_uuid.data(), pipeline_uuid->data(), VK_UUID_SIZE);
+    result.loader_image_path = std::move(*loader);
+    result.moltenvk_image_path = std::move(*moltenvk);
+    if (!result.is_accepted())
+        return std::unexpected("MoltenVK command capture qualification is incomplete");
+    return result;
+}
+
 /// @brief Fixed descriptor through which the helper reads the staged metallib.
 inline constexpr int k_archive_helper_metallib_child_fd = 197;
 
@@ -784,8 +1461,10 @@ class staged_archive_helper_invocation {
         if (::lstat(helper_path_.c_str(), &absent) == 0 || errno != ENOENT) {
             return std::unexpected("private archive helper name remained after unlink");
         }
-        if (::close(std::exchange(helper_fd_, -1)) != 0 ||
-            ::close(std::exchange(metallib_fd_, -1)) != 0) {
+        const int helper_fd = std::exchange(helper_fd_, -1);
+        const int metallib_fd = std::exchange(metallib_fd_, -1);
+        if ((helper_fd >= 0 && ::close(helper_fd) != 0) ||
+            (metallib_fd >= 0 && ::close(metallib_fd) != 0)) {
             return std::unexpected("private archive helper descriptors did not close");
         }
         helper_path_.clear();
@@ -824,13 +1503,14 @@ class staged_archive_helper_invocation {
     stage_archive_helper_invocation(const qualified_metal_archive_helper&, int);
 };
 
-/// @brief Stages the qualified helper and a read-only metallib descriptor privately.
+/// @brief Stages the qualified helper and an optional read-only metallib descriptor privately.
 /// @param[in] helper Once-qualified helper executable image.
 /// @param[in] metallib_fd Open metallib descriptor to duplicate.
 /// @return Move-owned invocation or an identity, permission, or I/O diagnostic.
 [[nodiscard]] inline std::expected<staged_archive_helper_invocation, std::string>
-stage_archive_helper_invocation(const qualified_metal_archive_helper& helper, int metallib_fd) {
-    if (!helper.is_accepted() || metallib_fd < 0) {
+stage_archive_helper_invocation(const qualified_metal_archive_helper& helper,
+                                int metallib_fd = -1) {
+    if (!helper.is_accepted()) {
         return std::unexpected("private archive helper staging inputs are incomplete");
     }
     std::error_code temp_error;
@@ -896,6 +1576,13 @@ stage_archive_helper_invocation(const qualified_metal_archive_helper& helper, in
         return std::unexpected("private archive helper read-only reopen changed identity");
     }
 
+    if (metallib_fd < 0) {
+        if (!staged.helper_identity_matches()) {
+            return std::unexpected(
+                "private archive staging identity changed before execution");
+        }
+        return staged;
+    }
     if (::lseek(metallib_fd, 0, SEEK_SET) < 0) {
         return std::unexpected("qualified metallib descriptor rewind failed");
     }
@@ -912,6 +1599,272 @@ stage_archive_helper_invocation(const qualified_metal_archive_helper& helper, in
         return std::unexpected("private archive staging identity changed before execution");
     }
     return staged;
+}
+
+/// @brief Captures, compiles, and seals MoltenVK's exact internal command library.
+/// @param[in] cache_dir Unsealed shader-cache directory owned by the supervisor.
+/// @return Success or the first helper, compiler, provenance, or publication diagnostic.
+[[nodiscard]] inline std::expected<void, std::string>
+ensure_moltenvk_command_library_for_sealed_seed(const std::filesystem::path& cache_dir) {
+#if !defined(__APPLE__)
+    (void)cache_dir;
+    return {};
+#else
+    std::error_code filesystem_error;
+    std::filesystem::create_directories(cache_dir, filesystem_error);
+    if (filesystem_error) {
+        return std::unexpected(shader_cache_message(
+            "create command-library cache directory failed: ", filesystem_error.message()));
+    }
+    const std::filesystem::path final_bundle = cache_moltenvk_command_library_path(cache_dir);
+    const std::filesystem::path temporary_source =
+        cache_dir / "moltenvk_command.source.tmp.metal";
+    const std::filesystem::path temporary_air = cache_dir / "moltenvk_command.air.tmp";
+    const std::filesystem::path temporary_metallib =
+        cache_dir / "moltenvk_command.metallib.tmp";
+    const std::filesystem::path temporary_bundle = final_bundle.string() + ".tmp";
+    const std::array temporary_paths{
+        temporary_source, temporary_air, temporary_metallib, temporary_bundle};
+    const auto cleanup_temporaries = [&temporary_paths]() noexcept {
+        std::error_code ignored;
+        for (const std::filesystem::path& path : temporary_paths) {
+            ignored.clear();
+            std::filesystem::remove(path, ignored);
+        }
+    };
+    cleanup_temporaries();
+    std::filesystem::remove(final_bundle, filesystem_error);
+    if (filesystem_error) {
+        return std::unexpected(shader_cache_message(
+            "remove unsealed MoltenVK command bundle failed: ", filesystem_error.message()));
+    }
+
+    filesystem_error.clear();
+    const std::filesystem::path required_loader_path = std::filesystem::canonical(
+        BIOSEQ_RECEIPT_OWNED_VULKAN_LOADER_PATH, filesystem_error);
+    if (filesystem_error || !required_loader_path.is_absolute()) {
+        return std::unexpected("receipt-owned Vulkan loader image path is not canonical");
+    }
+    std::unique_ptr<void, int (*)(void*)> runtime_loader_handle(
+        ::dlopen(required_loader_path.c_str(), RTLD_NOW | RTLD_LOCAL), &::dlclose);
+    if (!runtime_loader_handle) {
+        return std::unexpected("receipt-owned Vulkan loader image could not be opened");
+    }
+    void* runtime_loader_symbol =
+        ::dlsym(runtime_loader_handle.get(), "vkCreateInstance");
+    Dl_info runtime_loader_info{};
+    if (runtime_loader_symbol == nullptr ||
+        ::dladdr(runtime_loader_symbol, &runtime_loader_info) == 0 ||
+        runtime_loader_info.dli_fname == nullptr) {
+        return std::unexpected(
+            "receipt-owned Vulkan loader does not own vkCreateInstance");
+    }
+    filesystem_error.clear();
+    const std::filesystem::path runtime_loader_path =
+        std::filesystem::canonical(runtime_loader_info.dli_fname, filesystem_error);
+    if (filesystem_error || runtime_loader_path != required_loader_path) {
+        return std::unexpected(
+            "resolved vkCreateInstance image differs from the receipt-owned Vulkan loader");
+    }
+    runtime_loader_handle.reset();
+
+    const auto helper = qualified_metal_archive_helper_process_store_instance().load_once();
+    if (!helper)
+        return std::unexpected(helper.error());
+    const qualified_metal_archive_helper& qualified_helper = **helper;
+    auto staged_helper = stage_archive_helper_invocation(qualified_helper);
+    if (!staged_helper)
+        return std::unexpected(staged_helper.error());
+    const std::vector<std::string> capture_args{
+        staged_helper->helper_path().string(),
+        "--capture-moltenvk-command",
+        temporary_source.string(),
+        runtime_loader_path.string(),
+    };
+    if (!staged_helper->helper_identity_matches()) {
+        cleanup_temporaries();
+        return std::unexpected("private command capture helper identity changed before execution");
+    }
+    auto capture = run_capture(capture_args,
+                               run_capture_limits{
+                                   .maximum_output_bytes = 64u << 10u,
+                                   .timeout = std::chrono::minutes(2),
+                               });
+    auto staging_finished = staged_helper->finish();
+    if (!staging_finished) {
+        cleanup_temporaries();
+        return std::unexpected(staging_finished.error());
+    }
+    if (!capture) {
+        cleanup_temporaries();
+        return std::unexpected(
+            shader_cache_message("MoltenVK command capture helper failed: ", capture.error()));
+    }
+    if (!archive_helper_transcript_is_exact_success(*capture)) {
+        cleanup_temporaries();
+        return std::unexpected(shader_cache_message(
+            "MoltenVK command capture lacked exact success sentinel: ", *capture));
+    }
+    auto captured = parse_moltenvk_command_capture_qualification(*capture);
+    if (!captured) {
+        cleanup_temporaries();
+        return std::unexpected(captured.error());
+    }
+    if (captured->loader_image_path != runtime_loader_path) {
+        cleanup_temporaries();
+        return std::unexpected(
+            "MoltenVK command capture did not use the selected Vulkan loader image");
+    }
+
+    const auto stable_image_digest = [](const std::filesystem::path& reported,
+                                        std::string_view label)
+        -> std::expected<sealed_shader_cache_detail::stable_regular_file_digest, std::string> {
+        std::error_code error;
+        const std::filesystem::path canonical = std::filesystem::canonical(reported, error);
+        if (error || !canonical.is_absolute()) {
+            return std::unexpected(shader_cache_message(
+                label, " canonical image path failed: ", error.message()));
+        }
+        return sealed_shader_cache_detail::stream_stable_regular_file_digest(
+            canonical, label, sealed_shader_cache_detail::k_maximum_seed_artifact_bytes);
+    };
+    auto loader_digest = stable_image_digest(captured->loader_image_path, "Vulkan loader image");
+    auto moltenvk_digest = stable_image_digest(captured->moltenvk_image_path, "MoltenVK image");
+    if (!loader_digest || !moltenvk_digest) {
+        cleanup_temporaries();
+        return std::unexpected(loader_digest ? moltenvk_digest.error() : loader_digest.error());
+    }
+
+    const std::uint64_t language_major = captured->compile_options.language_version >> 16u;
+    const std::uint64_t language_minor = captured->compile_options.language_version & 0xffffu;
+    if (language_major == 0u || language_major > 99u || language_minor > 99u) {
+        cleanup_temporaries();
+        return std::unexpected("captured MoltenVK Metal language version is not representable");
+    }
+    std::vector<std::string> metal_args{
+        xcrun_executable(),
+        "-sdk",
+        "macosx",
+        "metal",
+        shader_cache_message("-std=metal", language_major, '.', language_minor),
+    };
+    if (captured->compile_options.math_mode_available != 0u) {
+        constexpr std::array math_modes{
+            "-fmetal-math-mode=safe",
+            "-fmetal-math-mode=relaxed",
+            "-fmetal-math-mode=fast",
+        };
+        constexpr std::array math_functions{
+            "-fmetal-math-fp32-functions=fast",
+            "-fmetal-math-fp32-functions=precise",
+        };
+        metal_args.emplace_back(math_modes[captured->compile_options.math_mode]);
+        metal_args.emplace_back(
+            math_functions[captured->compile_options.math_fp_functions]);
+    } else {
+        metal_args.emplace_back(captured->compile_options.fast_math_enabled != 0u
+                                    ? "-ffast-math"
+                                    : "-fno-fast-math");
+    }
+    if (captured->compile_options.optimization_level == 1u)
+        metal_args.emplace_back("-Os");
+    if (captured->compile_options.preserve_invariance != 0u)
+        metal_args.emplace_back("-fpreserve-invariance");
+    metal_args.emplace_back("-c");
+    metal_args.push_back(temporary_source.string());
+    metal_args.emplace_back("-o");
+    metal_args.push_back(temporary_air.string());
+    if (auto compiled = spawn_wait(metal_args); !compiled) {
+        cleanup_temporaries();
+        return std::unexpected(
+            shader_cache_message("exact MoltenVK command source compile failed: ", compiled.error()));
+    }
+    const std::vector<std::string> metallib_args{
+        xcrun_executable(),
+        "-sdk",
+        "macosx",
+        "metallib",
+        temporary_air.string(),
+        "-o",
+        temporary_metallib.string(),
+    };
+    if (auto linked = spawn_wait(metallib_args); !linked) {
+        cleanup_temporaries();
+        return std::unexpected(shader_cache_message(
+            "exact MoltenVK command metallib link failed: ", linked.error()));
+    }
+
+    const auto read_stable = [](const std::filesystem::path& path,
+                                std::string_view label,
+                                std::uint64_t maximum)
+        -> std::expected<std::vector<std::byte>, std::string> {
+        struct stat status{};
+        if (::lstat(path.c_str(), &status) != 0 || !S_ISREG(status.st_mode) ||
+            S_ISLNK(status.st_mode) || status.st_size <= 0 ||
+            static_cast<std::uint64_t>(status.st_size) > maximum) {
+            return std::unexpected(shader_cache_message(label, " identity is invalid"));
+        }
+        auto image = sealed_shader_cache_detail::read_stable_regular_file(
+            path, label, static_cast<std::uint64_t>(status.st_size), maximum);
+        if (!image)
+            return std::unexpected(image.error());
+        return std::move(image->bytes);
+    };
+    auto source = read_stable(temporary_source,
+                              "captured MoltenVK command source",
+                              sealed_shader_cache_detail::k_maximum_command_source_bytes);
+    auto metallib = read_stable(temporary_metallib,
+                                "compiled MoltenVK command metallib",
+                                sealed_shader_cache_detail::k_maximum_seed_artifact_bytes);
+    if (!source || !metallib) {
+        cleanup_temporaries();
+        return std::unexpected(source ? metallib.error() : source.error());
+    }
+    moltenvk_command_library_bundle bundle{};
+    bundle.source = std::move(*source);
+    bundle.metallib = std::move(*metallib);
+    bundle.qualification = moltenvk_command_library_qualification_receipt{
+        .wire_revision = sealed_shader_cache_detail::k_command_library_wire_revision,
+        .capture_count = captured->capture_count,
+        .source_size = static_cast<std::uint64_t>(bundle.source.size()),
+        .source_sha256 = sealed_shader_cache_detail::sha256(bundle.source),
+        .compile_options = captured->compile_options,
+        .source_options_sha256 = moltenvk_command_source_options_fingerprint(
+            bundle.source, captured->compile_options),
+        .metallib_size = static_cast<std::uint64_t>(bundle.metallib.size()),
+        .metallib_sha256 = sealed_shader_cache_detail::sha256(bundle.metallib),
+        .helper_wire_revision = 2u,
+        .helper_build_identity = captured->build_identity,
+        .helper_source = qualified_helper.source,
+        .helper_executable_size = qualified_helper.executable_size,
+        .helper_executable_sha256 = qualified_helper.executable_sha256,
+        .helper_metal_registry_id = captured->metal_registry_id,
+        .vulkan_device = captured->vulkan_device,
+        .loader_image_size = loader_digest->size,
+        .loader_image_sha256 = loader_digest->sha256,
+        .moltenvk_image_size = moltenvk_digest->size,
+        .moltenvk_image_sha256 = moltenvk_digest->sha256,
+    };
+    if (!bundle.is_accepted()) {
+        cleanup_temporaries();
+        return std::unexpected("exact MoltenVK command-library bundle failed self-validation");
+    }
+    auto wire = sealed_shader_cache_detail::serialize_moltenvk_command_library_bundle(bundle);
+    if (!wire) {
+        cleanup_temporaries();
+        return std::unexpected(wire.error());
+    }
+    if (auto written = durable_write_file(temporary_bundle, *wire); !written) {
+        cleanup_temporaries();
+        return written;
+    }
+    if (auto published = durable_rename_existing(temporary_bundle, final_bundle); !published) {
+        cleanup_temporaries();
+        return published;
+    }
+    cleanup_temporaries();
+    return {};
+#endif
 }
 
 /// @brief Builds and qualifies every Metal archive required by one shader variant.

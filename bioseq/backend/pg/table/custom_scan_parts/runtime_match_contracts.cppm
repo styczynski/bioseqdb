@@ -70,6 +70,8 @@ export {
         k_per_row_honest_total_cost = 16,
         k_per_row_incumbent_cost_floor = 17,
         k_per_row_match_owner_descriptor = 18,
+        k_per_row_target_source_tid_resno = 19,
+        k_per_row_target_source_tableoid_resno = 20,
     };
 
     /** @brief Defines stable fields in a batched-join planner-to-executor payload. */

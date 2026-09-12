@@ -120,6 +120,7 @@ inspect_ready_minimizer_generation(Oid rel, std::string index_name, std::int64_t
         }
         return static_cast<std::int32_t>(value);
     };
+    const auto& algorithm_identity = inspection.manifest.algorithm_identity;
     std::vector<bioseq::postgres::sql_rows::inspect_ready_minimizer_generation_row> rows;
     rows.push_back({
         sql_bigint(inspection.identity.generation_id, "generation_id"),
@@ -141,6 +142,20 @@ inspect_ready_minimizer_generation(Oid rel, std::string index_name, std::int64_t
         sql_smallint(inspection.source.storage_unit_byte_width, "storage_unit_byte_width"),
         sql_smallint(inspection.manifest.kmer_size, "kmer_size"),
         sql_smallint(inspection.manifest.window_size, "window_size"),
+        static_cast<std::int32_t>(algorithm_identity.requested_algorithm),
+        static_cast<std::int32_t>(algorithm_identity.effective_algorithm),
+        static_cast<std::int32_t>(algorithm_identity.physical_record_id),
+        static_cast<std::int32_t>(algorithm_identity.highway_owner_id),
+        sql_smallint(algorithm_identity.record_position_log2, "record_position_log2"),
+        sql_smallint(algorithm_identity.physical_kmer_size, "physical_kmer_size"),
+        sql_smallint(static_cast<std::uint8_t>(algorithm_identity.hash_width),
+                     "hash_width_bytes"),
+        sql_smallint(algorithm_identity.packed_storage_bits, "packed_storage_bits"),
+        sql_integer(algorithm_identity.payload_layout_abi_revision,
+                    "payload_layout_abi_revision"),
+        static_cast<std::int32_t>(inspection.manifest.producer_backend_id),
+        sql_integer(inspection.manifest.producer_identity_revision,
+                    "producer_identity_revision"),
         sql_integer(inspection.manifest.gpu_abi_revision, "gpu_abi_revision"),
         sql_smallint(inspection.manifest.segment_geometry_revision, "segment_geometry_revision"),
         sql_bigint(inspection.manifest.position_segment_span_bp, "position_segment_span_bp"),

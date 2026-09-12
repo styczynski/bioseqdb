@@ -28,6 +28,7 @@ import bioseq.postgres.storage.indexing.active_read_policy;
 import bioseq.sequences;
 import bioseq.sequences.cigar;
 import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.pipe;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
@@ -99,11 +100,11 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
             "GPU CIGAR extension received inverted sequence window");
     }
     const sequence_size_t len_bp = end_bp - start_bp;
-    if (len_bp > bioseq::gpu::vulkan::k_gpu_alignment_simple_cigar_max_len) {
+    if (len_bp > bioseq::gpu::vulkan::k_gpu_alignment_cigar_operation_max_len) {
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
-            std::format("GPU CIGAR extension window length {} exceeds simple CIGAR limit {}",
+            std::format("GPU CIGAR extension window length {} exceeds packed-operation limit {}",
                         len_bp,
-                        bioseq::gpu::vulkan::k_gpu_alignment_simple_cigar_max_len));
+                        bioseq::gpu::vulkan::k_gpu_alignment_cigar_operation_max_len));
     }
     if (end_bp > static_cast<sequence_size_t>(seq.bp_size())) {
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
@@ -183,9 +184,9 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
             "GPU CIGAR lazy sequence window is invalid");
     }
     const sequence_size_t length_bp = end_bp - start_bp;
-    if (length_bp > bioseq::gpu::vulkan::k_gpu_alignment_simple_cigar_max_len) {
+    if (length_bp > bioseq::gpu::vulkan::k_gpu_alignment_cigar_operation_max_len) {
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
-            "GPU CIGAR lazy sequence window exceeds the supported limit");
+            "GPU CIGAR lazy sequence window exceeds the packed-operation limit");
     }
     const std::size_t length = static_cast<std::size_t>(length_bp);
     const std::size_t output_offset = destination.size();
@@ -293,7 +294,8 @@ gpu_alignment_common_match_run(std::span<const std::uint32_t> query_symbols,
 }
 
 /** Decodes packed GPU CIGAR words into @p destination and merges adjacent identical opcodes. */
-inline void append_packed_cigar_slice(std::vector<cigar_operation>& destination,
+template <class p_cigar_storage>
+inline void append_packed_cigar_slice(p_cigar_storage& destination,
                                       std::span<const std::uint32_t> packed) {
     for (std::uint32_t entry : packed) {
         const std::uint32_t opcode = entry & 0xfU;
@@ -313,7 +315,7 @@ inline void append_packed_cigar_slice(std::vector<cigar_operation>& destination,
 template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_raw_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked("minimap_port", [&args...]() -> match_result_collection {
-        return minimap_port_raw_owned(std::forward<p_arguments>(args)...);
+        return ::bioseq::simd::minimap_port_raw_owned(std::forward<p_arguments>(args)...);
     });
 }
 
@@ -322,7 +324,8 @@ template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_hash_major_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked(
         "minimap2_port_with_index", [&args...]() -> match_result_collection {
-            return minimap_port_hash_major_owned(std::forward<p_arguments>(args)...);
+            return ::bioseq::simd::minimap_port_hash_major_owned(
+                std::forward<p_arguments>(args)...);
         });
 }
 
@@ -331,7 +334,8 @@ template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_grouped_soa_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked(
         "minimap2_port_with_index", [&args...]() -> match_result_collection {
-            return minimap_port_grouped_soa_owned(std::forward<p_arguments>(args)...);
+            return ::bioseq::simd::minimap_port_grouped_soa_owned(
+                std::forward<p_arguments>(args)...);
         });
 }
 

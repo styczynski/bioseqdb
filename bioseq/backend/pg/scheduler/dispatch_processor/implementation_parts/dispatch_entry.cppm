@@ -20,6 +20,7 @@ import :typed_flat_selector;
 import bioseq.common.logging;
 import bioseq.highway.dispatch_contract;
 import bioseq.parallelism.pool;
+import bioseq.pipeline.pipe;
 
 namespace bioseq::simd {
 
@@ -43,7 +44,7 @@ namespace bioseq::simd {
  * @param[in,out] scanner_pg_ctx Optional scan-owned preparation and observer context.
  * @return Matches grouped by the corresponding query identifier.
  */
-[[nodiscard]] std::map<int32_t, std::vector<match_result>> batch_processor::process_sequences(
+[[nodiscard]] match_result_map batch_processor::process_sequences(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -51,12 +52,39 @@ namespace bioseq::simd {
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>& target_hdrs,
     const std::array<int32_t, dispatch_batch_capacity>& query_ids,
-    const minimap2_parameters& base_params,
+    pipe::statement_execution_plan_owner execution_plan,
     batch_invocation_role invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     batch_processor::scanner_pg_context* scanner_pg_ctx) {
-    std::map<int32_t, std::vector<match_result>> results;
+    if (!execution_plan) {
+        throw std::logic_error("batch dispatch requires its immutable statement plan");
+    }
+    const auto& base_params = execution_plan->frozen_parameters;
+    if (base_params.alphabet_code != alphabet_code) {
+        throw std::logic_error("batch alphabet disagrees with its frozen statement plan");
+    }
+    if (scanner_pg_ctx != nullptr) {
+        if (scanner_pg_ctx->execution_plan &&
+            (scanner_pg_ctx->execution_plan.get() != execution_plan.get() ||
+             scanner_pg_ctx->execution_plan.owner_before(execution_plan) ||
+             execution_plan.owner_before(scanner_pg_ctx->execution_plan))) {
+            throw std::logic_error("batch dispatch changed its statement-plan control block");
+        }
+        scanner_pg_ctx->execution_plan = execution_plan;
+        if (scanner_pg_ctx->downstream_active_wall != base_params.downstream_active_wall) {
+            throw std::logic_error("batch timing owner disagrees with its statement plan");
+        }
+    }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (base_params.downstream_active_wall != nullptr &&
+        !base_params.downstream_active_wall->attest_benchmark_e2e_statement_plan_checkpoint(
+            execution_plan,
+            benchmark_e2e_statement_plan_checkpoint::scan_dispatch)) {
+        throw std::logic_error{"batch dispatch changed its guarded statement-plan owner"};
+    }
+#endif
+    match_result_map results;
     const bool per_row_query_mode = per_row_query_hdrs != nullptr;
 
     if (!per_row_query_mode && query_hdr == nullptr) {
@@ -76,23 +104,15 @@ namespace bioseq::simd {
         return results;
     }
 
-    const auto highway_plan = ::bioseq::simd_dispatch::registered_highway_dispatch_plan();
-    const auto& highway_binding = ::bioseq::simd_dispatch::select_highway_target_once(highway_plan);
-    if (highway_binding.target == 0 || highway_binding.kernels == nullptr ||
-        !highway_binding.kernels->is_complete() ||
-        highway_binding.target != highway_plan.planned_target) {
+    if (base_params.highway_executed_target == 0 || base_params.highway_kernels == nullptr ||
+        !base_params.highway_kernels->is_complete() ||
+        base_params.highway_executed_target != base_params.highway_dispatch.planned_target) {
         throw std::logic_error{"Highway runtime binding disagrees with the generated target plan"};
     }
     if (scanner_pg_ctx != nullptr && !scanner_pg_ctx->highway_preparation.empty() &&
         !scanner_pg_ctx->highway_preparation.valid()) {
         throw std::logic_error{"Highway preparation hook is only partially configured"};
     }
-    minimap2_parameters dispatched_params = base_params;
-    dispatched_params.highway_kernels = highway_binding.kernels;
-    dispatched_params.highway_dispatch = highway_plan;
-    dispatched_params.highway_executed_target = highway_binding.target;
-    dispatched_params.alphabet_code = alphabet_code;
-
     auto run_pipeline_body = [batch_size,
                               alphabet_code,
                               storage_unit_byte_width,
@@ -100,7 +120,7 @@ namespace bioseq::simd {
                               per_row_query_hdrs,
                               &target_hdrs,
                               &query_ids,
-                              &dispatched_params,
+                              execution_plan,
                               invocation_role,
                               broadcast_query_ordinal,
                               &stats,
@@ -113,7 +133,7 @@ namespace bioseq::simd {
                                                    per_row_query_hdrs,
                                                    target_hdrs,
                                                    query_ids,
-                                                   dispatched_params,
+                                                   execution_plan,
                                                    invocation_role,
                                                    broadcast_query_ordinal,
                                                    stats,

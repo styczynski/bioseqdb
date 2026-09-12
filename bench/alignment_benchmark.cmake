@@ -90,6 +90,7 @@ bioseq_add_postgresql_extension(
     "${BIOSEQ_ALIGNMENT_BENCHMARK_FRAMEWORK_DIR}"
   CXX_MOD_FILES
     ${BIOSEQ_ALIGNMENT_BENCHMARK_MODULES}
+    "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}/tool_minimap2/alignment.cppm"
   HWY 1.3.0)
 
 target_compile_definitions(bioseq_benchmark

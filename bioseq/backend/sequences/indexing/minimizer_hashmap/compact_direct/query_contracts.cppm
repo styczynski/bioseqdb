@@ -41,7 +41,7 @@ export namespace bioseq::indexing {
 
 /// One query sequence and its precomputed minimizer view for fragment seeding.
 struct fragment_seed_query {
-    std::span<const minimap_sketch_data> minimizers{};
+    ::bioseq::minimizers::minimizer_physical_batch_view minimizers{};
     sequence_size_t query_length = 0u;
     std::int32_t kmer_size = 0;
 };
@@ -329,25 +329,44 @@ enum class query_occurrence_route : std::uint8_t {
     wide,
 };
 
-/// Compact `(hash, query, ordinal)` record with a packed query-and-ordinal word.
+/// Native H32 compact occurrence with a packed query-and-ordinal word.
 struct packed_query_occurrence {
+    using hash_type = std::uint32_t;
     std::uint32_t hash = 0u;
     std::uint32_t query_and_ordinal = 0u;
 };
 static_assert(sizeof(packed_query_occurrence) == 8u);
+
+/// Native H64 compact occurrence with a packed query-and-ordinal word.
+struct packed_query_occurrence_h64 {
+    using hash_type = std::uint64_t;
+    std::uint64_t hash = 0u;
+    std::uint32_t query_and_ordinal = 0u;
+};
+static_assert(sizeof(packed_query_occurrence_h64) == 16u);
 
 /// The compact-direct split keeps smaller occurrence waves on the measured
 /// serial/in-place radix baseline so pool dispatch cannot dominate them.
 inline constexpr std::size_t k_compact_direct_parallel_packed_occurrence_radix_min_count = 1u
                                                                                            << 16u;
 
-/// Expanded query occurrence used when the packed ordinal field is too narrow.
+/// Native H32 expanded occurrence used when the packed ordinal field is too narrow.
 struct wide_query_occurrence {
+    using hash_type = std::uint32_t;
     std::uint32_t hash = 0u;
     std::uint32_t batch_query_ordinal = 0u;
     std::uint32_t query_ordinal = 0u;
 };
 static_assert(sizeof(wide_query_occurrence) == 12u);
+
+/// Native H64 expanded occurrence used when the packed ordinal field is too narrow.
+struct wide_query_occurrence_h64 {
+    using hash_type = std::uint64_t;
+    std::uint64_t hash = 0u;
+    std::uint32_t batch_query_ordinal = 0u;
+    std::uint32_t query_ordinal = 0u;
+};
+static_assert(sizeof(wide_query_occurrence_h64) == 16u);
 
 /// Bit allocation and capacity of a planned packed occurrence word.
 struct query_occurrence_packing_layout {
@@ -512,7 +531,7 @@ static_assert(sizeof(block_query_anchor_layout) == 48u);
 struct prepared_query_anchors {
     std::unique_ptr<bioseq::chaining::anchor[]> anchors{};
     std::uint64_t anchor_count = 0u;
-    const minimap_sketch_data* minimizer_data = nullptr;
+    ::bioseq::minimizers::minimizer_physical_batch_view minimizers{};
     std::uint64_t minimizer_count = 0u;
     sequence_size_t query_length = 0u;
     std::int32_t kmer_size = 0;

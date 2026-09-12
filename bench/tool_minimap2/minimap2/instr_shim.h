@@ -29,6 +29,8 @@
 
 #include <stdint.h>
 
+#if !defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -50,7 +52,45 @@ void bench_instr_region_end(const void* desc, uint64_t t_begin_ns);
 }  // extern "C"
 #endif
 
+#endif  // !BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT
+
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+
+#include <stdio.h>
+
+#define BIOSEQ_MINIMAP2_E2E_PHASE_CIGAR ((uint32_t)1u)
+#define BIOSEQ_MINIMAP2_E2E_PHASE_MAPQ ((uint32_t)2u)
+
 #ifdef __cplusplus
+extern "C" {
+#endif
+
+/// Start one operation-origin phase interval. A zero return value is an
+/// invalid/disabled sentinel and must be passed unchanged to _end().
+uint64_t bioseq_minimap2_e2e_phase_begin(uint32_t phase);
+
+/// Close and publish the half-open [begin_ns, end_ns) interval.
+void bioseq_minimap2_e2e_phase_end(uint32_t phase, uint64_t begin_ns);
+
+/// Reset, publish, and inspect helper-private split-file I/O failure state.
+void bioseq_minimap2_e2e_io_error_reset(void);
+void bioseq_minimap2_e2e_io_error_mark(void);
+int bioseq_minimap2_e2e_io_error_seen(void);
+
+/// Flush/check/close a split output, or check/close a split input. Each function
+/// consumes the FILE exactly once and publishes any failure to the I/O latch.
+int bioseq_minimap2_e2e_close_split_output(FILE *fp);
+int bioseq_minimap2_e2e_close_split_input(FILE *fp);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif
+
+#endif  // BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT
+
+#ifdef __cplusplus
+
+#if !defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
 
 namespace bench_instr_shim_detail {
 
@@ -74,6 +114,35 @@ struct ScopedRegion {
 
 }  // namespace bench_instr_shim_detail
 
+#endif  // !BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT
+
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+
+namespace bioseq_minimap2_e2e_phase_detail {
+
+/// Stack-only scope used exclusively by the isolated E2E minimap2 binary.
+struct ScopedPhase {
+    uint32_t phase;
+    uint64_t begin_ns;
+
+    explicit ScopedPhase(uint32_t phase_value) noexcept
+        : phase(phase_value),
+          begin_ns(::bioseq_minimap2_e2e_phase_begin(phase_value)) {}
+
+    ~ScopedPhase() noexcept {
+        ::bioseq_minimap2_e2e_phase_end(phase, begin_ns);
+    }
+
+    ScopedPhase(const ScopedPhase&) = delete;
+    ScopedPhase& operator=(const ScopedPhase&) = delete;
+    ScopedPhase(ScopedPhase&&) = delete;
+    ScopedPhase& operator=(ScopedPhase&&) = delete;
+};
+
+}  // namespace bioseq_minimap2_e2e_phase_detail
+
+#endif  // BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT
+
 #define BENCH_INSTR_SHIM_PASTE_INNER(a, b) a##b
 #define BENCH_INSTR_SHIM_PASTE(a, b) BENCH_INSTR_SHIM_PASTE_INNER(a, b)
 
@@ -83,6 +152,9 @@ struct ScopedRegion {
 /// region — same lifetime semantics as the easy_profiler scope it
 /// replaces. Safe to invoke multiple times in the same function (each
 /// call site gets its own static-local via __LINE__-suffixed names).
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+#define BENCH_INSTR_BLOCK(name) ((void)0)
+#else
 #define BENCH_INSTR_BLOCK(name)                                            \
     static const void* BENCH_INSTR_SHIM_PASTE(_bench_instr_desc_, __LINE__) = \
         ::bench_instr_region_register((name), __FILE__,                    \
@@ -91,14 +163,71 @@ struct ScopedRegion {
         BENCH_INSTR_SHIM_PASTE(_bench_instr_scope_, __LINE__){             \
             BENCH_INSTR_SHIM_PASTE(_bench_instr_desc_, __LINE__)           \
         }
+#endif
+
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+#define BIOSEQ_MINIMAP2_E2E_PHASE_SCOPE(phase_value)                       \
+    ::bioseq_minimap2_e2e_phase_detail::ScopedPhase                        \
+        BENCH_INSTR_SHIM_PASTE(_bioseq_minimap2_e2e_phase_, __LINE__){     \
+            (phase_value)                                                   \
+        }
+#endif
 
 #else  // !__cplusplus
+
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+
+// Portable downstream C builds use a cleanup guard below. This repository's
+// isolated target follows the committed bundled sources and compiles them as
+// C++26, matching the existing alignment benchmark target.
+#define BENCH_INSTR_BLOCK(name) ((void)0)
+
+#define BENCH_INSTR_SHIM_PASTE_INNER(a, b) a##b
+#define BENCH_INSTR_SHIM_PASTE(a, b) BENCH_INSTR_SHIM_PASTE_INNER(a, b)
+
+#if defined(__clang__)
+#if !__has_attribute(cleanup)
+#error "BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT requires Clang cleanup support"
+#endif
+#elif !defined(__GNUC__)
+#error "BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT requires Clang or GCC cleanup support"
+#endif
+
+typedef struct bioseq_minimap2_e2e_phase_guard_s {
+    uint32_t phase;
+    uint64_t begin_ns;
+} bioseq_minimap2_e2e_phase_guard_t;
+
+static inline bioseq_minimap2_e2e_phase_guard_t
+bioseq_minimap2_e2e_phase_guard_make(uint32_t phase)
+{
+    bioseq_minimap2_e2e_phase_guard_t guard;
+    guard.phase = phase;
+    guard.begin_ns = bioseq_minimap2_e2e_phase_begin(phase);
+    return guard;
+}
+
+static inline void bioseq_minimap2_e2e_phase_guard_cleanup(
+    bioseq_minimap2_e2e_phase_guard_t *guard)
+{
+    bioseq_minimap2_e2e_phase_end(guard->phase, guard->begin_ns);
+}
+
+#define BIOSEQ_MINIMAP2_E2E_PHASE_SCOPE(phase_value)                       \
+    bioseq_minimap2_e2e_phase_guard_t                                      \
+        BENCH_INSTR_SHIM_PASTE(_bioseq_minimap2_e2e_phase_, __LINE__)     \
+        __attribute__((cleanup(bioseq_minimap2_e2e_phase_guard_cleanup))) = \
+            bioseq_minimap2_e2e_phase_guard_make((phase_value))
+
+#else
 
 // We only ever build the minimap2 sources as C++ TUs (CMake routes the
 // .c files through CXX), so the C-only path is unreachable. Define
 // BENCH_INSTR_BLOCK as a no-op anyway in case a downstream consumer
 // tries to compile this header in pure C.
 #define BENCH_INSTR_BLOCK(name) ((void)0)
+
+#endif  // BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT
 
 #endif  // __cplusplus
 

@@ -18,6 +18,7 @@ export module bioseq.postgres.scheduler.dispatch_buffer.runtime_contract;
 export import bioseq.postgres.scheduler.dispatch_buffer.output_contract;
 
 import bioseq.pipeline.minimap_parameters_contract;
+import bioseq.pipeline.pipe;
 import bioseq.pipeline.stats;
 import bioseq.indexing.type;
 import bioseq.postgres.types.compact_sequence;
@@ -32,6 +33,14 @@ export namespace bioseq::scheduler {
  */
 [[nodiscard]] bioseq::simd_dispatch::highway_dispatch_plan
 highway_dispatch_plan_for_plan() noexcept;
+
+/**
+ * @brief Binds the registered PostgreSQL target before freezing one request.
+ * @param[in] parameters Validated executor parameters with all overrides applied.
+ * @return The sole immutable statement owner, including its exact target binding.
+ */
+[[nodiscard]] bioseq::simd::pipe::statement_execution_plan_owner
+make_postgres_statement_execution_plan(bioseq::simd::minimap2_parameters parameters);
 
 /** @brief Associates a query ordinal with a borrowed PostgreSQL tuple slot. */
 struct dispatch_join_query_ref {
@@ -57,7 +66,7 @@ class dispatch_buffer_runtime {
     dispatch_buffer_runtime& operator=(dispatch_buffer_runtime&& other) noexcept;
 
     /** @brief Configures alignment, index-read, relation, snapshot, and memory owners. */
-    void configure_params(const bioseq::simd::minimap2_parameters& params,
+    void configure_params(bioseq::simd::pipe::statement_execution_plan_owner execution_plan,
                           bioseq::indexing::index_read_requirement index_read_requirement,
                           bool read_sequence_index,
                           Oid scan_user_relid,
@@ -83,6 +92,10 @@ class dispatch_buffer_runtime {
     /** @brief Binds the statement accumulator for persisted GPU operation statistics. */
     void bind_persisted_gpu_operation_stats_sink(
         bioseq::pipeline_stats::persisted_gpu_operation_accumulator& sink);
+
+    /** @brief Binds the statement-owned downstream active-wall union tracker. */
+    void bind_downstream_active_wall_tracker(
+        bioseq::simd::downstream_active_wall_tracker& tracker);
 
     /** @brief Binds the statement guard that owns asynchronous slice work. */
     void bind_slice_async_owner(slice_async_owner_guard* owner);
@@ -162,6 +175,23 @@ class dispatch_buffer_runtime {
 
     /** @brief Copies one physical scan slot into the pending dispatch batch. */
     void submit_scan(TupleTableSlot* scan_slot);
+    /**
+     * @brief Copies one recipe row with its actual physical source identity.
+     *
+     * The TID is admitted for physical dispatch only when @p source_relation_oid
+     * authenticates the relation configured for this buffer.  An inherited row
+     * remains usable by host execution without acquiring a forged parent identity.
+     */
+    void submit_scan_with_source_tid(TupleTableSlot* scan_slot,
+                                     Oid source_relation_oid,
+                                     ItemPointerData source_tid);
+    /**
+     * @brief Copies a recipe row for which no direct-relation identity is admissible.
+     *
+     * This preserves host execution while explicitly suppressing any incidental
+     * slot TID that cannot be authenticated without an actual relation OID.
+     */
+    void submit_scan_recipe_without_source_tid(TupleTableSlot* scan_slot);
     /** @brief Copies one scan slot together with evaluated target and query values. */
     void submit_scan_evaluated(TupleTableSlot* scan_slot,
                                Datum target,
@@ -192,6 +222,11 @@ class dispatch_buffer_runtime {
      * @return A value snapshot independent of later buffer mutations.
      */
     [[nodiscard]] bioseq::pipeline_stats::pipeline_execution_stats execution_stats() const;
+    /**
+     * @brief Reports the effective sequence-index read state after configuration.
+     * @return True when this buffer may read sequence indexes.
+     */
+    [[nodiscard]] bool reads_sequence_index() const;
     /**
      * @brief Counts additional broadcast queries.
      * @return The number of queries beyond the primary query.

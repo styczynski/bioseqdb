@@ -40,7 +40,7 @@ template <class p_sequence,
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>& target_hdrs,
     const std::array<int32_t, dispatch_batch_capacity>& query_ids,
-    const minimap2_parameters& dispatch_params,
+    pipe::statement_execution_plan_owner execution_plan,
     const std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     batch_processor::scanner_pg_context* scanner_pg_ctx,
@@ -60,10 +60,10 @@ template <class p_sequence,
     const p_with_pg_target& with_pg_target,
     const p_attach_query_stats& attach_query_stats,
     const p_process_generic_rows& process_generic_rows_callback)
-    -> std::map<int32_t, std::vector<match_result>> {
-    std::map<int32_t, std::vector<match_result>> results;
+    -> match_result_map {
+    match_result_map results;
     bool shared_target_outcome_recorded = false;
-    std::optional<std::vector<minimap_sketch_data>> cached_query_minimizers;
+    std::shared_ptr<const std::vector<minimap_sketch_data>> cached_query_minimizers;
     std::optional<pipe::minimizer_range_execution_stats> cached_query_minimizer_stats;
     auto& pool = bioseq::parallelism::global_pool::instance();
     /*
@@ -89,7 +89,7 @@ template <class p_sequence,
                          &per_row_query_hdrs,
                          &target_hdrs,
                          &query_ids,
-                         &dispatch_params,
+                         execution_plan,
                          &broadcast_query_ordinal,
                          &stats,
                          &scanner_pg_ctx,
@@ -113,7 +113,7 @@ template <class p_sequence,
                                       per_row_query_hdrs,
                                       target_hdrs,
                                       query_ids,
-                                      dispatch_params,
+                                      execution_plan,
                                       broadcast_query_ordinal,
                                       stats,
                                       scanner_pg_ctx,
@@ -136,7 +136,7 @@ template <class p_sequence,
                                                per_row_query_hdrs,
                                                target_hdrs,
                                                query_ids,
-                                               dispatch_params,
+                                               execution_plan,
                                                broadcast_query_ordinal,
                                                stats,
                                                scanner_pg_ctx,

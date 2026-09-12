@@ -427,6 +427,9 @@ static void mm_set_inv_mapq(void *km, int n_regs, mm_reg1_t *regs)
 void mm_set_mapq2(void *km, int n_regs, mm_reg1_t *regs, int min_chain_sc, int match_sc, int rep_len, int is_sr, int is_splice)
 {
 	BENCH_INSTR_BLOCK("tool_minimap2.mm_set_mapq");
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	BIOSEQ_MINIMAP2_E2E_PHASE_SCOPE(BIOSEQ_MINIMAP2_E2E_PHASE_MAPQ);
+#endif
 	static const float q_coef = 40.0f;
 	int64_t sum_sc = 0;
 	float uniq_ratio;

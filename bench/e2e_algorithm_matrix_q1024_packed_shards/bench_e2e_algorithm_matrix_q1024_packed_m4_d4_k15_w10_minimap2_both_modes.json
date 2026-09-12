@@ -1,0 +1,251 @@
+{
+  "params": {
+    "minimap2_no_index": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "match-count baseline"
+      },
+      "threads": {
+        "type": "integer",
+        "default": 0,
+        "description": "scheduler-parity thread count"
+      }
+    },
+    "minimap2_just_index": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "match-count baseline"
+      },
+      "threads": {
+        "type": "integer",
+        "default": 0,
+        "description": "scheduler-parity thread count"
+      }
+    }
+  },
+  "test_cases": {
+    "M4_D4_K15_W10": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna4",
+        "size_label": "matrix_4gbp_dna4_k15_w10",
+        "reference_length": 4000000000,
+        "fragment_count": 1024,
+        "fragment_length_mean": 20000,
+        "fragment_length_stddev": 500,
+        "substitution_rate": 0.001,
+        "insertion_rate": 0.0005,
+        "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0,
+        "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5,
+        "kmer_size": 15,
+        "window_size": 10,
+        "cigar_projection": true,
+        "mapq_projection": true,
+        "minimap2_split_bp": 2000000352,
+        "seed": 33340010
+      },
+      "description": "4 Gbp dna4, k15/w10, 1024 approximately 20 kbp queries"
+    }
+  },
+  "bench_e2e": {
+    "tags": [
+      "e2e",
+      "algorithm-matrix",
+      "campaign-packed-q1024"
+    ],
+    "description": "Sealed q1024 paired minimap2 no-index/just-index baselines for M4_D4_K15_W10.",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 333
+    },
+    "matrix": {
+      "for": {
+        "M4_D4_K15_W10": 5
+      },
+      "over": {
+        "minimap2_no_index": {
+          "threads": [
+            0
+          ]
+        },
+        "minimap2_just_index": {
+          "threads": [
+            0
+          ]
+        }
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": []
+        },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "tuple_accepted": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "match_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "expected_match_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "correct_match_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "exact_primary_count_accepted": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "correct_cigar_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "cigar_replay_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "mapq_result_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "pipeline_validation_accepted": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "stage_engine_matrix_valid": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "backend_declines": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "backend_fallbacks": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "prefilter_activity_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "measured_region_ns_manual": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "cigar_or_mapq_interval_union_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "outer_e2e_minus_cigar_or_mapq_union_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "minimap2_receipt_available": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "minimap2_cigar_interval_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "minimap2_mapq_interval_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_no_index",
+            "minimap2_just_index"
+          ],
+          "rules": []
+        }
+      }
+    }
+  },
+  "regression_rules": []
+}

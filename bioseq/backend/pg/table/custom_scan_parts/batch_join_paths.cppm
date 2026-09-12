@@ -620,6 +620,7 @@ export {
         Const* hidden_rowno = makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(0), false, true);
         add_column_to_pathtarget(
             locator_path->path.pathtarget, reinterpret_cast<Expr*>(hidden_rowno), 0);
+        const int locator_rowno_resno = list_length(locator_path->path.pathtarget->exprs);
         set_pathtarget_cost_width(root, locator_path->path.pathtarget);
         /* A lower BatchJoin may publish an otherwise-unused target sequence as the
          * PARAM_EXEC query of an upper BatchJoin.  The locator child must therefore
@@ -679,7 +680,7 @@ export {
         List* locator_tag = list_make4(makeInteger(k_bioseq_locator_passthrough_magic),
                                        makeInteger(k_bioseq_batch_join_plan_version),
                                        makeInteger(token),
-                                       makeInteger(0));
+                                       makeInteger(locator_rowno_resno));
         locator_path->custom_private = lappend(locator_path->custom_private, locator_tag);
         locator_path->path.parallel_safe = false;
         locator_path->path.parallel_aware = false;

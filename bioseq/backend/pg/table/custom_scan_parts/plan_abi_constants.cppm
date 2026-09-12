@@ -27,11 +27,11 @@ export inline constexpr int k_bioseq_batch_join_path_private_fields = 13;
 /** @brief Number of private fields in a batched-join plan. */
 export inline constexpr int k_bioseq_batch_join_private_fields = 18;
 /** @brief Version of the one-child per-row join planner payload. */
-export inline constexpr int k_bioseq_per_row_join_plan_version = 4;
+export inline constexpr int k_bioseq_per_row_join_plan_version = 5;
 /** @brief Number of private fields in a per-row join path. */
 export inline constexpr int k_bioseq_per_row_join_path_private_fields = 13;
 /** @brief Number of private fields in a per-row join plan. */
-export inline constexpr int k_bioseq_per_row_join_private_fields = 19;
+export inline constexpr int k_bioseq_per_row_join_private_fields = 21;
 /** @brief Magic tag for a match-owner descriptor. */
 export inline constexpr int k_bioseq_match_owner_descriptor_magic = 0x424d4231;
 /** @brief Version of a match-owner descriptor. */

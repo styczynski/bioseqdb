@@ -40,6 +40,24 @@ TEST_CASE("archive helper success sentinel is unique and final",
     CHECK_FALSE(gv::archive_helper_transcript_is_exact_success("RESULT: ok"));
 }
 
+TEST_CASE("sealed MoltenVK command library round-trips and rejects tamper",
+          "[component:bioseq][layer:unit][feature:gpu_runtime]") {
+    const auto bundle = fake_moltenvk_command_library_bundle();
+    auto wire = gv::sealed_shader_cache_detail::
+        serialize_moltenvk_command_library_bundle(bundle);
+    REQUIRE(wire);
+    const auto parsed = gv::sealed_shader_cache_detail::
+        parse_moltenvk_command_library_bundle(*wire);
+    REQUIRE(parsed);
+    CHECK(*parsed == bundle);
+
+    wire->back() ^= std::byte{0x01u};
+    const auto tampered = gv::sealed_shader_cache_detail::
+        parse_moltenvk_command_library_bundle(*wire);
+    REQUIRE_FALSE(tampered);
+    CHECK(tampered.error().find("checksum mismatch") != std::string::npos);
+}
+
 TEST_CASE("archive miss NSError fingerprint and receipt are canonical",
           "[component:bioseq][layer:unit][feature:gpu_runtime]") {
     constexpr std::string_view transcript =
@@ -211,15 +229,34 @@ TEST_CASE("archive helper qualification is terminal and hashes once",
     const auto first = store.load_once();
     REQUIRE(first);
     CHECK((**first).source == "test-env-override");
+    const gv::shader_cache_build_inputs cache_inputs{};
+    const auto first_cache_digest =
+        gv::shader_cache_digest_hex_with_qualified_helper(cache_inputs, **first);
+    REQUIRE(first_cache_digest);
     CHECK(store.qualification_attempt_count() == 1u);
     CHECK(store.filesystem_hash_count() == 1u);
     REQUIRE(gv::durable_write_file(helper, bytes_of("mutated")));
+    REQUIRE(::chmod(helper.c_str(), 0700) == 0);
     const auto second = store.load_once();
     REQUIRE(second);
     CHECK(first->get() == second->get());
     CHECK((**second).executable_bytes == helper_bytes);
+    const auto second_cache_digest =
+        gv::shader_cache_digest_hex_with_qualified_helper(cache_inputs, **second);
+    REQUIRE(second_cache_digest);
+    CHECK(*second_cache_digest == *first_cache_digest);
     CHECK(store.qualification_attempt_count() == 1u);
     CHECK(store.filesystem_hash_count() == 1u);
+
+    gv::qualified_metal_archive_helper_process_store changed_store;
+    const auto changed = changed_store.load_once();
+    REQUIRE(changed);
+    const auto changed_cache_digest =
+        gv::shader_cache_digest_hex_with_qualified_helper(cache_inputs, **changed);
+    REQUIRE(changed_cache_digest);
+    CHECK(*changed_cache_digest != *first_cache_digest);
+    CHECK(changed_store.qualification_attempt_count() == 1u);
+    CHECK(changed_store.filesystem_hash_count() == 1u);
 
     const std::filesystem::path metallib = temp.path / "input.metallib";
     REQUIRE(gv::durable_write_file(metallib, bytes_of("metallib")));

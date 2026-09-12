@@ -18,6 +18,7 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -106,11 +107,13 @@ direct_minimizer_spill_storage_binding fragment_index_storage::begin_segment_spi
             runs.abandon_after_pg_error_noexcept();
         }
         segment_sorted_runs_.clear();
+        active_segment_write_buffer_owner_.reset();
         segment_spill_binding_ = {};
         segment_spill_pg_poisoned_ = true;
         throw;
     }
     segment_sorted_runs_.clear();
+    active_segment_write_buffer_owner_.reset();
     std::uint64_t token = next_segment_spill_generation_token_.load(std::memory_order_relaxed);
     for (;;) {
         if (token == 0) {
@@ -175,11 +178,37 @@ std::size_t fragment_index_storage::spill_sorted_segment_run(
             segment_sorted_runs_.begin() + static_cast<std::ptrdiff_t>(offset),
             segment_run_entry_type{position_segment, sorted_pair_run_store{}});
     }
-    // sorted_pair_run_store may compact/demote physical runs internally. Those
-    // transformations preserve the exact canonical pair stream. The mutation
-    // revision increment names the logical run injection, not its
-    // eventual memory-vs-BufFile representation.
     try {
+        if (!active_segment_write_buffer_owner_.has_value()) {
+            // Validate a pre-existing destination honestly while allowing the
+            // first segment to acquire its writer lazily in spill_sorted_run.
+            if (!iterator->second.try_transfer_completed_write_buffer_to(iterator->second)) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer-sequence spill writer ownership is invalid");
+            }
+            active_segment_write_buffer_owner_ = position_segment;
+        } else if (*active_segment_write_buffer_owner_ != position_segment) {
+            // The destination entry and its admitted metadata already exist.
+            // Re-find the source by ordinal because insertion may relocate it.
+            const auto source = std::lower_bound(
+                segment_sorted_runs_.begin(),
+                segment_sorted_runs_.end(),
+                *active_segment_write_buffer_owner_,
+                [](const segment_run_entry_type& entry, std::uint32_t segment) {
+                    return entry.first < segment;
+                });
+            if (source == segment_sorted_runs_.end() ||
+                source->first != *active_segment_write_buffer_owner_ ||
+                !source->second.try_transfer_completed_write_buffer_to(iterator->second)) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer-sequence spill writer transfer is invalid");
+            }
+            active_segment_write_buffer_owner_ = position_segment;
+        }
+        // sorted_pair_run_store may compact/demote physical runs internally. Those
+        // transformations preserve the exact canonical pair stream. The mutation
+        // revision increment names the logical run injection, not its
+        // eventual memory-vs-BufFile representation.
         const std::size_t run = iterator->second.spill_sorted_run(sorted);
         inject_minimizer_generation_failure_as_cpp(
             minimizer_generation_failure_injection::minimizer_sequence_spill,
@@ -191,6 +220,7 @@ std::size_t fragment_index_storage::spill_sorted_segment_run(
             (void)segment;
             runs.abandon_after_pg_error_noexcept();
         }
+        active_segment_write_buffer_owner_.reset();
         segment_spill_binding_ = {};
         segment_spill_pg_poisoned_ = true;
         throw;
@@ -223,6 +253,7 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
         bioseq::parallelism::memory_permit permit;
         std::vector<segment_run_entry_type> values;
     } rerouted;
+    std::optional<std::uint32_t> rerouted_active_write_buffer_owner;
     // Bounds transient replay ownership to one admitted pair batch.
     struct admitted_pair_batch {
         bioseq::parallelism::memory_permit permit;
@@ -275,7 +306,9 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
     };
     // Finds or creates the sorted-run store for one replacement segment.
     const auto rerouted_store =
-        [&rerouted, &ensure_capacity](std::uint32_t segment) -> sorted_pair_run_store& {
+        [&rerouted,
+         &rerouted_active_write_buffer_owner,
+         &ensure_capacity](std::uint32_t segment) -> sorted_pair_run_store& {
         auto iterator = std::lower_bound(rerouted.values.begin(),
                                          rerouted.values.end(),
                                          segment,
@@ -291,10 +324,41 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
                 rerouted.values.begin() + static_cast<std::ptrdiff_t>(offset),
                 segment_run_entry_type{segment, sorted_pair_run_store{}});
         }
+        if (!rerouted_active_write_buffer_owner.has_value()) {
+            if (!iterator->second.try_transfer_completed_write_buffer_to(iterator->second)) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer-sequence reroute writer ownership is invalid");
+            }
+            rerouted_active_write_buffer_owner = segment;
+        } else if (*rerouted_active_write_buffer_owner != segment) {
+            // The destination metadata is already admitted. Re-find the source
+            // by ordinal because destination insertion may have relocated it.
+            const auto source = std::lower_bound(
+                rerouted.values.begin(),
+                rerouted.values.end(),
+                *rerouted_active_write_buffer_owner,
+                [](const segment_run_entry_type& entry, std::uint32_t value) {
+                    return entry.first < value;
+                });
+            if (source == rerouted.values.end() ||
+                source->first != *rerouted_active_write_buffer_owner ||
+                !source->second.try_transfer_completed_write_buffer_to(iterator->second)) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer-sequence reroute writer transfer is invalid");
+            }
+            rerouted_active_write_buffer_owner = segment;
+        }
         return iterator->second;
     };
     bool valid = true;
     try {
+        // Reroute consumes immutable source runs. Drop every completed source
+        // writer before the first reader or replacement allocation is admitted.
+        for (auto& [segment, runs] : segment_sorted_runs_) {
+            (void)segment;
+            runs.release_completed_write_buffer();
+        }
+        active_segment_write_buffer_owner_.reset();
         for (auto& [old_segment, runs] : segment_sorted_runs_) {
             runs.merge_runs([&valid,
                              new_span,
@@ -361,6 +425,7 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
                 });
             });
             if (!valid) {
+                active_segment_write_buffer_owner_.reset();
                 segment_spill_binding_ = {};
                 segment_spill_pg_poisoned_ = true;
                 return false;
@@ -382,6 +447,7 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
             (void)segment;
             runs.abandon_after_pg_error_noexcept();
         }
+        active_segment_write_buffer_owner_.reset();
         segment_spill_binding_ = {};
         segment_spill_pg_poisoned_ = true;
         throw;
@@ -394,12 +460,14 @@ bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
             (void)segment;
             runs.release_runs_noexcept();
         }
+        active_segment_write_buffer_owner_.reset();
         segment_spill_binding_ = {};
         segment_spill_pg_poisoned_ = true;
         throw;
     }
     segment_sorted_runs_.swap(rerouted.values);
     std::swap(segment_sorted_runs_metadata_permit_, rerouted.permit);
+    active_segment_write_buffer_owner_ = rerouted_active_write_buffer_owner;
     record_segment_spill_mutation_();
     return true;
 }
@@ -479,6 +547,7 @@ void fragment_index_storage::release_runs_noexcept() noexcept {
         runs.release_runs_noexcept();
     }
     segment_sorted_runs_.clear();
+    active_segment_write_buffer_owner_.reset();
     record_segment_spill_mutation_();
 }
 
@@ -499,6 +568,7 @@ void fragment_index_storage::release_runs() {
             runs.release_runs();
         }
         segment_sorted_runs_.clear();
+        active_segment_write_buffer_owner_.reset();
         record_segment_spill_mutation_();
     } catch (const bioseq::postgres::support::postgres_error&) {
         if (sorted_runs_.has_value()) {
@@ -510,6 +580,7 @@ void fragment_index_storage::release_runs() {
             runs.abandon_after_pg_error_noexcept();
         }
         segment_sorted_runs_.clear();
+        active_segment_write_buffer_owner_.reset();
         segment_spill_binding_ = {};
         segment_spill_pg_poisoned_ = true;
         throw;
@@ -532,6 +603,7 @@ void fragment_index_storage::abandon_after_pg_error_noexcept() noexcept {
         runs.abandon_after_pg_error_noexcept();
     }
     segment_sorted_runs_.clear();
+    active_segment_write_buffer_owner_.reset();
     segment_spill_binding_ = {};
     segment_spill_pg_poisoned_ = true;
 

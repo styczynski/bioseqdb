@@ -1,7 +1,9 @@
 """Focused unit tests for the safe local benchmark-e2e config override."""
 
 from pathlib import Path
+import copy
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -27,7 +29,9 @@ import build_worker
 import cache_modes
 import doxygen_toolchain
 import integrity
+import postgres_runtime
 import process_state
+import q1024_watchdog
 import protocol
 import remote
 import server as build_server
@@ -319,6 +323,1184 @@ class BenchE2eConfigOverrideTests(unittest.TestCase):
         self.assertIn("must name a .json file", non_json_error)
 
 
+class AlgorithmMatrixSingletonAuthorityTests(unittest.TestCase):
+    LEGACY_EMPTY_LEDGER_FIXTURE = (
+        REPOSITORY_ROOT
+        / "bench/tests/contract/fixtures/q1024_revision4_empty_ledger.json"
+    )
+    SINGLETON0058 = (
+        "bench/e2e_algorithm_matrix_shards/"
+        "bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+        "0058_15aceb88564a0756.json"
+    )
+    SINGLETON0068 = (
+        "bench/e2e_algorithm_matrix_shards/"
+        "bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+        "0068_2496323c88e8add2.json"
+    )
+    PROBE_SINGLETON = (
+        "bench/e2e_algorithm_matrix_shards/"
+        "bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+        "0664_ce4a7113f77b3cdf.json"
+    )
+    SUPERSEDED_SINGLETON = (
+        "bench/e2e_algorithm_matrix_shards/"
+        "bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+        "0081_423ec685980909f5.json"
+    )
+    PACKED_CONFIG = (
+        "bench/e2e_algorithm_matrix_q1024_packed_shards/"
+        "bench_e2e_algorithm_matrix_q1024_packed_"
+        "m2_d4_k20_w15_minimap2_both_modes.json"
+    )
+    M4_MPS_PACKED_CONFIG = (
+        "bench/e2e_algorithm_matrix_shards/"
+        "bench_e2e_algorithm_matrix_campaign_shard_"
+        "m4_d4_k15_w10_just_index_scalar_mpsequence.json"
+    )
+    OBSERVED_CONFIG = (
+        "bench/e2e_algorithm_matrix_q2_observed_singletons/"
+        "bench_e2e_algorithm_matrix_q2_observed_singleton_"
+        "0725_925f4f05e3a6c239.json"
+    )
+
+    def _legacy_empty_ledger(self):
+        return json.loads(
+            self.LEGACY_EMPTY_LEDGER_FIXTURE.read_text(encoding="utf-8"))
+
+    def _ledger_document_patch(self, document):
+        ledger_path = REPOSITORY_ROOT / "ALL_RESULTS.yaml"
+        raw = json.dumps(
+            document, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False,
+        ).encode("utf-8")
+        strict_json = build_worker._strict_json_object
+
+        def load_with_fixture(path, label):
+            if Path(path) == ledger_path:
+                return copy.deepcopy(document), raw
+            return strict_json(path, label)
+
+        return mock.patch.object(
+            build_worker, "_strict_json_object", side_effect=load_with_fixture)
+
+    def _nonempty_current_ledger_patch(self):
+        current = self._legacy_empty_ledger()
+        current["schema_version"] = 6
+        current["contract"]["version"] = 4
+        current["aggregation_state"]["processed_reports"] = [
+            {"sealed_test_adoption": True}]
+        return self._ledger_document_patch(current)
+
+    def test_exact_probe_singleton_is_hybrid_authorized_after_adoption(self):
+        with self._nonempty_current_ledger_patch():
+            authority, error = (
+                build_worker._algorithm_matrix_campaign_authority_status(
+                    self.PROBE_SINGLETON))
+
+        self.assertIsNone(error)
+        self.assertEqual(authority["name"], "q1024")
+        self.assertEqual(authority["execution_role"], "q1024_singleton")
+        profile = build_worker._ALGORITHM_MATRIX_CAMPAIGN_PROFILES[0]
+        self.assertEqual(
+            authority["partition_manifest_sha256"],
+            profile["packed_partition_manifest_sha256"],
+        )
+        self.assertEqual(
+            authority["singleton_partition_manifest_sha256"],
+            profile["singleton_partition_manifest_sha256"],
+        )
+        self.assertEqual(authority["singleton"]["ordinal"], 664)
+        self.assertEqual(authority["singleton"]["parent_tuple_index"], 0)
+        self.assertEqual(
+            authority["singleton"]["parent_config_sha256"],
+            "aa8c89910b5375a3fb1161b1b695b3d6d39dd3c57ca1092a06612d53b0e2b6f2",
+        )
+        packed_manifest = json.loads((
+            REPOSITORY_ROOT / profile["packed_partition_manifest"]
+        ).read_text(encoding="utf-8"))
+        retained = [
+            entry for entry in packed_manifest["retained_singletons"]
+            if entry["ordinal"] == 664
+        ]
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0]["role"], "first_mps_probe")
+        self.assertEqual(retained[0]["path"], self.PROBE_SINGLETON)
+        self.assertEqual(
+            retained[0]["stable_key_sha256"],
+            authority["singleton"]["stable_key_sha256"],
+        )
+
+    def test_independent_q1024_timeout_authorities_are_exact_and_closed(self):
+        singleton_manifest = json.loads((
+            REPOSITORY_ROOT
+            / "bench/bench_e2e_algorithm_matrix_q1024_"
+              "singleton_partition_manifest.json"
+        ).read_text(encoding="utf-8"))
+
+        def campaign_authority(ordinal):
+            singleton = next(
+                child for child in singleton_manifest["children"]
+                if child["ordinal"] == ordinal)
+            return {
+                "name": "q1024",
+                "execution_role": "q1024_singleton",
+                "singleton_partition_manifest_sha256": (
+                    build_worker._ALGORITHM_MATRIX_CAMPAIGN_PROFILES[0][
+                        "singleton_partition_manifest_sha256"]),
+                "singleton": singleton,
+            }
+
+        hard_stop = (
+            build_worker._ALGORITHM_MATRIX_Q1024_SINGLETON0068_HARD_STOP_EPOCH)
+        with mock.patch.object(
+                build_worker.time, "time", return_value=hard_stop - 1):
+            authority0058, authority0058_error = (
+                build_worker._q1024_extended_timeout_authority(
+                    self.SINGLETON0058, campaign_authority(58)))
+            authority0068, authority0068_error = (
+                build_worker._q1024_extended_timeout_authority(
+                    self.SINGLETON0068, campaign_authority(68)))
+        self.assertIsNone(authority0058_error)
+        self.assertIsNone(authority0068_error)
+        self.assertEqual(
+            authority0058["name"],
+            "q1024_singleton0058_extended_timeout")
+        self.assertEqual(
+            authority0068["name"],
+            "q1024_singleton0068_extended_timeout")
+        self.assertNotEqual(
+            authority0058["manifest"], authority0068["manifest"])
+
+        with mock.patch.object(
+                build_worker.time, "time", return_value=hard_stop):
+            expired_authority, expired_error = (
+                build_worker._q1024_extended_timeout_authority(
+                    self.SINGLETON0068, campaign_authority(68)))
+        self.assertIsNone(expired_authority)
+        self.assertIn("authority has expired", expired_error)
+
+        with mock.patch.object(
+                build_worker.time, "time", return_value=hard_stop - 1_000):
+            bounded_timeout = (
+                build_worker._run_only_runtime_timeout_seconds(
+                    "benchmark-e2e", self.SINGLETON0068, 14_400.0))
+        self.assertEqual(bounded_timeout, 999.0)
+        with mock.patch.object(
+                build_worker,
+                "_algorithm_matrix_campaign_authority_status",
+                return_value=({"name": "q1024"}, None)):
+            self.assertEqual(
+                build_worker._run_only_runtime_timeout_seconds(
+                    "benchmark-e2e", self.PROBE_SINGLETON, 14_400.0),
+                14_400.0,
+            )
+
+        deadline_q1024 = {
+            "name": "deadline",
+            "execution_role": "deadline_singleton",
+            "runtime_timeout_seconds": 172_800,
+            "selected_shard": {"identity": {"query_count": 1024}},
+        }
+        with mock.patch.object(
+                build_worker,
+                "_algorithm_matrix_campaign_authority_status",
+                return_value=(deadline_q1024, None)):
+            self.assertEqual(
+                build_worker._run_only_runtime_timeout_seconds(
+                    "benchmark-e2e", "canonical-deadline-member", 14_400.0),
+                43_200.0,
+            )
+        q1024_kill_offset = (
+            build_worker._Q1024_WHOLE_INVOCATION_TIMEOUT_SECONDS
+            - build_worker._Q1024_CLEANUP_RESERVE_SECONDS
+        )
+        q1024_work_offset = (
+            q1024_kill_offset
+            - process_state.BUILD_TIMEOUT_TERM_GRACE_SEC
+        )
+        self.assertEqual(q1024_kill_offset, 42_900)
+        self.assertEqual(q1024_work_offset, 42_890)
+
+        observed_q1024 = {
+            "name": "observed_rung",
+            "execution_role": "observed_rung_singleton",
+            "query_count": 1024,
+        }
+        with mock.patch.object(
+                build_worker,
+                "_algorithm_matrix_campaign_authority_status",
+                return_value=(observed_q1024, None)):
+            self.assertEqual(
+                build_worker._run_only_runtime_timeout_seconds(
+                    "benchmark-e2e", "canonical-observed-member", 14_400.0),
+                14_400.0,
+            )
+        owner = build_worker._q1024_postgres_application_name("a" * 32)
+        self.assertEqual(
+            build_worker._validated_q1024_postgres_application_name(owner),
+            owner,
+        )
+
+    def test_all_q1024_authority_shapes_reject_nonreceipt_execution(self):
+        authorities = (
+            {"name": "q1024", "execution_role": "q1024_singleton"},
+            {
+                "name": "observed_rung",
+                "execution_role": "observed_rung_singleton",
+                "query_count": 1024,
+            },
+            {
+                "name": "deadline",
+                "execution_role": "deadline_singleton",
+                "selected_shard": {"identity": {"query_count": 1024}},
+            },
+        )
+        for authority in authorities:
+            with self.subTest(name=authority["name"]):
+                self.assertTrue(
+                    build_worker._q1024_nonreceipt_execution_forbidden(
+                        authority, build_only=False, run_only=False))
+                self.assertFalse(
+                    build_worker._q1024_nonreceipt_execution_forbidden(
+                        authority, build_only=True, run_only=False))
+                self.assertFalse(
+                    build_worker._q1024_nonreceipt_execution_forbidden(
+                        authority, build_only=False, run_only=True))
+
+    def test_expired_control_deadline_prevents_receipt_io_or_publication(self):
+        with mock.patch.object(
+                build_worker.time, "time", return_value=100.0), \
+                mock.patch.object(
+                    build_worker, "_get_build_receipt") as get_receipt:
+            with self.assertRaises(TimeoutError):
+                build_worker._validate_build_receipt(
+                    "br_test", deadline=100.0)
+        get_receipt.assert_not_called()
+
+        with mock.patch.object(
+                build_worker.time, "time", return_value=100.0), \
+                mock.patch.object(
+                    build_worker, "_store_build_receipt") as store:
+            with self.assertRaises(TimeoutError):
+                build_worker._seal_run_receipt(
+                    mode="benchmark-e2e",
+                    build_receipt={},
+                    report_files=[],
+                    bench_flags=[],
+                    test_flags=[],
+                    bench_e2e_config=None,
+                    deadline=100.0,
+                )
+        store.assert_not_called()
+
+    def test_exact_packed_config_is_authorized_after_adoption(self):
+        with self._nonempty_current_ledger_patch():
+            authority, error = (
+                build_worker._algorithm_matrix_campaign_authority_status(
+                    self.PACKED_CONFIG))
+
+        self.assertIsNone(error)
+        self.assertEqual(authority["execution_role"], "q1024_packed")
+        self.assertEqual(authority["packed_member"]["expected_result_cells"], 2)
+
+    def test_q1024_backend_cleanup_feeds_sql_on_stdin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary) / "build"
+            bindir = Path(temporary) / "pg-bin"
+            build_dir.mkdir()
+            bindir.mkdir()
+            pg_config = Path(temporary) / "pg_config"
+            pg_config.write_text("stub\n", encoding="utf-8")
+            psql = bindir / "psql"
+            psql.write_text("stub\n", encoding="utf-8")
+            psql.chmod(0o755)
+            (build_dir / "CMakeCache.txt").write_text(
+                f"PostgreSQL_CONFIG:FILEPATH={pg_config}\n",
+                encoding="utf-8",
+            )
+            completed = [
+                subprocess.CompletedProcess([], 0, f"{bindir}\n", ""),
+                subprocess.CompletedProcess([], 0, "t\n", ""),
+                subprocess.CompletedProcess([], 0, "t\n", ""),
+                subprocess.CompletedProcess([], 0, "0\n", ""),
+            ]
+            with mock.patch.object(
+                    postgres_runtime.subprocess,
+                    "run",
+                    side_effect=completed,
+            ) as run:
+                evidence = postgres_runtime._cleanup_owned_postgresql_backends(
+                    build_dir,
+                    "bench-e2e-opt",
+                    application_name="bioseq-q1024-" + "a" * 32,
+                    database_name="bioseq",
+                    database_user="postgres",
+                    log_handle=io.StringIO(),
+                    deadline=time.time() + 60.0,
+                )
+        self.assertTrue(evidence["cleanup_verified"])
+        for call in run.call_args_list[1:]:
+            argv = call.args[0]
+            statement = call.kwargs.get("input")
+            self.assertNotIn("--command", argv)
+            self.assertEqual(argv[-2:], ["--file", "-"])
+            self.assertIn(
+                "owner_application=bioseq-q1024-" + "a" * 32, argv)
+            self.assertIn("owner_database=bioseq", argv)
+            self.assertIn("owner_user=postgres", argv)
+            self.assertIsInstance(statement, str)
+            self.assertIn(":'owner_application'", statement)
+            self.assertIn(":'owner_database'", statement)
+            self.assertIn(":'owner_user'", statement)
+
+    def test_q1024_backend_last_resort_rechecks_exact_backend_and_postmaster(self):
+        backend = process_state._ProcessIdentity(
+            444, 111, 444, 444, "backend-os-start", "postgres backend")
+        postmaster = process_state._ProcessIdentity(
+            111, 1, 111, 111, "postmaster-os-start", "postgres")
+        backend_start = "2026-09-09 10:00:00+00"
+        postmaster_start = "2026-09-09 09:00:00+00"
+        snapshot = f"444\t{backend_start}\t{postmaster_start}\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary) / "build"
+            bindir = Path(temporary) / "pg-bin"
+            data_dir = Path(temporary) / "pg-data"
+            build_dir.mkdir()
+            bindir.mkdir()
+            data_dir.mkdir()
+            pg_config = Path(temporary) / "pg_config"
+            pg_config.write_text("stub\n", encoding="utf-8")
+            psql = bindir / "psql"
+            psql.write_text("stub\n", encoding="utf-8")
+            psql.chmod(0o755)
+            (build_dir / "CMakeCache.txt").write_text(
+                f"PostgreSQL_CONFIG:FILEPATH={pg_config}\n",
+                encoding="utf-8",
+            )
+            completed = [
+                subprocess.CompletedProcess([], 0, f"{bindir}\n", ""),
+                subprocess.CompletedProcess([], 0, snapshot, ""),
+                subprocess.CompletedProcess([], 0, "t\n", ""),
+                subprocess.CompletedProcess([], 0, "t\n", ""),
+                subprocess.CompletedProcess([], 0, "1\n", ""),
+                subprocess.CompletedProcess([], 0, snapshot, ""),
+                subprocess.CompletedProcess([], 0, "0\n", ""),
+            ]
+
+            def capture(pid, *, deadline=None):
+                return postmaster if pid == 111 else backend if pid == 444 else None
+
+            with mock.patch.object(
+                    postgres_runtime.subprocess,
+                    "run",
+                    side_effect=completed,
+            ), mock.patch.object(
+                    postgres_runtime,
+                    "_query_postgresql_data_directory",
+                    return_value=str(data_dir),
+            ), mock.patch.object(
+                    postgres_runtime,
+                    "_postgresql_postmaster_pid",
+                    return_value=111,
+            ), mock.patch.object(
+                    postgres_runtime,
+                    "_capture_process_identity",
+                    side_effect=capture,
+            ), mock.patch.object(postgres_runtime.os, "kill") as kill:
+                evidence = postgres_runtime._cleanup_owned_postgresql_backends(
+                    build_dir,
+                    "bench-e2e-opt",
+                    application_name="bioseq-q1024-" + "b" * 32,
+                    database_name="bioseq",
+                    database_user="postgres",
+                    log_handle=io.StringIO(),
+                    deadline=time.time() + 60.0,
+                    allow_sigkill_backend=True,
+                )
+
+        kill.assert_called_once_with(444, signal.SIGKILL)
+        self.assertTrue(evidence["cleanup_verified"])
+        self.assertTrue(evidence["last_resort"]["recovery_ready"])
+        self.assertEqual(
+            evidence["sealed_backends"][0]["backend_start"], backend_start)
+
+    def test_exact_m4_mps_parent_is_authorized_as_one_eight_cell_pack(self):
+        with self._nonempty_current_ledger_patch():
+            authority, error = (
+                build_worker._algorithm_matrix_campaign_authority_status(
+                    self.M4_MPS_PACKED_CONFIG))
+
+        self.assertIsNone(error)
+        self.assertEqual(authority["execution_role"], "q1024_packed")
+        member = authority["packed_member"]
+        self.assertEqual(member["expected_result_cells"], 8)
+        self.assertEqual(member["expected_raw_records"], 40)
+        self.assertEqual(member["planned_supported_cells"], 6)
+        self.assertEqual(member["planned_selector_rejection_cells"], 2)
+
+    def test_adopted_cell_singleton_is_superseded(self):
+        authority, error = (
+            build_worker._algorithm_matrix_campaign_authority_status(
+                self.SUPERSEDED_SINGLETON))
+
+        self.assertIsNone(authority)
+        self.assertIn("superseded by exact packed/adopted ownership", error)
+
+    def test_reserved_lookalike_is_not_authority(self):
+        lookalike = (
+            "bench/e2e_algorithm_matrix_shards/"
+            "bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+            "0081_0000000000000000.json"
+        )
+        authority, error = (
+            build_worker._algorithm_matrix_campaign_authority_status(lookalike))
+
+        self.assertIsNone(authority)
+        self.assertIn("not manifest-owned", error)
+
+    def test_empty_ledger_rejects_a_valid_nonfirst_singleton(self):
+        with self._ledger_document_patch(self._legacy_empty_ledger()):
+            authority, error = (
+                build_worker._algorithm_matrix_campaign_authority_status(
+                    self.PROBE_SINGLETON))
+
+        self.assertIsNone(authority)
+        self.assertIn("must start with deterministic baseline", error)
+        self.assertIn("adoption s056", error)
+
+    def test_worker_and_aggregator_share_exact_legacy_empty_boundary(self):
+        aggregator_path = REPOSITORY_ROOT / "bench/aggregate_e2e_algorithm_matrix.py"
+        spec = importlib.util.spec_from_file_location(
+            "worker_test_algorithm_matrix_aggregator", aggregator_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        aggregator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(aggregator)
+        aggregator._activate_campaign_profile("ALL_RESULTS.yaml")
+        original = self._legacy_empty_ledger()
+        mutations = {
+            "result_cell_count": ("aggregation_state", "result_cell_count", 1),
+            "accepted_cell_count": ("aggregation_state", "accepted_cell_count", 1),
+            "measurements_collected": ("campaign", "measurements_collected", 5),
+            "canonical_result_cell_count": (
+                "aggregation_state", "canonical_result_cell_count", 1295),
+            "report_count": ("aggregation_state", "report_count", 1),
+            "raw_record_count": ("aggregation_state", "raw_record_count", 5),
+            "processed_reports": (
+                "aggregation_state", "processed_reports", [{}]),
+            "run_receipt_membership": (
+                "aggregation_state", "build_receipts", []),
+            "unexpected_running_count": (
+                "aggregation_state", "running_cell_count", 1),
+            "missing_count": (
+                "aggregation_state", "missing_canonical_cell_count", 1295),
+            "pending_count": ("aggregation_state", "pending_cell_count", 1),
+            "rejected_count": ("aggregation_state", "rejected_cell_count", 1),
+            "invalid_count": ("aggregation_state", "invalid_cell_count", 1),
+            "membership_complete": (
+                "aggregation_state", "canonical_membership_complete", True),
+            "statuses_invalid": (
+                "aggregation_state", "canonical_statuses_valid", False),
+            "publication_count": ("publication_state", "result_count", 1),
+            "publication_status": (
+                "publication_state", "status", "complete"),
+            "publication_collection": (
+                "publication_state", "result_collection", "published_results"),
+            "publication_calibration_membership": (
+                "publication_state", "calibration_results_included", True),
+            "campaign_publishable": (
+                "campaign", "results_are_publishable", True),
+            "campaign_status": ("campaign", "status", "complete"),
+            "campaign_started_count": (
+                "campaign", "benchmark_runs_started", 999),
+            "results_collection": (None, "results", [{}]),
+            "top_level_status": (None, "status", "complete"),
+            "deadline_checkpoint_tamper": (
+                None, "deadline_v2_checkpoint", {}),
+        }
+        worker_args = (
+            build_worker._ALGORITHM_MATRIX_CAMPAIGN_ID,
+            build_worker._ALGORITHM_MATRIX_CAMPAIGN_DIGEST,
+        )
+        self.assertTrue(build_worker._legacy_q1024_ledger_is_exactly_empty(
+            original, *worker_args))
+        self.assertTrue(aggregator._legacy_q1024_ledger_is_exactly_empty(
+            original, *worker_args))
+        for name, (section, field, value) in mutations.items():
+            with self.subTest(name=name):
+                document = copy.deepcopy(original)
+                if section is None:
+                    document[field] = value
+                else:
+                    document[section][field] = value
+                worker_result = (
+                    build_worker._legacy_q1024_ledger_is_exactly_empty(
+                        document, *worker_args))
+                aggregator_result = (
+                    aggregator._legacy_q1024_ledger_is_exactly_empty(
+                        document, *worker_args))
+                self.assertEqual(worker_result, aggregator_result)
+                self.assertFalse(worker_result)
+
+    def test_campaign_authority_rejects_populated_legacy_ledger(self):
+        stale = self._legacy_empty_ledger()
+        stale["campaign"]["measurements_collected"] = 5
+        with self._ledger_document_patch(stale):
+            authority, error = (
+                build_worker._algorithm_matrix_campaign_authority_status(
+                    self.PROBE_SINGLETON))
+
+        self.assertIsNone(authority)
+        self.assertIn("does not bind the audited campaign authority", error)
+
+    def test_q1024_canonical_configs_are_topology_only(self):
+        authority, error = (
+            build_worker._algorithm_matrix_campaign_authority_status(
+                "bench/bench_e2e_algorithm_matrix_campaign.json"))
+
+        self.assertIsNone(error)
+        self.assertEqual(authority["execution_role"], "canonical_topology")
+
+    def test_start_rejects_singleton_without_run_only(self):
+        with self._nonempty_current_ledger_patch(), mock.patch.object(
+            build_worker, "_refuse_root_build_identity", return_value=None,
+        ), mock.patch.object(
+            build_worker, "_ensure_build_worker_timesharing_policy",
+        ):
+            result = build_worker.tool_start_build(
+                mode="benchmark-e2e",
+                bench_filter={"benchmarks": ["bench_e2e"]},
+                filter_supplied=True,
+                bench_e2e_config=self.PROBE_SINGLETON,
+            )
+
+        self.assertIn("requires run_only=true", result)
+
+    def test_singleton_terminal_flow_seals_receipt_before_ingestion(self):
+        self._assert_terminal_flow_seals_receipt_before_consumer(self.PROBE_SINGLETON)
+
+    def test_observed_terminal_flow_seals_receipt_before_validation(self):
+        self._assert_terminal_flow_seals_receipt_before_consumer(self.OBSERVED_CONFIG)
+
+    def _assert_terminal_flow_seals_receipt_before_consumer(self, config):
+        events = []
+        build_receipt = {
+            "build_receipt_id": "br_test",
+            "debug": False,
+            "authorized_artifacts": [{"sealed": True}],
+        }
+        run_receipt = {
+            "build_receipt_id": "rr_" + "a" * 32,
+            "content_sha256": "b" * 64,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = root / "report_1.json"
+            report.write_text("{}\n", encoding="utf-8")
+            with (root / "run.log").open("w", encoding="utf-8") as log_handle, \
+                    self._nonempty_current_ledger_patch(), \
+                    mock.patch.object(
+                        build_worker,
+                        "_build_worker_descendant_environment",
+                        return_value={},
+                    ), mock.patch.object(
+                        build_worker, "_ensure_local_toolchain_environment",
+                    ), mock.patch.object(
+                        build_worker, "_stream_subprocess", return_value=0,
+                    ), mock.patch.object(
+                        build_worker, "_restart_postgresql",
+                    ) as restart_postgresql, mock.patch.object(
+                        build_worker, "_prepare_postgresql_test_database",
+                    ) as prepare_postgresql, mock.patch.object(
+                        build_worker,
+                        "_benchmark_e2e_runtime_environment",
+                        return_value={},
+                    ), mock.patch.object(
+                        build_worker,
+                        "_ensure_darwin_algorithm_matrix_launch_nice",
+                        side_effect=lambda *args: events.append("priority"),
+                    ), mock.patch.object(
+                        build_worker,
+                        "_run_mode_commands",
+                        side_effect=lambda *args, **kwargs: (
+                            events.append("run")
+                            or (report, [report], [], [])),
+                    ) as run_commands, mock.patch.object(
+                        build_worker,
+                        "_validate_build_receipt",
+                        return_value=(build_receipt, None),
+                    ), mock.patch.object(
+                        build_worker,
+                        "_seal_run_receipt",
+                        side_effect=lambda **_: (
+                            events.append("seal") or run_receipt),
+                    ), mock.patch.object(
+                        build_worker,
+                        "_merge_algorithm_matrix_all_results",
+                        autospec=True,
+                        side_effect=lambda **kwargs: events.append(
+                            ("merge", kwargs.get("run_receipt_id"))),
+                    ), mock.patch.object(build_worker, "_update_entry"):
+                result = build_worker._run_only_from_build_receipt(
+                    mode="benchmark-e2e",
+                    entry={"started_at": time.time()},
+                    receipt=build_receipt,
+                    active_build_dir=root,
+                    active_bin_dir=root / "bioseq",
+                    active_preset="bench-e2e-opt",
+                    bench_flags=["--filter", "benchmark=bench_e2e"],
+                    test_flags=[],
+                    bench_e2e_config=config,
+                    log_handle=log_handle,
+                    deadline=time.time() + 60,
+                )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            events,
+            [
+                "priority", "run", "seal",
+                ("merge", "rr_" + "a" * 32),
+            ],
+        )
+        self.assertEqual(
+            run_commands.call_args.kwargs["state_mode"], "benchmark-e2e")
+        self.assertEqual(
+            run_commands.call_args.kwargs["phase"], "run_only_runtime")
+        self.assertEqual(
+            restart_postgresql.call_args.kwargs["state_mode"],
+            "benchmark-e2e",
+        )
+        self.assertEqual(
+            restart_postgresql.call_args.kwargs["phase"],
+            "run_only_postgresql_restart",
+        )
+        self.assertEqual(
+            prepare_postgresql.call_args.kwargs["state_mode"],
+            "benchmark-e2e",
+        )
+        self.assertEqual(
+            prepare_postgresql.call_args.kwargs["phase"],
+            "run_only_postgresql_database_prepare",
+        )
+
+    def test_consumer_failure_preserves_factual_run_receipt(self):
+        build_receipt = {
+            "build_receipt_id": "br_test",
+            "debug": False,
+            "authorized_artifacts": [{"sealed": True}],
+        }
+        run_receipt = {
+            "build_receipt_id": "rr_" + "a" * 32,
+            "content_sha256": "b" * 64,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = root / "report_1.json"
+            report.write_text("{}\n", encoding="utf-8")
+            with (root / "run.log").open("w", encoding="utf-8") as log_handle, \
+                    self._nonempty_current_ledger_patch(), \
+                    mock.patch.object(
+                        build_worker, "_build_worker_descendant_environment",
+                        return_value={},
+                    ), mock.patch.object(
+                        build_worker, "_ensure_local_toolchain_environment",
+                    ), mock.patch.object(
+                        build_worker, "_stream_subprocess", return_value=0,
+                    ), mock.patch.object(
+                        build_worker, "_restart_postgresql",
+                    ), mock.patch.object(
+                        build_worker, "_prepare_postgresql_test_database",
+                    ), mock.patch.object(
+                        build_worker, "_benchmark_e2e_runtime_environment",
+                        return_value={},
+                    ), mock.patch.object(
+                        build_worker, "_ensure_darwin_algorithm_matrix_launch_nice",
+                    ), mock.patch.object(
+                        build_worker, "_run_mode_commands",
+                        return_value=(report, [report], [], []),
+                    ), mock.patch.object(
+                        build_worker, "_validate_build_receipt",
+                        return_value=(build_receipt, None),
+                    ), mock.patch.object(
+                        build_worker, "_seal_run_receipt",
+                        return_value=run_receipt,
+                    ) as seal, mock.patch.object(
+                        build_worker, "_merge_algorithm_matrix_all_results",
+                        autospec=True,
+                        side_effect=RuntimeError("consumer rejected report"),
+                    ), mock.patch.object(
+                        build_worker, "_update_entry",
+                    ) as update:
+                with self.assertRaisesRegex(
+                        RuntimeError, "consumer rejected report"):
+                    build_worker._run_only_from_build_receipt(
+                        mode="benchmark-e2e",
+                        entry={"started_at": time.time()},
+                        receipt=build_receipt,
+                        active_build_dir=root,
+                        active_bin_dir=root / "bioseq",
+                        active_preset="bench-e2e-opt",
+                        bench_flags=["--filter", "benchmark=bench_e2e"],
+                        test_flags=[],
+                        bench_e2e_config=self.PROBE_SINGLETON,
+                        log_handle=log_handle,
+                        deadline=time.time() + 60,
+                    )
+        seal.assert_called_once()
+        self.assertNotIn("persist", seal.call_args.kwargs)
+        self.assertTrue(any(
+            call.kwargs.get("run_receipt_id")
+            == run_receipt["build_receipt_id"]
+            for call in update.call_args_list
+        ))
+        self.assertFalse(any(
+            call.kwargs.get("status") == "completed"
+            for call in update.call_args_list
+        ))
+
+
+class ObservedRungAuthorityTests(unittest.TestCase):
+    PRIORITY_SINGLETON_SUFFIX = "0725_925f4f05e3a6c239.json"
+
+    @classmethod
+    def config_for(cls, query_count):
+        return (
+            f"bench/e2e_algorithm_matrix_q{query_count}_observed_singletons/"
+            f"bench_e2e_algorithm_matrix_q{query_count}_observed_singleton_"
+            f"{cls.PRIORITY_SINGLETON_SUFFIX}")
+
+    def test_all_nine_observed_rungs_bind_exact_manifest_members(self):
+        self.assertEqual(
+            tuple(
+                profile["query_count"]
+                for profile in build_worker._ALGORITHM_MATRIX_OBSERVED_RUNG_PROFILES
+            ),
+            (2, 8, 16, 32, 64, 128, 256, 512, 1024),
+        )
+        for profile in build_worker._ALGORITHM_MATRIX_OBSERVED_RUNG_PROFILES:
+            query_count = profile["query_count"]
+            config = self.config_for(query_count)
+            with self.subTest(query_count=query_count):
+                authority, error = (
+                    build_worker._algorithm_matrix_campaign_authority_status(
+                        config))
+                self.assertIsNone(error)
+                self.assertEqual(authority["name"], "observed_rung")
+                self.assertEqual(
+                    authority["execution_role"], "observed_rung_singleton")
+                self.assertEqual(authority["query_count"], query_count)
+                self.assertEqual(authority["manifest"], profile["manifest"])
+                self.assertEqual(
+                    authority["campaign_digest"], profile["campaign_digest"])
+                self.assertEqual(authority["selected_config"]["path"], config)
+                self.assertEqual(
+                    authority["partition_manifest_sha256"],
+                    profile["singleton_partition_manifest_sha256"],
+                )
+
+    def test_observed_parent_configs_remain_topology_only(self):
+        parent = (
+            "bench/e2e_algorithm_matrix_q2_observed_shards/"
+            "bench_e2e_algorithm_matrix_q2_observed_shard_"
+            "m2_d4_k15_w10_just_index_bounded_nthash_simd_mpfragment.json")
+        authority, error = (
+            build_worker._algorithm_matrix_campaign_authority_status(parent))
+        self.assertIsNone(error)
+        self.assertEqual(authority["execution_role"], "observed_rung_topology")
+
+    def test_observed_rung_absolute_path_normalizes_but_aliases_do_not(self):
+        config = self.config_for(2)
+        absolute = str(REPOSITORY_ROOT / config)
+        resolved, error = build_worker._validate_bench_e2e_config_override(
+            "benchmark-e2e", absolute)
+        self.assertIsNone(error)
+        self.assertEqual(resolved, config)
+
+        directory = REPOSITORY_ROOT / (
+            "bench/e2e_algorithm_matrix_q2_observed_singletons")
+        aliased = str(directory / ".." / directory.name / Path(config).name)
+        rejected, alias_error = (
+            build_worker._validate_bench_e2e_config_override(
+                "benchmark-e2e", aliased))
+        self.assertIsNone(rejected)
+        self.assertIn("lexical alias", alias_error)
+
+    def test_observed_rung_rejects_unowned_path_and_selected_hash(self):
+        forged = (
+            "bench/e2e_algorithm_matrix_q2_observed_singletons/"
+            "bench_e2e_algorithm_matrix_q2_observed_singleton_"
+            "9999_0000000000000000.json")
+        authority, error = (
+            build_worker._algorithm_matrix_campaign_authority_status(forged))
+        self.assertIsNone(authority)
+        self.assertIn("not manifest-owned", error)
+
+        config = self.config_for(2)
+        selected_path = REPOSITORY_ROOT / config
+        real_sha256_file = build_worker.sha256_file
+
+        def mismatched_selected_hash(path):
+            if Path(path) == selected_path:
+                return "0" * 64
+            return real_sha256_file(path)
+
+        with mock.patch.object(
+                build_worker, "sha256_file",
+                side_effect=mismatched_selected_hash):
+            authority, error = (
+                build_worker._algorithm_matrix_campaign_authority_status(
+                    config))
+        self.assertIsNone(authority)
+        self.assertIn("config bytes differ from the manifest", error)
+
+    def test_observed_rung_start_requires_run_only_filter_and_receipt(self):
+        config = self.config_for(2)
+        with mock.patch.object(
+            build_worker, "_refuse_root_build_identity", return_value=None,
+        ), mock.patch.object(
+            build_worker, "_ensure_build_worker_timesharing_policy",
+        ):
+            full_result = build_worker.tool_start_build(
+                mode="benchmark-e2e",
+                bench_filter={"benchmarks": ["bench_e2e"]},
+                filter_supplied=True,
+                bench_e2e_config=config,
+            )
+            with mock.patch.object(
+                    build_worker, "_validate_build_receipt") as validate:
+                filter_result = build_worker.tool_start_build(
+                    mode="benchmark-e2e",
+                    run_only=True,
+                    reuse_build_receipt="br_test",
+                    bench_filter={"benchmarks": ["bench_e2e", "other"]},
+                    filter_supplied=True,
+                    bench_e2e_config=config,
+                )
+                validate.assert_not_called()
+
+            wrong_receipt = {
+                "debug": False,
+                "preset": "test-opt",
+                "mode": "unit-integration",
+                "preset_family": "test",
+                "binary_subdir": "bioseq",
+            }
+            with mock.patch.object(
+                    build_worker, "_validate_build_receipt",
+                    return_value=(wrong_receipt, None)):
+                receipt_result = build_worker.tool_start_build(
+                    mode="benchmark-e2e",
+                    run_only=True,
+                    reuse_build_receipt="br_test",
+                    bench_filter={"benchmarks": ["bench_e2e"]},
+                    filter_supplied=True,
+                    bench_e2e_config=config,
+                )
+
+        self.assertIn("requires run_only=true", full_result)
+        self.assertIn("accept only the exact filter", filter_result)
+        self.assertIn("debug=false bench-e2e-opt receipt", receipt_result)
+
+    def test_observed_worker_rejects_unreceipted_execution_before_commands(self):
+        config = self.config_for(2)
+        with mock.patch.object(
+            build_worker, "_refuse_root_build_identity", return_value=None,
+        ), mock.patch.object(
+            build_worker, "_ensure_build_worker_timesharing_policy",
+        ), mock.patch.object(
+            build_worker, "_load_state", return_value={
+                "benchmark-e2e": {"bench_e2e_config": config},
+            },
+        ), mock.patch.object(
+            build_worker, "_stream_subprocess",
+        ) as stream, mock.patch.object(
+            build_worker, "_run_mode_commands",
+        ) as run_commands, mock.patch.object(build_worker, "_log") as log:
+            result = build_worker._run_build_worker(
+                "benchmark-e2e",
+                bench_flags=["--filter", "benchmark=bench_e2e"],
+                bench_e2e_config=config,
+            )
+
+        self.assertEqual(result, 1)
+        stream.assert_not_called()
+        run_commands.assert_not_called()
+        self.assertIn("requires run_only=true", log.call_args.args[0])
+
+    def test_observed_rung_forces_runtime_environment_and_normal_timeout(self):
+        config = self.config_for(2)
+        original = {
+            "BIOSEQ_E2E_KEEP_ARTIFACTS": "1",
+            "BIOSEQ_E2E_RETAIN_MATRIX_JUST_INDEX_TARGET": "1",
+            "BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP": "1",
+            "BIOSEQ_E2E_SKIP_MINIMAP2_BASELINE_SETUP": "1",
+            "BIOSEQ_E2E_JUST_INDEX_SETUP_ONLY": "1",
+            "BIOSEQ_E2E_JUST_INDEX_SETUP_PIPELINE_MODE": "serial",
+            "BIOSEQ_E2E_PG_RESTART_CMD": "ambient restart",
+        }
+        config_open_path = str(REPOSITORY_ROOT / config)
+        with mock.patch.object(
+            build_worker, "_postgresql_e2e_restart_shell_command",
+            return_value="sealed restart",
+        ), mock.patch.object(
+            build_worker, "_validated_benchmark_e2e_config_open_path",
+            return_value=config_open_path,
+        ):
+            environment = build_worker._benchmark_e2e_runtime_environment(
+                original, Path("/unused"), "bench-e2e-opt", config)
+
+            later_environment = build_worker._benchmark_e2e_runtime_environment(
+                original, Path("/unused"), "bench-e2e-opt",
+                self.config_for(8))
+
+            no_index_environment = build_worker._benchmark_e2e_runtime_environment(
+                original, Path("/unused"), "bench-e2e-opt",
+                "bench/e2e_algorithm_matrix_q2_observed_singletons/"
+                "bench_e2e_algorithm_matrix_q2_observed_singleton_"
+                "0000_0ed6b7419bc8e21f.json")
+            minimap2_environment = build_worker._benchmark_e2e_runtime_environment(
+                original, Path("/unused"), "bench-e2e-opt",
+                "bench/e2e_algorithm_matrix_q2_observed_singletons/"
+                "bench_e2e_algorithm_matrix_q2_observed_singleton_"
+                "0640_423ec685980909f5.json")
+
+        expected_environment = dict(
+            build_worker._ALGORITHM_MATRIX_RUNTIME_ENVIRONMENT)
+        expected_environment[
+            "BIOSEQ_E2E_RETAIN_MATRIX_JUST_INDEX_TARGET"] = "1"
+        expected_environment[
+            "BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP"] = "1"
+        for key, value in expected_environment.items():
+            self.assertEqual(environment[key], value)
+        self.assertEqual(
+            environment["BIOSEQ_E2E_PG_RESTART_CMD"], "sealed restart")
+        self.assertEqual(
+            environment["BIOSEQ_E2E_RETAIN_MATRIX_JUST_INDEX_TARGET"], "1")
+        self.assertEqual(
+            environment["BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP"], "1")
+        self.assertEqual(
+            later_environment[
+                "BIOSEQ_E2E_RETAIN_MATRIX_JUST_INDEX_TARGET"], "1")
+        self.assertEqual(
+            later_environment["BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP"], "1")
+        self.assertEqual(later_environment["BIOSEQ_E2E_KEEP_ARTIFACTS"], "0")
+        for unchanged_environment in (
+                no_index_environment, minimap2_environment):
+            self.assertEqual(
+                unchanged_environment[
+                    "BIOSEQ_E2E_RETAIN_MATRIX_JUST_INDEX_TARGET"], "0")
+            self.assertEqual(
+                unchanged_environment[
+                    "BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP"], "0")
+            self.assertEqual(
+                unchanged_environment["BIOSEQ_E2E_KEEP_ARTIFACTS"], "0")
+        self.assertEqual(
+            environment[build_worker._BENCHMARK_E2E_CONFIG_IDENTITY_ENV],
+            config_open_path,
+        )
+        self.assertEqual(
+            environment[build_worker._BENCHMARK_E2E_CONFIG_OPEN_ENV],
+            config_open_path,
+        )
+        self.assertEqual(original["BIOSEQ_E2E_KEEP_ARTIFACTS"], "1")
+        self.assertEqual(
+            original["BIOSEQ_E2E_RETAIN_MATRIX_JUST_INDEX_TARGET"], "1")
+        self.assertEqual(
+            build_worker._run_only_runtime_timeout_seconds(
+                "benchmark-e2e", config, 14_400.0),
+            14_400.0,
+        )
+
+    def test_observed_rung_consumer_is_exact_read_only_validator(self):
+        config = self.config_for(2)
+        report = (
+            REPOSITORY_ROOT
+            / "reporting/bioseq_benchmark_e2e/report_999999.json")
+        merger = REPOSITORY_ROOT / "bench/aggregate_e2e_algorithm_matrix.py"
+        run_receipt_id = "rr_" + "a" * 32
+        original_internal_file = build_worker._campaign_internal_regular_file
+
+        def verified_internal_file(path, label):
+            if Path(path) == report:
+                return report
+            return original_internal_file(path, label)
+
+        log = io.StringIO()
+        with mock.patch.object(
+            build_worker, "_campaign_internal_regular_file",
+            side_effect=verified_internal_file,
+        ), mock.patch.object(
+            build_worker, "_stream_subprocess", return_value=0,
+        ) as stream, mock.patch.object(build_worker, "_update_entry"):
+            build_worker._merge_algorithm_matrix_all_results(
+                mode="benchmark-e2e",
+                report_path=report,
+                bench_e2e_config=config,
+                environment={},
+                log_handle=log,
+                deadline=time.time() + 60,
+                run_receipt_id=run_receipt_id,
+            )
+
+        command = stream.call_args.args[0]
+        profile = build_worker._ALGORITHM_MATRIX_OBSERVED_RUNG_PROFILES[0]
+        self.assertEqual(command, [
+            sys.executable,
+            str(merger),
+            "validate-observed-rung-report",
+            "--manifest", profile["manifest"],
+            "--expected-campaign-digest", profile["campaign_digest"],
+            "--query-count", "2",
+            "--report", "reporting/bioseq_benchmark_e2e/report_999999.json",
+            "--config", config,
+            "--run-receipt-id", run_receipt_id,
+        ])
+        serialized = json.dumps(command)
+        for forbidden in (
+                "Q8_RESULTS.yaml", "ALL_RESULTS.yaml",
+                "ALL_RESULTS_TUPLES.yaml", "--all-results"):
+            self.assertNotIn(forbidden, serialized)
+        self.assertEqual(
+            stream.call_args.kwargs["phase"],
+            "algorithm_matrix_observed_rung_validation",
+        )
+
+
+class DarwinAlgorithmMatrixLaunchNiceTests(unittest.TestCase):
+    CONFIG = AlgorithmMatrixSingletonAuthorityTests.PROBE_SINGLETON
+
+    def test_explicit_e2e_priority_flag_is_boolean_and_opt_in(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config.json"
+            config.write_text(json.dumps({
+                "test_cases": {
+                    "future": {
+                        "data": {"require_nice_attestation": True},
+                    },
+                },
+            }), encoding="utf-8")
+            with mock.patch.object(
+                build_worker,
+                "_validated_benchmark_e2e_config_open_path",
+                return_value=str(config),
+            ):
+                self.assertTrue(
+                    build_worker._e2e_config_requests_nice_attestation(
+                        "future.json"))
+
+    def test_darwin_campaign_launch_establishes_and_logs_ni_zero(self):
+        for authority_name in ("q1024", "observed_rung"):
+            with self.subTest(authority=authority_name):
+                self._assert_darwin_campaign_launch_establishes_ni_zero(authority_name)
+
+    def _assert_darwin_campaign_launch_establishes_ni_zero(self, authority_name):
+        log = io.StringIO()
+        with mock.patch.object(
+            build_worker, "_algorithm_matrix_campaign_authority_status",
+            return_value=({"name": authority_name}, None),
+        ), mock.patch.object(
+            build_worker.host_platform, "system", return_value="Darwin",
+        ), mock.patch.object(
+            build_worker.os, "setpriority",
+        ) as setpriority, mock.patch.object(
+            build_worker.os, "getpriority", return_value=0,
+        ) as getpriority:
+            build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+                "benchmark-e2e", self.CONFIG, log)
+
+        setpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0, 0)
+        getpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0)
+        self.assertIn("worker_NI=0 verified", log.getvalue())
+        self.assertIn(
+            "postgres_backend_priority_requires_exact_e2e_observation=true",
+            log.getvalue(),
+        )
+
+    def test_darwin_explicit_e2e_attestation_establishes_ni_zero(self):
+        log = io.StringIO()
+        with mock.patch.object(
+            build_worker, "_algorithm_matrix_campaign_authority_status",
+            return_value=(None, None),
+        ), mock.patch.object(
+            build_worker, "_e2e_config_requests_nice_attestation",
+            return_value=True,
+        ), mock.patch.object(
+            build_worker.host_platform, "system", return_value="Darwin",
+        ), mock.patch.object(
+            build_worker.os, "setpriority",
+        ) as setpriority, mock.patch.object(
+            build_worker.os, "getpriority", return_value=0,
+        ) as getpriority:
+            build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+                "benchmark-e2e", "build/mcp/future.json", log)
+
+        setpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0, 0)
+        getpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0)
+        self.assertIn("authority=explicit_e2e_attestation", log.getvalue())
+
+    def test_darwin_campaign_launch_rejects_nonzero_nice(self):
+        with mock.patch.object(
+            build_worker, "_algorithm_matrix_campaign_authority_status",
+            return_value=({"name": "q8"}, None),
+        ), mock.patch.object(
+            build_worker.host_platform, "system", return_value="Darwin",
+        ), mock.patch.object(
+            build_worker.os, "setpriority",
+        ), mock.patch.object(
+            build_worker.os, "getpriority", return_value=1,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "verified worker NI=0"):
+                build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+                    "benchmark-e2e", self.CONFIG, io.StringIO())
+
+    def test_darwin_campaign_launch_rejects_priority_api_errors(self):
+        for api_name in ("setpriority", "getpriority"):
+            with self.subTest(api=api_name), mock.patch.object(
+                build_worker, "_algorithm_matrix_campaign_authority_status",
+                return_value=({"name": "q1024"}, None),
+            ), mock.patch.object(
+                build_worker.host_platform, "system", return_value="Darwin",
+            ), mock.patch.object(
+                build_worker.os, "setpriority",
+                side_effect=OSError("denied") if api_name == "setpriority" else None,
+            ), mock.patch.object(
+                build_worker.os, "getpriority",
+                side_effect=OSError("unavailable") if api_name == "getpriority" else None,
+                return_value=0,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "could not establish"):
+                    build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+                        "benchmark-e2e", self.CONFIG, io.StringIO())
+
+    def test_priority_gate_does_not_touch_non_campaign_or_non_darwin_paths(self):
+        for mode, authority, system_name in (
+            ("benchmark", {"name": "q1024"}, "Darwin"),
+            ("benchmark-e2e", None, "Darwin"),
+            ("benchmark-e2e", {"name": "q1024"}, "Linux"),
+        ):
+            with self.subTest(mode=mode, authority=authority, system=system_name), \
+                    mock.patch.object(
+                        build_worker, "_algorithm_matrix_campaign_authority_status",
+                        return_value=(authority, None),
+                    ), mock.patch.object(
+                        build_worker.host_platform, "system", return_value=system_name,
+                    ), mock.patch.object(
+                        build_worker,
+                        "_e2e_config_requests_nice_attestation",
+                        return_value=False,
+                    ), mock.patch.object(
+                        build_worker.os, "setpriority",
+                    ) as setpriority, mock.patch.object(
+                        build_worker.os, "getpriority",
+                    ) as getpriority:
+                build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+                    mode, self.CONFIG, io.StringIO())
+                setpriority.assert_not_called()
+                getpriority.assert_not_called()
+
+
 
 class OrdinaryBenchE2eFilterTests(unittest.TestCase):
     def test_omitted_filter_selects_exact_preexisting_e2e_suite(self):
@@ -464,6 +1646,7 @@ class UnitIntegrationQualificationTests(unittest.TestCase):
         )
         expected_command_counts = {
             "unit-integration": 4,
+            build_presets.ALL_ALPHABETS_UNIT_INTEGRATION_MODE: 4,
             "cache-unit": 5,
             "cache-integration": 1,
             "cache-bioseq-integration": 2,
@@ -485,10 +1668,7 @@ class UnitIntegrationQualificationTests(unittest.TestCase):
                 artifact_values[key] = str(path)
             for mode, expected_count in expected_command_counts.items():
                 with self.subTest(mode=mode):
-                    binary_dir = root / (
-                        "bioseq" if mode == "unit-integration"
-                        else "bioseq_caching"
-                    )
+                    binary_dir = root / build_presets.MODES[mode].binary_subdir
                     with mock.patch.object(
                         build_worker,
                         "_cache_native_artifacts",
@@ -517,6 +1697,16 @@ class UnitIntegrationQualificationTests(unittest.TestCase):
 
 class UnitIntegrationCacheIsolationTests(unittest.TestCase):
     def test_optional_component_mode_invariants_are_explicit(self):
+        self.assertEqual(
+            build_presets.MODES[
+                build_presets.ALL_ALPHABETS_UNIT_INTEGRATION_MODE
+            ].required_cache_variables,
+            {
+                "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+                "BIOSEQ_BUILD_WEBSITE": "OFF",
+                "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
+            },
+        )
         self.assertEqual(
             build_presets.MODES["unit-integration"].required_cache_variables,
             {
@@ -1517,6 +2707,28 @@ class RemoteActivityReservationTests(unittest.TestCase):
 
 class BuildReceiptWorkflowTests(unittest.TestCase):
     @staticmethod
+    def _inspect_receipt(
+        mode: str,
+        build_dir: Path,
+        *,
+        debug: bool,
+        preset: str,
+        receipt_id: str = "br_debug",
+    ) -> dict[str, object]:
+        details = build_presets.MODES[mode]
+        return {
+            "build_receipt_id": receipt_id,
+            "mode": mode,
+            "debug": debug,
+            "preset": preset,
+            "preset_family": details.preset_family,
+            "binary_subdir": details.binary_subdir,
+            "targets": list(details.targets),
+            "build_dir": str(build_dir),
+            "source_graph_fingerprint": "source-digest",
+        }
+
+    @staticmethod
     def _write_receipted_bench_command(build_dir: Path) -> Path:
         bin_dir = build_dir / "bioseq"
         bin_dir.mkdir(parents=True, exist_ok=True)
@@ -1546,6 +2758,10 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
         )
         self.assertIn(
             "reuse_build_receipt", inspect_schema["properties"])
+        self.assertIn(
+            "historical_artifact_only", inspect_schema["properties"])
+        self.assertFalse(
+            inspect_schema["properties"]["historical_artifact_only"]["default"])
 
     def test_status_schema_is_closed_and_accepts_empty_aggregate_request(self):
         status_schema = next(
@@ -1884,6 +3100,13 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
                 self.assertIsNone(error)
                 self.assertEqual(
                     observed["build_receipt_id"], "br_round_trip")
+                with mock.patch.object(
+                        build_worker, "_source_graph_fingerprint",
+                        return_value="changed-source-digest"):
+                    rejected, rejection = build_worker._validate_build_receipt(
+                        "br_round_trip", expected_mode="unit-integration")
+                self.assertIsNone(rejected)
+                self.assertIn("source graph no longer matches", rejection)
                 schema_mutations = {
                     "legacy": lambda value: value.update(
                         schema_version=value.pop("schema_revision")),
@@ -1977,6 +3200,9 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
                 root, hard_kill_deadline=10.0)
         self.assertIn((21, signal.SIGKILL), killed)
         self.assertIn(21, evidence["survivor_pids"])
+        self.assertFalse(evidence["cleanup_verified"])
+        self.assertEqual(
+            [item["pid"] for item in evidence["survivor_identities"]], [21])
 
     def test_artifact_authority_detects_extension_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2626,17 +3852,16 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
                 run_commands.call_args.kwargs["test_flags"], test_flags)
             subprocess_call.assert_not_called()
 
-    def test_inspect_uses_exact_debug_receipt_tree(self):
+    def test_inspect_accepts_unit_receipt_for_postgresql_bioseq(self):
         with tempfile.TemporaryDirectory() as temporary:
             build_dir = Path(temporary) / "debug-tree"
             build_dir.mkdir()
-            receipt = {
-                "build_receipt_id": "br_debug",
-                "debug": True,
-                "preset": "test-opt-debug",
-                "build_dir": str(build_dir),
-                "source_graph_fingerprint": "source-digest",
-            }
+            receipt = self._inspect_receipt(
+                "unit-integration",
+                build_dir,
+                debug=True,
+                preset="test-opt-debug",
+            )
             captured = {}
 
             def inspect_impl(**arguments):
@@ -2650,23 +3875,381 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
             ) as validate, mock.patch.object(
                 build_worker,
                 "_inspect_artifact_candidates",
-                return_value=("bioseq_unit_tests",),
+                return_value=("bioseq.dylib",),
             ), mock.patch.object(
                 build_worker, "_run_inspect_impl", side_effect=inspect_impl,
             ):
                 result = json.loads(build_worker.tool_inspect({
                     "function_name": "ksw",
-                    "target": "bioseq_unit_tests",
+                    "target": "postgresql_bioseq",
                     "reuse_build_receipt": "br_debug",
                 }))
         validate.assert_called_once_with(
             "br_debug",
-            expected_mode="unit-integration",
             expected_debug=None,
         )
         self.assertEqual(captured["build_dir"], build_dir)
+        self.assertEqual(captured["binary_subdir"], "bioseq")
         self.assertEqual(
             result["build_metadata"]["build_receipt_id"], "br_debug")
+        self.assertEqual(
+            captured["shared_target_names"],
+            ("bioseq_modules_nopg", "bioseq_highway_fixed_target",
+             "bioseq_runtime_core", "bioseq_pipeline_dispatch_owners"),
+        )
+        self.assertEqual(
+            result["build_metadata"]["mode"], "unit-integration")
+        self.assertEqual(result["build_metadata"]["preset_used"],
+                         "test-opt-debug")
+        self.assertEqual(result["build_metadata"]["preset_family"], "test")
+        self.assertTrue(result["build_metadata"]["test_indexes_expected"])
+
+    def test_inspect_receipt_rejects_target_not_owned_by_sealed_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary) / "debug-tree"
+            build_dir.mkdir()
+            receipt = self._inspect_receipt(
+                "unit-integration",
+                build_dir,
+                debug=True,
+                preset="test-opt-debug",
+            )
+            with mock.patch.object(
+                build_worker,
+                "_validate_build_receipt",
+                return_value=(receipt, None),
+            ) as validate, mock.patch.object(
+                build_worker, "_inspect_artifact_candidates",
+            ) as artifact_candidates, mock.patch.object(
+                build_worker, "_run_inspect_impl",
+            ) as inspect_impl:
+                result = json.loads(build_worker.tool_inspect({
+                    "function_name": "ksw",
+                    "target": "bioseq_benchmark",
+                    "reuse_build_receipt": "br_debug",
+                }))
+
+        validate.assert_called_once_with(
+            "br_debug",
+            expected_debug=None,
+        )
+        self.assertIn("does not own target 'bioseq_benchmark'", result["error"])
+        artifact_candidates.assert_not_called()
+        inspect_impl.assert_not_called()
+
+    def test_inspect_receipt_accepts_benchmark_fast_target_ownership(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary) / "debug-tree"
+            build_dir.mkdir()
+            receipt = self._inspect_receipt(
+                "benchmark-fast",
+                build_dir,
+                debug=True,
+                preset="bench-opt-debug",
+            )
+            captured = {}
+
+            def inspect_impl(**arguments):
+                captured.update(arguments)
+                return {"summary": {}}
+
+            with mock.patch.object(
+                build_worker,
+                "_validate_build_receipt",
+                return_value=(receipt, None),
+            ) as validate, mock.patch.object(
+                build_worker,
+                "_inspect_artifact_candidates",
+                return_value=("bioseq_benchmark",),
+            ), mock.patch.object(
+                build_worker, "_run_inspect_impl", side_effect=inspect_impl,
+            ):
+                result = json.loads(build_worker.tool_inspect({
+                    "function_name": "ksw",
+                    "target": "bioseq_benchmark",
+                    "reuse_build_receipt": "br_debug",
+                }))
+
+        validate.assert_called_once_with(
+            "br_debug",
+            expected_debug=None,
+        )
+        self.assertEqual(captured["build_dir"], build_dir)
+        self.assertEqual(captured["binary_subdir"], "bioseq")
+        self.assertEqual(result["build_metadata"]["mode"], "benchmark-fast")
+        self.assertEqual(result["build_metadata"]["preset_used"],
+                         "bench-opt-debug")
+        self.assertEqual(result["build_metadata"]["preset_family"], "core")
+        self.assertFalse(result["build_metadata"]["test_indexes_expected"])
+
+    def test_inspect_receipt_rejects_nondebug_and_explicit_debug_mismatch(
+            self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary) / "fast-tree"
+            build_dir.mkdir()
+            receipt = self._inspect_receipt(
+                "benchmark-fast",
+                build_dir,
+                debug=False,
+                preset="bench-opt",
+            )
+            with self.subTest(case="validated nondebug receipt"), \
+                    mock.patch.object(
+                        build_worker,
+                        "_validate_build_receipt",
+                        return_value=(receipt, None),
+                    ) as validate, mock.patch.object(
+                        build_worker, "_inspect_artifact_candidates",
+                    ) as artifact_candidates, mock.patch.object(
+                        build_worker, "_run_inspect_impl",
+                    ) as inspect_impl:
+                result = json.loads(build_worker.tool_inspect({
+                    "function_name": "ksw",
+                    "target": "bioseq_benchmark",
+                    "reuse_build_receipt": "br_debug",
+                }))
+                validate.assert_called_once_with(
+                    "br_debug",
+                    expected_debug=None,
+                )
+                self.assertIn("requires a debug build receipt", result["error"])
+                artifact_candidates.assert_not_called()
+                inspect_impl.assert_not_called()
+
+            mismatch = (
+                None,
+                "build receipt debug-tree mismatch: expected True, got False",
+            )
+            with self.subTest(case="explicit debug mismatch"), \
+                    mock.patch.object(
+                        build_worker,
+                        "_validate_build_receipt",
+                        return_value=mismatch,
+                    ) as validate, mock.patch.object(
+                        build_worker, "_inspect_artifact_candidates",
+                    ) as artifact_candidates, mock.patch.object(
+                        build_worker, "_run_inspect_impl",
+                    ) as inspect_impl:
+                result = json.loads(build_worker.tool_inspect({
+                    "function_name": "ksw",
+                    "target": "bioseq_benchmark",
+                    "debug": True,
+                    "reuse_build_receipt": "br_debug",
+                }))
+                validate.assert_called_once_with(
+                    "br_debug",
+                    expected_debug=True,
+                )
+                self.assertIn("debug-tree mismatch", result["error"])
+                artifact_candidates.assert_not_called()
+                inspect_impl.assert_not_called()
+
+    def test_inspect_historical_artifact_accepts_exact_nondebug_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary) / "fast-tree"
+            build_dir.mkdir()
+            receipt = self._inspect_receipt(
+                "benchmark-fast",
+                build_dir,
+                debug=False,
+                preset="bench-opt",
+            )
+            receipt["authorized_artifacts"] = [{
+                "relative_path": "bioseq/bioseq_benchmark",
+                "sha256": "sealed-by-validator",
+            }]
+            captured = {}
+
+            def inspect_impl(**arguments):
+                captured.update(arguments)
+                return {"summary": {}}
+
+            with mock.patch.object(
+                build_worker,
+                "_validate_build_receipt",
+                return_value=(receipt, None),
+            ) as validate, mock.patch.object(
+                build_worker,
+                "_inspect_artifact_candidates",
+                return_value=("bioseq_benchmark", "old_benchmark"),
+            ), mock.patch.object(
+                build_worker, "_run_inspect_impl", side_effect=inspect_impl,
+            ):
+                result = json.loads(build_worker.tool_inspect({
+                    "function_name": "scan_sorted_events",
+                    "target": "bioseq_benchmark",
+                    "reuse_build_receipt": "br_fast",
+                    "historical_artifact_only": True,
+                }))
+
+        validate.assert_called_once_with(
+            "br_fast",
+            expected_debug=None,
+            verify_source=False,
+        )
+        self.assertEqual(captured["build_dir"], build_dir)
+        self.assertEqual(captured["artifact_names"], ("bioseq_benchmark",))
+        self.assertFalse(captured["llc_on_bc"])
+        self.assertFalse(result["build_metadata"]["debug_tree_used"])
+        self.assertTrue(
+            result["build_metadata"]["historical_artifact_only"])
+        self.assertFalse(
+            result["build_metadata"]["current_worktree_source_verified"])
+        self.assertIn("historical artifact",
+                      result["build_metadata"]["artifact_scope"])
+        self.assertIn("current worktree not verified",
+                      result["build_metadata"]["source_scope"])
+
+    def test_inspect_historical_artifact_requires_receipt_and_target_artifact(
+            self):
+        without_receipt = json.loads(build_worker.tool_inspect({
+            "function_name": "scan_sorted_events",
+            "historical_artifact_only": True,
+        }))
+        self.assertIn("requires reuse_build_receipt", without_receipt["error"])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary) / "fast-tree"
+            build_dir.mkdir()
+            receipt = self._inspect_receipt(
+                "benchmark-fast",
+                build_dir,
+                debug=False,
+                preset="bench-opt",
+            )
+            receipt["authorized_artifacts"] = [{
+                "relative_path": "bioseq/unrelated_artifact",
+            }]
+            with mock.patch.object(
+                build_worker,
+                "_validate_build_receipt",
+                return_value=(receipt, None),
+            ), mock.patch.object(
+                build_worker,
+                "_inspect_artifact_candidates",
+                return_value=("bioseq_benchmark",),
+            ), mock.patch.object(
+                build_worker, "_run_inspect_impl",
+            ) as inspect_impl:
+                result = json.loads(build_worker.tool_inspect({
+                    "function_name": "scan_sorted_events",
+                    "target": "bioseq_benchmark",
+                    "reuse_build_receipt": "br_fast",
+                    "historical_artifact_only": True,
+                }))
+
+        self.assertIn("does not authorize an artifact", result["error"])
+        inspect_impl.assert_not_called()
+
+    def test_inspect_unit_receipt_keeps_cache_target_artifact_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary) / "debug-tree"
+            build_dir.mkdir()
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_BUILD_TYPE:STRING=RelWithDebInfo\n",
+                encoding="utf-8",
+            )
+            receipt = self._inspect_receipt(
+                "unit-integration",
+                build_dir,
+                debug=True,
+                preset="test-opt-debug",
+            )
+            captured = {}
+
+            def inspect_impl(**arguments):
+                captured.update(arguments)
+                return {"summary": {}}
+
+            with mock.patch.object(
+                build_worker,
+                "_validate_build_receipt",
+                return_value=(receipt, None),
+            ), mock.patch.object(
+                build_worker.host_platform, "system", return_value="Darwin",
+            ), mock.patch.object(
+                build_worker, "_run_inspect_impl", side_effect=inspect_impl,
+            ):
+                result = json.loads(build_worker.tool_inspect({
+                    "function_name": "ksw",
+                    "target": "postgresql_bioseq_cache",
+                    "reuse_build_receipt": "br_debug",
+                }))
+
+        self.assertEqual(captured["binary_subdir"], "bioseq_caching")
+        self.assertEqual(captured["artifact_names"], (
+            "artifacts/cache_production/RelWithDebInfo/bioseq_cache.dylib",
+            "bioseq_cache.dylib",
+        ))
+        self.assertEqual(result["build_metadata"]["mode"], "unit-integration")
+        self.assertEqual(result["build_metadata"]["preset_family"], "test")
+        self.assertTrue(result["build_metadata"]["test_indexes_expected"])
+
+    def test_inspect_without_receipt_keeps_target_default_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary) / "default-debug-tree"
+            build_dir.mkdir()
+            captured = {}
+
+            def inspect_impl(**arguments):
+                captured.update(arguments)
+                return {"summary": {}}
+
+            with mock.patch.object(
+                build_worker, "build_dir_for", return_value=build_dir,
+            ) as build_dir_for, mock.patch.object(
+                build_worker, "preset_for", return_value="bench-e2e-opt-debug",
+            ) as preset_for, mock.patch.object(
+                build_worker, "_validate_build_receipt",
+            ) as validate, mock.patch.object(
+                build_worker,
+                "_inspect_artifact_candidates",
+                return_value=("bioseq.dylib",),
+            ), mock.patch.object(
+                build_worker, "_run_inspect_impl", side_effect=inspect_impl,
+            ):
+                result = json.loads(build_worker.tool_inspect({
+                    "function_name": "ksw",
+                    "target": "postgresql_bioseq",
+                    "debug": True,
+                }))
+
+        validate.assert_not_called()
+        build_dir_for.assert_called_once_with("benchmark-e2e", True)
+        preset_for.assert_called_once_with("benchmark-e2e", True)
+        self.assertEqual(captured["build_dir"], build_dir)
+        self.assertEqual(captured["binary_subdir"], "bioseq")
+        self.assertNotIn("mode", result["build_metadata"])
+        self.assertEqual(result["build_metadata"]["preset_family"], "e2e")
+        self.assertFalse(result["build_metadata"]["test_indexes_expected"])
+
+    def test_inspect_default_modes_directly_own_their_target_names(self):
+        shared_core = ("bioseq_modules_nopg", "bioseq_runtime_core")
+        shared_highway = ("bioseq_modules_nopg", "bioseq_highway_fixed_target",
+                          "bioseq_runtime_core")
+        expected_owners = {
+            "bioseq_benchmark": shared_highway,
+            "bioseq_io_benchmark": shared_core,
+            "bioseq_unit_tests": shared_highway,
+            "bioseq_integration_tests": shared_highway,
+            "bioseq_benchmark_e2e_contract_tests": shared_core,
+            "bioseq_benchmark_framework_contract_tests": shared_core,
+            "postgresql_bioseq": shared_highway + (
+                "bioseq_pipeline_dispatch_owners",),
+        }
+        for target, definition in build_worker.INSPECT_TARGETS.items():
+            with self.subTest(target=target, mode=definition.mode):
+                self.assertIn(
+                    target,
+                    build_presets.MODES[definition.mode].targets,
+                )
+                if target in expected_owners:
+                    self.assertEqual(
+                        definition.shared_target_names, expected_owners[target])
+                if target != "postgresql_bioseq":
+                    self.assertNotIn(
+                        "bioseq_pipeline_dispatch_owners",
+                        definition.shared_target_names)
 
 
 class GuardedProcessTrackerTests(unittest.TestCase):
@@ -2757,6 +4340,104 @@ class GuardedProcessTrackerTests(unittest.TestCase):
             live = tracker.refresh()
         self.assertEqual({process.pid for process in live.values()}, {30})
 
+    def test_verified_service_closure_is_preserved_but_unknown_child_remains(self):
+        client = self._identity(35, 1, 35, 35, "client", "benchmark")
+        postmaster = self._identity(36, 35, 36, 36, "pg", "postgres")
+        checkpointer = self._identity(
+            37, 36, 36, 36, "checkpointer", "postgres: checkpointer")
+        unknown = self._identity(38, 35, 38, 38, "unknown", "helper")
+        boundary = process_state._GuardedServiceBoundary(
+            verified_root=postmaster,
+            quarantined_root=None,
+            evidence={"runtime_identity_verified": True},
+        )
+        tracker = process_state._GuardedProcessTracker(
+            client,
+            "marker",
+            service_boundary_provider=lambda *unused: boundary,
+        )
+        snapshot = {
+            value.pid: value
+            for value in (client, postmaster, checkpointer, unknown)
+        }
+        with mock.patch.object(
+            process_state,
+            "_guarded_process_snapshot",
+            return_value=(snapshot, set(snapshot)),
+        ):
+            live = tracker.refresh()
+        self.assertEqual({item.pid for item in live.values()}, {35, 38})
+        self.assertEqual(
+            {item.pid for item in tracker.last_preserved_service.values()},
+            {36, 37},
+        )
+
+    def test_unverified_service_candidate_is_quarantined_not_signalled(self):
+        client = self._identity(45, 1, 45, 45, "client", "benchmark")
+        # Deliberately share the client's process group: the service boundary
+        # must force exact-PID signaling instead of killpg(45).
+        postmaster = self._identity(46, 45, 45, 46, "pg", "postgres")
+        unknown = self._identity(47, 45, 47, 47, "unknown", "helper")
+        boundary = process_state._GuardedServiceBoundary(
+            verified_root=None,
+            quarantined_root=postmaster,
+            evidence={"runtime_identity_verified": False},
+        )
+        tracker = process_state._GuardedProcessTracker(
+            client,
+            "marker",
+            service_boundary_provider=lambda *unused: boundary,
+        )
+        snapshot = {
+            value.pid: value for value in (client, postmaster, unknown)
+        }
+        with mock.patch.object(
+            process_state,
+            "_guarded_process_snapshot",
+            return_value=(snapshot, set(snapshot)),
+        ), mock.patch.object(process_state.os, "killpg") as kill_group, \
+                mock.patch.object(process_state.os, "kill") as kill_pid:
+            live = tracker.refresh()
+            process_state._signal_guarded_processes(
+                live, signal.SIGTERM, snapshot=snapshot)
+        self.assertEqual(
+            {item.pid for item in tracker.last_quarantined_service.values()},
+            {46},
+        )
+        self.assertNotIn(46, [call.args[0] for call in kill_group.call_args_list])
+        self.assertNotIn(45, [call.args[0] for call in kill_group.call_args_list])
+        self.assertNotIn(46, [call.args[0] for call in kill_pid.call_args_list])
+
+    def test_strict_snapshot_accepts_only_proven_transient_exit(self):
+        output = (
+            "10 1 10 10 Thu Sep 10 03:00:00 2026 ps -axo\n"
+            "11 1 11 11 Thu Sep 10 03:00:01 2026 worker\n"
+        )
+        completed = subprocess.CompletedProcess([], 0, output, "")
+
+        def pgid(pid):
+            if pid == 10:
+                raise ProcessLookupError()
+            return pid
+
+        with mock.patch.object(
+            process_state.subprocess, "run", return_value=completed,
+        ), mock.patch.object(
+            process_state.os, "getpgid", side_effect=pgid,
+        ), mock.patch.object(process_state.os, "getsid", return_value=11):
+            snapshot = process_state._process_snapshot(
+                time.time() + 1, require_complete=True)
+        self.assertEqual(set(snapshot), {11})
+
+        with mock.patch.object(
+            process_state.subprocess, "run", return_value=completed,
+        ), mock.patch.object(
+            process_state.os, "getpgid", side_effect=PermissionError("denied"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "PermissionError"):
+                process_state._process_snapshot(
+                    time.time() + 1, require_complete=True)
+
     def test_termination_discovers_group_created_after_term_snapshot(self):
         root = self._identity(40, 1, 40, 40, "root-start", "cmake")
         child = self._identity(41, 1, 41, 41, "child-start", "clang")
@@ -2778,7 +4459,7 @@ class GuardedProcessTrackerTests(unittest.TestCase):
         with mock.patch.object(
             process_state,
             "_guarded_process_snapshot",
-            side_effect=lambda marker, ownership_root=None: next(snapshots),
+            side_effect=lambda marker, ownership_root=None, **options: next(snapshots),
         ), mock.patch.object(
             process_state,
             "_guarded_worker_validation",
@@ -2856,6 +4537,26 @@ class GuardedProcessTrackerTests(unittest.TestCase):
                     deadline_clock=lambda: 10.0,
                 )
         popen.assert_not_called()
+
+    def test_fallback_group_grace_stays_inside_hard_deadline(self):
+        signals = []
+        with mock.patch.object(
+                process_state.os, "getpgid", return_value=71), \
+                mock.patch.object(
+                    process_state.os,
+                    "killpg",
+                    side_effect=lambda pgid, sig: signals.append((pgid, sig)),
+                ), mock.patch.object(process_state.time, "sleep") as sleep:
+            process_state._kill_pgroup(
+                71,
+                hard_kill_deadline=10.0,
+                clock=lambda: 10.0,
+            )
+        self.assertEqual(
+            signals,
+            [(71, signal.SIGTERM), (71, signal.SIGKILL)],
+        )
+        sleep.assert_not_called()
 
     def test_guard_preflight_cannot_launch_after_deadline(self):
         now = [9.0]
@@ -3035,6 +4736,114 @@ class GuardedProcessTrackerTests(unittest.TestCase):
         self.assertTrue(observed["cleanup_unverified"])
         self.assertEqual(observed["termination_evidence"], evidence)
 
+    def test_unexpected_worker_death_preserves_postgres_cleanup_block(self):
+        entry = {
+            "status": "running",
+            "pid": 909,
+            "started_at": 1.0,
+            "postgres_cleanup_unverified": True,
+            "cleanup_unverified": True,
+            "postgres_cleanup_evidence": {
+                "cleanup_verified": False,
+                "reason": "armed before E2E client launch",
+            },
+        }
+        state = {"benchmark-e2e": entry}
+        with mock.patch.object(
+                process_state, "_is_pid_alive", return_value=False), \
+                mock.patch.object(process_state, "_save_state"):
+            observed = process_state._refresh(state, "benchmark-e2e")
+        self.assertEqual(observed["status"], "aborted")
+        self.assertTrue(observed["cleanup_unverified"])
+        self.assertTrue(observed["postgres_cleanup_unverified"])
+        self.assertTrue(
+            observed["postgres_cleanup_evidence"]["unexpected_worker_exit"])
+
+    def test_q1024_postgres_cleanup_preserves_process_uncertainty_or(self):
+        owner = "bioseq-q1024-" + "a" * 32
+        cases = (
+            (
+                "prior uncertainty",
+                {"cleanup_unverified_before_postgres_owner": True},
+                True,
+            ),
+            (
+                "unverified termination",
+                {
+                    "cleanup_unverified_before_postgres_owner": False,
+                    "termination_evidence": {
+                        "cleanup_verified": False,
+                        "survivor_pids": [42],
+                    },
+                },
+                True,
+            ),
+            (
+                "sticky process uncertainty survives later clean evidence",
+                {
+                    "cleanup_unverified_before_postgres_owner": False,
+                    "process_cleanup_unverified": True,
+                    "termination_evidence": {
+                        "cleanup_verified": True,
+                        "survivor_pids": [],
+                        "marker_survivor_pids": [],
+                        "survivor_identities": [],
+                    },
+                },
+                True,
+            ),
+            (
+                "fully verified",
+                {
+                    "cleanup_unverified_before_postgres_owner": False,
+                    "termination_evidence": {
+                        "cleanup_verified": True,
+                        "survivor_pids": [],
+                        "marker_survivor_pids": [],
+                        "survivor_identities": [],
+                    },
+                },
+                False,
+            ),
+        )
+        for name, extra_state, expected_unverified in cases:
+            with self.subTest(name=name):
+                state_entry = {
+                    "postgres_backend_owner_started": True,
+                    "postgres_backend_identity": {
+                        "application_name": owner,
+                        "database": "bioseq",
+                        "user": "postgres",
+                    },
+                    "postgres_cleanup_unverified": True,
+                    "cleanup_unverified": True,
+                    **extra_state,
+                }
+                with mock.patch.object(
+                    build_worker, "_load_state",
+                    return_value={"benchmark-e2e": state_entry},
+                ), mock.patch.object(
+                    build_worker, "_cleanup_owned_postgresql_backends",
+                    return_value={"cleanup_verified": True},
+                ), mock.patch.object(
+                    build_worker, "_update_entry",
+                ) as update:
+                    verified = (
+                        build_worker._cleanup_armed_q1024_postgresql_owner(
+                            mode="benchmark-e2e",
+                            active_build_dir=Path("/tmp/receipt-tree"),
+                            active_preset="bench-e2e-opt",
+                            postgres_application_name=owner,
+                            log_handle=io.StringIO(),
+                            cleanup_deadline=time.time() + 60,
+                        ))
+                self.assertTrue(verified)
+                terminal = update.call_args.kwargs
+                self.assertFalse(terminal["postgres_backend_owner_started"])
+                self.assertFalse(terminal["postgres_cleanup_unverified"])
+                self.assertEqual(
+                    terminal["cleanup_unverified"], expected_unverified)
+
     def test_unverified_cleanup_requires_successful_empty_ownership_sweep(self):
         entry = {
             "cleanup_unverified": True,
@@ -3056,6 +4865,928 @@ class GuardedProcessTrackerTests(unittest.TestCase):
             cleared = build_worker._unverified_guard_cleanup({"benchmark": entry})
         self.assertIsNone(cleared)
 
+        postgres_entry = {
+            **entry,
+            "postgres_cleanup_unverified": True,
+        }
+        with mock.patch.object(
+                build_worker,
+                "_guarded_process_snapshot",
+                side_effect=AssertionError("process sweep cannot prove PG cleanup")):
+            postgres_blocked = build_worker._unverified_guard_cleanup(
+                {"benchmark-e2e": postgres_entry})
+        self.assertIn("PostgreSQL backend cleanup", postgres_blocked)
+
+
+class Q1024ServiceLifecycleTests(unittest.TestCase):
+    @staticmethod
+    def _identity(pid, ppid, pgid, session, started, command):
+        return process_state._ProcessIdentity(
+            pid, ppid, pgid, session, started, command)
+
+    def _legacy_entry(self, build_dir: Path) -> dict[str, object]:
+        token = "a" * 32
+        application = f"bioseq-q1024-{token}"
+        identities = {
+            "worker_process_identity": self._identity(
+                101, 1, 101, 101, "worker", "server.py").__dict__,
+            "active_process_identity": self._identity(
+                102, 101, 102, 102, "client", "bioseq_benchmark_e2e").__dict__,
+            "q1024_watchdog_process_identity": self._identity(
+                103, 1, 103, 103, "watchdog", "q1024_watchdog.py").__dict__,
+        }
+        return {
+            "mode": "benchmark-e2e",
+            "status": "aborted",
+            "step": "aborted",
+            "exit_code": None,
+            "report_files": ["/tmp/report274.json"],
+            "q1024_run_token": token,
+            "postgres_application_name": application,
+            "postgres_backend_owner_started": True,
+            "postgres_cleanup_unverified": True,
+            "process_cleanup_unverified": True,
+            "cleanup_unverified": True,
+            "postgres_backend_identity": {
+                "application_name": application,
+                "database": "bioseq",
+                "user": "postgres",
+            },
+            "bench_e2e_config": "sealed-q1024.json",
+            "reuse_build_receipt": "br_build33",
+            "build_dir": str(build_dir),
+            "preset": "bench-e2e-opt",
+            "preset_family": "e2e",
+            **identities,
+        }
+
+    def test_persisted_boundary_context_or_token_mismatch_quarantines(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            data_dir = root / "data"
+            data_dir.mkdir()
+            postgres = root / "postgres"
+            dso = root / "bioseq.dylib"
+            postgres.write_bytes(b"postgres")
+            dso.write_bytes(b"dso")
+            client = self._identity(200, 100, 200, 200, "client", "benchmark")
+            worker = self._identity(100, 1, 100, 100, "worker", "server")
+            postmaster = self._identity(201, 200, 201, 201, "pg", "postgres")
+            marker = "b" * 32
+            token = "c" * 32
+
+            def file_identity(path):
+                metadata = path.stat()
+                return {
+                    "path": str(path),
+                    "device": metadata.st_dev,
+                    "inode": metadata.st_ino,
+                    "size": metadata.st_size,
+                    "sha256": "d" * 64,
+                }
+
+            boundary = {
+                "schema_version": 1,
+                "mode": "benchmark-e2e",
+                "run_token": token,
+                "application_name": f"bioseq-q1024-{token}",
+                "client_process_identity": client.__dict__,
+                "guard_marker": marker,
+                "data_directory": {
+                    "path": str(data_dir),
+                    "device": data_dir.stat().st_dev,
+                    "inode": data_dir.stat().st_ino,
+                },
+                "postgres_executable_identity": file_identity(postgres),
+                "bioseq_dso_identity": file_identity(dso),
+                "postmaster_process_identity": postmaster.__dict__,
+                "runtime_identity_verified": True,
+                "verified_at": 1.0,
+            }
+            entry = {
+                "mode": "benchmark-e2e",
+                "q1024_run_token": token,
+                "postgres_application_name": f"bioseq-q1024-{token}",
+                "active_guard_marker": marker,
+                "active_process_identity": client.__dict__,
+                "worker_process_identity": worker.__dict__,
+                "postgres_service_boundary": boundary,
+            }
+            observed_wrong_session = self._identity(
+                201, 200, 201, 999, "pg", "postgres")
+            provider = process_state._persisted_guarded_service_boundary_provider(
+                entry)
+            self.assertIsNotNone(provider)
+            observation = provider(
+                {201: observed_wrong_session}, client, marker, None, {201})
+            self.assertIsNone(observation.verified_root)
+            self.assertEqual(observation.quarantined_root, postmaster)
+
+            bad_token_entry = copy.deepcopy(entry)
+            bad_token_entry["postgres_service_boundary"]["run_token"] = "e" * 32
+            bad_provider = (
+                process_state._persisted_guarded_service_boundary_provider(
+                    bad_token_entry))
+            bad_observation = bad_provider(
+                {201: postmaster}, client, marker, None, {201})
+            self.assertIsNone(bad_observation.verified_root)
+            self.assertEqual(bad_observation.quarantined_root, postmaster)
+
+    def test_runtime_provider_quarantines_first_observation_and_pid_gap(self):
+        token = "4" * 32
+        client = self._identity(300, 1, 300, 300, "client", "benchmark")
+        first_postmaster = self._identity(
+            301, 300, 301, 301, "pg1",
+            "/opt/postgresql/bin/postgres -D /tmp/one")
+        first_child = self._identity(
+            302, 301, 301, 301, "pg1-child", "postgres: checkpointer")
+        second_postmaster = self._identity(
+            303, 300, 303, 303, "pg2", "postmaster -D /tmp/two")
+        snapshot = {
+            item.pid: item
+            for item in (
+                client, first_postmaster, first_child, second_postmaster)
+        }
+        entry = {
+            "mode": "benchmark-e2e",
+            "status": "running",
+            "q1024_run_token": token,
+            "postgres_application_name": f"bioseq-q1024-{token}",
+            "postgres_backend_owner_started": True,
+        }
+        provider = postgres_runtime._PostgreSQLGuardServiceBoundaryProvider(
+            mode="benchmark-e2e",
+            run_token=token,
+            application_name=f"bioseq-q1024-{token}",
+            active_build_dir=Path("/tmp/build"),
+            active_preset="bench-e2e-opt",
+            log_handle=io.StringIO(),
+        )
+        with mock.patch.object(
+            postgres_runtime, "_load_state",
+            return_value={"benchmark-e2e": entry}), mock.patch.object(
+            provider, "_runtime_selection",
+            side_effect=RuntimeError("selection failed")):
+            observation = provider(
+                snapshot, client, "5" * 32, time.time() + 1,
+                set(snapshot))
+        self.assertIsNone(observation.verified_root)
+        self.assertEqual(
+            {item.pid for item in observation.quarantined_roots},
+            {301, 303},
+        )
+
+        with mock.patch.object(
+            postgres_runtime, "_load_state",
+            return_value={"benchmark-e2e": entry}), mock.patch.object(
+            provider, "_runtime_selection",
+            return_value=("/tmp/data", mock.sentinel.postgres,
+                          mock.sentinel.dso)), mock.patch.object(
+            postgres_runtime, "_postgresql_postmaster_pid",
+            side_effect=RuntimeError("postmaster.pid missing")):
+            observation = provider(
+                snapshot, client, "5" * 32, time.time() + 1,
+                set(snapshot))
+        self.assertIsNone(observation.verified_root)
+        self.assertEqual(
+            {item.pid for item in observation.quarantined_roots},
+            {301, 303},
+        )
+
+    def test_provider_exception_terminates_exact_root_and_quarantines_service(
+            self):
+        client = self._identity(310, 1, 310, 310, "client", "benchmark")
+        postmaster = self._identity(
+            311, 310, 311, 311, "pg", "/opt/bin/postgres -D /tmp/data")
+        tracker = process_state._GuardedProcessTracker(
+            client,
+            "6" * 32,
+            service_boundary_provider=mock.Mock(
+                side_effect=KeyError("provider failed")),
+        )
+        calls = [0]
+        now = [0.0]
+        group_signals = []
+        direct_signals = []
+
+        def snapshot(marker, ownership_root=None, **options):
+            calls[0] += 1
+            if calls[0] == 1:
+                return (
+                    {client.pid: client, postmaster.pid: postmaster},
+                    {client.pid, postmaster.pid},
+                )
+            return ({postmaster.pid: postmaster}, {postmaster.pid})
+
+        def sleep(duration):
+            now[0] += max(duration, 0.1)
+
+        with mock.patch.object(
+            process_state, "_guarded_process_snapshot",
+            side_effect=snapshot,
+        ), mock.patch.object(
+            process_state, "_guarded_worker_validation",
+            return_value=({}, None),
+        ), mock.patch.object(
+            process_state.os, "killpg",
+            side_effect=lambda pgid, sig: group_signals.append((pgid, sig)),
+        ), mock.patch.object(
+            process_state.os, "kill",
+            side_effect=lambda pid, sig: direct_signals.append((pid, sig)),
+        ), mock.patch.object(
+            process_state, "BUILD_TIMEOUT_TERM_GRACE_SEC", 0.1,
+        ):
+            with self.assertRaises(
+                process_state._GuardedTerminationError,
+            ) as raised:
+                process_state._terminate_guarded_process_tree(
+                    tracker,
+                    hard_kill_deadline=0.5,
+                    state_mode="benchmark-e2e",
+                    clock=lambda: now[0],
+                    sleeper=sleep,
+                )
+
+        self.assertIn((310, signal.SIGTERM), group_signals)
+        self.assertIn((310, signal.SIGTERM), direct_signals)
+        self.assertNotIn(311, [pid for pid, unused in group_signals])
+        self.assertNotIn(311, [pid for pid, unused in direct_signals])
+        self.assertFalse(raised.exception.evidence["cleanup_verified"])
+        self.assertEqual(raised.exception.evidence["survivor_pids"], [311])
+        self.assertEqual(
+            {item.pid for item in tracker.last_quarantined_service.values()},
+            {311},
+        )
+        self.assertTrue(
+            tracker.last_service_boundary_evidence[
+                "provider_exception_quarantine"])
+        reused_client = self._identity(
+            310, 1, 310, 310, "reused-client", "benchmark")
+        self.assertEqual(
+            process_state._provider_exception_quarantine_roots(
+                {310: reused_client}, {310}, client),
+            (reused_client,),
+        )
+        with mock.patch.object(
+            process_state, "_process_snapshot",
+            return_value={310: client, 311: postmaster},
+        ):
+            groups, evidence = process_state._validated_process_tree(
+                client,
+                deadline=time.time() + 1,
+                guard_marker="6" * 32,
+                service_boundary_provider=mock.Mock(
+                    side_effect=KeyError("provider failed")),
+            )
+        self.assertEqual(set(groups), {310})
+        self.assertEqual(
+            [item["pid"]
+             for item in evidence["quarantined_service_identities"]],
+            [311],
+        )
+
+    def test_provider_exception_latch_blocks_empty_cleanup_success(self):
+        client = self._identity(312, 1, 312, 312, "client", "benchmark")
+        tracker = process_state._GuardedProcessTracker(
+            client,
+            "7" * 32,
+            service_boundary_provider=mock.Mock(
+                side_effect=KeyError("provider failed")),
+        )
+        calls = [0]
+        now = [0.0]
+        direct_signals = []
+
+        def snapshot(marker, ownership_root=None, **options):
+            calls[0] += 1
+            if calls[0] == 1:
+                return ({client.pid: client}, {client.pid})
+            return ({}, set())
+
+        def sleep(duration):
+            now[0] += max(duration, 0.1)
+
+        with mock.patch.object(
+            process_state, "_guarded_process_snapshot", side_effect=snapshot,
+        ), mock.patch.object(
+            process_state, "_guarded_worker_validation",
+            return_value=({}, None),
+        ), mock.patch.object(
+            process_state.os, "killpg",
+        ), mock.patch.object(
+            process_state.os, "kill",
+            side_effect=lambda pid, sig: direct_signals.append((pid, sig)),
+        ), mock.patch.object(
+            process_state, "BUILD_TIMEOUT_TERM_GRACE_SEC", 0.1,
+        ):
+            with self.assertRaises(
+                process_state._GuardedTerminationError,
+            ) as raised:
+                process_state._terminate_guarded_process_tree(
+                    tracker,
+                    hard_kill_deadline=0.5,
+                    state_mode="benchmark-e2e",
+                    clock=lambda: now[0],
+                    sleeper=sleep,
+                )
+        self.assertIn((312, signal.SIGTERM), direct_signals)
+        self.assertEqual(raised.exception.evidence["survivor_pids"], [])
+        self.assertTrue(
+            raised.exception.evidence["service_boundary_failed"])
+        self.assertFalse(raised.exception.evidence["cleanup_verified"])
+
+        with mock.patch.object(
+            process_state, "_process_snapshot",
+            side_effect=[{312: client}, {312: client}, {}],
+        ), mock.patch.object(
+            process_state.os, "killpg",
+        ), mock.patch.object(
+            process_state.os, "kill",
+        ), mock.patch.object(
+            process_state.time, "time",
+            side_effect=[0.0, 0.0, 10.0, 10.0, 10.0],
+        ):
+            evidence = process_state._terminate_validated_process_tree(
+                client,
+                hard_kill_deadline=10.0,
+                guard_marker="7" * 32,
+                service_boundary_provider=mock.Mock(
+                    side_effect=KeyError("provider failed")),
+            )
+        self.assertTrue(evidence["service_boundary_failed"])
+        self.assertFalse(evidence["cleanup_verified"])
+
+    def test_initial_classifier_protects_service_after_snapshot_failure(self):
+        client = self._identity(313, 1, 313, 313, "client", "benchmark")
+        postmaster = self._identity(
+            314, 313, 314, 314, "pg", "postgres -D /tmp/q1024")
+        initial_provider = (
+            postgres_runtime._postgresql_recovery_service_boundary_provider({
+                "mode": "benchmark-e2e",
+                "postgres_backend_owner_started": True,
+            }))
+        self.assertIsNotNone(initial_provider)
+        full_provider = mock.Mock()
+        fake_process = mock.Mock(pid=313)
+        fake_process.stdout = mock.Mock()
+        snapshots = [0]
+        now = [0.0]
+        group_signals = []
+        direct_signals = []
+
+        def clock():
+            # The cleanup reserve below is 20 ms.  Advancing 500 ms on each
+            # clock read exhausts it before the post-TERM snapshot can run.
+            now[0] += 0.001
+            return now[0]
+
+        def snapshot(marker, ownership_root=None, **options):
+            snapshots[0] += 1
+            if snapshots[0] == 1:
+                return ({}, set())
+            if snapshots[0] == 2:
+                raise RuntimeError("initial snapshot failed")
+            if snapshots[0] == 3:
+                return (
+                    {313: client, 314: postmaster},
+                    {313, 314},
+                )
+            return ({314: postmaster}, {314})
+
+        with tempfile.NamedTemporaryFile(mode="w+") as log_handle, \
+                mock.patch.object(
+                    process_state, "_load_state",
+                    return_value={
+                        "benchmark-e2e": {"build_dir": "/tmp/guarded"},
+                    },
+                ), mock.patch.object(
+                    process_state, "_guarded_process_snapshot",
+                    side_effect=snapshot,
+                ), mock.patch.object(
+                    process_state, "_capture_process_identity",
+                    return_value=client,
+                ), mock.patch.object(
+                    process_state.subprocess, "Popen",
+                    return_value=fake_process,
+                ), mock.patch.object(
+                    process_state, "_guarded_worker_validation",
+                    return_value=({}, None),
+                ), mock.patch.object(
+                    process_state.os, "killpg",
+                    side_effect=lambda pgid, sig: group_signals.append(
+                        (pgid, sig)),
+                ), mock.patch.object(
+                    process_state.os, "kill",
+                    side_effect=lambda pid, sig: direct_signals.append(
+                        (pid, sig)),
+                ), mock.patch.object(
+                    process_state, "_update_entry",
+                ), mock.patch.object(
+                    process_state, "BUILD_TIMEOUT_TERM_GRACE_SEC", 0.01,
+                ):
+            with self.assertRaises(
+                process_state._GuardedTerminationError,
+            ) as raised:
+                process_state._stream_subprocess(
+                    ["benchmark"],
+                    log_handle,
+                    deadline=3.0,
+                    hard_kill_deadline=3.5,
+                    state_mode="benchmark-e2e",
+                    require_verified_termination=True,
+                    service_boundary_provider=full_provider,
+                    initial_service_boundary_provider=initial_provider,
+                    deadline_clock=clock,
+                )
+        self.assertIn((313, signal.SIGTERM), group_signals)
+        self.assertIn((313, signal.SIGTERM), direct_signals)
+        self.assertNotIn(314, [pid for pid, unused in group_signals])
+        self.assertNotIn(314, [pid for pid, unused in direct_signals])
+        self.assertFalse(raised.exception.evidence["cleanup_verified"])
+        self.assertEqual(raised.exception.evidence["survivor_pids"], [314])
+        full_provider.assert_not_called()
+
+    def test_provider_failure_blocks_normal_client_exit(self):
+        client = self._identity(315, 1, 315, 315, "client", "benchmark")
+        initial_provider = (
+            postgres_runtime._postgresql_recovery_service_boundary_provider({
+                "mode": "benchmark-e2e",
+                "postgres_backend_owner_started": True,
+            }))
+        self.assertIsNotNone(initial_provider)
+        full_provider = mock.Mock(side_effect=KeyError("provider failed"))
+        fake_process = mock.Mock(pid=315)
+        fake_process.stdout = mock.Mock()
+        fake_process.stdout.fileno.return_value = 99
+        fake_process.poll.return_value = 0
+        fake_process.wait.return_value = 0
+        snapshots = [0]
+        now = [0.0]
+
+        def clock():
+            now[0] += 1.0
+            return now[0]
+
+        def snapshot(marker, ownership_root=None, **options):
+            snapshots[0] += 1
+            if snapshots[0] == 1:
+                return ({}, set())
+            if snapshots[0] == 2:
+                return ({315: client}, {315})
+            return ({}, set())
+
+        with tempfile.NamedTemporaryFile(mode="w+") as log_handle, \
+                mock.patch.object(
+                    process_state, "_load_state",
+                    return_value={
+                        "benchmark-e2e": {"build_dir": "/tmp/guarded"},
+                    },
+                ), mock.patch.object(
+                    process_state, "_guarded_process_snapshot",
+                    side_effect=snapshot,
+                ), mock.patch.object(
+                    process_state, "_capture_process_identity",
+                    return_value=client,
+                ), mock.patch.object(
+                    process_state.subprocess, "Popen",
+                    return_value=fake_process,
+                ), mock.patch.object(
+                    process_state.select, "select",
+                    return_value=([], [], []),
+                ), mock.patch.object(
+                    process_state, "_guarded_worker_validation",
+                    return_value=({}, None),
+                ), mock.patch.object(
+                    process_state.os, "killpg",
+                ), mock.patch.object(
+                    process_state.os, "kill",
+                ), mock.patch.object(
+                    process_state, "_update_entry",
+                ):
+            with self.assertRaises(
+                process_state._GuardedTerminationError,
+            ) as raised:
+                process_state._stream_subprocess(
+                    ["benchmark"],
+                    log_handle,
+                    deadline=5.0,
+                    hard_kill_deadline=6.0,
+                    state_mode="benchmark-e2e",
+                    require_verified_termination=True,
+                    service_boundary_provider=full_provider,
+                    initial_service_boundary_provider=initial_provider,
+                    deadline_clock=clock,
+                )
+        self.assertGreaterEqual(full_provider.call_count, 1)
+        self.assertEqual(raised.exception.evidence["survivor_pids"], [])
+        self.assertTrue(
+            raised.exception.evidence["service_boundary_failed"])
+        self.assertFalse(raised.exception.evidence["cleanup_verified"])
+
+    def test_dead_worker_without_persisted_boundary_quarantines_postmasters(self):
+        token = "7" * 32
+        client = self._identity(320, 100, 320, 320, "client", "benchmark")
+        postmaster = self._identity(
+            321, 320, 321, 321, "pg", "postgres -D /tmp/data")
+        entry = {
+            "mode": "benchmark-e2e",
+            "q1024_run_token": token,
+            "postgres_application_name": f"bioseq-q1024-{token}",
+            "postgres_backend_owner_started": True,
+        }
+        provider = (
+            postgres_runtime._postgresql_recovery_service_boundary_provider(
+                entry))
+        self.assertIsNotNone(provider)
+        observation = provider(
+            {321: postmaster}, client, "8" * 32, time.time() + 1, {321})
+        self.assertIsNone(observation.verified_root)
+        self.assertEqual(
+            {item.pid for item in observation.quarantined_roots}, {321})
+
+    def test_verifier_waits_for_exact_client_arm_and_rejects_stale_token(self):
+        token = "9" * 32
+        marker = "a" * 32
+        client = self._identity(330, 100, 330, 330, "client", "benchmark")
+        shell = self._identity(331, 330, 330, 330, "shell", "sh -c")
+        verifier = self._identity(
+            332, 331, 330, 330, "verifier", "postgres_runtime.py")
+        base_entry = {
+            "mode": "benchmark-e2e",
+            "status": "running",
+            "q1024_run_token": token,
+            "postgres_application_name": f"bioseq-q1024-{token}",
+            "postgres_backend_owner_started": True,
+        }
+        stale_arm = {
+            **base_entry,
+            "active_guard_marker": "b" * 32,
+            "active_process_identity": client.__dict__,
+        }
+        exact_arm = {
+            **base_entry,
+            "active_guard_marker": marker,
+            "active_process_identity": client.__dict__,
+        }
+        now = [0.0]
+
+        def sleep(duration):
+            now[0] += duration
+
+        with mock.patch.object(
+            postgres_runtime, "_load_state",
+            side_effect=[
+                {"benchmark-e2e": stale_arm},
+                {"benchmark-e2e": exact_arm},
+            ]), mock.patch.object(
+            postgres_runtime, "_process_snapshot",
+            return_value={330: client, 331: shell, 332: verifier},
+        ) as snapshot, mock.patch.object(
+            postgres_runtime.os, "getpid", return_value=332):
+            observed = postgres_runtime._await_q1024_client_boundary_arm(
+                mode="benchmark-e2e",
+                run_token=token,
+                application_name=f"bioseq-q1024-{token}",
+                guard_marker=marker,
+                clock=lambda: now[0],
+                wall_clock=lambda: 100.0,
+                sleeper=sleep,
+            )
+        self.assertEqual(observed, client)
+        snapshot.assert_called_once()
+
+        stale_token = {**exact_arm, "q1024_run_token": "c" * 32}
+        with mock.patch.object(
+            postgres_runtime, "_load_state",
+            return_value={"benchmark-e2e": stale_token}), mock.patch.object(
+            postgres_runtime, "_process_snapshot") as snapshot:
+            with self.assertRaisesRegex(RuntimeError, "stale"):
+                postgres_runtime._await_q1024_client_boundary_arm(
+                    mode="benchmark-e2e",
+                    run_token=token,
+                    application_name=f"bioseq-q1024-{token}",
+                    guard_marker=marker,
+                )
+        snapshot.assert_not_called()
+
+    def test_runtime_cli_arms_client_before_postmaster_verification(self):
+        token = "d" * 32
+        marker = "e" * 32
+        client = self._identity(340, 1, 340, 340, "client", "benchmark")
+        postmaster = self._identity(341, 340, 341, 341, "pg", "postgres")
+        order = []
+
+        def arm(**unused):
+            order.append("arm")
+            return client
+
+        def verify(*unused):
+            order.append("verify")
+            return postmaster
+
+        def evidence(**unused):
+            order.append("evidence")
+            return {"runtime_identity_verified": True}
+
+        def publish(*unused):
+            order.append("publish")
+            return True
+
+        arguments = [
+            "verify-postgresql-runtime-identity",
+            "--data-dir", "/tmp/q1024-data",
+            "--active-preset", "bench-e2e-opt",
+            "--postgres-path", "/tmp/postgres",
+            "--postgres-device", "1",
+            "--postgres-inode", "2",
+            "--postgres-size", "3",
+            "--postgres-sha256", "f" * 64,
+            "--bioseq-dso-path", "/tmp/bioseq.dylib",
+            "--bioseq-dso-device", "4",
+            "--bioseq-dso-inode", "5",
+            "--bioseq-dso-size", "6",
+            "--bioseq-dso-sha256", "0" * 64,
+            "--boundary-mode", "benchmark-e2e",
+            "--boundary-run-token", token,
+            "--boundary-application-name", f"bioseq-q1024-{token}",
+        ]
+        with mock.patch.dict(
+            os.environ, {process_state.BUILD_GUARD_ENV_KEY: marker}, clear=False,
+        ), mock.patch.object(
+            postgres_runtime, "_await_q1024_client_boundary_arm",
+            side_effect=arm,
+        ), mock.patch.object(
+            postgres_runtime, "_verify_postgresql_runtime_identity",
+            side_effect=verify,
+        ), mock.patch.object(
+            postgres_runtime, "_postgresql_service_boundary_evidence",
+            side_effect=evidence,
+        ), mock.patch.object(
+            postgres_runtime, "_publish_q1024_postgresql_service_boundary",
+            side_effect=publish,
+        ):
+            self.assertEqual(
+                postgres_runtime._postgresql_runtime_identity_cli(arguments), 0)
+        self.assertEqual(order, ["arm", "verify", "evidence", "publish"])
+
+    def test_q1024_nonzero_and_timeout_are_not_converted_to_success(self):
+        provider = object()
+        initial_provider = object()
+        common = (
+            mock.patch.object(build_worker, "_require_control_deadline"),
+            mock.patch.object(
+                build_worker, "_run_command_argv", return_value=["bench"]),
+            mock.patch.object(
+                build_worker, "_cache_apply_runtime_budget",
+                side_effect=lambda mode, command, deadline: command),
+            mock.patch.object(
+                build_worker, "_cache_command_deadline",
+                side_effect=lambda mode, command, deadline: deadline),
+            mock.patch.object(
+                build_worker, "_next_report_path",
+                return_value=Path("/tmp/q1024-report.json")),
+            mock.patch.object(build_worker, "_require_allocated_command_report"),
+            mock.patch.object(build_worker, "_update_entry"),
+        )
+        with common[0], common[1], common[2], common[3], common[4], \
+                common[5], common[6], mock.patch.object(
+                    build_worker, "_stream_subprocess", return_value=2,
+                ) as stream:
+            with self.assertRaisesRegex(RuntimeError, "q1024 guarded client"):
+                build_worker._run_mode_commands(
+                    "benchmark-e2e", Path("/tmp/bin"), Path("/tmp/build"),
+                    {}, io.StringIO(), time.time() + 10, set(),
+                    hard_kill_deadline=time.time() + 20,
+                    service_boundary_provider=provider,
+                    initial_service_boundary_provider=initial_provider,
+                )
+        self.assertIs(
+            stream.call_args.kwargs["service_boundary_provider"], provider)
+        self.assertIs(
+            stream.call_args.kwargs["initial_service_boundary_provider"],
+            initial_provider,
+        )
+
+        timeout = TimeoutError("bounded timeout")
+        with common[0], common[1], common[2], common[3], common[4], \
+                common[5], common[6], mock.patch.object(
+                    build_worker, "_stream_subprocess", side_effect=timeout,
+                ):
+            with self.assertRaises(TimeoutError):
+                build_worker._run_mode_commands(
+                    "benchmark-e2e", Path("/tmp/bin"), Path("/tmp/build"),
+                    {}, io.StringIO(), time.time() + 10, set(),
+                    hard_kill_deadline=time.time() + 20,
+                    service_boundary_provider=provider,
+                    initial_service_boundary_provider=initial_provider,
+                )
+
+    def test_legacy_global_zero_rejects_candidates_and_runtime_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            bindir = build_dir / "pgbin"
+            bindir.mkdir()
+            postgres = bindir / "postgres"
+            postgres.write_bytes(b"server")
+            entry = self._legacy_entry(build_dir)
+            metadata = postgres.stat()
+            sealed = postgres_runtime._PostgreSQLFileIdentity(
+                str(postgres), metadata.st_dev, metadata.st_ino,
+                metadata.st_size, "f" * 64)
+            patches = (
+                mock.patch.object(
+                    postgres_runtime, "_pg_config_from_cache",
+                    return_value="/configured/pg_config"),
+                mock.patch.object(
+                    postgres_runtime, "_postgresql_config_path",
+                    return_value=str(bindir)),
+                mock.patch.object(
+                    postgres_runtime, "_cmake_cache_value",
+                    return_value=str(postgres)),
+                mock.patch.object(
+                    postgres_runtime, "_seal_postgresql_file_identity",
+                    return_value=sealed),
+            )
+            with patches[0], patches[1], patches[2], patches[3], \
+                    mock.patch.object(
+                        postgres_runtime, "_process_snapshot", return_value={}), \
+                    mock.patch.object(postgres_runtime.os, "kill") as signal_pid, \
+                    mock.patch.object(postgres_runtime.subprocess, "run") as sql:
+                evidence = (
+                    postgres_runtime._legacy_q1024_global_postgresql_zero_evidence(
+                        entry=entry,
+                        active_build_dir=build_dir,
+                        active_preset="bench-e2e-opt",
+                        deadline=time.time() + 5,
+                    ))
+            self.assertTrue(evidence["cleanup_verified"])
+            signal_pid.assert_not_called()
+            sql.assert_not_called()
+
+            other_cluster = self._identity(
+                500, 1, 500, 500, "other", "postgres: checkpointer")
+            with patches[0], patches[1], patches[2], patches[3], \
+                    mock.patch.object(
+                        postgres_runtime, "_process_snapshot",
+                        return_value={500: other_cluster}):
+                rejected = (
+                    postgres_runtime._legacy_q1024_global_postgresql_zero_evidence(
+                        entry=entry,
+                        active_build_dir=build_dir,
+                        active_preset="bench-e2e-opt",
+                        deadline=time.time() + 5,
+                    ))
+            self.assertFalse(rejected["cleanup_verified"])
+            self.assertEqual(
+                rejected["postgresql_candidates"][0]["process_identity"]["pid"],
+                500,
+            )
+
+            # This fixture has no socket or postmaster.pid.  Their absence is
+            # deliberately not authority when the global snapshot is not
+            # complete.
+            self.assertFalse((build_dir / ".s.PGSQL.5432").exists())
+            self.assertFalse((build_dir / "postmaster.pid").exists())
+            with patches[0], patches[1], patches[2], patches[3], \
+                    mock.patch.object(
+                        postgres_runtime, "_process_snapshot",
+                        side_effect=RuntimeError(
+                            "incomplete snapshot: PermissionError")):
+                incomplete = (
+                    postgres_runtime._legacy_q1024_global_postgresql_zero_evidence(
+                        entry=entry,
+                        active_build_dir=build_dir,
+                        active_preset="bench-e2e-opt",
+                        deadline=time.time() + 5,
+                    ))
+            self.assertFalse(incomplete["cleanup_verified"])
+            self.assertIn("PermissionError", incomplete["error"])
+
+            changed = postgres_runtime._PostgreSQLFileIdentity(
+                str(postgres), metadata.st_dev, metadata.st_ino + 1,
+                metadata.st_size, "f" * 64)
+            with patches[0], patches[1], patches[2], mock.patch.object(
+                postgres_runtime, "_seal_postgresql_file_identity",
+                side_effect=[sealed, changed],
+            ), mock.patch.object(
+                postgres_runtime, "_process_snapshot",
+                side_effect=AssertionError("snapshot must follow identity proof"),
+            ):
+                rejected = (
+                    postgres_runtime._legacy_q1024_global_postgresql_zero_evidence(
+                        entry=entry,
+                        active_build_dir=build_dir,
+                        active_preset="bench-e2e-opt",
+                        deadline=time.time() + 5,
+                    ))
+            self.assertFalse(rejected["cleanup_verified"])
+            self.assertIn("differ", rejected["error"])
+
+    def test_terminal_revalidation_uses_historical_receipt_only_for_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            entry = self._legacy_entry(build_dir)
+            receipt = {
+                "build_receipt_id": "br_build33",
+                "content_sha256": "1" * 64,
+                "mode": "benchmark-e2e",
+                "debug": False,
+                "preset": "bench-e2e-opt",
+                "preset_family": "e2e",
+                "binary_subdir": "bioseq",
+                "build_dir": str(build_dir),
+            }
+            captured = {}
+
+            def finish(mode, token, claim_token, evidence):
+                captured.update(evidence)
+                return evidence.get("cleanup_verified") is True
+
+            with mock.patch.object(
+                build_worker, "_load_state",
+                return_value={"benchmark-e2e": entry}), mock.patch.object(
+                build_worker, "_algorithm_matrix_campaign_authority_status",
+                return_value=({
+                    "name": "q1024", "execution_role": "q1024_singleton",
+                }, None)), mock.patch.object(
+                build_worker, "_validate_build_receipt",
+                return_value=(receipt, None),
+            ) as validate, mock.patch.object(
+                build_worker, "_claim_q1024_postgresql_revalidation",
+                return_value=("claim", dict(entry))), mock.patch.object(
+                build_worker,
+                "_legacy_q1024_global_postgresql_zero_evidence",
+                return_value={"cleanup_verified": True}), mock.patch.object(
+                build_worker, "_finish_q1024_postgresql_revalidation",
+                side_effect=finish), mock.patch.object(
+                build_worker, "_seal_run_receipt",
+                side_effect=AssertionError("no receipt may be sealed")):
+                verified = (
+                    build_worker
+                    ._revalidate_legacy_q1024_postgresql_cleanup_before_admission(
+                        request_deadline=time.time() + 30))
+            self.assertTrue(verified)
+            self.assertFalse(validate.call_args.kwargs["verify_source"])
+            self.assertLessEqual(
+                validate.call_args.kwargs["deadline"], time.time() + 15.1)
+            self.assertEqual(captured["preserved_terminal_status"], "aborted")
+            self.assertIsNone(captured["preserved_terminal_exit_code"])
+
+    def test_terminal_claim_rejects_live_claimant_and_finish_preserves_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_path = root / "state.json"
+            lock_path = root / "state.lock"
+            entry = self._legacy_entry(root)
+            claimant = self._identity(
+                900, 1, 900, 900, "server", "server.py")
+            previous = self._identity(
+                901, 1, 901, 901, "other", "server.py")
+            entry["postgres_cleanup_claim"] = {
+                "actor": "server_revalidator",
+                "claim_token": "prior",
+                "process_identity": previous.__dict__,
+            }
+            state_path.write_text(
+                json.dumps({"benchmark-e2e": entry}), encoding="utf-8")
+            token = str(entry["q1024_run_token"])
+            with mock.patch.object(process_state, "STATE_FILE", state_path), \
+                    mock.patch.object(process_state, "LOCK_FILE", lock_path), \
+                    mock.patch.object(process_state.os, "getpid", return_value=900), \
+                    mock.patch.object(
+                        process_state, "_process_snapshot",
+                        return_value={900: claimant, 901: previous}):
+                self.assertIsNone(
+                    process_state._claim_q1024_postgresql_revalidation(
+                        "benchmark-e2e", token, deadline=time.time() + 1))
+                self.assertIsNone(
+                    process_state._claim_q1024_postgresql_revalidation(
+                        "benchmark-e2e", "wrong", deadline=time.time() + 1))
+
+            entry.pop("postgres_cleanup_claim")
+            state_path.write_text(
+                json.dumps({"benchmark-e2e": entry}), encoding="utf-8")
+            with mock.patch.object(process_state, "STATE_FILE", state_path), \
+                    mock.patch.object(process_state, "LOCK_FILE", lock_path), \
+                    mock.patch.object(process_state.os, "getpid", return_value=900), \
+                    mock.patch.object(
+                        process_state, "_process_snapshot",
+                        return_value={900: claimant}):
+                claim = process_state._claim_q1024_postgresql_revalidation(
+                    "benchmark-e2e", token, deadline=time.time() + 1)
+                self.assertIsNotNone(claim)
+                claim_token, _ = claim
+                self.assertTrue(
+                    process_state._finish_q1024_postgresql_revalidation(
+                        "benchmark-e2e", token, claim_token,
+                        {"cleanup_verified": True}))
+                terminal = process_state._load_state()["benchmark-e2e"]
+            self.assertEqual(terminal["status"], "aborted")
+            self.assertIsNone(terminal["exit_code"])
+            self.assertEqual(terminal["report_files"], ["/tmp/report274.json"])
+            self.assertFalse(terminal["postgres_backend_owner_started"])
+            self.assertFalse(terminal["postgres_cleanup_unverified"])
+            self.assertTrue(terminal["cleanup_unverified"])
 
 if __name__ == "__main__":
     unittest.main()

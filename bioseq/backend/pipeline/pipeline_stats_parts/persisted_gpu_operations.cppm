@@ -337,6 +337,13 @@ struct persisted_gpu_operation_stats {
     std::uint64_t publication_commits = 0u;
     std::uint64_t query_pipeline_receipt_count = 0u;
     std::uint64_t shape_pipeline_receipt_count = 0u;
+    std::uint64_t alignment_pipeline_receipt_count = 0u;
+    std::uint64_t alignment_submission_count = 0u;
+    std::uint64_t mapq_pipeline_receipt_count = 0u;
+    std::uint64_t mapq_submission_count = 0u;
+    std::uint64_t mapq_result_count = 0u;
+    std::uint64_t mapq_published_count = 0u;
+    std::uint64_t mapq_result_digest = 0u;
     std::uint64_t submission_count = 0u;
     std::uint64_t query_pipeline_operation_identity = 0u;
     std::uint64_t shape_pipeline_operation_identity = 0u;
@@ -358,7 +365,25 @@ struct persisted_gpu_operation_stats {
             !is_persisted_grouped_soa_coordinate_publication_consistent(publication) ||
             published_jobs != publication.expected_jobs || publication_commits != 1u ||
             query_pipeline_receipt_count != 3u || shape_pipeline_receipt_count < 7u ||
-            shape_pipeline_receipt_count > 10u || submission_count < 6u ||
+            shape_pipeline_receipt_count > 10u || alignment_pipeline_receipt_count > 1u ||
+            ((alignment_pipeline_receipt_count == 0u) != (alignment_submission_count == 0u)) ||
+            mapq_pipeline_receipt_count > 1u ||
+            ((mapq_pipeline_receipt_count == 0u) != (mapq_submission_count == 0u)) ||
+            mapq_submission_count != mapq_pipeline_receipt_count ||
+            ((mapq_pipeline_receipt_count == 0u) != (mapq_result_digest == 0u)) ||
+            mapq_published_count > mapq_result_count ||
+            (mapq_pipeline_receipt_count == 0u &&
+             (mapq_result_count != 0u || mapq_published_count != 0u)) ||
+            mapq_result_count > k_sql_bigint_value_max ||
+            mapq_published_count > k_sql_bigint_value_max ||
+            mapq_result_digest > k_sql_bigint_value_max ||
+            alignment_submission_count > k_sql_bigint_value_max ||
+            mapq_submission_count > k_sql_bigint_value_max ||
+            alignment_submission_count >
+                (std::numeric_limits<std::uint64_t>::max)() - mapq_submission_count ||
+            alignment_submission_count + mapq_submission_count >
+                (std::numeric_limits<std::uint64_t>::max)() - 6u ||
+            submission_count < 6u + alignment_submission_count + mapq_submission_count ||
             submission_count > k_sql_bigint_value_max || query_pipeline_operation_identity == 0u ||
             shape_pipeline_operation_identity == 0u ||
             shape_pipeline_operation_identity != operation_identity ||
@@ -430,7 +455,14 @@ struct persisted_gpu_operation_stats {
                 }
             }
         }
-        return submission_count == 2u + shape_ordinal_count;
+        if (shape_ordinal_count > k_sql_bigint_value_max - 2u ||
+            alignment_submission_count > k_sql_bigint_value_max - 2u - shape_ordinal_count ||
+            mapq_submission_count >
+                k_sql_bigint_value_max - 2u - shape_ordinal_count - alignment_submission_count) {
+            return false;
+        }
+        return submission_count ==
+               2u + shape_ordinal_count + alignment_submission_count + mapq_submission_count;
     }
 };
 

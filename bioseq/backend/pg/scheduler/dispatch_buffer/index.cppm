@@ -75,6 +75,7 @@ export import :active_policy_accounting;
 import bioseq.common.logging;
 import bioseq.postgres.support.datums;
 import bioseq.indexing.type;
+import bioseq.pipeline.pipe;
 import bioseq.postgres.storage.indexing.active_read_policy_resolution_contract;
 import bioseq.postgres.storage.indexing.executor_read_context;
 import bioseq.postgres.storage.indexing.minimizer_read_stats;
@@ -191,7 +192,7 @@ class tuple_dispatch_buffer {
         int32_t primary_key = -1;
         bool primary_key_is_null = true;
         int64_t sequence_rowno =
-            -1; /* derived from scan_slot->tts_tid; -1 when the TID was invalid */
+            -1; /* authenticated direct-source TID, or -1 when no physical identity applies */
         std::vector<char> seq_varlena;
         bool seq_is_null = true;
         bool target_from_evaluated_expression = false;
@@ -342,13 +343,10 @@ class tuple_dispatch_buffer {
     mmsearch_context mmsearch_state;
 
     /*
-     * Per-scan base minimap2_parameters, captured when the column scan begins
-     * from the plan (GUC snapshot + per-call aligner_options() overrides) and
-     * pushed into batch_processor::process_sequences once per batch. Every
-     * row inherits these values with size-heuristic tuning applied if the
-     * user left the minimap2 defaults in place.
+     * The same immutable executor control block captured before preparation.
+     * Provider scans without alignment retain no biological plan.
      */
-    ::bioseq::simd::minimap2_parameters base_params{};
+    ::bioseq::simd::pipe::statement_execution_plan_owner execution_plan{};
 
     /*
      * Effective per-scan persisted-payload read gate. `allow` preserves the
@@ -376,7 +374,7 @@ class tuple_dispatch_buffer {
     ::bioseq::pipeline_stats::pipeline_execution_stats last_stats{};
 
     std::vector<buffered_scan_entry> buffered_entries;
-    std::map<int32_t, std::vector<::bioseq::simd::match_result>> match_map;
+    ::bioseq::simd::match_result_map match_map;
     std::vector<output_cursor> output_cursors;
     int output_position = -1;
 
@@ -392,7 +390,7 @@ class tuple_dispatch_buffer {
     std::vector<join_query_ref> join_pending_cpu_preparation_queries{};
     bool join_cpu_preparation_pending = false;
     join_cpu_preparation_scratch join_cpu_preparation_scratch{};
-    std::map<std::uint64_t, std::vector<::bioseq::simd::match_result>> join_match_map{};
+    ::bioseq::simd::basic_match_result_map<std::uint64_t> join_match_map{};
     std::vector<join_output_cursor> join_output_cursors{};
     std::size_t join_output_position = 0;
     bool join_target_active = false;
@@ -403,7 +401,14 @@ class tuple_dispatch_buffer {
     std::optional<bioseq::storage::indexing::active_read_policy_resolution>
         join_active_read_policy{};
     bioseq::storage::indexing::cold_index_preparation_stats join_cold_policy_stats{};
-    ::bioseq::simd::batch_processor::cpu_prepared_target join_cpu_prepared_target{};
+    // Retained query views alias this real target-wide owner. Replacing a
+    // completed target creates a new control block rather than mutating the
+    // allocation-bearing object beneath any surviving view.
+    std::shared_ptr<::bioseq::simd::batch_processor::cpu_prepared_target>
+        join_cpu_prepared_target =
+            std::make_shared<::bioseq::simd::batch_processor::cpu_prepared_target>();
+    ::bioseq::simd::batch_processor::gpu_prepared_mpf_target
+        join_gpu_prepared_mpf_target{};
     ::bioseq::simd::batch_processor::gpu_prepared_grouped_soa_target
         join_gpu_prepared_grouped_soa_target{};
     std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity> join_target_hdrs{};
@@ -415,7 +420,7 @@ class tuple_dispatch_buffer {
     // PG_TRY is sigsetjmp-based: the catch path must not read a cache pointer
     // automatic that was assigned inside the protected region.
     bioseq::storage::seq_caches* join_scanner_pg_cache = nullptr;
-    std::map<int32_t, std::vector<::bioseq::simd::match_result>> join_result_scratch{};
+    ::bioseq::simd::match_result_map join_result_scratch{};
 
     /*
      * Additional Const-only mmsearch quals that share the primary
@@ -462,6 +467,8 @@ class tuple_dispatch_buffer {
     // Borrowed from the statement-root alignment_execution_collector.
     bioseq::pipeline_stats::persisted_gpu_operation_accumulator*
         persisted_gpu_operation_stats_sink = nullptr;
+    bioseq::simd::downstream_active_wall_tracker*
+        downstream_active_wall_tracker = nullptr;
     slice_async_owner_guard* slice_async_owner = nullptr;
     bioseq::storage::sequence_payload_allocation_observer mmsearch_target_payload_observer{};
     bioseq::storage::sequence_payload_allocation_observer mmsearch_query_payload_observer{};
@@ -494,6 +501,12 @@ class tuple_dispatch_buffer {
         bool query_is_null = true;
     };
 
+    /** Exact physical identity projected from one transformed target source. */
+    struct explicit_source_identity {
+        Oid relation_oid = InvalidOid;
+        ItemPointerData tid{};
+    };
+
     void require_evaluated_mmsearch_index_policy_() const;
 
     static void require_registered_mvcc_snapshot_(Snapshot snapshot);
@@ -518,6 +531,10 @@ class tuple_dispatch_buffer {
     /// Bind the sole statement-root owner used by every batch/node/rescan.
     void bind_persisted_gpu_operation_stats_sink(
         bioseq::pipeline_stats::persisted_gpu_operation_accumulator& sink);
+
+    /// Bind the sole statement-owned downstream active-wall union tracker.
+    void bind_downstream_active_wall_tracker(
+        bioseq::simd::downstream_active_wall_tracker& tracker);
 
     void bind_slice_async_owner(slice_async_owner_guard* owner);
 
@@ -547,7 +564,7 @@ class tuple_dispatch_buffer {
      * aligner_options() overrides have been applied. Must be called before
      * the first submit_scan.
      */
-    void configure_params(const ::bioseq::simd::minimap2_parameters& params,
+    void configure_params(::bioseq::simd::pipe::statement_execution_plan_owner plan,
                           bioseq::indexing::index_read_requirement read_requirement,
                           bool read_sequence_index,
                           Oid scan_user_relid,
@@ -565,7 +582,10 @@ class tuple_dispatch_buffer {
     void replace_executor_snapshot(Snapshot executor_snapshot);
 
     [[nodiscard]] const ::bioseq::simd::minimap2_parameters& base_aligner_params() const {
-        return base_params;
+        if (!execution_plan) {
+            throw std::logic_error("alignment dispatch requires its statement plan");
+        }
+        return execution_plan->frozen_parameters;
     }
     [[nodiscard]] const ::bioseq::pipeline_stats::pipeline_execution_stats&
     execution_stats() const {
@@ -662,12 +682,12 @@ class tuple_dispatch_buffer {
     static void prepare_join_cpu_after_highway_selection_thunk(
         void* state,
         ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
-        const ::bioseq::simd::minimap2_parameters& dispatched_params,
+        ::bioseq::simd::pipe::statement_execution_plan_owner dispatched_plan,
         const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations& typmod_ops);
 
     void prepare_join_cpu_after_highway_selection(
         ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
-        const ::bioseq::simd::minimap2_parameters& dispatched_params,
+        ::bioseq::simd::pipe::statement_execution_plan_owner dispatched_plan,
         const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations& typmod_ops);
 
   public:
@@ -745,7 +765,31 @@ class tuple_dispatch_buffer {
      * clone so the data outlives the next ExecScanFetch call.
      */
     [[gnu::always_inline]] inline void submit_scan(TupleTableSlot* scan_slot) {
-        submit_scan_impl_(scan_slot, nullptr);
+        submit_scan_impl_(scan_slot, nullptr, nullptr, /*accept_slot_tid=*/true);
+    }
+
+    void submit_scan_with_source_tid(TupleTableSlot* scan_slot,
+                                     const Oid source_relation_oid,
+                                     const ItemPointerData source_tid) {
+        require_evaluated_mmsearch_index_policy_();
+        if (!OidIsValid(source_relation_oid) || !ItemPointerIsValid(&source_tid)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq transformed target source identity is invalid")));
+        }
+        const explicit_source_identity source_identity{
+            .relation_oid = source_relation_oid,
+            .tid = source_tid,
+        };
+        submit_scan_impl_(scan_slot,
+                          nullptr,
+                          std::addressof(source_identity),
+                          /*accept_slot_tid=*/false);
+    }
+
+    void submit_scan_recipe_without_source_tid(TupleTableSlot* scan_slot) {
+        require_evaluated_mmsearch_index_policy_();
+        submit_scan_impl_(scan_slot, nullptr, nullptr, /*accept_slot_tid=*/false);
     }
 
     void submit_scan_evaluated(TupleTableSlot* scan_slot,
@@ -772,12 +816,18 @@ class tuple_dispatch_buffer {
             .query = query,
             .query_is_null = query_is_null,
         };
-        submit_scan_impl_(scan_slot, std::addressof(evaluated));
+        submit_scan_impl_(scan_slot,
+                          std::addressof(evaluated),
+                          nullptr,
+                          /*accept_slot_tid=*/true);
     }
 
   private:
     [[gnu::always_inline]] inline void submit_scan_impl_(TupleTableSlot* scan_slot,
-                                                         const evaluated_row_operands* evaluated) {
+                                                         const evaluated_row_operands* evaluated,
+                                                         const explicit_source_identity*
+                                                             source_identity,
+                                                         const bool accept_slot_tid) {
         if (!mmsearch_state.active) {
             bioseq_log<logging_level::debug>(
                 "[bioseq] pg: submit_scan called while mmsearch state inactive; skipping");
@@ -799,15 +849,40 @@ class tuple_dispatch_buffer {
 
         buffered_scan_entry entry{};
 
-        /*
-         * Capture the scan slot's tts_tid (set by the bioseq columnar
-         * access method in the column-scan iterator) and invert it back to a
-         * row number so downstream consumers can join against the
-         * sidecar tables (keyed on (user_relid, sequence_rowno)). Uses
-         * the canonical tid_to_row_number helper from access_method.cppm
-         * so the encoding stays in lockstep with row_number_to_tid.
-         */
-        if (ItemPointerIsValid(&scan_slot->tts_tid)) {
+        /* A transformed child supplies (tableoid, ctid) explicitly because
+         * its virtual result slot has no authoritative physical identity.
+         * Authenticate that pair against the configured direct relation before
+         * publishing a row number.  A parent owner above Append deliberately
+         * leaves inherited rows at -1, preserving host execution while making
+         * Vulkan's existing physical-identity prerequisite fail closed. */
+        if (source_identity != nullptr) {
+            if (!OidIsValid(source_identity->relation_oid) ||
+                !ItemPointerIsValid(&source_identity->tid)) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq transformed target source identity is invalid")));
+            }
+            if (OidIsValid(scan_slot->tts_tableOid) &&
+                scan_slot->tts_tableOid != source_identity->relation_oid) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq transformed target table identity disagrees with its slot")));
+            }
+            if (ItemPointerIsValid(&scan_slot->tts_tid) &&
+                (ItemPointerGetBlockNumberNoCheck(&scan_slot->tts_tid) !=
+                     ItemPointerGetBlockNumberNoCheck(&source_identity->tid) ||
+                 ItemPointerGetOffsetNumberNoCheck(&scan_slot->tts_tid) !=
+                     ItemPointerGetOffsetNumberNoCheck(&source_identity->tid))) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq transformed target TID disagrees with its slot")));
+            }
+            if (source_identity->relation_oid == user_relid) {
+                entry.sequence_rowno =
+                    static_cast<int64_t>(tid_to_row_number(source_identity->tid));
+            }
+        } else if (accept_slot_tid && ItemPointerIsValid(&scan_slot->tts_tid)) {
+            /* Direct physical scans retain their established slot-owned route. */
             entry.sequence_rowno = static_cast<int64_t>(tid_to_row_number(scan_slot->tts_tid));
         }
 
@@ -963,6 +1038,12 @@ class tuple_dispatch_buffer {
             MakeSingleTupleTableSlot(scan_slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
         ExecStoreMinimalTuple(
             ExecCopySlotMinimalTuple(copy_source), entry.scan_slot_copy, /*shouldFree=*/true);
+        /* MinimalTuple stores ordinary attributes, not slot-owned system columns.
+         * Only a direct physical scan may carry its original slot identity. */
+        if (accept_slot_tid) {
+            entry.scan_slot_copy->tts_tid = scan_slot->tts_tid;
+            entry.scan_slot_copy->tts_tableOid = scan_slot->tts_tableOid;
+        }
         MemoryContextSwitchTo(previous_copy_context);
 
         /*

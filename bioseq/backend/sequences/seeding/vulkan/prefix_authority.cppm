@@ -248,7 +248,8 @@ validated_mapped_sorted_dense_prefix_view(
         || resident->source_stream_checksum == 0u
         || resident->source_stream_checksum
             != resident->mapped_stream_checksum
-        || resident->complete_source_traversals != 1u
+        || (resident->complete_source_traversals != 1u &&
+            resident->complete_source_traversals != 2u)
         || resident->complete_mapped_traversals != 1u) {
         throw mapped_prefix_invalid_error{};
     }

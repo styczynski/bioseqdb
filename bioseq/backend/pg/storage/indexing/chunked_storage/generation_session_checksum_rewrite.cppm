@@ -30,6 +30,8 @@ extern "C" {
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_session_checksum_rewrite;
 
 import std;
+import bioseq.pipeline.runtime_contract;
+import bioseq.common.seqan_adapter;
 
 import bioseq.common.logging;
 import bioseq.indexing.minimizer_hashmap;
@@ -91,6 +93,15 @@ rewrite_source_checksum_pg(Oid table_oid, std::uint64_t query_key, std::uint64_t
     {
         constexpr auto k_fixture_scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(
             bioseq::indexing::minimizer_sketch_backend::scalar);
+        constexpr auto k_fixture_layout =
+            bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+                bioseq::simd::minimizer_algorithm::scalar,
+                bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp,
+                15u,
+                10u);
+        constexpr auto k_fixture_algorithm_identity =
+            bioseq::indexing::make_minimizer_generation_algorithm_identity(k_fixture_layout);
+        static_assert(k_fixture_algorithm_identity.has_value());
         constexpr expected_minimizer_generation_identity k_fixture_expected{
             .layout = bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
             .alphabet_code = bioseq::indexing::k_minimizer_persisted_dna4_alphabet_code,
@@ -102,6 +113,7 @@ rewrite_source_checksum_pg(Oid table_oid, std::uint64_t query_key, std::uint64_t
             .minimizer_scheme_revision = k_fixture_scheme.revision,
             .producer_backend_id = bioseq::indexing::minimizer_producer_backend::scalar,
             .producer_identity_revision = bioseq::indexing::k_minimizer_producer_identity_revision,
+            .algorithm_identity = *k_fixture_algorithm_identity,
             .max_occ_cap = bioseq::indexing::k_grouped_soa_default_max_occurrence_cap,
         };
         index_storage_fragment_generation_read_session session{

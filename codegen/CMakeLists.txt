@@ -271,6 +271,7 @@ endif()
 
 if(BIOSEQ_CODEGEN_ENABLE_HIGHWAY)
   list(APPEND _codegen_module_files
+    "${BIOSEQ_REPOSITORY_ROOT}/bioseq/backend/sequences/kmers/minimizer_layout_geometry.cppm"
     "${_codegen_src}/highway/model.cppm"
     "${_codegen_src}/highway/manifest.cppm"
     "${_codegen_src}/highway/validator.cppm"
