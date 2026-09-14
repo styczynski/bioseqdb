@@ -1,0 +1,925 @@
+---
+schema: bioseq.remote-approved-e2e-result-tuples
+version: 1
+status: approved_remote_partial
+purpose: Self-contained approved E2E results measured on the AWS machine identified by remote_host_binding, replaying only locally approved logical tuples. Each accepted observation measures 1024 queries with CIGAR and MAPQ enabled, prefilter disabled and observed inactive, and at least five independent repeats. All timings are integer nanoseconds. p50_a is the median whole measured framework iteration. p50_b is the median of each repeat's whole iteration minus that same repeat's physical union of CIGAR and MAPQ intervals, not the difference of medians. Block aligner CIGAR intervals include DP, trace storage, traceback, CIGAR assembly and result materialization, so p50_b is not universally seeding-and-chaining-only time. just_index queries a previously built persisted index and excludes its construction; no_index includes transient index construction and mapping with no pre-existing user index. Fixture generation and process restart setup are outside these timings. Repeats are process-cold; OS page caches are unspecified and are not purged. Exact per-query returned match counts must equal the minimap2 baseline and positions must be within 15 base pairs, with strand, CIGAR replay and MAPQ presence checked. Minimizer bit/count parity and numeric MAPQ equality are not requirements. Requested and observed algorithms and any exceptional behavior are recorded per row; range_minimum_query is RMQ, not SIMD-DP. simd_minimap2 denotes literal bounded_batch_approximate SIMD-DP. Linux intervals use CLOCK_MONOTONIC under the same-kernel nanosecond-rate contract. Remote workers use nice -20. Project and code generation are compiled with Clang 22.1.8; codegen links libstdc++ to match packaged libclang, which is not compilation with GCC. GPU-dependent cells are hardware_unavailable and were not executed, never zero-time results. Embedded CPU, physical RAM, storage and GPU inventory describe this host; copied campaign dimensions describe the requested matrix, not completed coverage. approved_results contains only audited timings and is appended without discarding unaffected prior measurements. campaign_identity.execution_scope and matrix_scope.execution_location are frozen source-campaign descriptors, not the measurement location; all timings in this file were collected on the embedded AWS host.
+authority:
+  contains_only_approved_rows: true
+  external_lookup_required_to_interpret: false
+  full_eligible_set_complete: false
+  gpu_execution_prohibited: true
+  host_timings_only: true
+  no_external_path_or_reference_dependency: true
+  normative_datasets:
+  - approved_results
+  - hardware_unavailable_cells
+  profile: aws_cpu_only_v1
+  sealed_verification_manifest_required_for_append: true
+projection_provenance:
+  approved_result_count: 9
+  approved_results_projection_sha256: f2717f7538404b7b9109d741020dbdeee0a4258f686484d32cc04637bb0e8e39
+  approved_run_count: 45
+  classification: derived_non_authoritative
+  eligible_stable_keys_projection_sha256: af1e74297b3e059bc52e3f4a8a5ac039a0487eb20fa987148997bf81e177a30b
+  generator: bioseq-approved-results-projection
+  generator_version: 1
+  hardware_unavailable_cells_projection_sha256: fc1661857a6e33dfdbb90aa6ba2f58a2f0f489f19f93d4bd2282f253c0b5ad5b
+  hardware_unavailable_count: 10
+  remaining_eligible_count: 65
+  source_local_approved_results_projection_sha256: 5bb17915d825bec25917066c67377d40edf379333f93687a04e725aeebe7df06
+  source_local_authority_sha256: 1c3d2cd8de6a6e1ac4f7bef120353f994bc1f595eba393bc451495d223ef57fc
+campaign_identity:
+  campaign_digest: 011fbb1ef33a214ab80d3568c2341e8d0f8311f82e21a5955bdcb93b3c63b979
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  classification: derived_non_authoritative
+  execution_scope: local_campaign
+  projection_description: Generated projection of the campaign identity carried by every normative row.
+  row_identity_note: campaign_id is carried by every row and is the first stable-key value. campaign_digest is campaign-level metadata and is not a bioseq-e2e-cell-v2 row-identity field.
+stable_key_contract:
+  approved_row_field_projection:
+    alphabet: alphabet
+    bioseq_index_name: index_type for pipeline bioseq; null for pipeline minimap2
+    campaign_id: campaign_id
+    dataset: dataset
+    engine: pipeline
+    index_mode: mode
+    kmer_size: kmer_size
+    requested_base_alignment_algorithm: requested_algorithms.base_alignment
+    requested_chaining_algorithm: requested_algorithms.chaining
+    requested_minimizer_algorithm: requested_algorithms.minimizer
+    target_size_gbp: target_size_gbp
+    window_size: window_size
+  classification: derived_non_authoritative
+  observation_identity_rule: stable_key remains the logical tuple identity; the publication observation identity is the ordered pair (stable_key, timing_scope).
+  ordered_aggregator_fields:
+  - campaign_id
+  - dataset
+  - alphabet
+  - target_size_gbp
+  - kmer_size
+  - window_size
+  - index_mode
+  - engine
+  - bioseq_index_name
+  - requested_minimizer_algorithm
+  - requested_chaining_algorithm
+  - requested_base_alignment_algorithm
+  projection_description: Generated descriptive copy of the existing aggregator contract used by every approved row; it is not a second identity authority.
+  stable_key_encoding: 'The literal prefix bioseq-e2e-cell-v2: followed by a compact JSON array of the ordered field values, encoded with ensure_ascii=true and separators comma and colon.'
+  stable_key_schema: bioseq-e2e-cell-v2
+  validation_rule: Decode each stable_key and compare its twelve values with the row field projection. Stable keys may repeat only across timing scopes; every (stable_key, timing_scope) observation pair is unique.
+matrix_scope:
+  alphabets:
+  - dna4
+  - dna5
+  bioseq_base_alignment_algorithms:
+  - ksw2
+  - block_aligner
+  bioseq_chaining_algorithms:
+  - scalar_minimap2
+  - simd_minimap2
+  - range_minimum_query
+  - vulkan_tiled_dynamic_programming
+  bioseq_expected_cells: 1280
+  bioseq_index_types:
+  - minimizers_per_fragment
+  - minimizers_per_sequence
+  bioseq_minimizer_algorithms:
+  - scalar
+  - simd_minimap2_reference
+  - two_stack_nthash
+  - vulkan_minimap_integer
+  - bounded_nthash_simd
+  bioseq_pipeline_mode: task_parallel
+  cigar_projection: true
+  classification: derived_non_authoritative
+  excluded_runtime_only_base_alignment_algorithms:
+  - ksw2_batched
+  execution_location: local
+  mapq_projection: true
+  minimap2_expected_cells: 16
+  modes:
+  - no_index
+  - just_index
+  pipelines:
+  - bioseq
+  - minimap2
+  prefilter: false
+  projection_description: Generated scope projection from approved_results and the frozen campaign input; it is not a publication-row authority.
+  query_count: 1024
+  repetitions_per_cell: 5
+  target_size_gbp:
+  - 2
+  - 4
+  target_size_unit: Decimal Gbp, exactly 1,000,000,000 base pairs.
+  total_expected_cells: 1296
+  total_expected_runs: 6480
+  window_kmer_pairs:
+  - kmer_size: 15
+    window_size: 10
+  - kmer_size: 20
+    window_size: 15
+remote_host_binding:
+  schema: bioseq.remote-benchmark-host
+  version: 1
+  machine_id: C7G
+  cloud_provider: aws
+  aws_identity:
+    account_id: '970376923108'
+    region: us-east-1
+    availability_zone: us-east-1f
+    instance_id: i-0cab5f0ab9a1cb002
+    ec2_architecture: arm64
+  instance_type: c7g.xlarge
+  architecture: aarch64
+  cpu:
+    architecture: aarch64
+    model: Neoverse-V1
+    isa: 'aarch64 features: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm paca pacg dcpodp svei8mm svebf16 i8mm bf16 dgh rng'
+    vcpu_count: 4
+    core_count: 4
+    threads_per_core: 1
+  memory:
+    physical_mib: 8192
+  storage:
+    kind: ebs
+    root_device: /dev/sda1
+    volume_id: vol-0a68963a0efa7f81b
+    capacity_gib: 500
+    volume_type: gp3
+    provisioned_iops: 6000
+    provisioned_throughput_mib_per_s: 500
+    encrypted: true
+    instance_store_present: false
+  receipt_host:
+    machine: aarch64
+    node: ip-172-31-72-135
+    release: 7.0.0-1012-aws
+    system: Linux
+  measurement_device:
+    identity: cpu:aarch64:ip-172-31-72-135
+    version: Linux:7.0.0-1012-aws
+  build_preset: native-arm64-clang22-linux-e2e
+  preset_family: e2e
+  gpu:
+    available: false
+    device_count: 0
+    identity:
+    driver:
+    vulkan_available: false
+    aws_gpu_info:
+  descriptor_sha256: 36352e91b67f1c931d6cedd66745ba4d35693acf01c5b3c28bcd0279f8608051
+eligible_stable_keys:
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","range_minimum_query","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","range_minimum_query","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","scalar_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","scalar_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","simd_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","range_minimum_query","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","range_minimum_query","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","scalar_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","scalar_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","simd_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"no_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","range_minimum_query","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","range_minimum_query","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","scalar_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","scalar_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","simd_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","range_minimum_query","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","range_minimum_query","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","scalar_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","scalar_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","simd_minimap2","ksw2"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"no_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"no_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"no_index","minimap2",null,null,null,null]'
+hardware_unavailable_cells:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+append_update_protocol:
+  canonical_serializer:
+    name: bioseq-approved-results-yaml
+    version: 1
+  mode: additive_audited_rows_only
+  sealed_append_candidate:
+    name: bioseq-approved-result-append-candidate
+    verification_manifest:
+      name: bioseq-approved-result-verification-manifest
+      proof_categories:
+      - source
+      - build
+      - fixture
+      - config
+      - measurement_contract
+      - chunk_plan
+      version: 2
+    version: 3
+  writer:
+    lock:
+      name: bioseq-approved-results-publication
+      version: 1
+    name: bioseq-approved-results-aggregator
+    version: 3
+approved_results:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 73062707481
+    p50_b: 65685743181
+  comments:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 445376133279
+    p50_b: 410847337545
+  comments:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 291572686071
+    p50_b: 286634900300
+  comments:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 28165178832
+    p50_b: 26247664431
+  comments:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 166397339637
+    p50_b: 162700054192
+  comments:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 18493978422
+    p50_b: 17023660297
+  comments:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"no_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 60116907183
+    p50_b: 58571469783
+  comments:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 391459993227
+    p50_b: 386327922862
+  comments: Valid same-host C7G timing. Severe swap pressure was observed in both untimed external minimap2 index setup (helper VmHWM 5,983,412 KiB, VmSwap 13,925,508 KiB, host swap 17,045,596 KiB) and the timed prebuilt-index query (helper VmHWM 7,235,888 KiB, VmSwap 7,757,092 KiB, with active host swap and 54% I/O wait). A receipt-pinned read-only diagnostic dump finished writing about 16 seconds before the repeat-1 query helper started, but the MCP inspection server exit timestamp was not retained. Overlap with the earlier repeat-0/framework interval is therefore indeterminate. Timing is retained without noise invalidation or rebaseline.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 1505471456372
+    p50_b: 1500747211558
+  comments: 'External minimap2 prebuilt-index control on native ARM64 Clang 22. All five repeats returned the exact locally sealed 1,024-query count, strand, CIGAR replay, and MAPQ presence contract with maximum position offset 3 bp; each used one prebuilt index part, and physical CIGAR/MAPQ interval unions reproduce B as A minus union. No GPU/Vulkan path, prefilter, bioseq algorithm, or target-index build executed in the timed query phase. Severe host memory pressure and swapping were observed during timed prebuilt-query execution: the first timed helper reached MemAvailable 98,748 KiB and SwapFree 88,333,476 KiB of 108,605,212 KiB (20,271,736 KiB used), with helper VmHWM 7,238,280 KiB and VmSwap 14,595,324 KiB. This resource-pressure caveat is retained without invalidating, rerunning, or rebaselining the accepted measurements.'

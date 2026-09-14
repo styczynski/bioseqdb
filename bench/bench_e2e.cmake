@@ -147,6 +147,19 @@ if(BUILD_TESTING)
       "component:benchmark;layer:contract;feature:configuration;feature:e2e_driver;feature:reporting;feature:selection")
 endif()
 
+# The PostgreSQL target graph already gives this definition to the DSO and
+# shared module owners. Give the driver-owned module the same selection so its
+# serialized duration-rate contract describes the clock implementation it
+# imports. Ordinary builds leave the definition absent.
+if(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+  target_compile_definitions(bioseq_benchmark_e2e PRIVATE
+    BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
+  if(TARGET bioseq_benchmark_e2e_contract_tests)
+    target_compile_definitions(bioseq_benchmark_e2e_contract_tests PRIVATE
+      BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
+  endif()
+endif()
+
 target_compile_definitions(bioseq_benchmark_e2e PRIVATE
   "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_REPOSITORY_ROOT}/reporting/bioseq_benchmark_e2e\""
   "BIOSEQ_E2E_DATA_DIR=\"${BIOSEQ_E2E_BENCHMARK_ROOT}\""

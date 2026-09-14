@@ -11824,7 +11824,7 @@ template<typename p_input, typename p_output, typename p_iteration_boundaries>
 
     /// Historical immediate path.  The legacy factory instantiates this with
     /// `std::nullptr_t`, so the boundary branch is discarded at compile time.
-    auto run_one_iteration = [&on_run, &commit_iteration, counter_handles,
+    auto run_one_iteration = [&on_run, commit_iteration, counter_handles,
                               &iteration_boundaries](
                                   measurement_cell& cell,
                                   const p_input& input,

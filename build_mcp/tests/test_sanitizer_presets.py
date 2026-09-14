@@ -55,6 +55,14 @@ LINKER_KEYS = (
 
 
 class SanitizerPresetContractTest(unittest.TestCase):
+    def setUp(self) -> None:
+        # PostgreSQL fixtures below use the absolute deadline 123.0. Keep
+        # their clock in that same domain so the real deadline checks run.
+        wall_clock = mock.patch.object(
+            postgres_runtime.time, "time", return_value=100.0)
+        wall_clock.start()
+        self.addCleanup(wall_clock.stop)
+
     @classmethod
     def setUpClass(cls) -> None:
         payload = json.loads((REPOSITORY_ROOT / "CMakePresets.json").read_text())
@@ -797,8 +805,12 @@ if Path(runtime.__file__).resolve() != expected_helper.resolve():
 
         psql = f"{bindir}/psql"
         self.assertEqual(order.mock_calls, [
-            mock.call.preload(psql, "aws-test-opt", log, 123.0),
-            mock.call.prepared(psql, "aws-test-opt", log, 123.0),
+            mock.call.preload(
+                psql, "aws-test-opt", log, 123.0,
+                hard_kill_deadline=None, state_mode=None, phase=None),
+            mock.call.prepared(
+                psql, "aws-test-opt", log, 123.0,
+                hard_kill_deadline=None, state_mode=None, phase=None),
             mock.call.restart(
                 ["sudo", "-n", "/usr/bin/systemctl", "restart",
                  "postgresql"],
@@ -807,9 +819,10 @@ if Path(runtime.__file__).resolve() != expected_helper.resolve():
                 data_dir="/var/lib/postgresql/17/main",
                 active_preset="aws-test-opt",
                 expected_postgres=f"{bindir}/postgres",
-                expected_bioseq_dso=f"{pkglibdir}/bioseq.so"),
-            mock.call.verify_preload(psql, "aws-test-opt"),
-            mock.call.verify_prepared(psql, "aws-test-opt"),
+                expected_bioseq_dso=f"{pkglibdir}/bioseq.so",
+                deadline=123.0),
+            mock.call.verify_preload(psql, "aws-test-opt", 123.0),
+            mock.call.verify_prepared(psql, "aws-test-opt", 123.0),
         ])
 
     def test_local_postgresql_test_database_uses_configured_tools(self) -> None:

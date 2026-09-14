@@ -308,9 +308,17 @@ constexpr std::uint64_t  k_e2e_max_statement_timeout_ms =
 // the local campaign platform. Their epochs need not, and must not, be compared.
 constexpr std::string_view k_minimap2_framework_duration_rate_contract =
     "same_kernel_monotonic_nanosecond_rate";
+#elif defined(__linux__) && defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+// The dedicated Linux E2E module clock and the immutable helper both call
+// CLOCK_MONOTONIC. Their epochs are still not compared; only durations are.
+static_assert(
+    bioseq::instrumentation::clock::now_ns_clock_id == CLOCK_MONOTONIC,
+    "Linux E2E framework clock must match the immutable minimap2 receipt clock");
+constexpr std::string_view k_minimap2_framework_duration_rate_contract =
+    "same_kernel_monotonic_nanosecond_rate";
 #else
-// Linux's framework clock is CLOCK_MONOTONIC_RAW while the immutable helper
-// declares CLOCK_MONOTONIC. Their duration rates are not asserted equivalent.
+// Ordinary Linux uses CLOCK_MONOTONIC_RAW while the immutable helper declares
+// CLOCK_MONOTONIC. Other platform pairs are likewise not proven here.
 constexpr std::string_view k_minimap2_framework_duration_rate_contract =
     "not_proven";
 #endif

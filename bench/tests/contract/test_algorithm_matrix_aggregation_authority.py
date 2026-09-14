@@ -50,6 +50,7 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
     _synthetic_q8_evidence_cache = None
     _synthetic_approved_authority_cache = None
     _legacy_approved_authority_cache = None
+    _current_approved_authority_cache = None
 
     @classmethod
     def setUpClass(cls):
@@ -64,6 +65,7 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
         raw = (REPOSITORY_ROOT / "ALL_RESULTS_TUPLES.yaml").read_bytes()
         document = aggregator._parse_approved_tuples_yaml(raw, "current authority")
         aggregator._validate_approved_tuple_authority_document(document, raw)
+        cls._current_approved_authority_cache = (copy.deepcopy(document), raw)
         if document["version"] == aggregator.APPROVED_TUPLES_LEGACY_VERSION:
             if hashlib.sha256(raw).hexdigest() != aggregator.APPROVED_TUPLES_LEGACY_SHA256:
                 raise AssertionError("frozen v2 authority bytes changed")
@@ -394,6 +396,13 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
                 aggregator._migrate_approved_tuple_authority_v3(
                     legacy, hashlib.sha256(raw).hexdigest()))
         return copy.deepcopy(cls._synthetic_approved_authority_cache)
+
+    @classmethod
+    def _current_approved_authority(cls):
+        if cls._current_approved_authority_cache is None:
+            raise AssertionError("current authority fixture was not initialized")
+        document, raw = cls._current_approved_authority_cache
+        return copy.deepcopy(document), raw
 
     @classmethod
     def _synthetic_observed_manifest(cls, _authority):
@@ -1051,6 +1060,130 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
         del envelope["candidate_envelope_sha256"]
         candidate["candidate_envelope_sha256"] = hashlib.sha256(
             aggregator._canonical_bytes(envelope)).hexdigest()
+
+    @staticmethod
+    def _synthetic_remote_host_descriptor(machine_id="M7A"):
+        policy = aggregator.APPROVED_TUPLES_REMOTE_MACHINE_POLICIES[machine_id]
+        receipt_host = {
+            "node": policy["hostname"],
+            "system": "Linux",
+            "machine": policy["architecture"],
+            "release": "7.0.0-1012-aws",
+        }
+        descriptor = {
+            "schema": aggregator.APPROVED_TUPLES_REMOTE_HOST_SCHEMA,
+            "version": aggregator.APPROVED_TUPLES_REMOTE_HOST_VERSION,
+            "machine_id": machine_id,
+            "cloud_provider": "aws",
+            "aws_identity": {
+                "account_id": policy["account_id"],
+                "region": policy["region"],
+                "availability_zone": policy["availability_zone"],
+                "instance_id": policy["instance_id"],
+                "ec2_architecture": policy["ec2_architecture"],
+            },
+            "instance_type": policy["instance_type"],
+            "architecture": policy["architecture"],
+            "cpu": {
+                "architecture": policy["architecture"],
+                "model": {
+                    "C7G": "AWS Graviton3 Processor",
+                    "M4": "Intel Xeon processor",
+                    "M7A": "AMD EPYC 9R14",
+                    "M7I": "Intel(R) Xeon(R) Platinum 8488C",
+                }[machine_id],
+                "isa": policy["architecture"],
+                "vcpu_count": policy["vcpu_count"],
+                "core_count": policy["core_count"],
+                "threads_per_core": policy["threads_per_core"],
+            },
+            "memory": {"physical_mib": policy["physical_memory_mib"]},
+            "storage": {
+                "kind": "ebs",
+                "root_device": policy["root_device"],
+                "volume_id": policy["volume_id"],
+                "capacity_gib": policy["capacity_gib"],
+                "volume_type": policy["volume_type"],
+                "provisioned_iops": policy["provisioned_iops"],
+                "provisioned_throughput_mib_per_s": policy[
+                    "provisioned_throughput_mib_per_s"],
+                "encrypted": True,
+                "instance_store_present": False,
+            },
+            "receipt_host": receipt_host,
+            "measurement_device": {
+                "identity": (
+                    f"cpu:{policy['architecture']}:{receipt_host['node']}"),
+                "version": f"Linux:{receipt_host['release']}",
+            },
+            "build_preset": policy["build_preset"],
+            "preset_family": "e2e",
+            "gpu": {
+                "available": False,
+                "device_count": 0,
+                "identity": None,
+                "driver": None,
+                "vulkan_available": False,
+                "aws_gpu_info": None,
+            },
+            "descriptor_sha256": "0" * 64,
+        }
+        descriptor["descriptor_sha256"] = (
+            aggregator._remote_host_descriptor_sha256(descriptor))
+        return descriptor
+
+    @classmethod
+    def _remoteize_candidate(cls, candidate, remote_authority):
+        candidate = copy.deepcopy(candidate)
+        host = remote_authority["remote_host_binding"]
+        authority_sha256 = (
+            aggregator._remote_bootstrap_seed_sha256(remote_authority)
+            if not remote_authority["approved_results"] else
+            hashlib.sha256(
+                aggregator._canonical_approved_tuples_yaml_v3(
+                    remote_authority)).hexdigest())
+        candidate["version"] = aggregator.APPROVED_TUPLES_REMOTE_CANDIDATE_VERSION
+        candidate["authority_before_sha256"] = authority_sha256
+        candidate["remote_host_binding"] = {
+            "machine_id": host["machine_id"],
+            "host_descriptor_sha256": host["descriptor_sha256"],
+            "receipt_host_sha256": hashlib.sha256(
+                aggregator._canonical_bytes(host["receipt_host"])).hexdigest(),
+        }
+        candidate["same_host_baselines"] = [{
+            "candidate_stable_key": row["stable_key"],
+            "baseline_stable_key": aggregator._remote_baseline_stable_key(row),
+            "host_descriptor_sha256": host["descriptor_sha256"],
+        } for row in candidate["candidate_rows"]]
+        baseline_by_candidate = {
+            binding["candidate_stable_key"]: binding["baseline_stable_key"]
+            for binding in candidate["same_host_baselines"]
+        }
+        for row in candidate["verification_manifest"]["proofs"][
+                "chunk_plan"]["payload"]["rows"]:
+            row["baseline_stable_key"] = baseline_by_candidate[
+                row["stable_key"]]
+        build = candidate["verification_manifest"]["proofs"]["build"]["payload"]
+        build.update({
+            "preset": host["build_preset"],
+            "remote_host_descriptor_sha256": host["descriptor_sha256"],
+            "receipt_host_sha256": candidate[
+                "remote_host_binding"]["receipt_host_sha256"],
+        })
+        measurement = candidate["verification_manifest"]["proofs"][
+            "measurement_contract"]["payload"]
+        measurement.update({
+            "device": copy.deepcopy(host["measurement_device"]),
+            "remote_host_descriptor_sha256": host["descriptor_sha256"],
+        })
+        merged = sorted(
+            copy.deepcopy(remote_authority["approved_results"]
+                          + candidate["candidate_rows"]),
+            key=aggregator._approved_observation_sort_key)
+        candidate["candidate_projection_sha256"] = (
+            aggregator._approved_projection_sha256(merged))
+        cls._reseal_synthetic_candidate(candidate)
+        return candidate
 
     @classmethod
     def _write_synthetic_approved_inputs(cls, directory, *, legacy=False):
@@ -2715,6 +2848,274 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
                         f"query-scope copied {name}",
                         allow_legacy_preservation=True,
                         require_field_order=True)
+
+    def test_remote_authority_bootstrap_is_cpu_only_and_never_rewrites_local_v3(self):
+        local, local_raw = self._current_approved_authority()
+        historical_sha256 = local["projection_provenance"][
+            "historical_v2_preservation"]["source_authority_sha256"]
+        legacy_seal = mock.patch.object(
+            aggregator, "APPROVED_TUPLES_LEGACY_SHA256", historical_sha256)
+        legacy_seal.start()
+        self.addCleanup(legacy_seal.stop)
+        aggregator._validate_approved_tuple_authority_document(local, local_raw)
+        local_sha256 = hashlib.sha256(local_raw).hexdigest()
+        expected_machine_policy = {
+            "C7G": (
+                "i-0cab5f0ab9a1cb002", "c7g.xlarge", "arm64", "aarch64",
+                4, 4, 1, 8192, "vol-0a68963a0efa7f81b", 500,
+                "native-arm64-clang22-linux-e2e"),
+            "M4": (
+                "i-09b8f0b9dc8c60564", "m4.xlarge", "x86_64", "x86_64",
+                4, 2, 2, 16384, "vol-0d447fc0269e11320", 500,
+                "native-x64-clang22-linux-e2e"),
+            "M7A": (
+                "i-0c724c456e6a87366", "m7a.xlarge", "x86_64", "x86_64",
+                4, 4, 1, 16384, "vol-09e1fb2d8a352b673", 500,
+                "native-x64-clang22-linux-e2e"),
+            "M7I": (
+                "i-0e647495fa0691f94", "m7i.xlarge", "x86_64", "x86_64",
+                4, 2, 2, 16384, "vol-032e918f7fc9c0763", 500,
+                "native-x64-clang22-linux-e2e"),
+        }
+        for machine_id, expected in expected_machine_policy.items():
+            with self.subTest(remote_machine_policy=machine_id):
+                policy = aggregator.APPROVED_TUPLES_REMOTE_MACHINE_POLICIES[
+                    machine_id]
+                self.assertEqual(
+                    (policy["instance_id"], policy["instance_type"],
+                     policy["ec2_architecture"], policy["architecture"],
+                     policy["vcpu_count"], policy["core_count"],
+                     policy["threads_per_core"],
+                     policy["physical_memory_mib"], policy["volume_id"],
+                     policy["capacity_gib"], policy["build_preset"]),
+                    expected)
+                descriptor = self._synthetic_remote_host_descriptor(machine_id)
+                self.assertEqual(
+                    aggregator._validate_remote_host_descriptor(
+                        descriptor, f"{machine_id} descriptor",
+                        require_field_order=True),
+                    descriptor)
+                self.assertTrue(aggregator._approved_e2e_receipt_preset_matches({
+                    "preset_family": "e2e",
+                    "preset": policy["build_preset"],
+                    "host": descriptor["receipt_host"],
+                }))
+        wrong_host_preset = self._synthetic_remote_host_descriptor("M7A")
+        self.assertFalse(aggregator._approved_e2e_receipt_preset_matches({
+            "preset_family": "e2e",
+            "preset": "aws-x64-linux-e2e",
+            "host": wrong_host_preset["receipt_host"],
+        }))
+        rejected_old_size = self._synthetic_remote_host_descriptor("M7A")
+        rejected_old_size["instance_type"] = "m7a.4xlarge"
+        rejected_old_size["descriptor_sha256"] = (
+            aggregator._remote_host_descriptor_sha256(rejected_old_size))
+        with self.assertRaisesRegex(
+                aggregator.ContractError, "closed machine policy"):
+            aggregator._validate_remote_host_descriptor(
+                rejected_old_size, "obsolete-size descriptor",
+                require_field_order=True)
+        missing_inventory = self._synthetic_remote_host_descriptor("M7I")
+        del missing_inventory["cpu"]
+        with self.assertRaises(aggregator.ContractError):
+            aggregator._validate_remote_host_descriptor(
+                missing_inventory, "missing-inventory descriptor",
+                require_field_order=False)
+        for name, section, field, replacement in (
+                ("instance", "aws_identity", "instance_id", "i-00000000000000000"),
+                ("cpu", "cpu", "model", "unknown"),
+                ("memory", "memory", "physical_mib", 8192),
+                ("storage", "storage", "volume_id", "vol-00000000000000000"),
+                ("gpu", "gpu", "aws_gpu_info", {"Gpus": 1})):
+            with self.subTest(tampered_remote_inventory=name):
+                tampered = self._synthetic_remote_host_descriptor("M7I")
+                tampered[section][field] = replacement
+                tampered["descriptor_sha256"] = (
+                    aggregator._remote_host_descriptor_sha256(tampered))
+                with self.assertRaises(aggregator.ContractError):
+                    aggregator._validate_remote_host_descriptor(
+                        tampered, f"tampered-{name} descriptor",
+                        require_field_order=True)
+        host = self._synthetic_remote_host_descriptor("M7A")
+        seed = aggregator._new_remote_approved_tuple_authority(
+            local, local_sha256, host)
+        expected_rows = aggregator._remote_eligible_rows_from_local_authority(
+            local["approved_results"])
+        cpu_identity = copy.deepcopy(aggregator._approved_row_identity(next(
+            row for row in expected_rows
+            if not aggregator._remote_identity_requires_vulkan(
+                aggregator._approved_row_identity(row)))))
+        for field in (
+                "requested_minimizer_algorithm",
+                "requested_chaining_algorithm",
+                "requested_base_alignment_algorithm"):
+            with self.subTest(requested_gpu_stage=field):
+                identity = copy.deepcopy(cpu_identity)
+                identity[field] = "vulkan_test_stage"
+                self.assertTrue(
+                    aggregator._remote_identity_requires_vulkan(identity))
+        baseline_row = copy.deepcopy(next(
+            row for row in expected_rows if row["pipeline"] == "minimap2"))
+        baseline_row["timing_scope"] = (
+            aggregator.APPROVED_TUPLES_QUERY_TIMING_SCOPE)
+        baseline_row["metrics"] = {"unit": "ns", "p50_a": 110, "p50_b": 100}
+        baseline_row = aggregator._approved_row_in_fixed_order(baseline_row)
+        candidate = self._remoteize_candidate(
+            self._synthetic_candidate(
+                local, [baseline_row], authority_raw=local_raw), seed)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            local_path = root / "ALL_RESULTS_TUPLES.yaml"
+            local_path.write_bytes(local_raw)
+            descriptor_path = root / "remote_host.json"
+            descriptor_path.write_text(
+                json.dumps(host, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8")
+            candidate_path = root / "approved_remote_baseline_candidate.json"
+            candidate_path.write_text(
+                json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+                + "\n", encoding="utf-8")
+            remote_path = root / "ALL_RESULTS_TUPLES_REMOTE_M7A.yaml"
+            receipt = aggregator.bootstrap_remote_approved_tuples(
+                remote_path, local_path, local_sha256, descriptor_path,
+                candidate_path)
+            self.assertEqual(local_path.read_bytes(), local_raw)
+            self.assertEqual(receipt["machine_id"], "M7A")
+            self.assertEqual(receipt["approved_result_count"], 1)
+            self.assertEqual(stat.S_IMODE(remote_path.stat().st_mode), 0o600)
+            remote_raw = remote_path.read_bytes()
+            remote = aggregator._parse_approved_tuples_yaml(
+                remote_raw, "remote authority")
+            aggregator._validate_approved_tuple_authority_document(
+                remote, remote_raw)
+            self.assertEqual(
+                remote["eligible_stable_keys"],
+                [row["stable_key"] for row in expected_rows])
+            self.assertEqual(
+                len(remote["eligible_stable_keys"]),
+                len({row["stable_key"] for row in local["approved_results"]}))
+            self.assertEqual(
+                [row["stable_key"]
+                 for row in remote["hardware_unavailable_cells"]],
+                [row["stable_key"] for row in expected_rows
+                 if aggregator._remote_identity_requires_vulkan(
+                     aggregator._approved_row_identity(row))])
+            self.assertTrue(all(
+                row["run_count"] == 0
+                and row["metrics"] == {
+                    "unit": "ns", "p50_a": None, "p50_b": None}
+                and row["execution_attempted"] is False
+                for row in remote["hardware_unavailable_cells"]))
+            stable_remote = remote_path.read_bytes()
+            with self.assertRaises(aggregator.ApprovedTupleIOError):
+                aggregator.bootstrap_remote_approved_tuples(
+                    remote_path, local_path, local_sha256, descriptor_path,
+                    candidate_path)
+            self.assertEqual(remote_path.read_bytes(), stable_remote)
+
+    def test_remote_candidate_binds_host_allowlist_and_preapproved_baseline(self):
+        local, local_raw = self._current_approved_authority()
+        historical_sha256 = local["projection_provenance"][
+            "historical_v2_preservation"]["source_authority_sha256"]
+        legacy_seal = mock.patch.object(
+            aggregator, "APPROVED_TUPLES_LEGACY_SHA256", historical_sha256)
+        legacy_seal.start()
+        self.addCleanup(legacy_seal.stop)
+        aggregator._validate_approved_tuple_authority_document(local, local_raw)
+        host = self._synthetic_remote_host_descriptor("M7A")
+        remote = aggregator._new_remote_approved_tuple_authority(
+            local, hashlib.sha256(local_raw).hexdigest(), host)
+        eligible_rows = aggregator._remote_eligible_rows_from_local_authority(
+            local["approved_results"])
+        eligible_by_key = {row["stable_key"]: row for row in eligible_rows}
+        cpu_row = copy.deepcopy(next(
+            row for row in eligible_rows
+            if row["pipeline"] == "bioseq"
+            and row["execution_conformance"] == "exact_requested_path"
+            and not aggregator._remote_identity_requires_vulkan(
+                aggregator._approved_row_identity(row))
+            and aggregator._remote_baseline_stable_key(row) in eligible_by_key))
+        baseline_row = copy.deepcopy(
+            eligible_by_key[aggregator._remote_baseline_stable_key(cpu_row)])
+        for row in (baseline_row, cpu_row):
+            row["timing_scope"] = aggregator.APPROVED_TUPLES_QUERY_TIMING_SCOPE
+            row["metrics"] = {"unit": "ns", "p50_a": 110, "p50_b": 100}
+        baseline_row = aggregator._approved_row_in_fixed_order(baseline_row)
+        cpu_row = aggregator._approved_row_in_fixed_order(cpu_row)
+
+        baseline_candidate = self._remoteize_candidate(
+            self._synthetic_candidate(local, [baseline_row],
+                                      authority_raw=local_raw), remote)
+        remote_sha256 = aggregator._remote_bootstrap_seed_sha256(remote)
+        _, baseline_merge = aggregator._validate_approved_append_candidate_document(
+            baseline_candidate, remote, remote_sha256)
+        aggregator._regenerate_remote_approved_tuple_projections(
+            remote, baseline_merge)
+        remote_raw = aggregator._canonical_approved_tuples_yaml_v3(remote)
+        aggregator._validate_approved_tuple_authority_document(remote, remote_raw)
+
+        cpu_candidate = self._remoteize_candidate(
+            self._synthetic_candidate(local, [cpu_row], authority_raw=local_raw),
+            remote)
+        remote_sha256 = hashlib.sha256(remote_raw).hexdigest()
+        candidate_rows, merged = (
+            aggregator._validate_approved_append_candidate_document(
+                cpu_candidate, remote, remote_sha256))
+        self.assertEqual(candidate_rows, [cpu_row])
+        self.assertEqual(len(merged), 2)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            authority_path = root / "ALL_RESULTS_TUPLES_REMOTE_M7A.yaml"
+            authority_path.write_bytes(remote_raw)
+            candidate_path = root / "approved_remote_cpu_candidate.json"
+            candidate_path.write_text(
+                json.dumps(cpu_candidate, sort_keys=True, separators=(",", ":"))
+                + "\n", encoding="utf-8")
+            receipt = aggregator.append_approved_tuples(
+                authority_path, remote_sha256, candidate_path)
+            self.assertEqual(receipt["approved_result_count"], 2)
+            self.assertEqual(receipt["machine_id"], "M7A")
+            appended_raw = authority_path.read_bytes()
+            appended = aggregator._parse_approved_tuples_yaml(
+                appended_raw, "appended remote authority")
+            aggregator._validate_approved_tuple_authority_document(
+                appended, appended_raw)
+            self.assertEqual(appended["approved_results"], merged)
+            self.assertEqual(stat.S_IMODE(authority_path.stat().st_mode), 0o600)
+            self.assertEqual(
+                (root / ".ALL_RESULTS_TUPLES_REMOTE_M7A.yaml.lock").stat().st_size,
+                0)
+
+        missing_baseline = aggregator._new_remote_approved_tuple_authority(
+            local, hashlib.sha256(local_raw).hexdigest(), host)
+        rebound = self._remoteize_candidate(
+            self._synthetic_candidate(local, [cpu_row], authority_raw=local_raw),
+            missing_baseline)
+        with self.assertRaisesRegex(
+                aggregator.ApprovedTupleProofError, "same-host minimap2 baseline"):
+            aggregator._validate_approved_append_candidate_document(
+                rebound, missing_baseline,
+                aggregator._remote_bootstrap_seed_sha256(missing_baseline))
+
+        wrong_host = copy.deepcopy(cpu_candidate)
+        wrong_host["remote_host_binding"]["machine_id"] = "M4"
+        self._reseal_synthetic_candidate(wrong_host)
+        with self.assertRaisesRegex(
+                aggregator.ApprovedTupleProofError, "different remote host"):
+            aggregator._validate_approved_append_candidate_document(
+                wrong_host, remote, remote_sha256)
+
+        wrong_preset = copy.deepcopy(cpu_candidate)
+        wrong_preset["verification_manifest"]["proofs"]["build"][
+            "payload"]["preset"] = "unlisted-remote-e2e"
+        self._reseal_synthetic_candidate(wrong_preset)
+        with self.assertRaisesRegex(
+                aggregator.ApprovedTupleProofError, "remote authority host"):
+            aggregator._validate_approved_append_candidate_document(
+                wrong_preset, remote, remote_sha256)
+        self.assertEqual(
+            aggregator._canonical_approved_tuples_yaml_v3(local), local_raw)
 
     def test_validate_approved_tuples_cli_is_read_only_and_reports_exact_receipt(self):
         with tempfile.TemporaryDirectory() as directory:

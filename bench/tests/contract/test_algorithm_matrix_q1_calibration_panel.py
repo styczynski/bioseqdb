@@ -106,7 +106,7 @@ class Q1CalibrationPanelContractTests(unittest.TestCase):
         with (mock.patch.object(build_worker.host_platform, "system", return_value="Darwin"),
               mock.patch.object(build_worker.os, "setpriority") as setpriority,
               mock.patch.object(build_worker.os, "getpriority", return_value=0)):
-            build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+            build_worker._ensure_algorithm_matrix_launch_nice(
                 "benchmark-e2e", config, output)
         setpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0, 0)
         self.assertIn("worker_NI=0 verified", output.getvalue())
@@ -115,7 +115,7 @@ class Q1CalibrationPanelContractTests(unittest.TestCase):
               mock.patch.object(build_worker.os, "setpriority"),
               mock.patch.object(build_worker.os, "getpriority", return_value=1)):
             with self.assertRaisesRegex(RuntimeError, "requires verified worker NI=0"):
-                build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+                build_worker._ensure_algorithm_matrix_launch_nice(
                     "benchmark-e2e", config, io.StringIO())
 
     def test_q1_merge_is_explicitly_nonpublication(self):

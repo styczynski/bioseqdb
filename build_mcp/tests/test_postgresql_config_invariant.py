@@ -406,7 +406,7 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
                 "/var/lib/postgresql/17/main", "aws-test-opt")
         self.assertEqual(pid, 42)
         read_as_postgres.assert_called_once_with(
-            Path("/var/lib/postgresql/17/main/postmaster.pid"))
+            Path("/var/lib/postgresql/17/main/postmaster.pid"), None)
 
     def test_runtime_identity_rejects_wrong_executable_before_sql(
             self) -> None:

@@ -52,6 +52,43 @@ namespace bioseq::simd::HWY_NAMESPACE {
 using namespace minimizer_hashmap_test_support;
 using namespace fragment_producer_test_support;
 
+TEST_CASE("Vulkan fragment replay batch count obeys every existing admission bound",
+          "[component:bioseq][layer:unit][feature:storage][resource:highway]") {
+    using namespace bioseq::indexing;
+    constexpr std::size_t fragment_count = 1'000u;
+    constexpr std::size_t fragment_bp = 32'768u;
+    constexpr std::size_t aggregate_halo = 2u * (15u + 20u - 2u);
+
+    REQUIRE(gpu_minimizer_fragments_per_batch(
+                fragment_count, fragment_bp, aggregate_halo, 0u)
+            == 1u);
+    REQUIRE(gpu_minimizer_fragments_per_batch(
+                fragment_count,
+                fragment_bp,
+                aggregate_halo,
+                std::size_t{64u} << 20u)
+            == 21u);
+    REQUIRE(gpu_minimizer_fragments_per_batch(
+                fragment_count,
+                fragment_bp,
+                aggregate_halo,
+                std::size_t{2u} << 30u)
+            == 255u);
+    REQUIRE(gpu_minimizer_fragments_per_batch(
+                7u,
+                fragment_bp,
+                aggregate_halo,
+                std::size_t{2u} << 30u)
+            == 7u);
+    REQUIRE(gpu_minimizer_fragments_per_batch(
+                fragment_count,
+                fragment_bp,
+                static_cast<std::size_t>(
+                    minimap_sketch_data::k_position_field_mask),
+                std::size_t{2u} << 30u)
+            == 1u);
+}
+
 TEST_CASE("bounded ntHash fragment replay matches one checked resident execution",
           "[component:bioseq][layer:unit][feature:storage][resource:highway]") {
     using namespace bioseq::indexing;

@@ -29,7 +29,7 @@ export import :model;
 export import :policy;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.codegen.sql.collector;
-import :tests.contract;
+export import :tests.contract;
 import bioseq.codegen.sql.graph;
 import bioseq.codegen.sql.renderer;
 import bioseq.codegen.structural_analysis;

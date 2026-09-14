@@ -473,6 +473,7 @@ TEST_CASE(
         bioseq::minimizers::minimizer_sketch_backend::scalar,
         15u,
         fragments);
+    std::uint64_t cooperative_checkpoint_calls = 0u;
     auto adapter = idx::minimizer_fragment_compact_hash32_adapter::open(
         idx::opened_minimizer_fragment_generation_view{
             .head = &fixture.head,
@@ -483,6 +484,12 @@ TEST_CASE(
         idx::minimizer_fragment_compact_hash32_options{
             .buffered_run_position_cap = 3u,
             .emission_chunk_positions = 2u,
+            .cancellation_checkpoint = idx::cooperative_cancellation_checkpoint{
+                .context = &cooperative_checkpoint_calls,
+                .invoke_fn = +[](void* context) {
+                    ++*static_cast<std::uint64_t*>(context);
+                },
+            },
         });
     REQUIRE(adapter.has_value());
     REQUIRE(adapter->ready());
@@ -496,6 +503,7 @@ TEST_CASE(
     const auto image = idx::build_compact_hash32_direct_index(
         source, *build_options);
     REQUIRE(image.has_value());
+    REQUIRE(cooperative_checkpoint_calls > 0u);
     const auto view = idx::validate_compact_hash32_direct_index(
         *image,
         build_options->identity,
@@ -635,6 +643,89 @@ TEST_CASE(
     CHECK(moved_adapter.scan_stats().source_scans_completed == 2u);
     CHECK(moved_adapter.scan_stats().receiver_position_chunks == 2u);
     CHECK(moved_adapter.scan_stats().peak_buffered_run_positions == 1u);
+}
+
+TEST_CASE(
+    "Minimizer-fragment compact-hash32 adapter reads ahead across 32 controls and "
+    "resets at an adjacent directory entry",
+    "[component:bioseq][layer:unit][feature:index]") {
+    constexpr std::uint64_t segment_span = 64u;
+    std::vector<control_spec> first_entry_controls;
+    first_entry_controls.reserve(35u);
+    for (std::uint32_t ordinal = 0u; ordinal < 35u; ++ordinal) {
+        first_entry_controls.push_back(control_spec{
+            .hash = ordinal * 2u + 1u,
+            .positions = {{
+                .bp = ordinal,
+                .strand_one = (ordinal & 1u) != 0u,
+            }},
+        });
+    }
+    const std::vector<fragment_spec> fragments{
+        fragment_spec{
+            .position_segment = 0u,
+            .controls = std::move(first_entry_controls),
+        },
+        fragment_spec{
+            .position_segment = 0u,
+            .controls = {
+                control_spec{
+                    .hash = 100u,
+                    .positions = {{.bp = 40u, .strand_one = false}},
+                },
+                control_spec{
+                    .hash = 101u,
+                    .positions = {{.bp = 41u, .strand_one = true}},
+                },
+            },
+        },
+    };
+    const oracle_type oracle = make_oracle(segment_span, fragments);
+    auto fixture = make_minimizer_fragment_fixture(
+        segment_span,
+        segment_span,
+        10u,
+        idx::k_minimap_scheme_identity,
+        bioseq::minimizers::minimizer_sketch_backend::scalar,
+        15u,
+        fragments);
+    auto adapter = idx::minimizer_fragment_compact_hash32_adapter::open(
+        idx::opened_minimizer_fragment_generation_view{
+            .head = &fixture.head,
+            .manifest = &fixture.manifest,
+            .directory = &fixture.directory,
+            .mapped_payload = fixture.payload,
+        });
+    REQUIRE(adapter.has_value());
+
+    captured_runs captured;
+    const idx::compact_hash32_sorted_run_receiver receiver{
+        .context = &captured,
+        .begin_run_fn = &capture_begin,
+        .consume_positions_fn = &capture_positions,
+    };
+    auto source = adapter->sorted_run_source();
+    REQUIRE(source.scan_sorted_runs(receiver).has_value());
+    REQUIRE(captured.headers.size() == oracle.size());
+    REQUIRE(captured.positions.size() == oracle.size());
+    std::size_t run = 0u;
+    for (const auto& [hash, positions] : oracle) {
+        CAPTURE(run, hash);
+        CHECK(captured.headers[run].hash == hash);
+        CHECK(captured.headers[run].global_count == positions.size());
+        CHECK(captured.positions[run] == positions);
+        ++run;
+    }
+    const auto& estimate = adapter->prebuild_estimate();
+    const auto& stats = adapter->scan_stats();
+    CHECK(estimate.nonempty_fragment_count == 1u);
+    CHECK(estimate.directory_entry_count == 2u);
+    CHECK(estimate.fragment_cursor_scratch_bytes
+        >= 32u * 4u * sizeof(std::uint64_t));
+    CHECK(stats.fragment_controls_read == fixture.manifest.control_count);
+    CHECK(stats.control_scalar_bytes_read
+        == estimate.control_scalar_bytes_per_source_scan);
+    CHECK(stats.positions_emitted == fixture.manifest.position_count);
 }
 
 TEST_CASE(

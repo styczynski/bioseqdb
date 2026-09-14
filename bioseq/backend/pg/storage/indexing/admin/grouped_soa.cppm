@@ -49,6 +49,110 @@ import :hash_major;
 
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
+namespace bioseq::storage::indexing::detail {
+
+/// Avoid the allocating PostgreSQL error bridge on the ordinary no-interrupt path.
+/// A pending query-cancel ERROR crosses the bridge and unwinds statement-owned C++
+/// state; backend-termination/FATAL retains PostgreSQL's native terminal semantics.
+void check_generation_interrupts_as_cpp(void*) {
+    if (!INTERRUPTS_PENDING_CONDITION()) {
+        return;
+    }
+    bioseq::postgres::support::invoke_pg_as_cpp([] {
+        CHECK_FOR_INTERRUPTS();
+    });
+}
+
+} // namespace bioseq::storage::indexing::detail
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+namespace bioseq::storage::indexing::detail {
+
+// Preserve existing producer counters before the ordinary update_index wrapper
+// discards its validated publication. This is not a transaction-commit receipt.
+void log_e2e_minimizer_publication_execution(
+    const ready_minimizer_generation_publication& publication,
+    Oid user_relid,
+    std::int16_t column_attno,
+    std::string_view index_name,
+    std::uint64_t query_key) {
+    const char* receipt_kind = "";
+    const char* scan_counter = "";
+    const char* retry_counter = "";
+    std::uint64_t scans = 0, retries = 0, short_runs = 0;
+    std::uint64_t scalar_runs = 0, exact_runs = 0, bounded_runs = 0, vulkan_runs = 0;
+    std::uint64_t roundtrips = 0, downloaded = 0, window_splits = 0;
+    bool receipt_saturated = false, vulkan_saturated = false;
+
+    if (const auto* receipt =
+            std::get_if<bioseq::indexing::minimizer_fragment_generation_execution_receipt>(
+                &publication.execution())) {
+        receipt_kind = "fragment";
+        scan_counter = "producer_scan_count";
+        retry_counter = "geometry_retry_count";
+        scans = receipt->producer_scan_count;
+        retries = receipt->geometry_retry_count;
+        short_runs = receipt->short_core_runs;
+        scalar_runs = receipt->scalar_core_runs;
+        exact_runs = receipt->exact_simd_core_runs;
+        bounded_runs = receipt->bounded_nthash_core_runs;
+        vulkan_runs = receipt->vulkan_core_runs;
+        roundtrips = receipt->vulkan_stats.completed_roundtrips;
+        downloaded = receipt->vulkan_stats.downloaded_minimizers;
+        window_splits = receipt->vulkan_stats.gpu_window_splits;
+        receipt_saturated = receipt->saturated;
+        vulkan_saturated = receipt->vulkan_stats.saturated;
+    } else if (const auto* receipt =
+                   std::get_if<bioseq::indexing::minimizer_sequence_generation_execution_receipt>(
+                       &publication.execution())) {
+        receipt_kind = "sequence";
+        scan_counter = "replay_scan_count";
+        retry_counter = "replay_reroute_pass_count";
+        scans = receipt->replay_scan_count;
+        retries = receipt->replay_reroute_pass_count;
+        short_runs = receipt->short_core_runs;
+        scalar_runs = receipt->scalar_core_runs;
+        exact_runs = receipt->exact_simd_core_runs;
+        bounded_runs = receipt->bounded_nthash_core_runs;
+        vulkan_runs = receipt->vulkan_core_runs;
+        roundtrips = receipt->vulkan_stats.completed_roundtrips;
+        downloaded = receipt->vulkan_stats.downloaded_minimizers;
+        window_splits = receipt->vulkan_stats.gpu_window_splits;
+        receipt_saturated = receipt->saturated;
+        vulkan_saturated = receipt->vulkan_stats.saturated;
+    } else {
+        return;
+    }
+
+    bioseq_log<logging_level::info, logging_target::postgres>(
+        "[bioseq_e2e] event=validated_minimizer_publication_execution version=1 "
+        "receipt_kind={} backend_pid={} database_oid={} user_relid={} column_attno={} "
+        "index_name={} query_key={} generation_id={} source_identity={:016x} "
+        "source_content_checksum={:016x} storage_contract_checksum={:016x} "
+        "selected_backend={} {}={} {}={} short_core_runs={} scalar_core_runs={} "
+        "exact_simd_core_runs={} bounded_nthash_core_runs={} vulkan_core_runs={} "
+        "vulkan_completed_roundtrips={} vulkan_downloaded_minimizers={} "
+        "vulkan_gpu_window_splits={} receipt_saturated={} vulkan_saturated={}",
+        receipt_kind,
+        MyProcPid,
+        static_cast<unsigned>(MyDatabaseId),
+        static_cast<unsigned>(user_relid),
+        static_cast<int>(column_attno),
+        index_name,
+        query_key,
+        publication.generation_id(),
+        publication.source_identity(),
+        publication.source_content_checksum(),
+        publication.storage_contract_checksum(),
+        bioseq::minimizers::minimizer_sketch_backend_name(publication.selected_backend()),
+        scan_counter, scans, retry_counter, retries,
+        short_runs, scalar_runs, exact_runs, bounded_runs, vulkan_runs,
+        roundtrips, downloaded, window_splits, receipt_saturated, vulkan_saturated);
+}
+
+} // namespace bioseq::storage::indexing::detail
+#endif
+
 export namespace bioseq::storage::indexing {
 
 /**
@@ -296,6 +400,12 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
             .algorithm_identity = algorithm_identity,
             .max_occ_cap = k_max_occ_cap,
         };
+        const bioseq::indexing::cooperative_cancellation_checkpoint
+            generation_cancellation{
+                .context = nullptr,
+                .invoke_fn = &detail::check_generation_interrupts_as_cpp,
+            };
+        detail::check_generation_interrupts_as_cpp(nullptr);
         if (is_fragment_index) {
             auto encoded = fragment_index::encode_persisted_generation(
                 sequence,
@@ -305,7 +415,9 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                 options,
                 bioseq::indexing::grouped_soa_generation_limits{},
                 &state->fragment_execution,
-                state->source.alphabet_code);
+                state->source.alphabet_code,
+                storage.run_buffer_bytes(),
+                generation_cancellation);
             if (encoded) {
                 state->generation.emplace(std::move(*encoded));
                 state->execution = state->fragment_execution;
@@ -342,6 +454,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                 }
             }
         }
+        detail::check_generation_interrupts_as_cpp(nullptr);
         if (state->generation.has_value()) {
             result.binding =
                 bioseq::indexing::make_minimizer_generation_publication_binding(*state->generation);
@@ -486,6 +599,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                                          "READY minimizer encoded manifest identity disagrees");
         }
 
+        detail::check_generation_interrupts_as_cpp(nullptr);
         state->ready_token.emplace(state->writer->validate_ready_generation(*state->generation));
         result.writer_rows = state->writer->row_count();
         result.writer_batches = state->writer->catalog_multi_insert_batches();
@@ -498,6 +612,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
             minimizer_generation_failure_injection::generation_storage_close,
             "generation_storage_close");
 
+        detail::check_generation_interrupts_as_cpp(nullptr);
         ready_minimizer_generation_published_head_receipt publication_receipt =
             publish_ready_minimizer_generation_head_pg(std::move(*state->ready_token));
         state->ready_token.reset();
@@ -646,6 +761,10 @@ inline void build_and_verify_grouped_soa_minimizer_generation_pg(
                         index_name,
                         bioseq::minimizers::minimizer_sketch_backend_name(backend)));
     }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    detail::log_e2e_minimizer_publication_execution(
+        publication, user_relid, column_attno, index_name, sequence_rowno);
+#endif
 }
 
 // Keep one explicit production facade/binding instantiation as a narrow

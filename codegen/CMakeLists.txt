@@ -199,6 +199,23 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL
   execute_process(COMMAND "${LLVM_CONFIG_BINARY}" --version
     OUTPUT_VARIABLE _bioseq_llvm_version OUTPUT_STRIP_TRAILING_WHITESPACE
     COMMAND_ERROR_IS_FATAL ANY)
+  execute_process(COMMAND "${LLVM_CONFIG_BINARY}" --has-rtti
+    OUTPUT_VARIABLE _bioseq_llvm_has_rtti
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+  string(TOUPPER "${_bioseq_llvm_has_rtti}"
+    _bioseq_llvm_has_rtti)
+  if(NOT "${_bioseq_llvm_has_rtti}" STREQUAL "YES"
+      AND NOT "${_bioseq_llvm_has_rtti}" STREQUAL "NO")
+    message(FATAL_ERROR
+      "llvm-config --has-rtti returned an unsupported value: "
+      "'${_bioseq_llvm_has_rtti}'")
+  endif()
+  if(_bioseq_llvm_has_rtti STREQUAL "NO")
+    # CMake's synthesized std module is a separate internal target, so the
+    # isolated project and every importer must share the same RTTI dialect.
+    string(APPEND CMAKE_CXX_FLAGS " -fno-rtti")
+  endif()
   if(_bioseq_llvm_version VERSION_LESS "22")
     message(FATAL_ERROR
       "bioseq_codegen AST tooling requires LLVM/Clang >= 22; found "

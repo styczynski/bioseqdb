@@ -233,7 +233,6 @@ function(bioseq_add_sql_codegen_context)
         ${_identity_arguments}
       DEPENDS
         ${_codegen_dependencies}
-        "${_prepare_stamp}"
         "${_compile_database}"
         "${_pcm_manifest}"
         "${_registry_file}"

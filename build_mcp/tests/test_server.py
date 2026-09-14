@@ -75,6 +75,68 @@ class DetachedWorkerArgumentContractTests(unittest.TestCase):
         )
 
 
+class NativeClang22PresetPortabilityTests(unittest.TestCase):
+    def test_native_release_and_debug_presets_map_to_isolated_e2e_trees(self):
+        expected = {
+            "native-arm64-clang22-linux":
+                "native-arm64-clang22-linux-e2e",
+            "native-arm64-clang22-linux-debug":
+                "native-arm64-clang22-linux-e2e-debug",
+            "native-x64-clang22-linux":
+                "native-x64-clang22-linux-e2e",
+            "native-x64-clang22-linux-debug":
+                "native-x64-clang22-linux-e2e-debug",
+        }
+        for production, e2e in expected.items():
+            with self.subTest(production=production):
+                self.assertEqual(
+                    build_presets._default_e2e_preset(production), e2e)
+
+    def test_native_presets_are_aws_runtime_hosts_without_x64_relabel(self):
+        for preset in (
+            "native-arm64-clang22-linux",
+            "native-arm64-clang22-linux-e2e",
+            "test-native-x64-clang22-linux",
+            "native-x64-clang22-linux-e2e-debug",
+        ):
+            with self.subTest(preset=preset):
+                self.assertTrue(build_presets._is_aws_preset(preset))
+                self.assertFalse(build_presets._is_aws_clang_preset(preset))
+
+    def test_release_e2e_host_contract_is_closed_and_architecture_exact(self):
+        self.assertEqual(
+            build_presets._release_clang_e2e_preset_host_contract(
+                "bench-e2e-opt"),
+            ("Darwin", "arm64", None, None),
+        )
+        self.assertEqual(
+            build_presets._release_clang_e2e_preset_host_contract(
+                "aws-x64-linux-e2e"),
+            ("Linux", "x86_64", "x64", "x64-linux-libcxx"),
+        )
+        self.assertEqual(
+            build_presets._release_clang_e2e_preset_host_contract(
+                "native-arm64-clang22-linux-e2e"),
+            ("Linux", "aarch64", "arm64", "arm64-linux-libcxx"),
+        )
+        self.assertEqual(
+            build_presets._release_clang_e2e_preset_host_contract(
+                "native-x64-clang22-linux-e2e"),
+            ("Linux", "x86_64", "x64", "x64-linux-libcxx"),
+        )
+        for rejected in (
+            "aws-x64-linux-gcc161-e2e",
+            "bench-e2e-opt-debug",
+            "native-arm64-clang22-linux-e2e-debug",
+            "native-arm64-clang23-linux-e2e",
+            "invented-e2e",
+        ):
+            with self.subTest(rejected=rejected):
+                self.assertIsNone(
+                    build_presets._release_clang_e2e_preset_host_contract(
+                        rejected))
+
+
 class DocumentActivityContractTests(unittest.TestCase):
     def test_qmd_collections_recreate_stale_root_lift_path(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -918,7 +980,7 @@ class AlgorithmMatrixSingletonAuthorityTests(unittest.TestCase):
                         return_value={},
                     ), mock.patch.object(
                         build_worker,
-                        "_ensure_darwin_algorithm_matrix_launch_nice",
+                        "_ensure_algorithm_matrix_launch_nice",
                         side_effect=lambda *args: events.append("priority"),
                     ), mock.patch.object(
                         build_worker,
@@ -1016,7 +1078,7 @@ class AlgorithmMatrixSingletonAuthorityTests(unittest.TestCase):
                         build_worker, "_benchmark_e2e_runtime_environment",
                         return_value={},
                     ), mock.patch.object(
-                        build_worker, "_ensure_darwin_algorithm_matrix_launch_nice",
+                        build_worker, "_ensure_algorithm_matrix_launch_nice",
                     ), mock.patch.object(
                         build_worker, "_run_mode_commands",
                         return_value=(report, [report], [], []),
@@ -1201,7 +1263,7 @@ class ObservedRungAuthorityTests(unittest.TestCase):
 
         self.assertIn("requires run_only=true", full_result)
         self.assertIn("accept only the exact filter", filter_result)
-        self.assertIn("debug=false bench-e2e-opt receipt", receipt_result)
+        self.assertIn("qualified debug=false Clang E2E receipt", receipt_result)
 
     def test_observed_worker_rejects_unreceipted_execution_before_commands(self):
         config = self.config_for(2)
@@ -1368,7 +1430,7 @@ class ObservedRungAuthorityTests(unittest.TestCase):
         )
 
 
-class DarwinAlgorithmMatrixLaunchNiceTests(unittest.TestCase):
+class AlgorithmMatrixLaunchNiceTests(unittest.TestCase):
     CONFIG = AlgorithmMatrixSingletonAuthorityTests.PROBE_SINGLETON
 
     def test_explicit_e2e_priority_flag_is_boolean_and_opt_in(self):
@@ -1390,29 +1452,36 @@ class DarwinAlgorithmMatrixLaunchNiceTests(unittest.TestCase):
                     build_worker._e2e_config_requests_nice_attestation(
                         "future.json"))
 
-    def test_darwin_campaign_launch_establishes_and_logs_ni_zero(self):
-        for authority_name in ("q1024", "observed_rung"):
-            with self.subTest(authority=authority_name):
-                self._assert_darwin_campaign_launch_establishes_ni_zero(authority_name)
+    def test_darwin_and_linux_campaign_launches_establish_ni_zero(self):
+        for platform_name, authority_name in (
+            ("Darwin", "q1024"),
+            ("Linux", "observed_rung"),
+        ):
+            with self.subTest(
+                    platform=platform_name, authority=authority_name):
+                self._assert_campaign_launch_establishes_ni_zero(
+                    platform_name, authority_name)
 
-    def _assert_darwin_campaign_launch_establishes_ni_zero(self, authority_name):
+    def _assert_campaign_launch_establishes_ni_zero(
+            self, platform_name, authority_name):
         log = io.StringIO()
         with mock.patch.object(
             build_worker, "_algorithm_matrix_campaign_authority_status",
             return_value=({"name": authority_name}, None),
         ), mock.patch.object(
-            build_worker.host_platform, "system", return_value="Darwin",
+            build_worker.host_platform, "system", return_value=platform_name,
         ), mock.patch.object(
             build_worker.os, "setpriority",
         ) as setpriority, mock.patch.object(
             build_worker.os, "getpriority", return_value=0,
         ) as getpriority:
-            build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+            build_worker._ensure_algorithm_matrix_launch_nice(
                 "benchmark-e2e", self.CONFIG, log)
 
         setpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0, 0)
         getpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0)
         self.assertIn("worker_NI=0 verified", log.getvalue())
+        self.assertIn(f"platform={platform_name}", log.getvalue())
         self.assertIn(
             "postgres_backend_priority_requires_exact_e2e_observation=true",
             log.getvalue(),
@@ -1433,7 +1502,7 @@ class DarwinAlgorithmMatrixLaunchNiceTests(unittest.TestCase):
         ) as setpriority, mock.patch.object(
             build_worker.os, "getpriority", return_value=0,
         ) as getpriority:
-            build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+            build_worker._ensure_algorithm_matrix_launch_nice(
                 "benchmark-e2e", "build/mcp/future.json", log)
 
         setpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0, 0)
@@ -1452,7 +1521,7 @@ class DarwinAlgorithmMatrixLaunchNiceTests(unittest.TestCase):
             build_worker.os, "getpriority", return_value=1,
         ):
             with self.assertRaisesRegex(RuntimeError, "verified worker NI=0"):
-                build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+                build_worker._ensure_algorithm_matrix_launch_nice(
                     "benchmark-e2e", self.CONFIG, io.StringIO())
 
     def test_darwin_campaign_launch_rejects_priority_api_errors(self):
@@ -1471,14 +1540,14 @@ class DarwinAlgorithmMatrixLaunchNiceTests(unittest.TestCase):
                 return_value=0,
             ):
                 with self.assertRaisesRegex(RuntimeError, "could not establish"):
-                    build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+                    build_worker._ensure_algorithm_matrix_launch_nice(
                         "benchmark-e2e", self.CONFIG, io.StringIO())
 
-    def test_priority_gate_does_not_touch_non_campaign_or_non_darwin_paths(self):
+    def test_priority_gate_does_not_touch_non_campaign_paths(self):
         for mode, authority, system_name in (
             ("benchmark", {"name": "q1024"}, "Darwin"),
             ("benchmark-e2e", None, "Darwin"),
-            ("benchmark-e2e", {"name": "q1024"}, "Linux"),
+            ("benchmark-e2e", None, "Linux"),
         ):
             with self.subTest(mode=mode, authority=authority, system=system_name), \
                     mock.patch.object(
@@ -1495,7 +1564,7 @@ class DarwinAlgorithmMatrixLaunchNiceTests(unittest.TestCase):
                     ) as setpriority, mock.patch.object(
                         build_worker.os, "getpriority",
                     ) as getpriority:
-                build_worker._ensure_darwin_algorithm_matrix_launch_nice(
+                build_worker._ensure_algorithm_matrix_launch_nice(
                     mode, self.CONFIG, io.StringIO())
                 setpriority.assert_not_called()
                 getpriority.assert_not_called()
@@ -1908,7 +1977,8 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                     }
                     with mock.patch.object(
                             build_worker, "_refresh",
-                            side_effect=lambda current, candidate:
+                            side_effect=lambda current, candidate,
+                            service_boundary_provider=None:
                             current.get(candidate)):
                         conflict_mode, conflict_entry = (
                             build_worker._running_in_same_group(
@@ -1934,7 +2004,8 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
 
             with mock.patch.object(
                     build_worker, "_refresh",
-                    side_effect=lambda current, candidate:
+                    side_effect=lambda current, candidate,
+                    service_boundary_provider=None:
                     current.get(candidate)), mock.patch.object(
                         build_worker, "build_dirs_for",
                         side_effect=fallback_build_dirs):
@@ -1958,7 +2029,8 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
             }
             with mock.patch.object(
                     build_worker, "_refresh",
-                    side_effect=lambda current, candidate:
+                    side_effect=lambda current, candidate,
+                    service_boundary_provider=None:
                     current.get(candidate)):
                 conflict = build_worker._running_in_same_group(
                     state, "external-api", True, external_tree)
@@ -2703,6 +2775,252 @@ class RemoteActivityReservationTests(unittest.TestCase):
 
         self.assertEqual(load.call_count, 2)
         sleeper.assert_called_once_with(0.1)
+
+
+class CanonicalClangE2EReceiptPortabilityTests(unittest.TestCase):
+    @staticmethod
+    def _receipt(
+        build_dir: Path,
+        *,
+        preset: str,
+        system: str,
+        machine: str,
+        target_architecture: str | None = None,
+        target_architecture_type: str = "STRING",
+        target_triplet: str | None = None,
+        intervals: str = "ON",
+        test_indexes: str = "OFF",
+        profile: str = "all_alphabets_uint64",
+        compiler: str = "/opt/llvm-22/bin/clang++",
+        compiler_id: str | None = "Clang",
+        compiler_version: str | None = "22.1.8",
+        flags: str = (
+            "-O3 -DNDEBUG -fno-omit-frame-pointer -stdlib=libc++"),
+    ) -> dict[str, object]:
+        build_dir.mkdir(parents=True)
+        cache = [
+            f"BIOSEQ_BENCHMARK_E2E_INTERVALS:BOOL={intervals}",
+            f"BIOSEQ_TEST_INDEXES:BOOL={test_indexes}",
+            f"BIOSEQ_TEMPLATE_FLATTEN_PROFILE:STRING={profile}",
+        ]
+        if target_architecture is not None:
+            cache.append(
+                "VCPKG_TARGET_ARCHITECTURE:"
+                + target_architecture_type + "=" + target_architecture)
+        if target_triplet is not None:
+            cache.append("VCPKG_TARGET_TRIPLET:STRING=" + target_triplet)
+        (build_dir / "CMakeCache.txt").write_text(
+            "\n".join(cache) + "\n", encoding="utf-8")
+        return {
+            "mode": "benchmark-e2e",
+            "debug": False,
+            "preset": preset,
+            "preset_family": "e2e",
+            "binary_subdir": "bioseq",
+            "build_dir": str(build_dir),
+            "host": {
+                "node": "worker",
+                "system": system,
+                "machine": machine,
+                "release": "test",
+            },
+            "configuration": {
+                "compiler_contract": {
+                    "CMAKE_CXX_COMPILER": compiler,
+                    "CMAKE_CXX_COMPILER_ID": compiler_id,
+                    "CMAKE_CXX_COMPILER_VERSION": compiler_version,
+                    "CMAKE_CXX_FLAGS": flags,
+                },
+            },
+        }
+
+    def test_accepts_each_supported_native_release_clang_e2e_identity(self):
+        cases = (
+            ("bench-e2e-opt", "Darwin", "arm64", None, None),
+            (
+                "aws-x64-linux-e2e", "Linux", "x86_64", "x64",
+                "x64-linux-libcxx",
+            ),
+            (
+                "native-arm64-clang22-linux-e2e", "Linux", "aarch64",
+                "arm64", "arm64-linux-libcxx",
+            ),
+            (
+                "native-x64-clang22-linux-e2e", "Linux", "x86_64",
+                "x64", "x64-linux-libcxx",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index, (preset, system, machine, arch, triplet) in enumerate(
+                    cases):
+                with self.subTest(preset=preset):
+                    receipt = self._receipt(
+                        root / str(index),
+                        preset=preset,
+                        system=system,
+                        machine=machine,
+                        target_architecture=arch,
+                        target_triplet=triplet,
+                    )
+                    self.assertIsNone(
+                        build_worker.
+                        _canonical_algorithm_matrix_clang_e2e_receipt_error(
+                            receipt))
+
+    def test_accepts_cmake_cache_without_exported_id_version_when_path_is_22(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            receipt = self._receipt(
+                Path(temporary) / "arm64",
+                preset="native-arm64-clang22-linux-e2e",
+                system="Linux",
+                machine="aarch64",
+                target_architecture="arm64",
+                target_triplet="arm64-linux-libcxx",
+                compiler=(
+                    "/opt/bioseq-package-toolchain/llvm-22/bin/clang++"),
+                compiler_id=None,
+                compiler_version=None,
+            )
+            self.assertIsNone(
+                build_worker.
+                _canonical_algorithm_matrix_clang_e2e_receipt_error(receipt))
+
+    def test_accepts_actual_approved_darwin_receipt_contract(self):
+        # Mirrors sealed br_2e3718eb1b464541bf9319ce28857a12: Darwin's
+        # LLVM 22 defaults to libc++, so its recorded flags have no -stdlib.
+        with tempfile.TemporaryDirectory() as temporary:
+            receipt = self._receipt(
+                Path(temporary) / "bench-e2e-opt",
+                preset="bench-e2e-opt",
+                system="Darwin",
+                machine="arm64",
+                compiler="/opt/homebrew/opt/llvm@22/bin/clang++",
+                compiler_id=None,
+                compiler_version=None,
+                flags="-O3 -DNDEBUG -fno-omit-frame-pointer",
+            )
+            receipt["configuration"]["compiler_contract"].update(
+                CMAKE_BUILD_TYPE="Debug")
+            self.assertIsNone(
+                build_worker.
+                _canonical_algorithm_matrix_clang_e2e_receipt_error(receipt))
+            receipt["configuration"]["compiler_contract"].update(
+                CMAKE_CXX_FLAGS=(
+                    "-O3 -DNDEBUG -fno-omit-frame-pointer "
+                    "-stdlib=libstdc++"))
+            self.assertIsNotNone(
+                build_worker.
+                _canonical_algorithm_matrix_clang_e2e_receipt_error(receipt))
+
+    def test_accepts_actual_aws_x64_linux_cache_contract(self):
+        # Mirrors the preserved M7A aws-x64-linux-e2e CMake cache: the
+        # architecture is UNINITIALIZED=x64, and an empty profile cache value
+        # selects the authored default rather than an invented profile gate.
+        with tempfile.TemporaryDirectory() as temporary:
+            receipt = self._receipt(
+                Path(temporary) / "aws-x64-linux-e2e",
+                preset="aws-x64-linux-e2e",
+                system="Linux",
+                machine="x86_64",
+                target_architecture="x64",
+                target_architecture_type="UNINITIALIZED",
+                target_triplet="x64-linux-libcxx",
+                profile="",
+                compiler=(
+                    "/opt/bioseq-package-toolchain/llvm-22/bin/clang++"),
+                compiler_id=None,
+                compiler_version=None,
+            )
+            receipt["configuration"]["compiler_contract"].update(
+                CMAKE_BUILD_TYPE="Debug")
+            self.assertIsNone(
+                build_worker.
+                _canonical_algorithm_matrix_clang_e2e_receipt_error(receipt))
+
+    def test_rejects_name_host_compiler_mode_and_flag_lookalikes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = self._receipt(
+                root / "base",
+                preset="native-arm64-clang22-linux-e2e",
+                system="Linux",
+                machine="aarch64",
+                target_architecture="arm64",
+                target_triplet="arm64-linux-libcxx",
+            )
+            mutations = {
+                "gcc preset": lambda value: value.update(
+                    preset="aws-x64-linux-gcc161-e2e"),
+                "debug preset": lambda value: value.update(
+                    preset="native-arm64-clang22-linux-e2e-debug"),
+                "arbitrary preset": lambda value: value.update(
+                    preset="invented-e2e"),
+                "wrong mode": lambda value: value.update(mode="benchmark"),
+                "debug tree": lambda value: value.update(debug=True),
+                "wrong family": lambda value: value.update(
+                    preset_family="test"),
+                "wrong subdirectory": lambda value: value.update(
+                    binary_subdir="bioseq_caching"),
+                "wrong host": lambda value: value["host"].update(
+                    machine="x86_64"),
+                "gcc compiler": lambda value: value["configuration"]
+                    ["compiler_contract"].update(
+                        CMAKE_CXX_COMPILER="/usr/bin/g++",
+                        CMAKE_CXX_COMPILER_ID="GNU"),
+                "clang 23": lambda value: value["configuration"]
+                    ["compiler_contract"].update(
+                        CMAKE_CXX_COMPILER="/opt/llvm-23/bin/clang++",
+                        CMAKE_CXX_COMPILER_VERSION="23.1.1"),
+                "O2": lambda value: value["configuration"]
+                    ["compiler_contract"].update(
+                        CMAKE_CXX_FLAGS=(
+                            "-O2 -DNDEBUG -fno-omit-frame-pointer "
+                            "-stdlib=libc++")),
+                "sanitizer": lambda value: value["configuration"]
+                    ["compiler_contract"].update(
+                        CMAKE_CXX_FLAGS=(
+                            "-O3 -DNDEBUG -fno-omit-frame-pointer "
+                            "-stdlib=libc++ -fsanitize=address")),
+                "explicit libstdc++": lambda value: value["configuration"]
+                    ["compiler_contract"].update(
+                        CMAKE_CXX_FLAGS=(
+                            "-O3 -DNDEBUG -fno-omit-frame-pointer "
+                            "-stdlib=libstdc++")),
+            }
+            for label, mutate in mutations.items():
+                with self.subTest(label=label):
+                    candidate = copy.deepcopy(base)
+                    mutate(candidate)
+                    self.assertIsNotNone(
+                        build_worker.
+                        _canonical_algorithm_matrix_clang_e2e_receipt_error(
+                            candidate))
+
+    def test_rejects_missing_e2e_cache_and_cross_architecture_contracts(self):
+        cases = (
+            {"intervals": "OFF"},
+            {"test_indexes": "ON"},
+            {"target_architecture": "x64"},
+            {"target_triplet": "x64-linux-libcxx"},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index, overrides in enumerate(cases):
+                with self.subTest(overrides=overrides):
+                    options = {
+                        "preset": "native-arm64-clang22-linux-e2e",
+                        "system": "Linux",
+                        "machine": "aarch64",
+                        "target_architecture": "arm64",
+                        "target_triplet": "arm64-linux-libcxx",
+                        **overrides,
+                    }
+                    receipt = self._receipt(root / str(index), **options)
+                    self.assertIsNotNone(
+                        build_worker.
+                        _canonical_algorithm_matrix_clang_e2e_receipt_error(
+                            receipt))
 
 
 class BuildReceiptWorkflowTests(unittest.TestCase):
@@ -5684,18 +6002,22 @@ class Q1024ServiceLifecycleTests(unittest.TestCase):
 
     def test_terminal_revalidation_uses_historical_receipt_only_for_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
-            build_dir = Path(temporary).resolve()
+            build_dir = (Path(temporary) / "build").resolve()
+            receipt = CanonicalClangE2EReceiptPortabilityTests._receipt(
+                build_dir,
+                preset="bench-e2e-opt",
+                system="Darwin",
+                machine="arm64",
+                compiler="/opt/homebrew/opt/llvm@22/bin/clang++",
+                compiler_id=None,
+                compiler_version=None,
+                flags="-O3 -DNDEBUG -fno-omit-frame-pointer",
+            )
             entry = self._legacy_entry(build_dir)
-            receipt = {
+            receipt.update({
                 "build_receipt_id": "br_build33",
                 "content_sha256": "1" * 64,
-                "mode": "benchmark-e2e",
-                "debug": False,
-                "preset": "bench-e2e-opt",
-                "preset_family": "e2e",
-                "binary_subdir": "bioseq",
-                "build_dir": str(build_dir),
-            }
+            })
             captured = {}
 
             def finish(mode, token, claim_token, evidence):

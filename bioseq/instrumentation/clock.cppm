@@ -24,12 +24,30 @@ export module bioseq.instrumentation.clock;
 
 export namespace bioseq::instrumentation::clock {
 
+#if defined(__linux__)
+/**
+ * @brief Clock selected for framework interval timestamps on Linux.
+ *
+ * The dedicated E2E interval-evidence tree must share CLOCK_MONOTONIC's
+ * physical rate with the immutable minimap2 helper receipt. Ordinary Linux
+ * builds retain CLOCK_MONOTONIC_RAW.
+ */
+inline constexpr clockid_t now_ns_clock_id =
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    CLOCK_MONOTONIC;
+#else
+    CLOCK_MONOTONIC_RAW;
+#endif
+#endif
+
 /**
  * @brief Read the platform's monotonic clock in nanoseconds.
  *
- * Apple uses `mach_absolute_time`, Linux uses `CLOCK_MONOTONIC_RAW`, and
- * other platforms use `std::chrono::steady_clock`. The returned value is an
- * absolute timestamp suitable only for same-clock differences.
+ * Apple uses `mach_absolute_time`. Linux uses `CLOCK_MONOTONIC` only in the
+ * dedicated E2E interval-evidence tree and otherwise retains
+ * `CLOCK_MONOTONIC_RAW`. Other platforms use `std::chrono::steady_clock`.
+ * The returned value is an absolute timestamp suitable only for same-clock
+ * differences.
  *
  * @return Monotonic time in nanoseconds.
  */
@@ -44,7 +62,7 @@ inline std::uint64_t now_ns() noexcept {
     return mach_absolute_time() * timebase.numer / timebase.denom;
 #elif defined(__linux__)
     struct timespec timestamp{};
-    clock_gettime(CLOCK_MONOTONIC_RAW, &timestamp);
+    clock_gettime(now_ns_clock_id, &timestamp);
     return static_cast<std::uint64_t>(timestamp.tv_sec) * 1'000'000'000ull +
            static_cast<std::uint64_t>(timestamp.tv_nsec);
 #else

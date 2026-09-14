@@ -11,6 +11,7 @@ import itertools
 import json
 from pathlib import Path
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -284,8 +285,8 @@ class DeadlineCampaignContractTests(unittest.TestCase):
             no_index = build_worker._run_only_runtime_timeout_seconds(
                 "benchmark-e2e", self.schedule[59]["path"], 14_400)
             self.assertEqual(ordinary, 14_400)
-            self.assertEqual(persisted, 172_800)
-            self.assertEqual(no_index, 172_800)
+            self.assertEqual(persisted, 43_200)
+            self.assertEqual(no_index, 43_200)
 
         parent_entry = self.parent["schedule"][0]
         with self._with_current_source_authority(1) as current_parent:
@@ -362,7 +363,7 @@ class DeadlineCampaignContractTests(unittest.TestCase):
                 bench_e2e_config=self.schedule[0]["path"],
                 environment={},
                 log_handle=output,
-                deadline=0.0,
+                deadline=time.time() + 60.0,
             )
         self.assertIn("ALL_RESULTS.yaml candidate", output.getvalue())
         self.assertIn("automatic run_only merge skipped", output.getvalue())

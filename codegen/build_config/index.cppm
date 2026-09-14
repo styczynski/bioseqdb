@@ -19,10 +19,10 @@ module;
 
 export module bioseq.codegen.build_config;
 
-import :model;
-import :renderer;
+export import :model;
+export import :renderer;
 import :tests.contract;
-import :validator;
+export import :validator;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::build_config {

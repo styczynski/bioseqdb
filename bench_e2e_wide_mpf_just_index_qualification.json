@@ -72,6 +72,7 @@
         "mapq_projection": true,
         "minimap2_split_bp": 1000608,
         "skip_minimap2_baseline_setup": true,
+        "keep_benchmark_artifacts": true,
         "seed": 33325010,
         "skip_index_baseline_setup": false
       }

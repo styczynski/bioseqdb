@@ -1498,7 +1498,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             ->user_code_callback_free = false;
         auto record = std::ranges::find(
             callback_provenance.records,
-            "libcxx.is_constant_evaluated",
+            std::string{"libcxx.is_constant_evaluated"},
             &provenance_record::record_id);
         record->user_code_callback_free = false;
         analyzer_test_detail::require_failure(

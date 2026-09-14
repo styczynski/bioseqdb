@@ -87,18 +87,28 @@ TEST_CASE("independent fragment halo and spill-run merge producers are canonical
     lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
     const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
     auto fragment_options = test_generation_options(range.bp_size());
+    std::uint64_t cooperative_checkpoint_calls = 0u;
     auto fragment_producer = index_type::make_generation_replay_producer(
         lazy_view,
         minimizer_sketch_backend::scalar,
         nullptr,
         fragment_options.algorithm_identity,
         fragment_options.window_size,
-        fragment_options.kmer_size);
+        fragment_options.kmer_size,
+        fixed_alphabet_code<::seq::dna4>(),
+        0u,
+        cooperative_cancellation_checkpoint{
+            .context = &cooperative_checkpoint_calls,
+            .invoke_fn = +[](void* context) {
+                ++*static_cast<std::uint64_t*>(context);
+            },
+        });
     collecting_minimizer_row_sink fragment_sink;
     auto fragment_encoding =
         encode_minimizer_generation(fragment_producer, fragment_sink, fragment_options);
     REQUIRE(fragment_encoding.has_value());
     REQUIRE(fragment_producer.scan_count() == 3);
+    REQUIRE(cooperative_checkpoint_calls > fragment_producer.scan_count());
     const minimizer_fragment_generation_execution_receipt scalar_execution =
         fragment_producer.execution_stats();
     REQUIRE(scalar_execution.is_accepted());
@@ -1167,6 +1177,195 @@ TEST_CASE("Vulkan fragment build records accepted operation-originated batched s
     REQUIRE(storage.number_of_chunks(k_directory_sub_key) == 1u);
     REQUIRE(*storage.template read_chunk<std::int64_t>(k_directory_sub_key, 0u) ==
             static_cast<std::int64_t>(expected_fragments));
+}
+
+TEST_CASE("grouped-SoA Vulkan replay batches adjacent persisted fragments without merging them",
+          "[component:bioseq][layer:unit][feature:storage][resource:gpu]") {
+    using namespace bioseq::indexing;
+    if (!::bioseq::gpu::vulkan::hardware_device_available(
+            ::bioseq::gpu::vulkan::runtime::instance())) {
+        SKIP("no hardware Vulkan device");
+    }
+    constexpr std::size_t source_fragment_units = 64u;
+    constexpr std::uint64_t persisted_fragment_bp = 32'768u;
+    using chunked =
+        chunked_span_sequence_scanner<std::uint64_t, source_fragment_units>;
+    using index_type = minimizers_per_fragment_index<fake_fragment_storage<>>;
+    auto data = make_dna4(98'417u, 0x4D50464241544348ULL);
+    range_t range(data);
+    lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
+    const auto view = bioseq::storage::make_lazy_sequence_view(lazy);
+    auto options = test_generation_options(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::vulkan_minimap_integer);
+    options.position_segment_span_bp = persisted_fragment_bp;
+    auto producer = index_type::make_generation_replay_producer(
+        view,
+        minimizer_sketch_backend::vulkan_segment,
+        nullptr,
+        options.algorithm_identity,
+        options.window_size,
+        options.kmer_size,
+        fixed_alphabet_code<::seq::dna4>(),
+        std::size_t{64u} << 20u);
+    collecting_minimizer_row_sink sink;
+    const auto encoded =
+        encode_minimizer_generation(producer, sink, options);
+    REQUIRE(encoded.has_value());
+    REQUIRE(encoded->manifest.position_segment_span_bp == persisted_fragment_bp);
+
+    const std::uint64_t physical_fragments =
+        (range.bp_size() + persisted_fragment_bp - 1u)
+        / persisted_fragment_bp;
+    const auto evidence = producer.execution_stats();
+    REQUIRE(evidence.is_accepted());
+    REQUIRE(evidence.selected_backend
+            == minimizer_sketch_backend::vulkan_segment);
+    REQUIRE(evidence.producer_scan_count == 3u);
+    REQUIRE(evidence.scalar_core_runs == 0u);
+    REQUIRE(evidence.exact_simd_core_runs == 0u);
+    REQUIRE(evidence.bounded_nthash_core_runs == 0u);
+    REQUIRE(evidence.vulkan_core_runs
+            == evidence.producer_scan_count * physical_fragments);
+    REQUIRE(evidence.vulkan_stats.is_internally_consistent(true));
+    REQUIRE(evidence.vulkan_stats.completed_roundtrips > 0u);
+    REQUIRE(evidence.vulkan_stats.completed_roundtrips
+            < evidence.vulkan_core_runs);
+    REQUIRE(producer.peak_buffered_core_bp() == range.bp_size());
+    REQUIRE(producer.peak_active_fragment_runs() == physical_fragments);
+    REQUIRE(producer.peak_buffered_events() > 0u);
+    require_complete_generation_rows(*encoded, sink.rows);
+
+    auto single_fragment_options = test_generation_options(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::vulkan_minimap_integer);
+    single_fragment_options.position_segment_span_bp = persisted_fragment_bp;
+    auto single_fragment_producer = index_type::make_generation_replay_producer(
+        view,
+        minimizer_sketch_backend::vulkan_segment,
+        nullptr,
+        single_fragment_options.algorithm_identity,
+        single_fragment_options.window_size,
+        single_fragment_options.kmer_size,
+        fixed_alphabet_code<::seq::dna4>(),
+        0u);
+    collecting_minimizer_row_sink single_fragment_sink;
+    const auto single_fragment_encoded = encode_minimizer_generation(
+        single_fragment_producer,
+        single_fragment_sink,
+        single_fragment_options);
+    REQUIRE(single_fragment_encoded.has_value());
+    REQUIRE(single_fragment_encoded->manifest.position_segment_span_bp
+            == persisted_fragment_bp);
+    const auto single_fragment_evidence =
+        single_fragment_producer.execution_stats();
+    REQUIRE(single_fragment_evidence.is_accepted());
+    REQUIRE(single_fragment_evidence.selected_backend
+            == minimizer_sketch_backend::vulkan_segment);
+    REQUIRE(single_fragment_evidence.vulkan_core_runs
+            == evidence.vulkan_core_runs);
+    REQUIRE(single_fragment_evidence.vulkan_stats.completed_roundtrips
+            == single_fragment_evidence.vulkan_core_runs);
+    require_complete_generation_rows(*single_fragment_encoded,
+                                     single_fragment_sink.rows);
+    require_encoded_generations_equal_normalized(
+        *encoded,
+        sink.rows,
+        *single_fragment_encoded,
+        single_fragment_sink.rows);
+    REQUIRE(decode_generation_events(*encoded, sink.rows)
+            == decode_generation_events(*single_fragment_encoded,
+                                        single_fragment_sink.rows));
+
+    // A persisted segment narrower than the physical fragment can cross a
+    // physical boundary. The buffered producer batches complete adjacent
+    // segments while the zero-buffer producer retains the one-segment route;
+    // both must preserve the identical encoded generation.
+    constexpr std::uint64_t unaligned_persisted_fragment_bp = 21'504u;
+    auto unaligned_options = test_generation_options(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::vulkan_minimap_integer);
+    unaligned_options.position_segment_span_bp =
+        unaligned_persisted_fragment_bp;
+    auto unaligned_producer = index_type::make_generation_replay_producer(
+        view,
+        minimizer_sketch_backend::vulkan_segment,
+        nullptr,
+        unaligned_options.algorithm_identity,
+        unaligned_options.window_size,
+        unaligned_options.kmer_size,
+        fixed_alphabet_code<::seq::dna4>(),
+        std::size_t{64u} << 20u);
+    collecting_minimizer_row_sink unaligned_sink;
+    const auto unaligned_encoded = encode_minimizer_generation(
+        unaligned_producer, unaligned_sink, unaligned_options);
+    REQUIRE(unaligned_encoded.has_value());
+    REQUIRE(unaligned_encoded->manifest.position_segment_span_bp
+            == unaligned_persisted_fragment_bp);
+    const auto unaligned_evidence = unaligned_producer.execution_stats();
+    REQUIRE(unaligned_evidence.is_accepted());
+    REQUIRE(unaligned_evidence.selected_backend
+            == minimizer_sketch_backend::vulkan_segment);
+    REQUIRE(unaligned_evidence.producer_scan_count == 3u);
+    REQUIRE(unaligned_evidence.scalar_core_runs == 0u);
+    REQUIRE(unaligned_evidence.exact_simd_core_runs == 0u);
+    REQUIRE(unaligned_evidence.bounded_nthash_core_runs == 0u);
+    REQUIRE(unaligned_evidence.vulkan_core_runs > 0u);
+    REQUIRE(unaligned_evidence.vulkan_stats.is_internally_consistent(true));
+    REQUIRE(unaligned_evidence.vulkan_stats.completed_roundtrips > 0u);
+    REQUIRE(unaligned_producer.peak_buffered_core_bp()
+            > unaligned_persisted_fragment_bp);
+    REQUIRE(unaligned_producer.peak_active_fragment_runs() > 1u);
+    require_complete_generation_rows(*unaligned_encoded, unaligned_sink.rows);
+
+    auto unaligned_single_options = test_generation_options(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::vulkan_minimap_integer);
+    unaligned_single_options.position_segment_span_bp =
+        unaligned_persisted_fragment_bp;
+    auto unaligned_single_producer =
+        index_type::make_generation_replay_producer(
+            view,
+            minimizer_sketch_backend::vulkan_segment,
+            nullptr,
+            unaligned_single_options.algorithm_identity,
+            unaligned_single_options.window_size,
+            unaligned_single_options.kmer_size,
+            fixed_alphabet_code<::seq::dna4>(),
+            0u);
+    collecting_minimizer_row_sink unaligned_single_sink;
+    const auto unaligned_single_encoded = encode_minimizer_generation(
+        unaligned_single_producer,
+        unaligned_single_sink,
+        unaligned_single_options);
+    REQUIRE(unaligned_single_encoded.has_value());
+    const auto unaligned_single_evidence =
+        unaligned_single_producer.execution_stats();
+    REQUIRE(unaligned_single_evidence.is_accepted());
+    REQUIRE(unaligned_single_evidence.selected_backend
+            == minimizer_sketch_backend::vulkan_segment);
+    REQUIRE(unaligned_single_evidence.producer_scan_count == 3u);
+    REQUIRE(unaligned_single_evidence.scalar_core_runs == 0u);
+    REQUIRE(unaligned_single_evidence.exact_simd_core_runs == 0u);
+    REQUIRE(unaligned_single_evidence.bounded_nthash_core_runs == 0u);
+    REQUIRE(unaligned_single_evidence.vulkan_core_runs
+            == unaligned_evidence.vulkan_core_runs);
+    REQUIRE(unaligned_single_evidence.vulkan_stats.is_internally_consistent(
+        true));
+    REQUIRE(unaligned_evidence.vulkan_stats.completed_roundtrips
+            < unaligned_single_evidence.vulkan_stats.completed_roundtrips);
+    REQUIRE(unaligned_single_producer.peak_buffered_core_bp()
+            <= unaligned_persisted_fragment_bp);
+    require_complete_generation_rows(
+        *unaligned_single_encoded, unaligned_single_sink.rows);
+    require_encoded_generations_equal_normalized(
+        *unaligned_encoded,
+        unaligned_sink.rows,
+        *unaligned_single_encoded,
+        unaligned_single_sink.rows);
+    REQUIRE(decode_generation_events(*unaligned_encoded, unaligned_sink.rows)
+            == decode_generation_events(*unaligned_single_encoded,
+                                        unaligned_single_sink.rows));
 }
 
 } // namespace bioseq::simd::HWY_NAMESPACE

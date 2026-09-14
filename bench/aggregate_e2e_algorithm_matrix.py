@@ -108,6 +108,12 @@ APPROVED_TUPLES_CANDIDATE_VERSION = 2
 APPROVED_TUPLES_MANIFEST_SCHEMA = (
     "bioseq-approved-result-verification-manifest")
 APPROVED_TUPLES_MANIFEST_VERSION = 2
+APPROVED_TUPLES_REMOTE_SCHEMA = "bioseq.remote-approved-e2e-result-tuples"
+APPROVED_TUPLES_REMOTE_VERSION = 1
+APPROVED_TUPLES_REMOTE_CANDIDATE_VERSION = 3
+APPROVED_TUPLES_REMOTE_HOST_SCHEMA = "bioseq.remote-benchmark-host"
+APPROVED_TUPLES_REMOTE_HOST_VERSION = 1
+APPROVED_TUPLES_REMOTE_PROFILE = "aws_cpu_only_v1"
 APPROVED_TUPLES_LEGACY_SHA256 = (
     "d2c31ead65867d24e38f3b2b75a17cf1b6a5fc66bf49b5d83a3848faae918d5c")
 APPROVED_TUPLES_LEGACY_PROJECTION_SHA256 = (
@@ -131,6 +137,145 @@ APPROVED_TUPLES_TOP_LEVEL_FIELDS = (
     "excluded_and_nonvalid_summary", "deterministic_ordering",
     "append_update_protocol", "invariants", "approved_results",
 )
+APPROVED_TUPLES_REMOTE_TOP_LEVEL_FIELDS = (
+    "schema", "version", "status", "purpose", "authority",
+    "projection_provenance", "campaign_identity", "stable_key_contract",
+    "matrix_scope", "remote_host_binding", "eligible_stable_keys",
+    "hardware_unavailable_cells", "append_update_protocol",
+    "approved_results",
+)
+APPROVED_TUPLES_REMOTE_HOST_FIELDS = (
+    "schema", "version", "machine_id", "cloud_provider", "aws_identity",
+    "instance_type", "architecture", "cpu", "memory", "storage",
+    "receipt_host", "measurement_device", "build_preset", "preset_family",
+    "gpu", "descriptor_sha256",
+)
+APPROVED_TUPLES_REMOTE_AWS_IDENTITY_FIELDS = (
+    "account_id", "region", "availability_zone", "instance_id",
+    "ec2_architecture",
+)
+APPROVED_TUPLES_REMOTE_CPU_FIELDS = (
+    "architecture", "model", "isa", "vcpu_count", "core_count",
+    "threads_per_core",
+)
+APPROVED_TUPLES_REMOTE_MEMORY_FIELDS = ("physical_mib",)
+APPROVED_TUPLES_REMOTE_STORAGE_FIELDS = (
+    "kind", "root_device", "volume_id", "capacity_gib", "volume_type",
+    "provisioned_iops", "provisioned_throughput_mib_per_s", "encrypted",
+    "instance_store_present",
+)
+APPROVED_TUPLES_REMOTE_GPU_FIELDS = (
+    "available", "device_count", "identity", "driver", "vulkan_available",
+    "aws_gpu_info",
+)
+APPROVED_TUPLES_REMOTE_DISPOSITION_FIELDS = (
+    "stable_key_schema", "stable_key", "campaign_id", "dataset",
+    "target_size_gbp", "alphabet", "kmer_size", "window_size",
+    "query_count", "mode", "pipeline", "pipeline_mode", "index_type",
+    "requested_algorithms", "execution_attempted", "observed_algorithms",
+    "effective_path", "prefilter", "status", "reason", "run_count",
+    "metrics",
+)
+APPROVED_TUPLES_REMOTE_BINDING_FIELDS = (
+    "machine_id", "host_descriptor_sha256", "receipt_host_sha256",
+)
+APPROVED_TUPLES_REMOTE_BASELINE_BINDING_FIELDS = (
+    "candidate_stable_key", "baseline_stable_key",
+    "host_descriptor_sha256",
+)
+# This is an admission map, not hardware discovery.  The producing worker must
+# seal the matching live descriptor into its build receipt.  Keep these names
+# synchronized with build_mcp/build_presets.py; arbitrary presets are rejected.
+APPROVED_TUPLES_REMOTE_MACHINE_POLICIES = {
+    "C7G": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_C7G.yaml",
+        "account_id": "970376923108",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-0cab5f0ab9a1cb002",
+        "instance_type": "c7g.xlarge",
+        "ec2_architecture": "arm64",
+        "architecture": "aarch64",
+        "hostname": "ip-172-31-72-135",
+        "vcpu_count": 4,
+        "core_count": 4,
+        "threads_per_core": 1,
+        "physical_memory_mib": 8192,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-0a68963a0efa7f81b",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-arm64-clang22-linux-e2e",
+    },
+    "M4": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_M4.yaml",
+        "account_id": "970376923108",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-09b8f0b9dc8c60564",
+        "instance_type": "m4.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-65-160",
+        "vcpu_count": 4,
+        "core_count": 2,
+        "threads_per_core": 2,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-0d447fc0269e11320",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e",
+    },
+    "M7A": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_M7A.yaml",
+        "account_id": "970376923108",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-0c724c456e6a87366",
+        "instance_type": "m7a.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-77-104",
+        "vcpu_count": 4,
+        "core_count": 4,
+        "threads_per_core": 1,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-09e1fb2d8a352b673",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e",
+    },
+    "M7I": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_M7I.yaml",
+        "account_id": "970376923108",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-0e647495fa0691f94",
+        "instance_type": "m7i.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-73-182",
+        "vcpu_count": 4,
+        "core_count": 2,
+        "threads_per_core": 2,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-032e918f7fc9c0763",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e",
+    },
+}
 APPROVED_TUPLES_V2_ROW_FIELDS = (
     "stable_key_schema", "stable_key", "campaign_id", "dataset",
     "target_size_gbp", "alphabet", "kmer_size", "window_size",
@@ -951,6 +1096,25 @@ def _validate_content_seal(
     return receipt
 
 
+def _approved_e2e_receipt_preset_matches(receipt: dict[str, Any]) -> bool:
+    """Admit only the local preset or one closed remote Clang E2E preset."""
+    if receipt.get("preset_family") != "e2e":
+        return False
+    preset = receipt.get("preset")
+    if preset == "bench-e2e-opt":
+        return True
+    host = receipt.get("host")
+    if not isinstance(host, dict) or host.get("system") != "Linux":
+        return False
+    matching_hosts = [
+        policy for policy in APPROVED_TUPLES_REMOTE_MACHINE_POLICIES.values()
+        if (policy["build_preset"] == preset
+            and policy["architecture"] == host.get("machine")
+            and policy["hostname"] == host.get("node"))
+    ]
+    return len(matching_hosts) == 1
+
+
 def _validate_build_receipt_snapshot(
         value: Any, label: str) -> dict[str, Any]:
     receipt = _validate_content_seal(value, BUILD_RECEIPT_FIELDS, label)
@@ -960,11 +1124,11 @@ def _validate_build_receipt_snapshot(
             or receipt.get("exit_code") != 0
             or receipt.get("mode") != "benchmark-e2e"
             or receipt.get("debug") is not False
-            or receipt.get("preset") != "bench-e2e-opt"
-            or receipt.get("preset_family") != "e2e"
+            or not _approved_e2e_receipt_preset_matches(receipt)
             or receipt.get("binary_subdir") != "bioseq"
             or receipt.get("source_repository_root") != str(REPOSITORY_ROOT)):
-        raise ContractError(f"{label} is not an exact completed bench-e2e-opt receipt")
+        raise ContractError(
+            f"{label} is not an exact completed approved E2E receipt")
     _require_string(receipt.get("build_receipt_id"), f"{label} id")
     _require_string(receipt.get("source_commit"), f"{label} source commit")
     _require_string(
@@ -1200,6 +1364,44 @@ def _stable_key_for_identity(identity: dict[str, Any]) -> str:
         raise ContractError("stable identity field order changed")
     return "bioseq-e2e-cell-v2:" + json.dumps(
         list(identity.values()), ensure_ascii=True, separators=(",", ":"))
+
+
+def _approved_identity_from_stable_key(value: Any, label: str) -> dict[str, Any]:
+    stable_key = _require_string(value, label)
+    prefix = "bioseq-e2e-cell-v2:"
+    if not stable_key.startswith(prefix):
+        raise ContractError(f"{label} is not a bioseq-e2e-cell-v2 key")
+    decoded = _loads_json(stable_key[len(prefix):], label)
+    if not isinstance(decoded, list) or len(decoded) != len(STABLE_KEY_FIELDS):
+        raise ContractError(f"{label} does not contain the canonical identity width")
+    identity = dict(zip(STABLE_KEY_FIELDS, decoded))
+    if _stable_key_for_identity(identity) != stable_key:
+        raise ContractError(f"{label} is not canonically encoded")
+    return identity
+
+
+def _remote_identity_requires_vulkan(identity: dict[str, Any]) -> bool:
+    return any(
+        isinstance(identity[field], str)
+        and identity[field].startswith("vulkan_")
+        for field in (
+            "requested_minimizer_algorithm",
+            "requested_chaining_algorithm",
+            "requested_base_alignment_algorithm",
+        )
+    )
+
+
+def _remote_baseline_stable_key(row: dict[str, Any]) -> str:
+    identity = _approved_row_identity(row)
+    identity.update({
+        "engine": "minimap2",
+        "bioseq_index_name": None,
+        "requested_minimizer_algorithm": None,
+        "requested_chaining_algorithm": None,
+        "requested_base_alignment_algorithm": None,
+    })
+    return _stable_key_for_identity(identity)
 
 
 def _execution_descriptors_from_config(
@@ -10205,6 +10407,22 @@ def _approved_yaml_mapping_order(value: dict[str, Any]) -> list[str]:
     keys = set(value)
     if keys == set(APPROVED_TUPLES_TOP_LEVEL_FIELDS):
         return list(APPROVED_TUPLES_TOP_LEVEL_FIELDS)
+    if keys == set(APPROVED_TUPLES_REMOTE_TOP_LEVEL_FIELDS):
+        return list(APPROVED_TUPLES_REMOTE_TOP_LEVEL_FIELDS)
+    if keys == set(APPROVED_TUPLES_REMOTE_HOST_FIELDS):
+        return list(APPROVED_TUPLES_REMOTE_HOST_FIELDS)
+    if keys == set(APPROVED_TUPLES_REMOTE_AWS_IDENTITY_FIELDS):
+        return list(APPROVED_TUPLES_REMOTE_AWS_IDENTITY_FIELDS)
+    if keys == set(APPROVED_TUPLES_REMOTE_CPU_FIELDS):
+        return list(APPROVED_TUPLES_REMOTE_CPU_FIELDS)
+    if keys == set(APPROVED_TUPLES_REMOTE_MEMORY_FIELDS):
+        return list(APPROVED_TUPLES_REMOTE_MEMORY_FIELDS)
+    if keys == set(APPROVED_TUPLES_REMOTE_STORAGE_FIELDS):
+        return list(APPROVED_TUPLES_REMOTE_STORAGE_FIELDS)
+    if keys == set(APPROVED_TUPLES_REMOTE_GPU_FIELDS):
+        return list(APPROVED_TUPLES_REMOTE_GPU_FIELDS)
+    if keys == set(APPROVED_TUPLES_REMOTE_DISPOSITION_FIELDS):
+        return list(APPROVED_TUPLES_REMOTE_DISPOSITION_FIELDS)
     if keys == set(APPROVED_TUPLES_ROW_FIELDS):
         return list(APPROVED_TUPLES_ROW_FIELDS)
     if keys == set(APPROVED_TUPLES_V2_ROW_FIELDS):
@@ -10574,6 +10792,655 @@ def _validate_approved_tuple_row(
             f"{label}.stable_key has an identity collision")
     return (row if require_field_order else _approved_row_in_fixed_order(
         row, authority_version=authority_version))
+
+
+def _is_remote_approved_authority(document: dict[str, Any]) -> bool:
+    return (document.get("schema") == APPROVED_TUPLES_REMOTE_SCHEMA
+            and document.get("version") == APPROVED_TUPLES_REMOTE_VERSION)
+
+
+def _remote_host_descriptor_sha256(value: dict[str, Any]) -> str:
+    payload = {field: copy.deepcopy(value[field])
+               for field in APPROVED_TUPLES_REMOTE_HOST_FIELDS
+               if field != "descriptor_sha256"}
+    return _sha256(_canonical_bytes(payload))
+
+
+def _validate_remote_host_descriptor(
+        value: Any, label: str, *, require_field_order: bool) -> dict[str, Any]:
+    descriptor = _require_dict(value, label)
+    if require_field_order:
+        _approved_exact_order(
+            descriptor, APPROVED_TUPLES_REMOTE_HOST_FIELDS, label)
+    else:
+        _require_exact_keys(
+            descriptor, set(APPROVED_TUPLES_REMOTE_HOST_FIELDS), label)
+    if (descriptor.get("schema") != APPROVED_TUPLES_REMOTE_HOST_SCHEMA
+            or descriptor.get("version") != APPROVED_TUPLES_REMOTE_HOST_VERSION
+            or descriptor.get("cloud_provider") != "aws"
+            or descriptor.get("preset_family") != "e2e"):
+        raise ContractError(f"{label} schema/provider/preset family changed")
+    machine_id = _require_string(
+        descriptor.get("machine_id"), f"{label}.machine_id")
+    policy = APPROVED_TUPLES_REMOTE_MACHINE_POLICIES.get(machine_id)
+    if policy is None:
+        raise ContractError(f"{label}.machine_id is not admitted")
+    if any(descriptor.get(field) != policy[field] for field in (
+            "instance_type", "architecture", "build_preset")):
+        raise ContractError(f"{label} differs from the closed machine policy")
+    aws_identity = _require_dict(
+        descriptor.get("aws_identity"), f"{label}.aws_identity")
+    if require_field_order:
+        _approved_exact_order(
+            aws_identity, APPROVED_TUPLES_REMOTE_AWS_IDENTITY_FIELDS,
+            f"{label}.aws_identity")
+    else:
+        _require_exact_keys(
+            aws_identity, set(APPROVED_TUPLES_REMOTE_AWS_IDENTITY_FIELDS),
+            f"{label}.aws_identity")
+    expected_aws_identity = {
+        "account_id": policy["account_id"],
+        "region": policy["region"],
+        "availability_zone": policy["availability_zone"],
+        "instance_id": policy["instance_id"],
+        "ec2_architecture": policy["ec2_architecture"],
+    }
+    if aws_identity != expected_aws_identity:
+        raise ContractError(
+            f"{label}.aws_identity differs from the exact admitted instance")
+    cpu = _require_dict(descriptor.get("cpu"), f"{label}.cpu")
+    if require_field_order:
+        _approved_exact_order(cpu, APPROVED_TUPLES_REMOTE_CPU_FIELDS,
+                              f"{label}.cpu")
+    else:
+        _require_exact_keys(cpu, set(APPROVED_TUPLES_REMOTE_CPU_FIELDS),
+                            f"{label}.cpu")
+    model = _require_string(cpu.get("model"), f"{label}.cpu.model")
+    isa = _require_string(cpu.get("isa"), f"{label}.cpu.isa")
+    for field in ("vcpu_count", "core_count", "threads_per_core"):
+        _require_int(cpu.get(field), f"{label}.cpu.{field}", minimum=1)
+    if (model.casefold() in {"unknown", "not available", "not_available"}
+            or isa.casefold() in {"unknown", "not available", "not_available"}
+            or cpu != {
+                "architecture": policy["architecture"],
+                "model": model,
+                "isa": isa,
+                "vcpu_count": policy["vcpu_count"],
+                "core_count": policy["core_count"],
+                "threads_per_core": policy["threads_per_core"],
+            }):
+        raise ContractError(f"{label}.cpu is not the admitted host inventory")
+    memory = _require_dict(descriptor.get("memory"), f"{label}.memory")
+    if require_field_order:
+        _approved_exact_order(memory, APPROVED_TUPLES_REMOTE_MEMORY_FIELDS,
+                              f"{label}.memory")
+    else:
+        _require_exact_keys(memory, set(APPROVED_TUPLES_REMOTE_MEMORY_FIELDS),
+                            f"{label}.memory")
+    _require_int(memory.get("physical_mib"), f"{label}.memory.physical_mib",
+                 minimum=1)
+    if memory != {"physical_mib": policy["physical_memory_mib"]}:
+        raise ContractError(
+            f"{label}.memory differs from the admitted EC2 physical memory")
+    storage = _require_dict(descriptor.get("storage"), f"{label}.storage")
+    if require_field_order:
+        _approved_exact_order(storage, APPROVED_TUPLES_REMOTE_STORAGE_FIELDS,
+                              f"{label}.storage")
+    else:
+        _require_exact_keys(storage, set(APPROVED_TUPLES_REMOTE_STORAGE_FIELDS),
+                            f"{label}.storage")
+    for field in (
+            "capacity_gib", "provisioned_iops",
+            "provisioned_throughput_mib_per_s"):
+        _require_int(storage.get(field), f"{label}.storage.{field}", minimum=1)
+    expected_storage = {
+        "kind": "ebs",
+        "root_device": policy["root_device"],
+        "volume_id": policy["volume_id"],
+        "capacity_gib": policy["capacity_gib"],
+        "volume_type": policy["volume_type"],
+        "provisioned_iops": policy["provisioned_iops"],
+        "provisioned_throughput_mib_per_s": policy[
+            "provisioned_throughput_mib_per_s"],
+        "encrypted": True,
+        "instance_store_present": False,
+    }
+    if storage != expected_storage:
+        raise ContractError(
+            f"{label}.storage differs from the exact attached root volume")
+    receipt_host = _require_dict(
+        descriptor.get("receipt_host"), f"{label}.receipt_host")
+    _require_exact_keys(
+        receipt_host, {"node", "system", "machine", "release"},
+        f"{label}.receipt_host")
+    for field in ("node", "system", "machine", "release"):
+        _require_string(receipt_host.get(field), f"{label}.receipt_host.{field}")
+    if (receipt_host.get("node") != policy["hostname"]
+            or receipt_host.get("system") != "Linux"
+            or receipt_host.get("machine") != policy["architecture"]):
+        raise ContractError(f"{label}.receipt_host is not the admitted Linux host")
+    measurement_device = _require_dict(
+        descriptor.get("measurement_device"), f"{label}.measurement_device")
+    _require_exact_keys(
+        measurement_device, {"identity", "version"},
+        f"{label}.measurement_device")
+    expected_device = {
+        "identity": (
+            f"cpu:{policy['architecture']}:{receipt_host['node']}"),
+        "version": f"Linux:{receipt_host['release']}",
+    }
+    if measurement_device != expected_device:
+        raise ContractError(
+            f"{label}.measurement_device differs from the receipt host")
+    gpu = _require_dict(descriptor.get("gpu"), f"{label}.gpu")
+    if require_field_order:
+        _approved_exact_order(gpu, APPROVED_TUPLES_REMOTE_GPU_FIELDS,
+                              f"{label}.gpu")
+    else:
+        _require_exact_keys(gpu, set(APPROVED_TUPLES_REMOTE_GPU_FIELDS),
+                            f"{label}.gpu")
+    _require_int(gpu.get("device_count"), f"{label}.gpu.device_count")
+    if gpu != {
+            "available": False,
+            "device_count": 0,
+            "identity": None,
+            "driver": None,
+            "vulkan_available": False,
+            "aws_gpu_info": None,
+    }:
+        raise ContractError(f"{label}.gpu is not the CPU-only disposition")
+    claimed = _require_hex(
+        descriptor.get("descriptor_sha256"), f"{label}.descriptor_sha256", 64)
+    if claimed != _remote_host_descriptor_sha256(descriptor):
+        raise ContractError(f"{label} seal does not recompute")
+    normalized = {field: copy.deepcopy(descriptor[field])
+                  for field in APPROVED_TUPLES_REMOTE_HOST_FIELDS}
+    normalized["aws_identity"] = {
+        field: copy.deepcopy(aws_identity[field])
+        for field in APPROVED_TUPLES_REMOTE_AWS_IDENTITY_FIELDS}
+    normalized["cpu"] = {
+        field: copy.deepcopy(cpu[field])
+        for field in APPROVED_TUPLES_REMOTE_CPU_FIELDS}
+    normalized["memory"] = {
+        field: copy.deepcopy(memory[field])
+        for field in APPROVED_TUPLES_REMOTE_MEMORY_FIELDS}
+    normalized["storage"] = {
+        field: copy.deepcopy(storage[field])
+        for field in APPROVED_TUPLES_REMOTE_STORAGE_FIELDS}
+    normalized["gpu"] = {
+        field: copy.deepcopy(gpu[field])
+        for field in APPROVED_TUPLES_REMOTE_GPU_FIELDS}
+    return normalized
+
+
+def _load_remote_host_descriptor(path: Path) -> dict[str, Any]:
+    raw = _read_approved_tuple_file(path, "remote host descriptor")
+    try:
+        value = _loads_json(raw.decode("utf-8"), "remote host descriptor")
+    except UnicodeError as exc:
+        raise ContractError(f"remote host descriptor is not UTF-8: {exc}") from exc
+    return _validate_remote_host_descriptor(
+        value, "remote host descriptor", require_field_order=False)
+
+
+def _remote_hardware_disposition_from_row(
+        row: dict[str, Any]) -> dict[str, Any]:
+    if not _remote_identity_requires_vulkan(_approved_row_identity(row)):
+        raise ContractError("hardware-unavailable disposition is not a Vulkan cell")
+    return {
+        "stable_key_schema": "bioseq-e2e-cell-v2",
+        "stable_key": row["stable_key"],
+        "campaign_id": row["campaign_id"],
+        "dataset": row["dataset"],
+        "target_size_gbp": row["target_size_gbp"],
+        "alphabet": row["alphabet"],
+        "kmer_size": row["kmer_size"],
+        "window_size": row["window_size"],
+        "query_count": row["query_count"],
+        "mode": row["mode"],
+        "pipeline": row["pipeline"],
+        "pipeline_mode": row["pipeline_mode"],
+        "index_type": row["index_type"],
+        "requested_algorithms": copy.deepcopy(row["requested_algorithms"]),
+        "execution_attempted": False,
+        "observed_algorithms": {
+            "minimizer": None,
+            "chaining": None,
+            "base_alignment": None,
+        },
+        "effective_path": None,
+        "prefilter": False,
+        "status": "hardware_unavailable",
+        "reason": "vulkan_device_unavailable",
+        "run_count": 0,
+        "metrics": {"unit": "ns", "p50_a": None, "p50_b": None},
+    }
+
+
+def _validate_remote_hardware_disposition(
+        value: Any, campaign_id: str, label: str) -> dict[str, Any]:
+    row = _require_dict(value, label)
+    _approved_exact_order(row, APPROVED_TUPLES_REMOTE_DISPOSITION_FIELDS, label)
+    identity = _approved_identity_from_stable_key(
+        row.get("stable_key"), f"{label}.stable_key")
+    requested = _require_dict(
+        row.get("requested_algorithms"), f"{label}.requested_algorithms")
+    observed = _require_dict(
+        row.get("observed_algorithms"), f"{label}.observed_algorithms")
+    metrics = _require_dict(row.get("metrics"), f"{label}.metrics")
+    _approved_exact_order(requested, APPROVED_TUPLES_ALGORITHM_FIELDS,
+                          f"{label}.requested_algorithms")
+    _approved_exact_order(observed, APPROVED_TUPLES_ALGORITHM_FIELDS,
+                          f"{label}.observed_algorithms")
+    _approved_exact_order(metrics, APPROVED_TUPLES_METRIC_FIELDS,
+                          f"{label}.metrics")
+    expected_identity_fields = {
+        "campaign_id": identity["campaign_id"],
+        "dataset": identity["dataset"],
+        "target_size_gbp": identity["target_size_gbp"],
+        "alphabet": identity["alphabet"],
+        "kmer_size": identity["kmer_size"],
+        "window_size": identity["window_size"],
+        "mode": identity["index_mode"],
+        "pipeline": identity["engine"],
+        "index_type": identity["bioseq_index_name"],
+    }
+    if (row.get("stable_key_schema") != "bioseq-e2e-cell-v2"
+            or identity["campaign_id"] != campaign_id
+            or any(row.get(field) != expected
+                   for field, expected in expected_identity_fields.items())
+            or row.get("query_count") != 1024
+            or row.get("pipeline") != "bioseq"
+            or row.get("pipeline_mode") != "task_parallel"
+            or requested != {
+                "minimizer": identity["requested_minimizer_algorithm"],
+                "chaining": identity["requested_chaining_algorithm"],
+                "base_alignment": identity[
+                    "requested_base_alignment_algorithm"],
+            }
+            or not _remote_identity_requires_vulkan(identity)
+            or row.get("execution_attempted") is not False
+            or observed != {
+                "minimizer": None, "chaining": None, "base_alignment": None}
+            or row.get("effective_path") is not None
+            or row.get("prefilter") is not False
+            or row.get("status") != "hardware_unavailable"
+            or row.get("reason") != "vulkan_device_unavailable"
+            or row.get("run_count") != 0
+            or metrics != {"unit": "ns", "p50_a": None, "p50_b": None}):
+        raise ContractError(f"{label} is not an exact unavailable-Vulkan cell")
+    return copy.deepcopy(row)
+
+
+def _remote_eligible_rows_from_local_authority(
+        local_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # The locally sealed logical identity is the allowlist.  Eligibility is not
+    # copied from one historical execution disposition: remote timings are new
+    # host observations, while every requested Vulkan identity is separately
+    # projected as non-executed hardware-unavailable on these CPU-only hosts.
+    return sorted(_approved_logical_rows(local_rows),
+                  key=lambda row: row["stable_key"])
+
+
+def _remote_authority_complete(
+        eligible_keys: list[str], unavailable_keys: set[str],
+        approved_rows: list[dict[str, Any]]) -> bool:
+    return set(eligible_keys) == unavailable_keys.union(
+        row["stable_key"] for row in approved_rows)
+
+
+def _regenerate_remote_approved_tuple_projections(
+        document: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+    rows = sorted(rows, key=_approved_observation_sort_key)
+    document["approved_results"] = rows
+    eligible_keys = _require_list(
+        document.get("eligible_stable_keys"), "eligible_stable_keys")
+    dispositions = _require_list(
+        document.get("hardware_unavailable_cells"),
+        "hardware_unavailable_cells")
+    unavailable_keys = {row["stable_key"] for row in dispositions}
+    complete = _remote_authority_complete(
+        eligible_keys, unavailable_keys, rows)
+    authority = _require_dict(document.get("authority"), "authority")
+    authority["full_eligible_set_complete"] = complete
+    document["status"] = (
+        "approved_remote_complete" if complete else "approved_remote_partial")
+    provenance = _require_dict(
+        document.get("projection_provenance"), "projection_provenance")
+    provenance.update({
+        "approved_results_projection_sha256":
+            _approved_projection_sha256(rows),
+        "approved_result_count": len(rows),
+        "approved_run_count": sum(row["run_count"] for row in rows),
+        "hardware_unavailable_count": len(dispositions),
+        "remaining_eligible_count": (
+            len(eligible_keys) - len(unavailable_keys) - len(rows)),
+    })
+
+
+def _new_remote_approved_tuple_authority(
+        local_authority: dict[str, Any], local_authority_sha256: str,
+        host_descriptor: dict[str, Any]) -> dict[str, Any]:
+    if (local_authority.get("schema") != APPROVED_TUPLES_SCHEMA
+            or local_authority.get("version") != APPROVED_TUPLES_VERSION):
+        raise ContractError("remote bootstrap requires a validated local v3 authority")
+    local_rows = _require_list(
+        local_authority.get("approved_results"), "local approved_results")
+    eligible_rows = _remote_eligible_rows_from_local_authority(local_rows)
+    eligible_keys = [row["stable_key"] for row in eligible_rows]
+    dispositions = [
+        _remote_hardware_disposition_from_row(row) for row in eligible_rows
+        if _remote_identity_requires_vulkan(_approved_row_identity(row))]
+    descriptor = _validate_remote_host_descriptor(
+        host_descriptor, "remote host binding", require_field_order=False)
+    local_projection = _approved_projection_sha256(local_rows)
+    document = {
+        "schema": APPROVED_TUPLES_REMOTE_SCHEMA,
+        "version": APPROVED_TUPLES_REMOTE_VERSION,
+        "status": "approved_remote_partial",
+        "purpose": (
+            "Host-local approved E2E timings for one sealed AWS CPU machine. "
+            "The authority embeds its exact EC2, CPU, RAM, root-volume, and "
+            "no-GPU inventory. "
+            "Linux E2E intervals use CLOCK_MONOTONIC under the existing strong "
+            "same-kernel nanosecond-rate contract; unavailable Vulkan cells are "
+            "non-executed dispositions, never zero-time results."),
+        "authority": {
+            "profile": APPROVED_TUPLES_REMOTE_PROFILE,
+            "normative_datasets": [
+                "approved_results", "hardware_unavailable_cells"],
+            "contains_only_approved_rows": True,
+            "host_timings_only": True,
+            "gpu_execution_prohibited": True,
+            "external_lookup_required_to_interpret": False,
+            "no_external_path_or_reference_dependency": True,
+            "sealed_verification_manifest_required_for_append": True,
+            "full_eligible_set_complete": False,
+        },
+        "projection_provenance": {
+            "classification": "derived_non_authoritative",
+            "generator": "bioseq-approved-results-projection",
+            "generator_version": APPROVED_TUPLES_REMOTE_VERSION,
+            "source_local_authority_sha256": local_authority_sha256,
+            "source_local_approved_results_projection_sha256": local_projection,
+            "eligible_stable_keys_projection_sha256":
+                _sha256(_canonical_bytes(eligible_keys)),
+            "hardware_unavailable_cells_projection_sha256":
+                _sha256(_canonical_bytes(dispositions)),
+            "approved_results_projection_sha256":
+                _approved_projection_sha256([]),
+            "approved_result_count": 0,
+            "approved_run_count": 0,
+            "hardware_unavailable_count": len(dispositions),
+            "remaining_eligible_count": len(eligible_keys) - len(dispositions),
+        },
+        "campaign_identity": copy.deepcopy(
+            local_authority["campaign_identity"]),
+        "stable_key_contract": copy.deepcopy(
+            local_authority["stable_key_contract"]),
+        "matrix_scope": copy.deepcopy(local_authority["matrix_scope"]),
+        "remote_host_binding": descriptor,
+        "eligible_stable_keys": eligible_keys,
+        "hardware_unavailable_cells": dispositions,
+        "append_update_protocol": {
+            "mode": "additive_audited_rows_only",
+            "writer": {
+                "name": "bioseq-approved-results-aggregator",
+                "version": 3,
+                "lock": {
+                    "name": "bioseq-approved-results-publication",
+                    "version": 1,
+                },
+            },
+            "canonical_serializer": {
+                "name": "bioseq-approved-results-yaml",
+                "version": APPROVED_TUPLES_REMOTE_VERSION,
+            },
+            "sealed_append_candidate": {
+                "name": APPROVED_TUPLES_CANDIDATE_SCHEMA,
+                "version": APPROVED_TUPLES_REMOTE_CANDIDATE_VERSION,
+                "verification_manifest": {
+                    "name": APPROVED_TUPLES_MANIFEST_SCHEMA,
+                    "version": APPROVED_TUPLES_MANIFEST_VERSION,
+                    "proof_categories": list(
+                        APPROVED_TUPLES_PROOF_CATEGORIES),
+                },
+            },
+        },
+        "approved_results": [],
+    }
+    return document
+
+
+def _remote_bootstrap_seed_sha256(document: dict[str, Any]) -> str:
+    if (not _is_remote_approved_authority(document)
+            or document.get("approved_results") != []):
+        raise ContractError(
+            "remote bootstrap seed requires the generated empty in-memory authority")
+    return _sha256(_canonical_bytes(document))
+
+
+def _validate_remote_approved_tuple_authority_document(
+        document: dict[str, Any], raw: bytes | None = None
+) -> list[dict[str, Any]]:
+    _approved_exact_order(
+        document, APPROVED_TUPLES_REMOTE_TOP_LEVEL_FIELDS,
+        "remote approved tuple authority")
+    if (document.get("schema") != APPROVED_TUPLES_REMOTE_SCHEMA
+            or document.get("version") != APPROVED_TUPLES_REMOTE_VERSION
+            or document.get("status") not in {
+                "approved_remote_partial", "approved_remote_complete"}):
+        raise ContractError("remote approved tuple authority schema/status changed")
+    _require_string(document.get("purpose"), "remote authority purpose")
+    authority = _require_dict(document.get("authority"), "authority")
+    _require_exact_keys(authority, {
+        "profile", "normative_datasets", "contains_only_approved_rows",
+        "host_timings_only", "gpu_execution_prohibited",
+        "external_lookup_required_to_interpret",
+        "no_external_path_or_reference_dependency",
+        "sealed_verification_manifest_required_for_append",
+        "full_eligible_set_complete",
+    }, "remote authority flags")
+    if (authority.get("profile") != APPROVED_TUPLES_REMOTE_PROFILE
+            or authority.get("normative_datasets") != [
+                "approved_results", "hardware_unavailable_cells"]
+            or authority.get("contains_only_approved_rows") is not True
+            or authority.get("host_timings_only") is not True
+            or authority.get("gpu_execution_prohibited") is not True
+            or authority.get("external_lookup_required_to_interpret") is not False
+            or authority.get("no_external_path_or_reference_dependency") is not True
+            or authority.get(
+                "sealed_verification_manifest_required_for_append") is not True):
+        raise ContractError("remote authority ownership flags changed")
+    campaign = _require_dict(document.get("campaign_identity"),
+                             "campaign_identity")
+    if (campaign.get("campaign_id") != Q1024_CAMPAIGN_ID
+            or campaign.get("campaign_digest") != Q1024_CAMPAIGN_DIGEST):
+        raise ContractError("remote authority campaign identity changed")
+    stable_contract = _require_dict(
+        document.get("stable_key_contract"), "stable_key_contract")
+    if (stable_contract.get("stable_key_schema") != "bioseq-e2e-cell-v2"
+            or stable_contract.get("ordered_aggregator_fields")
+                != list(STABLE_KEY_FIELDS)):
+        raise ContractError("remote stable-key contract changed")
+    matrix = _require_dict(document.get("matrix_scope"), "matrix_scope")
+    if (matrix.get("total_expected_cells") != EXPECTED_RESULT_CELLS
+            or matrix.get("repetitions_per_cell") != MIN_ACCEPTED_REPEATS
+            or matrix.get("query_count") != 1024
+            or matrix.get("prefilter") is not False
+            or matrix.get("cigar_projection") is not True
+            or matrix.get("mapq_projection") is not True):
+        raise ContractError("remote matrix scope changed")
+    host = _validate_remote_host_descriptor(
+        document.get("remote_host_binding"), "remote_host_binding",
+        require_field_order=True)
+    eligible_keys = _require_list(
+        document.get("eligible_stable_keys"), "eligible_stable_keys")
+    if (not eligible_keys or eligible_keys != sorted(eligible_keys)
+            or len(eligible_keys) != len(set(eligible_keys))):
+        raise ContractError("eligible_stable_keys must be one sorted unique allowlist")
+    identities: dict[str, dict[str, Any]] = {}
+    matrix_pairs = {
+        (item.get("kmer_size"), item.get("window_size"))
+        for item in _require_list(matrix.get("window_kmer_pairs"),
+                                  "matrix_scope.window_kmer_pairs")
+        if isinstance(item, dict)
+    }
+    for index, key in enumerate(eligible_keys):
+        identity = _approved_identity_from_stable_key(
+            key, f"eligible_stable_keys[{index}]")
+        if (identity["campaign_id"] != Q1024_CAMPAIGN_ID
+                or identity["dataset"] != (
+                    f"matrix_{identity['target_size_gbp']}gbp_"
+                    f"{identity['alphabet']}_k{identity['kmer_size']}_"
+                    f"w{identity['window_size']}")
+                or identity["target_size_gbp"] not in matrix.get(
+                    "target_size_gbp", [])
+                or identity["alphabet"] not in matrix.get("alphabets", [])
+                or (identity["kmer_size"], identity["window_size"])
+                    not in matrix_pairs
+                or identity["index_mode"] not in {"just_index", "no_index"}
+                or identity["engine"] not in matrix.get("pipelines", [])):
+            raise ContractError(
+                f"eligible_stable_keys[{index}] is outside the sealed matrix")
+        if identity["engine"] == "minimap2":
+            if (identity["bioseq_index_name"] is not None
+                    or any(identity[field] is not None for field in (
+                        "requested_minimizer_algorithm",
+                        "requested_chaining_algorithm",
+                        "requested_base_alignment_algorithm"))):
+                raise ContractError("eligible minimap2 key has Bioseq fields")
+        elif (identity["bioseq_index_name"] not in matrix.get(
+                    "bioseq_index_types", [])
+                or identity["requested_minimizer_algorithm"] not in matrix.get(
+                    "bioseq_minimizer_algorithms", [])
+                or identity["requested_chaining_algorithm"] not in matrix.get(
+                    "bioseq_chaining_algorithms", [])
+                or identity["requested_base_alignment_algorithm"] not in matrix.get(
+                    "bioseq_base_alignment_algorithms", [])):
+            raise ContractError("eligible Bioseq key is outside the sealed matrix")
+        identities[key] = identity
+    raw_dispositions = _require_list(
+        document.get("hardware_unavailable_cells"),
+        "hardware_unavailable_cells")
+    dispositions = [
+        _validate_remote_hardware_disposition(
+            value, Q1024_CAMPAIGN_ID,
+            f"hardware_unavailable_cells[{index}]")
+        for index, value in enumerate(raw_dispositions)]
+    unavailable_keys = [row["stable_key"] for row in dispositions]
+    expected_unavailable = [key for key in eligible_keys
+                            if _remote_identity_requires_vulkan(identities[key])]
+    if unavailable_keys != expected_unavailable:
+        raise ContractError(
+            "hardware_unavailable_cells is not the exact Vulkan allowlist projection")
+    raw_rows = _require_list(document.get("approved_results"), "approved_results")
+    if not raw_rows:
+        raise ContractError(
+            "published remote approved_results must start with a host-local baseline")
+    rows = [
+        _validate_approved_tuple_row(
+            raw_row, Q1024_CAMPAIGN_ID, matrix,
+            f"approved_results[{index}]", allow_legacy_preservation=False,
+            require_field_order=True,
+            authority_version=APPROVED_TUPLES_VERSION)
+        for index, raw_row in enumerate(raw_rows)]
+    observation_identities = [
+        _approved_observation_identity(row) for row in rows]
+    if (observation_identities != sorted(observation_identities)
+            or len(observation_identities) != len(set(observation_identities))):
+        raise ApprovedTupleDuplicateError(
+            "remote approved_results is not sorted and unique")
+    unavailable_set = set(unavailable_keys)
+    approved_keys = {row["stable_key"] for row in rows}
+    for index, row in enumerate(rows):
+        if (row["timing_scope"] != APPROVED_TUPLES_QUERY_TIMING_SCOPE
+                or row["stable_key"] not in identities
+                or row["stable_key"] in unavailable_set
+                or row["execution_conformance"] not in {
+                    "exact_requested_path", "external_minimap2_baseline"}):
+            raise ContractError(
+                f"approved_results[{index}] is not one host-local eligible result")
+        if (row["pipeline"] == "bioseq"
+                and _remote_baseline_stable_key(row) not in approved_keys):
+            raise ContractError(
+                f"approved_results[{index}] lacks its same-host minimap2 baseline")
+    protocol = _require_dict(
+        document.get("append_update_protocol"), "append_update_protocol")
+    expected_protocol = {
+        "mode": "additive_audited_rows_only",
+        "writer": {
+            "name": "bioseq-approved-results-aggregator",
+            "version": 3,
+            "lock": {
+                "name": "bioseq-approved-results-publication", "version": 1},
+        },
+        "canonical_serializer": {
+            "name": "bioseq-approved-results-yaml",
+            "version": APPROVED_TUPLES_REMOTE_VERSION,
+        },
+        "sealed_append_candidate": {
+            "name": APPROVED_TUPLES_CANDIDATE_SCHEMA,
+            "version": APPROVED_TUPLES_REMOTE_CANDIDATE_VERSION,
+            "verification_manifest": {
+                "name": APPROVED_TUPLES_MANIFEST_SCHEMA,
+                "version": APPROVED_TUPLES_MANIFEST_VERSION,
+                "proof_categories": list(APPROVED_TUPLES_PROOF_CATEGORIES),
+            },
+        },
+    }
+    if protocol != expected_protocol:
+        raise ContractError("remote append protocol projection changed")
+    provenance = _require_dict(
+        document.get("projection_provenance"), "projection_provenance")
+    _require_exact_keys(provenance, {
+        "classification", "generator", "generator_version",
+        "source_local_authority_sha256",
+        "source_local_approved_results_projection_sha256",
+        "eligible_stable_keys_projection_sha256",
+        "hardware_unavailable_cells_projection_sha256",
+        "approved_results_projection_sha256", "approved_result_count",
+        "approved_run_count", "hardware_unavailable_count",
+        "remaining_eligible_count",
+    }, "remote projection_provenance")
+    _require_hex(provenance.get("source_local_authority_sha256"),
+                 "source local authority SHA-256", 64)
+    _require_hex(
+        provenance.get("source_local_approved_results_projection_sha256"),
+        "source local projection SHA-256", 64)
+    expected_complete = _remote_authority_complete(
+        eligible_keys, unavailable_set, rows)
+    if (provenance.get("classification") != "derived_non_authoritative"
+            or provenance.get("generator")
+                != "bioseq-approved-results-projection"
+            or provenance.get("generator_version")
+                != APPROVED_TUPLES_REMOTE_VERSION
+            or provenance.get("eligible_stable_keys_projection_sha256")
+                != _sha256(_canonical_bytes(eligible_keys))
+            or provenance.get("hardware_unavailable_cells_projection_sha256")
+                != _sha256(_canonical_bytes(dispositions))
+            or provenance.get("approved_results_projection_sha256")
+                != _approved_projection_sha256(rows)
+            or provenance.get("approved_result_count") != len(rows)
+            or provenance.get("approved_run_count")
+                != sum(row["run_count"] for row in rows)
+            or provenance.get("hardware_unavailable_count")
+                != len(dispositions)
+            or provenance.get("remaining_eligible_count")
+                != len(eligible_keys) - len(dispositions) - len(rows)
+            or authority.get("full_eligible_set_complete") is not expected_complete
+            or document.get("status") != (
+                "approved_remote_complete" if expected_complete
+                else "approved_remote_partial")):
+        raise ContractError("remote authority projections are stale")
+    if raw is not None and raw != _canonical_approved_tuples_yaml_v3(document):
+        raise ContractError("remote approved tuple authority is not canonical YAML")
+    # A descriptor is normative and intentionally contributes no path.  Its
+    # digest is returned so callers can bind candidates without reproducing it.
+    if host["descriptor_sha256"] != document[
+            "remote_host_binding"]["descriptor_sha256"]:
+        raise ContractError("remote host descriptor changed during validation")
+    return rows
 
 
 def _approved_projection_sha256(rows: list[dict[str, Any]]) -> str:
@@ -11433,6 +12300,8 @@ def _migrate_approved_tuple_authority_v3(
 
 def _validate_approved_tuple_authority_document(
         document: dict[str, Any], raw: bytes | None = None) -> list[dict[str, Any]]:
+    if _is_remote_approved_authority(document):
+        return _validate_remote_approved_tuple_authority_document(document, raw)
     _approved_exact_order(
         document, APPROVED_TUPLES_TOP_LEVEL_FIELDS, "approved tuple authority")
     authority_version = document.get("version")
@@ -11798,12 +12667,17 @@ def _validate_approved_source_proof(
 
 def _validate_approved_build_proof(
         payload: dict[str, Any], source_payload: dict[str, Any],
-        timing_scope: str) -> None:
-    _require_exact_keys(payload, {
+        timing_scope: str, *,
+        remote_host: dict[str, Any] | None = None) -> None:
+    expected_fields = {
         "timing_scope", "build_receipt_id", "build_receipt_sha256", "mode",
         "preset", "debug", "status", "source_commit", "source_graph_fingerprint",
         "authorized_artifacts_sha256",
-    }, "build proof payload")
+    }
+    if remote_host is not None:
+        expected_fields.update({
+            "remote_host_descriptor_sha256", "receipt_host_sha256"})
+    _require_exact_keys(payload, expected_fields, "build proof payload")
     receipt_id = _require_string(payload.get("build_receipt_id"),
                                  "build proof receipt id")
     if not re.fullmatch(r"br_[0-9a-f]{32}", receipt_id):
@@ -11822,6 +12696,16 @@ def _validate_approved_build_proof(
         if payload.get(field) != source_payload.get(field):
             raise ApprovedTupleProofError(
                 f"build proof does not bind source proof field {field}")
+    if remote_host is not None:
+        receipt_host_sha256 = _sha256(_canonical_bytes(
+            remote_host["receipt_host"]))
+        if (payload.get("preset") != remote_host["build_preset"]
+                or payload.get("remote_host_descriptor_sha256")
+                    != remote_host["descriptor_sha256"]
+                or payload.get("receipt_host_sha256")
+                    != receipt_host_sha256):
+            raise ApprovedTupleProofError(
+                "build proof does not bind the remote authority host")
 
 
 def _validate_approved_fixture_proof(
@@ -12748,12 +13632,17 @@ def _validate_approved_gate8_sql(
 def _validate_approved_measurement_proof(
         payload: dict[str, Any], candidate_rows: list[dict[str, Any]],
         timing_scope: str, *, build_payload: dict[str, Any],
-        fixture_payload: dict[str, Any], config_payload: dict[str, Any]) -> None:
-    _require_exact_keys(payload, {
+        fixture_payload: dict[str, Any], config_payload: dict[str, Any],
+        remote_host: dict[str, Any] | None = None) -> None:
+    expected_fields = {
         "timing_scope", "clock", "unit", "cigar_projection", "mapq_projection",
         "prefilter", "interval_receipt_complete", "equal_nanosecond_rate",
         "device", "driver", "rows",
-    }, "measurement-contract proof payload")
+    }
+    if remote_host is not None:
+        expected_fields.add("remote_host_descriptor_sha256")
+    _require_exact_keys(
+        payload, expected_fields, "measurement-contract proof payload")
     if (payload.get("timing_scope") != timing_scope
             or payload.get("clock") != "monotonic"
             or payload.get("unit") != "ns"
@@ -12769,6 +13658,12 @@ def _validate_approved_measurement_proof(
                             f"measurement contract {field}")
         _require_string(identity.get("identity"), f"measurement contract {field} identity")
         _require_string(identity.get("version"), f"measurement contract {field} version")
+    if remote_host is not None and (
+            payload.get("remote_host_descriptor_sha256")
+                != remote_host["descriptor_sha256"]
+            or payload.get("device") != remote_host["measurement_device"]):
+        raise ApprovedTupleProofError(
+            "measurement contract does not bind the remote authority host")
     rows = _approved_manifest_rows(
         payload, "rows", candidate_rows,
         "measurement-contract proof")
@@ -12824,7 +13719,8 @@ def _validate_approved_measurement_proof(
 
 def _validate_approved_chunk_proof(
         payload: dict[str, Any], candidate_rows: list[dict[str, Any]],
-        timing_scope: str) -> None:
+        timing_scope: str, *,
+        remote_baselines: dict[str, str] | None = None) -> None:
     _require_exact_keys(
         payload, {"timing_scope", "rows"}, "chunk-plan proof payload")
     if payload.get("timing_scope") != timing_scope:
@@ -12835,9 +13731,17 @@ def _validate_approved_chunk_proof(
     replay_keys: set[str] = set()
     for row_index, (proof_row, candidate_row) in enumerate(zip(rows, candidate_rows)):
         label = f"chunk-plan proof rows[{row_index}]"
-        _require_exact_keys(proof_row, {
+        expected_fields = {
             "stable_key", "timing_scope", "prior_disposition", "repeats",
-        }, label)
+        }
+        if remote_baselines is not None:
+            expected_fields.add("baseline_stable_key")
+        _require_exact_keys(proof_row, expected_fields, label)
+        if (remote_baselines is not None
+                and proof_row.get("baseline_stable_key")
+                    != remote_baselines.get(candidate_row["stable_key"])):
+            raise ApprovedTupleProofError(
+                f"{label} count vectors do not bind the same-host baseline")
         prior_disposition = proof_row.get("prior_disposition")
         if prior_disposition not in {"missing", "rejected", "invalid"}:
             raise ApprovedTupleProofError(
@@ -12930,7 +13834,9 @@ def _validate_approved_chunk_proof(
 
 def _validate_approved_verification_manifest(
         raw_manifest: Any, candidate_rows: list[dict[str, Any]],
-        campaign: dict[str, Any], timing_scope: str) -> None:
+        campaign: dict[str, Any], timing_scope: str, *,
+        remote_host: dict[str, Any] | None = None,
+        remote_baselines: dict[str, str] | None = None) -> None:
     manifest = _require_dict(raw_manifest, "append verification_manifest")
     _require_exact_keys(
         manifest, {"schema", "version", "timing_scope", "proofs", "row_bindings"},
@@ -12970,7 +13876,8 @@ def _validate_approved_verification_manifest(
             payloads[category] = payload
         _validate_approved_source_proof(payloads["source"], timing_scope)
         _validate_approved_build_proof(
-            payloads["build"], payloads["source"], timing_scope)
+            payloads["build"], payloads["source"], timing_scope,
+            remote_host=remote_host)
         _validate_approved_fixture_proof(
             payloads["fixture"], candidate_rows, timing_scope)
         _validate_approved_config_proof(
@@ -12979,9 +13886,10 @@ def _validate_approved_verification_manifest(
             payloads["measurement_contract"], candidate_rows, timing_scope,
             build_payload=payloads["build"],
             fixture_payload=payloads["fixture"],
-            config_payload=payloads["config"])
+            config_payload=payloads["config"], remote_host=remote_host)
         _validate_approved_chunk_proof(
-            payloads["chunk_plan"], candidate_rows, timing_scope)
+            payloads["chunk_plan"], candidate_rows, timing_scope,
+            remote_baselines=remote_baselines)
     except ApprovedTupleProofError:
         raise
     except ContractError as exc:
@@ -13022,14 +13930,22 @@ def _validate_approved_verification_manifest(
 def _validate_approved_append_candidate_document(
         candidate: dict[str, Any], authority: dict[str, Any],
         authority_sha256: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    _require_exact_keys(candidate, {
+    remote_authority = _is_remote_approved_authority(authority)
+    expected_candidate_fields = {
         "schema", "version", "authority_before_sha256", "stable_key_schema",
         "timing_scope", "candidate_rows", "verification_manifest",
         "candidate_projection_sha256", "candidate_envelope_sha256",
-    }, "approved tuple append candidate")
+    }
+    if remote_authority:
+        expected_candidate_fields.update({
+            "remote_host_binding", "same_host_baselines"})
+    _require_exact_keys(
+        candidate, expected_candidate_fields, "approved tuple append candidate")
     timing_scope = candidate.get("timing_scope")
     if (candidate.get("schema") != APPROVED_TUPLES_CANDIDATE_SCHEMA
-            or candidate.get("version") != APPROVED_TUPLES_CANDIDATE_VERSION
+            or candidate.get("version") != (
+                APPROVED_TUPLES_REMOTE_CANDIDATE_VERSION
+                if remote_authority else APPROVED_TUPLES_CANDIDATE_VERSION)
             or candidate.get("stable_key_schema") != "bioseq-e2e-cell-v2"
             or timing_scope != APPROVED_TUPLES_QUERY_TIMING_SCOPE):
         raise ContractError("append candidate schema/version/stable-key schema changed")
@@ -13046,8 +13962,9 @@ def _validate_approved_append_candidate_document(
     del envelope_value["candidate_envelope_sha256"]
     if _sha256(_canonical_bytes(envelope_value)) != envelope:
         raise ApprovedTupleProofError("candidate envelope seal does not recompute")
-    merge_base = _migrate_approved_tuple_authority_v3(
-        authority, authority_sha256)
+    merge_base = (copy.deepcopy(authority) if remote_authority else
+                  _migrate_approved_tuple_authority_v3(
+                      authority, authority_sha256))
     campaign = _require_dict(
         merge_base.get("campaign_identity"), "campaign_identity")
     matrix = _require_dict(merge_base.get("matrix_scope"), "matrix_scope")
@@ -13061,6 +13978,42 @@ def _validate_approved_append_candidate_document(
             authority_version=APPROVED_TUPLES_VERSION)
         for index, raw_row in enumerate(raw_candidate_rows)
     ]
+    remote_host: dict[str, Any] | None = None
+    remote_baselines: dict[str, str] | None = None
+    if remote_authority:
+        remote_host = _validate_remote_host_descriptor(
+            merge_base.get("remote_host_binding"),
+            "remote authority host binding", require_field_order=True)
+        raw_remote_binding = _require_dict(
+            candidate.get("remote_host_binding"),
+            "candidate remote_host_binding")
+        _require_exact_keys(
+            raw_remote_binding, set(APPROVED_TUPLES_REMOTE_BINDING_FIELDS),
+            "candidate remote_host_binding")
+        expected_receipt_host_sha256 = _sha256(
+            _canonical_bytes(remote_host["receipt_host"]))
+        if raw_remote_binding != {
+                "machine_id": remote_host["machine_id"],
+                "host_descriptor_sha256": remote_host["descriptor_sha256"],
+                "receipt_host_sha256": expected_receipt_host_sha256,
+        }:
+            raise ApprovedTupleProofError(
+                "candidate is bound to a different remote host")
+        eligible_keys = set(_require_list(
+            merge_base.get("eligible_stable_keys"), "eligible_stable_keys"))
+        unavailable_keys = {
+            item["stable_key"] for item in _require_list(
+                merge_base.get("hardware_unavailable_cells"),
+                "hardware_unavailable_cells")}
+        for index, row in enumerate(candidate_rows):
+            if (row["stable_key"] not in eligible_keys
+                    or row["stable_key"] in unavailable_keys
+                    or row["timing_scope"]
+                        != APPROVED_TUPLES_QUERY_TIMING_SCOPE
+                    or row["execution_conformance"] not in {
+                        "exact_requested_path", "external_minimap2_baseline"}):
+                raise ApprovedTupleProofError(
+                    f"candidate_rows[{index}] is not admitted by the remote allowlist")
     if any(row["timing_scope"] != timing_scope for row in candidate_rows):
         raise ContractError("candidate_rows timing_scope differs from its envelope")
     candidate_identities = [
@@ -13079,6 +14032,46 @@ def _validate_approved_append_candidate_document(
     if duplicate:
         raise ApprovedTupleDuplicateError(
             f"candidate observation identity already exists: {duplicate[0]}")
+    if remote_authority:
+        raw_baselines = _require_list(
+            candidate.get("same_host_baselines"), "same_host_baselines")
+        if len(raw_baselines) != len(candidate_rows):
+            raise ApprovedTupleProofError(
+                "same_host_baselines must bind every candidate row")
+        existing_keys = {row["stable_key"] for row in existing_rows}
+        observed_bindings: list[tuple[str, str]] = []
+        remote_baselines = {}
+        for index, (raw_binding, row) in enumerate(
+                zip(raw_baselines, candidate_rows)):
+            binding = _require_dict(
+                raw_binding, f"same_host_baselines[{index}]")
+            _require_exact_keys(
+                binding,
+                set(APPROVED_TUPLES_REMOTE_BASELINE_BINDING_FIELDS),
+                f"same_host_baselines[{index}]")
+            expected_baseline = _remote_baseline_stable_key(row)
+            if (binding.get("candidate_stable_key") != row["stable_key"]
+                    or binding.get("baseline_stable_key") != expected_baseline
+                    or binding.get("host_descriptor_sha256")
+                        != remote_host["descriptor_sha256"]):
+                raise ApprovedTupleProofError(
+                    f"same_host_baselines[{index}] does not bind the exact control")
+            if (row["pipeline"] == "minimap2"
+                    and expected_baseline != row["stable_key"]):
+                raise ApprovedTupleProofError(
+                    "external minimap2 baseline does not self-bind")
+            if (row["pipeline"] == "bioseq"
+                    and expected_baseline not in existing_keys):
+                raise ApprovedTupleProofError(
+                    f"candidate_rows[{index}] requires its previously approved "
+                    "same-host minimap2 baseline")
+            observed_bindings.append(
+                (binding["candidate_stable_key"], binding["baseline_stable_key"]))
+            remote_baselines[row["stable_key"]] = binding[
+                "baseline_stable_key"]
+        if observed_bindings != sorted(observed_bindings):
+            raise ApprovedTupleProofError(
+                "same_host_baselines is not in candidate-row order")
     merged_rows = sorted(
         [copy.deepcopy(row) for row in existing_rows]
         + [copy.deepcopy(row) for row in candidate_rows],
@@ -13093,16 +14086,20 @@ def _validate_approved_append_candidate_document(
         raise ApprovedTupleProofError("candidate post-merge projection seal does not recompute")
     _validate_approved_verification_manifest(
         candidate.get("verification_manifest"), candidate_rows, campaign,
-        timing_scope)
+        timing_scope, remote_host=remote_host,
+        remote_baselines=remote_baselines)
     return candidate_rows, merged_rows
 
 
 @contextlib.contextmanager
 def _exclusive_results_lock(
-        path: Path, *, approved_tuples: bool = False) -> Iterable[int]:
+        path: Path, *, approved_tuples: bool = False,
+        approved_target_must_exist: bool = True) -> Iterable[int]:
     """Serialize the complete read/validate/merge/replace state transaction."""
     if approved_tuples:
-        _approved_tuple_path(path, "approved tuple lock target", must_exist=True)
+        _approved_tuple_path(
+            path, "approved tuple lock target",
+            must_exist=approved_target_must_exist)
         error_type: type[ContractError] = ApprovedTupleIOError
     else:
         _verified_repository_file(path, f"{EXPECTED_LEDGER_PATH} lock target")
@@ -13163,6 +14160,24 @@ def _exclusive_results_lock(
 
 def _approved_tuple_receipt(raw: bytes, document: dict[str, Any]) -> dict[str, Any]:
     rows = _require_list(document.get("approved_results"), "approved_results")
+    if _is_remote_approved_authority(document):
+        host = _require_dict(
+            document.get("remote_host_binding"), "remote_host_binding")
+        unavailable = _require_list(
+            document.get("hardware_unavailable_cells"),
+            "hardware_unavailable_cells")
+        return {
+            "byte_count": len(raw),
+            "lf_terminated_line_count": raw.count(b"\n"),
+            "sha256": _sha256(raw),
+            "approved_results_projection_sha256":
+                _approved_projection_sha256(rows),
+            "approved_result_count": len(rows),
+            "approved_run_count": sum(row["run_count"] for row in rows),
+            "hardware_unavailable_count": len(unavailable),
+            "machine_id": host["machine_id"],
+            "host_descriptor_sha256": host["descriptor_sha256"],
+        }
     timing_scoped = document.get("version") == APPROVED_TUPLES_VERSION
     return {
         "byte_count": len(raw),
@@ -13208,6 +14223,105 @@ def _fsync_approved_publication_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _atomic_bootstrap_remote_approved_tuples(
+        path: Path, document: dict[str, Any], *,
+        lock_descriptor: int) -> dict[str, Any]:
+    """Create one remote authority without an overwrite-capable operation."""
+    payload = _canonical_approved_tuples_yaml_v3(document)
+    parsed = _parse_approved_tuples_yaml(payload, "generated remote authority")
+    _validate_remote_approved_tuple_authority_document(parsed, payload)
+    path = _approved_tuple_path(
+        path, "remote approved tuple authority", must_exist=False)
+    temporary: Path | None = None
+    linked = False
+    marker_started = False
+    try:
+        if path.exists():
+            raise ApprovedTupleIOError(
+                "remote approved tuple authority already exists")
+        descriptor, name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary = Path(name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        temporary_raw = _read_approved_tuple_file(
+            temporary, "remote authority bootstrap temporary")
+        if temporary_raw != payload:
+            raise ApprovedTupleIOError(
+                "remote authority bootstrap temporary bytes changed")
+        temporary_document = _parse_approved_tuples_yaml(
+            temporary_raw, "remote authority bootstrap temporary")
+        _validate_remote_approved_tuple_authority_document(
+            temporary_document, temporary_raw)
+        marker_started = True
+        _write_approved_publication_marker(lock_descriptor, _canonical_bytes({
+            "state": "remote_authority_bootstrap_pending_final_validation",
+            "intended_after_sha256": _sha256(payload),
+        }) + b"\n")
+        _fsync_approved_publication_directory(path)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise ApprovedTupleIOError(
+                "remote authority appeared during bootstrap; no overwrite attempted") \
+                from exc
+        linked = True
+        temporary.unlink()
+        temporary = None
+        _fsync_approved_publication_directory(path)
+        final_raw = _read_approved_tuple_file(
+            path, "final remote approved tuple authority")
+        final_document = _parse_approved_tuples_yaml(
+            final_raw, "final remote approved tuple authority")
+        _validate_remote_approved_tuple_authority_document(
+            final_document, final_raw)
+        if final_raw != payload:
+            raise ApprovedTupleIOError(
+                "final remote authority differs from validated bootstrap bytes")
+        receipt = _approved_tuple_receipt(final_raw, final_document)
+        _write_approved_publication_marker(lock_descriptor, b"")
+        return receipt
+    except Exception as exc:
+        if linked:
+            observed = "unreadable"
+            try:
+                observed = _sha256(_read_approved_tuple_file(
+                    path, "post-bootstrap remote authority"))
+            except Exception:
+                pass
+            try:
+                _write_approved_publication_marker(
+                    lock_descriptor, _canonical_bytes({
+                        "state": "fatal_remote_bootstrap_validation_failure",
+                        "intended_after_sha256": _sha256(payload),
+                        "observed_sha256": observed,
+                    }) + b"\n")
+            except ApprovedTupleIOError:
+                pass
+            if isinstance(exc, ApprovedTupleIOError):
+                raise
+            raise ApprovedTupleIOError(
+                "remote authority was created but final validation failed; "
+                f"observed_sha256={observed}") from exc
+        if marker_started:
+            _write_approved_publication_marker(lock_descriptor, b"")
+        raise
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _atomic_write_approved_tuples(
@@ -13346,6 +14460,48 @@ def _atomic_write_approved_tuples(
                     f"cannot remove failed approved tuple temporary: {exc}") from exc
 
 
+def bootstrap_remote_approved_tuples(
+        authority_path: Path, source_authority_path: Path,
+        expected_source_sha256: str,
+        host_descriptor_path: Path, candidate_path: Path) -> dict[str, Any]:
+    authority_path = _approved_tuple_path(
+        authority_path, "remote approved tuple authority", must_exist=False)
+    if authority_path.exists():
+        raise ApprovedTupleIOError(
+            "remote approved tuple authority already exists")
+    source, source_raw = _load_approved_tuple_authority(
+        source_authority_path, expected_source_sha256)
+    if _sha256(source_raw) != expected_source_sha256:
+        raise ApprovedTupleProofError("source authority seal changed")
+    descriptor = _load_remote_host_descriptor(host_descriptor_path)
+    policy = APPROVED_TUPLES_REMOTE_MACHINE_POLICIES[
+        descriptor["machine_id"]]
+    if authority_path.name != policy["authority_filename"]:
+        raise ApprovedTupleIOError(
+            "remote authority filename differs from the machine policy")
+    seed_document = _new_remote_approved_tuple_authority(
+        source, expected_source_sha256, descriptor)
+    bootstrap_seed_sha256 = _remote_bootstrap_seed_sha256(seed_document)
+    candidate, _ = _load_approved_append_candidate(candidate_path)
+    candidate_rows, merged_rows = _validate_approved_append_candidate_document(
+        candidate, seed_document, bootstrap_seed_sha256)
+    if (len(candidate_rows) != 1
+            or candidate_rows[0]["pipeline"] != "minimap2"
+            or candidate_rows[0]["execution_conformance"]
+                != "external_minimap2_baseline"):
+        raise ApprovedTupleProofError(
+            "remote bootstrap candidate must contain exactly one host-local "
+            "external minimap2 baseline")
+    document = copy.deepcopy(seed_document)
+    _regenerate_remote_approved_tuple_projections(document, merged_rows)
+    _validate_remote_approved_tuple_authority_document(document)
+    with _exclusive_results_lock(
+            authority_path, approved_tuples=True,
+            approved_target_must_exist=False) as lock_descriptor:
+        return _atomic_bootstrap_remote_approved_tuples(
+            authority_path, document, lock_descriptor=lock_descriptor)
+
+
 def validate_approved_tuples(
         authority_path: Path, expected_sha256: str) -> dict[str, Any]:
     document, raw = _load_approved_tuple_authority(
@@ -13393,9 +14549,13 @@ def append_approved_tuples(
         candidate, _ = _load_approved_append_candidate(candidate_path)
         _, merged_rows = _validate_approved_append_candidate_document(
             candidate, authority, _sha256(authority_raw))
-        merged = _migrate_approved_tuple_authority_v3(
-            authority, _sha256(authority_raw))
-        _regenerate_approved_tuple_projections(merged, merged_rows)
+        if _is_remote_approved_authority(authority):
+            merged = copy.deepcopy(authority)
+            _regenerate_remote_approved_tuple_projections(merged, merged_rows)
+        else:
+            merged = _migrate_approved_tuple_authority_v3(
+                authority, _sha256(authority_raw))
+            _regenerate_approved_tuple_projections(merged, merged_rows)
         _validate_approved_tuple_authority_document(merged)
         return _atomic_write_approved_tuples(
             authority_path, _sha256(authority_raw), merged,
@@ -13650,6 +14810,7 @@ def merge(
 
 
 APPROVED_TUPLE_COMMANDS = {
+    "bootstrap-remote-approved-tuples",
     "validate-approved-tuples",
     "validate-append-candidate",
     "append-approved-tuples",
@@ -13678,8 +14839,16 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
         for command in sorted(APPROVED_TUPLE_COMMANDS):
             subparser = subparsers.add_parser(command)
             subparser.add_argument("--authority", required=True)
-            subparser.add_argument("--expected-sha256", required=True)
-            if command != "validate-approved-tuples":
+            if command == "bootstrap-remote-approved-tuples":
+                subparser.add_argument("--source-authority", required=True)
+                subparser.add_argument("--expected-source-sha256", required=True)
+                subparser.add_argument("--host-descriptor", required=True)
+                subparser.add_argument("--candidate", required=True)
+            else:
+                subparser.add_argument("--expected-sha256", required=True)
+            if command not in {
+                    "bootstrap-remote-approved-tuples",
+                    "validate-approved-tuples"}:
                 subparser.add_argument("--candidate", required=True)
         args = parser.parse_args(arguments)
         args.observed_rung_command = None
@@ -13707,6 +14876,14 @@ def main(argv: list[str] | None = None) -> int:
                 _canonical_repository_file(args.config, "rung config"),
                 args.run_receipt_id,
             )
+            print(json.dumps(receipt, ensure_ascii=True, sort_keys=True,
+                             separators=(",", ":")))
+            return 0
+        if args.approved_command == "bootstrap-remote-approved-tuples":
+            receipt = bootstrap_remote_approved_tuples(
+                Path(args.authority), Path(args.source_authority),
+                args.expected_source_sha256, Path(args.host_descriptor),
+                Path(args.candidate))
             print(json.dumps(receipt, ensure_ascii=True, sort_keys=True,
                              separators=(",", ":")))
             return 0

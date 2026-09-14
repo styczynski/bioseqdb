@@ -35,6 +35,22 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
+/// Optional allocation-free cooperative checkpoint for long synchronous
+/// generation work. The callback runs only on the invoking coordinator thread
+/// and may throw to stop the operation. An empty binding is a no-op.
+struct cooperative_cancellation_checkpoint {
+    void* context = nullptr;
+    void (*invoke_fn)(void*) = nullptr;
+
+    void operator()() const {
+        if (invoke_fn != nullptr) {
+            invoke_fn(context);
+        }
+    }
+};
+
+static_assert(std::is_trivially_copyable_v<cooperative_cancellation_checkpoint>);
+
 /// Grouped-SoA generation controls.
 /// Fixed-width limits of persisted controls and PostgreSQL key axes.
 struct grouped_soa_generation_limits {

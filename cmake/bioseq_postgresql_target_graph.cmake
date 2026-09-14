@@ -274,6 +274,8 @@ if(BIOSEQ_BENCHMARK_E2E_INTERVALS)
     message(FATAL_ERROR
       "BIOSEQ_BENCHMARK_E2E_INTERVALS requires a test-hook-free dedicated tree")
   endif()
+  target_compile_definitions(bioseq_runtime_core PRIVATE
+    BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
   target_compile_definitions(postgresql_bioseq PRIVATE
     BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
   target_compile_definitions(bioseq_pipeline_dispatch_owners PRIVATE

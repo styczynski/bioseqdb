@@ -26,25 +26,6 @@ export namespace bioseq::codegen::namespace_materialization {
 
 namespace detail {
 
-[[nodiscard]] inline bool nonempty_range(
-    const structural_analysis::source_range& range) noexcept {
-    return range.end.byte_offset > range.begin.byte_offset;
-}
-
-[[nodiscard]] inline const structural_analysis::source_range& declaration_range(
-    const structural_analysis::declaration_record& declaration) noexcept {
-    return nonempty_range(declaration.declaration_range)
-        ? declaration.declaration_range
-        : declaration.range;
-}
-
-[[nodiscard]] inline const structural_analysis::source_range& attribute_range(
-    const structural_analysis::attribute_record& attribute) noexcept {
-    return nonempty_range(attribute.removal_range)
-        ? attribute.removal_range
-        : attribute.spelling_range;
-}
-
 [[nodiscard]] inline bool policy_attribute(
     std::string_view qualified_name) noexcept {
     return qualified_name == "bioseq::template_flatten"
@@ -53,14 +34,7 @@ namespace detail {
         || qualified_name == "bioseq::template_flatten_provenance";
 }
 
-[[nodiscard]] inline bool contains(
-    const structural_analysis::source_range& outer,
-    const structural_analysis::source_range& inner) noexcept {
-    return outer.begin.byte_offset <= inner.begin.byte_offset
-        && inner.end.byte_offset <= outer.end.byte_offset;
-}
-
-[[nodiscard]] inline std::string slice(
+[[nodiscard]] inline std::string render_slice(
     std::string_view source,
     const structural_analysis::source_range& range,
     std::string_view role) {
@@ -616,7 +590,7 @@ inline void render_signature_donor_import(
         .purpose = "select binding case",
     });
     std::string rendered = apply_exact_edits(
-        slice(plan.source_text, range, "binding declaration"),
+        render_slice(plan.source_text, range, "binding declaration"),
         std::move(edits),
         range.begin.byte_offset);
     if (synthetic_provenance && !inline_provenance) {
@@ -653,24 +627,13 @@ inline void render_signature_donor_import(
         });
     }
     std::string rendered = apply_exact_edits(
-        slice(plan.source_text, range, "entry declaration head"),
+        render_slice(plan.source_text, range, "entry declaration head"),
         std::move(edits),
         range.begin.byte_offset);
     if (synthetic_provenance && !inline_provenance) {
         rendered = provenance_marker(entry.declaration, coordinate) + rendered;
     }
     return rendered;
-}
-
-[[nodiscard]] inline std::string identity_key(
-    const materialization_coordinate& coordinate) {
-    std::ostringstream result;
-    for (const axis_case_assignment& assignment : coordinate.assignments) {
-        if (assignment.role == axis_role::identity) {
-            result << assignment.group << '=' << assignment.case_label << '\n';
-        }
-    }
-    return result.str();
 }
 
 [[nodiscard]] inline const materialization_coordinate& coordinate_at(
@@ -1011,7 +974,8 @@ inline void render_selector_switch(
             std::make_move_iterator(marker_edits.end()));
     }
     std::string body = apply_exact_edits(
-        detail::slice(plan.source_text, body_range, "materialization body"),
+        detail::render_slice(
+            plan.source_text, body_range, "materialization body"),
         std::move(edits),
         body_range.begin.byte_offset);
     if (body.contains("[[bioseq::template_flatten")) {
@@ -1099,7 +1063,7 @@ inline void render_selector_switch(
         if (plan.topology.region.support_island.has_value()) {
             const structural_analysis::source_range& support_range =
                 plan.topology.region.support_island->declaration_range;
-            output << detail::slice(
+            output << detail::render_slice(
                 plan.source_text,
                 support_range,
                 "implementation-owner support island");

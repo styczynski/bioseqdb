@@ -9,6 +9,7 @@ export module bioseq.codegen.safety;
 
 export import :model;
 export import :analyzer_model;
+export import :json;
 export import :manifest;
 export import :validation;
 export import :analyzer;

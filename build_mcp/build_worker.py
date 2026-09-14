@@ -61,6 +61,8 @@ from build_presets import (
     _is_aws_gcc_preset,
     _is_aws_preset,
     _is_debug_preset,
+    _is_native_linux_clang22_preset,
+    _release_clang_e2e_preset_host_contract,
     _resolved_cmake_preset_cache_variables,
     _unit_test_filter_to_cli_args,
     build_dir_for,
@@ -2448,6 +2450,128 @@ def _validate_build_receipt(
     receipt["source_repository_root"] = str(source_repository_root)
     receipt["build_dir"] = str(build_dir)
     return receipt, None
+
+
+def _canonical_algorithm_matrix_clang_e2e_receipt_error(
+        receipt: Mapping[str, object]) -> str | None:
+    """Validate one release Clang E2E receipt for canonical matrix reuse.
+
+    Generic receipt validation authenticates source, host, configuration, and
+    runtime artifacts. This narrower campaign gate additionally binds the
+    declared E2E preset to its native host and requires the optimization,
+    libc++, and interval-instrumentation contract used by matrix evidence.
+    """
+    if (
+        receipt.get("mode") != "benchmark-e2e"
+        or receipt.get("debug") is not False
+        or receipt.get("preset_family") != "e2e"
+        or receipt.get("binary_subdir") != "bioseq"
+    ):
+        return "receipt is not a debug=false benchmark-e2e/bioseq authority"
+
+    preset = receipt.get("preset")
+    if not isinstance(preset, str):
+        return "receipt preset is malformed"
+    host_contract = _release_clang_e2e_preset_host_contract(preset)
+    if host_contract is None:
+        return "preset is not a supported release Clang E2E family"
+    expected_system, expected_machine, target_arch, target_triplet = (
+        host_contract)
+    host = receipt.get("host")
+    if not isinstance(host, dict):
+        return "receipt host identity is malformed"
+    if (
+        host.get("system") != expected_system
+        or host.get("machine") != expected_machine
+    ):
+        return (
+            f"preset {preset!r} does not match receipt host "
+            f"{host.get('system')!r}/{host.get('machine')!r}"
+        )
+
+    configuration = receipt.get("configuration")
+    compiler_contract = (
+        configuration.get("compiler_contract")
+        if isinstance(configuration, dict) else None
+    )
+    if not isinstance(compiler_contract, dict):
+        return "receipt compiler contract is malformed"
+    compiler = compiler_contract.get("CMAKE_CXX_COMPILER")
+    if not isinstance(compiler, str) or not Path(compiler).is_absolute():
+        return "receipt C++ compiler is not an absolute path"
+    compiler_name = Path(compiler).name
+    if re.fullmatch(r"clang\+\+(?:-22)?", compiler_name) is None:
+        return "receipt C++ compiler is not Clang 22"
+    if (
+        "llvm-22" not in compiler
+        and "llvm@22" not in compiler
+        and compiler_name != "clang++-22"
+    ):
+        return "receipt C++ compiler path does not identify LLVM 22"
+    compiler_id = compiler_contract.get("CMAKE_CXX_COMPILER_ID")
+    if compiler_id is not None and compiler_id not in {"Clang", "AppleClang"}:
+        return "receipt C++ compiler ID is not Clang"
+    compiler_version = compiler_contract.get("CMAKE_CXX_COMPILER_VERSION")
+    if compiler_version is not None:
+        if not isinstance(compiler_version, str):
+            return "receipt C++ compiler version is malformed"
+        version = re.fullmatch(
+            r"22\.(\d+)\.(\d+)(?:[-+].*)?", compiler_version)
+        if (
+            version is None
+            or (int(version.group(1)), int(version.group(2))) < (1, 6)
+        ):
+            return "receipt C++ compiler must be Clang >=22.1.6 and <23"
+
+    flags = compiler_contract.get("CMAKE_CXX_FLAGS")
+    if not isinstance(flags, str):
+        return "receipt C++ flags are malformed"
+    try:
+        flag_tokens = shlex.split(flags)
+    except ValueError:
+        return "receipt C++ flags cannot be parsed"
+    required_flags = {"-O3", "-DNDEBUG", "-fno-omit-frame-pointer"}
+    if not required_flags.issubset(flag_tokens):
+        return "receipt C++ flags do not prove the release contract"
+    stdlib_flags = [
+        token for token in flag_tokens if token.startswith("-stdlib=")
+    ]
+    if expected_system == "Linux":
+        if stdlib_flags != ["-stdlib=libc++"]:
+            return "receipt Linux C++ flags do not prove the libc++ ABI"
+    elif stdlib_flags not in ([], ["-stdlib=libc++"]):
+        return "receipt Darwin C++ flags select a non-libc++ ABI"
+    optimization_flags = [
+        token for token in flag_tokens
+        if re.fullmatch(r"-O(?:[0-3]|fast|g|s|z)", token)
+    ]
+    if optimization_flags != ["-O3"]:
+        return "receipt C++ flags contain a non-canonical optimization level"
+    if any(
+        token.startswith("-g")
+        or token.startswith("-fsanitize")
+        or token in {"-fomit-frame-pointer", "-UNDEBUG"}
+        for token in flag_tokens
+    ):
+        return "receipt C++ flags contain debug/sanitizer/release suppression"
+
+    build_dir_text = receipt.get("build_dir")
+    if not isinstance(build_dir_text, str) or not build_dir_text:
+        return "receipt build directory is malformed"
+    build_dir = Path(build_dir_text)
+    if _cmake_cache_bool(
+            build_dir, "BIOSEQ_BENCHMARK_E2E_INTERVALS") is not True:
+        return "receipt build does not enable E2E interval instrumentation"
+    if _cmake_cache_bool(build_dir, "BIOSEQ_TEST_INDEXES") is not False:
+        return "receipt build does not disable test indexes"
+    if expected_system == "Linux":
+        if _cmake_cache_value(
+                build_dir, "VCPKG_TARGET_ARCHITECTURE") != target_arch:
+            return "receipt vcpkg architecture does not match its Linux host"
+        if _cmake_cache_value(
+                build_dir, "VCPKG_TARGET_TRIPLET") != target_triplet:
+            return "receipt vcpkg triplet does not match its Linux host"
+    return None
 
 def _seal_successful_build_receipt(
         *,
@@ -5969,20 +6093,18 @@ def _e2e_config_requests_nice_attestation(config_path: str | None) -> bool:
     return requested
 
 
-def _ensure_darwin_algorithm_matrix_launch_nice(
+def _ensure_algorithm_matrix_launch_nice(
         mode: str,
         config_path: str | None,
         log_handle,
 ) -> None:
-    """Establish NI=0 before a canonical or explicitly attested E2E launch.
+    """Establish ordinary-worker NI=0 before an attested E2E launch.
 
     This is intentionally narrower than the build-worker scheduling guard. It
     never requests negative niceness and never runs for an ordinary E2E/product
     path unless its data explicitly requires E2E priority attestation.
     """
     if mode != "benchmark-e2e" or config_path is None:
-        return
-    if host_platform.system() != "Darwin":
         return
     authority, authority_error = _algorithm_matrix_campaign_authority_status(
         config_path)
@@ -5994,19 +6116,24 @@ def _ensure_darwin_algorithm_matrix_launch_nice(
         _e2e_config_requests_nice_attestation(config_path))
     if not canonical_priority_launch and not explicit_attestation_launch:
         return
+    platform_name = host_platform.system()
+    if platform_name not in {"Darwin", "Linux"}:
+        raise RuntimeError(
+            "algorithm-matrix launch priority supports Darwin/Linux only")
     try:
         process_selector = os.PRIO_PROCESS
         os.setpriority(process_selector, 0, 0)
         nice_value = os.getpriority(process_selector, 0)
     except (AttributeError, OSError) as exc:
         raise RuntimeError(
-            "Darwin algorithm-matrix launch could not establish worker NI=0") from exc
+            "algorithm-matrix launch could not establish worker NI=0") from exc
     if type(nice_value) is not int or nice_value != 0:
         raise RuntimeError(
-            "Darwin algorithm-matrix launch requires verified worker NI=0; "
+            "algorithm-matrix launch requires verified worker NI=0; "
             f"observed={nice_value!r}")
     log_handle.write(
-        "# algorithm-matrix Darwin launch priority worker_NI=0 verified; "
+        "# algorithm-matrix launch priority worker_NI=0 verified; "
+        f"platform={platform_name}; "
         f"authority={'canonical' if canonical_priority_launch else 'explicit_e2e_attestation'}; "
         "exec_children_inherit_worker_nice=true; "
         "postgres_backend_priority_requires_exact_e2e_observation=true\n")
@@ -6840,12 +6967,14 @@ def _run_only_from_build_receipt(
             "run_only cannot invoke a CMake post-build target because that "
             "could compile implicitly")
     _require_control_deadline(deadline, "run-only setup")
-    _ensure_darwin_algorithm_matrix_launch_nice(
+    _ensure_algorithm_matrix_launch_nice(
         mode, bench_e2e_config, log_handle)
     env = _build_worker_descendant_environment()
     _scrub_benchmark_e2e_config_environment(env)
     _ensure_local_toolchain_environment(env, active_build_dir)
-    if _is_aws_clang_preset(active_preset):
+    if _is_native_linux_clang22_preset(active_preset):
+        env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_LINUX_CLANG22"
+    elif _is_aws_clang_preset(active_preset):
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
     elif _is_aws_gcc_preset(active_preset):
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
@@ -7381,7 +7510,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
             campaign_authority, build_only=build_only, run_only=run_only):
         _log(
             "q1024 execution requires run_only=true and a current "
-            "debug=false bench-e2e-opt build receipt")
+            "qualified debug=false Clang E2E build receipt")
         return 1
     try:
         postgres_application_name = (
@@ -7424,7 +7553,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
             and not build_only and not run_only):
         _log(
             "observed-rung execution requires run_only=true and a current "
-            "debug=false bench-e2e-opt build receipt")
+            "qualified debug=false Clang E2E build receipt")
         return 1
     allowed_campaign_flags = (
         _ALGORITHM_MATRIX_EXACT_BENCH_FLAGS,
@@ -7670,7 +7799,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 log_handle=log_handle,
             )
         )
-        if _is_aws_clang_preset(active_preset):
+        if _is_native_linux_clang22_preset(active_preset):
+            env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_LINUX_CLANG22"
+        elif _is_aws_clang_preset(active_preset):
             env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
         elif _is_aws_gcc_preset(active_preset):
             env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
@@ -8358,7 +8489,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                         "# BIOSEQ_E2E_CONFIG_OPEN_PATH="
                         f"{run_env[_BENCHMARK_E2E_CONFIG_OPEN_ENV]}\n")
                 log_handle.flush()
-            _ensure_darwin_algorithm_matrix_launch_nice(
+            _ensure_algorithm_matrix_launch_nice(
                 mode, bench_e2e_config, log_handle)
             (
                 report_path,
@@ -8531,7 +8662,8 @@ def _revalidate_legacy_q1024_postgresql_cleanup_before_admission(
         receipt.get("build_receipt_id") != receipt_id
         or receipt.get("mode") != "benchmark-e2e"
         or receipt.get("debug") is not False
-        or active_preset != "bench-e2e-opt"
+        or _canonical_algorithm_matrix_clang_e2e_receipt_error(receipt)
+            is not None
         or receipt.get("preset_family") != "e2e"
         or receipt.get("binary_subdir") != "bioseq"
         or active_build_dir != recorded_build_dir
@@ -9103,7 +9235,7 @@ def tool_start_build(mode: str, build_only: bool = False,
             campaign_authority, build_only=build_only, run_only=run_only):
         return (
             "q1024 execution requires run_only=true and a current "
-            "debug=false bench-e2e-opt build receipt")
+            "qualified debug=false Clang E2E build receipt")
     if (campaign_authority is not None
             and campaign_authority.get("name") == "q1024"):
         if campaign_authority.get("execution_role") not in {
@@ -9114,7 +9246,7 @@ def tool_start_build(mode: str, build_only: bool = False,
         if not run_only and not build_only:
             return (
                 "q1024 execution requires run_only=true and a current "
-                "debug=false bench-e2e-opt build receipt")
+                "qualified debug=false Clang E2E build receipt")
         if debug_supplied and debug:
             return "q1024 execution requires debug=false"
     if (campaign_authority is not None
@@ -9126,7 +9258,7 @@ def tool_start_build(mode: str, build_only: bool = False,
         if not run_only and not build_only:
             return (
                 "Observed-rung execution requires run_only=true and a current "
-                "debug=false bench-e2e-opt build receipt")
+                "qualified debug=false Clang E2E build receipt")
         if debug_supplied and debug:
             return "Observed-rung execution requires debug=false"
     if (campaign_authority is not None
@@ -9136,7 +9268,7 @@ def tool_start_build(mode: str, build_only: bool = False,
         if not run_only:
             return (
                 "deadline campaign execution requires run_only=true and a current "
-                "debug=false bench-e2e-opt build receipt")
+                "qualified debug=false Clang E2E build receipt")
         if debug_supplied and debug:
             return "deadline campaign execution requires debug=false"
     if campaign_selected:
@@ -9198,14 +9330,15 @@ def tool_start_build(mode: str, build_only: bool = False,
                          or campaign_authority.get("execution_role")
                             in {"q1024_singleton", "q1024_packed"})
                     and (debug is not False
-                         or selected_preset != "bench-e2e-opt"
+                         or _canonical_algorithm_matrix_clang_e2e_receipt_error(
+                             selected_receipt) is not None
                          or selected_receipt.get("mode") != "benchmark-e2e"
                          or selected_receipt.get("preset_family") != "e2e"
                          or selected_receipt.get("binary_subdir") != "bioseq")):
                 return (
                     "Canonical algorithm-matrix execution requires a current "
                     "completed "
-                    "debug=false bench-e2e-opt receipt")
+                    "qualified debug=false Clang E2E receipt")
             source_repository_root = Path(
                 str(selected_receipt["source_repository_root"])
             ).resolve(strict=True)

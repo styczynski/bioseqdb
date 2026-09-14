@@ -175,7 +175,7 @@ void wire_for_each_bucket(const char* blob,
 ///
 /// @param nfrag Total physical fragment count for the target.
 /// @param frag_bp Bytes in one fragment core.
-/// @param halo_bp Collection halo on each side of a batch core.
+/// @param halo_bp Aggregate collection halo added around a batch core.
 /// @param run_buffer_bytes GPU run-buffer capacity for one submission.
 [[nodiscard]] inline std::size_t
 gpu_minimizer_fragments_per_batch(std::size_t nfrag,
@@ -555,8 +555,10 @@ class minimizer_fragment_generation_execution_receipt {
 /// Concrete minimizer-fragment producer. Each replay rescans source fragments with
 /// the canonical `w+k-2` halo and emits each physical fragment's independently
 /// ordered index. A multi-run merge route is used only when a caller explicitly
-/// requests a persisted span wider than one
-/// physical fragment. The production minimizer-fragment publisher never does so.
+/// requests a persisted span wider than one physical fragment. The production
+/// Vulkan publisher may collect adjacent persisted segments in one admitted
+/// batch, but retains every segment/physical-fragment intersection and emits
+/// each persisted segment's independently ordered stream.
 ///
 /// @tparam p_alphabet Alphabet carried by the borrowed lazy sequence.
 template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_replay_producer {
@@ -577,6 +579,8 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     std::uint8_t alphabet_code_ = bioseq::minimizers::k_unbound_packed_alphabet_code;
     std::uint16_t window_size_ = 0;
     std::uint16_t kmer_size_ = 0;
+    std::size_t gpu_run_buffer_bytes_ = 0;
+    cooperative_cancellation_checkpoint cancellation_checkpoint_{};
     std::uint64_t scan_count_ = 0;
     std::uint64_t geometry_retry_count_ = 0;
     minimizer_generation_layout generation_layout_ = minimizer_generation_layout::invalid;
@@ -601,6 +605,12 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     std::uint64_t vulkan_core_runs_ = 0;
     bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats vulkan_stats_{};
     bool route_stats_saturated_ = false;
+
+    /// Poll a caller-owned cooperative cancellation source on this synchronous
+    /// producer's coordinator thread.
+    void cancellation_checkpoint() const {
+        cancellation_checkpoint_();
+    }
 
     /// Increment a route counter and latch saturation instead of wrapping.
     void increment_route_counter_(std::uint64_t& counter) noexcept {
@@ -644,26 +654,95 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         std::uint64_t emit_base = 0u;
         std::uint64_t core_lo = 0u;
         std::uint64_t core_hi = 0u;
-        std::uint64_t next_fragment_lo = 0u;
+        std::uint64_t output_segment_lo = 0u;
+        std::uint64_t next_core_lo = 0u;
     };
 
+    /// One non-empty physical-core run and the persisted segment that owns it.
+    struct vulkan_segment_core_run {
+        std::uint64_t output_segment_lo = 0u;
+        std::vector<canonical_minimizer_event> events;
+    };
+
+    /// Emit one persisted segment from its independently canonicalized core runs.
+    /// Empty runs are omitted by every caller before this merge.
+    [[nodiscard]] static std::expected<void, minimizer_generation_encoding_error>
+    emit_sorted_core_runs_(
+        const std::vector<std::vector<canonical_minimizer_event>>& runs,
+        canonical_minimizer_event_receiver& receiver) {
+        if (runs.empty()) {
+            return {};
+        }
+        if (runs.size() == 1u) {
+            for (const canonical_minimizer_event& event : runs.front()) {
+                if (auto accepted = receiver(event); !accepted) {
+                    return accepted;
+                }
+            }
+            return {};
+        }
+
+        // Order the merge heap by hash and encoded position. Keep cursor
+        // storage fixed-size: Clang 22 can miscompile libc++'s append path
+        // for this module-instantiated cursor type by losing the local end
+        // pointer. Standard heap operations over an active prefix preserve
+        // the priority_queue ordering without growing this vector.
+        const auto after = [&runs](const cursor& lhs, const cursor& rhs) {
+            const auto& left = runs[lhs.run][lhs.index];
+            const auto& right = runs[rhs.run][rhs.index];
+            return std::pair{left.hash, left.encoded_position} >
+                   std::pair{right.hash, right.encoded_position};
+        };
+        std::vector<cursor> heap(runs.size());
+        std::size_t active_cursor_count = 0u;
+        for (std::size_t run = 0; run < runs.size(); ++run) {
+            heap[active_cursor_count] = cursor{.run = run, .index = 0};
+            ++active_cursor_count;
+            std::push_heap(heap.begin(), heap.begin() + active_cursor_count, after);
+        }
+        while (active_cursor_count != 0u) {
+            std::pop_heap(heap.begin(), heap.begin() + active_cursor_count, after);
+            cursor& current_cursor = heap[active_cursor_count - 1u];
+            if (auto accepted = receiver(runs[current_cursor.run][current_cursor.index]);
+                !accepted) {
+                return accepted;
+            }
+            ++current_cursor.index;
+            if (current_cursor.index < runs[current_cursor.run].size()) {
+                std::push_heap(heap.begin(), heap.begin() + active_cursor_count, after);
+            } else {
+                --active_cursor_count;
+            }
+        }
+        return {};
+    }
+
     /**
-     * Collect every physical core in one persisted segment through admitted
-     * prepared-upload batches. Source owners and descriptors remain live until
-     * each batch completes; runs are returned only after every record slice is
-     * validated, clipped, sorted, and deduplicated.
+     * Collect every physical core in one bounded range through admitted
+     * prepared-upload batches. `output_segment_span` retains every original
+     * persisted-segment boundary even when the range spans adjacent segments;
+     * physical-fragment boundaries remain independent core boundaries too.
+     * Source owners and descriptors remain live until each batch completes;
+     * non-empty runs retain core order and return only after every record slice
+     * is validated, clipped, sorted, and deduplicated.
      *
      * @tparam p_minimizer_type Generated physical record selected for the
      * largest local upload window before any batch allocation or dispatch.
+     * @param segment_lo Inclusive aggregate collection bound.
+     * @param segment_hi Exclusive aggregate collection bound.
+     * @param fragment_bp Physical fragment width used by source ownership.
+     * @param output_segment_span Persisted segment width used for output grouping.
+     * @return Non-empty core runs tagged with their original persisted segment.
      */
     template <class p_minimizer_type>
     [[nodiscard]] std::expected<
-        std::vector<std::vector<canonical_minimizer_event>>,
+        std::vector<vulkan_segment_core_run>,
         minimizer_generation_encoding_error>
     collect_vulkan_segment_runs_(
         std::uint64_t segment_lo,
         std::uint64_t segment_hi,
-        std::uint64_t fragment_bp) {
+        std::uint64_t fragment_bp,
+        std::uint64_t output_segment_span) {
         using minimizer_type = p_minimizer_type;
         using canonical_window =
             bioseq::gpu::vulkan::admitted_sequence_detail::canonical_u32_window<
@@ -682,12 +761,58 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             static_cast<std::uint64_t>(window_size_) + kmer_size_ - 1u;
         const bioseq::gpu::vulkan::vulkan_rank_lut rank_lut =
             bioseq::gpu::vulkan::make_vulkan_rank_lut<upload_range>();
-        std::vector<std::vector<canonical_minimizer_event>> completed_runs;
+        if (fragment_bp == 0u || output_segment_span == 0u
+            || segment_lo > segment_hi || segment_hi > target_length) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::arithmetic_overflow);
+        }
+        std::vector<vulkan_segment_core_run> completed_runs;
         std::optional<canonical_window> pending_owner;
         std::optional<vulkan_core_geometry> pending_geometry;
-        std::uint64_t fragment_lo = (segment_lo / fragment_bp) * fragment_bp;
+        std::uint64_t core_cursor = segment_lo;
 
-        while (fragment_lo < segment_hi) {
+        const auto geometry_for_core = [=](std::uint64_t core_lo)
+            -> std::expected<vulkan_core_geometry,
+                             minimizer_generation_encoding_error> {
+            if (core_lo >= segment_hi || core_lo >= target_length) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::arithmetic_overflow);
+            }
+            const std::uint64_t fragment_lo =
+                (core_lo / fragment_bp) * fragment_bp;
+            const std::uint64_t fragment_hi = std::min(
+                target_length,
+                bioseq::common::saturating_add(fragment_lo, fragment_bp));
+            const std::uint64_t output_segment_lo =
+                (core_lo / output_segment_span) * output_segment_span;
+            const std::uint64_t output_segment_hi = std::min(
+                target_length,
+                bioseq::common::saturating_add(output_segment_lo,
+                                                output_segment_span));
+            const std::uint64_t core_hi =
+                std::min({segment_hi, fragment_hi, output_segment_hi});
+            if (core_hi <= core_lo) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::arithmetic_overflow);
+            }
+            const std::uint64_t collect_lo =
+                core_lo >= halo ? core_lo - halo : 0u;
+            const std::uint64_t collect_hi =
+                core_hi > target_length - std::min(target_length, halo)
+                    ? target_length
+                    : core_hi + halo;
+            return vulkan_core_geometry{
+                .collect_lo = collect_lo,
+                .collect_hi = collect_hi,
+                .emit_base = collect_lo,
+                .core_lo = core_lo,
+                .core_hi = core_hi,
+                .output_segment_lo = output_segment_lo,
+                .next_core_lo = core_hi,
+            };
+        };
+
+        while (core_cursor < segment_hi) {
             auto plan = bioseq::gpu::vulkan::
                 make_minimap_sketch_data_vulkan_upload_batch_admission_plan<
                     minimizer_type>(
@@ -699,33 +824,30 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             if (!plan) {
                 pending_owner.reset();
                 pending_geometry.reset();
-                const std::uint64_t fragment_hi =
-                    std::min(target_length, fragment_lo + fragment_bp);
-                const std::uint64_t core_lo = std::max(segment_lo, fragment_lo);
-                const std::uint64_t core_hi = std::min(segment_hi, fragment_hi);
-                if (core_lo < core_hi) {
-                    auto run = collect_core_run(core_lo, core_hi);
-                    if (!run) {
-                        return std::unexpected(run.error());
-                    }
-                    if (!run->empty()) {
-                        completed_runs.push_back(std::move(*run));
-                    }
+                auto geometry = geometry_for_core(core_cursor);
+                if (!geometry) {
+                    return std::unexpected(geometry.error());
                 }
-                if (fragment_hi <= fragment_lo) {
-                    return std::unexpected(
-                        minimizer_generation_encoding_error::arithmetic_overflow);
+                auto run = collect_core_run(geometry->core_lo, geometry->core_hi);
+                if (!run) {
+                    return std::unexpected(run.error());
                 }
-                fragment_lo = fragment_hi;
+                if (!run->empty()) {
+                    completed_runs.push_back(vulkan_segment_core_run{
+                        .output_segment_lo = geometry->output_segment_lo,
+                        .events = std::move(*run),
+                    });
+                }
+                core_cursor = geometry->next_core_lo;
                 continue;
             }
 
             canonical_window_batch source_owners;
             bioseq::gpu::vulkan::sequence_upload_batch upload_batch;
             std::vector<vulkan_core_geometry> geometries;
-            std::uint64_t candidate_fragment_lo = fragment_lo;
+            std::uint64_t candidate_core_lo = core_cursor;
 
-            while (candidate_fragment_lo < segment_hi) {
+            while (candidate_core_lo < segment_hi) {
                 vulkan_core_geometry geometry{};
                 std::optional<canonical_window> candidate_owner;
                 if (pending_owner) {
@@ -734,47 +856,34 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                             "Vulkan fragment batch retained an owner without geometry"};
                     }
                     geometry = *pending_geometry;
+                    if (geometry.core_lo != candidate_core_lo) {
+                        throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                            "Vulkan fragment batch retained non-contiguous geometry"};
+                    }
                     candidate_owner.emplace(std::move(*pending_owner));
                     pending_owner.reset();
                     pending_geometry.reset();
                 } else {
-                    const std::uint64_t fragment_hi =
-                        std::min(target_length, candidate_fragment_lo + fragment_bp);
-                    const std::uint64_t core_lo =
-                        std::max(segment_lo, candidate_fragment_lo);
-                    const std::uint64_t core_hi =
-                        std::min(segment_hi, fragment_hi);
-                    if (core_lo >= core_hi) {
+                    auto next_geometry = geometry_for_core(candidate_core_lo);
+                    if (!next_geometry) {
+                        return std::unexpected(next_geometry.error());
+                    }
+                    geometry = *next_geometry;
+                    if (geometry.collect_hi <= geometry.collect_lo
+                        || geometry.collect_hi - geometry.collect_lo
+                            < minimum_bases) {
                         break;
                     }
-                    const std::uint64_t collect_lo =
-                        core_lo >= halo ? core_lo - halo : 0u;
-                    const std::uint64_t collect_hi =
-                        core_hi > target_length - std::min(target_length, halo)
-                            ? target_length
-                            : core_hi + halo;
-                    if (collect_hi <= collect_lo
-                        || collect_hi - collect_lo < minimum_bases) {
-                        break;
-                    }
-                    geometry = vulkan_core_geometry{
-                        .collect_lo = collect_lo,
-                        .collect_hi = collect_hi,
-                        .emit_base = collect_lo,
-                        .core_lo = core_lo,
-                        .core_hi = core_hi,
-                        .next_fragment_lo = fragment_hi,
-                    };
                     bioseq::gpu::vulkan::vulkan_sketch_decline decline{
-                        .bp_size = collect_hi - collect_lo,
+                        .bp_size = geometry.collect_hi - geometry.collect_lo,
                         .window_size = window_size_,
                         .kmer_size = kmer_size_,
                     };
                     auto window = bioseq::gpu::vulkan::admitted_sequence_detail::
                         prepare_canonical_u32_window(
                             sequence_,
-                            static_cast<sequence_size_t>(collect_lo),
-                            static_cast<sequence_size_t>(collect_hi),
+                            static_cast<sequence_size_t>(geometry.collect_lo),
+                            static_cast<sequence_size_t>(geometry.collect_hi),
                             &decline);
                     if (!window) {
                         break;
@@ -799,34 +908,31 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                 source_owners.push_back(std::move(*candidate_owner));
                 upload_batch.push_back(std::move(upload));
                 geometries.push_back(geometry);
-                if (geometry.next_fragment_lo <= candidate_fragment_lo) {
+                if (geometry.next_core_lo <= candidate_core_lo) {
                     return std::unexpected(
                         minimizer_generation_encoding_error::arithmetic_overflow);
                 }
-                candidate_fragment_lo = geometry.next_fragment_lo;
+                candidate_core_lo = geometry.next_core_lo;
             }
 
             if (geometries.empty()) {
                 pending_owner.reset();
                 pending_geometry.reset();
-                const std::uint64_t fragment_hi =
-                    std::min(target_length, fragment_lo + fragment_bp);
-                const std::uint64_t core_lo = std::max(segment_lo, fragment_lo);
-                const std::uint64_t core_hi = std::min(segment_hi, fragment_hi);
-                if (core_lo < core_hi) {
-                    auto run = collect_core_run(core_lo, core_hi);
-                    if (!run) {
-                        return std::unexpected(run.error());
-                    }
-                    if (!run->empty()) {
-                        completed_runs.push_back(std::move(*run));
-                    }
+                auto geometry = geometry_for_core(core_cursor);
+                if (!geometry) {
+                    return std::unexpected(geometry.error());
                 }
-                if (fragment_hi <= fragment_lo) {
-                    return std::unexpected(
-                        minimizer_generation_encoding_error::arithmetic_overflow);
+                auto run = collect_core_run(geometry->core_lo, geometry->core_hi);
+                if (!run) {
+                    return std::unexpected(run.error());
                 }
-                fragment_lo = fragment_hi;
+                if (!run->empty()) {
+                    completed_runs.push_back(vulkan_segment_core_run{
+                        .output_segment_lo = geometry->output_segment_lo,
+                        .events = std::move(*run),
+                    });
+                }
+                core_cursor = geometry->next_core_lo;
                 continue;
             }
 
@@ -851,6 +957,9 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                 throw bioseq::gpu::vulkan::vulkan_runtime_error{
                     "Vulkan fragment batch returned an invalid completed result"};
             }
+            // The synchronous Vulkan roundtrip is complete and authenticated;
+            // a throwing checkpoint can now unwind its result/source owners.
+            cancellation_checkpoint();
 
             std::vector<std::vector<canonical_minimizer_event>> pending_runs(
                 accepted_count);
@@ -914,13 +1023,23 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             vulkan_stats_.merge(batch_stats);
             route_stats_saturated_ =
                 route_stats_saturated_ || vulkan_stats_.saturated;
-            for (auto& run : pending_runs) {
+            for (std::size_t core_index = 0u;
+                 core_index < pending_runs.size();
+                 ++core_index) {
+                auto& run = pending_runs[core_index];
                 increment_route_counter_(vulkan_core_runs_);
                 if (!run.empty()) {
-                    completed_runs.push_back(std::move(run));
+                    completed_runs.push_back(vulkan_segment_core_run{
+                        .output_segment_lo =
+                            geometries[core_index].output_segment_lo,
+                        .events = std::move(run),
+                    });
                 }
             }
-            fragment_lo = geometries.back().next_fragment_lo;
+            core_cursor = geometries.back().next_core_lo;
+            // The upload/dispatch/download roundtrip and all result validation
+            // are complete. Poll only now, on the synchronous caller thread.
+            cancellation_checkpoint();
         }
         return completed_runs;
     }
@@ -943,6 +1062,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         std::vector<canonical_minimizer_event> run;
         if (collect_hi <= emit_base || collect_hi - emit_base < minimum_bases) {
             increment_route_counter_(short_core_runs_);
+            cancellation_checkpoint();
             return run;
         }
 
@@ -1229,6 +1349,8 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             }
         }
         canonicalize_core_run_(run);
+        // One physical core and all of its backend-owned scratch are complete.
+        cancellation_checkpoint();
         return run;
     }
 
@@ -1242,10 +1364,14 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         minimizer_generation_algorithm_identity algorithm_identity,
         std::uint16_t window_size,
         std::uint16_t kmer_size,
-        std::uint8_t alphabet_code) noexcept
+        std::uint8_t alphabet_code,
+        std::size_t gpu_run_buffer_bytes = 0u,
+        cooperative_cancellation_checkpoint cancellation_checkpoint = {}) noexcept
         : sequence_(sequence), backend_(backend), kernels_(kernels),
           algorithm_identity_(algorithm_identity), alphabet_code_(alphabet_code),
-          window_size_(window_size), kmer_size_(kmer_size) {}
+          window_size_(window_size), kmer_size_(kmer_size),
+          gpu_run_buffer_bytes_(gpu_run_buffer_bytes),
+          cancellation_checkpoint_(cancellation_checkpoint) {}
 
     /// Bind the required replay count from the persisted generation layout before scanning.
     /// Sets `saturated` when the layout is unsupported, a scan already ran, or the layout changes
@@ -1309,6 +1435,280 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const std::uint64_t target_length = sequence_.bp_size();
+        cancellation_checkpoint();
+
+        // Grouped-SoA MPF publication persists exactly one physical fragment
+        // per segment. For that geometry only, widen Vulkan collection across
+        // adjacent fragments while retaining one independently canonicalized
+        // run per physical fragment. The physical record remains selected for
+        // one fragment and its own halo, never for the aggregate batch width.
+        if (backend_ == minimizer_sketch_backend::vulkan_segment
+            && persisted_span == fragment_bp && target_length != 0u) {
+            const std::uint64_t halo =
+                static_cast<std::uint64_t>(window_size_) + kmer_size_ - 2u;
+            const std::uint64_t aggregate_halo =
+                bioseq::common::saturating_mul(halo, 2u);
+            const std::uint64_t fragment_count_u64 =
+                target_length / fragment_bp
+                + static_cast<std::uint64_t>(target_length % fragment_bp != 0u);
+            if (!std::in_range<std::size_t>(fragment_count_u64)
+                || !std::in_range<std::size_t>(fragment_bp)
+                || !std::in_range<std::size_t>(aggregate_halo)) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::arithmetic_overflow);
+            }
+            const std::size_t fragments_per_batch =
+                gpu_minimizer_fragments_per_batch(
+                    static_cast<std::size_t>(fragment_count_u64),
+                    static_cast<std::size_t>(fragment_bp),
+                    static_cast<std::size_t>(aggregate_halo),
+                    gpu_run_buffer_bytes_);
+            if (!std::in_range<std::uint64_t>(fragments_per_batch)
+                || fragments_per_batch == 0u
+                || static_cast<std::uint64_t>(fragments_per_batch)
+                    > (std::numeric_limits<std::uint64_t>::max)() / fragment_bp) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::arithmetic_overflow);
+            }
+            const std::uint64_t batch_core_capacity =
+                static_cast<std::uint64_t>(fragments_per_batch) * fragment_bp;
+            const std::uint64_t maximum_window_bp = std::min(
+                target_length,
+                bioseq::common::saturating_add(fragment_bp, aggregate_halo));
+            return bioseq::gpu::vulkan::
+                with_vulkan_segment_pair_record<p_alphabet>(
+                    window_size_,
+                    kmer_size_,
+                    maximum_window_bp,
+                    [this,
+                     target_length,
+                     fragment_bp,
+                     batch_core_capacity,
+                     &receiver]<class p_minimizer_type>()
+                        -> std::expected<void,
+                                         minimizer_generation_encoding_error> {
+                        std::uint64_t batch_lo = 0u;
+                        while (batch_lo < target_length) {
+                            const std::uint64_t batch_width =
+                                std::min(batch_core_capacity,
+                                         target_length - batch_lo);
+                            if (batch_width == 0u) {
+                                return std::unexpected(
+                                    minimizer_generation_encoding_error::
+                                        arithmetic_overflow);
+                            }
+                            const std::uint64_t batch_hi = batch_lo + batch_width;
+                            auto runs = this->template collect_vulkan_segment_runs_<
+                                p_minimizer_type>(batch_lo,
+                                                  batch_hi,
+                                                  fragment_bp,
+                                                  fragment_bp);
+                            if (!runs) {
+                                return std::unexpected(runs.error());
+                            }
+                            std::uint64_t buffered_events = 0u;
+                            for (const auto& run : *runs) {
+                                if (buffered_events
+                                    > (std::numeric_limits<std::uint64_t>::max)()
+                                        - run.events.size()) {
+                                    return std::unexpected(
+                                        minimizer_generation_encoding_error::
+                                            arithmetic_overflow);
+                                }
+                                buffered_events += run.events.size();
+                            }
+                            peak_buffered_events_ =
+                                std::max(peak_buffered_events_, buffered_events);
+                            peak_buffered_core_bp_ =
+                                std::max(peak_buffered_core_bp_, batch_width);
+                            peak_active_fragment_runs_ =
+                                std::max<std::uint64_t>(
+                                    peak_active_fragment_runs_, runs->size());
+
+                            // Runs are already independently hash-major and
+                            // retain physical-fragment order. Emitting them
+                            // directly prevents a cross-segment hash merge.
+                            for (const auto& run : *runs) {
+                                for (const canonical_minimizer_event& event :
+                                     run.events) {
+                                    if (auto accepted = receiver(event); !accepted) {
+                                        return accepted;
+                                    }
+                                }
+                                this->cancellation_checkpoint();
+                            }
+                            batch_lo = batch_hi;
+                        }
+                        return {};
+                    });
+        }
+
+        // A persisted segment whose width differs from the physical geometry
+        // may straddle one or more physical boundaries. Batch complete adjacent
+        // segments, but retain every original segment/fragment intersection as
+        // an independent descriptor with its own halo and clipping interval.
+        if (backend_ == minimizer_sketch_backend::vulkan_segment
+            && persisted_span != fragment_bp && target_length != 0u) {
+            const std::uint64_t halo =
+                static_cast<std::uint64_t>(window_size_) + kmer_size_ - 2u;
+            const std::uint64_t aggregate_halo =
+                bioseq::common::saturating_mul(halo, 2u);
+            const std::uint64_t segment_count_u64 =
+                target_length / persisted_span
+                + static_cast<std::uint64_t>(target_length % persisted_span != 0u);
+            // A half-open interval of this width can intersect at most this
+            // many physical fragments for any starting offset. The bound is
+            // deliberately conservative when both widths are aligned.
+            const std::uint64_t cores_per_segment_bound_u64 =
+                persisted_span / fragment_bp
+                + (persisted_span % fragment_bp == 0u ? 1u : 2u);
+            if (std::in_range<std::size_t>(segment_count_u64)
+                && std::in_range<std::size_t>(cores_per_segment_bound_u64)
+                && cores_per_segment_bound_u64 != 0u
+                && segment_count_u64
+                    <= (std::numeric_limits<std::size_t>::max)()
+                        / static_cast<std::size_t>(
+                            cores_per_segment_bound_u64)
+                && std::in_range<std::size_t>(fragment_bp)
+                && std::in_range<std::size_t>(aggregate_halo)) {
+                const std::size_t maximum_core_count =
+                    static_cast<std::size_t>(segment_count_u64)
+                    * static_cast<std::size_t>(
+                        cores_per_segment_bound_u64);
+                const std::size_t core_capacity =
+                    gpu_minimizer_fragments_per_batch(
+                        maximum_core_count,
+                        static_cast<std::size_t>(fragment_bp),
+                        static_cast<std::size_t>(aggregate_halo),
+                        gpu_run_buffer_bytes_);
+                const std::size_t segment_capacity =
+                    core_capacity
+                    / static_cast<std::size_t>(
+                        cores_per_segment_bound_u64);
+                if (segment_capacity != 0u) {
+                    if (!std::in_range<std::uint64_t>(segment_capacity)
+                        || static_cast<std::uint64_t>(segment_capacity)
+                            > (std::numeric_limits<std::uint64_t>::max)()
+                                / persisted_span) {
+                        return std::unexpected(
+                            minimizer_generation_encoding_error::
+                                arithmetic_overflow);
+                    }
+                    const std::uint64_t batch_segment_capacity =
+                        static_cast<std::uint64_t>(segment_capacity)
+                        * persisted_span;
+                    const std::uint64_t maximum_window_bp = std::min(
+                        target_length,
+                        bioseq::common::saturating_add(fragment_bp,
+                            aggregate_halo));
+                    return bioseq::gpu::vulkan::
+                        with_vulkan_segment_pair_record<p_alphabet>(
+                            window_size_,
+                            kmer_size_,
+                            maximum_window_bp,
+                            [this,
+                             target_length,
+                             persisted_span,
+                             fragment_bp,
+                             batch_segment_capacity,
+                             &receiver]<class p_minimizer_type>()
+                                -> std::expected<
+                                    void,
+                                    minimizer_generation_encoding_error> {
+                                std::uint64_t batch_lo = 0u;
+                                while (batch_lo < target_length) {
+                                    const std::uint64_t batch_width = std::min(
+                                        batch_segment_capacity,
+                                        target_length - batch_lo);
+                                    if (batch_width == 0u) {
+                                        return std::unexpected(
+                                            minimizer_generation_encoding_error::
+                                                arithmetic_overflow);
+                                    }
+                                    const std::uint64_t batch_hi =
+                                        batch_lo + batch_width;
+                                    auto core_runs = this->template
+                                        collect_vulkan_segment_runs_<
+                                            p_minimizer_type>(
+                                                batch_lo,
+                                                batch_hi,
+                                                fragment_bp,
+                                                persisted_span);
+                                    if (!core_runs) {
+                                        return std::unexpected(core_runs.error());
+                                    }
+                                    const std::uint64_t batch_segment_count_u64 =
+                                        batch_width / persisted_span
+                                        + static_cast<std::uint64_t>(
+                                            batch_width % persisted_span != 0u);
+                                    if (!std::in_range<std::size_t>(
+                                            batch_segment_count_u64)) {
+                                        return std::unexpected(
+                                            minimizer_generation_encoding_error::
+                                                arithmetic_overflow);
+                                    }
+                                    std::vector<std::vector<std::vector<
+                                        canonical_minimizer_event>>> segment_runs(
+                                            static_cast<std::size_t>(
+                                                batch_segment_count_u64));
+                                    std::uint64_t buffered_events = 0u;
+                                    for (auto& core_run : *core_runs) {
+                                        if (core_run.output_segment_lo < batch_lo) {
+                                            return std::unexpected(
+                                                minimizer_generation_encoding_error::
+                                                    arithmetic_overflow);
+                                        }
+                                        const std::uint64_t relative_segment_lo =
+                                            core_run.output_segment_lo - batch_lo;
+                                        if (relative_segment_lo % persisted_span
+                                            != 0u) {
+                                            return std::unexpected(
+                                                minimizer_generation_encoding_error::
+                                                    arithmetic_overflow);
+                                        }
+                                        const std::uint64_t segment_slot_u64 =
+                                            relative_segment_lo / persisted_span;
+                                        if (!std::in_range<std::size_t>(
+                                                segment_slot_u64)
+                                            || segment_slot_u64
+                                                >= batch_segment_count_u64
+                                            || buffered_events
+                                                > (std::numeric_limits<
+                                                       std::uint64_t>::max)()
+                                                    - core_run.events.size()) {
+                                            return std::unexpected(
+                                                minimizer_generation_encoding_error::
+                                                    arithmetic_overflow);
+                                        }
+                                        buffered_events += core_run.events.size();
+                                        segment_runs[static_cast<std::size_t>(
+                                            segment_slot_u64)]
+                                            .push_back(
+                                                std::move(core_run.events));
+                                    }
+                                    peak_buffered_events_ = std::max(
+                                        peak_buffered_events_, buffered_events);
+                                    peak_buffered_core_bp_ = std::max(
+                                        peak_buffered_core_bp_, batch_width);
+                                    peak_active_fragment_runs_ =
+                                        std::max<std::uint64_t>(
+                                            peak_active_fragment_runs_,
+                                            core_runs->size());
+                                    for (const auto& runs : segment_runs) {
+                                        auto emitted = emit_sorted_core_runs_(
+                                            runs, receiver);
+                                        if (!emitted) {
+                                            return emitted;
+                                        }
+                                        this->cancellation_checkpoint();
+                                    }
+                                    batch_lo = batch_hi;
+                                }
+                                return {};
+                            });
+                }
+            }
+        }
 
         std::uint64_t segment_lo = 0;
         while (segment_lo < target_length) {
@@ -1330,11 +1730,18 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                         window_size_,
                         kmer_size_,
                         maximum_window_bp,
-                        [this, segment_lo, segment_hi, fragment_bp]
+                        [this,
+                         segment_lo,
+                         segment_hi,
+                         fragment_bp,
+                         persisted_span]
                         <class p_minimizer_type>() {
                             return this->template collect_vulkan_segment_runs_<
                                 p_minimizer_type>(
-                                    segment_lo, segment_hi, fragment_bp);
+                                    segment_lo,
+                                    segment_hi,
+                                    fragment_bp,
+                                    persisted_span);
                         });
                 if (!batched_runs) {
                     return std::unexpected(batched_runs.error());
@@ -1342,12 +1749,12 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                 for (auto& run : *batched_runs) {
                     if (buffered_events
                         > (std::numeric_limits<std::uint64_t>::max)()
-                            - run.size()) {
+                            - run.events.size()) {
                         return std::unexpected(
                             minimizer_generation_encoding_error::arithmetic_overflow);
                     }
-                    buffered_events += run.size();
-                    runs.push_back(std::move(run));
+                    buffered_events += run.events.size();
+                    runs.push_back(std::move(run.events));
                 }
             } else {
                 std::uint64_t fragment_lo =
@@ -1385,50 +1792,14 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             peak_active_fragment_runs_ =
                 std::max<std::uint64_t>(peak_active_fragment_runs_, runs.size());
 
-            if (runs.size() == 1u) {
-                for (const canonical_minimizer_event& event : runs.front()) {
-                    if (auto accepted = receiver(event); !accepted) {
-                        return accepted;
-                    }
-                }
-                segment_lo = segment_hi;
-                continue;
-            }
-
-            // Order the merge heap by hash and encoded position. Keep cursor
-            // storage fixed-size: Clang 22 can miscompile libc++'s append path
-            // for this module-instantiated cursor type by losing the local end
-            // pointer. Standard heap operations over an active prefix preserve
-            // the priority_queue ordering without growing this vector.
-            const auto after = [&runs](const cursor& lhs, const cursor& rhs) {
-                const auto& left = runs[lhs.run][lhs.index];
-                const auto& right = runs[rhs.run][rhs.index];
-                return std::pair{left.hash, left.encoded_position} >
-                       std::pair{right.hash, right.encoded_position};
-            };
-            std::vector<cursor> heap(runs.size());
-            std::size_t active_cursor_count = 0u;
-            for (std::size_t run = 0; run < runs.size(); ++run) {
-                heap[active_cursor_count] = cursor{.run = run, .index = 0};
-                ++active_cursor_count;
-                std::push_heap(heap.begin(), heap.begin() + active_cursor_count, after);
-            }
-            while (active_cursor_count != 0u) {
-                std::pop_heap(heap.begin(), heap.begin() + active_cursor_count, after);
-                cursor& current_cursor = heap[active_cursor_count - 1u];
-                if (auto accepted = receiver(runs[current_cursor.run][current_cursor.index]);
-                    !accepted) {
-                    return accepted;
-                }
-                ++current_cursor.index;
-                if (current_cursor.index < runs[current_cursor.run].size()) {
-                    std::push_heap(heap.begin(), heap.begin() + active_cursor_count, after);
-                } else {
-                    --active_cursor_count;
-                }
+            auto emitted = emit_sorted_core_runs_(runs, receiver);
+            if (!emitted) {
+                return emitted;
             }
             segment_lo = segment_hi;
+            cancellation_checkpoint();
         }
+        cancellation_checkpoint();
         return {};
     }
 
@@ -1436,15 +1807,15 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     [[nodiscard]] std::uint64_t scan_count() const noexcept {
         return scan_count_;
     }
-    /// Return the maximum canonical events buffered for one persisted segment.
+    /// Return the maximum canonical events buffered for one collection batch.
     [[nodiscard]] std::uint64_t peak_buffered_events() const noexcept {
         return peak_buffered_events_;
     }
-    /// Return the largest persisted segment width buffered in base pairs.
+    /// Return the largest aggregate core width buffered in base pairs.
     [[nodiscard]] std::uint64_t peak_buffered_core_bp() const noexcept {
         return peak_buffered_core_bp_;
     }
-    /// Return the largest number of fragment runs merged concurrently.
+    /// Return the largest number of fragment runs buffered concurrently.
     [[nodiscard]] std::uint64_t peak_active_fragment_runs() const noexcept {
         return peak_active_fragment_runs_;
     }
@@ -1541,9 +1912,19 @@ template <class p_storage> struct minimizers_per_fragment_index {
         minimizer_generation_algorithm_identity algorithm_identity,
         std::uint16_t window_size,
         std::uint16_t kmer_size,
-        std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code) {
+        std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code,
+        std::size_t gpu_run_buffer_bytes = 0u,
+        cooperative_cancellation_checkpoint cancellation_checkpoint = {}) {
         return minimizer_fragment_generation_replay_producer<p_alphabet>{
-            sequence, backend, kernels, algorithm_identity, window_size, kmer_size, alphabet_code};
+            sequence,
+            backend,
+            kernels,
+            algorithm_identity,
+            window_size,
+            kmer_size,
+            alphabet_code,
+            gpu_run_buffer_bytes,
+            cancellation_checkpoint};
     }
 
     /// Encode a fragment image from the bounded producer selected by the caller.
@@ -1564,7 +1945,9 @@ template <class p_storage> struct minimizers_per_fragment_index {
         const grouped_soa_generation_options& options,
         const grouped_soa_generation_limits& limits = {},
         minimizer_fragment_generation_execution_receipt* execution_stats_out = nullptr,
-        std::uint8_t runtime_alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code) {
+        std::uint8_t runtime_alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code,
+        std::size_t gpu_run_buffer_bytes = 0u,
+        cooperative_cancellation_checkpoint cancellation_checkpoint = {}) {
         if (execution_stats_out != nullptr) {
             *execution_stats_out = {};
         }
@@ -1592,7 +1975,9 @@ template <class p_storage> struct minimizers_per_fragment_index {
                                                         options.algorithm_identity,
                                                         options.window_size,
                                                         options.kmer_size,
-                                                        runtime_alphabet_code);
+                                                        runtime_alphabet_code,
+                                                        gpu_run_buffer_bytes,
+                                                        cancellation_checkpoint);
         auto encoded = encode_minimizer_generation(producer, sink, options, limits);
         minimizer_fragment_generation_execution_receipt stats = producer.execution_stats();
         const minimizer_producer_identity stats_backend =

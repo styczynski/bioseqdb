@@ -53,6 +53,39 @@ _HOST_DEFAULT_BUILD_PRESET = (
 DEFAULT_BUILD_PRESET = os.environ.get(
     "BIOSEQ_BUILD_PRESET", _HOST_DEFAULT_BUILD_PRESET)
 
+_NATIVE_LINUX_CLANG22_PRESET_RE = re.compile(
+    r"^(?:test-)?native-(arm64|x64)-clang22-linux"
+    r"(?:-e2e)?(?:-debug)?$")
+
+
+def _is_native_linux_clang22_preset(preset: str) -> bool:
+    """Return whether ``preset`` is one declared native Clang 22 family."""
+    return _NATIVE_LINUX_CLANG22_PRESET_RE.fullmatch(preset) is not None
+
+
+def _release_clang_e2e_preset_host_contract(
+        preset: str,
+) -> tuple[str, str, str | None, str | None] | None:
+    """Map supported release Clang E2E presets to their native host contract.
+
+    The returned fields are host system, host machine, vcpkg architecture,
+    and vcpkg triplet.  Darwin does not use the Linux vcpkg architecture
+    fields.  Exact names plus the closed native family keep arbitrary
+    ``*-e2e`` and every GCC/debug preset outside canonical campaign admission.
+    """
+    if preset == "bench-e2e-opt":
+        return "Darwin", "arm64", None, None
+    if preset == "aws-x64-linux-e2e":
+        return "Linux", "x86_64", "x64", "x64-linux-libcxx"
+    native = re.fullmatch(
+        r"native-(arm64|x64)-clang22-linux-e2e", preset)
+    if native is None:
+        return None
+    architecture = native.group(1)
+    if architecture == "arm64":
+        return "Linux", "aarch64", "arm64", "arm64-linux-libcxx"
+    return "Linux", "x86_64", "x64", "x64-linux-libcxx"
+
 def _default_debug_preset(production_preset: str) -> str:
     mapped = {
         "bench-opt": "bench-opt-debug",
@@ -112,6 +145,12 @@ def _default_e2e_preset(production_preset: str) -> str:
     }.get(production_preset)
     if mapped is not None:
         return mapped
+    native = re.fullmatch(
+        r"(native-(?:arm64|x64)-clang22-linux)(-debug)?",
+        production_preset,
+    )
+    if native is not None:
+        return f"{native.group(1)}-e2e{native.group(2) or ''}"
     raise RuntimeError(
         "benchmark-e2e interval instrumentation requires an isolated preset; "
         f"production preset {production_preset!r} has no E2E mapping")
@@ -1044,7 +1083,11 @@ def _is_aws_gcc_preset(preset: str) -> bool:
     return normalized.startswith("aws-x64-linux-gcc161")
 
 def _is_aws_preset(preset: str) -> bool:
-    return _is_aws_clang_preset(preset) or _is_aws_gcc_preset(preset)
+    return (
+        _is_aws_clang_preset(preset)
+        or _is_aws_gcc_preset(preset)
+        or _is_native_linux_clang22_preset(preset)
+    )
 
 def _is_debug_preset(preset: str) -> bool:
     return preset.removeprefix("test-").endswith("-debug")

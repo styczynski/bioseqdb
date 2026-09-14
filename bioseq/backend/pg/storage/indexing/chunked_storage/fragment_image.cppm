@@ -39,6 +39,7 @@ export module bioseq.postgres.storage.indexing.chunked_storage:fragment_image;
 import std;
 export import bioseq.postgres.storage.indexing.minimizer_fragment_mapping_lease;
 import bioseq.common.logging;
+import bioseq.postgres.support;
 import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
@@ -49,6 +50,19 @@ import :file_actions;
 export namespace bioseq::storage::indexing {
 
 namespace minimizer_fragment_image_pg_detail {
+
+/// Avoid the allocating PostgreSQL error bridge on the ordinary no-interrupt path.
+/// A pending query-cancel ERROR crosses the bridge; backend-termination/FATAL
+/// retains PostgreSQL's native terminal semantics. The callback shape also binds
+/// directly to the portable compact-H32 adapter.
+inline void check_fragment_image_interrupts_as_cpp(void*) {
+    if (!INTERRUPTS_PENDING_CONDITION()) {
+        return;
+    }
+    bioseq::postgres::support::invoke_pg_as_cpp([] {
+        CHECK_FOR_INTERRUPTS();
+    });
+}
 
 [[nodiscard]] inline minimizer_generation_file_identity
 generation_file_identity(const minimizer_generation_administration_identity& identity,
@@ -88,13 +102,16 @@ pwrite_all(const int fd, const std::span<const std::byte> bytes, const std::uint
                                          bytes.data() + static_cast<std::ptrdiff_t>(written),
                                          bytes.size() - written,
                                          static_cast<off_t>(current));
-        if (result < 0 && errno == EINTR)
+        if (result < 0 && errno == EINTR) {
+            check_fragment_image_interrupts_as_cpp(nullptr);
             continue;
+        }
         if (result <= 0) {
             minimizer_generation_storage_error_as_cpp(
                 fmt::format("minimizer fragment image write failed: errno={}", errno));
         }
         written += static_cast<std::size_t>(result);
+        check_fragment_image_interrupts_as_cpp(nullptr);
     }
 }
 
@@ -118,11 +135,14 @@ inline void resize_temporary_image(const int fd, const std::uint64_t image_bytes
             "minimizer fragment image image length is not mmap/off_t representable");
     }
     while (::ftruncate(fd, static_cast<off_t>(image_bytes)) != 0) {
-        if (errno == EINTR)
+        if (errno == EINTR) {
+            check_fragment_image_interrupts_as_cpp(nullptr);
             continue;
+        }
         minimizer_generation_storage_error_as_cpp(
             fmt::format("minimizer fragment image image resize failed: errno={}", errno));
     }
+    check_fragment_image_interrupts_as_cpp(nullptr);
 }
 
 /// Scope-bound offset-zero shared mapping. Offset zero is page-aligned on
@@ -168,12 +188,16 @@ class scoped_mapped_region {
 
     /// Persist every dirty page before the outer header can authorize it.
     void sync() const {
+        check_fragment_image_interrupts_as_cpp(nullptr);
         while (msync(mapping_, bytes_, MS_SYNC) != 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) {
+                check_fragment_image_interrupts_as_cpp(nullptr);
                 continue;
+            }
             minimizer_generation_storage_error_as_cpp(
                 fmt::format("minimizer fragment image mapped image sync failed: errno={}", errno));
         }
+        check_fragment_image_interrupts_as_cpp(nullptr);
     }
 };
 
@@ -496,13 +520,21 @@ class minimizer_fragment_image_writer {
         std::optional<compact_hash32_image_plan> compact_plan{};
         std::optional<minimizer_fragment_compact_hash32_section_spec> compact_section_spec{};
         if (compact_hash32_supported) {
+            const minimizer_fragment_compact_hash32_options adapter_options{
+                .cancellation_checkpoint = cooperative_cancellation_checkpoint{
+                    .context = nullptr,
+                    .invoke_fn = &minimizer_fragment_image_pg_detail::
+                        check_fragment_image_interrupts_as_cpp,
+                },
+            };
             auto opened_adapter = minimizer_fragment_compact_hash32_adapter::open(
                 opened_minimizer_fragment_generation_view{
                     .head = &head,
                     .manifest = &manifest,
                     .directory = &authenticated_directory,
                     .mapped_payload = mapped_payload,
-                });
+                },
+                adapter_options);
             if (!opened_adapter) {
                 minimizer_generation_storage_error_as_cpp(
                     "minimizer fragment image compact-H32 source adapter rejected grouped-SoA");
@@ -520,6 +552,8 @@ class minimizer_fragment_image_writer {
             }
             compact_options.emplace(std::move(*opened_options));
             compact_source.emplace(compact_adapter->sorted_run_source());
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
             auto planned_compact =
                 plan_compact_hash32_direct_index(*compact_source, *compact_options);
             if (!planned_compact) {
@@ -527,6 +561,8 @@ class minimizer_fragment_image_writer {
                     "minimizer fragment image compact-H32 image planning failed");
             }
             compact_plan.emplace(std::move(*planned_compact));
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
             compact_section_spec.emplace(
                 minimizer_fragment_compact_hash32_section_spec{
                     .bytes = compact_plan->image_bytes,
@@ -591,12 +627,16 @@ class minimizer_fragment_image_writer {
                 static_cast<std::size_t>(provisional_layout->compact_hash32_direct.bytes);
             std::span<std::byte> direct_image =
                 destination_mapping.writable_bytes().subspan(direct_offset, direct_bytes);
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
             if (auto built = build_compact_hash32_direct_index_into(
                     *compact_source, *compact_options, *compact_plan, direct_image);
                 !built) {
                 minimizer_generation_storage_error_as_cpp(
                     "minimizer fragment image compact-H32 image replay/build failed");
             }
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
             const auto validated_direct =
                 validate_compact_hash32_direct_index(std::span<const std::byte>{direct_image},
                                                      compact_options->identity,
@@ -606,6 +646,8 @@ class minimizer_fragment_image_writer {
                 minimizer_generation_storage_error_as_cpp(
                     "minimizer fragment image compact-H32 nested image validation failed");
             }
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
             const compact_hash32_image_plan& validated_direct_plan = validated_direct->header;
             if (validated_direct_plan != *compact_plan) {
                 minimizer_generation_storage_error_as_cpp(
@@ -676,6 +718,8 @@ class minimizer_fragment_image_writer {
             minimizer_generation_storage_error_as_cpp(
                 "minimizer fragment image header self-decode failed");
         }
+        minimizer_fragment_image_pg_detail::
+            check_fragment_image_interrupts_as_cpp(nullptr);
         minimizer_fragment_image_pg_detail::pwrite_all(publication_.fd, *encoded_header, 0u);
 
         struct stat observed{};
@@ -709,6 +753,8 @@ class minimizer_fragment_image_writer {
             .device = publication_.expected_device,
             .inode = publication_.expected_inode,
         };
+        minimizer_fragment_image_pg_detail::
+            check_fragment_image_interrupts_as_cpp(nullptr);
         publish_generation_file(publication_);
         sealed_ = true;
         return receipt;

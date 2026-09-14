@@ -19,11 +19,11 @@ module;
 
 export module bioseq.codegen.highway;
 
-import :manifest;
-import :model;
-import :renderer;
-import :validator;
-import :tests.contract;
+export import :manifest;
+export import :model;
+export import :renderer;
+export import :validator;
+export import :tests.contract;
 import bioseq.codegen.structural_analysis;
 import bioseq.codegen.namespace_materialization;
 import bioseq.codegen.support;
