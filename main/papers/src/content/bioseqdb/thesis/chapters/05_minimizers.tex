@@ -2249,8 +2249,9 @@ Minimap2's C code construction is done via:
      (\mathit{last\_pos}\ll 1)\mathbin{|}\mathit{strand}.
 \end{align}
 
+\info{Homopolymer compression}{
 Normally span equals $k$ (or is $< k$ for first $k-1$ bases). Minimap2 suppors homopolymer compression (HPC) togglable by command line option \texttt{-H} which collapses strings of one repeating character into single character occurence. If HPC is enabled, span can have values $0 \leq span \leq 255$. If span is increased beyond 255 (there are 255 same characters in the input sequence next to each other), then minimizer is completely abandoned until new symbol is found.
-In BioseqDB we use/or not HPC by default?
+}\label{info:minimap-hpc}
 
 \todo{Find out if BioseqDB uses HPC.}
 
