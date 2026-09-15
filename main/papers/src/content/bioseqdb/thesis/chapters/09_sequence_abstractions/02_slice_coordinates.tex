@@ -1,61 +1,56 @@
 \section{Slices keep logical coordinates}
 \label{sec:sequence-sql-slicing}
 
-A slice selects positions \([a,b)\): it includes \(a\) and excludes \(b\).
-BioSeqDB uses zero-based positions, so \(S[0]\) is the first symbol. The
-length of a valid slice is \(b-a\), and its first position is again zero.
-This rule is independent of byte boundaries and of the fragments used to
-store \(S\).
+Postgres support array subscription operations natively, so I decided to support slicing as well in first version of BioseqDB.
 
-The SQL listing gives concrete examples. The type modifier binds the value to
-the DNA4 alphabet and 32-bit storage units. Casting the results to text makes
-the selected symbols visible.
+A slice selects positions \([a,b)\): it includes \(a\) and excludes \(b\).
+BioSeqDB uses zero-based positions, so \(S[0]\) is the first symbol of the slice.
+
+\warn{0-based indexing}{
+  This contradicts the fact that Postgres slices are 1-based, but it wasn't intentional decision. I had limited experience with Postgres array functionality and this realisation came only after most of the support was already implemented.
+  What is more interesting that SeqKit - tool for operating on FASTA/Q files use 1-based indexing~\cite{seqkit_subseq_usage}.
+  This incompatibility might be something to reconsider in the future.
+}
+
+I provided utility functions for common operations like reversing and reverse-complementing slices as well, example available in listing~\ref{lst:sequence-sql-examples}.
 \begin{lstlisting}[style=seq-nine-sql,
   caption={Zero-based slices and sequence transforms in SQL.},
   label={lst:sequence-sql-examples}]
 WITH v(s) AS (
-  VALUES ('ACGTAACCGTTA'::bioseq.seq('dna4', 32))
+  VALUES ('ACGTAACCGTTA'::bioseq.seq('dna4', 32))     -- ACGTAACCGTTA
 )
-SELECT s[2:10]::text AS middle,              -- GTAACCGT
-       ((s[2:10])[1:5])::text AS nested,     -- TAAC
-       s[-4:]::text AS suffix,              -- GTTA
-       bioseq.reverse(s[2:10])::text AS rev, -- TGCCAATG
-       bioseq.reverse_complement(s[2:10])::text AS rc
-FROM v;                                    -- rc: ACGGTTAC
+SELECT s[2:10]::text AS middle,                       -- GTAACCGT
+       ((s[2:10])[1:5])::text AS nested,              -- TAAC
+       s[-4:]::text AS suffix,                        -- GTTA
+       bioseq.reverse(s[2:10])::text AS rev,          -- TGCCAATG
+       bioseq.reverse_complement(s[2:10])::text AS rc -- ACGGTTAC
+FROM v;
 \end{lstlisting}
 
-The bounds follow a small set of rules.
+The bounds follow a small set of intuitive rules simiar to design of slices in Python~\cite{python_common_sequence_operations}:
 \begin{itemize}
   \item A missing lower bound means zero. A missing upper bound means the
         sequence length.
-  \item A negative bound counts from the end. For length 12, \(-4\) means 8.
-        Bounds outside the sequence are clamped to its ends.
-  \item An upper bound below the lower bound gives an empty slice.
-        Thus \texttt{s[4:2]} has length zero.
-  \item An out-of-range element, such as \texttt{s[12]} in this example,
-        gives SQL \texttt{NULL}. An explicit null slice bound also gives
-        \texttt{NULL}.
+  \item A negative bound counts from the end (example: for length 12, \(-4\) means 8) and bounds outside the sequence are clamped to its ends.
+  \item An upper bound below the lower bound gives an empty slice, so \texttt{s[4:2]} has length zero.
+  \item User can extract any element (symbol) from slice, which has separate SQL type \texttt{LETTER}. An out-of-range element, such as \texttt{s[12]} in this example,
+        gives SQL \texttt{NULL}. An explicit null slice bound also gives \texttt{NULL} i.e $s[a:\text{NULL}]$ is equivalent to $s[\text{NULL}:a]$ and is also equivalent to $s[\text{NULL}:\text{NULL}]$ (all of them result in \texttt{NULL})
 \end{itemize}
-The implemented subscripting supports one dimension and unit steps. It does
-not support assignment through a subscript.
 
-For a forward view \(V=S[a,b)\), view position \(j\) refers to
+The slicing can be implemented by old holding slice coordinates, without actually loading any sequences, by very simple coordinates arithmetic visible at figure below~\ref{fig:sequence-slice-coordinates}
+For a slice view \(V=S[a,b)\), view position \(j\) refers to
 \(S[a+j]\). A second slice therefore combines its offsets directly:
 \[
   V[c,d)=S[a+c,a+d).
 \]
 The example's \(S[2,10)[1,5)\) is \(S[3,7)\), which reads
-\texttt{TAAC}. Neither step needs to round its bounds to storage units.
-
-Reversal changes the mapping, not the chosen symbols' storage. Let
-\(W=\operatorname{reverse}(S[a,b))\). Then
+\texttt{TAAC}. Reversal is represented by reversing start and end coordinates: For
+\(W=\operatorname{reverse}(S[a,b))\) we have:
 \[
   W[j]=S[b-1-j],\qquad
   W[c,d)=\operatorname{reverse}(S[b-d,b-c)).
 \]
-A reverse-complement view applies the alphabet's complement after this
-position mapping. For DNA4, the pairs are \(A\leftrightarrow T\) and
-\(C\leftrightarrow G\).
+Complementing operation leaves the coordinates unchanged, but alters binary flag representing if the slice is complemented or not.
 
 \begin{figure}[H]
 \centering
@@ -98,16 +93,6 @@ position mapping. For DNA4, the pairs are \(A\leftrightarrow T\) and
   \node[anchor=west,align=left,text=seqNineOrange] at (10.35,.55)
     {$W[1,4)$\\reads $S[6,9)$\\backward: \texttt{GCC}};
 \end{tikzpicture}
-\caption{Blue cells form the first slice. Orange cells show a second slice.
-The source positions above the reversed view decrease while its own positions
-increase. The selected intervals are exact even when a boundary falls inside
-a packed unit.}
+\caption{Blue cells form the first slice and orange cells show a second slice}
 \label{fig:sequence-slice-coordinates}
 \end{figure}
-
-This separation matters for long references. A request for the last 100 symbols
-can be mapped to the corresponding source interval before any symbols are
-read. Stored fragments may be larger than that interval, so the physical read
-can still fetch or decompress extra data. Laziness avoids requiring the whole
-source to be decoded. It does not make the storage system's read granularity
-equal to one symbol.
