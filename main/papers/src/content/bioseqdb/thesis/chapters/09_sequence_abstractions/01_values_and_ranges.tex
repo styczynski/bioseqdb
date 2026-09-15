@@ -39,110 +39,124 @@ own C++ system of templates with different specializations driven by C++ concept
   Because the architecture of BioseqDB pipeline is very custom, I decided to only use SeqAn's alphabet layer~\autocite{seqan3AlphabetsDocs} and utilities exposed by its public API. This means that libraries using SeqAn code as base, could be slightly adjusted to be able to work with BioseqDB pipelines.
 }
 
-Table~\ref{tab:sequence-representation-specializations} lists every specialization of all BioseqDB sequence representations, to showcase how they are used in different scenarios.
+Table~\ref{tab:sequence-representation-specializations} lists every specialization of all BioseqDB sequence representations, to showcase how they are used in different scenarios. SeqAn offers abstractions over lazy sequences as well~\cite{seqanSequencesInDepth}, but they're not as sophisticates as in my case.
 
 \begingroup\footnotesize\setlength{\tabcolsep}{4pt}
 \renewcommand{\arraystretch}{1.08}
+\setlength{\LTleft}{-0.043\linewidth}
+\setlength{\LTright}{-0.043\linewidth}
+\setlength{\LTcapwidth}{\linewidth}
 \begin{longtable}{@{}
-  >{\raggedright\arraybackslash}p{0.185\linewidth}
-  >{\raggedright\arraybackslash}p{0.215\linewidth}
-  >{\raggedright\arraybackslash}p{0.245\linewidth}
-  >{\raggedright\arraybackslash}p{0.275\linewidth}@{}}
+  >{\raggedright\arraybackslash}p{\dimexpr0.2506\linewidth-5.34pt\relax}
+  >{\raggedright\arraybackslash}p{\dimexpr0.3133\linewidth-5.33pt\relax}
+  >{\raggedright\arraybackslash}p{\dimexpr0.5221\linewidth-5.33pt\relax}@{}}
 \caption{Iterfaces for sequence representations in \mbox{BioSeqDB}.}
 \label{tab:sequence-representation-specializations}\\
 \toprule
 \textbf{Template} & \textbf{Specialization, and when it is selected} &
-\textbf{Physical form and ownership} & \textbf{What it is used for}\\
+\textbf{Description and usage context}\\
 \midrule
 \endfirsthead
 \toprule
 \textbf{Template} & \textbf{Specialization, and when it is selected} &
-\textbf{Physical form and ownership} & \textbf{What it is used for}\\
+\textbf{Description and usage context}\\
 \midrule
 \endhead
 \bottomrule
 \endfoot
-\path{compact_sequence_range<R>}\par
+\path{compact_sequence_range<R>}\par\vspace{2.5pt}
 This is the core type representing sequence that resides completely in memory. Template allows only four available specializations depending on what \texttt{R} is and each of them have entirely separate handling logic. &
 \texttt{R} is a container of alphabet values, such as
 \path{std::vector<dna4>} &
 This is only adapter for existing sequence containers to provide compatibility with SeqAn and standard library containers.
-There is no alphabet packing and the type borrows \texttt{const R\&} &
+There is no alphabet packing and the type borrows \texttt{const R\&}
 Adapter just provides common sequence interface. Adapting one costs \(O(1)\) as we proxy all operations to the underlying container\\
 \addlinespace
 & \texttt{R} is a packing configuration
 \path{sequence_custom_alphabet<A, U, b>} &
-Bitpacked vector that stores sequences according to alphabet rules passed as type paramter. Owns storage. &
+Bitpacked vector that stores sequences according to alphabet rules passed as type paramter. Owns storage.
 Can convert to and from other bitpacked or not-bitpacked sequences, but if constructed from non-bitpacked sequence, then constructor costs \(O(N)\) \\
 \addlinespace
 & \texttt{R} is an SeqAn alphabet type, as in
 \path{compact_sequence_range<dna4>} &
-The same as \path{sequence_custom_alphabet<A, U, b>}, but has sensible defaults for used underlying alphabet's storage unit width etc. &
+The same as \path{sequence_custom_alphabet<A, U, b>}, but has sensible defaults for used underlying alphabet's storage unit width etc.
 Commonly used in tests. Code interfacing directly with BioseqDB C++ API should use this specialization. \\
 \addlinespace
 & \texttt{R} is
 \path{compact_sequence_stdc_instance<...>} &
 Holds only reference to the underlying object.
-Adapter to convert \path{compact_sequence_stdc_instance<...>} to \path{compact_sequence_range<R>}. \path{compact_sequence_stdc_instance<...>} is a type that comes from \path{compact_sequence_stdc<...>} - described below &
+Adapter to convert \path{compact_sequence_stdc_instance<...>} to \path{compact_sequence_range<R>}. \path{compact_sequence_stdc_instance<...>} is a type that comes from \path{compact_sequence_stdc<...>} - described below
 Used internally \\
 \midrule
-\path{compact_sequence_stdc<...>}\par
+\path{compact_sequence_stdc<...>}\par\vspace{2.5pt}
 Represents standard layout C type~\cite{cppreference_standard_layout_type} that is used to type-erase \path{compact_sequence_range<R>} types i.e allow user to
 have one type for storing possibly multiple different sequences types. Metadata like alphabet type and storage unit width are stored inside the struct and specialized template dispatch
 lambda is called to convert it back to the \path{compact_sequence_range<R>} type. This is heavily used by Postgres code to store sequences as C structures. &
+% This row never named a specialization, so its second cell stays empty and the
+% ownership text below belongs to the description column.
+&
 Owns everything and stores fixed header that records struct (self) size in bytes (compatible with Postgres varlena), alphabet code, unit width, padding,
-and symbol count &
+and symbol count
 Used heavy by Postgres code as we cannot store template instances directly and need to hold them in one object that converts type parameters of templates to runtime values (with correct runtime dispatch). If you want to store sequences of different alphabets in one single container, you should use this. \\
 \addlinespace
 & \path{compact_sequence_stdc_instance<Stdc, A, W>}, internal type obtained when dispatching the type at runtime &
-Carries nothing, this is primarily runtime tag &
+Carries nothing, this is primarily runtime tag
 Shouldn't be used directly, one should receive \path{compact_sequence_range<compact_sequence_stdc_instance<...>>} when using dispatch methods of the stdc template \\
 \midrule
-\path{lazy_sequence<R, Scanner>}\par
+\path{lazy_sequence<R, Scanner>}\par\vspace{2.5pt}
 Represents sequence that can be loaded in fragments by some storage provider represented by type parameter \path{Scanner} &
 \texttt{Scanner} has static constexpr method \path{is_fragmented()} that returns false (this means that Scanner always holds entire sequence in memory and there's only one fragment). This is used as compatibility layer so you can directly create lazy sequence from compact sequence range instance.
 I have \path{resident_sequence_scanner<U>} for trivial implementation of non-fragmented scanners so you can write \path{lazy_sequence<R, resident_sequence_scanner<R>>} and don't have to implement scanner type on your own.&
-Holds single non-owning pointer to \path{compact_sequence_range<R>} &
+Holds single non-owning pointer to \path{compact_sequence_range<R>}
 Used as adapter to convert compact sequence range to lazy sequence. All primary pipeline operations should accept it as parameter \\
 \addlinespace
 & \texttt{Scanner} is fragmented (\path{is_fragmented()} returns true) &
-Ows scanner, internal small cache for sequence fragments that are neither copyable or movable &
+Ows scanner, internal small cache for sequence fragments that are neither copyable or movable
 Allows iteration over data source of sequences that doesn't fit into memory at once. This is primary specialisation for loading sequences from PostgreSQL relations. The Postgres side implements large scanner type that tells the lazy sequence template how to fetch blocks of sequences \\
 \midrule
-\path{bit_casted_view<Base, Out>}\par
+\path{bit_casted_view<Base, Out>}\par\vspace{2.5pt}
 Only legal for few types of alphabets and storage widths. &
 Special non-owning type that is used to provide zero-cost changes to pitpacking. It allows to cast bitpacked sequences to different storage widths i.e cast sequence encoded on 32-bit int to be read as sequence encoded on 64-bit or 16-bit or 8-bit units.
 There are special requirements for alphabet to be able to do that (discussed below).
 &
-Holds only reference to underlying compact sequence range &
-This is adapter type that provides zero-cost conversion between different specialisations of compact sequence range. Used for example by SIMD algorithms to have specific vector lane widths
+Holds only reference to underlying compact sequence range
+This is adapter type that provides zero-cost conversion between different specialisations of compact sequence range. Used for example by SIMD algorithms to have specific vector lane widths\\
 \end{longtable}
 \endgroup
-
-The rows differ in where the bytes live and in who owns them. They agree on
-what the bytes mean: each one reports the same logical length, yields the same
-symbols in the same order, and copies ranks from the same coordinates, because
-all of them follow one packing rule. That rule is the subject of the next
-section.
 
 \section{Packed symbols and a common C++ interface}
 \label{sec:compact-sequence-range}
 \label{sec:sequence-bit-layout}
 
-An alphabet assigns each symbol an integer called its \emph{rank}. For DNA4,
-the four ranks are \(A=0\), \(C=1\), \(G=2\), and \(T=3\). A rank is an
-encoding of a symbol, not a score. Two bits are enough for these four values.
-Other alphabets can require more bits and different complement rules.
+The template-driven design allows usage of any arbitrary alphabet for sequences, though for now I only support DNA4 and DNA5.
 
-BioSeqDB packs several ranks in an unsigned integer called a \emph{storage
-unit}. For a unit of \(B\) bytes and \(b\) bits per symbol, it stores
-\[
-  L=\left\lfloor\frac{8B}{b}\right\rfloor
-\]
-symbols per unit. The first symbol uses the lowest \(b\) bits. Symbol position
-\(i\) is in unit \(\lfloor i/L\rfloor\), at bit offset
-\(b(i\bmod L)\). Reading its rank loads that unit, shifts it right by the
-offset, and keeps the lowest \(b\) bits.
+Sequence is encoded using bitpacking - the symbols are converted into integers values with specified fixed number of bits per symbol, then several symbols are packed into one single storage unit. Storage unit can be integer of any physical size.
+This is generalisation of bitpacking strategies commonly used in other software like packed-seq~\cite{packed_seq_library} Rust library developed by author of SIMD minimizers paper. packed-seq Rust library offers non-alphabet-generic packing~\cite{packed_seq_docs}.
+My design was more inspired by SeqAn approach where packing container is available, but very limited in features~\cite{seqanManual}.
+
+SeqAn alphabet assigns each symbol an integer called its \emph{rank}. For DNA4,
+the four ranks are \(A=0\), \(C=1\), \(G=2\), and \(T=3\). A rank is an
+encoding of a symbol. Each \path{compact_sequence_range<R>} type needs to know certain properties of the encoding that are held (using CRTP) in \path{compact_sequence_range<R>::traits} type. 
+In my storage symbols never spill to other storage units i.e to retrieve some symbol you always need to access at most one storage unit.
+The symbols in the storage unit are always packed in "little-endian" order i.e the first symbol is in the lowest bits of the storage unit and the last symbol is in the highest bits.
+The properties in traits type are either types or constexpr static expressions/functions:
+\begin{itemize}
+  \item \path{alphabet_type} - type of the alphabet
+  \item \path{storage_unit} - type of the underlying storage unit (usually \path{uint8_t}, \path{uint16_t}, \path{uint32_t}, \path{uint64_t})
+  \item \path{alphabet_size} - number of symbols in the alphabet
+  \item \path{unit_width} - width in bits of the storage unit: \(\text{sizeof(storage\_unit)} \times 8\)
+  \item \path{bits_per_char} - number of bits per symbol: \(\left\lfloor\log_2(\text{alphabet\_size})\right\rfloor\)
+  \item \path{letters_per_unit} - number of symbols that can be packed into one storage unit: \(\left\lfloor\frac{\text{unit\_width}}{\text{bits\_per\_char}}\right\rfloor\)
+  \item \path{unit_used_bits} - number of bits used in the storage unit (for alphabet sizes that are not a power of two, some bits must stay unassigned): \(\text{letters\_per\_unit} \times \text{bits\_per\_char}\)
+  \item \path{unit_leftover_bits} - number of bits leftover in the storage unit: \(\text{unit\_width} - \text{unit\_used\_bits}\)
+  \item \path{char_mask} - mask for the last symbol in the storage unit
+  \item \path{rev_char_mask} - mask for the first symbol in the storage unit
+  \item \path{used_storage_mask} - mask for the used bits in the storage unit
+  \item Conversion functions for converting between storage unit and symbol: \path{letter_to_symbol}, \path{letter_to_char}, \path{letter_complement}
+  \item Utilities for generating k-mer masks: \path{kmer_mask}
+\end{itemize}
+
+The figure below~\ref{fig:lsb-packed-layout} shows an example of how I bitpack DNA4 sequence in storage units.
 
 \begin{figure}[H]
 \centering
@@ -173,33 +187,23 @@ offset, and keeps the lowest \(b\) bits.
     {2 empty symbol slots\\in the final unit};
 \end{tikzpicture}
 \caption{Packing \texttt{ACGTGA} with four DNA4 symbols per byte. The dashed
-slots are padding, so they are not part of the sequence. The drawing orders
-slots by logical position, from low bits to high bits.}
+slots are padding, which occurs at the end of the sequence as rarely sequence size is multiple of
+\path{compact_sequence_range<R>::traits::letters_per_unit} so they are not part of the sequence.}
 \label{fig:lsb-packed-layout}
 \end{figure}
 
-The C++ type \texttt{compact\_sequence\_range<R>} provides common operations
-for several resident representations. Its compile-time properties, called
-\emph{traits}, supply the alphabet, unit type, and packing rules. Algorithms
-use those traits instead of assuming that
-every input is DNA4 or that every symbol occupies one byte.
-
-Three sizes must be kept separate.
-\begin{itemize}
-  \item \texttt{size()} counts storage units in a compact range.
-  \item \texttt{bp\_size()} counts logical symbols, excluding padding.
-        The name is retained for all supported sequence alphabets.
-  \item \texttt{byte\_size()} counts bytes occupied by the units.
-\end{itemize}
-If the range contains \(U\) units and the last unit has \(P\) empty symbol
-slots, then \(N=UL-P\) is its logical length. Figure~\ref{fig:lsb-packed-layout}
-has \(U=2\), \(L=4\), and \(P=2\), hence \(N=6\). Unused high bits in
-a unit are a separate issue: three-bit ranks in an eight-bit unit leave two
-high bits that cannot hold another symbol. Unlike final padding, these bits
-are unused in every unit.
+\warn{Template instance explosion}{
+  In BioseqDB I tried to allow user to specify any storage width that is power of two (8, 16, 32, 64) and alphabet (currently supported is DNA4 and DNA5). Because both of parameters are constexpr template parameters, this leads in some parts to creation of hundreds separate versions of pipeline.
+  This slows downs compilation times and led to creation of absurdly large BMIs resulting in multi-gigabyte Clang \text{.pcm} files. Resulting binary still is optimised down to more convenient size, however I put lots of burden onto the compiler and linker.
+  The goal of user-supplied storage widths was to observe how they affect performance and if they affect it at all. Currently in some parts of the pipeline I still cast the stored types to \text{uint32\_t}, this happens because some algorithms like SIMD chaining require
+  larger widths to store indices and scores. Extracting  symbols directly from storage unit is a complex process involving lots of bitwise operations, so at this time most algorithms (SIMD/GPU) cannot operate directly on packed sequences as this would require lots of additional engineering effort.
+  I added conversion helpers like one presented in the listing below~\ref{lst:compact-range-interface} that convert requested ranges of sequence into non-bitpacked sequence that is easier to work with.
+  This operation is done on demand and stored in separate memory pool region, so pipeline doesn't have to convert sequence from bitpacked to non-bitpacked format multiple times.
+  Directly unpacking sequence inside pipeline at the latest point in time is potential opportunity for future improvements.
+}
 
 \noindent\begin{minipage}{\linewidth}
-The following example uses the actual range API at a consumer boundary. The
+The following example uses actual code snippet from BioseqDB - in this case the
 caller owns \texttt{output}, which has at least \(last-first\) bytes, and
 passes bounds satisfying \(0\leq first\leq last\leq N\).
 \begin{BioseqCppSnippet}[caption={A consumer requests only the ranks it needs.},
@@ -213,13 +217,3 @@ void read_fragment(const compact_sequence_range<R>& sequence,
 }
 \end{BioseqCppSnippet}
 \end{minipage}
-
-For resident packed data, this call seeks to the first selected unit and
-decodes \(last-first\) symbols. It does not first decode the preceding
-symbols. The storage-unit width describes packing; coordinates, scores, and
-hashes can use other integer widths.
-
-The common interface also does not impose one ownership rule. A compact range
-over a packed vector can own its payload. An adapter over a caller's alphabet
-container or a validated PostgreSQL value borrows it. A borrowed range remains
-valid only while that container or value is alive.
