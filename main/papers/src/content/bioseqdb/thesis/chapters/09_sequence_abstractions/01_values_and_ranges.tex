@@ -121,6 +121,33 @@ There are special requirements for alphabet to be able to do that (discussed bel
 &
 Holds only reference to underlying compact sequence range
 This is adapter type that provides zero-cost conversion between different specialisations of compact sequence range. Used for example by SIMD algorithms to have specific vector lane widths\\
+\midrule
+\path{lazy_sequence_view<A>}\par\vspace{2.5pt}
+Type-erased, non-owning facade over every representation listed above. It is templated on the alphabet only, so exactly one type name crosses module and Postgres boundaries. The object itself is two pointers: opaque backend state and a static \path{backend_ops} table that holds \path{bp_size}, four orientation-specific \path{read_at} slots (read forward or backward, write forward or backward), \path{try_resident_packed}, \path{copy_packed_sequence} and \path{worker_shareable}. Specialization here means which callback table is installed. &
+\path{owned_sequence_adapter<R, Scanner>}, created by \path{make_lazy_sequence_view} for a concrete \path{lazy_sequence<R, Scanner>} &
+Complete table over an owning lazy sequence.
+This is the table behind every lazy sequence that pipeline code receives, where Postgres provides pointers to actual functions. \\
+\addlinespace
+& \path{compact_range_adapter<R>}, created by \path{make_lazy_sequence_view} for \path{compact_sequence_range<R>} &
+Used as convenient adapter to convert compact sequence range to lazy sequence view without worrying about scanner type and ownership. Useful for testing. \\
+\addlinespace
+& \path{facade_adapter<A>}, created by \path{make_pg_sequence_call_owner} on the Postgres side &
+This struct holds Postgres Scanner state - it is either a detoasted flat value or a piece tree root together with its read session, because sequences need to be represented as trees of slice operations  \\
+\addlinespace
+& \path{resident_adapter<A>}, created by \path{admitted_packed_sequence::view()} &
+Postgres Scanner for sequence only holds descriptor for already materialized sequence \\
+\midrule
+\path{retained_lazy_sequence_view<A>}\par\vspace{2.5pt}
+Has only one form. This type pairs view mentioned above with opaque lifetime pointer. It's used in Postgres code for management of sequence lifecycle during DB operations &
+Constructed from a view, an opaque lifetime pointer and a \texttt{noexcept} release callback, so there is nothing to specialize &
+Used wherever a view has to outlive the expression that produced it. The Postgres read session allocates the owner in its own memory context and registers it there, so the retain is dropped even when Postgres unwinds with \texttt{longjmp} and skips C++ destructors.
+This means that this type is specific version of \path{std::unique_ptr} that allows us to provide custom lifecycle management during scans. \\
+\midrule
+\path{admitted_packed_sequence<A>}\par\vspace{2.5pt}
+Supporting type to propagate sequence along with memory permit (memory permits are used in BioseqDB to manage large memory regions for sequences) &
+Created during materialization by \path{materialize_packed_sequence}. In BioseqDB there's a little sequence access planner that is responsible for deciding if we can materialize it all at once and directly or it needs to be streamed. \path{plan_sequence_access} picks this type when a contiguous resident region and we cannot use existing materialization (for example we access specific nucleotide that doesn't align well with storage unit boundary, but the GPU algorithm requires continous region of sequence, so we need to copy it) &
+Owns the permit, the aligned buffer and its descriptor together, so accounted bytes are released with the object.
+Its \path{view()} returns an ordinary view over \path{resident_adapter<A>}, which is how SIMD and GPU kernels obtain contiguous packed input from a sequence that is tree-backed or fragmented \\
 \end{longtable}
 \endgroup
 
