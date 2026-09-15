@@ -16,40 +16,114 @@
 \lstdefinestyle{seq-nine-sql}{style=bioseq-cpp26,language=SQL,
   basicstyle=\small\ttfamily,columns=fullflexible,keepspaces=true}
 
-\section{One sequence, several ways to read it}
+\section{Designing sequence abstraction}
 \label{sec:sequence-abstractions}
 
-Suppose a chromosome contains 100 million symbols, but an alignment step needs
-only positions 500000 through 500099. Its input is the 100-symbol slice
-\(S[500000,500100)\). Decoding the whole chromosome into one byte per symbol
-would first create a 100 MB buffer for this small request. Repeating that
-conversion for each candidate alignment region would waste memory and time.
+Suppose user stores large genome sequence in one row, but only wants to align specific small part of it (let's say we know location of one protein-coding human gene and are interested only in finding occurences of that gene).
+It would be very wasteful if I didn't provide built-in functionality to load only that small region. This region could be stored on disk, so we only have it's locator poiting to a specific chunk in the table.
+On the other hand, we can load sequences from fasta file, where parser can be writing to RAM, so our sequence could refer to location in memory, where all sequences are pooled into one memory region to avoid constant allocation/reallocation.
+In yet another case, in tests we would like to use standard library containers to prepare and examine sequences (potentially even somebody could directly call some internal BioseqDB functions as standalone alignment library).
+This created a design challenge: same sequence can arrive as relationship locator, region in memory pool in RAM, can be provided as a whole as standrad container or as only a fragment (if user wants to operate only on specific slice or if it does not fit in RAM or RAM is limited, so we cannot fit entire sequence directly there), while
+these fragments should also be shareable, so parallel alignment to the same sequence doesn't have to load them multiple times.
 
-The database introduces another difficulty: the same sequence can arrive as
-a packed value, several stored fragments, or an expression such as a reversed
-slice. The algorithms need the symbols in the right order in each case.
-BioSeqDB separates a sequence's meaning from the way its symbols are stored.
-The distinction has four parts.
-\begin{itemize}
-  \item \textbf{Value.} A sequence has an alphabet, a length, and an ordered
-        list of symbols.
-  \item \textbf{Storage.} Symbols may already be in memory or may need to be
-        read from stored fragments.
-  \item \textbf{View.} A view describes which symbols to read and their order.
-        A slice can therefore describe part of a sequence without copying its
-        symbols.
-  \item \textbf{Consumer.} An algorithm states whether it can read a stream
-        of symbols or needs one contiguous block of packed data, stored at
-        adjacent memory addresses.
-\end{itemize}
 
-Here, \emph{lazy} means that the system delays reading, decoding, or copying
-symbols until they are needed. Creating a lazy value can still allocate small
-objects and retain access to its source. A lazy slice is useful because its
-description is small even when its source is large. It does not promise that
-every later read will avoid copying. Data is \emph{resident} when it is already
-in memory. An \emph{owner} is the object responsible for keeping that memory
-and any source resources alive until their last use.
+There are several existing libraries for interfacing with genomic sequences.
+SeqAn\autocite{REINERT2017157,seqanManual} is a C++ library that provides modern interface for composing efficient sequence-analysis
+software from generic C++ components. Its library includes sequence
+representations, indexes and configurable alignment algorithms, with SIMD
+alignment, but it has it's own limitations. However SeqAn SIMD algorithms are mostly limited to auto-vectoriztion provided by the compiler (which doesn't have to be portable in most cases) and offers very narrow set of features for custom pipelines.
+I would be hard to directly reuse it for implementation of mentioned feautres. Using SeqAn would require deep integration, that's why I decided to address the design challenges by designing 
+own C++ system of templates with different specializations driven by C++ concepts (inspired by nice-looking HPC MPI code~\cite{uhl2026conceptspracticecmpi}).
+
+\info{SeqAn compatibility}{
+  Because the architecture of BioseqDB pipeline is very custom, I decided to only use SeqAn's alphabet layer~\autocite{seqan3AlphabetsDocs} and utilities exposed by its public API. This means that libraries using SeqAn code as base, could be slightly adjusted to be able to work with BioseqDB pipelines.
+}
+
+Table~\ref{tab:sequence-representation-specializations} lists every specialization of all BioseqDB sequence representations, to showcase how they are used in different scenarios.
+
+\begingroup\footnotesize\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{longtable}{@{}
+  >{\raggedright\arraybackslash}p{0.185\linewidth}
+  >{\raggedright\arraybackslash}p{0.215\linewidth}
+  >{\raggedright\arraybackslash}p{0.245\linewidth}
+  >{\raggedright\arraybackslash}p{0.275\linewidth}@{}}
+\caption{Iterfaces for sequence representations in \mbox{BioSeqDB}.}
+\label{tab:sequence-representation-specializations}\\
+\toprule
+\textbf{Template} & \textbf{Specialization, and when it is selected} &
+\textbf{Physical form and ownership} & \textbf{What it is used for}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Template} & \textbf{Specialization, and when it is selected} &
+\textbf{Physical form and ownership} & \textbf{What it is used for}\\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\path{compact_sequence_range<R>}\par
+This is the core type representing sequence that resides completely in memory. Template allows only four available specializations depending on what \texttt{R} is and each of them have entirely separate handling logic. &
+\texttt{R} is a container of alphabet values, such as
+\path{std::vector<dna4>} &
+This is only adapter for existing sequence containers to provide compatibility with SeqAn and standard library containers.
+There is no alphabet packing and the type borrows \texttt{const R\&} &
+Adapter just provides common sequence interface. Adapting one costs \(O(1)\) as we proxy all operations to the underlying container\\
+\addlinespace
+& \texttt{R} is a packing configuration
+\path{sequence_custom_alphabet<A, U, b>} &
+Bitpacked vector that stores sequences according to alphabet rules passed as type paramter. Owns storage. &
+Can convert to and from other bitpacked or not-bitpacked sequences, but if constructed from non-bitpacked sequence, then constructor costs \(O(N)\) \\
+\addlinespace
+& \texttt{R} is an SeqAn alphabet type, as in
+\path{compact_sequence_range<dna4>} &
+The same as \path{sequence_custom_alphabet<A, U, b>}, but has sensible defaults for used underlying alphabet's storage unit width etc. &
+Commonly used in tests. Code interfacing directly with BioseqDB C++ API should use this specialization. \\
+\addlinespace
+& \texttt{R} is
+\path{compact_sequence_stdc_instance<...>} &
+Holds only reference to the underlying object.
+Adapter to convert \path{compact_sequence_stdc_instance<...>} to \path{compact_sequence_range<R>}. \path{compact_sequence_stdc_instance<...>} is a type that comes from \path{compact_sequence_stdc<...>} - described below &
+Used internally \\
+\midrule
+\path{compact_sequence_stdc<...>}\par
+Represents standard layout C type~\cite{cppreference_standard_layout_type} that is used to type-erase \path{compact_sequence_range<R>} types i.e allow user to
+have one type for storing possibly multiple different sequences types. Metadata like alphabet type and storage unit width are stored inside the struct and specialized template dispatch
+lambda is called to convert it back to the \path{compact_sequence_range<R>} type. This is heavily used by Postgres code to store sequences as C structures. &
+Owns everything and stores fixed header that records struct (self) size in bytes (compatible with Postgres varlena), alphabet code, unit width, padding,
+and symbol count &
+Used heavy by Postgres code as we cannot store template instances directly and need to hold them in one object that converts type parameters of templates to runtime values (with correct runtime dispatch). If you want to store sequences of different alphabets in one single container, you should use this. \\
+\addlinespace
+& \path{compact_sequence_stdc_instance<Stdc, A, W>}, internal type obtained when dispatching the type at runtime &
+Carries nothing, this is primarily runtime tag &
+Shouldn't be used directly, one should receive \path{compact_sequence_range<compact_sequence_stdc_instance<...>>} when using dispatch methods of the stdc template \\
+\midrule
+\path{lazy_sequence<R, Scanner>}\par
+Represents sequence that can be loaded in fragments by some storage provider represented by type parameter \path{Scanner} &
+\texttt{Scanner} has static constexpr method \path{is_fragmented()} that returns false (this means that Scanner always holds entire sequence in memory and there's only one fragment). This is used as compatibility layer so you can directly create lazy sequence from compact sequence range instance.
+I have \path{resident_sequence_scanner<U>} for trivial implementation of non-fragmented scanners so you can write \path{lazy_sequence<R, resident_sequence_scanner<R>>} and don't have to implement scanner type on your own.&
+Holds single non-owning pointer to \path{compact_sequence_range<R>} &
+Used as adapter to convert compact sequence range to lazy sequence. All primary pipeline operations should accept it as parameter \\
+\addlinespace
+& \texttt{Scanner} is fragmented (\path{is_fragmented()} returns true) &
+Ows scanner, internal small cache for sequence fragments that are neither copyable or movable &
+Allows iteration over data source of sequences that doesn't fit into memory at once. This is primary specialisation for loading sequences from PostgreSQL relations. The Postgres side implements large scanner type that tells the lazy sequence template how to fetch blocks of sequences \\
+\midrule
+\path{bit_casted_view<Base, Out>}\par
+Only legal for few types of alphabets and storage widths. &
+Special non-owning type that is used to provide zero-cost changes to pitpacking. It allows to cast bitpacked sequences to different storage widths i.e cast sequence encoded on 32-bit int to be read as sequence encoded on 64-bit or 16-bit or 8-bit units.
+There are special requirements for alphabet to be able to do that (discussed below).
+&
+Holds only reference to underlying compact sequence range &
+This is adapter type that provides zero-cost conversion between different specialisations of compact sequence range. Used for example by SIMD algorithms to have specific vector lane widths
+\end{longtable}
+\endgroup
+
+The rows differ in where the bytes live and in who owns them. They agree on
+what the bytes mean: each one reports the same logical length, yields the same
+symbols in the same order, and copies ranks from the same coordinates, because
+all of them follow one packing rule. That rule is the subject of the next
+section.
 
 \section{Packed symbols and a common C++ interface}
 \label{sec:compact-sequence-range}
