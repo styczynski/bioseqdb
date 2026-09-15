@@ -23,9 +23,9 @@ Minimap2 $D_{\mathrm{in}}$ can be set to $0$ to disable second AVL tree entirely
 
 While the original anchor array is sorted by increasing reference coordinates $r_i$, the AVL trees order the node primarily by increasing query coordinate, then by increasing anchor index in the array (pairs $(q_j, j)$).
 As we want to prevent chaining anchors with the same reference coordinate, we will not add single anchor to the trees (a "reference group" is the continous sequence in the anchor array that has the same reference position, but different query positions).
-We will add entire reference group to the tree at once. This is implemented via $\Call{InsertCompletedReferenceGroup}{\(T,a,f,i\)}$ pseudocode function which checks if current anchor reference coordinate is different to the saved one.
+We will add entire reference group to the tree at once. This is implemented via $\Call{InsertCompletedReferenceGroup}{T,a,f,i}$ pseudocode function which checks if current anchor reference coordinate is different to the saved one.
 
-The trees also need to remove anchors that go outside reference coordinates i.e \(0<r_i-r_j\leq D_{\mathrm{in}}, D\). This is implemented via $\Call{RemoveExpiredEntries}{\(T,a,i,D,C\)}$ pseudocode function. Such operation could be implemented by visiting each node in the entire tree, however internally minimap2 saves
+The trees also need to remove anchors that go outside reference coordinates i.e \(0<r_i-r_j\leq D_{\mathrm{in}}, D\). This is implemented via $\Call{RemoveExpiredEntries}{T,a,i,D,C}$ pseudocode function. Such operation could be implemented by visiting each node in the entire tree, however internally minimap2 saves
 pointer (cursor) to the first anchor in the window and moves it when going to next anchor. This results in better reemoval theoretical complexity. 
 
 The last complex operation is local scan. After best candidate $j^{*}$ is selected from the main tree $T$, we calculate it's score \(c_{j^\star}=f_{j^\star}+E(j^\star,i)\) and accept it only when the anchor is "exact":
@@ -38,7 +38,7 @@ The last complex operation is local scan. After best candidate $j^{*}$ is select
 meaning that two anchors advcance equally and no more than k-mer span (as discussed earlier $k = \ell_{j^\star}$ for HPC disabled~\ref{info:minimap-hpc}). 
 If that's not the case, then minimap2 runs the local scan. The scan goes through all anchors in the query coordinate interval $q_i-D_{\mathrm{in}}\leq q_j\leq q_i-1$.
 This is implemented by first finding the first anchor in the tree with largest $q_i$ value that is strictly less than $q_j$ and then iterating candidates in decreasing order of $q_j$ value (this is ordinary tree traversal).
-The scan itself is implemented via $\Call{ScanLocalInterval}{\(T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t\)}$ pseudocode function and is very similar to forward chaining loop in minimap2 scalar algorithm~\ref{alg:chaining-b1}. The only difference is that in the forward chaining loop without RMQ
+The scan itself is implemented via $\Call{ScanLocalInterval}{T_{\mathrm{in}},i,D_{\mathrm{in}},B,S,f,p,t}$ pseudocode function and is very similar to forward chaining loop in minimap2 scalar algorithm~\ref{alg:chaining-b1}. The only difference is that in the forward chaining loop without RMQ
 minimap2 iteration was driven by $max\_iter$ limit for anchors not sorted by query coordinate, while in the RMQ scan we don't have $max\_iter$ limit (the minimap2 skip counter is used in the same way - it stops iteration on anchors that don't improve score several times in a row).
 
 \info{Theoretical complexity}{
