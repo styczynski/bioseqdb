@@ -1,32 +1,22 @@
 \section{Composing sequences without joining their payloads}
 \label{sec:sequence-piece-tree}
 
-A slice can be described by two bounds, but a concatenation may contain pieces
-from several sources. BioSeqDB stores such SQL expressions as expanded
-PostgreSQL values containing an immutable balanced tree of pieces. An
-\emph{expanded value} is a PostgreSQL value kept in a form suited to operations
-in memory. It can later be converted to the flat form required for storage.
+The slice model I showed is very primitive. If we add ability to concatenate sequences we can represent any slice as a tree of pieces that represent operations on original sequence.
+In BioseqDB this tree refers to Postgres operators and datums.
 
-The tree has three kinds of node.
+The slice tree is constructed from the following elements:
 \begin{itemize}
-  \item A \textbf{source leaf} retains access to a source and describes an
-        interval in that source.
-  \item A \textbf{literal leaf} owns the bytes of a literal and the information
-        needed to interpret them.
-  \item A \textbf{branch} joins two children. It records their total length,
-        piece count, and tree height.
+  \item A \textbf{source leaf} describes interval in the source sequence.
+  \item A \textbf{literal leaf} holds literal value referencing Postgres datum with additional metadata.
+  \item A \textbf{branch} node that represents concatenation of two children. It holds total length, piece count (total number of leafs in subtree) and tree height. We collect total length to estimate how long the memory region in the pool should be to accomodate the materialized sequence.
+  \item An \textbf{edge} that connects a node to its child. It holds reverse and complement flags, which affect the order of traversal and the interpretation of the leafs.
 \end{itemize}
-Reverse and complement flags belong to the edges. A reverse flag makes the
-reader visit children in the opposite order and read each selected leaf
-backward. A complement flag changes the ranks as they are read.
 
-Figure~\ref{fig:piece-tree} uses the source from the slice example. It forms
+Figure~\ref{fig:piece-tree} illustrates concatenation of three pieces including two source leaves and one literal leaf:
 \[
   Z=S[2,6)\ \Vert\ \operatorname{reverse}(S[8,12))\ \Vert\ \texttt{AC},
 \]
-where \(\Vert\) means concatenation. The three pieces produce
-\texttt{GTAA}, \texttt{ATTG}, and \texttt{AC}. The result is
-\texttt{GTAAATTGAC}, with length \(4+4+2=10\).
+The result is \texttt{GTAAATTGAC}, with length \(4+4+2=10\).
 
 \begin{figure}[H]
 \centering
@@ -73,52 +63,26 @@ where \(\Vert\) means concatenation. The three pieces produce
   \node[text=seqNineOrange] at (6.41,-1.6) {source, backward};
   \node[text=seqNineGreen] at (8.97,-1.6) {owned literal};
 \end{tikzpicture}
-\caption{A piece tree describes a ten-symbol result without putting the two
-source intervals into a new sequence buffer. Dashed lines connect source
-leaves to their intervals. The orange edge reverses one piece.}
+\caption{A piece tree describes how BioseqDB process slices of a sequence.}
 \label{fig:piece-tree}
 \end{figure}
 
-The same tree can be shared by later expressions because existing nodes do
-not change. Concatenation joins roots and restores balance. Slicing splits at
-the two bounds and retains the middle part, sharing unaffected nodes.
-Reversing a complete tree changes the edge flags. Two reversals cancel, as do
-two complements when the alphabet's complement operation maps each symbol
-back to itself after two applications.
+Each of the operations can easily be implemented by traversing the tree: concatenation joins roots and restores tree balance, slicing splits at the two bounds and leaves the middle part, reversing just as complementation flipps flags on the edges.
 
-This structure explains both the benefit and its limits.
+Reading actual slice content in BioseqDB is implemented using 
+\path{lazy_sequence_view<A>} of
+table~\ref{tab:sequence-representation-specializations}. It's built for the
+duration of a single call and the tree operations read only metadata from sequence locators (such as lengths). This means that we don't need to fetch large relations with sequence content and slicing is very performant.
+In the pipeline specific stages (like SIMD or GPU kernels) can request contiguous region of sequence and BioseqDB will materialize it into its own packed buffer first.
+
+I implemented concatenation support for SQL text literals as well. This means that we can concatenate sequences with text directly without casting them, but this has it's own limitations:
 \begin{itemize}
-  \item A new expression can share existing payloads while allocating only
-        the metadata needed to describe the change.
-  \item Splits and joins follow paths in the tree. They are not universally
-        constant-time operations.
-  \item Reading \(m\) result symbols still requires producing those \(m\)
-        ranks, together with the work of locating and reading their pieces.
-  \item First expanding a flat value can copy its packed bytes to establish
-        ownership. Binding a text literal also has to validate its symbols.
-\end{itemize}
-The point of the tree is to avoid repeatedly copying a long sequence merely
-to describe a new order or interval.
-
-\subsection{The alphabet is part of the value}
-
-A plain SQL sequence literal can remain \emph{unbound}: it contains text but
-has not yet adopted an alphabet. A bound value has a known alphabet and
-packing width. The distinction prevents operations from silently changing a
-symbol's meaning.
-\begin{itemize}
-  \item Slicing and reversal can operate on unbound text because they need
+  \item Slicing and reversal can operate on text without no known alphabet because they need
         only positions and order.
-  \item Joining a bound sequence with a text literal validates the literal
-        against that alphabet.
-  \item Reverse-complement requires a bound alphabet with a complement rule
+  \item Joining a known-alphabet sequence with a text literal validates the literal
+        against that alphabet, so we require to go through entire literal (which shouldn't be a problem as we don't expect very long literals as this should be done via loading FASTA first into the table)
+  \item Reverse-complement requires known alphabet with a complement rule
         for every symbol in that alphabet.
-  \item Two different bound alphabets are not silently converted into one
-        another.
+  \item Two different alphabets are not converted automatically to one another and this will result in an error.
 \end{itemize}
 
-Equality and hashing use logical content. For bound values this includes the
-alphabet and the ordered ranks. Storage width, padding, and piece boundaries
-do not change equality. An unbound text value has a different identity from a
-bound sequence, even if both print the same letters. This is needed so that
-SQL comparison and hash-based operations agree for all physical forms.
