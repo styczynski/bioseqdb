@@ -64,34 +64,6 @@ Internally I distinguish several access policies which are specified by the pipe
 
 \info{Borrowing}{Borrowing can fail if the region for example starts in the middle of storage unit in packed sequence, then we cannot reuse that memory chunk as it's misaligned}
 
-At this point I need to describe lifecycles of various entities to illustrate how reading is performed.
-Figure~\ref{fig:sequence-scan-lifecycle} shows how what is happening under the hood during the scan:
-\begin{itemize}
-  \item (a)~Each row of a batch gets its own scanner with 16 fragment slots for caching. A miss looks in the decoded chunk cache
-  (this is lower-layer cache for sequences chunks which may store multiple unrelated sequences and is discussed in later chapters),
-  then in the columnar relation, and copies one fragment into a slot.
-  \item (b)~The incoming queries are grouped in batches. Each batch has it's own session, which is destroyed when batch processing is finished.
-  The session is different entity to the chunk cache so relation isn't reopen when batch is finished and we keep large sequence chunks still in memory.
-  At the start of the batch the backend first builds one packed copy in memory and distributes that copy to workers from the pool.
-  It's important that in this architecture we only have one backend thread which is responsible for reading relation.
-  This means that the actual pipeline is run by single thread that submits various work to worker pool.
-  I needed to read the relation on a single thread to avoid race conditions on PostgreSQL's process-local state which is not thread-safe -
-  PostgreSQL starts (forks) a new server process for each client connection, and even parallel SQL starts extra background worker processes rather than extra threads inside the 
-  same backend~\autocite{postgresql17_tutorial_arch,postgresql17_how_parallel_query}.
-  The same read could still be done in parallel by giving each reader its own backend: one way would be to fork a background worker with a database connection
-  (which in this context is problematic as forking with pool running will result in segfaults) 
-  or open a second client session through libpq (libpq is thread-safe when each thread uses its own connection)~\autocite{postgresql17_bgworker,postgresql17_libpq_threading}.
-  I did not take those paths for fragment reads during a query as it would complicate the implementation and this is something to be done in the future.
-  \item (c)~A view is built from two pointers - \texttt{state} is a piece tree together with the session that holds one scanner per source row and \texttt{ops} contains length, two flags and 
-  two function pointers. Providing function pointer serves as abstraction layer to divide non-Postgres code with actual Postgres implementation.
-  Using templated types could be possible here, but they still would need type erasure.
-  A retained view additionally holds a release callback (C-style destructor)
-  \item (d)~At every batch end, in this order: (1)~release retained views, (2)~finish each scanner so its slot copies go, (3)~drop the session's memory.
-  The worker pool and the snapshot naturally outlive the batch as discussed here.
-  It might happen that we encounter an error and failing query skips C++ destructors, so steps 1--3 also run from a memory context callback (retained view release callback)
-\end{itemize}
-
-
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[x=0.97cm,y=0.90cm,font=\footnotesize,
@@ -311,10 +283,50 @@ Figure~\ref{fig:sequence-scan-lifecycle} shows how what is happening under the h
 \label{fig:sequence-scan-lifecycle}
 \end{figure}
 
-\warn{Single-process reading}{
-  As backend is only one process there's a gap in (c)~\ref{fig:sequence-scan-lifecycle} between end of batch 1 and start of batch 2. 
-  In that time reader process collects tuples from relation (just metadata and sequence locators not entire sequences) and fitlers them using WHERE clauses provided in the query. 
-  Tuples then land in the dispatch buffer and when enough tuples are collected backed submits the batch.
-  This is technically next potential opporunity for optimisation, which I didn't investigate.
-  More details about implementation of scans in Postgres in discussed in the next chapter~\ref{sec:postgres-custom-scan-scope}.
+At this point I need to describe lifecycles of various entities to illustrate how reading is performed.
+Figure~\ref{fig:sequence-scan-lifecycle} shows how what is happening under the hood during the scan:
+\begin{itemize}
+  \item (a)~Each row of a batch gets its own scanner with 16 fragment slots for caching. A miss looks in the decoded chunk cache
+  (this is lower-layer cache for sequences chunks which may store multiple unrelated sequences and is discussed in later chapters),
+  then in the columnar relation, and copies one fragment into a slot.
+  \item (b)~The incoming queries are grouped in batches. Each batch has it's own session, which is destroyed when batch processing is finished.
+  The session is different entity to the chunk cache so relation isn't reopen when batch is finished and we keep large sequence chunks still in memory.
+  At the start of the batch the backend first builds one packed copy in memory and distributes that copy to workers from the pool.
+  It's important that in this architecture we only have one backend thread which is responsible for reading relation.
+  This means that the actual pipeline is run by single thread that submits various work to worker pool.
+  I needed to read the relation on a single thread to avoid race conditions on PostgreSQL's process-local state which is not thread-safe -
+  PostgreSQL starts (forks) a new server process for each client connection, and even parallel SQL starts extra background worker processes rather than extra threads inside the 
+  same backend~\autocite{postgresql17_tutorial_arch,postgresql17_how_parallel_query}.
+  The same read could still be done in parallel by giving each reader its own backend: one way would be to fork a background worker with a database connection
+  (which in this context is problematic as forking with pool running will result in segfaults) 
+  or open a second client session through libpq (libpq is thread-safe when each thread uses its own connection)~\autocite{postgresql17_bgworker,postgresql17_libpq_threading}.
+  I did not take those paths for fragment reads during a query as it would complicate the implementation and this is something to be done in the future.
+  \item (c)~A view is built from two pointers - \texttt{state} is a piece tree together with the session that holds one scanner per source row and \texttt{ops} contains length, two flags and 
+  two function pointers. Providing function pointer serves as abstraction layer to divide non-Postgres code with actual Postgres implementation.
+  Using templated types could be possible here, but they still would need type erasure.
+  A retained view additionally holds a release callback (C-style destructor)
+  \item (d)~At every batch end, in this order: (1)~release retained views, (2)~finish each scanner so its slot copies go, (3)~drop the session's memory.
+  The worker pool and the snapshot naturally outlive the batch as discussed here.
+  It might happen that we encounter an error and failing query skips C++ destructors, so steps 1--3 also run from a memory context callback (retained view release callback)
+\end{itemize}
+
+
+Panel~(d) of Figure~\ref{fig:sequence-scan-lifecycle} has a gap between the end of batch~1 and the start of batch~2.
+In that gap the backend collects the next tuples from the relation (metadata and sequence locators, not entire sequences), applies the query's \texttt{WHERE} clauses, and places surviving tuples in the dispatch buffer.
+When enough tuples are collected, it submits the next batch.
+That collection still uses one relation-reading thread per PostgreSQL process.
+There's however support for \path{bioseq.scheduler.postgres_parallel.enabled} for any query that do not use alignment. 
+The reasoning behind that is that only the thread pool wasn't designed around being multi-process safe and current statistics collection doesn't support it.
+The scans that do not use alignment are marked parallel-safe. This means that example shown on lsiting below~\ref{code:simple-table-read-with-slice} can be executed by postgres parallel scan.
+
+Scans in details are covered in the next chapter~\ref{sec:postgres-custom-scan-scope} in detail.
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Simple table read},label=code:simple-table-read-with-slice]
+  SELECT id, bioseq.to_text(s[0:8]) FROM t;
+\end{lstlisting}
+\end{minipage}
+
+\warn{Parallel scan}{
+  This is potential optimisation in the future. Statistics collection can be easily made multi-process safe by implementing reduce function, while thread pool design needs to be revisited and reimplemented.
 }
