@@ -39,82 +39,9 @@ expressions retain scalar fetch where the vector conditions are disabled.
 Batching itself does not imply a hardware SIMD instruction for every
 expression.
 
-\subsection{A fragment read owns its copy}
-
-The PostgreSQL sequence scanner has 16 fragment slots. On a miss it finds the
-fragment row through a shard reader using the registered snapshot, checks the
-packed representation, and copies the fragment into scanner-owned memory.
-A later request for a resident fragment can borrow those packed bytes.
-The borrowed view lasts until that fragment is released, its slot is reused,
-or the scanner ends.
-
-For 64-bit packed units, the full payload capacity of these slots is
-\[
-  16\times1024\times8=131{,}072\ \text{bytes}=128\ \text{KiB}.
-\]
-This counts fragment payload only. Open reader state, compressed column
-buffers, scratch space, indexes, anchors, and alignment matrices have
-additional costs. In particular, this is not a 128~KiB bound for a query.
-
-Figure~\ref{fig:storage-resident-slots} distinguishes releasing a fragment
-from releasing its allocated memory.
-
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
-  \node[anchor=west,font=\bfseries] at (0,4.1)
-    {Two of the scanner's 16 slots};
-  \node at (3.9,3.45) {slot A};
-  \node at (7.15,3.45) {slot B};
-  \node[anchor=east] at (2.1,2.65) {read fragment 1};
-  \node[anchor=east] at (2.1,1.6) {read fragment 2};
-  \node[anchor=east] at (2.1,.55) {release fragment 1};
-  \node[anchor=east] at (2.1,-.5) {read fragment 3};
-  \foreach \y in {2.65,1.6,.55,-.5} {
-    \draw[draw=black!55,fill=black!3] (2.4,\y-.33) rectangle (5.4,\y+.33);
-    \draw[draw=black!55,fill=black!3] (5.65,\y-.33) rectangle (8.65,\y+.33);
-  }
-  \foreach \y in {2.65,1.6} {
-    \draw[draw=storageBlue,fill=storageBlue!17]
-      (2.4,\y-.33) rectangle (5.4,\y+.33);
-    \node at (3.9,\y) {fragment 1};
-  }
-  \foreach \y in {1.6,.55,-.5} {
-    \draw[draw=storageGreen,fill=storageGreen!15]
-      (5.65,\y-.33) rectangle (8.65,\y+.33);
-    \node at (7.15,\y) {fragment 2};
-  }
-  \node[text=black!60] at (7.15,2.65) {unused};
-  \node[text=black!65] at (3.9,.55) {free; allocation kept};
-  \draw[draw=storageOrange,fill=storageOrange!16]
-    (2.4,-.83) rectangle (5.4,-.17);
-  \node at (3.9,-.5) {fragment 3};
-  \node[anchor=west,align=left] at (9.0,.55)
-    {No live borrowed view\\may use released bytes.};
-  \node[anchor=west,align=left] at (9.0,-.5)
-    {The next fragment\\reuses the allocation.};
-  \draw[storage arrow,black!55] (.35,-1.5)--(11.9,-1.5);
-  \node[above] at (6.1,-1.5) {end of read session: release scanner storage};
-\end{tikzpicture}
-\caption{Fragment residency has an explicit lifetime. Releasing a fragment
-marks its slot reusable. It does not immediately return the slot's allocation
-to PostgreSQL. The scanner can refill that space for a later request.}
-\label{fig:storage-resident-slots}
-\end{figure}
-
-Consumers release fragments after their borrowed views are no longer needed.
-The scanner can keep each slot's allocation for reuse. A request crossing a
-fragment boundary can copy the required pieces into bounded scratch space,
-as described in Section~\ref{sec:lazy-sequence-facade}. The scanner uses a
-free slot when one is available. If all 16 slots are occupied, it reuses the
-slot containing the fragment with the smallest number.
-
-The scanner owns its fragment buffers and borrows the read session's shard
-readers and snapshot. Cleanup releases these resources through their
-respective owners. PostgreSQL error cleanup also needs ownership registered with its
-memory-context and resource mechanisms, since a database error can bypass
-ordinary C++ destruction. Views must finish before their source owner is
-released.
+How a scanner copies a fragment into its own slots, how long those slots
+live, and how that copy sits next to the column chunk cache is described
+in Section~\ref{sec:lazy-sequence-facade}.
 
 \subsection{Decoded column chunks have a different cache}
 \label{sec:pg-storage-caches}

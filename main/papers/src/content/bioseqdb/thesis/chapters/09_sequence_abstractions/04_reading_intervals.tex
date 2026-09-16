@@ -64,53 +64,250 @@ Internally I distinguish several access policies which are specified by the pipe
 
 \info{Borrowing}{Borrowing can fail if the region for example starts in the middle of storage unit in packed sequence, then we cannot reuse that memory chunk as it's misaligned}
 
-The following pseudocode states the logical read rule. A piece may refer to
-memory or to a stored fragment. Locating it and fetching its storage are
-handled by the storage reader.
-\begin{algorithm}[H]
-\caption{Read one interval of a composed sequence}
-\label{lst:lazy-window-read}
-\small
-\begin{algorithmic}[1]
-  \Require view $V$, valid bounds $0\leq a\leq b\leq |V|$
-  \Require output space for $b-a$ ranks
-  \ForAll{pieces intersecting $V[a,b)$, in logical order}
-    \State Map the intersection to that piece's source positions
-    \State Read those positions, using bounded scratch space if needed
-    \State Apply the piece's reverse and complement flags
-    \State Append the resulting ranks to the output
-  \EndFor
-  \State Require exactly $b-a$ output ranks
-\end{algorithmic}
-\end{algorithm}
+At this point I need to describe lifecycles of various entities to illustrate how reading is performed.
+Figure~\ref{fig:sequence-scan-lifecycle} shows how what is happening under the hood during the scan:
+\begin{itemize}
+  \item (a)~Each row of a batch gets its own scanner with 16 fragment slots for caching. A miss looks in the decoded chunk cache
+  (this is lower-layer cache for sequences chunks which may store multiple unrelated sequences and is discussed in later chapters),
+  then in the columnar relation, and copies one fragment into a slot.
+  \item (b)~The incoming queries are grouped in batches. Each batch has it's own session, which is destroyed when batch processing is finished.
+  The session is different entity to the chunk cache so relation isn't reopen when batch is finished and we keep large sequence chunks still in memory.
+  At the start of the batch the backend first builds one packed copy in memory and distributes that copy to workers from the pool. 
+  It's important that in this architecture we only have one backend thread which is responsible for reading relation.
+  This means that the actual pipeline is run by single thread that submits various work to worker pool.
+  I needed to read relation in a single thread to avoid race conditions ---- write here?
+  \item (c)~A view is built from two pointers - \texttt{state} is a piece tree together with the session that holds one scanner per source row.
+  A retained view additionally holds a release callback (C-style destructor)
+  \item (d)~At every batch end, in this order: (1)~release retained views, (2)~finish each scanner so its slot copies go, (3)~drop the session's memory.
+  The worker pool and the snapshot naturallyoutlive the batch.
+  It might happen that we encounter an error and failing query skips C++ destructors, so steps 1--3 also run from a memory context callback (retained view release callback)
+\end{itemize}
 
-An interval crossing two fragments must still produce the same symbols as an
-equivalent flat value. A storage reader may fetch complete fragments, but
-only the requested ranks enter the logical output. Thus the interface limits
-what the algorithm asks for without claiming that every source supports
-equally small physical reads.
 
-\subsection{Where a flat value is required}
-\label{sec:sequence-stdc}
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=0.97cm,y=0.90cm,font=\footnotesize,
+  panel/.style={anchor=west,font=\small\bfseries},
+  frame/.style={draw=black!40,rounded corners=2pt},
+  note/.style={anchor=north west,align=left,text=black!72,font=\scriptsize},
+  lead/.style={anchor=north west,text=black!72,font=\scriptsize\itshape},
+  arrowlab/.style={font=\scriptsize,inner sep=1pt},
+  rowlab/.style={anchor=east,font=\footnotesize},
+  evlab/.style={anchor=south west,rotate=20,font=\scriptsize,
+    text=black!80,inner sep=1pt},
+  guide/.style={draw=black!22,dashed,line width=.3pt},
+  inbar/.style={font=\scriptsize,text=black!70},
+  stepmark/.style={draw=black!60,circle,fill=white,inner sep=.5pt,
+    font=\scriptsize,minimum size=.32cm}]
 
-BioSeqDB's flat PostgreSQL value consists of a fixed header followed by aligned
-packed data. The header records the alphabet, unit width, length, and padding.
-The adapter validates the header and payload before selecting a typed compact
-range. Runtime checks happen at this boundary, so the inner loop can use
-compile-time packing rules.
+%% ---------------------------------------------------------------- (a)
+\node[panel] at (0,19.35)
+  {(a) One batch of rows: every row gets its own scanner};
+\node[lead] at (0,19.0)
+  {built on the first symbol request, lives until the batch ends};
 
-An already resident, uncompressed, aligned value can be borrowed through this
-adapter. PostgreSQL may first have to fetch out-of-line data or decompress it
-using TOAST.\footcite{postgresql17_toast} That work precedes borrowing and can
-include a copy.
+\draw[frame] (0,15.05) rectangle (2.7,18.55);
+\node[anchor=north west,font=\scriptsize\itshape,text=black!70]
+  at (.08,18.48) {one batch};
+\foreach \i/\r in {0/7,1/8,2/9} {
+  \draw[draw=seqNineBlue,fill=seqNineBlue!10]
+    (.2,17.4-.95*\i) rectangle (2.5,18.1-.95*\i);
+  \node at (1.35,17.75-.95*\i) {row \r: locator};
+}
 
-Writing a lazy expression into durable storage is another boundary. Its
-temporary source references cannot be stored as raw pointers. The expression
-must be flattened to a value that can stand on its own. Text output similarly
-has to create the requested text. If the result exceeds the flat PostgreSQL
-value's size limit, the operation reports an error.
+\draw[frame,dashed,draw=black!45] (3.5,15.05) rectangle (8.85,18.65);
+\node[anchor=north east,font=\scriptsize\itshape,text=black!70]
+  at (8.75,18.58) {one session for the batch};
 
-For repeated full reads, one packed copy can be a useful choice. Laziness
-preserves that option while also supporting the small-interval case. It is
-the consumer's access requirement, not the mere existence of a slice, that
-determines when to build the copy.
+\foreach \i/\r in {0/7,1/8,2/9} {
+  \draw[frame,fill=black!2]
+    (3.65,17.28-.95*\i) rectangle (8.7,18.18-.95*\i);
+  \node[anchor=north west,font=\scriptsize] at (3.75,18.13-.95*\i)
+    {scanner for row \r};
+  \foreach \j in {0,...,15}
+    \draw[draw=black!45,fill=white]
+      (3.8+.3*\j,17.38-.95*\i) rectangle ++(.26,.32);
+}
+\foreach \j in {0,1,4}
+  \draw[draw=seqNineBlue,fill=seqNineBlue!30]
+    (3.8+.3*\j,17.38) rectangle ++(.26,.32);
+\draw[draw=seqNineBlue,fill=seqNineBlue!30]
+  (3.8,16.43) rectangle ++(.26,.32);
+\foreach \j in {0,1}
+  \draw[draw=seqNineBlue,fill=seqNineBlue!30]
+    (3.8+.3*\j,15.48) rectangle ++(.26,.32);
+\foreach \i in {0,1,2}
+  \draw[seq nine flow] (2.7,17.75-.95*\i)--(3.65,17.75-.95*\i);
+
+\draw[frame] (9.65,16.85) rectangle (12.55,18.55);
+\node[anchor=north west,font=\scriptsize] at (9.75,18.48) {chunk cache};
+\draw[draw=seqNineOrange,fill=seqNineOrange!16]
+  (9.8,17.05) rectangle (12.4,17.95);
+\node at (11.1,17.5) {decoded chunk};
+
+\draw[frame] (9.65,15.05) rectangle (12.55,16.65);
+\node[anchor=north west,font=\scriptsize] at (9.75,16.58)
+  {columnar relation};
+\foreach \i in {0,...,3} {
+  \draw[draw=black!50,fill=black!5]
+    (9.8+.65*\i,15.25) rectangle (10.35+.65*\i,16.05);
+  \node[font=\scriptsize] at (10.075+.65*\i,15.65) {c\i};
+}
+
+\draw[seq nine flow,seqNineOrange] (8.85,17.9)--(9.65,17.5);
+\node[arrowlab,text=seqNineOrange,above] at (9.25,17.88) {miss};
+\draw[seq nine flow,seqNineOrange] (11.1,16.85)--(11.1,16.65);
+\node[arrowlab,text=seqNineOrange,anchor=west] at (11.25,16.75) {miss};
+\draw[seq nine flow,seqNineOrange] (9.65,17.3)--(8.85,17.55);
+\node[arrowlab,text=seqNineOrange,below] at (9.25,17.28) {copy};
+
+\node[note,text width=2.55cm] at (12.75,18.55)
+  {window in a loaded slot: borrow the pointer};
+\node[note,text width=2.55cm] at (12.75,17.25)
+  {window across fragments: stitch into scratch};
+\node[note,text width=2.55cm] at (12.75,16.0)
+  {reading the row again reuses this scanner};
+
+%% ---------------------------------------------------------------- (b)
+\node[panel] at (0,14.35)
+  {(b) Only the backend thread may touch the table};
+\draw[frame,fill=black!2] (0,11.35) rectangle (8.35,13.95);
+\node[anchor=north west,font=\scriptsize\itshape,text=black!70]
+  at (.1,13.88) {the PostgreSQL backend running the query};
+\draw[draw=black!50,fill=white] (.25,12.45) rectangle (3.45,13.55);
+\node[align=center] at (1.85,13.0) {the scanners\\of panel (a)};
+\draw[draw=seqNineOrange,fill=seqNineOrange!12]
+  (4.55,12.45) rectangle (8.1,13.55);
+\node[align=center] at (6.325,13.0) {one packed copy in\\admitted memory};
+\draw[seq nine flow] (3.45,13.0)--(4.55,13.0);
+\foreach \i/\w in {0/1,1/2,2/3} {
+  \draw[draw=seqNineGreen,fill=seqNineGreen!12]
+    (9.2,13.35-.7*\i) rectangle (12.15,13.95-.7*\i);
+  \node at (10.675,13.65-.7*\i) {worker \w};
+  \draw[seq nine flow,seqNineGreen] (8.35,13.0)--(9.2,13.65-.7*\i);
+}
+\node[note,text width=8.2cm] at (0,11.25)
+  {no packed copy: backend walks the row, window by window};
+\node[note,text width=2.9cm] at (12.35,13.95)
+  {workers share the buffer, each keeps a view copy};
+
+%% ---------------------------------------------------------------- (c)
+\node[panel] at (0,10.55)
+  {(c) A view is two pointers, and it owns nothing};
+\draw[frame,dashed,draw=seqNineGreen] (-.05,9.05) rectangle (3.25,10.1);
+\draw[draw=black!60,fill=black!4] (.1,9.22) rectangle (1.55,9.92);
+\node at (.825,9.57) {state};
+\draw[draw=black!60,fill=black!4] (1.7,9.22) rectangle (3.1,9.92);
+\node at (2.4,9.57) {ops};
+\draw[seq nine flow] (3.25,9.57)--(4.05,9.57);
+\foreach \i/\t in {0/length,1/read one window,2/may I borrow?,3/copy it all packed,4/safe for workers?} {
+  \draw[draw=black!55,fill=black!4]
+    (4.05+2.2*\i,9.12) rectangle ++(2.14,.8);
+  \node[align=center,font=\scriptsize,text width=2.0cm]
+    at (5.12+2.2*\i,9.52) {\t};
+}
+\draw[seq nine flow] (.825,9.05)--(.825,8.7);
+\draw[frame,fill=black!2] (0,7.05) rectangle (9.2,8.7);
+\node[font=\scriptsize] at (1.85,8.48) {piece tree};
+\node[circle,draw=black!55,fill=black!4,inner sep=0.8pt,font=\tiny,
+  minimum size=.38cm] (croot) at (1.85,7.85) {10};
+\node[draw=seqNineBlue,fill=seqNineBlue!12,font=\tiny,inner sep=1pt,
+  minimum width=1.25cm,minimum height=.34cm,align=center]
+  (cleft) at (0.75,7.28) {$S[2,6)$};
+\node[draw=seqNineGreen,fill=seqNineGreen!12,font=\tiny,inner sep=1pt,
+  minimum width=1.05cm,minimum height=.34cm,align=center]
+  (cright) at (3.0,7.28) {AC};
+\draw[seq nine flow] (croot)--(cleft);
+\draw[seq nine flow] (croot)--(cright);
+
+\node[font=\scriptsize] at (6.35,8.48) {session scanners};
+\foreach \i in {0,1} {
+  \draw[draw=black!45,fill=white]
+    (4.35,7.55-.45*\i) rectangle (8.95,7.95-.45*\i);
+  \foreach \j in {0,...,12}
+    \draw[draw=black!40,fill=white]
+      (4.48+.26*\j,7.61-.45*\i) rectangle ++(.22,.26);
+}
+\foreach \j in {0,2,5}
+  \draw[draw=seqNineBlue,fill=seqNineBlue!30]
+    (4.48+.26*\j,7.61) rectangle ++(.22,.26);
+\foreach \j in {0,1}
+  \draw[draw=seqNineBlue,fill=seqNineBlue!30]
+    (4.48+.26*\j,7.16) rectangle ++(.22,.26);
+
+\node[note,text width=5.4cm] at (9.45,8.65)
+  {dashed frame: retained view + release callback};
+
+%% ---------------------------------------------------------------- (d)
+\begin{scope}[shift={(0,-1.32)}]
+\node[panel] at (0,6.35)
+  {(d) What is alive when: two batches of one scan};
+
+\foreach \x in {4.85,5.85,6.95,8.2,9.55,10.75,13.75}
+  \draw[guide] (\x,5.45)--(\x,1.55);
+\node[evlab] at (4.85,5.52) {scan starts};
+\node[evlab] at (5.85,5.52) {batch 1 arrives};
+\node[evlab] at (6.95,5.52) {first symbols wanted};
+\node[evlab] at (8.2,5.52) {distribute to workers};
+\node[evlab] at (9.55,5.52) {batch 1 ends};
+\node[evlab] at (10.75,5.52) {batch 2 arrives};
+\node[evlab] at (13.75,5.52) {scan ends};
+
+\node[rowlab] at (4.35,5.05) {worker threads};
+\draw[draw=seqNineGreen!55,dashed,fill=seqNineGreen!8]
+  (8.2,4.9) rectangle (15.1,5.2);
+\draw[draw=seqNineGreen,fill=seqNineGreen!35]
+  (8.2,4.9) rectangle (9.2,5.2);
+\draw[draw=seqNineGreen,fill=seqNineGreen!35]
+  (12.05,4.9) rectangle (13.0,5.2);
+\node[inbar] at (8.7,5.05) {busy};
+\node[inbar] at (10.7,5.05) {alive, idle};
+\node[inbar] at (12.52,5.05) {busy};
+
+\node[rowlab] at (4.35,4.5) {table readers + snapshot};
+\draw[draw=black!45,fill=black!12] (4.85,4.35) rectangle (13.75,4.65);
+
+\node[rowlab] at (4.35,3.95) {rows of one batch};
+\draw[draw=seqNineBlue!70,fill=seqNineBlue!15]
+  (5.85,3.8) rectangle (9.55,4.1);
+\node[inbar] at (7.7,3.95) {batch 1};
+\draw[draw=seqNineBlue!70,fill=seqNineBlue!15]
+  (10.75,3.8) rectangle (13.2,4.1);
+\node[inbar] at (11.97,3.95) {batch 2};
+
+\node[rowlab] at (4.35,3.4) {read session};
+\draw[draw=black!55,fill=black!8] (5.85,3.25) rectangle (9.55,3.55);
+\draw[draw=black!55,fill=black!8] (10.75,3.25) rectangle (13.2,3.55);
+\node[stepmark] at (9.7,3.4) {3};
+\node[stepmark] at (13.35,3.4) {3};
+
+\node[rowlab] at (4.35,2.85) {scanner + 16 slots};
+\draw[draw=seqNineBlue,fill=seqNineBlue!30]
+  (6.95,2.7) rectangle (9.35,3.0);
+\draw[draw=seqNineBlue,fill=seqNineBlue!30]
+  (11.45,2.7) rectangle (13.0,3.0);
+\node[stepmark] at (9.5,2.85) {2};
+\node[stepmark] at (13.15,2.85) {2};
+
+\node[rowlab] at (4.35,2.3) {retained view};
+\draw[draw=seqNineGreen,fill=seqNineGreen!22]
+  (6.95,2.15) rectangle (9.15,2.45);
+\draw[draw=seqNineGreen,fill=seqNineGreen!22]
+  (11.45,2.15) rectangle (12.8,2.45);
+\node[stepmark] at (9.3,2.3) {1};
+\node[stepmark] at (12.95,2.3) {1};
+
+\node[rowlab] at (4.35,1.75) {packed copy};
+\draw[draw=seqNineOrange,fill=seqNineOrange!25]
+  (8.2,1.6) rectangle (9.2,1.9);
+\draw[draw=seqNineOrange,fill=seqNineOrange!25]
+  (12.05,1.6) rectangle (13.0,1.9);
+
+\draw[seq nine flow,black!55] (4.55,1.55)--(15.15,1.55);
+\node[font=\scriptsize,text=black!70,anchor=north east] at (15.15,1.5)
+  {time};
+\end{scope}
+\end{tikzpicture}
+\caption{Illustration of structures used and operations performed on sequences during scan lifecycle}
+\label{fig:sequence-scan-lifecycle}
+\end{figure}
