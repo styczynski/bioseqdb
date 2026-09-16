@@ -2,40 +2,21 @@
 \label{sec:lazy-sequence-facade}
 \label{sec:sequence-materialization}
 
-The tree describes the value. The algorithm needs a way to read it.
-BioSeqDB supplies \texttt{lazy\_sequence\_view}, an alphabet-specific,
-non-owning view over flat data, stored fragments, sequence sources, or piece
-trees. The view holds a pointer to its backing state and a small table of
-operations. Different storage forms therefore provide the same operations
-without putting a storage-specific branch inside every algorithm.
-
-The view supports four main requests.
+The storage can be provided in different forms as explained previously in the first section~\ref{sec:sequence-abstractions}
+In BioseqDB main implementation of Postgres-based storage is done via \path{lazy_sequence_view<A>} and \path{retained_lazy_sequence_view<A>} mentioned in table~\ref{tab:sequence-representation-specializations}.
+These types holds pointers to functions that implement the storage and represent the following operations:
 \begin{itemize}
-  \item Report the logical symbol count.
-  \item Copy ranks from a given interval into caller-owned memory.
-  \item Read successive chunks, including reverse or reverse-complement
-        traversal.
-  \item Check whether a compatible packed interval is already in memory and
-        can be borrowed safely.
+  \item Report sizes of sequences
+  \item Copy selected intervals into caller-owned memory, which in this case can be GPU-owned memory in GPU-accelerated pipeline stages
+  \item Reading successive chunks
+  \item Checking if the compatible interval was already materialized and can be borrowed (caching)
 \end{itemize}
-Its \texttt{bp\_size()} and \texttt{size()} both report logical symbols.
-This differs from \texttt{size()} on a compact range, which counts storage
-units. Code that works with both interfaces should use \texttt{bp\_size()}
-when it means sequence length.
-
-The access decision follows the consumer's needs. A \emph{memory permit}
-reserves part of the allowed memory budget for an allocation. To
-\emph{materialize} an interval means to create its packed buffer.
+Internally I distinguish several access policies which are specified by the pipeline stage, they are the following choices:
 \begin{enumerate}
   \item \textbf{Stream.} If the algorithm accepts a stream, read the selected
-        interval in bounded chunks. Scratch memory can be reused after each
-        chunk has been consumed.
-  \item \textbf{Borrow.} If the algorithm needs packed data, first check
-        whether the interval already occupies compatible, aligned, stable
-        storage. Keep its owner alive while the algorithm reads it.
-  \item \textbf{Pack.} Otherwise, calculate the required allocation, obtain a
-        memory permit, and pack the selected interval. The resulting owner
-        retains both the buffer and the permit.
+        interval in bounded chunks and save it to reusable scratch memory (large memory pool)
+  \item \textbf{Borrow.} If the algorithm needs packed data, first check if's already in cache and safe to borrow.
+  \item \textbf{Pack.} In case if borrowing is not possible, algorithm needs to request new memory permit (this is routed through custom pool allocator). Caller is then responsible for this memory chunk.
 \end{enumerate}
 
 \begin{figure}[H]
@@ -77,18 +58,11 @@ reserves part of the allowed memory budget for an allocation. To
   \node[align=center] at (11.35,-1.5)
     {allocate with a permit\\retain buffer and permit};
 \end{tikzpicture}
-\caption{The same logical interval can be streamed, borrowed, or packed.
-The drawings at the bottom show the resulting memory use. A resident packed
-interval is borrowed only if its layout and lifetime satisfy the consumer.}
+\caption{Simplified view of different access policies}
 \label{fig:sequence-abstraction-layers}
 \end{figure}
 
-A slice beginning inside a packed unit illustrates why borrowing can fail.
-Passing the unit's address alone would make the consumer read the wrong first
-symbol. The requested unit type must also meet C++ alignment and type-access
-rules. Matching bit widths is insufficient. A byte buffer suitable for copying
-to a GPU is not automatically safe to dereference as a different C++ integer
-type.
+\info{Borrowing}{Borrowing can fail if the region for example starts in the middle of storage unit in packed sequence, then we cannot reuse that memory chunk as it's misaligned}
 
 The following pseudocode states the logical read rule. A piece may refer to
 memory or to a stored fragment. Locating it and fetching its storage are
