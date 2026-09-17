@@ -27,17 +27,8 @@ These placefolders are filled from the current search result before projection.
   {ParadeDB placeholder replacement}{inject_placeholders}{493}
 Similar design was used in BioseqDB - described in Section~\ref{sec:match-placeholder-injection}.
 
-SELECT id, title, pdb.score(id) AS score
-FROM documents
-WHERE body ||| 'postgresql search'
-ORDER BY score DESC, id;
-
-SELECT id, pdb.snippet(body) AS excerpt
-FROM documents
-WHERE body &&& 'postgresql indexing';
-
 \noindent\begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-search-sql,caption={ParadeDB pg_search examples}]
+\begin{lstlisting}[style=bioseq-search-sql,caption={ParadeDB pg_search examples},label={lst:paradedb-pg-search-examples}]
 -- Some examples for pg_search
 SELECT id, title, pdb.score(id) AS score
 FROM documents
@@ -50,32 +41,29 @@ WHERE body &&& 'postgresql indexing';
 \end{lstlisting}
 \end{minipage}
 
+Listing~\ref{lst:paradedb-pg-search-examples} shows how similar ParadeDB's problem is to my initial API designs.\autocite{pigsty_pg_search}\autocite{neon_pg_search}
+
 \subsection{Paths, plans, and live state}
 \label{sec:planner-support-and-ownership}
 \label{sec:custom-path-plan-lifecycle}
 
-Three PostgreSQL objects have different jobs:
-
+To implement custom scan, we must understand different objects in Postgres:
 \begin{enumerate}
-  \item \textbf{A path is a candidate execution strategy.} It describes
+  \item \textbf{Path:} Describes
     possible inputs, estimated work, output row count, and ordering. The
-    planner may compare several paths before selecting one.
-  \item \textbf{A plan records the chosen strategy.} A \texttt{CustomScan}
-    contains child plans, expression trees, and copyable descriptions of the
-    search. It can be kept for later execution in a prepared statement.
-  \item \textbf{Live state belongs to one execution.} A
-    \texttt{CustomScanState} holds the input cursor, retained rows, alignment
-    buffers, and current hit. These cannot be saved as process-local pointers
-    in a reusable plan.
+    planner usually compares several paths before selecting one (this is done via genetic query optimizer GQO~\autocite{postgresql_planner_optimizer}\autocite{conway_postgres_optimizer}, but in this case we don't have to know it's internal implementation details, we just provide simple information about path). 
+    The path is later converted into a plan. I register serveral own paths to let postgres know how to access the table.
+  \item \textbf{Plan:} In our case \texttt{CustomScan} contains child plans, expression trees, and descriptions of the
+    search.
+  \item \textbf{State:} When plan is executed, postgres creates its state via my code. \texttt{CustomScanState} holds the input cursor, alignment
+    buffers for sequences and metadata, and slots for generated hit.
+    Postgres will call scan repeatedly to get new rows, so I use the state to hold any information that needs to be preserved between calls.
 \end{enumerate}
 
-The output estimate must describe hit rows, because later joins and sorts
-receive those rows rather than one row per stored sequence. It remains an
-estimate: the actual number of hits is known only after alignment.
-
-PostgreSQL calls \texttt{PlanCustomPath} when it converts a selected custom
-path into a plan. It later calls \texttt{CreateCustomScanState} to create the
-executor state. These are separate extension callbacks.\footnote{PostgreSQL
+All types of Postgres API described in table earlier~\ref{tab:pg-scan-extension-points} mainly rely on callbacks (in Postgres called \emph{hooks}). Extension fills the structure with function pointers and let postgres know which call is handled by which function.
+In this case PostgreSQL calls \texttt{PlanCustomPath} when it converts a selected custom
+path into a plan and later calls \texttt{CreateCustomScanState} to create the
+executor state\footnote{PostgreSQL
 17, \href{https://www.postgresql.org/docs/17/custom-scan-path.html}
 {Creating Custom Scan Paths} and
 \href{https://www.postgresql.org/docs/17/custom-scan-plan.html}
