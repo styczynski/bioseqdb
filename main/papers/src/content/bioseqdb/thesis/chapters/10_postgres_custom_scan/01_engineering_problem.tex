@@ -129,8 +129,8 @@ WHERE save_search(seq, $1)
 
 Now the fields are easy to track as we can directly look for a call to a function in the AST expression tree. 
 However if the extension implemented only Postgres function this example couldn't work. 
-We would need to pass some internal state between function calls - \texttt{save_search} would need to save some pointer
-to lazy execution object invisible to the user so it can be later called by \texttt{last_score}. This way we compute only what we need.
+We would need to pass some internal state between function calls - \texttt{save\_search} would need to save some pointer
+to lazy execution object invisible to the user so it can be later called by \texttt{last\_score}. This way we compute only what we need.
 Declaring these functions \texttt{VOLATILE} limits some planner transformations, but does not
 guarantee execution order between them\footnote{PostgreSQL 17,
 \href{https://www.postgresql.org/docs/17/xfunc-volatility.html}

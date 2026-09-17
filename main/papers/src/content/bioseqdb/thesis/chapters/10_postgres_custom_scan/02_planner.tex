@@ -15,7 +15,7 @@
 
 % \subsection{Inspiration from PostgreSQL extensions}
 
-A full text search interface (\texttt{pg_search}) from ParadeDB was an important motivation for the SQL API design of BioseqDB. 
+A full text search interface (\texttt{pg\_search}) from ParadeDB was an important motivation for the SQL API design of BioseqDB. 
 ParadeDB is an extension written in Rust that uses custom text storage engine under the hood. I deeply inspected its source code to understand how we can implement our own syntax in BioseqDB.
 ParadeDB resolves similar problem as FTS can also return multiple hits for a single query.\coderef{paradedb/pg_search/src/postgres/customscan/basescan/projections/score.rs}
 {ParadeDB score expression}{score_from_relation}{30}
@@ -28,7 +28,7 @@ These placefolders are filled from the current search result before projection.
 Similar design was used in BioseqDB - described in Section~\ref{sec:match-placeholder-injection}.
 
 \noindent\begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-search-sql,caption={ParadeDB pg_search examples},label={lst:paradedb-pg-search-examples}]
+\begin{lstlisting}[style=bioseq-search-sql,caption={ParadeDB pg\_search examples},label={lst:paradedb-pg-search-examples}]
 -- Some examples for pg_search
 SELECT id, title, pdb.score(id) AS score
 FROM documents
@@ -51,8 +51,10 @@ To implement custom scan, we must understand different objects in Postgres:
 \begin{enumerate}
   \item \textbf{Path:} Describes
     possible inputs, estimated work, output row count, and ordering. The
-    planner usually compares several paths before selecting one (this is done via genetic query optimizer GQO~\autocite{postgresql_planner_optimizer}\autocite{conway_postgres_optimizer}, but in this case we don't have to know it's internal implementation details, we just provide simple information about path). 
-    The path is later converted into a plan. I register serveral own paths to let postgres know how to access the table.
+    planner compares several paths and keeps the cheapest one~\autocite{postgresql_planner_optimizer}\autocite{conway_postgres_optimizer}.
+    The Genetic Query Optimizer is used only when the number of joins exceeds \texttt{geqo\_threshold}.
+    A single-table \texttt{BioseqScan} is ordinary cost comparison, not GEQO.
+    The path is later converted into a plan. I register my own paths so PostgreSQL knows how to access the table.
   \item \textbf{Plan:} In our case \texttt{CustomScan} contains child plans, expression trees, and descriptions of the
     search.
   \item \textbf{State:} When plan is executed, postgres creates its state via my code. \texttt{CustomScanState} holds the input cursor, alignment
@@ -68,40 +70,120 @@ executor state\footnote{PostgreSQL
 {Creating Custom Scan Paths} and
 \href{https://www.postgresql.org/docs/17/custom-scan-plan.html}
 {Creating Custom Scan Plans}.}
+Figure~\ref{fig:bioseqscan-hook-lifecycle} shows when PostgreSQL calls those hooks, when \texttt{BioseqScan} runs, and when the columnar table access method returns a tuple.
 
 \begin{figure}[htbp]
 \centering
-\begin{tikzpicture}[font=\footnotesize]
-  \node[anchor=west,font=\bfseries] at (0,4.7) {SQL expressions};
-  \node[scan box,minimum width=5.0cm] (project0) at (2.6,3.75)
-    {id, score, start};
-  \node[scan hit,minimum width=5.0cm] (filter0) at (2.6,2.25)
-    {id $>20$ and mmsearch(seq, query)};
-  \node[scan input,minimum width=2.7cm] (table0) at (2.6,.75)
-    {target rows};
-  \draw[scan arrow] (table0) -- (filter0);
-  \draw[scan arrow] (filter0) -- (project0);
-  \node[anchor=west,font=\bfseries] at (7.0,4.7) {Custom plan};
-  \node[scan output,minimum width=4.9cm] (project1) at (9.55,3.75)
-    {id and fields of the current hit};
-  \node[scan hit,minimum width=4.9cm] (owner) at (9.55,2.25)
-    {BioSeqDB custom scan};
-  \node[scan input,minimum width=2.7cm] (table1) at (8.05,.75)
-    {rows with id $>20$};
-  \node[scan input,minimum width=1.6cm] (query1) at (11.45,.75)
-    {query};
-  \draw[scan arrow] (table1) -- (owner);
-  \draw[scan arrow] (query1) -- (owner);
-  \draw[scan arrow] (owner) -- (project1);
-  \draw[scan arrow,dashed,black!55] (5.45,2.25) -- (6.8,2.25);
-  \node[align=center,text=black!65] at (6.1,1.45) {plan\\rewrite};
+\begin{tikzpicture}[x=0.92cm,y=0.58cm,font=\scriptsize,
+  pg/.style={scan box,minimum width=3.9cm,minimum height=.52cm,
+    font=\scriptsize,align=center,inner sep=2pt},
+  hook/.style={scan hit,minimum width=4.5cm,minimum height=.52cm,
+    font=\scriptsize,align=center,inner sep=2pt},
+  tam/.style={scan output,minimum width=3.4cm,minimum height=.52cm,
+    font=\scriptsize,align=center,inner sep=2pt},
+  phase/.style={anchor=west,font=\scriptsize\bfseries,inner sep=1pt},
+  coltitle/.style={anchor=south,font=\footnotesize\bfseries,inner sep=1pt},
+  callarr/.style={scan arrow,shorten >=1pt,shorten <=1pt}]
+\node[coltitle] at (3.05,16.55) {PostgreSQL};
+\node[coltitle] at (8.05,16.55) {BioSeqDB hooks / \texttt{BioseqScan}};
+\node[coltitle] at (12.85,16.55) {Columnar TAM};
+% load
+\node[phase] at (0.15,15.85) {Load};
+\node[pg] (initpg) at (3.05,15.15) {\texttt{\_PG\_init}};
+\node[hook] (init) at (8.05,15.15) {\texttt{initialize\_bioseq\_extension}};
+\node[tam] (tamreg) at (12.85,15.15) {register \texttt{TableAmRoutine}};
+\draw[callarr] (initpg) -- (init);
+\draw[callarr] (init) -- (tamreg);
+% parse
+\node[phase] at (0.15,14.25) {Parse};
+\node[pg] (parse) at (3.05,13.55) {parse, analyze, rewrite};
+\node[hook] (util) at (8.05,12.65) {\texttt{ProcessUtility\_hook}};
+\draw[callarr,dashed] (parse.east) -- ++(0.35,0) |- (util.west);
+\node[anchor=south,text=black!60,font=\scriptsize] at (6.15,13.12)
+  {utility only};
+% plan
+\node[phase] at (0.15,11.85) {Plan};
+\draw[black!35,dashed,rounded corners=2pt]
+  (0.10,4.55) rectangle (15.05,12.05);
+\node[pg] (plhook) at (3.05,11.35) {\texttt{planner\_hook}};
+\node[hook] (colpl) at (8.05,11.35) {\texttt{column\_planner\_hook}};
+\draw[callarr] (parse) -- (plhook);
+\draw[callarr] (plhook) -- (colpl);
+\node[pg] (stdpl) at (3.05,10.35) {\texttt{standard\_planner}};
+\draw[callarr] (colpl.south) -- ++(0,-0.18) -| (stdpl.east);
+\node[pg] (relinfo) at (3.05,9.35) {relation info};
+\node[hook] (relhook) at (8.05,9.35)
+  {\texttt{get\_relation\_info\_hook}};
+\draw[callarr] (stdpl) -- (relinfo);
+\draw[callarr] (relinfo) -- (relhook);
+\node[pg] (pathlist) at (3.05,8.35) {collect access paths};
+\node[hook] (pathhook) at (8.05,8.35)
+  {\texttt{set\_rel\_pathlist\_hook}};
+\draw[callarr] (relinfo) -- (pathlist);
+\draw[callarr] (pathlist) -- (pathhook);
+\node[pg] (cheap) at (3.05,7.35) {cheapest path};
+\draw[callarr] (pathlist) -- (cheap);
+\node[pg] (planpath) at (3.05,6.35) {\texttt{create\_plan}};
+\node[hook] (pcp) at (8.05,6.35) {\texttt{PlanCustomPath}};
+\draw[callarr] (cheap) -- (planpath);
+\draw[callarr] (planpath) -- (pcp);
+\node[hook] (mutate) at (8.05,5.25) {mutate finished plan};
+\draw[callarr] (colpl.east) -- ++(0.45,0) |- (mutate.east);
+% execute
+\node[phase] at (0.15,3.75) {Execute};
+\node[pg] (mkstate) at (3.05,3.15) {\texttt{CreateCustomScanState}};
+\node[hook] (state) at (8.05,3.15) {allocate \texttt{scan\_state}};
+\draw[callarr] (mkstate) -- (state);
+\node[pg] (begin) at (3.05,2.15) {\texttt{BeginCustomScan}};
+\node[hook] (beginh) at (8.05,2.15) {open scan};
+\node[tam] (tbegin) at (12.85,2.15) {\texttt{scan\_begin}};
+\draw[callarr] (begin) -- (beginh);
+\draw[callarr] (beginh) -- (tbegin);
+\node[pg] (exec) at (3.05,1.05) {\texttt{ExecCustomScan}};
+\node[hook] (exech) at (8.05,1.05) {next stored row};
+\node[tam] (tnext) at (12.85,1.05) {\texttt{scan\_getnextslot}};
+\draw[callarr] (exec) -- (exech);
+\draw[callarr] (exech) -- (tnext);
+\draw[scan arrow,dashed] (tnext.south) -- ++(0,-0.38) -|
+  node[pos=0.18,below,font=\scriptsize,text=black!60] {until NULL}
+  (exec.south);
+\node[pg] (endc) at (3.05,-0.15) {\texttt{EndCustomScan}};
+\node[hook] (endh) at (8.05,-0.15) {close scan};
+\node[tam] (tend) at (12.85,-0.15) {\texttt{scan\_end}};
+\draw[callarr] (endc) -- (endh);
+\draw[callarr] (endh) -- (tend);
 \end{tikzpicture}
-\caption{A conceptual expression tree and the work assigned by the custom
-plan. The search becomes the operation that produces hit rows. Ordinary
-identifier filtering remains before alignment. The boxes describe logical
-roles, rather than a literal \texttt{EXPLAIN} output.}
-\label{fig:mmsearch-plan-flow}
+\caption{Lifecycle of \texttt{BioseqScan} and the columnar table access method.
+Grey boxes are PostgreSQL. Orange boxes are BioSeqDB hooks or the custom scan.
+Green boxes are TAM callbacks. Solid arrows are the calls PostgreSQL makes.
+The dashed arrow after parse is utility SQL only.
+The dashed loop is repeated \texttt{ExecCustomScan} until the TAM returns no slot.
+\texttt{column\_planner\_hook} wraps \texttt{standard\_planner} and mutates the plan after
+\texttt{PlanCustomPath}. Join scans and slice projection are omitted.}
+\label{fig:bioseqscan-hook-lifecycle}
 \end{figure}
+
+\texttt{ProcessUtility\_hook} is not part of planning a \texttt{SELECT}.
+PostgreSQL uses it for utility statements such as \texttt{CREATE}, \texttt{DROP}, \texttt{COPY}, and \texttt{CREATE INDEX}.
+The table-AM hook checks those statements on \texttt{USING bioseq} tables.
+The chained planner hook only logs \texttt{CREATE TABLE \ldots USING bioseq}.
+
+\texttt{column\_planner\_hook} is the process-wide \texttt{planner\_hook}.
+It is not a second step after \texttt{create\_plan}.
+It wraps the whole planner.
+It validates \texttt{mmsearch} options, then calls \texttt{standard\_planner}.
+After that it may rewrite aggregates or wrap an index scan on a columnar table.
+\texttt{set\_rel\_pathlist\_hook} registers \texttt{BioseqScan} paths.
+That registration goes through \texttt{add\_bioseq\_column\_scan\_paths}.
+\texttt{get\_relation\_info\_hook} runs earlier.
+It turns off stock parallel workers on those tables.
+
+During execution PostgreSQL calls \texttt{BioseqScan} methods.
+\texttt{BeginCustomScan} opens the TAM with \texttt{scan\_begin}.
+Each \texttt{ExecCustomScan} asks the TAM for one stored row.
+That fetch uses \texttt{table\_scan\_getnextslot}, which calls \texttt{scan\_getnextslot}.
+When that returns no slot, the scan is finished and \texttt{EndCustomScan} calls \texttt{scan\_end}.
+Join custom scans and slice projection use other method tables and are omitted here.
 
 \subsection{What the hooks must establish}
 
