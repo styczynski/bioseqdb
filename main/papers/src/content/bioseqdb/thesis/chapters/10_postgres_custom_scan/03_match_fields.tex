@@ -166,15 +166,26 @@ This makes Postgres know that we already computed these values. The idea was cre
 
 \subsection{Supporting joins}
 
-Joins can move expressions between plan levels and an outer join can also add a
-row of nulls for a missing input. 
+A join can lift a helper such as \texttt{bioseq.score(t.pk)} out of the scan that produced the hit and an outer join can also emit a null row when one input has no match.
 
-PostgreSQL's \texttt{PlaceHolderVar} records where an expression must be evaluated and which outer joins can make its
-result \path{NULL}. In this case the provided value is \path{Const*}, but you cannot alter const value. For this purpose \path{PlaceHolderVar} was invented to represent anti-coalescing so constant that can be forced to be \path{NULL}~\autocite{lane2010_placeholdervar}.
+The \texttt{Const} rewrite from the previous subsection is nice execution trick inside \texttt{BioseqScan}, but the join planner does not see those constants.
+It still sees an ordinary function call, so PostgreSQL may copy that call onto the other input of a \texttt{LEFT JOIN}, or evaluate it again in a \texttt{Join} or \texttt{Aggregate} node.
 
+PostgreSQL's \texttt{PlaceHolderVar} exactly to resolve this issue, however it's suprisingly low volume of documentation about it. I only found old mailing list archive, where it's described as an anti-COALESCE: the expression keeps its value on a matching row and is forced to \path{NULL} on a missing row~\autocite{lane2010_placeholdervar}.
+The \texttt{PlaceHolderVar} records the relation at which the expression must be computed and the value then rises through the plan like a column.
+When an outer join nulls that relation, the placeholder becomes \path{NULL} (a \texttt{Const} cannot do this as it's always the same value).
 \coderef{postgres17/src/include/nodes/pathnodes.h}
   {PostgreSQL expression placement}{PlaceHolderVar}{2750}
-BioSeqDB uses this planning mechanism where needed to keep BioseqDB functions attached
-to the right input.
+
+Without that wrapper the following could happen:
+\begin{itemize}
+  \item The inner scan of a \texttt{LEFT JOIN} receives \texttt{bioseq.cigar(t1.pk)} even though the helper belongs to \texttt{t1} and that scan rewrites a function it does not own.
+  \item A \texttt{Join} or \texttt{Aggregate} node calls the C++ stub. As I mentioned the function does not compute an alignment (the actual value is only scan-provided), so we get an error.
+  \item Mishandling of \path{NULL} values:An unmatched outer-join row keeps a filled score instead of SQL \path{NULL} or \texttt{ORDER BY bioseq.score(t.pk)} after a join can sort on all-null keys.
+\end{itemize}
+
+ParadeDB uses the same mechanism for \texttt{pdb.score} and its planner function wraps the call in a \texttt{PlaceHolderVar} when the query has a join or an aggregate, so the custom scan keeps emitting the score and upper nodes do not re-run the function.
 \coderef{paradedb/pg_search/src/postgres/customscan/projections.rs}
   {ParadeDB score placement}{placeholder_support}{314}
+
+In BioSeqDB I do this using \texttt{SupportRequestSimplify} hook as \texttt{bioseq\_placeholder\_support}, where we kip placeholders when there's no joins or aggregates.
