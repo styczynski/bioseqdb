@@ -204,40 +204,21 @@ First BioseqDB hook validates \texttt{mmsearch} options, then it calls \texttt{s
 \texttt{get\_relation\_info\_hook} and \texttt{set\_rel\_pathlist\_hook} hooks, where we set options like disabling parallel scans or index-only scans and register custom access paths for cust scan, run inside that call.
 Then GQO is run and finds the best path that needs to be converted into a plan, so the \texttt{PlanCustomPath} is run.
 When \texttt{standard\_planner} returns we are still in the  \texttt{column\_planner\_hook}, so I'm free to rewrite plan tree freely.
-There are some important things that needs to be performed during rewrite:
+The rewrite mutor performs the following changes:
 \begin{itemize}
-  \item Replace aggregate with the vectorized aggregator (this runs the improved version of Citus/Hydra columnar vectorized optimisations like allowing to \path{COUNT(*)} or aggregations on metadta columns like \path{SUM(col)} to be processed in batches, yielding several orders of magnitude speeduops)
-  \item Wrap index scan on a columnar table... to do... ???
+  \item \textbf{Enable vectorized execution for simple aggregates}
+    Using modernized Citus/Hydra columnar vectorized optimisations I allow simple aggregates on metadta columns to be vectorized (processed in batches) for example: \path{COUNT(*)} or \path{SUM(foo_bar)}.
+    If current node is Postgres \texttt{Agg} it will be replaced by custom aggregator \texttt{VectorAggNode}.
+    If this plan has \texttt{VectorAggNode} as parent, then I return batches of rows instead of single tuples. Rewrite adds falgs to mark that the plan needs to change its output mode.
+    Additionally Postgres \texttt{Agg}
+  \item \textbf{Wrap an index scans on columnar tables}
+    PostgreSQL can still choose a metadata index on a \texttt{USING bioseq} table and use external \texttt{IndexScan}.
+    If that happens this index can read some tuples that shouldn't be red (columnar TAM allows removing rows. If that happens row is marked in bitmask, but index scan can go around it and still read the row, because it's physically there).
+    To prevent that the \texttt{IndexScan} is replaced by custom \texttt{BioseqIndexScan} that hounours bitmask.
 \end{itemize}
 
+As entities like \texttt{bioseq.score(id)} are still ordinary functions, I discourage Postgres by using prohibitive execution costs~\footcite{postgresql17_support_functions}.
+The function implementation itself mostly just emits an error, because it shouldn't be ever called.
+Instead \path{ExecCustomScan} will using special Postgres expression nodes i.e \path{Const*} node to tell Postgres that the scan itself calculated the function's value and it shouldn't evaluate it by itself.
 
-\subsection{What the hooks must establish}
 
-A \emph{hook} is a function that PostgreSQL calls at a defined planning
-stage. BioSeqDB installs relation and join path hooks. A relation hook sees
-candidate access methods for a table. A join hook sees candidate ways to
-combine relations. Their task is more than finding the name
-\texttt{mmsearch}:
-
-\begin{itemize}
-  \item \textbf{Recognize the operation.} Check the function identity, the
-    argument types, the supported expression shape, and the search options.
-  \item \textbf{Find its inputs.} Associate each operand with its table alias
-    and column, or with a supported expression derived from them. For the
-    target operand, this association and its query scope form the
-    \emph{target binding} used by result helpers.
-  \item \textbf{Propose an owner.} Add a candidate base-scan or supported
-    join path whose inputs can supply the search arguments. Selecting a path
-    fixes the owner in the resulting plan; the hook does not run alignment.
-  \item \textbf{Remove ordinary execution sites.} Remove the owned marker
-    from row, vectorized, and storage filter lists. A leftover copy would
-    call the scalar failure body after the custom scan had already done the
-    search.
-\end{itemize}
-
-A planner support function also reports a high cost for scalar
-\texttt{mmsearch} evaluation.\footcite{postgresql17_support_functions} Cost
-encourages a suitable plan, but does not enforce the search's output rules. The
-structural checks and the unowned-call error provide that boundary.
-Unsupported join, security, or expression shapes do not become correct merely
-because a path has a low estimated cost.
