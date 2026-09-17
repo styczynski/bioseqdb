@@ -182,40 +182,34 @@ Figure~\ref{fig:bioseqscan-hook-lifecycle} shows when PostgreSQL calls those hoo
   (exec.south);
 \end{tikzpicture}
 \caption{Lifecycle of \texttt{BioseqScan} and the columnar table access method.
-Pale bands mark initialization, parsing, planning, and execution.
-Grey boxes are PostgreSQL. Orange boxes are BioSeqDB hooks or the custom scan.
-Green boxes are TAM callbacks.
-Solid arrows follow the main sequence.
-Dashed arrows represent calling and returning:
-\texttt{column\_planner\_hook} calls \texttt{standard\_planner}, then rewrites the finished plan,
-utility SQL takes the \texttt{ProcessUtility\_hook} path, and \texttt{ExecCustomScan} repeats until the TAM returns no slot.}
+Bands mark exeuction states: initialization, parsing, planning, and execution.
+Boxes have various colours: Grey boxes are PostgreSQL, orange boxes are BioSeqDB hooks or the custom scan and green boxes are TAM callbacks.
+Arrows follow the order in which Postgres calls specific hooks.
+\texttt{column\_planner\_hook} calls \texttt{standard\_planner}, then rewrites the finished plan, so we don't explicitly control GQO, but can affect it using costs functions, registering paths and even after plan is choosen, we have complete constrol over it (we are free to rewrite its parts).
+The scan is calling TAM to fetch rows from storage and returns them to Postgres until it returns NULL (no more tuples to fetch)}
 \label{fig:bioseqscan-hook-lifecycle}
 \end{figure}
 
-\texttt{ProcessUtility\_hook} is not part of planning a \texttt{SELECT}.
-PostgreSQL uses it for utility statements such as \texttt{CREATE}, \texttt{DROP}, \texttt{COPY}, and \texttt{CREATE INDEX}.
-The table-AM hook handles those statements on \texttt{USING bioseq} tables.
-The planner-module utility hook only logs \texttt{CREATE TABLE \ldots USING bioseq}.
-A \texttt{SELECT}, including \texttt{CREATE TABLE AS}, never enters that path.
+\texttt{ProcessUtility\_hook} is used for utility statements such as \texttt{CREATE}, \texttt{DROP}, \texttt{COPY}, and \texttt{CREATE INDEX}. This is useful to forbid user from doing certain operations (Currently I only use it to log statements).
 
-\texttt{column\_planner\_hook} is the process-wide \texttt{planner\_hook}.
-It is not a second step after \texttt{create\_plan}, and it does not call \texttt{ProcessUtility\_hook}.
-It wraps the whole planner.
-First it validates \texttt{mmsearch} options, then it calls \texttt{standard\_planner}.
-\texttt{get\_relation\_info\_hook} and \texttt{set\_rel\_pathlist\_hook} run inside that call.
-\texttt{PlanCustomPath} also runs inside it, when PostgreSQL converts the chosen custom path into a plan.
-When \texttt{standard\_planner} returns, the same \texttt{column\_planner\_hook} may rewrite the finished tree with \texttt{mutate\_pg\_plan\_tree}.
-That rewrite can replace an aggregate with the vectorized aggregator, or wrap an index scan on a columnar table.
-It runs only for a single-table \texttt{SELECT} when vectorization or the columnar index scan is enabled.
-\texttt{set\_rel\_pathlist\_hook} registers \texttt{BioseqScan} paths through \texttt{add\_bioseq\_column\_scan\_paths}.
-\texttt{get\_relation\_info\_hook} runs earlier and turns off stock parallel workers on those tables.
+The TAM is reposible for storing tuples in columnar format. As we can store large sequences, only sequence locator is stored in the column, while the sequence itself is stored elsewhere in separate relations (this is diuscussed in later chapter~\ref{sec:bioseq-columnar-storage})
+This means that the custom scan will somehow need to fetch the sequence from storage - this is the entire aspect of lazy-loading sequences we discussed earlier. 
+Loading sequences was called "hydration" by me in this context and TAM is responsible for it. The custom scan will set \path{defers_sequence_hydration} flag to true to get tuples only with sequence locator.
+When I do "fetch next row from storage"~\ref{fig:bioseqscan-hook-lifecycle}, the custom scan logic will place the tuple into dispatch buffer. When this buffer is full, we launch another batch~\ref{fig:sequence-scan-lifecycle}(d).
+The "miss/copy" part visible in figure (a) section~\ref{sec:sequence-scan-lifecycle} is representing \path{CustomBioseqScan} calling \path{hydrate_sequence_columns_in_slot} (this is the mathod in TAM).
 
-During execution PostgreSQL calls \texttt{BioseqScan} methods.
-\texttt{BeginCustomScan} opens the TAM with \texttt{scan\_begin}.
-Each \texttt{ExecCustomScan} asks the TAM for one stored row.
-That fetch uses \texttt{table\_scan\_getnextslot}, which calls \texttt{scan\_getnextslot}.
-When that returns no slot, the scan is finished and \texttt{EndCustomScan} calls \texttt{scan\_end}.
-Join custom scans and slice projection use other method tables and are omitted here.
+BioseqDB have control over the plan using \texttt{column\_planner\_hook}.
+This hook is called when PostgreSQL needs to perform planning and SQL query is already parsed. 
+First BioseqDB hook validates \texttt{mmsearch} options, then it calls \texttt{standard\_planner}.
+\texttt{get\_relation\_info\_hook} and \texttt{set\_rel\_pathlist\_hook} hooks, where we set options like disabling parallel scans or index-only scans and register custom access paths for cust scan, run inside that call.
+Then GQO is run and finds the best path that needs to be converted into a plan, so the \texttt{PlanCustomPath} is run.
+When \texttt{standard\_planner} returns we are still in the  \texttt{column\_planner\_hook}, so I'm free to rewrite plan tree freely.
+There are some important things that needs to be performed during rewrite:
+\begin{itemize}
+  \item Replace aggregate with the vectorized aggregator (this runs the improved version of Citus/Hydra columnar vectorized optimisations like allowing to \path{COUNT(*)} or aggregations on metadta columns like \path{SUM(col)} to be processed in batches, yielding several orders of magnitude speeduops)
+  \item Wrap index scan on a columnar table... to do... ???
+\end{itemize}
+
 
 \subsection{What the hooks must establish}
 
