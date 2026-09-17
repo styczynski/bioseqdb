@@ -192,11 +192,10 @@ The scan is calling TAM to fetch rows from storage and returns them to Postgres 
 
 \texttt{ProcessUtility\_hook} is used for utility statements such as \texttt{CREATE}, \texttt{DROP}, \texttt{COPY}, and \texttt{CREATE INDEX}. This is useful to forbid user from doing certain operations (Currently I only use it to log statements).
 
-The TAM is reposible for storing tuples in columnar format. As we can store large sequences, only sequence locator is stored in the column, while the sequence itself is stored elsewhere in separate relations (this is diuscussed in later chapter~\ref{sec:bioseq-columnar-storage})
-This means that the custom scan will somehow need to fetch the sequence from storage - this is the entire aspect of lazy-loading sequences we discussed earlier. 
-Loading sequences was called "hydration" by me in this context and TAM is responsible for it. The custom scan will set \path{defers_sequence_hydration} flag to true to get tuples only with sequence locator.
-When I do "fetch next row from storage"~\ref{fig:bioseqscan-hook-lifecycle}, the custom scan logic will place the tuple into dispatch buffer. When this buffer is full, we launch another batch~\ref{fig:sequence-scan-lifecycle}(d).
-The "miss/copy" part visible in figure (a) section~\ref{sec:sequence-scan-lifecycle} is representing \path{CustomBioseqScan} calling \path{hydrate_sequence_columns_in_slot} (this is the mathod in TAM).
+The TAM stores the user table in columnar format: A long sequence is not kept in that table row, only a locator is stored there.
+The sequence itself is stored in companion \emph{fragment sub-tables}, and all of them use the bioseq TAM as well. 
+More on storage format is discussed in Chapter~\ref{sec:bioseq-columnar-storage}.
+I called the process of fetching fragment from locator "hydration" and TAM is responsible for it.
 
 BioseqDB have control over the plan using \texttt{column\_planner\_hook}.
 This hook is called when PostgreSQL needs to perform planning and SQL query is already parsed. 
@@ -221,4 +220,138 @@ As entities like \texttt{bioseq.score(id)} are still ordinary functions, I disco
 The function implementation itself mostly just emits an error, because it shouldn't be ever called.
 Instead \path{ExecCustomScan} will using special Postgres expression nodes i.e \path{Const*} node to tell Postgres that the scan itself calculated the function's value and it shouldn't evaluate it by itself.
 
+Figure~\ref{fig:execcustomscan-dispatch} shows how Panel~(a) of Figure~\ref{fig:sequence-scan-lifecycle} looks in the context of Postgres scan.
+\texttt{BioseqScan} asks for the next row from TAM. This row is placed into dispatch buffer (locator only) and dispatch buffer holds all the structures presented before~\ref{fig:sequence-scan-lifecycle} - scanners.
+The dispatch buffer code then handles all view copies to the workers.
 
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\scriptsize,
+  pg/.style={scan box,minimum width=3.55cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  hook/.style={scan hit,minimum width=4.05cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  tam/.style={scan output,minimum width=3.85cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  stagelab/.style={anchor=north west,font=\scriptsize\bfseries,
+    text=black!45,inner sep=0pt},
+  note/.style={font=\scriptsize,text=black!60,inner sep=1pt,align=center},
+  callarr/.style={scan arrow},
+  altarr/.style={scan arrow,draw=scanBlue}]
+% three code regions
+\fill[scanOrange!8,rounded corners=1.2pt]
+  (0.06,-1.70) rectangle (4.78,9.88);
+\node[stagelab] at (0.16,9.80) {BioseqScan};
+\fill[seqNineBlue!9,rounded corners=1.2pt]
+  (4.90,-1.70) rectangle (9.78,9.88);
+\node[stagelab] at (5.00,9.80) {Dispatch buffer code};
+\fill[scanGreen!8,rounded corners=1.2pt]
+  (9.90,-1.70) rectangle (15.50,9.88);
+\node[stagelab] at (10.00,9.80) {TAM};
+% BioseqScan
+\node[pg] (exec) at (2.42,9.20) {\texttt{ExecCustomScan}};
+\node[hook] (locator) at (2.42,8.00) {locator row};
+\node[pg] (retnow) at (2.42,2.30) {return one row};
+% Dispatch buffer
+\node[draw=scanOrange,fill=scanOrange!12,rounded corners=2.5pt,
+  minimum width=4.37cm,minimum height=1.50cm,anchor=center] (bufbox) at (7.34,6.30) {};
+\node at (7.34,6.82) {locator slots};
+\foreach \i in {0,1,2,3} {
+  \draw[draw=scanOrange,fill=white]
+    (5.55+0.90*\i,5.78) rectangle ++(.78,.48);
+  \node at (5.94+0.90*\i,6.02) {\tiny loc};
+}
+\node[draw=black!40,rounded corners=2pt,dashed,
+  minimum width=4.37cm,minimum height=2.10cm,anchor=center] (scanframe) at (7.34,4.12) {};
+\node[anchor=north west,font=\scriptsize\itshape,text=black!70]
+  at (5.25,5.10) {session + scanners};
+\foreach \i in {0,1} {
+  \draw[draw=black!45,fill=white]
+    (5.30,4.45-0.72*\i) rectangle (9.38,4.82-0.72*\i);
+  \foreach \j in {0,...,9}
+    \draw[draw=black!40,fill=white]
+      (5.42+0.38*\j,4.52-0.72*\i) rectangle ++(.32,.24);
+}
+\foreach \j in {0,1,4}
+  \draw[draw=seqNineBlue,fill=seqNineBlue!35]
+    (5.42+0.38*\j,4.52) rectangle ++(.32,.24);
+\node[draw=seqNineGreen,fill=seqNineGreen!14,
+  minimum width=1.18cm,minimum height=.72cm] (w1) at (5.88,0.55) {worker 1};
+\node[draw=seqNineGreen,fill=seqNineGreen!14,
+  minimum width=1.18cm,minimum height=.72cm] (w2) at (7.34,0.55) {worker 2};
+\node[draw=seqNineGreen,fill=seqNineGreen!14,
+  minimum width=1.18cm,minimum height=.72cm] (w3) at (8.80,0.55) {worker 3};
+% TAM
+\node[tam] (usertam) at (12.24,9.20) {user table};
+\node[note] at (13.48,8.58) {locator + metadata};
+\node[tam] (colcache) at (12.24,4.12) {column cache};
+\node[note] at (11.18,2.82) {load stripe};
+\node[draw=scanGreen,fill=scanGreen!9,rounded corners=2pt,
+  minimum width=4.08cm,minimum height=1.70cm,anchor=center] (fragbox) at (12.24,1.00) {};
+\node[font=\scriptsize] at (12.24,1.62) {fragment sub-table};
+\foreach \i in {0,1,2,3} {
+  \draw[draw=scanGreen,fill=scanGreen!22]
+    (10.45+0.90*\i,0.32) rectangle (11.20+0.90*\i,1.28);
+  \node[font=\tiny] at (10.825+0.90*\i,0.80) {f\i};
+}
+% ExecCustomScan asks the user-table TAM for the next locator
+\draw[callarr] (exec)--(usertam);
+% locator comes back: drop below the user table, then a long run into the east side
+\draw[callarr,rounded corners=2.5pt]
+  (usertam.south)--++(0,-0.92)--(locator.east);
+% place into buffer from the middle of the locator's south side
+\draw[callarr,rounded corners=2.5pt]
+  (locator.south)--++(0,-1.42)--(bufbox.west);
+\node[note,align=center] at (4.05,6.55) {place into\\buffer};
+% not-full loop: long last segment into the east side, not a tight top corner
+\draw[callarr,dashed,rounded corners=2.5pt]
+  (bufbox.east)--(14.85,6.30)--(14.85,9.06)--([yshift=-4pt]usertam.east);
+\node[note,align=center] at (13.12,6.85)
+  {fetch next row\\if batch not full};
+% full buffer opens scanners on the backend thread
+\draw[callarr] (bufbox.south)--(scanframe.north);
+\node[note] at (6.18,5.34) {run next batch};
+% scanners load fragments. workers never touch TAM or the cache
+\draw[callarr] (scanframe.east)--(colcache.west);
+\node[note] at (9.82,4.42) {miss};
+\draw[callarr] (colcache.south)--(fragbox.north);
+\draw[callarr,dashed]
+  ([yshift=-8pt]colcache.west)--([yshift=-8pt]scanframe.east);
+\node[note] at (9.82,3.78) {copy};
+\coordinate (viewbus) at (7.34,1.90);
+\draw[rounded corners=2pt,thick] (scanframe.south)--(viewbus);
+\draw[callarr,rounded corners=2.5pt] (viewbus)-|(w1.north);
+\draw[callarr,rounded corners=2.5pt] (viewbus)--(w2.north);
+\draw[callarr,rounded corners=2.5pt] (viewbus)-|(w3.north);
+\node[note] at (8.72,2.22) {provide view copy};
+% drain hits enter the east side of the return box, not along its bottom
+\draw[callarr,rounded corners=2.5pt]
+  (w1.west)--++(-0.45,0)|-(retnow.east);
+\node[note] at (3.55,1.15) {drain hits};
+\draw[callarr,dashed,rounded corners=2.5pt]
+  (retnow.west)--++(-0.55,0)|-(exec.west);
+\node[note,align=left,anchor=west] at (0.52,5.85) {Postgres fetches\\next tuple};
+% no search: leave the locator to the right, hydrate via cache, return into south
+\draw[altarr,rounded corners=2.5pt]
+  (locator.south east)--++(0.40,0)--++(0,-0.28)--(15.15,7.44)
+  --(15.15,4.12)--(colcache.east);
+\draw[altarr,rounded corners=2.5pt]
+  ([xshift=20pt]colcache.south)--++(0,-0.48)--(15.15,3.36)
+  --(15.15,-1.12)--(2.42,-1.12)--(retnow.south);
+\node[note,text=scanBlue,align=center] at (7.34,-1.40)
+  {no search: hydrate via cache, then return};
+\end{tikzpicture}
+\caption{Inside \texttt{ExecCustomScan}, the following things happen:
+\texttt{BioseqScan} holds dispatch buffer and fetches a locator handles it to the buffer logic and retrieves results from it.
+The dispatch buffer stores locators, then builds a session that holds scanners.
+A scanner miss reads the fragment sub-table through the TAM column cache and copies the fragment into a slot.
+Workers receive a view copy from the scanners.
+Black arrows show the normal alignmen execution path, however it might happen that we don't perform alignment and just want to return the sequences itself.
+In that case the flow uses blue arrows (there's no \texttt{mmsearch} in the query) and \texttt{BioseqScan} hydrates the sequence row through cache and just returns it without interacting with dispatch buffer.
+Dashed arrows repesent loops here.}
+\label{fig:execcustomscan-dispatch}
+\end{figure}
+
+The collect loop is the gap between batch~1 and batch~2 in panel~(d) of Figure~\ref{fig:sequence-scan-lifecycle}.
+\texttt{BioseqScan} may call the user-table TAM many times before it returns to fill in the dispatch buffer.
+The backend thread that owns the scanners performs fragment reads, while workers only see the view copy described in panel~(b).
