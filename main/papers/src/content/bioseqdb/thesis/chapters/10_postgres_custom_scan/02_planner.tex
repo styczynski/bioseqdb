@@ -74,109 +74,141 @@ Figure~\ref{fig:bioseqscan-hook-lifecycle} shows when PostgreSQL calls those hoo
 
 \begin{figure}[htbp]
 \centering
-\begin{tikzpicture}[x=0.92cm,y=0.58cm,font=\scriptsize,
-  pg/.style={scan box,minimum width=3.9cm,minimum height=.52cm,
-    font=\scriptsize,align=center,inner sep=2pt},
-  hook/.style={scan hit,minimum width=4.5cm,minimum height=.52cm,
-    font=\scriptsize,align=center,inner sep=2pt},
-  tam/.style={scan output,minimum width=3.4cm,minimum height=.52cm,
-    font=\scriptsize,align=center,inner sep=2pt},
-  phase/.style={anchor=west,font=\scriptsize\bfseries,inner sep=1pt},
+\begin{tikzpicture}[x=1cm,y=1cm,font=\scriptsize,
+  pg/.style={scan box,minimum width=3.15cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  hook/.style={scan hit,minimum width=4.35cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  tam/.style={scan output,minimum width=3.05cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  actor/.style={draw=scanBlue,fill=scanBlue!8,rounded corners=2.5pt,
+    align=center,font=\scriptsize,inner sep=3pt,outer sep=0.5pt,
+    minimum width=2.15cm,minimum height=1.05cm},
+  stagelab/.style={anchor=north west,font=\scriptsize\bfseries,
+    text=black!45,inner sep=0pt},
   coltitle/.style={anchor=south,font=\footnotesize\bfseries,inner sep=1pt},
-  callarr/.style={scan arrow,shorten >=1pt,shorten <=1pt}]
-\node[coltitle] at (3.05,16.55) {PostgreSQL};
-\node[coltitle] at (8.05,16.55) {BioSeqDB hooks / \texttt{BioseqScan}};
-\node[coltitle] at (12.85,16.55) {Columnar TAM};
-% load
-\node[phase] at (0.15,15.85) {Load};
-\node[pg] (initpg) at (3.05,15.15) {\texttt{\_PG\_init}};
-\node[hook] (init) at (8.05,15.15) {\texttt{initialize\_bioseq\_extension}};
-\node[tam] (tamreg) at (12.85,15.15) {register \texttt{TableAmRoutine}};
+  callarr/.style={scan arrow}]
+% full-width stage stripes (drawn first, sit behind nodes)
+\fill[scanBlue!9,rounded corners=1.2pt]
+  (0.06,7.275) rectangle (14.58,9.08);
+\node[stagelab] at (0.16,9.00) {Initialization};
+\fill[black!6,rounded corners=1.2pt]
+  (0.06,5.22) rectangle (14.58,7.175);
+\node[stagelab] at (0.16,7.10) {Parsing};
+\fill[scanOrange!8,rounded corners=1.2pt]
+  (0.06,-1.95) rectangle (14.58,5.12);
+\node[stagelab] at (0.16,5.00) {Planning};
+\fill[scanGreen!8,rounded corners=1.2pt]
+  (0.06,-6.845) rectangle (14.58,-2.05);
+\node[stagelab] at (0.16,-2.12) {Execution};
+% column titles sit above the stripes
+\node[coltitle] at (1.20,9.32) {Actor};
+\node[coltitle] at (4.50,9.32) {PostgreSQL};
+\node[coltitle] at (8.77,9.32) {BioSeqDB hooks / \texttt{BioseqScan}};
+\node[coltitle] at (12.97,9.32) {Columnar TAM};
+% initialization
+\node[actor] (loaded) at (1.20,7.90)
+  {{\large\faDesktop}\\[-1pt]Extension loaded\\[-1pt]
+   {\tiny\color{black!55}automatic}};
+\node[pg] (initpg) at (4.50,7.90) {\texttt{\_PG\_init}};
+\node[hook] (init) at (8.77,7.90) {\texttt{initialize\_bioseq\_extension}};
+\node[tam] (tamreg) at (12.97,7.90) {register \texttt{TableAmRoutine}};
+\draw[callarr] (loaded) -- (initpg);
 \draw[callarr] (initpg) -- (init);
 \draw[callarr] (init) -- (tamreg);
-% parse
-\node[phase] at (0.15,14.25) {Parse};
-\node[pg] (parse) at (3.05,13.55) {parse, analyze, rewrite};
-\node[hook] (util) at (8.05,12.65) {\texttt{ProcessUtility\_hook}};
-\draw[callarr,dashed] (parse.east) -- ++(0.35,0) |- (util.west);
-\node[anchor=south,text=black!60,font=\scriptsize] at (6.15,13.12)
+% parsing
+\node[actor] (query) at (1.20,6.20)
+  {{\large\faUser}\\[-1pt]User query};
+\node[pg] (parse) at (4.50,6.20) {parse, analyze, rewrite};
+\node[hook] (util) at (8.77,5.58) {\texttt{ProcessUtility\_hook}};
+\draw[callarr] (query) -- (parse);
+\draw[callarr,dashed] (parse.east) -- ++(0.48,0) |- (util.west);
+\node[anchor=west,text=black!60,font=\scriptsize] at (6.95,5.90)
   {utility only};
-% plan
-\node[phase] at (0.15,11.85) {Plan};
-\draw[black!35,dashed,rounded corners=2pt]
-  (0.10,4.55) rectangle (15.05,12.05);
-\node[pg] (plhook) at (3.05,11.35) {\texttt{planner\_hook}};
-\node[hook] (colpl) at (8.05,11.35) {\texttt{column\_planner\_hook}};
+% planning
+\node[pg] (plhook) at (4.50,4.57) {\texttt{planner\_hook}};
+\node[hook] (colpl) at (8.77,4.57) {\texttt{column\_planner\_hook}};
 \draw[callarr] (parse) -- (plhook);
 \draw[callarr] (plhook) -- (colpl);
-\node[pg] (stdpl) at (3.05,10.35) {\texttt{standard\_planner}};
-\draw[callarr] (colpl.south) -- ++(0,-0.18) -| (stdpl.east);
-\node[pg] (relinfo) at (3.05,9.35) {relation info};
-\node[hook] (relhook) at (8.05,9.35)
+\node[pg] (stdpl) at (4.50,3.55) {\texttt{standard\_planner}};
+\draw[callarr,dashed] (colpl.south) -- ++(0,-0.28) -| (stdpl.east);
+\node[pg] (relinfo) at (4.50,2.53) {relation info};
+\node[hook] (relhook) at (8.77,2.53)
   {\texttt{get\_relation\_info\_hook}};
 \draw[callarr] (stdpl) -- (relinfo);
 \draw[callarr] (relinfo) -- (relhook);
-\node[pg] (pathlist) at (3.05,8.35) {collect access paths};
-\node[hook] (pathhook) at (8.05,8.35)
+\node[pg] (pathlist) at (4.50,1.51) {collect access paths};
+\node[hook] (pathhook) at (8.77,1.51)
   {\texttt{set\_rel\_pathlist\_hook}};
 \draw[callarr] (relinfo) -- (pathlist);
 \draw[callarr] (pathlist) -- (pathhook);
-\node[pg] (cheap) at (3.05,7.35) {cheapest path};
+\node[pg] (cheap) at (4.50,0.49) {cheapest path};
 \draw[callarr] (pathlist) -- (cheap);
-\node[pg] (planpath) at (3.05,6.35) {\texttt{create\_plan}};
-\node[hook] (pcp) at (8.05,6.35) {\texttt{PlanCustomPath}};
+\node[pg] (planpath) at (4.50,-0.53) {\texttt{create\_plan}};
+\node[hook] (pcp) at (8.77,-0.53) {\texttt{PlanCustomPath}};
 \draw[callarr] (cheap) -- (planpath);
 \draw[callarr] (planpath) -- (pcp);
-\node[hook] (mutate) at (8.05,5.25) {mutate finished plan};
-\draw[callarr] (colpl.east) -- ++(0.45,0) |- (mutate.east);
-% execute
-\node[phase] at (0.15,3.75) {Execute};
-\node[pg] (mkstate) at (3.05,3.15) {\texttt{CreateCustomScanState}};
-\node[hook] (state) at (8.05,3.15) {allocate \texttt{scan\_state}};
+\node[hook] (mutate) at (8.77,-1.55) {rewrite plan tree};
+\draw[callarr,dashed] (pcp) -- (mutate);
+% execution
+\node[pg] (mkstate) at (4.50,-2.70) {\texttt{CreateCustomScanState}};
+\node[hook] (state) at (8.77,-2.70) {allocate \texttt{scan\_state}};
+\draw[callarr] (mutate.south west) -- ++(0,-0.22) -| (mkstate.north);
 \draw[callarr] (mkstate) -- (state);
-\node[pg] (begin) at (3.05,2.15) {\texttt{BeginCustomScan}};
-\node[hook] (beginh) at (8.05,2.15) {open scan};
-\node[tam] (tbegin) at (12.85,2.15) {\texttt{scan\_begin}};
+\node[pg] (begin) at (4.50,-3.72) {\texttt{BeginCustomScan}};
+\node[hook] (beginh) at (8.77,-3.72) {open scan};
+\node[tam] (tbegin) at (12.97,-3.72) {\texttt{scan\_begin}};
+\draw[callarr] (mkstate) -- (begin);
 \draw[callarr] (begin) -- (beginh);
 \draw[callarr] (beginh) -- (tbegin);
-\node[pg] (exec) at (3.05,1.05) {\texttt{ExecCustomScan}};
-\node[hook] (exech) at (8.05,1.05) {next stored row};
-\node[tam] (tnext) at (12.85,1.05) {\texttt{scan\_getnextslot}};
+\node[pg] (exec) at (4.50,-4.74) {\texttt{ExecCustomScan}};
+\node[hook] (exech) at (8.77,-4.74) {fetch next row from storage};
+\node[tam] (tnext) at (12.97,-4.74) {\texttt{scan\_getnextslot}};
+\draw[callarr] (begin) -- (exec);
 \draw[callarr] (exec) -- (exech);
 \draw[callarr] (exech) -- (tnext);
-\draw[scan arrow,dashed] (tnext.south) -- ++(0,-0.38) -|
-  node[pos=0.18,below,font=\scriptsize,text=black!60] {until NULL}
-  (exec.south);
-\node[pg] (endc) at (3.05,-0.15) {\texttt{EndCustomScan}};
-\node[hook] (endh) at (8.05,-0.15) {close scan};
-\node[tam] (tend) at (12.85,-0.15) {\texttt{scan\_end}};
+\node[pg] (endc) at (4.50,-6.20) {\texttt{EndCustomScan}};
+\node[hook] (endh) at (8.77,-6.20) {close scan};
+\node[tam] (tend) at (12.97,-6.20) {\texttt{scan\_end}};
+\node[actor] (results) at (1.20,-6.20)
+  {{\large\faUser}\\[-1pt]Return results};
+\draw[callarr] ([xshift=2.5pt]exec.south west) -- ([xshift=2.5pt]endc.north west);
 \draw[callarr] (endc) -- (endh);
 \draw[callarr] (endh) -- (tend);
+\draw[callarr] (endc) -- (results);
+\draw[scan arrow,dashed,rounded corners=2pt]
+  (tnext.south) -- ++(0,-0.50) -|
+  node[pos=0.18,below,font=\scriptsize,text=black!60] {until NULL}
+  (exec.south);
 \end{tikzpicture}
 \caption{Lifecycle of \texttt{BioseqScan} and the columnar table access method.
+Pale bands mark initialization, parsing, planning, and execution.
 Grey boxes are PostgreSQL. Orange boxes are BioSeqDB hooks or the custom scan.
-Green boxes are TAM callbacks. Solid arrows are the calls PostgreSQL makes.
-The dashed arrow after parse is utility SQL only.
-The dashed loop is repeated \texttt{ExecCustomScan} until the TAM returns no slot.
-\texttt{column\_planner\_hook} wraps \texttt{standard\_planner} and mutates the plan after
-\texttt{PlanCustomPath}. Join scans and slice projection are omitted.}
+Green boxes are TAM callbacks.
+Solid arrows follow the main sequence.
+Dashed arrows represent calling and returning:
+\texttt{column\_planner\_hook} calls \texttt{standard\_planner}, then rewrites the finished plan,
+utility SQL takes the \texttt{ProcessUtility\_hook} path, and \texttt{ExecCustomScan} repeats until the TAM returns no slot.}
 \label{fig:bioseqscan-hook-lifecycle}
 \end{figure}
 
 \texttt{ProcessUtility\_hook} is not part of planning a \texttt{SELECT}.
 PostgreSQL uses it for utility statements such as \texttt{CREATE}, \texttt{DROP}, \texttt{COPY}, and \texttt{CREATE INDEX}.
-The table-AM hook checks those statements on \texttt{USING bioseq} tables.
-The chained planner hook only logs \texttt{CREATE TABLE \ldots USING bioseq}.
+The table-AM hook handles those statements on \texttt{USING bioseq} tables.
+The planner-module utility hook only logs \texttt{CREATE TABLE \ldots USING bioseq}.
+A \texttt{SELECT}, including \texttt{CREATE TABLE AS}, never enters that path.
 
 \texttt{column\_planner\_hook} is the process-wide \texttt{planner\_hook}.
-It is not a second step after \texttt{create\_plan}.
+It is not a second step after \texttt{create\_plan}, and it does not call \texttt{ProcessUtility\_hook}.
 It wraps the whole planner.
-It validates \texttt{mmsearch} options, then calls \texttt{standard\_planner}.
-After that it may rewrite aggregates or wrap an index scan on a columnar table.
-\texttt{set\_rel\_pathlist\_hook} registers \texttt{BioseqScan} paths.
-That registration goes through \texttt{add\_bioseq\_column\_scan\_paths}.
-\texttt{get\_relation\_info\_hook} runs earlier.
-It turns off stock parallel workers on those tables.
+First it validates \texttt{mmsearch} options, then it calls \texttt{standard\_planner}.
+\texttt{get\_relation\_info\_hook} and \texttt{set\_rel\_pathlist\_hook} run inside that call.
+\texttt{PlanCustomPath} also runs inside it, when PostgreSQL converts the chosen custom path into a plan.
+When \texttt{standard\_planner} returns, the same \texttt{column\_planner\_hook} may rewrite the finished tree with \texttt{mutate\_pg\_plan\_tree}.
+That rewrite can replace an aggregate with the vectorized aggregator, or wrap an index scan on a columnar table.
+It runs only for a single-table \texttt{SELECT} when vectorization or the columnar index scan is enabled.
+\texttt{set\_rel\_pathlist\_hook} registers \texttt{BioseqScan} paths through \texttt{add\_bioseq\_column\_scan\_paths}.
+\texttt{get\_relation\_info\_hook} runs earlier and turns off stock parallel workers on those tables.
 
 During execution PostgreSQL calls \texttt{BioseqScan} methods.
 \texttt{BeginCustomScan} opens the TAM with \texttt{scan\_begin}.
