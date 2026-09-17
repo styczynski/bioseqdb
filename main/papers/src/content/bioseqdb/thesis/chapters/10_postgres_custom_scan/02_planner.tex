@@ -1,64 +1,54 @@
 \section{From a Boolean marker to a custom scan}
 \label{sec:mmsearch-sql-rendezvous}
 
-PostgreSQL lets an extension add a \emph{custom scan}: an executor node with
-extension-defined methods for producing rows.\footcite{postgresql17_custom_scan}
-BioSeqDB uses this facility to make a search
-part of the plan tree. The node responsible for one search is its
-\emph{owner}. It receives the input sequences, runs alignment, and produces
-the hit rows.
+% \texttt{mmsearch} is declared as an ordinary SQL function returning
+% \texttt{boolean}. PostgreSQL can therefore resolve its arguments and accept
+% it in a condition without a new SQL grammar. Its two-argument form uses the
+% session's alignment settings. A third argument can supply typed options.
+% The extra hit rows are part of BioSeqDB's search contract, which every
+% accepted plan must preserve.
+% During planning the call acts as a \emph{marker}: it identifies the search
+% that an owning custom scan must perform. When the plan is constructed, the
+% owner removes that marker from the conditions that PostgreSQL would otherwise
+% execute. An unowned non-null call reaches a function body that reports an
+% unsupported query shape. There is no ordinary scalar alignment fallback.
 
-\texttt{mmsearch} is declared as an ordinary SQL function returning
-\texttt{boolean}. PostgreSQL can therefore resolve its arguments and accept
-it in a condition without a new SQL grammar. Its two-argument form uses the
-session's alignment settings. A third argument can supply typed options.
-The extra hit rows are part of BioSeqDB's search contract, which every
-accepted plan must preserve.
-During planning the call acts as a \emph{marker}: it identifies the search
-that an owning custom scan must perform. When the plan is constructed, the
-owner removes that marker from the conditions that PostgreSQL would otherwise
-execute. An unowned non-null call reaches a function body that reports an
-unsupported query shape. There is no ordinary scalar alignment fallback.
+% \subsection{Inspiration from PostgreSQL extensions}
 
-\subsection{Inspiration from PostgreSQL extensions}
+A full text search interface (\texttt{pg_search}) from ParadeDB was an important motivation for the SQL API design of BioseqDB. 
+ParadeDB is an extension written in Rust that uses custom text storage engine under the hood. I deeply inspected its source code to understand how we can implement our own syntax in BioseqDB.
+ParadeDB resolves similar problem as FTS can also return multiple hits for a single query.\coderef{paradedb/pg_search/src/postgres/customscan/basescan/projections/score.rs}
+{ParadeDB score expression}{score_from_relation}{30}
 
-ParadeDB was an important motivation for this design. Its search interface
-keeps a search condition and a score expression in ordinary SQL, while its
-custom executor supplies the score of the current search result. This showed
-how an extension could connect a compact SQL expression to a richer execution
-method. BioSeqDB applies the same general idea to alignment fields and adds
-the requirement that one source row may produce several hits.
-The source references below use the public main branch; the inspected source
-snapshot identifies itself as version 0.25.6.
-\coderef{paradedb/pg_search/src/postgres/customscan/basescan/projections/score.rs}
-  {ParadeDB score expression}{score_from_relation}{30}
-
-In particular, ParadeDB replaces score expressions with typed placeholders,
-then fills them from the current search result before projection.
+To return custom results instead of relying on Postgres evaluating the function (We don't want to let Postgres call actual \path{bioseq.score()} function, but rether provide it ourselves. ParadeDB has similar syntax and the same problem)
+ ParadeDB replaces score expressions with typed placeholders.
+These placefolders are filled from the current search result before projection.
 \coderef{paradedb/pg_search/src/postgres/customscan/projections.rs}
   {ParadeDB placeholder replacement}{inject_placeholders}{493}
-This is the concrete mechanism that informed the shared-field design
-described in Section~\ref{sec:match-placeholder-injection}.
+Similar design was used in BioseqDB - described in Section~\ref{sec:match-placeholder-injection}.
 
-The pgvector extension supplied another useful example of a concise typed
-operator. Its \texttt{<->} operator returns the Euclidean distance between two
-vectors, so SQL can order rows by that distance:
-\coderef{pgvector/sql/vector.sql}
-  {pgvector distance operator}{CREATE OPERATOR <->}{174}
+SELECT id, title, pdb.score(id) AS score
+FROM documents
+WHERE body ||| 'postgresql search'
+ORDER BY score DESC, id;
+
+SELECT id, pdb.snippet(body) AS excerpt
+FROM documents
+WHERE body &&& 'postgresql indexing';
 
 \noindent\begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-search-sql,caption={A scalar distance with pgvector.}]
--- pgvector example: one distance for each stored vector
-SELECT id, embedding <-> '[1,2,3]' AS distance
-FROM items
-ORDER BY embedding <-> '[1,2,3]'
-LIMIT 5;
+\begin{lstlisting}[style=bioseq-search-sql,caption={ParadeDB pg_search examples}]
+-- Some examples for pg_search
+SELECT id, title, pdb.score(id) AS score
+FROM documents
+WHERE body ||| 'postgresql search'
+ORDER BY score DESC, id;
+
+SELECT id, pdb.snippet(body) AS excerpt
+FROM documents
+WHERE body &&& 'postgresql indexing';
 \end{lstlisting}
 \end{minipage}
-
-This is an inspiration for the syntax, not an equivalent result model. One
-distance is a scalar value. Alignment must also preserve the identity and
-fields of each of several possible hits from one sequence pair.
 
 \subsection{Paths, plans, and live state}
 \label{sec:planner-support-and-ownership}
