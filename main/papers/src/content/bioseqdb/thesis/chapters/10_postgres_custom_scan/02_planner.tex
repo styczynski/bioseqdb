@@ -221,3 +221,11 @@ The rewrite mutor performs the following changes:
 As entities like \texttt{bioseq.score(id)} are still ordinary functions, I discourage Postgres by using prohibitive execution costs~\footcite{postgresql17_support_functions}.
 The function implementation itself mostly just emits an error, because it shouldn't be ever called.
 Instead \path{ExecCustomScan} will using special Postgres expression nodes i.e \path{Const*} node to tell Postgres that the scan itself calculated the function's value and it shouldn't evaluate it by itself.
+
+\subsection{Different types of scans}
+
+When I talk about custom scan I focus on \texttt{BioseqCustomScan}, which is primary way to access the table, but in BioseqDB I also have other types of scans:
+\begin{itemize}
+  \item \textbf{Dedicated join support} \texttt{BioseqBatchJoin} is a separate custom scan that receives target and query child plans and perform joining ???
+  \item \textbf{Returning slices} \texttt{BioseqSliceProject} is used for what???
+\end{itemize}
