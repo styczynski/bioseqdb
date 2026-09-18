@@ -1,121 +1,271 @@
-\section{Batch work inside a row-at-a-time executor}
-\label{sec:customscan-batch-state-machine}
+\subsection{Dispatch buffer internals}
+\label{sec:dispatch-buffer-api}
 
-PostgreSQL's executor asks a child node for its next row. This follows the
-iterator interface described in Volcano: the parent requests results one at
-a time.\footnote{G.~Graefe, \emph{Volcano---An Extensible and Parallel Query
-Evaluation System}, IEEE Transactions on Knowledge and Data Engineering
-6(1), 1994, pp.~120--135, \url{https://doi.org/10.1109/69.273032}.}
-A custom scan must
-honor that interface even when the aligner's efficient work unit is a batch
-of sequence pairs. BioSeqDB bridges the two sizes by retaining one batch and
-returning its hits one at a time.
+The main component I want to discuss here is the dispatch buffer: a container abstraction reponsible for retrieving, storing, distributing and collecting of the tuples with results.
+This requires managing memory and lifetime of Postgres tuples (both incoming from table and outgoing to the user).
 
-\begin{enumerate}
-  \item \textbf{Collect input.} Read rows and apply supported ordinary
-    conditions that do not depend on a hit. Retain the rows and sequence
-    references needed for alignment.
-  \item \textbf{Process a batch.} When the batch reaches its capacity, or the
-    input ends, submit its sequence pairs to the selected alignment pipeline.
-  \item \textbf{Return hits.} Select the next retained hit, supply its fields,
-    and return one SQL row. Repeated requests advance through the same batch.
-  \item \textbf{Reuse the space.} After all hits have been returned, release
-    the completed batch and collect another one if input remains.
-\end{enumerate}
+\subsubsection{Handling tuples}
 
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}[font=\footnotesize]
-  \node[anchor=west,font=\bfseries] at (0,3.6) {Input batch};
-  \foreach \y/\r in {2.65/A,1.75/B,.85/C}
-    \node[scan input,minimum width=1.4cm] (row\r) at (.85,\y) {row \r};
-  \node[scan hit,minimum width=2.5cm,minimum height=2.5cm] (align)
-    at (4.0,1.75) {one batch\\alignment call};
-  \foreach \r in {A,B,C}
-    \draw[scan arrow] (row\r.east) -- (align.west);
-  \node[anchor=west,font=\bfseries] at (6.25,3.6) {Retained hits};
-  \node[scan hit,minimum width=.75cm] (a) at (6.75,2.65) {$A_0$};
-  \node[scan hit,minimum width=.75cm] (b) at (7.75,2.05) {$A_1$};
-  \node[text=black!60] at (7.25,1.40) {row B: no hit};
-  \node[scan hit,minimum width=.75cm] (c) at (6.75,.85) {$C_0$};
-  \draw[scan arrow] (align.east) -- (a.west);
-  \draw[scan arrow] (align.east) -- (c.west);
-  \node[anchor=west,font=\bfseries] at (9.4,3.6) {SQL rows};
-  \node[scan output,minimum width=1.4cm] (out) at (10.25,2.65) {$A_0$};
-  \draw[scan arrow,scanGreen] (a.east) -- (out.west);
-  \node[align=center] at (10.25,1.5) {one per\\parent request};
-  \node[anchor=west,text=black!65] at (0,-.1)
-    {The next requests return $A_1$ and $C_0$ before another batch is collected.};
-\end{tikzpicture}
-\caption{Three input rows produce three hits with a different distribution:
-two for A, none for B, and one for C. The parent still receives one row per
-request. The aligner processes batches; SQL receives individual rows.}
-\label{fig:scan-batch-pull}
-\end{figure}
+Postgres offsers \texttt{TupleTableSlot*} type, which represents reusable holder for a tuple.
+The Postgres executor keeps one scan slot on the expression node and asks the table access method to fill that same holder on every fetch.
 
-Scalar and vectorized table access converge before alignment submission. A
-vectorized condition may first produce a mask of rows to keep, but surviving
-rows still enter the same batch mechanism. PostgreSQL parallel execution is a
-separate choice: the alignment owners are currently marked
-\texttt{parallel\_safe=false}. The alignment pipeline may still use its own
-workers or a GPU under its configuration.
+This holder consist of a tuple descriptor, current column values, null flags, and a small operations (functions pointers) table that knows how to read or copy the physical layout currently stored inside it~\parencite{postgresql17_tuptable}.
+The tuple descriptor is the struct holding information about the columns schema (how many attributes it has, names of the attributes and their types with additonal metadata).
 
-\subsection{Row stability during a search}
+PostgreSQL offsers the following types of slots~\coderef{postgres17/src/include/executor/tuptable.h}{Builtin tuple table slot types}{TTSOpsMinimalTuple}{38}:
+\begin{itemize}
+  \item \textbf{Buffer heap tuple} (\texttt{TTSOpsBufferHeapTuple}).
+        The slot points at a row that still lives in a shared buffer page.
+  \item \textbf{Heap tuple} (\texttt{TTSOpsHeapTuple}).
+        The slot owns a \texttt{palloc} copy of a full on-disk row with system columns (added by Postgres)~\parencite{postgresql17_storage_page_layout}.
+  \item \textbf{Minimal tuple} (\texttt{TTSOpsMinimalTuple}).
+        The slot owns a compact copy of the user columns only without system columns added by Postgres.
+        Sort, hash, and materialize nodes use this type because it is smaller than a heap tuple.
+  \item \textbf{Virtual tuple} (\texttt{TTSOpsVirtual}).
+        Instead of storing entire row it stores arbitrary data in array (usually pointers to the actual values, so we can reference existing tuple).
+\end{itemize}
+
+The TAM has one slot that is used to return tuples and it's overwriten with each tuple fetch (\texttt{getnextslot} call). This means that dispatch buffer has to store the tuple somewhere.
+In a dispatch buffer method called \texttt{submit\_scan} I allocate a fresh slot with \texttt{TTSOpsMinimalTuple}, copy the current user columns with \texttt{ExecCopySlotMinimalTuple}, 
+and store it with \texttt{ExecStoreMinimalTuple}.
+The third argument is \texttt{shouldFree=true}, so the copied slot owns the bytes and will \texttt{pfree} them when the buffer later drops the slot.
+
+Sequence tuples in the dispatch buffer needs to represent lazy-loadable seqences, so during their lifetime they can become of of the 3 types (I need to distinguish them, because in code they are all just minimal tuples, but semantically express different  concepts):
+\begin{itemize}
+  \item \textbf{Locator}: This object is what is usually stored in the user table and represents entire sequence stored in separate internal table. This is "unhydrated" sequence.
+  \item \textbf{Expanded}: Postgres has a flag \path{VARATT_IS_EXTERNAL_EXPANDED} (I call this in a code "expanded recipe") to mark the value is not a flat byte array yet, but complex structure in memory. This happens when sequence holds piece-tree (slice graph)~\ref{sec:sequence-piece-tree}, so we have multiple slice operations to perform if we want to convert this value to flat sequence. This is also different form of "unhydrated" sequence.
+  \item \textbf{Varlena}: Representing "hydrated" sequence fragment, so the slices or locator were converted to some flat byte array.
+\label{lst:tuple-types}
+\end{itemize}
+The alignment pipeline uses first two representations directly and as mentioned before when discussing sequence abstractions~\ref{sec:sequence-abstractions} the sequence will be kept as a locator or piece-tree until the actual data is requested~\ref{fig:execcustomscan-dispatch}. Then I load requested bytes and return them directly.
+However in some cases we need to convert the tuple into 3rd form. If user requests slice projection directly it goes through separate branch of BioseqDB handling where that conversion is performed:
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={ParadeDB pg\_search examples},label={lst:paradedb-pg-search-examples}]
+SELECT seq[2:3] FROM table;
+\end{lstlisting}
+\end{minipage}
+
+% Additionally the scan needs to correctly handle PostgreSQL tuple visibility.
+% It wasn't the primary goal of BioseqDB to provide full correct MVCC support as operations favour OLAP use cases, so I didn't verify that 
+
+% Hydration during an \texttt{mmsearch} batch does not allocate a second user-facing tuple slot for the letters.
+% \texttt{submit\_scan} stores whatever the TAM left in the sequence column, usually a locator stub, inside the MinimalTuple copy.
+% Production alignment then streams those locators through statement-owned scanners, which still fetch fragment rows through the TAM (Figure~\ref{fig:sequence-scan-lifecycle}).
+% The testing GUCs that force an in-memory scanner flatten locators by writing a fetched \texttt{bioseq.seq} pointer into the sequence column of \emph{that same} copied slot.
+% Queries without \texttt{mmsearch} never enter this buffer.
+% They hydrate on the backend thread through the TAM, which is the solid alternative path in Figure~\ref{fig:execcustomscan-dispatch}.
+
+\subsubsection{Buffer API}
+
+Table~\ref{tab:dispatch-buffer-api} lists the most important methods of the dispatch buffer that are used during \texttt{ExecCustomScan} call.
+\texttt{Snapshot} here means the set of row versions this statement is allowed to see (this is mechanism for MVCC support in PostgreSQL)~\parencite{postgresql17_mvcc} and is discussed later.
+
+\begingroup
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\setlength{\LTleft}{-0.07\linewidth}
+\setlength{\LTright}{-0.07\linewidth}
+\setlength{\LTcapwidth}{\linewidth}
+\begin{longtable}{@{}
+  >{\raggedright\arraybackslash}p{0.31\linewidth}
+  >{\raggedright\arraybackslash}p{0.41\linewidth}
+  >{\raggedright\arraybackslash}p{0.42\linewidth}@{}}
+\caption{Dispatch-buffer methods used by the Bioseq custom scans.}
+\label{tab:dispatch-buffer-api}\\
+\toprule
+Method group & When the custom scan calls it & What it does \\
+\midrule
+\endfirsthead
+\caption[]{Dispatch-buffer methods used by the Bioseq custom scans (continued).}\\
+\toprule
+Method group & When the custom scan calls it & What it does \\
+\midrule
+\endhead
+\midrule
+\multicolumn{3}{r}{\emph{Continued on next page}}\\
+\endfoot
+\bottomrule
+\endlastfoot
+
+\path{configure_params},
+\path{replace_executor_snapshot},
+\path{bind_sequence_source_provider}
+  & \texttt{BeginCustomScan} after the scan has a relation and a snapshot.
+    PostgreSQL parallel workers (only for queries that do not use alignment~\ref{code:simple-table-read-with-slice}) restore a copy of that snapshot and call \texttt{replace\_executor\_snapshot}.
+    The worker must use its own registered \texttt{Snapshot} pointer for later fragment reads.
+  & Stores aligner settings, the user table identity, the borrowed snapshot, and the statement-owned sequence source that scanners will read. \\
+\addlinespace
+
+\path{configure_mmsearch},
+\path{configure_mmsearch_per_row},
+\path{configure_mmsearch_per_row_evaluated}
+  & \texttt{BeginCustomScan} once the planner-private list has named the search, or on \texttt{ReScan} when a join parameter changes the query.
+  & Records which columns are the target and (if needed) the per-row query, copies a constant query, and turns the buffer into the writing stage. \\
+\addlinespace
+
+\path{submit_scan},
+\path{submit_scan_evaluated}
+  & Writing stage of \texttt{ExecCustomScan}, after a TAM row passed the filter conditions.
+    The "evaluated" method is called when parameter in \texttt{mmsearch} is an expression that needs to be evaluated.
+  & Copies that row into a buffer-owned MinimalTuple~\ref{lst:tuple-types} slot and records its row number, primary key, and sequence locator (or evaluated Datums). Does not run alignment yet. \\
+\addlinespace
+
+\path{ready_to_dispatch},
+\path{has_finished_writing},
+\path{mmsearch_active}
+  & The \texttt{ExecCustomScan} loop, after each submit and after each drained hit.
+  & Returns flags indicating whether the physical buffer has reached 8192 rows, whether the current batch has already been aligned, and whether this scan is an \texttt{mmsearch} scan at all. \\
+\addlinespace
+
+\path{run_batch_and_build_cursors}
+  & When the buffer is full, or when the TAM source is exhausted.
+  & Streams the buffered locators into the alignment pipeline, then builds an output cursor for retrieving hits. \\
+\addlinespace
+
+\path{read_next_output}
+  & Reading stage of \texttt{ExecCustomScan}, once writing has finished.
+  & Returns the next hit together with a pointer to the copied scan slot.
+    The scan then fills the match-field \texttt{Const} nodes from Section~\ref{sec:match-placeholder-injection} and projects. \\
+\addlinespace
+
+\path{clear_slots}
+  & After a full 8192-row batch has been drained while the TAM source still has rows, and on \texttt{ReScan} or \texttt{EndCustomScan}.
+  & Frees every copied MinimalTuple slot and the payload arena so the next physical batch can start empty. \\
+\addlinespace
+
+Support for joins:
+\path{configure_mmsearch_join},
+\path{begin_join_target},
+\path{prepare_join_target_queries},
+\path{set_join_query_batch},
+\path{run_join_query_batch_and_build_cursors},
+\path{finish_join_target},
+\path{reset_join_runtime_for_rescan},
+\path{abandon_join_runtime_after_pg_error_noexcept}
+  & Methods called only by \texttt{BioseqBatchJoin} custom scan for custom join (discussed in next section~\ref{sec:mmsearch-join-ownership}).
+    PostgreSQL \texttt{ReScan} restarts a plan node from its first row, often with new parameters (for example the inner side of a nested loop for the next outer row, or a cursor rewind).
+    \texttt{ReScanCustomScan} therefore calls the reset helper so leftover join targets and hits are dropped.
+  & Holds one join target in the buffer, streams inner queries in batches of at most 8192, runs alignment against that stored target, then drops the target.
+    The reset and abandon helpers clear join state without asking the caller to redo \texttt{submit\_scan}. \\
+
+\end{longtable}
+\endgroup
+
+The code in \texttt{ExecCustomScan} pulls one TAM row, runs filtering conditions (these can reject the row based on metdata) and on success calls \texttt{submit\_scan} to let buffer copy the tuple.
+When the copies in buffer reach the set capacity \texttt{dispatch\_batch\_capacity} (\8192 = 2^{13}\), \texttt{ready\_to\_dispatch} flag changes to true so the scan calls \texttt{run\_batch\_and\_build\_cursors}.
+This method is also invoked when there are no more tuples in TAM source.
+
+\texttt{run\_batch\_and\_build\_cursors} is where the batch starts and scanners and workers from Figure~\ref{fig:execcustomscan-dispatch} run.
+It groups the locators already stored in the MinimalTuple copies, lets scanners fetch fragment bytes through the TAM under the Postgres table snapshot object and then distributes the views to workers.
+
+Then the scan needs to read results. Reading stage calls \texttt{read\_next\_output} on every later \texttt{ExecCustomScan} to retrieve the next result (this means that in this semantic first call to \texttt{ExecCustomScan} takes very long as it needs to align first batch, while later calls return tuples one-after-another from the output cursor until they are exhausted and process repeats).
+This is the place where we need to set values of nodes and project the tuple to let Postgres construct final results~\ref{sec:match-placeholder-injection}.
+After Postgres consumes that projected tuple, the next call drops the previous result slot and asks for the next hit.
+When the cursor is empty and the TAM source is not yet exhausted, the node calls \texttt{clear\_slots} and returns to the writing stage (this corresponds to finishing batch and starting collecting rows again)
+
+\paragraph{Execution statistics.}
+Each completed call to \texttt{run\_batch\_and\_build\_cursors} writes a \texttt{pipeline\_execution\_stats} aggregate onto the buffer, where I collect debugging statistics. 
+\texttt{EXPLAIN ANALYZE} reads then through \texttt{execution\_stats()}.
+Table~\ref{tab:dispatch-buffer-stats} presents some of them as the list is long and not every one is relevant to the common user.
+
+\begingroup
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{longtable}{@{}
+  >{\raggedright\arraybackslash}p{0.22\linewidth}
+  >{\raggedright\arraybackslash}p{0.34\linewidth}
+  >{\raggedright\arraybackslash}p{0.38\linewidth}@{}}
+\caption{Grouped execution statistics collected by the dispatch buffer.}
+\label{tab:dispatch-buffer-stats}\\
+\toprule
+Group & Fields (batched) & What they tell you \\
+\midrule
+\endfirsthead
+\caption[]{Grouped execution statistics collected by the dispatch buffer (continued).}\\
+\toprule
+Group & Fields (batched) & What they tell you \\
+\midrule
+\endhead
+\midrule
+\multicolumn{3}{r}{\emph{Continued on next page}}\\
+\endfoot
+\bottomrule
+\endlastfoot
+
+Backend choice
+  & requested versus actual backend, backend declines, backend fallbacks
+  & Whether the scan asked for GPU or CPU, and whether the runtime had to use fallback (hardware unavailable or alogirhtm is not supported). \\
+\addlinespace
+
+Alignment jobs
+  & attempted, completed, failed
+  & How many target and query pairs the pipeline tried, how many finished. \\
+\addlinespace
+
+Target index
+  & target rows, persisted index rows, missing persisted rows, recomputed rows
+  & Whether minimizer indexes were read from storage or rebuilt for this batch. \\
+\addlinespace
+
+GPU dispatch
+  & seed, chain, backtrack and other stages
+  & How much of the aligner actually ran on the device \\
+\addlinespace
+
+Stage timings
+  & per-stage nanosecond counters (query sketch, index build, seed, chain, extend, \ldots)
+  & Which pipeline stage dominated wall time on this statement. \\
+\addlinespace
+
+Integrity flags
+  & mixed environment, mixed persisted identity, saturated counters
+  & Additional flags indicating overflow or aggregation of counters and "mixing" which means that different stages of pipeline run in different modes (incompatible k/w or GPU/CPU mixing) - this is used for debugging \\
+
+\end{longtable}
+\endgroup
+
+\subsection{MVCC support}
+\label{sec:scan-row-stability}
 
 PostgreSQL holds its current input row in temporary storage called a tuple
-slot. The scan may still need that row for alignment after the slot is reused.
-Another transaction may also update that row. The scan therefore separates
-its saved values from the database view that it is allowed to read:
+slot, but another transaction may also update that row. \texttt{Snapshot} in Postgres is set of row versions some statement is allowed to see as it needs to perform visibility checks before doing anything~\parencite{postgresql17_mvcc}.
+\texttt{configure\_params} borrows this snapshot object so later fragment reads and bulk fetches observe the same MVCC view as the original TAM fetch.
+Let's see if this is compatible with the BisoeqDB model:
 
 \begin{itemize}
-  \item \textbf{Keep the input values.} A batch keeps ordinary fields in
-    compact row copies in memory it owns, and keeps sequence references with
-    their owners. A hit points to
-    its batch entry, so several hits can return the same saved fields.
-    Keeping a lazy reference does not require copying all sequence symbols.
-  \item \textbf{Keep the same database view.} PostgreSQL uses a snapshot to
-    decide which row versions a command can see. The sequence reader retains
-    the scan's snapshot and checks a stored reference against the table,
-    column, and source version visible through it. Stored source fragments
+  \item \textbf{Copying values:} Dispatch buffer always copies the original tuple into an owned MinimalTuple slot, so Postgres won't overwirte this data.
+  \item \textbf{Saving Postgres snapshot object:} PostgreSQL uses a snapshot to
+    decide which row versions a command can see. The sequence saves scan's Snapshot and checks a stored reference against the row (visibility check). Stored source fragments
     are immutable. An update publishes a new version, while an
     older snapshot can still read its earlier version. Delaying a read does
     not switch it to the latest committed sequence.\footnote{PostgreSQL 17,
     \href{https://www.postgresql.org/docs/17/transaction-iso.html}
     {Transaction Isolation}.}
-  \item \textbf{Separate internal and SQL identity.} The scan's internal
-    row number locates source data; the SQL primary key identifies a logical
-    row for the user. The batch-entry position selects saved values for a
-    hit. None replaces the source-version and snapshot checks.
-  \item \textbf{Keep the relations available.} Normal reads hold an
-    \texttt{ACCESS SHARE} relation lock, and deferred source readers use the
-    same mode. This prevents conflicting operations such as dropping or
-    rewriting a relation while it is in use. Ordinary concurrent updates
-    and deletes remain possible; the read does not lock each selected
-    row.\footnote{PostgreSQL 17,
+  \item \textbf{Saving row numbers:} While the primary key is important for user, the row internally holds a row number that is used to indentify results.
+  \item \textbf{Opening relation:} In scan I use 
+    \texttt{ACCESS SHARE} relation lock to prevent conflicting operations such as dropping or
+    rewriting a relation while it is in use (concurrent updates and deletes are still possible, but avoided due to snapshot mechanism)\footnote{PostgreSQL 17,
     \href{https://www.postgresql.org/docs/17/explicit-locking.html}
     {Explicit Locking}.}
 \end{itemize}
+I use existing Postgres mechanisms to support MVCC so it didn't require any additional custom code.
 
-A rescan discards the previous batch and hit fields while preserving the
-scan's database view. Cleanup releases saved values before their source
-readers and snapshots. Reuse across later queries also needs the result-cache
-checks described below.
+\subsection{Filter placement}
 
-\subsection{Filter placement and early stopping}
-
-Two kinds of condition require different inputs:
+As this mentioned here, before saving tuple into the buffer, scan checks if the filter predicate on non-alignment dependent values evaluates to true. This is done to avoid aligning rows that will be discarded anyway.
+In BioseqDB there are two types of filter conditions:
 
 \begin{itemize}
   \item \textbf{A row condition} such as \texttt{t.id > 20} depends only on
-    stored columns. Evaluating it before alignment avoids searching discarded
-    rows.
-  \item \textbf{A hit condition} needs an alignment result. The current
-    implementation recognizes a narrow supported form such as
-    \texttt{bioseq.edit(t.seq) < 10} and checks the edit count of each hit.
-    This count is the sum of mismatched, inserted, and deleted symbols in
-    that hit's alignment; each symbol counts once.
-    This does not imply general support for arbitrary helper expressions in
-    \texttt{WHERE}.
+    stored columns, so is evaluated before alignment.
+  \item \textbf{A hit condition} This is special case of alignment prefilter. I have a separate stage in the pipeline that can be invoked to run cheaper estimation of edit distance for each sequence.
+  If I detect special predicate of form   
+  \texttt{bioseq.edit(t.seq) < 10} I run pipeline with prefilter enabled. This is different to the case above, because it still requires batching tuples and running pipeline, but it allows for faster termination.
+  If the distance estimation yields false, then the rest of stages are skipped (there's no seeding, chaining, backtracking etc.) so we avoid even the cost of fetching the minimizers from the saved index.
+  This results in great speedups, but at this time is yet an experimental feature using code from libraries that weren't developed by me.
 \end{itemize}
 
 \noindent\begin{minipage}{\linewidth}
@@ -129,75 +279,9 @@ LIMIT 5;
 \end{lstlisting}
 \end{minipage}
 
-The identifier condition can avoid alignment for a row. The edit condition
-selects hits after the required alignment information exists.
-
-\texttt{LIMIT 5} lets the parent stop asking after five rows. It does not
-guarantee that only five hits were computed: the current batch may already
-be complete. Likewise, \texttt{ORDER BY score DESC LIMIT 5} does not by itself
-give BioSeqDB a general top-$k$ alignment algorithm. Producing a correct
-global score order can require reading all relevant hits.
-
-\subsection{Initialization, rescans, and cleanup}
-
-PostgreSQL defines four callbacks for the owner's execution
-lifetime:\footnote{PostgreSQL 17,
-\href{https://www.postgresql.org/docs/17/custom-scan-execution.html}
-{Executing Custom Scans}.}
-
-\begin{itemize}
-  \item \texttt{BeginCustomScan} initializes execution state once.
-  \item \texttt{ExecCustomScan} returns the next row, or reports the end.
-  \item \texttt{ReScanCustomScan} restarts with the current input parameters.
-  \item \texttt{EndCustomScan} releases execution resources.
-\end{itemize}
-
-Figure~\ref{fig:scan-lifecycle} shows the normal loop and the paths that need
-special care.
-
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}[font=\footnotesize]
-  \node[scan input,minimum width=2.6cm] (collect) at (2.1,3.1) {collect input};
-  \node[scan hit,minimum width=2.6cm] (process) at (8.8,3.1) {process batch};
-  \node[scan output,minimum width=2.6cm] (return) at (5.45,.5) {select next hit};
-  \draw[scan arrow] (collect) -- node[above] {full batch or input ends} (process);
-  \draw[scan arrow] (process.south) -- (return.east);
-  \draw[scan arrow] (return.west) -- (collect.south);
-  \node[align=center] at (6.5,2.0) {batch\\complete};
-  \node[align=center] at (4.1,2.0) {no hit;\\more input};
-  \draw[scan arrow] (return.south east) to[out=-35,in=-145,looseness=4]
-    node[below,align=center] {return one hit;\\next row request} (return.south west);
-  \node[scan box,minimum width=2.2cm] (init) at (2.1,5.0) {initialize};
-  \draw[scan arrow] (init) -- (collect);
-  \node[scan box,minimum width=2.2cm] (cleanup) at (11.25,.5) {release state};
-  \draw[scan arrow] (return.east) -- node[pos=.55,above] {end or early stop} (cleanup.west);
-  \draw[scan arrow,dashed,scanOrange] (process.east) to[out=0,in=90]
-    node[right] {error} (cleanup.north);
-  \draw[scan arrow,dashed,scanBlue,rounded corners=5pt] (return.west)
-    -- (0,.5) -- (0,3.1) -- (collect.west);
-  \node[anchor=west,align=left,text=scanBlue] at (.15,1.75)
-    {rescan:\\clear hits,\\rebind inputs};
-\end{tikzpicture}
-\caption{One execution owns its batches and current hit. The ordinary loop
-returns all hits of a batch before collecting another. A batch with no hits
-continues to the next input batch or ends the scan. A normal end means that
-no input rows or retained hits remain. A rescan starts with fresh inputs.
-Cleanup is also required after early termination or an error.}
-\label{fig:scan-lifecycle}
-\end{figure}
-
-\begin{itemize}
-  \item \textbf{Initialize only execution state.} A prepared plan stores
-    descriptions of inputs, not live alignment objects. Plain
-    \texttt{EXPLAIN} follows a description-only initialization path and
-    submits no alignment work.
-  \item \textbf{Rescan with the new inputs.} A nested-loop join may supply a
-    different query sequence on every outer row. The owner clears retained
-    rows and hit cursors, rebinds the execution parameters, and restarts.
-  \item \textbf{Release every owned resource.} Rows, sequence references,
-    alignment buffers, and current-hit values have bounded lifetimes.
-    PostgreSQL errors can unwind execution without ordinary C++ stack
-    unwinding, so cleanup must also be registered with PostgreSQL's lifetime
-    mechanisms. It cannot rely only on C++ destructors.
-\end{itemize}
+\warn{Potential features}{
+  Currently I do not optimise limits so \texttt{LIMIT 5} will still evaluate all tuples in batch even after more than 5 results are found.
+  I also do not provide any optimisations for score ordering, so \texttt{ORDER BY score DESC LIMIT 5} doesn't result in any specialised algorithm.
+  However there are some very speicific cases that would be interesting to optimise. We can use faster chaining if we know that there's only one good hit per sequence. This isn't expressable in SQL with this API, but you can imagine providing 
+  custom limit per one row: \texttt{WHERE bioseq.count(t.seq) = 1}.
+}
