@@ -224,8 +224,25 @@ Instead \path{ExecCustomScan} will using special Postgres expression nodes i.e \
 
 \subsection{Different types of scans}
 
-When I talk about custom scan I focus on \texttt{BioseqCustomScan}, which is primary way to access the table, but in BioseqDB I also have other types of scans:
+When I talk about a custom scan I focus on \texttt{BioseqScan}, which is the primary way to read a \texttt{USING bioseq} table, but there are other types of custom scans used for different purposes in BioseqDB, some of them already mentioned earlier.
+All scans types are the following ones:
 \begin{itemize}
-  \item \textbf{Dedicated join support} \texttt{BioseqBatchJoin} is a separate custom scan that receives target and query child plans and perform joining ???
-  \item \textbf{Returning slices} \texttt{BioseqSliceProject} is used for what???
+  \item \textbf{Dedicated join support:}
+    \texttt{BioseqBatchJoin} is a custom scan with two children: one child is the target plan, the other is the query plan.
+    Normally Postgres would use nested loop join that would read one target and one query and perform alignment for each pair, however we want to avoid this behaviour as target index can be loaded once (running \texttt{BioseqScan} for each pair would cause index for one table be loaded, then unloaded and loaded again for each query).
+    This scan, dedicated for joins, prepares that target once (open the stored minimizer reader, or build index manually if not available) and runs the same logic as \texttt{BioseqScan} for each query in the batch.
+    Dispatch buffer has separate API for joins, but they mostly effectively do same processing as for \texttt{BioseqScan} (collect queries in batches etc.)
+  \item \textbf{Slices across operations:}
+    \texttt{BioseqSliceProject} wraps a child plan when the query asks for a slice or other piece-tree operation, for example \texttt{SELECT seq[100:200]} or \texttt{mmsearch(t.seq[a:b], q.seq)}.
+    It evaluates those expressions into expanded piece-tree Datums (Section~\ref{sec:sequence-piece-tree}) and sends them to Postgres as read-only expanded objects in a virtual slot. This means that the piece-tree is stored in the tuple itself and can be passed around other scans, joins etc. without translating it into a string yet:
+    later \texttt{BioseqScan} or \texttt{BioseqBatchJoin} can align that slice lazily.
+    When user requests a slice as in \texttt{SELECT seq[100:200]} and it doesn't go through other operation nodes, then it will be "hydrated" from piece-tree into actual byte sequence.
+  \item \textbf{Support for indexing:}
+    \texttt{BioseqIndexScan} is the wrapper around \texttt{IndexScan} described above, that allows to correctly read deleted columnar rows (support for bitmasks).
+  \item \textbf{Sorting by sequence:}
+    \texttt{BioseqBatchSortScan} is only for sorting by the sequence itself, for example \texttt{ORDER BY seq} or \texttt{ORDER BY seq DESC}.
+    The planner will choose it only when there is exactly one \texttt{ORDER BY} key and that key has type \texttt{bioseq.seq}, and only when \path{bioseq.planner.sequence_sort_scan.enabled} is on (\texttt{ORDER BY seq, pk} and \texttt{ORDER BY seq::text} are still ordinary PostgreSQL sorts)
+    This is experimental feature to allow faster sorting by sequence without the need to flatten entire sequence first.
+    The custom scan buffers whole child rows, compares the sequence column as lazy views (not as printed text), and emits those same rows in the resulting permutation.
+\label{lst:bioseqscan-types}
 \end{itemize}

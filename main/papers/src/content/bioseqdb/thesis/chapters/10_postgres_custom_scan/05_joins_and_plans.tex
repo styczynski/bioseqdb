@@ -1,9 +1,7 @@
-\section{Different types of scans with focus on joins}
+\section{Joins support}
 \label{sec:mmsearch-join-ownership}
 
-A search between two tables needs both input rows before it can align their
-sequences. Assume \texttt{reads} has the same identifier and sequence columns
-as \texttt{targets}:
+Asssime we have a search between two tables \texttt{reads} and \texttt{targets}:
 
 \noindent\begin{minipage}{\linewidth}
 \begin{lstlisting}[style=bioseq-search-sql,caption={Search sequence pairs from two tables.}]
@@ -16,44 +14,19 @@ WHERE t.id > 20 AND q.id <= 100;
 \end{lstlisting}
 \end{minipage}
 
-For a supported inner-join shape, \texttt{BioseqBatchJoin} owns the search.
-It retains all query input rows and stable sequence references, and streams
-the target child. It constructs batches of candidate pairs and returns each
-accepted hit with the ordinary columns of both rows. Retaining the query
-input is a real cost: the bounded alignment batch does not mean that every
-part of this join uses only one batch's worth of memory.
-
-There are several possible plan placements:
+There are several possible plans for searches:
 
 \begin{itemize}
-  \item \textbf{Search before a join.} A base \texttt{BioseqScan} can search
-    a target against a constant query and pass its hit rows into an ordinary
-    SQL join.
-  \item \textbf{Search with an outer parameter.} A nested-loop plan can
-    supply a query sequence from its current outer row. Rescanning the owner
-    then rebinds that query sequence.
-  \item \textbf{Search at the join.} A supported \texttt{BioseqBatchJoin}
-    receives target and query child plans and owns their sequence pairing.
-  \item \textbf{Evaluate a sequence expression below the owner.} A
-    \texttt{BioseqSliceProject} can make a supported slice or transformation
-    available with a stable source identity.
+  \item \textbf{Search before a join:} A base \texttt{BioseqScan} can search
+    a target against a constant query. This is the most straightforward operation, but isn't possible for the described join.
+  \item \textbf{Search with an outer parameter:} Postgres can create a nested-loop plan that used \texttt{BioseqScan} inside. This was discussed in scan list~\ref{lst:bioseqscan-types} and causes the target to be loaded multiple times, which reduces performance heavily.
+  \item \textbf{Search at the join:} \texttt{BioseqBatchJoin} replaces the nested-loop plan and allows to keep the target index loaded only once, while iterating over queries. This is the most efficient plan for the described join.
 \end{itemize}
 
-These placements preserve the same rule: a hit's fields must come from the
-owner of its search. Ordinary join conditions still have to be evaluated at
-the level required by their inputs and SQL null semantics. The specialized
-join owner does not support every outer-join, security, or volatile-expression
-shape.
-
-\subsection{Two searches of the same stored sequence}
-
-The syntax has a cost. A helper takes a target expression, rather than an
-explicit hit-record argument. If both searches below used \texttt{t.seq},
-the helper would not say which query supplied its score:
-
+Interesting thing happens if we want to make two searches for the same row. Consider the example below:
 \noindent\begin{minipage}{\linewidth}
 \begin{lstlisting}[style=bioseq-search-sql,caption={Two searches with one ambiguous target binding.}]
--- Unsupported: two ordinary searches share one target binding
+-- Unsupported: this will cause an error
 SELECT t.id, bioseq.dp_score(t.seq)
 FROM targets AS t
 WHERE mmsearch(t.seq, $1::bioseq.seq('dna5', 64))
@@ -61,12 +34,11 @@ WHERE mmsearch(t.seq, $1::bioseq.seq('dna5', 64))
 \end{lstlisting}
 \end{minipage}
 
-Independent hit outputs need distinct, unambiguous target bindings. A
-self-join gives the same stored row two such roles. Since \texttt{id} is a
-primary key, the equality below pairs each row with itself:
-
+In this case due to my choise of SQL API, we don't know which score \path{bioseq.dp_score(t.seq)} refers to as we have two potential results with different scores.
+To resolve this issue we can do a self-join on the same table:
 \noindent\begin{minipage}{\linewidth}
 \begin{lstlisting}[style=bioseq-search-sql,caption={Give each independent search its own target binding.}]
+-- Supported: this is valid use-case within BioseqDB
 SELECT a.id,
        bioseq.dp_score(a.seq) AS score_a,
        bioseq.dp_score(b.seq) AS score_b
@@ -77,9 +49,11 @@ WHERE mmsearch(a.seq, $1::bioseq.seq('dna5', 64))
 \end{lstlisting}
 \end{minipage}
 
-Let $a_i$ be hit $i$ of the search bound to alias \texttt{a}, and let $b_j$
+Now, let $a_i$ be hit $i$ of the search bound to alias \texttt{a}, and let $b_j$
 be hit $j$ of the search bound to alias \texttt{b}. Figure~\ref{fig:scan-alias-pairs}
-shows their combinations for one target row.
+shows their combinations for one target row. We can see that natural extension of the used syntax would be to generate cross-product of hits.
+It's worth noting that currently we are not able to express search-specific limits~\ref{sec:filter-placement} meaning that there's no optimisation for example if we wanted to have only best-hit per each sequence (only tuple with best score on both searches). In that case all tuples needs to be evaluated and user can construct a query manually
+to select the highest-scoring hits.
 
 \begin{figure}[htbp]
 \centering
