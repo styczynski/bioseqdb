@@ -4,6 +4,7 @@
  */
 module;
 #include <bioseq/pg_compat.h>
+#include <new>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -23,6 +24,8 @@ extern "C" {
 
 export module bioseq.postgres.table:custom_scan_scan_runtime_execution_callbacks;
 
+export import :custom_scan_scan_runtime_execution_callbacks_contracts;
+
 import std;
 import bioseq.common.logging;
 import bioseq.instrumentation.summary_writer;
@@ -30,160 +33,20 @@ import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.support;
 import bioseq.postgres.table.alignment_execution;
 import bioseq.postgres.table.scan_state;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.storage.lazy_sequence;
+import bioseq.postgres.vectorization.types;
 
-import :access_method;
-import :custom_scan_batch_join_execution_resource_lifecycle;
-import :custom_scan_join_runtime_parameter_binding;
-import :custom_scan_join_runtime_tuple_production;
-import :custom_scan_oid_expression_support;
-import :custom_scan_runtime_support;
-import :custom_scan_scan_runtime_source_lifecycle;
-import :custom_scan_scan_runtime_symbol_count_materialization;
-import :custom_scan_scan_runtime_tuple_production;
-import :custom_scan_semantic_payload;
+import :access_method_contract;
+import :custom_scan_batch_join_execution_parent_tuple_contracts;
+import :custom_scan_join_runtime_parameter_binding_contracts;
+import :custom_scan_join_runtime_tuple_injection_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
+import :custom_scan_oid_expression_support_storage_pruning_contracts;
+import :custom_scan_scan_runtime_source_lifecycle_contracts;
+import :custom_scan_scan_runtime_state_contracts;
 
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Installs executor placeholders once and advances the base-scan state machine. */
-    TupleTableSlot* custom_exec_scan(scan_state* bioseq_scan_state,
-                                     ExecScanAccessMtd access_mtd,
-                                     ExecScanRecheckMtd recheck_mtd) {
-
-        // Testing custom exec scan
-        bioseq_log<logging_level::debug>("[bioseq] pg: CustomExecScan() entered");
-
-        ScanState* node = reinterpret_cast<ScanState*>(&bioseq_scan_state->custom_scan_state.ss);
-        PlanState ps = node->ps;
-        bioseq_scan_runtime& runtime = bioseq_runtime(bioseq_scan_state);
-
-        bioseq_log<logging_level::debug>("[bioseq] pg: CustomExecScan() reading plan targetlist");
-        auto targetlist = ps.plan->targetlist;
-        bioseq_log<logging_level::debug>("[bioseq] pg: CustomExecScan() targetlist_is_null={}",
-                                         targetlist == nullptr);
-        bioseq_log<logging_level::debug>(
-            "[bioseq] pg: CustomExecScan() targetlist iteration complete");
-
-        if (runtime.placeholder_consts.dp_score_node == nullptr) {
-            bioseq_log<logging_level::debug>(
-                "[bioseq] pg: CustomExecScan() allocating placeholder const nodes");
-
-            /* INT4: byval, len=4, no collation. Used for the int32_t match_result
-             * fields (dp_score, mapq, chain_score, dp_max_score, seed_count,
-             * secondary_chain_score). */
-            const auto int_placeholder = []() {
-                return makeConst(INT4OID,
-                                 -1,
-                                 InvalidOid,
-                                 4,
-                                 static_cast<Datum>(static_cast<int32_t>(0)),
-                                 /*constisnull=*/true,
-                                 /*constbyval=*/true);
-            };
-            /* INT8: byval on LP64 (pg_type.typbyval for bigint is 't'), len=8.
-             * Used for the eight sequence_size_t (uint64) coordinate/length
-             * fields (query_len … block_length) so positions in sequences longer
-             * than INT32_MAX are not truncated. Matches the SQL
-             * DDL where those eight projections RETURN BIGINT. */
-            const auto bigint_placeholder = []() {
-                return makeConst(
-                    INT8OID,
-                    -1,
-                    InvalidOid,
-                    8,
-                    bioseq::postgres::support::pg_datum::from(static_cast<std::int64_t>(0)).raw(),
-                    /*constisnull=*/true,
-                    /*constbyval=*/true);
-            };
-            /* BOOL: byval, len=1, no collation. */
-            const auto bool_placeholder = []() {
-                return makeConst(BOOLOID,
-                                 -1,
-                                 InvalidOid,
-                                 1,
-                                 bioseq::postgres::support::pg_datum::from(false).raw(),
-                                 /*constisnull=*/true,
-                                 /*constbyval=*/true);
-            };
-            /* FLOAT4: byval, len=4, no collation. */
-            const auto float_placeholder = []() {
-                return makeConst(FLOAT4OID,
-                                 -1,
-                                 InvalidOid,
-                                 4,
-                                 bioseq::postgres::support::pg_datum::from(0.0F).raw(),
-                                 /*constisnull=*/true,
-                                 /*constbyval=*/true);
-            };
-            /* TEXT: byref, len=-1 (varlena), default collation. */
-            const auto text_placeholder = []() {
-                return makeConst(TEXTOID,
-                                 -1,
-                                 DEFAULT_COLLATION_OID,
-                                 -1,
-                                 bioseq::postgres::support::pg_datum::from_pointer(nullptr).raw(),
-                                 /*constisnull=*/true,
-                                 /*constbyval=*/false);
-            };
-
-            runtime.placeholder_consts.symbol_count_sites.clear();
-            runtime.placeholder_consts.dp_score_node = int_placeholder();
-            runtime.placeholder_consts.query_len_node = bigint_placeholder();
-            runtime.placeholder_consts.query_start_node = bigint_placeholder();
-            runtime.placeholder_consts.query_end_node = bigint_placeholder();
-            runtime.placeholder_consts.target_len_node = bigint_placeholder();
-            runtime.placeholder_consts.target_start_node = bigint_placeholder();
-            runtime.placeholder_consts.target_end_node = bigint_placeholder();
-            runtime.placeholder_consts.num_matches_node = bigint_placeholder();
-            runtime.placeholder_consts.block_length_node = bigint_placeholder();
-            runtime.placeholder_consts.edit_distance_node = bigint_placeholder();
-            runtime.placeholder_consts.mapq_node = int_placeholder();
-            runtime.placeholder_consts.chain_score_node = int_placeholder();
-            runtime.placeholder_consts.dp_max_score_node = int_placeholder();
-            runtime.placeholder_consts.seed_count_node = int_placeholder();
-            runtime.placeholder_consts.secondary_chain_score_node = int_placeholder();
-            runtime.placeholder_consts.is_reverse_node = bool_placeholder();
-            runtime.placeholder_consts.is_primary_node = bool_placeholder();
-            runtime.placeholder_consts.has_cigar_node = bool_placeholder();
-            runtime.placeholder_consts.divergence_node = float_placeholder();
-            runtime.placeholder_consts.cigar_node = text_placeholder();
-
-            /*
-             * Reset only the slot buffer; keep the mmsearch_context that
-             * BeginCustomScan configured earlier for this scan.
-             */
-            runtime.buffer.clear_slots();
-
-            const bioseq_stub_oids& oids_snapshot = get_cached_stub_oids();
-            var_injector_context injector_ctx;
-            injector_ctx.consts = &runtime.placeholder_consts;
-            injector_ctx.oids = &oids_snapshot;
-            injector_ctx.current_relation =
-                bioseq_scan_state->custom_scan_state.ss.ss_currentRelation;
-            injector_ctx.match_sequence_varno = runtime.match_sequence_varno;
-            injector_ctx.match_sequence_attno = runtime.match_sequence_attno;
-            injector_ctx.match_target_recipe = runtime.match_target_recipe;
-            injector_ctx.match_target_lineage = runtime.match_target_lineage;
-            injector_ctx.match_helper_sites = runtime.match_helper_sites;
-            injector_ctx.stable_match_id = runtime.stable_match_id;
-
-            runtime.newtargetlist = reinterpret_cast<List*>(
-                var_injector(reinterpret_cast<Node*>(targetlist), &injector_ctx));
-            derive_mmsearch_source_lifetime_roles(
-                runtime,
-                ps.plan,
-                bioseq_scan_state->custom_scan_state.ss.ss_ScanTupleSlot->tts_tupleDescriptor);
-        }
-
-        bioseq_log<logging_level::debug>(
-            "[bioseq] pg: CustomExecScan() dispatching to Inner_CustomExecScan");
-
-        auto tuple_slot = inner_custom_exec_scan(bioseq_scan_state, access_mtd, recheck_mtd);
-        return tuple_slot;
-    }
-
     /**
      * @brief Opens the table-AM scan lazily and fetches its next scalar or vector slot.
      * @return A populated scan slot, or null when the table scan is exhausted.
@@ -297,67 +160,6 @@ export {
         return true;
     }
 
-    /** @brief Executes one base-scan step and translates C++ failures to PostgreSQL errors. */
-    TupleTableSlot* bioseq_column_scan_exec_custom_scan(CustomScanState* node) {
-        TupleTableSlot* result = nullptr;
-        ErrorData* exact_error = nullptr;
-        bool cpp_error = false;
-        bool unknown_cpp_error = false;
-        std::array<char, 512> detail{"std::exception without detail"};
-        try {
-            scan_state* state = scan_state::from_custom_scan_state(node);
-            bioseq_scan_runtime& runtime = bioseq_runtime(state);
-            if (runtime.mmsearch_null_input && !runtime.match_evaluated_submission) {
-                /* A raw target with a NULL owned query is statement-empty.  An
-                 * evaluated target must still run once for every residual-admitted row
-                 * before strict NULL semantics discard the result, so only the raw
-                 * owner may bypass the table scan here. */
-                if (runtime.alignment_registration.is_registered()) {
-                    bioseq::postgres::table::alignment_execution::mark_alignment_pass_fully_drained(
-                        runtime.alignment_registration);
-                }
-                return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
-            }
-            bioseq::postgres::table::alignment_execution::ensure_alignment_node_registered(
-                runtime.alignment_registration);
-            result =
-                custom_exec_scan(state,
-                                 reinterpret_cast<ExecScanAccessMtd>(bioseq_column_scan_next),
-                                 reinterpret_cast<ExecScanRecheckMtd>(bioseq_column_scan_recheck));
-            return result;
-        } catch (bioseq::postgres::support::postgres_error& error) {
-            exact_error = error.release_error_data();
-        } catch (const std::exception& error) {
-            strlcpy(detail.data(),
-                    error.what() == nullptr ? "std::exception without detail" : error.what(),
-                    detail.size());
-            cpp_error = true;
-        } catch (...) {
-            unknown_cpp_error = true;
-        }
-
-        scan_state* state = scan_state::from_custom_scan_state(node);
-        if (state != nullptr && state->runtime_state != nullptr) {
-            auto* runtime = static_cast<bioseq_scan_runtime*>(state->runtime_state);
-            runtime->buffer.abandon_join_runtime_after_pg_error_noexcept();
-        }
-        if (exact_error != nullptr) {
-            ReThrowError(exact_error);
-        }
-        if (cpp_error) {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("BioseqColumnScan Exec raised a C++ exception"),
-                     errdetail_internal("%s", detail.data())));
-        }
-        if (unknown_cpp_error) {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("BioseqColumnScan Exec raised an unknown C++ exception")));
-        }
-        return result;
-    }
-
     /**
      * @brief Releases scan slots, providers, snapshots, and table-AM state in ownership order.
      *
@@ -424,16 +226,7 @@ export {
              * now release its wrappers and source-domain edges. */
             runtime_ptr->buffer.clear_slots();
 
-            if (runtime_ptr->lazy_source_provider != nullptr) {
-                bioseq::storage::close_pg_sequence_source_provider(
-                    runtime_ptr->lazy_source_provider, /*is_commit=*/true);
-                runtime_ptr->lazy_source_provider = nullptr;
-            }
-            runtime_ptr->buffer.clear_sequence_source_provider_binding();
-            if (runtime_ptr->lazy_trace_attachment != nullptr) {
-                release_slice_trace_attachment(runtime_ptr->lazy_trace_attachment);
-                runtime_ptr->lazy_trace_attachment = nullptr;
-            }
+            release_scan_runtime_lazy_resources(*runtime_ptr, /*is_commit=*/true);
             runtime_ptr->cleanup_done = true;
         }
 

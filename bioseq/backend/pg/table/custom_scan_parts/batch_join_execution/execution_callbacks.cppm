@@ -5,6 +5,16 @@
 module;
 // Anchor Highway in this global module fragment so target-specific definitions
 // imported through multiple module graphs share one translation-unit context.
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <limits>
+#include <memory>
+#include <new>
+#include <span>
+#include <string>
 #include <bioseq/pg_compat.h>
 #include <hwy/highway.h>
 
@@ -26,66 +36,34 @@ extern "C" {
 
 export module bioseq.postgres.table:custom_scan_batch_join_execution_execution_callbacks;
 
-import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
 import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
+import bioseq.pipeline.pipe;
+import bioseq.postgres.configuration.core;
+import bioseq.postgres.scheduler.dispatch_buffer.api;
+import bioseq.postgres.support;
+import bioseq.postgres.table.alignment_execution;
+import bioseq.postgres.table.scan_state;
+import bioseq.sequences.compact_sequence_typmod;
 
+import :api;
+import :custom_scan_join_ownership_helper_presence_contracts;
+import :custom_scan_join_ownership_cost_contracts;
+import :custom_scan_join_ownership_sequence_typmod_contract;
+import :custom_scan_match_analysis_match_owner_descriptor_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 import :custom_scan_execution_method_contracts;
-import :custom_scan_support;
-import :custom_scan_join_paths;
-import :custom_scan_scan_paths;
-import :custom_scan_plan_builders;
-import :custom_scan_match_ownership;
+import :custom_scan_execution_stats_contracts;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_planner_aligner_contracts;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_runtime_pipeline_contracts;
+import :custom_scan_batch_join_execution_runtime_state_contracts;
+import :custom_scan_scan_runtime_state_contracts;
+import :custom_scan_semantic_payload_query_sketch_route_contracts;
 
-import :custom_scan_join_runtime;
-
-import :custom_scan_batch_join_execution_resource_lifecycle;
-import :custom_scan_batch_join_execution_query_materialization;
-import :custom_scan_batch_join_execution_tuple_production;
+import :custom_scan_batch_join_execution_resource_lifecycle_contracts;
+import :custom_scan_batch_join_execution_query_materialization_contracts;
+import :custom_scan_batch_join_execution_tuple_production_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -378,75 +356,6 @@ export {
                 }
                 runtime->query_planner_rows = std::max(0.0, query_plan->plan_rows);
                 runtime->query_planner_width = std::max(0, query_plan->plan_width);
-                runtime->target_child = ExecInitNode(target_plan, estate, eflags);
-                runtime->target_child_initialized = true;
-                node->custom_ps = lappend(node->custom_ps, runtime->target_child);
-                runtime->query_child = ExecInitNode(query_plan, estate, eflags);
-                runtime->query_child_initialized = true;
-                node->custom_ps = lappend(node->custom_ps, runtime->query_child);
-                auto* target_custom = reinterpret_cast<CustomScan*>(target_plan);
-                if (!IsA(target_plan, CustomScan) ||
-                    target_custom->methods != bioseq_column_scan_scan_methods()) {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_INTERNAL_ERROR),
-                             errmsg("BioseqBatchJoin target provider is invalid")));
-                }
-                CustomScanState* target_custom_state = try_cast_pg_node<CustomScanState>(
-                    reinterpret_cast<Node*>(runtime->target_child));
-                if (target_custom_state == nullptr ||
-                    target_custom_state->methods != bioseq_column_scan_execute_methods() ||
-                    target_custom_state->ss.ps.plan != target_plan ||
-                    target_custom_state->ss.ss_currentRelation == nullptr ||
-                    RelationGetRelid(target_custom_state->ss.ss_currentRelation) !=
-                        runtime->target_relation_oid) {
-                    ereport(
-                        ERROR,
-                        (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("BioseqBatchJoin initialized target provider state is invalid")));
-                }
-                scan_state* target_bioseq_state =
-                    scan_state::from_custom_scan_state(target_custom_state);
-                bioseq_scan_runtime& target_scan_runtime = bioseq_runtime(target_bioseq_state);
-                Snapshot target_snapshot = target_bioseq_state->snapshot;
-                if (target_snapshot == nullptr || !IsMVCCSnapshot(target_snapshot) ||
-                    target_snapshot->regd_count == 0) {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                             errmsg("BioseqBatchJoin target provider snapshot is not registered "
-                                    "MVCC state")));
-                }
-                RangeTblEntry* target_rte = exec_rt_fetch(target_custom->scan.scanrelid, estate);
-                if (target_rte == nullptr || target_rte->rtekind != RTE_RELATION ||
-                    target_rte->relid != runtime->target_relation_oid) {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_INTERNAL_ERROR),
-                             errmsg("BioseqBatchJoin target provider relation is invalid")));
-                }
-                List* locator_tag = nullptr;
-                for (Node* raw_tag : postgres_list<Node>(target_custom->custom_private)) {
-                    if (raw_tag == nullptr || !IsA(raw_tag, List))
-                        continue;
-                    List* candidate = reinterpret_cast<List*>(raw_tag);
-                    if (list_length(candidate) != 4 ||
-                        !IsA(reinterpret_cast<Node*>(linitial(candidate)), Integer) ||
-                        intVal(linitial(candidate)) != k_bioseq_locator_passthrough_magic)
-                        continue;
-                    if (locator_tag != nullptr) {
-                        ereport(ERROR,
-                                (errcode(ERRCODE_INTERNAL_ERROR),
-                                 errmsg("BioseqBatchJoin target has duplicate locator ownership")));
-                    }
-                    locator_tag = candidate;
-                }
-                if (locator_tag == nullptr || list_length(locator_tag) != 4 ||
-                    intVal(list_nth(locator_tag, 0)) != k_bioseq_locator_passthrough_magic ||
-                    intVal(list_nth(locator_tag, 1)) != k_bioseq_batch_join_plan_version ||
-                    intVal(list_nth(locator_tag, 2)) != token ||
-                    intVal(list_nth(locator_tag, 3)) != runtime->target_slot_rowno_resno) {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_INTERNAL_ERROR),
-                             errmsg("BioseqBatchJoin target locator token mismatch")));
-                }
                 /* Validate against the post-setrefs Plan targetlists.  They are stable
                  * planner ABI; ps_ResultTupleSlot is not, because projection-free and
                  * pass-through PlanStates may return a scan/child slot instead.  The
@@ -560,23 +469,27 @@ export {
                 runtime->query_storage_unit_byte_width =
                     query_sequence_type_params.storage_unit_byte_width;
 
-                bioseq::simd::minimap2_parameters params = build_params_from_gucs();
-                bioseq::indexing::index_read_requirement requirement =
-                    bioseq::indexing::index_read_requirement::allow;
-                (void)apply_aligner_options_override(
-                    mmsearch, params, requirement, get_cached_stub_oids());
-                finalize_simd_chaining_policy(params);
+                /* Bind the validated plan types and projected outputs before any
+                 * child initialization, then immediately freeze this request. */
+                bioseq::simd::minimap2_parameters params = std::move(prevalidated_params);
+                const auto requirement = decoded_requirement;
                 params.alphabet_code = runtime->alphabet_code;
-                if (requirement != runtime->index_read_requirement) {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_DATA_CORRUPTED),
-                             errmsg("BioseqBatchJoin requirement changed after prevalidation")));
-                }
                 /* Plan setrefs has deliberately replaced every match-result helper
                  * with an INDEX_VAR into the combined scan tuple.  Derive expensive
                  * stage requirements from the validated private placeholder kinds,
                  * not by re-walking an executor targetlist in which helpers no longer
                  * exist. */
+                const int plan_node_id = cscan->scan.plan.plan_node_id;
+                if (plan_node_id < 0) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INTERNAL_ERROR),
+                             errmsg("BioseqBatchJoin plan node id is invalid")));
+                }
+                runtime->alignment_registration =
+                    bioseq::postgres::table::alignment_execution::bind_alignment_node(
+                        estate, static_cast<std::uint32_t>(plan_node_id));
+                params.downstream_active_wall = bioseq::postgres::table::alignment_execution::
+                        borrow_downstream_active_wall_tracker(runtime->alignment_registration);
                 params.do_cigar = false;
                 params.compute_divergence = false;
                 params.compute_mapq = false;
@@ -591,6 +504,80 @@ export {
                     params.compute_divergence =
                         params.compute_divergence || site.funcid == batch_oids.divergence_oid;
                     params.compute_mapq = params.compute_mapq || site.funcid == batch_oids.mapq_oid;
+                }
+
+                runtime->execution_plan =
+                    bioseq::scheduler::make_postgres_statement_execution_plan(std::move(params));
+                [[maybe_unused]] const auto& frozen_params = runtime->execution_plan->frozen_parameters;
+
+                runtime->target_child = ExecInitNode(target_plan, estate, eflags);
+                runtime->target_child_initialized = true;
+                node->custom_ps = lappend(node->custom_ps, runtime->target_child);
+                runtime->query_child = ExecInitNode(query_plan, estate, eflags);
+                runtime->query_child_initialized = true;
+                node->custom_ps = lappend(node->custom_ps, runtime->query_child);
+                auto* target_custom = reinterpret_cast<CustomScan*>(target_plan);
+                if (!IsA(target_plan, CustomScan) ||
+                    target_custom->methods != bioseq_column_scan_scan_methods()) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INTERNAL_ERROR),
+                             errmsg("BioseqBatchJoin target provider is invalid")));
+                }
+                CustomScanState* target_custom_state = try_cast_pg_node<CustomScanState>(
+                    reinterpret_cast<Node*>(runtime->target_child));
+                if (target_custom_state == nullptr ||
+                    target_custom_state->methods != bioseq_column_scan_execute_methods() ||
+                    target_custom_state->ss.ps.plan != target_plan ||
+                    target_custom_state->ss.ss_currentRelation == nullptr ||
+                    RelationGetRelid(target_custom_state->ss.ss_currentRelation) !=
+                        runtime->target_relation_oid) {
+                    ereport(
+                        ERROR,
+                        (errcode(ERRCODE_INTERNAL_ERROR),
+                         errmsg("BioseqBatchJoin initialized target provider state is invalid")));
+                }
+                scan_state* target_bioseq_state =
+                    scan_state::from_custom_scan_state(target_custom_state);
+                bioseq_scan_runtime& target_scan_runtime = bioseq_runtime(target_bioseq_state);
+                Snapshot target_snapshot = target_bioseq_state->snapshot;
+                if (target_snapshot == nullptr || !IsMVCCSnapshot(target_snapshot) ||
+                    target_snapshot->regd_count == 0) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                             errmsg("BioseqBatchJoin target provider snapshot is not registered "
+                                    "MVCC state")));
+                }
+                RangeTblEntry* target_rte = exec_rt_fetch(target_custom->scan.scanrelid, estate);
+                if (target_rte == nullptr || target_rte->rtekind != RTE_RELATION ||
+                    target_rte->relid != runtime->target_relation_oid) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INTERNAL_ERROR),
+                             errmsg("BioseqBatchJoin target provider relation is invalid")));
+                }
+                List* locator_tag = nullptr;
+                for (Node* raw_tag : postgres_list<Node>(target_custom->custom_private)) {
+                    if (raw_tag == nullptr || !IsA(raw_tag, List))
+                        continue;
+                    List* candidate = reinterpret_cast<List*>(raw_tag);
+                    if (list_length(candidate) != 4 ||
+                        !IsA(reinterpret_cast<Node*>(linitial(candidate)), Integer) ||
+                        intVal(linitial(candidate)) != k_bioseq_locator_passthrough_magic)
+                        continue;
+                    if (locator_tag != nullptr) {
+                        ereport(ERROR,
+                                (errcode(ERRCODE_INTERNAL_ERROR),
+                                 errmsg("BioseqBatchJoin target has duplicate locator ownership")));
+                    }
+                    locator_tag = candidate;
+                }
+                if (locator_tag == nullptr || list_length(locator_tag) != 4 ||
+                    intVal(list_nth(locator_tag, 0)) != k_bioseq_locator_passthrough_magic ||
+                    intVal(list_nth(locator_tag, 1)) != k_bioseq_batch_join_plan_version ||
+                    intVal(list_nth(locator_tag, 2)) != token ||
+                    intVal(list_nth(locator_tag, 3)) != runtime->target_slot_rowno_resno) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_INTERNAL_ERROR),
+                             errmsg("BioseqBatchJoin target locator token mismatch")));
                 }
 
                 /* Reuse the target provider's executor-owned Relation. Its lock lives
@@ -630,11 +617,10 @@ export {
                  * snapshot. batch_join_release_executor_resources_checked drains the
                  * buffer (and its fragment readers) before ExecEndNode(target_child)
                  * releases the child's registration. */
-                runtime->aligner_params = params;
-                runtime->aligner_params_captured = true;
                 runtime->pipeline_desc = describe_pipeline_for_pg_alphabet(
-                    params, runtime->alphabet_code, query_sketch_plan_route_for(requirement));
-                runtime->buffer.configure_params(params,
+                    runtime->execution_plan,
+                    runtime->alphabet_code, query_sketch_plan_route_for(requirement));
+                runtime->buffer.configure_params(runtime->execution_plan,
                                                  requirement,
                                                  bioseq::settings::index::sequence_read::enabled,
                                                  runtime->target_relation_oid,
@@ -660,19 +646,24 @@ export {
 
                 runtime->query_tuple_context = AllocSetContextCreate(
                     estate->es_query_cxt, "BioseqBatchJoin query tuples", ALLOCSET_DEFAULT_SIZES);
-                const int plan_node_id = cscan->scan.plan.plan_node_id;
-                if (plan_node_id < 0) {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_INTERNAL_ERROR),
-                             errmsg("BioseqBatchJoin plan node id is invalid")));
-                }
-                runtime->alignment_registration =
-                    bioseq::postgres::table::alignment_execution::bind_alignment_node(
-                        estate, static_cast<std::uint32_t>(plan_node_id));
                 runtime->buffer.bind_persisted_gpu_operation_stats_sink(
                     *bioseq::postgres::table::alignment_execution::
                         borrow_persisted_gpu_operation_accumulator(
                             runtime->alignment_registration));
+                runtime->buffer.bind_downstream_active_wall_tracker(
+                    *bioseq::postgres::table::alignment_execution::
+                        borrow_downstream_active_wall_tracker(
+                            runtime->alignment_registration));
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                if (frozen_params.downstream_active_wall == nullptr ||
+                    !frozen_params.downstream_active_wall
+                         ->begin_benchmark_e2e_statement_plan_proof(
+                             runtime->execution_plan,
+                             bioseq::simd::benchmark_e2e_statement_plan_shape::batch_join)) {
+                    throw std::logic_error{
+                        "BioseqBatchJoin admission changed its statement-plan control block"};
+                }
+#endif
             } catch (bioseq::postgres::support::postgres_error& error) {
                 converted_pg_error = error.release_error_data();
             } catch (...) {
@@ -1037,13 +1028,17 @@ export {
         ExplainPropertyBool("Bioseq Requirement Executable", true, es);
         ExplainPropertyText(
             "Bioseq CPU Prepared Target",
-            runtime->index_read_requirement ==
+            runtime->execution_plan && runtime->execution_plan->uses_vulkan_seed()
+                ? "disabled: selected Vulkan seed route owns target preparation"
+            : runtime->index_read_requirement ==
                     bioseq::indexing::index_read_requirement::require_absent
-                ? "disabled: ExactSimd target-sketch backend unavailable"
+                ? "native query sketches retained; one transient target across query waves"
             : runtime->index_read_requirement ==
                     bioseq::indexing::index_read_requirement::require_compatible_persisted
-                ? "grouped-SoA direct reader retained across query waves"
-                : "persisted-only query-hash union; one target index per parameter group",
+                ? "compatible persisted target reader retained across query waves"
+            : !runtime->buffer.reads_sequence_index()
+                ? "disabled: effective sequence-index reads are off; per-pair target route"
+                : "prepared query owner; one target index per parameter group",
             es);
         ExplainPropertyFloat(
             "Bioseq Query Planner Rows", nullptr, runtime->query_planner_rows, 0, es);
@@ -1076,7 +1071,7 @@ export {
         explain_pipeline_execution_stats(
             runtime->aggregate_stats,
             es,
-            runtime->aligner_params_captured ? &runtime->aligner_params : nullptr,
+            runtime->execution_plan ? &runtime->execution_plan->frozen_parameters : nullptr,
             runtime->pipeline_desc.has_value() ? &*runtime->pipeline_desc : nullptr,
             query_sketch_plan_route_for(runtime->index_read_requirement),
             /*highway_dispatch_already_rendered=*/false);

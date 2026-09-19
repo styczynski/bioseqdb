@@ -42,6 +42,7 @@ module;
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -85,6 +86,9 @@ import bioseq.instrumentation;
 // ---------------------------------------------------------------------------
 
 export namespace bioseq::bench::framework {
+
+/// Source-owned benchmark wire revision, also read by the Python consumer.
+inline constexpr std::uint64_t e2e_raw_payload_schema_version = 12;
 
 /**
  * @brief Variant-like wrapper for JSON-derived configuration values.
@@ -259,7 +263,11 @@ struct run_constraints {
 struct erased_benchmark {
     std::string title;
     std::string benchmark_key;
+    /// Stable report/provenance identity for the configuration.
     std::string config_path;
+    /// File-open path; equal to config_path unless a validated launcher
+    /// supplies a separate absolute read path.
+    std::string config_open_path;
     bool raw_samples_enabled = false;
     /// Owns the typed lambdas + iteration loop. The first call prepares and
     /// enqueues this benchmark without blocking a oneTBB worker; the returned
@@ -324,8 +332,9 @@ namespace detail {
  *                          `benchmarks.<benchmark_key>` entry. One config file may
  *                          hold multiple benchmark blocks; the key disambiguates
  *                          which block this `create_benchmark` call describes.
- * @param config_path       Path to the bench configuration JSON (validated against
- *                          a built-in JSON schema before use).
+ * @param config_path       Stable identity reported for the bench configuration
+ *                          JSON (validated against a built-in JSON schema before
+ *                          use).
  * @param on_estimate_resources  Returns a `run_constraints` describing the memory
  *                          this batch will need. Called at most once per
  *                          `(test_case, group)` batch, before `on_input`. The
@@ -369,7 +378,88 @@ namespace detail {
  *                          single-thread serialisation across cleanups —
  *                          but it is single-threaded *within* one batch.
  *                          **Must not throw**, same contract as `on_input`.
+ * @param config_open_path  Optional path used only to open/read configuration
+ *                          bytes. Empty preserves the historical behavior of
+ *                          reading config_path directly; config_path remains
+ *                          the report/provenance identity in either case.
  */
+template<typename p_output>
+struct repeat_output_reference {
+    std::string_view algorithm_name{};
+    const parameter_map* params = nullptr;
+    p_output* output = nullptr;
+};
+
+/**
+ * @brief Opt-in logical-repeat finalization for paired benchmark evidence.
+ *
+ * The empty default preserves the historical immediate-commit path.  When
+ * `enabled(input)` is true, an interleaved repeat is measured completely,
+ * `finalize_repeat` receives every mutable output before any evaluation/raw
+ * append, and `published_wall_clock_ns` may select a previously measured
+ * algorithm-only duration inside the framework envelope.  The framework
+ * retains the unmodified envelope in `outer_e2e_ns` and rejects an override
+ * which exceeds it.
+ */
+template<typename p_input, typename p_output>
+struct repeat_finalization_callbacks {
+    std::function<bool(const p_input&)> enabled{};
+    std::function<std::uint64_t(
+        std::string_view algorithm_name,
+        const parameter_map& params,
+        const p_input& input,
+        const p_output& output)> published_wall_clock_ns{};
+    std::function<void(
+        const p_input& input,
+        std::size_t repeat,
+        std::span<repeat_output_reference<p_output>> outputs)>
+        finalize_repeat{};
+};
+
+/// Exact framework-owned clock envelope for one measured iteration body.
+struct iteration_measurement_window {
+    std::int64_t  begin_ns = 0;
+    std::int64_t  end_ns = 0;
+    std::uint64_t elapsed_ns = 0;
+};
+
+/**
+ * @brief Opt-in per-iteration preparation and post-measurement mutation.
+ *
+ * `enabled` is evaluated outside the measurement window.  When it returns
+ * true, `before_iteration` constructs iteration-local preparation on the
+ * worker stack, `measured_iteration` alone occupies the framework clock and
+ * counter/profiler envelope, and `after_iteration` runs after that envelope
+ * but before evaluation or raw-sample publication.  A false result preserves
+ * the benchmark's ordinary `on_run` path.
+ */
+template<typename p_input, typename p_preparation, typename p_output>
+struct iteration_boundary_callbacks {
+    using preparation_type = p_preparation;
+
+    std::function<bool(
+        std::string_view algorithm_name,
+        const parameter_map& params,
+        const p_input& input)> enabled{};
+    std::function<p_preparation(
+        std::string_view algorithm_name,
+        const parameter_map& params,
+        const p_input& input,
+        std::size_t repeat)> before_iteration{};
+    std::function<p_output(
+        std::string_view algorithm_name,
+        const parameter_map& params,
+        const p_input& input,
+        p_preparation& preparation)> measured_iteration{};
+    std::function<void(
+        std::string_view algorithm_name,
+        const parameter_map& params,
+        const p_input& input,
+        p_preparation& preparation,
+        p_output& output,
+        const iteration_measurement_window& window)> after_iteration{};
+};
+
 template<typename p_input, typename p_output>
 [[nodiscard]] erased_benchmark create_benchmark(
     std::string title,
@@ -397,7 +487,44 @@ template<typename p_input, typename p_output>
                               const parameter_map& params,
                               const p_input& input,
                               const p_output& output)>
-        serialize_raw_sample_payload = {});
+        serialize_raw_sample_payload = {},
+    std::string config_open_path = {},
+    repeat_finalization_callbacks<p_input, p_output>
+        repeat_finalization = {});
+
+template<typename p_input, typename p_preparation, typename p_output>
+[[nodiscard]] erased_benchmark create_benchmark_with_iteration_boundaries(
+    std::string title,
+    std::string benchmark_key,
+    std::string config_path,
+    std::function<run_constraints(std::string_view data_dir,
+                                  std::string_view test_case_name,
+                                  simdjson::dom::element test_case_data)> on_estimate_resources,
+    std::function<p_input(std::string_view data_dir,
+                        std::string_view test_case_name,
+                        simdjson::dom::element test_case_data,
+                        const run_constraints& constraints)> on_input,
+    std::function<p_output(std::string_view algorithm_name,
+                         const parameter_map& params,
+                         const p_input& input)> on_run,
+    std::function<std::map<std::string, double>(std::string_view algorithm_name,
+                                                const parameter_map& params,
+                                                const p_input& input,
+                                                const p_output& output)> on_evaluate,
+    iteration_boundary_callbacks<p_input, p_preparation, p_output>
+        iteration_boundaries,
+    std::function<void(std::string_view data_dir,
+                       std::string_view test_case_name,
+                       simdjson::dom::element test_case_data,
+                       const p_input& input)> on_cleanup = {},
+    std::function<std::string(std::string_view algorithm_name,
+                              const parameter_map& params,
+                              const p_input& input,
+                              const p_output& output)>
+        serialize_raw_sample_payload = {},
+    std::string config_open_path = {},
+    repeat_finalization_callbacks<p_input, p_output>
+        repeat_finalization = {});
 
 /**
  * @brief Run all benchmarks. Returns 0 on success, 1 if any rule violated
@@ -765,6 +892,11 @@ struct metric_specification {
     /// loop_max_per_iter_ns) — semantic_validate_config rejects those if
     /// `region` is empty.
     std::string  region{};
+    /// Optional exact execution-row applicability for evaluation metrics.
+    /// Empty preserves the legacy report-global emission check. A non-empty
+    /// list opts into fail-closed per-accepted-iteration validation for the
+    /// named algorithm rows without changing ordinary benchmark semantics.
+    std::vector<std::string> applicable_algorithms{};
     std::vector<benchmark_rule> rules{};
 };
 
@@ -982,6 +1114,16 @@ struct paired_rule_evidence {
 using named_region_iteration_sample_counts =
     std::map<std::string, std::map<std::string, std::size_t>>;
 
+/// Completion evidence retained independently of numeric sample vectors.
+/// E2E raw records can be diagnostic/history-eligible while their rejected
+/// timing is deliberately absent; this per-repeat evidence lets validation
+/// distinguish that disposition from an accidentally missing accepted sample.
+struct iteration_completion_evidence {
+    bool completed = false;
+    bool framework_timing_eligible = true;
+    std::set<std::string> emitted_evaluation_metrics{};
+};
+
 struct measurement_cell {
     const test_case_specification*  test_case = nullptr;
     const execution_tuple* tuple = nullptr;
@@ -1001,8 +1143,9 @@ struct measurement_cell {
     std::size_t          tuple_index = 0;
 
     /// region_name -> metric_name -> sample values. "all_regions" is a
-    /// synthetic bucket holding the iteration-level wall_clock_ns and every
-    /// counter / evaluation metric. Per-region buckets only appear when
+    /// synthetic bucket holding every counter / evaluation metric and the
+    /// iteration-level wall_clock_ns for timing-eligible iterations.
+    /// Per-region buckets only appear when
     /// `benchmark_configuration::by_regions == true`.
     std::map<std::string, std::map<std::string, std::vector<double>>> samples{};
     /// Named instrumentation buckets may contain more than one descriptor
@@ -1025,6 +1168,9 @@ struct measurement_cell {
     /// Lossless benchmark-specific JSON objects, one per completed
     /// iteration. Written only by this cell's single batch worker.
     std::vector<std::string> raw_samples{};
+    /// Indexed by logical repeat. Populated only after any durable raw append
+    /// succeeds, in the same commit step as the aggregate sample vectors.
+    std::vector<iteration_completion_evidence> iteration_evidence{};
 
     measurement_cell() = default;
     measurement_cell(const measurement_cell&) = delete;
@@ -2611,12 +2757,18 @@ inline constexpr std::string_view k_bench_config_schema = R"json({
     },
     "metric_spec_evaluation": {
       "title": "EvaluationMetric",
-      "description": "User-computed metric. The metric key MUST appear in the std::map<std::string,double> returned by on_evaluate — the framework reads it from there each iteration. Metrics declared but never emitted by the handler raise a post-run error.",
+      "description": "User-computed metric. The metric key MUST appear in the std::map<std::string,double> returned by on_evaluate — the framework reads it from there each iteration. Metrics declared but never emitted by the handler raise a post-run error. applicable_algorithms opts into exact per-accepted-iteration coverage for named matrix rows; omission preserves the legacy report-global contract.",
       "type": "object",
       "required": ["type"],
       "additionalProperties": false,
       "properties": {
         "type": { "type": "string", "const": "evaluation" },
+        "applicable_algorithms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
         "rules": { "$ref": "#/definitions/rule_array" }
       },
       "examples": [
@@ -3157,7 +3309,7 @@ inline constexpr std::string_view k_bench_report_schema = R"json({
     "raw_sample": {
       "title": "RawSample",
       "type": "object",
-      "required": ["schema", "benchmark", "test_case", "algorithm", "group_index", "group_count", "tuple_index", "repeat", "params", "outer_e2e_ns", "raw_record_id", "schedule", "record_checksum"],
+      "required": ["schema", "benchmark", "test_case", "algorithm", "group_index", "group_count", "tuple_index", "repeat", "params", "outer_e2e_ns", "published_wall_clock_ns", "raw_record_id", "schedule", "record_checksum"],
       "additionalProperties": true,
       "properties": {
         "schema": { "type": "integer", "const": 1 },
@@ -3169,7 +3321,16 @@ inline constexpr std::string_view k_bench_report_schema = R"json({
         "tuple_index": { "type": "integer", "minimum": 0 },
         "repeat": { "type": "integer", "minimum": 0 },
         "params": { "$ref": "#/definitions/param_value_object" },
-        "outer_e2e_ns": { "type": "integer", "minimum": 0 },
+        "outer_e2e_ns": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Framework outer duration for timing-eligible records. Current E2E records with an exact rejected tuple_status carry null and are excluded from every framework timing aggregate."
+        },
+        "published_wall_clock_ns": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Duration admitted to the wall_clock_ns metric. Equal to outer_e2e_ns by default; an opt-in logical-repeat finalizer may select a previously measured algorithm-only sub-envelope, never a value greater than outer_e2e_ns."
+        },
         "raw_record_id": { "type": "integer", "minimum": 0 },
         "schedule": { "$ref": "#/definitions/raw_schedule" },
         "record_checksum": { "type": "string", "pattern": "^[0-9a-f]{16}$" }
@@ -3271,7 +3432,7 @@ inline constexpr std::string_view k_bench_report_schema = R"json({
     },
     "test_case_block": {
       "title": "TestCaseBlock",
-      "description": "Per-test-case sample buckets. The 'all_regions' key always exists and holds the iteration-level wall-clock plus every counter and evaluation metric. When 'by_regions' is true on the benchmark, additional keys appear — one per visited bioseq::instrumentation region — each carrying that region's per-iteration wall_clock_ns.",
+      "description": "Per-test-case sample buckets. The 'all_regions' key always exists and holds every counter and evaluation metric plus iteration-level wall-clock for timing-eligible iterations. Current rejected E2E iterations contribute no framework timing sample. When 'by_regions' is true on the benchmark, additional keys appear — one per visited bioseq::instrumentation region — each carrying timing-eligible per-iteration wall_clock_ns.",
       "type": "object",
       "minProperties": 1,
       "additionalProperties": { "$ref": "#/definitions/region_block" }
@@ -4128,6 +4289,21 @@ parse_compare_and_tolerance(
         if (inner_obj["region"].get(region_filter_text) == simdjson::SUCCESS) {
             metric.region = std::string{region_filter_text};
         }
+        simdjson::dom::array applicable_algorithms;
+        if (inner_obj["applicable_algorithms"].get(applicable_algorithms)
+                == simdjson::SUCCESS) {
+            for (auto algorithm_value : applicable_algorithms) {
+                std::string_view algorithm;
+                if (algorithm_value.get(algorithm) != simdjson::SUCCESS) {
+                    bioseq_log<logging_level::error>(
+                        "[bench_framework] metrics.{}.applicable_algorithms[*] is not a string",
+                        field.key);
+                    parse_ok = false;
+                    continue;
+                }
+                metric.applicable_algorithms.emplace_back(algorithm);
+            }
+        }
 
         simdjson::dom::array rules_array;
         if (inner_obj["rules"].get(rules_array) == simdjson::SUCCESS) {
@@ -4416,13 +4592,14 @@ struct config_parse_outcome {
 
 [[nodiscard]] inline config_parse_outcome parse_config_file(
     const std::string& config_path,
+    const std::string& config_open_path,
     const std::string& benchmark_key,
     benchmark_execution_state& state)
 {
     config_parse_outcome outcome;
     state.config.config_path   = config_path;
     state.config.benchmark_key = benchmark_key;
-    state.config_body = slurp_file(config_path);
+    state.config_body = slurp_file(config_open_path);
     if (state.config_body.empty()) {
         outcome.ok = false;
         outcome.diagnostics.push_back({
@@ -4939,6 +5116,32 @@ struct config_parse_outcome {
     };
 
     for (const auto& metric : config.metrics) {
+        if (!metric.applicable_algorithms.empty()) {
+            if (metric.kind != metric_kind::evaluation) {
+                error("metric_applicability_requires_evaluation",
+                      fmt::format("matrix.metrics.{}.applicable_algorithms",
+                                  metric.name),
+                      "per-row applicability is supported only for evaluation metrics");
+            }
+            std::set<std::string> seen_applicable_algorithms;
+            for (const auto& algorithm : metric.applicable_algorithms) {
+                if (!seen_applicable_algorithms.insert(algorithm).second) {
+                    error("duplicate_metric_applicable_algorithm",
+                          fmt::format("matrix.metrics.{}.applicable_algorithms",
+                                      metric.name),
+                          fmt::format("metric '{}' repeats applicable algorithm '{}'",
+                                      metric.name, algorithm));
+                }
+                if (!config.matrix_over.contains(algorithm)) {
+                    error("unknown_metric_applicable_algorithm",
+                          fmt::format("matrix.metrics.{}.applicable_algorithms",
+                                      metric.name),
+                          fmt::format("metric '{}' names algorithm '{}' outside this benchmark's matrix.over map",
+                                      metric.name, algorithm));
+                }
+            }
+        }
+
         // 4a. Builtin metric name + source compatibility. Counter and
         //     Evaluation metrics carry user-chosen names; Region / Loop /
         //     OuterClock metric keys must match a registry entry whose
@@ -5465,14 +5668,56 @@ struct config_parse_outcome {
     for (const auto& metric : state.config.metrics) {
 
         if (metric.kind == metric_kind::evaluation) {
-            if (!metric_was_emitted(metric.name)) {
+            if (metric.applicable_algorithms.empty()) {
+                if (!metric_was_emitted(metric.name)) {
+                    diagnostics.push_back({
+                        validation_diagnostic::diagnostic_severity::error,
+                        "missing_evaluation_metric",
+                        semantic_location(state,
+                            fmt::format("matrix.metrics.{}", metric.name)),
+                        fmt::format("metric '{}' is declared as 'type: evaluation' but the on_evaluate handler never returned this key for any iteration",
+                                    metric.name)
+                    });
+                }
+                continue;
+            }
+
+            for (const auto& cell_ptr : state.cells) {
+                if (std::find(metric.applicable_algorithms.begin(),
+                              metric.applicable_algorithms.end(),
+                              cell_ptr->tuple->algorithm_name)
+                        == metric.applicable_algorithms.end()) {
+                    continue;
+                }
+                std::size_t accepted_iterations = 0;
+                std::size_t emitted_for_accepted_iterations = 0;
+                for (const auto& completion : cell_ptr->iteration_evidence) {
+                    if (!completion.completed
+                        || !completion.framework_timing_eligible) {
+                        continue;
+                    }
+                    ++accepted_iterations;
+                    if (completion.emitted_evaluation_metrics.contains(
+                            metric.name)) {
+                        ++emitted_for_accepted_iterations;
+                    }
+                }
+                if (accepted_iterations == 0
+                    || emitted_for_accepted_iterations
+                        == accepted_iterations) {
+                    continue;
+                }
                 diagnostics.push_back({
                     validation_diagnostic::diagnostic_severity::error,
-                    "missing_evaluation_metric",
+                    "missing_evaluation_metric_for_accepted_cell",
                     semantic_location(state,
                         fmt::format("matrix.metrics.{}", metric.name)),
-                    fmt::format("metric '{}' is declared as 'type: evaluation' but the on_evaluate handler never returned this key for any iteration",
-                                metric.name)
+                    fmt::format("metric '{}' applies to accepted row '{}'/{} but on_evaluate emitted it for only {} of {} accepted iterations",
+                                metric.name,
+                                cell_ptr->tuple->algorithm_name,
+                                cell_ptr->test_case->name,
+                                emitted_for_accepted_iterations,
+                                accepted_iterations)
                 });
             }
             continue;
@@ -6110,8 +6355,8 @@ inline void combine_loop(
 }
 
 /// Write one iteration's measurements into the cell's metric arrays:
-/// - iteration-level outer `wall_clock_ns` always lands in
-///   `all_regions["wall_clock_ns"]`.
+/// - iteration-level outer `wall_clock_ns` lands in
+///   `all_regions["wall_clock_ns"]` only for timing-eligible iterations.
 /// - region/loop builtin metrics walk every visited descriptor, fold per
 ///   descriptor through the metric's combiner, then push the finalised
 ///   value into `all_regions[<metric_name>]`. When `by_regions: true`,
@@ -6122,6 +6367,8 @@ inline void combine_loop(
 /// against a unique `measurement_cell*`, so `samples` has a single writer.
 inline void append_iteration_samples(
     measurement_cell& cell,
+    std::size_t repeat,
+    bool framework_timing_eligible,
     bool by_regions,
     bool track_named_region_iteration_sample_counts,
     bioseq::instrumentation::profiler_state<profiler_configuration>& profiler_block,
@@ -6131,11 +6378,29 @@ inline void append_iteration_samples(
     const std::vector<std::int64_t>& counters_after,
     const std::map<std::string, double>& evaluation_metrics) noexcept
 {
+    if (cell.iteration_evidence.size() != cell.iterations) {
+        cell.iteration_evidence.resize(cell.iterations);
+    }
+    DEBUG_ASSERT(repeat < cell.iteration_evidence.size(),
+        "logical repeat must fit the measurement cell evidence vector");
+    if (repeat >= cell.iteration_evidence.size()) return;
+    auto& completion = cell.iteration_evidence[repeat];
+    DEBUG_ASSERT(!completion.completed,
+        "one measurement cell may complete each logical repeat only once");
+    completion.completed = true;
+    completion.framework_timing_eligible = framework_timing_eligible;
+    for (const auto& [metric_name, _value] : evaluation_metrics) {
+        completion.emitted_evaluation_metrics.insert(metric_name);
+    }
+
     auto& all_regions = cell.samples["all_regions"];
-    all_regions["wall_clock_ns"].push_back(iteration_wall_clock_ns);
+    if (framework_timing_eligible) {
+        all_regions["wall_clock_ns"].push_back(iteration_wall_clock_ns);
+    }
 
     named_region_iteration_sample_counts* iteration_named_sample_counts = nullptr;
-    if (track_named_region_iteration_sample_counts) {
+    if (track_named_region_iteration_sample_counts
+        && framework_timing_eligible) {
         cell.named_region_iteration_sample_counts.emplace_back();
         iteration_named_sample_counts =
             &cell.named_region_iteration_sample_counts.back();
@@ -6179,6 +6444,12 @@ inline void append_iteration_samples(
             }
             default: break;     // builtin region/loop metric — fall through.
         }
+
+        // E2E capability/correctness rejections remain visible through raw
+        // records and evaluation diagnostics, but they are not performance
+        // samples. Suppress every framework-derived region/loop number for
+        // those repeats. Ordinary benchmarks always pass true here.
+        if (!framework_timing_eligible) continue;
 
         const auto* entry = lookup_builtin_metric(metric.name);
         if (entry == nullptr) continue;     // already-flagged by semantic validation
@@ -10181,6 +10452,63 @@ private:
     return std::nullopt;
 }
 
+struct raw_timing_disposition {
+    bool e2e = false;
+    bool framework_timing_eligible = true;
+};
+
+/// Classify only the current E2E raw payload contract. Non-E2E payloads keep
+/// ordinary benchmark semantics. Once the E2E schema is claimed, malformed or
+/// contradictory acceptance evidence fails closed instead of defaulting to a
+/// numeric timing sample.
+[[nodiscard]] inline std::optional<raw_timing_disposition>
+classify_raw_timing_disposition(const nlohmann::json& record) noexcept {
+    const auto payload_schema = record.find("payload_schema");
+    if (payload_schema == record.end()
+        || !payload_schema->is_string()
+        || *payload_schema != "bioseq.e2e.raw-sample") {
+        return raw_timing_disposition{};
+    }
+    const auto payload_version = raw_json_u64(
+        record, "payload_schema_version");
+    const auto status = record.find("tuple_status");
+    if (!payload_version.has_value()
+        || (*payload_version != e2e_raw_payload_schema_version - 1u
+            && *payload_version != e2e_raw_payload_schema_version)
+        || status == record.end() || !status->is_object()) {
+        return std::nullopt;
+    }
+    const auto accepted = raw_json_u64(*status, "accepted");
+    const auto disposition = status->find("disposition");
+    if (!accepted.has_value() || *accepted > 1u
+        || disposition == status->end() || !disposition->is_string()) {
+        return std::nullopt;
+    }
+    constexpr std::array<std::string_view, 3> accepted_dispositions{
+        "accepted", "accepted_fallback", "accepted_behavior_difference",
+    };
+    constexpr std::array<std::string_view, 6> rejected_dispositions{
+        "rejected_setup", "rejected_sql", "invalid",
+        "rejected_attestation", "rejected_correctness",
+        "skipped_after_prior_attestation_rejection",
+    };
+    const std::string_view disposition_text =
+        disposition->get_ref<const std::string&>();
+    const auto contains = [disposition_text](const auto& values) noexcept {
+        return std::find(values.begin(), values.end(), disposition_text)
+            != values.end();
+    };
+    const bool eligible = *accepted == 1u;
+    if ((eligible && !contains(accepted_dispositions))
+        || (!eligible && !contains(rejected_dispositions))) {
+        return std::nullopt;
+    }
+    return raw_timing_disposition{
+        .e2e = true,
+        .framework_timing_eligible = eligible,
+    };
+}
+
 [[nodiscard]] inline nlohmann::json raw_duration_summary(
         std::vector<std::uint64_t> samples) {
     nlohmann::json result = nlohmann::json::object();
@@ -10344,10 +10672,32 @@ public:
                     && region->second.contains("measured_region_ns_manual");
                 const std::vector<double>* measured_region = has_measured_region
                     ? &region->second.at("measured_region_ns_manual") : nullptr;
+                const bool completion_evidence_valid =
+                    cell.iteration_evidence.size() == cell.iterations
+                    && std::all_of(
+                        cell.iteration_evidence.begin(),
+                        cell.iteration_evidence.end(),
+                        [](const iteration_completion_evidence& evidence) {
+                            return evidence.completed;
+                        });
+                const std::size_t timing_eligible_iterations =
+                    completion_evidence_valid
+                    ? static_cast<std::size_t>(std::count_if(
+                        cell.iteration_evidence.begin(),
+                        cell.iteration_evidence.end(),
+                        [](const iteration_completion_evidence& evidence) {
+                            return evidence.framework_timing_eligible;
+                        }))
+                    : 0;
                 if (cell.raw_samples.size() != cell.iterations
-                    || wall == nullptr || wall->size() != cell.iterations
+                    || !completion_evidence_valid
+                    || (timing_eligible_iterations == 0
+                        ? (wall != nullptr && !wall->empty())
+                        : (wall == nullptr
+                            || wall->size() != timing_eligible_iterations))
                     || (measured_region != nullptr
-                        && measured_region->size() != cell.iterations)) {
+                        && measured_region->size()
+                            != timing_eligible_iterations)) {
                     valid = false;
                 }
                 std::vector<std::uint64_t> cell_durations;
@@ -10356,6 +10706,8 @@ public:
                 std::vector<std::uint64_t> cell_index_and_map_durations;
                 std::vector<std::string> cell_checksums;
                 std::set<std::size_t> seen_repeats;
+                std::size_t wall_sample_index = 0;
+                std::size_t measured_region_sample_index = 0;
                 for (const std::string& serialized : cell.raw_samples) {
                     nlohmann::json record = nlohmann::json::parse(
                         serialized, nullptr, false);
@@ -10366,18 +10718,39 @@ public:
                     const auto id = raw_json_u64(record, "raw_record_id");
                     const auto repeat = raw_json_u64(record, "repeat");
                     const auto duration = raw_json_u64(record, "outer_e2e_ns");
+                    const auto published_duration = raw_json_u64(
+                        record, "published_wall_clock_ns");
                     const auto index_and_map = raw_json_u64(
                         record, "index_and_map_ns");
                     const auto group = raw_json_u64(record, "group_index");
                     const auto tuple = raw_json_u64(record, "tuple_index");
                     const auto checksum_it = record.find("record_checksum");
                     const auto schedule_it = record.find("schedule");
+                    const auto timing_disposition = record.is_discarded()
+                        ? std::nullopt
+                        : classify_raw_timing_disposition(record);
                     if (!id.has_value() || !repeat.has_value()
-                        || !duration.has_value() || !group.has_value()
+                        || !group.has_value()
                         || !tuple.has_value() || checksum_it == record.end()
                         || !checksum_it->is_string()
                         || schedule_it == record.end()
-                        || !schedule_it->is_object()) {
+                        || !schedule_it->is_object()
+                        || !timing_disposition.has_value()
+                        || !record.contains("outer_e2e_ns")
+                        || !record.contains("published_wall_clock_ns")
+                        || (duration.has_value()
+                            != timing_disposition
+                                ->framework_timing_eligible)
+                        || (published_duration.has_value()
+                            != timing_disposition
+                                ->framework_timing_eligible)
+                        || (!duration.has_value()
+                            && !record["outer_e2e_ns"].is_null())
+                        || (!published_duration.has_value()
+                            && !record["published_wall_clock_ns"].is_null())
+                        || (duration.has_value()
+                            && published_duration.has_value()
+                            && *published_duration > *duration)) {
                         valid = false;
                         continue;
                     }
@@ -10437,10 +10810,24 @@ public:
                             == raw_record_checksum(record)
                         && seen_repeats.insert(
                             static_cast<std::size_t>(*repeat)).second;
-                    if (!identity_valid || wall == nullptr
-                        || *repeat >= wall->size()
-                        || (*wall)[*repeat] != static_cast<double>(*duration)) {
+                    const bool repeat_evidence_valid =
+                        *repeat < cell.iteration_evidence.size()
+                        && cell.iteration_evidence[*repeat].completed
+                        && cell.iteration_evidence[*repeat]
+                                .framework_timing_eligible
+                            == timing_disposition
+                                ->framework_timing_eligible;
+                    if (!identity_valid || !repeat_evidence_valid) {
                         valid = false;
+                    }
+                    if (timing_disposition->framework_timing_eligible) {
+                        if (wall == nullptr || !published_duration.has_value()
+                            || wall_sample_index >= wall->size()
+                            || (*wall)[wall_sample_index]
+                                != static_cast<double>(*published_duration)) {
+                            valid = false;
+                        }
+                        ++wall_sample_index;
                     }
                     if (schedule_benchmark.has_value()
                         && schedule_case.has_value()
@@ -10457,12 +10844,26 @@ public:
                                 cell.tuple_index,
                                 expected_shuffle_seed);
                     }
-                    if (index_and_map.has_value() != (measured_region != nullptr)
-                        || (index_and_map.has_value()
-                            && (*repeat >= measured_region->size()
-                                || (*measured_region)[*repeat]
-                                    != static_cast<double>(*index_and_map)))) {
-                        valid = false;
+                    if (!timing_disposition->framework_timing_eligible) {
+                        if (!record.contains("index_and_map_ns")
+                            || !record["index_and_map_ns"].is_null()) {
+                            valid = false;
+                        }
+                    } else {
+                        if (index_and_map.has_value()
+                                != (measured_region != nullptr)
+                            || (index_and_map.has_value()
+                                && (measured_region_sample_index
+                                        >= measured_region->size()
+                                    || (*measured_region)[
+                                            measured_region_sample_index]
+                                        != static_cast<double>(
+                                            *index_and_map)))) {
+                            valid = false;
+                        }
+                        if (index_and_map.has_value()) {
+                            ++measured_region_sample_index;
+                        }
                     }
                     if (!embedded_by_id.emplace(*id, serialized).second) {
                         valid = false;
@@ -10477,17 +10878,25 @@ public:
                         schedule_repeat.value_or(0));
                     scheduled_checksums.emplace_back(schedule_key, checksum);
                     cell_checksums.push_back(checksum);
-                    cell_durations.push_back(*duration);
-                    if (repeat.has_value() && *repeat == 0) {
-                        cell_first_repeat_durations.push_back(*duration);
-                    } else if (repeat.has_value()) {
-                        cell_steady_state_durations.push_back(*duration);
+                    if (duration.has_value()) {
+                        cell_durations.push_back(*duration);
+                        if (*repeat == 0) {
+                            cell_first_repeat_durations.push_back(*duration);
+                        } else {
+                            cell_steady_state_durations.push_back(*duration);
+                        }
+                        all_durations.push_back(*duration);
                     }
-                    all_durations.push_back(*duration);
                     if (index_and_map.has_value()) {
                         cell_index_and_map_durations.push_back(*index_and_map);
                         all_index_and_map_durations.push_back(*index_and_map);
                     }
+                }
+                if ((wall != nullptr && wall_sample_index != wall->size())
+                    || (measured_region != nullptr
+                        && measured_region_sample_index
+                            != measured_region->size())) {
+                    valid = false;
                 }
                 std::sort(cell_checksums.begin(), cell_checksums.end());
                 std::uint64_t cell_hash = 14695981039346656037ULL;
@@ -10754,11 +11163,29 @@ private:
                 ? std::nullopt : raw_json_u64(record, "raw_record_id");
             const auto outer = record.is_discarded()
                 ? std::nullopt : raw_json_u64(record, "outer_e2e_ns");
+            const auto published = record.is_discarded()
+                ? std::nullopt
+                : raw_json_u64(record, "published_wall_clock_ns");
             const auto measured = record.is_discarded()
                 ? std::nullopt : raw_json_u64(record, "index_and_map_ns");
+            const auto timing_disposition = record.is_discarded()
+                ? std::nullopt
+                : classify_raw_timing_disposition(record);
             if (record.is_discarded() || !record.is_object()
                 || record.contains("kind") || !id.has_value()
-                || *id != index || !outer.has_value()
+                || *id != index || !timing_disposition.has_value()
+                || !record.contains("outer_e2e_ns")
+                || !record.contains("published_wall_clock_ns")
+                || (outer.has_value()
+                    != timing_disposition->framework_timing_eligible)
+                || (published.has_value()
+                    != timing_disposition->framework_timing_eligible)
+                || (!outer.has_value()
+                    && !record["outer_e2e_ns"].is_null())
+                || (!published.has_value()
+                    && !record["published_wall_clock_ns"].is_null())
+                || (outer.has_value() && published.has_value()
+                    && *published > *outer)
                 || !record.contains("schedule")
                 || !record["schedule"].is_object()
                 || record["schedule"].size() != 9
@@ -10791,7 +11218,7 @@ private:
                 record["record_checksum"].get<std::string>();
             disk_append_hash = raw_fnv1a64_update(
                 disk_append_hash, checksum);
-            disk_outer.push_back(*outer);
+            if (outer.has_value()) disk_outer.push_back(*outer);
             if (measured.has_value()) disk_index_and_map.push_back(*measured);
             const std::string schedule_key = fmt::format(
                 "{:020}:{:020}:{:020}:{:020}:{:020}",
@@ -11011,26 +11438,42 @@ inline void debug_finish_cell(benchmark_context& context,
     return result;
 }
 
-[[nodiscard]] inline std::optional<std::string> make_raw_sample_record(
+struct finalized_raw_sample_record {
+    std::string serialized{};
+    std::optional<std::uint64_t> e2e_adjusted_outer_ns{};
+    bool framework_timing_eligible = true;
+    std::optional<bool> e2e_tuple_accepted{};
+};
+
+/// Attach the framework-owned repeat envelope and finalize E2E-only derived
+/// timing evidence before the record enters either aggregation or the durable
+/// raw sink. Other benchmarks retain their existing open payload contract.
+[[nodiscard]] inline std::optional<finalized_raw_sample_record>
+make_raw_sample_record(
         const std::string_view payload,
         const benchmark_execution_state& state,
         const measurement_cell& cell,
         const std::size_t repeat,
-        const std::uint64_t outer_e2e_ns) noexcept {
+        const std::uint64_t outer_e2e_ns,
+        const std::uint64_t published_wall_clock_ns) noexcept {
     auto record = nlohmann::json::parse(payload, nullptr, false);
     if (record.is_discarded() || !record.is_object()) {
         return std::nullopt;
     }
-    constexpr std::array<std::string_view, 13> reserved{
+    constexpr std::array<std::string_view, 15> reserved{
         "schema", "benchmark", "test_case", "algorithm", "group_index",
         "group_count", "tuple_index", "repeat", "params", "outer_e2e_ns",
-        "raw_record_id", "schedule", "record_checksum",
+        "published_wall_clock_ns",
+        "outer_e2e_minus_cigar_or_mapq_union_ns", "raw_record_id",
+        "schedule", "record_checksum",
     };
     for (const std::string_view key : reserved) {
         if (record.contains(std::string{key})) {
             return std::nullopt;
         }
     }
+    const auto timing_disposition = classify_raw_timing_disposition(record);
+    if (!timing_disposition.has_value()) return std::nullopt;
     record["schema"] = 1;
     record["benchmark"] = state.config.benchmark_key;
     record["test_case"] = cell.test_case->name;
@@ -11040,11 +11483,100 @@ inline void debug_finish_cell(benchmark_context& context,
     record["tuple_index"] = cell.tuple_index;
     record["repeat"] = repeat;
     record["params"] = raw_param_map_json(cell.tuple->params);
-    record["outer_e2e_ns"] = outer_e2e_ns;
-    return record.dump();
+    record["outer_e2e_ns"] = timing_disposition->framework_timing_eligible
+        ? nlohmann::json(outer_e2e_ns)
+        : nlohmann::json(nullptr);
+    record["published_wall_clock_ns"] =
+        timing_disposition->framework_timing_eligible
+            ? nlohmann::json(published_wall_clock_ns)
+            : nlohmann::json(nullptr);
+
+    std::optional<std::uint64_t> adjusted_outer_ns;
+    const auto payload_schema = record.find("payload_schema");
+    if (payload_schema != record.end()
+        && payload_schema->is_string()
+        && *payload_schema == "bioseq.e2e.raw-sample") {
+        const auto payload_version = raw_json_u64(
+            record, "payload_schema_version");
+        const auto contract = record.find("e2e_interval_metric_contract");
+        if (!payload_version.has_value()
+            || (*payload_version != e2e_raw_payload_schema_version - 1u
+                && *payload_version != e2e_raw_payload_schema_version)
+            || contract == record.end() || !contract->is_object()
+            || contract->value("schema", std::string{})
+                != "bioseq.e2e.interval-metrics"
+            || raw_json_u64(*contract, "version") != 2u) {
+            return std::nullopt;
+        }
+        const auto finalize = contract->find("framework_finalize_adjusted_metric");
+        if (finalize == contract->end() || !finalize->is_boolean()) {
+            return std::nullopt;
+        }
+        if (finalize->get<bool>()) {
+            const auto tuple_status = record.find("tuple_status");
+            if (tuple_status == record.end() || !tuple_status->is_object()) {
+                return std::nullopt;
+            }
+            const auto accepted = raw_json_u64(*tuple_status, "accepted");
+            if (!accepted.has_value() || *accepted > 1u
+                || (*accepted == 1u)
+                    != timing_disposition->framework_timing_eligible) {
+                return std::nullopt;
+            }
+            const auto union_ns = raw_json_u64(
+                record, "cigar_or_mapq_interval_union_ns");
+            if (*accepted == 1u) {
+                const auto domains = contract->find("duration_clock_domains");
+                if (domains == contract->end() || !domains->is_object()) {
+                    return std::nullopt;
+                }
+                const auto interval_domain = domains->find("interval_union");
+                if (interval_domain == domains->end()
+                    || !interval_domain->is_object()) {
+                    return std::nullopt;
+                }
+                const std::string rate_compatibility = interval_domain->value(
+                    "rate_compatibility", std::string{});
+                const std::string interval_clock = interval_domain->value(
+                    "clock", std::string{});
+                const bool compatible_duration_rate =
+                    (rate_compatibility == "same_clock_implementation"
+                        && interval_clock ==
+                            "bioseq.instrumentation.clock::now_ns")
+                    || (rate_compatibility ==
+                            "same_kernel_monotonic_nanosecond_rate"
+                        && interval_clock ==
+                            "helper-declared CLOCK_MONOTONIC");
+                if (!union_ns.has_value() || *union_ns > outer_e2e_ns
+                    || !compatible_duration_rate) {
+                    return std::nullopt;
+                }
+                adjusted_outer_ns = outer_e2e_ns - *union_ns;
+                record["outer_e2e_minus_cigar_or_mapq_union_ns"] =
+                    *adjusted_outer_ns;
+            } else {
+                const auto union_value = record.find(
+                    "cigar_or_mapq_interval_union_ns");
+                if (union_value == record.end() || !union_value->is_null()) {
+                    return std::nullopt;
+                }
+                record["outer_e2e_minus_cigar_or_mapq_union_ns"] = nullptr;
+            }
+        }
+    }
+    return finalized_raw_sample_record{
+        .serialized = record.dump(),
+        .e2e_adjusted_outer_ns = adjusted_outer_ns,
+        .framework_timing_eligible =
+            timing_disposition->framework_timing_eligible,
+        .e2e_tuple_accepted = timing_disposition->e2e
+            ? std::optional<bool>{
+                timing_disposition->framework_timing_eligible}
+            : std::nullopt,
+    };
 }
 
-template<typename p_input, typename p_output>
+template<typename p_input, typename p_output, typename p_iteration_boundaries>
 [[nodiscard]] inline std::function<void()> prepare_typed_benchmark(
     benchmark_execution_state& state,
     benchmark_context& context,
@@ -11053,7 +11585,10 @@ template<typename p_input, typename p_output>
     const std::function<p_output(std::string_view, const parameter_map&, const p_input&)>& on_run,
     const std::function<std::map<std::string, double>(std::string_view, const parameter_map&, const p_input&, const p_output&)>& on_evaluate,
     const std::function<void(std::string_view, std::string_view, simdjson::dom::element, const p_input&)>& on_cleanup,
-    const std::function<std::string(std::string_view, const parameter_map&, const p_input&, const p_output&)>& serialize_raw_sample_payload)
+    const std::function<std::string(std::string_view, const parameter_map&, const p_input&, const p_output&)>& serialize_raw_sample_payload,
+    const repeat_finalization_callbacks<p_input, p_output>&
+        repeat_finalization,
+    const p_iteration_boundaries& iteration_boundaries)
 {
     using bioseq::instrumentation::installed_profiler_scope;
     using bioseq::instrumentation::profiler_state;
@@ -11115,45 +11650,63 @@ template<typename p_input, typename p_output>
     run_state->group_slots.resize(batches.size());
     run_state->batches = std::move(batches);
 
-    /// Run exactly one iteration of one cell against `input`. Hot path.
-    auto run_one_iteration = [&context, &state, by_regions,
+    /// Commit one already-measured output.  The paired path calls this only
+    /// after every output in the logical repeat has been finalized, so no raw
+    /// record or metric can escape ahead of a same-repeat invalid verdict.
+    auto commit_iteration = [&context, &state, by_regions,
                                 track_named_region_iteration_sample_counts,
                                 track_paired_rule_evidence,
                                 injected_schedule_fault,
-                                counter_handles,
-                                &on_run, &on_evaluate,
-                                &serialize_raw_sample_payload](measurement_cell& cell,
-                                                               const p_input& input,
-                                                               const std::size_t repeat,
-                                                               const std::size_t order_position,
-                                                               const std::uint64_t shuffle_seed) -> bool {
+                                &on_evaluate, &serialize_raw_sample_payload,
+                                &repeat_finalization](
+                                    measurement_cell& cell,
+                                    const p_input& input,
+                                    const p_output& output,
+                                    profiler_state<profiler_configuration>& profiler_block,
+                                    const std::vector<std::int64_t>& counters_before,
+                                    const std::vector<std::int64_t>& counters_after,
+                                    const std::int64_t t_begin_ns,
+                                    const std::int64_t t_end_ns,
+                                    const std::size_t repeat,
+                                    const std::size_t order_position,
+                                    const std::uint64_t shuffle_seed,
+                                    const bool use_repeat_finalization) -> bool {
         const auto& tuple = *cell.tuple;
-
-        profiler_state<profiler_configuration> profiler_block{};
-        installed_profiler_scope<profiler_configuration> profiler_scope{profiler_block};
-
-        const auto counters_before = snapshot_counters(counter_handles);
-
-        const auto t_begin_ns = bioseq::instrumentation::clock::now_ns();
-        const p_output output = on_run(tuple.algorithm_name, tuple.params, input);
-        const auto t_end_ns = bioseq::instrumentation::clock::now_ns();
-        const auto iteration_wall_clock_ns = static_cast<double>(t_end_ns - t_begin_ns);
-
-        const auto counters_after = snapshot_counters(counter_handles);
-
-        const auto evaluation_metrics =
+        const std::uint64_t outer_elapsed_ns = t_end_ns >= t_begin_ns
+            ? static_cast<std::uint64_t>(t_end_ns - t_begin_ns)
+            : std::uint64_t{0};
+        std::uint64_t published_wall_clock_ns = outer_elapsed_ns;
+        if (use_repeat_finalization
+            && repeat_finalization.published_wall_clock_ns) {
+            published_wall_clock_ns =
+                repeat_finalization.published_wall_clock_ns(
+                    tuple.algorithm_name, tuple.params, input, output);
+            if (published_wall_clock_ns > outer_elapsed_ns) {
+                push_runtime_diagnostic(
+                    context, validation_diagnostic::diagnostic_severity::error,
+                    "published_wall_clock_exceeds_framework_envelope",
+                    runtime_location(state.config.config_path,
+                        state.config.benchmark_key,
+                        cell.test_case->name, cell.group_index),
+                    "opt-in published algorithm duration must be contained "
+                    "by the same framework callback envelope");
+                return false;
+            }
+        }
+        const auto iteration_wall_clock_ns =
+            static_cast<double>(published_wall_clock_ns);
+        auto evaluation_metrics =
             on_evaluate(tuple.algorithm_name, tuple.params, input, output);
 
         std::optional<std::string> raw_sample;
+        bool framework_timing_eligible = true;
         if (serialize_raw_sample_payload) {
             const std::string payload = serialize_raw_sample_payload(
                 tuple.algorithm_name, tuple.params, input, output);
-            const auto elapsed = t_end_ns >= t_begin_ns
-                ? static_cast<std::uint64_t>(t_end_ns - t_begin_ns)
-                : std::uint64_t{0};
-            raw_sample = make_raw_sample_record(
-                payload, state, cell, repeat, elapsed);
-            if (!raw_sample.has_value()) {
+            auto finalized_raw_sample = make_raw_sample_record(
+                payload, state, cell, repeat, outer_elapsed_ns,
+                published_wall_clock_ns);
+            if (!finalized_raw_sample.has_value()) {
                 push_runtime_diagnostic(
                     context, validation_diagnostic::diagnostic_severity::error,
                     "raw_sample_payload_invalid",
@@ -11161,9 +11714,47 @@ template<typename p_input, typename p_output>
                         state.config.benchmark_key,
                         cell.test_case->name, cell.group_index),
                     "raw payload must be one JSON object without reserved "
-                    "framework fields");
+                    "framework fields and with a current valid benchmark-"
+                    "specific finalization contract");
                 return false;
             }
+            if (finalized_raw_sample->e2e_tuple_accepted.has_value()) {
+                const auto evaluated_acceptance =
+                    evaluation_metrics.find("tuple_accepted");
+                const double expected_acceptance =
+                    *finalized_raw_sample->e2e_tuple_accepted ? 1.0 : 0.0;
+                if (evaluated_acceptance == evaluation_metrics.end()
+                    || !std::isfinite(evaluated_acceptance->second)
+                    || evaluated_acceptance->second != expected_acceptance) {
+                    push_runtime_diagnostic(
+                        context,
+                        validation_diagnostic::diagnostic_severity::error,
+                        "e2e_timing_disposition_evidence_mismatch",
+                        state.config.benchmark_key,
+                        "E2E raw tuple_status.accepted and evaluator "
+                        "tuple_accepted must be identical integer evidence");
+                    return false;
+                }
+            }
+            framework_timing_eligible =
+                finalized_raw_sample->framework_timing_eligible;
+            if (finalized_raw_sample->e2e_adjusted_outer_ns.has_value()) {
+                const bool inserted = evaluation_metrics.emplace(
+                    "outer_e2e_minus_cigar_or_mapq_union_ns",
+                    static_cast<double>(
+                        *finalized_raw_sample->e2e_adjusted_outer_ns)).second;
+                if (!inserted) {
+                    push_runtime_diagnostic(
+                        context,
+                        validation_diagnostic::diagnostic_severity::error,
+                        "raw_sample_derived_metric_collision",
+                        state.config.benchmark_key,
+                        "E2E evaluator must not pre-populate the framework-"
+                        "finalized adjusted outer metric");
+                    return false;
+                }
+            }
+            raw_sample = std::move(finalized_raw_sample->serialized);
             if (context.raw_evidence_sink == nullptr) {
                 push_runtime_diagnostic(
                     context, validation_diagnostic::diagnostic_severity::error,
@@ -11201,7 +11792,7 @@ template<typename p_input, typename p_output>
         // a sidecar prefix, never an in-memory/report sample with no durable
         // counterpart.
         append_iteration_samples(
-            cell, by_regions,
+            cell, repeat, framework_timing_eligible, by_regions,
             track_named_region_iteration_sample_counts,
             profiler_block,
             iteration_wall_clock_ns, state.config.metrics,
@@ -11232,6 +11823,158 @@ template<typename p_input, typename p_output>
         return true;
     };
 
+    /// Historical immediate path.  The legacy factory instantiates this with
+    /// `std::nullptr_t`, so the boundary branch is discarded at compile time.
+    auto run_one_iteration = [&on_run, commit_iteration, counter_handles,
+                              &iteration_boundaries](
+                                  measurement_cell& cell,
+                                  const p_input& input,
+                                  const std::size_t repeat,
+                                  const std::size_t order_position,
+                                  const std::uint64_t shuffle_seed) -> bool {
+        const auto& tuple = *cell.tuple;
+        if constexpr (!std::is_same_v<p_iteration_boundaries, std::nullptr_t>) {
+            if (iteration_boundaries.enabled
+                && iteration_boundaries.enabled(
+                    tuple.algorithm_name, tuple.params, input)) {
+                using preparation_type =
+                    typename p_iteration_boundaries::preparation_type;
+                profiler_state<profiler_configuration> profiler_block{};
+                std::vector<std::int64_t> counters_before;
+                std::vector<std::int64_t> counters_after;
+                std::int64_t t_begin_ns = 0;
+                std::int64_t t_end_ns = 0;
+                std::optional<p_output> output;
+                {
+                    preparation_type preparation =
+                        iteration_boundaries.before_iteration(
+                            tuple.algorithm_name, tuple.params, input, repeat);
+                    {
+                        installed_profiler_scope<profiler_configuration>
+                            profiler_scope{profiler_block};
+                        counters_before = snapshot_counters(counter_handles);
+                        t_begin_ns = bioseq::instrumentation::clock::now_ns();
+                        output.emplace(
+                            iteration_boundaries.measured_iteration(
+                                tuple.algorithm_name, tuple.params, input,
+                                preparation));
+                        t_end_ns = bioseq::instrumentation::clock::now_ns();
+                        counters_after = snapshot_counters(counter_handles);
+                    }
+                    const iteration_measurement_window window{
+                        .begin_ns = t_begin_ns,
+                        .end_ns = t_end_ns,
+                        .elapsed_ns = t_end_ns >= t_begin_ns
+                            ? static_cast<std::uint64_t>(
+                                t_end_ns - t_begin_ns)
+                            : std::uint64_t{0},
+                    };
+                    iteration_boundaries.after_iteration(
+                        tuple.algorithm_name, tuple.params, input,
+                        preparation, *output, window);
+                }
+                return commit_iteration(
+                    cell, input, *output, profiler_block,
+                    counters_before, counters_after, t_begin_ns, t_end_ns,
+                    repeat, order_position, shuffle_seed,
+                    /*use_repeat_finalization=*/false);
+            }
+        }
+        profiler_state<profiler_configuration> profiler_block{};
+        installed_profiler_scope<profiler_configuration> profiler_scope{
+            profiler_block};
+        const auto counters_before = snapshot_counters(counter_handles);
+        const auto t_begin_ns = bioseq::instrumentation::clock::now_ns();
+        const p_output output = on_run(
+            tuple.algorithm_name, tuple.params, input);
+        const auto t_end_ns = bioseq::instrumentation::clock::now_ns();
+        const auto counters_after = snapshot_counters(counter_handles);
+        return commit_iteration(
+            cell, input, output, profiler_block,
+            counters_before, counters_after, t_begin_ns, t_end_ns,
+            repeat, order_position, shuffle_seed,
+            /*use_repeat_finalization=*/false);
+    };
+
+    struct deferred_iteration {
+        measurement_cell* cell = nullptr;
+        std::size_t repeat = 0;
+        std::size_t order_position = 0;
+        std::uint64_t shuffle_seed = 0;
+        profiler_state<profiler_configuration> profiler_block{};
+        std::vector<std::int64_t> counters_before{};
+        std::vector<std::int64_t> counters_after{};
+        std::int64_t t_begin_ns = 0;
+        std::int64_t t_end_ns = 0;
+        std::optional<p_output> output{};
+    };
+
+    auto measure_deferred_iteration = [&on_run, counter_handles,
+                                       &iteration_boundaries](
+                                            measurement_cell& cell,
+                                            const p_input& input,
+                                            const std::size_t repeat,
+                                            const std::size_t order_position,
+                                            const std::uint64_t shuffle_seed) {
+        auto pending = std::make_unique<deferred_iteration>();
+        pending->cell = &cell;
+        pending->repeat = repeat;
+        pending->order_position = order_position;
+        pending->shuffle_seed = shuffle_seed;
+        if constexpr (!std::is_same_v<p_iteration_boundaries, std::nullptr_t>) {
+            const auto& tuple = *cell.tuple;
+            if (iteration_boundaries.enabled
+                && iteration_boundaries.enabled(
+                    tuple.algorithm_name, tuple.params, input)) {
+                using preparation_type =
+                    typename p_iteration_boundaries::preparation_type;
+                preparation_type preparation =
+                    iteration_boundaries.before_iteration(
+                        tuple.algorithm_name, tuple.params, input, repeat);
+                {
+                    installed_profiler_scope<profiler_configuration>
+                        profiler_scope{pending->profiler_block};
+                    pending->counters_before =
+                        snapshot_counters(counter_handles);
+                    pending->t_begin_ns =
+                        bioseq::instrumentation::clock::now_ns();
+                    pending->output.emplace(
+                        iteration_boundaries.measured_iteration(
+                            tuple.algorithm_name, tuple.params, input,
+                            preparation));
+                    pending->t_end_ns =
+                        bioseq::instrumentation::clock::now_ns();
+                    pending->counters_after =
+                        snapshot_counters(counter_handles);
+                }
+                const iteration_measurement_window window{
+                    .begin_ns = pending->t_begin_ns,
+                    .end_ns = pending->t_end_ns,
+                    .elapsed_ns = pending->t_end_ns >= pending->t_begin_ns
+                        ? static_cast<std::uint64_t>(
+                            pending->t_end_ns - pending->t_begin_ns)
+                        : std::uint64_t{0},
+                };
+                iteration_boundaries.after_iteration(
+                    tuple.algorithm_name, tuple.params, input, preparation,
+                    *pending->output, window);
+                return pending;
+            }
+        }
+        {
+            installed_profiler_scope<profiler_configuration> profiler_scope{
+                pending->profiler_block};
+            pending->counters_before = snapshot_counters(counter_handles);
+            pending->t_begin_ns = bioseq::instrumentation::clock::now_ns();
+            const auto& tuple = *cell.tuple;
+            pending->output.emplace(on_run(
+                tuple.algorithm_name, tuple.params, input));
+            pending->t_end_ns = bioseq::instrumentation::clock::now_ns();
+            pending->counters_after = snapshot_counters(counter_handles);
+        }
+        return pending;
+    };
+
     /// serial-concurrency exclusion are enforced by the scheduler's
     /// admission predicates, so the body never blocks on a process-
     /// global mutex. This is what restores cross-batch parallelism
@@ -11259,9 +12002,12 @@ template<typename p_input, typename p_output>
     auto* const run_state_ptr = run_state.get();
     run_state->run_batch = [&context, &state,
                             &on_input, &on_cleanup,
+                            &repeat_finalization,
                             data_dir, run_state_ptr,
                             run_item_iterations,
-                            run_one_iteration](work_batch& batch)
+                            run_one_iteration,
+                            measure_deferred_iteration,
+                            commit_iteration](work_batch& batch)
     {
         const auto& spec = state.test_cases[batch.test_case_index];
         auto& slot = run_state_ptr->group_slots[batch.batch_index];
@@ -11302,6 +12048,28 @@ template<typename p_input, typename p_output>
         progress_mark_test_case_start(context, batch);
         const bool interleaved = state.config.iteration_order
             == benchmark_configuration::iteration_order_mode::interleaved_seeded;
+        const bool finalize_logical_repeats =
+            static_cast<bool>(repeat_finalization.enabled)
+            && repeat_finalization.enabled(*slot.input);
+        if (finalize_logical_repeats
+            && (!repeat_finalization.finalize_repeat
+                || !repeat_finalization.published_wall_clock_ns)) {
+            const std::string reason =
+                "enabled repeat finalization requires both a finalizer and "
+                "a published-duration selector";
+            push_runtime_diagnostic(
+                context, validation_diagnostic::diagnostic_severity::error,
+                "invalid_repeat_finalization_callbacks", location_str,
+                reason);
+            progress_mark_batch_aborted(context, batch, reason);
+            if (on_cleanup) {
+                cleanup_with_retry(context, batch, spec.name, location_str,
+                    [&] { on_cleanup(data_dir, spec.name, spec.data,
+                        *slot.input); });
+            }
+            slot.input.reset();
+            return;
+        }
         if (interleaved
             && (!state.config.concurrency.bench_lock
                 || state.config.concurrency.concurrency
@@ -11316,6 +12084,23 @@ template<typename p_input, typename p_output>
                 "concurrency=false and equal positive item iteration counts";
             push_runtime_diagnostic(context, validation_diagnostic::diagnostic_severity::error,
                 "invalid_interleaved_schedule", location_str, reason);
+            progress_mark_batch_aborted(context, batch, reason);
+            if (on_cleanup) {
+                cleanup_with_retry(context, batch, spec.name, location_str,
+                    [&] { on_cleanup(data_dir, spec.name, spec.data,
+                        *slot.input); });
+            }
+            slot.input.reset();
+            return;
+        }
+        if (finalize_logical_repeats && !interleaved) {
+            const std::string reason =
+                "logical-repeat finalization requires interleaved_seeded "
+                "so every same-repeat output is present before commit";
+            push_runtime_diagnostic(
+                context, validation_diagnostic::diagnostic_severity::error,
+                "repeat_finalization_requires_interleaving", location_str,
+                reason);
             progress_mark_batch_aborted(context, batch, reason);
             if (on_cleanup) {
                 cleanup_with_retry(context, batch, spec.name, location_str,
@@ -11349,16 +12134,54 @@ template<typename p_input, typename p_output>
                         repeat);
                 const auto order = raw_fisher_yates_order(
                     batch.items.size(), shuffle_seed);
+                std::vector<std::unique_ptr<deferred_iteration>> pending;
+                if (finalize_logical_repeats) {
+                    pending.reserve(order.size());
+                }
                 for (std::size_t position = 0;
                      position < order.size(); ++position) {
                     auto& item = batch.items[order[position]];
                     progress_update_label(
                         context, batch, item, state.config.benchmark_key);
-                    if (!run_one_iteration(
+                    if (finalize_logical_repeats) {
+                        pending.push_back(measure_deferred_iteration(
                             *item.cell, *slot.input, repeat,
-                            position, shuffle_seed)) {
-                        iteration_failed = true;
-                        break;
+                            position, shuffle_seed));
+                    } else {
+                        if (!run_one_iteration(
+                                *item.cell, *slot.input, repeat,
+                                position, shuffle_seed)) {
+                            iteration_failed = true;
+                            break;
+                        }
+                    }
+                }
+                if (finalize_logical_repeats && !iteration_failed) {
+                    std::vector<repeat_output_reference<p_output>> outputs;
+                    outputs.reserve(pending.size());
+                    for (auto& item : pending) {
+                        const auto& tuple = *item->cell->tuple;
+                        outputs.push_back(repeat_output_reference<p_output>{
+                            .algorithm_name = tuple.algorithm_name,
+                            .params = &tuple.params,
+                            .output = &*item->output,
+                        });
+                    }
+                    repeat_finalization.finalize_repeat(
+                        *slot.input, repeat, outputs);
+                    for (auto& item : pending) {
+                        if (!commit_iteration(
+                                *item->cell, *slot.input, *item->output,
+                                item->profiler_block,
+                                item->counters_before,
+                                item->counters_after,
+                                item->t_begin_ns, item->t_end_ns,
+                                item->repeat, item->order_position,
+                                item->shuffle_seed,
+                                /*use_repeat_finalization=*/true)) {
+                            iteration_failed = true;
+                            break;
+                        }
                     }
                 }
                 if (iteration_failed) break;
@@ -13830,10 +14653,12 @@ struct benchmark_filter_metadata {
 /// validation; keep these reads in sync with parse_config_file and
 /// parse_benchmark_block.
 [[nodiscard]] inline benchmark_filter_metadata extract_filter_metadata(
-    const std::string& config_path, const std::string& benchmark_key) noexcept {
+    const std::string& config_open_path,
+    const std::string& benchmark_key) noexcept {
     benchmark_filter_metadata meta;
     meta.benchmark_key = benchmark_key;
-    const std::string body = slurp_file(std::filesystem::path{config_path});
+    const std::string body = slurp_file(
+        std::filesystem::path{config_open_path});
     if (body.empty()) return meta;
     simdjson::dom::parser parser;
     simdjson::dom::element root;
@@ -13981,7 +14806,7 @@ struct benchmark_filter_metadata {
     regression_validation_universe validation_universe;
     for (const auto& erased : selected) {
         registered_metadata.push_back(extract_filter_metadata(
-            erased.config_path, erased.benchmark_key));
+            erased.config_open_path, erased.benchmark_key));
         const auto& metadata = registered_metadata.back();
         regression_benchmark_declaration declaration;
         declaration.benchmark_key = metadata.benchmark_key;
@@ -14520,8 +15345,10 @@ struct benchmark_filter_metadata {
 
 // ----------------- create_benchmark template body -----------------
 
-template<typename p_input, typename p_output>
-[[nodiscard]] erased_benchmark create_benchmark(
+namespace detail {
+
+template<typename p_input, typename p_output, typename p_iteration_boundaries>
+[[nodiscard]] erased_benchmark create_benchmark_impl(
     std::string title,
     std::string benchmark_key,
     std::string config_path,
@@ -14531,23 +15358,35 @@ template<typename p_input, typename p_output>
     std::function<std::map<std::string, double>(std::string_view, const parameter_map&, const p_input&, const p_output&)> on_evaluate,
     std::function<void(std::string_view, std::string_view, simdjson::dom::element, const p_input&)> on_cleanup,
     std::function<std::string(std::string_view, const parameter_map&, const p_input&, const p_output&)>
-        serialize_raw_sample_payload)
+        serialize_raw_sample_payload,
+    std::string config_open_path,
+    repeat_finalization_callbacks<p_input, p_output>
+        repeat_finalization,
+    p_iteration_boundaries iteration_boundaries)
 {
     erased_benchmark erased;
     erased.title         = std::move(title);
     erased.benchmark_key = std::move(benchmark_key);
     erased.config_path   = std::move(config_path);
+    erased.config_open_path = config_open_path.empty()
+        ? erased.config_path
+        : std::move(config_open_path);
     erased.raw_samples_enabled = static_cast<bool>(serialize_raw_sample_payload);
 
     erased.execute = [erased_title              = erased.title,
                        erased_benchmark_key      = erased.benchmark_key,
                        erased_config_path        = erased.config_path,
+                       erased_config_open_path   = erased.config_open_path,
                        captured_on_estimate      = std::move(on_estimate_resources),
                        captured_on_input         = std::move(on_input),
                        captured_on_run           = std::move(on_run),
                        captured_on_evaluate      = std::move(on_evaluate),
                        captured_on_cleanup       = std::move(on_cleanup),
-                       captured_raw_serializer   = std::move(serialize_raw_sample_payload)
+                       captured_raw_serializer   = std::move(serialize_raw_sample_payload),
+                       captured_repeat_finalization =
+                           std::move(repeat_finalization),
+                       captured_iteration_boundaries =
+                           std::move(iteration_boundaries)
                       ](benchmark_context& context) -> std::function<void()> {
         const auto no_op_finalizer = [] {
             return std::function<void()>{[] {}};
@@ -14582,7 +15421,8 @@ template<typename p_input, typename p_output>
         // 1. Parse the config file. The outcome carries schema diagnostics
         //    plus structural problems found during the simdjson walk.
         auto parse_outcome = detail::parse_config_file(
-            erased_config_path, erased_benchmark_key, state);
+            erased_config_path, erased_config_open_path,
+            erased_benchmark_key, state);
         const bool parse_failed = !parse_outcome.ok;
         detail::drain_diagnostics_to_context(context, parse_outcome.diagnostics);
         if (parse_failed) {
@@ -14730,7 +15570,9 @@ template<typename p_input, typename p_output>
                 captured_on_run,
                 captured_on_evaluate,
                 captured_on_cleanup,
-                captured_raw_serializer);
+                captured_raw_serializer,
+                captured_repeat_finalization,
+                captured_iteration_boundaries);
 
         return [typed_finalizer = std::move(typed_finalizer),
                 state_holder,
@@ -14776,6 +15618,56 @@ template<typename p_input, typename p_output>
     };
 
     return erased;
+}
+
+}  // namespace detail
+
+template<typename p_input, typename p_output>
+[[nodiscard]] erased_benchmark create_benchmark(
+    std::string title,
+    std::string benchmark_key,
+    std::string config_path,
+    std::function<run_constraints(std::string_view, std::string_view, simdjson::dom::element)> on_estimate_resources,
+    std::function<p_input(std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)> on_input,
+    std::function<p_output(std::string_view, const parameter_map&, const p_input&)> on_run,
+    std::function<std::map<std::string, double>(std::string_view, const parameter_map&, const p_input&, const p_output&)> on_evaluate,
+    std::function<void(std::string_view, std::string_view, simdjson::dom::element, const p_input&)> on_cleanup,
+    std::function<std::string(std::string_view, const parameter_map&, const p_input&, const p_output&)>
+        serialize_raw_sample_payload,
+    std::string config_open_path,
+    repeat_finalization_callbacks<p_input, p_output> repeat_finalization)
+{
+    return detail::create_benchmark_impl<p_input, p_output>(
+        std::move(title), std::move(benchmark_key), std::move(config_path),
+        std::move(on_estimate_resources), std::move(on_input),
+        std::move(on_run), std::move(on_evaluate), std::move(on_cleanup),
+        std::move(serialize_raw_sample_payload), std::move(config_open_path),
+        std::move(repeat_finalization), nullptr);
+}
+
+template<typename p_input, typename p_preparation, typename p_output>
+[[nodiscard]] erased_benchmark create_benchmark_with_iteration_boundaries(
+    std::string title,
+    std::string benchmark_key,
+    std::string config_path,
+    std::function<run_constraints(std::string_view, std::string_view, simdjson::dom::element)> on_estimate_resources,
+    std::function<p_input(std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)> on_input,
+    std::function<p_output(std::string_view, const parameter_map&, const p_input&)> on_run,
+    std::function<std::map<std::string, double>(std::string_view, const parameter_map&, const p_input&, const p_output&)> on_evaluate,
+    iteration_boundary_callbacks<p_input, p_preparation, p_output>
+        iteration_boundaries,
+    std::function<void(std::string_view, std::string_view, simdjson::dom::element, const p_input&)> on_cleanup,
+    std::function<std::string(std::string_view, const parameter_map&, const p_input&, const p_output&)>
+        serialize_raw_sample_payload,
+    std::string config_open_path,
+    repeat_finalization_callbacks<p_input, p_output> repeat_finalization)
+{
+    return detail::create_benchmark_impl<p_input, p_output>(
+        std::move(title), std::move(benchmark_key), std::move(config_path),
+        std::move(on_estimate_resources), std::move(on_input),
+        std::move(on_run), std::move(on_evaluate), std::move(on_cleanup),
+        std::move(serialize_raw_sample_payload), std::move(config_open_path),
+        std::move(repeat_finalization), std::move(iteration_boundaries));
 }
 
 }  // namespace bioseq::bench::framework

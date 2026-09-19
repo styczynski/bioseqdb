@@ -17,10 +17,12 @@ import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.chaining.core;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.minimizer_physical_registry;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.minimap2_sketch_baseline;
 import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.runtime_contract;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy_sequence;
@@ -692,29 +694,32 @@ TEST_CASE("O64 fast leaf and C64 dynamic rejection never walk positions",
     }
 }
 
-TEST_CASE("H64 reader open fails before admission or payload access",
+TEST_CASE("registered scalar K20 H64 reader produces authenticated anchors",
           "[component:bioseq][layer:unit][feature:index]") {
     using namespace bioseq::indexing;
+    constexpr std::uint64_t hash = (std::uint64_t{1u} << 39u) | 7u;
     const std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs{
-        {1u, 10u << 1u},
+        {hash, 10u << 1u},
     };
     vector_replay_minimizer_producer producer{pairs};
     collecting_minimizer_row_sink sink;
-    auto options = test_grouped_soa_generation_options(100u, 65'534u);
+    auto options = test_grouped_soa_generation_options(
+        100u, 65'534u, minimizer_algorithm::scalar, 2'000'000u, 20u, 15u);
     options.position_segment_span_bp = std::uint64_t{1} << 15u;
-    options.kmer_size = 17u;
     const auto generation = encode_minimizer_generation(producer, sink, options);
     REQUIRE(generation.has_value());
     REQUIRE(generation->manifest.hash_width == minimizer_scalar_width::u64);
+    REQUIRE(hash <= generation->manifest.max_hash);
     REQUIRE(generation->manifest.max_hash > (std::numeric_limits<std::uint32_t>::max)());
 
     auto payload = make_grouped_soa_mapped_payload(*generation, sink.rows);
     auto expected = test_grouped_soa_expected_storage_contract(65'534u);
-    expected.kmer_size = 17u;
+    expected.kmer_size = options.kmer_size;
+    expected.window_size = options.window_size;
+    expected.algorithm_identity = options.algorithm_identity;
     bioseq::parallelism::memory_admission_controller admission;
-    REQUIRE(admission.reserved_bytes() == 0u);
     std::shared_ptr<const void> payload_owner = payload;
-    const auto opened = prepared_minimizer_fragment_reader::open(
+    auto reader = prepared_minimizer_fragment_reader::open(
         admission,
         generation->head,
         generation->manifest,
@@ -723,8 +728,83 @@ TEST_CASE("H64 reader open fails before admission or payload access",
         1u,
         std::move(payload_owner),
         std::span<const std::byte>{payload->data(), payload->size()});
-    require_wire_error(opened, minimizer_generation_encoding_error::storage_contract_mismatch);
-    REQUIRE(admission.reserved_bytes() == 0u);
+    REQUIRE(reader.has_value());
+
+    const auto query_layout =
+        ::bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+            minimizer_algorithm::scalar, 100u, 20u, 15u);
+    // Target and query may use different position carriers for the same hash domain.
+    REQUIRE(query_layout.record_id != generation->manifest.algorithm_identity.physical_record_id);
+    const bool checked = ::bioseq::minimizers::visit_minimizer_physical_layout(
+        query_layout,
+        [&admission, &reader, hash]<class p_record>() {
+            std::vector<p_record> query_minimizers;
+            query_minimizers.emplace_back(hash, 30u, 1u);
+            const auto query_view =
+                ::bioseq::minimizers::minimizer_physical_batch_view{query_minimizers};
+            const std::array queries{
+                fragment_seed_query{
+                    .minimizers = query_view,
+                    .query_length = 100u,
+                    .kmer_size = 20,
+                },
+            };
+            auto scratch = query_wave_scratch::create(admission);
+            REQUIRE(scratch.has_value());
+            auto batch = reader->prepare_fragment_anchor_batch(admission, queries, 1, *scratch);
+            const auto anchors = batch.query_view(0u).ordered_fragment_seed_anchors(
+                query_view, 100u, 1, 20);
+            REQUIRE(anchors.size() == 1u);
+            REQUIRE(anchors.front().ref_position == 10u);
+            REQUIRE(anchors.front().query_position == 88u);
+            REQUIRE(anchors.front().is_reverse == 1u);
+            REQUIRE(anchors.front().query_span == 20u);
+            REQUIRE(anchors.front().flags == 0u);
+            REQUIRE(anchors.front().segment_id == 0u);
+            const auto snapshot = scratch->occurrence_capacity_snapshot();
+            REQUIRE(snapshot.route == query_occurrence_route::packed);
+            REQUIRE(snapshot.packed_size == 1u);
+            REQUIRE(snapshot.wide_size == 0u);
+            REQUIRE(snapshot.query_plan_size == 0u);
+            REQUIRE(snapshot.query_plan_capacity == 0u);
+            REQUIRE(snapshot.aggregate_occurrence_capacity_bytes >=
+                    sizeof(packed_query_occurrence_h64));
+            REQUIRE(batch.stats().peak_query_plan_capacity_bytes == 0u);
+            REQUIRE(snapshot.bucket_direct_matcher_active);
+            scratch->complete_wave_after_join();
+
+            // The sole selected hash has bit 39 set. A literal anchor receipt
+            // exercises the H64 oracle plan without a production/oracle parity claim.
+            auto oracle_batch = reader->prepare_fragment_anchor_batch(
+                admission,
+                queries,
+                1,
+                *scratch,
+                /*baseline_query_plan_matcher_for_testing=*/true,
+                /*verify_compositional_order_for_testing=*/true);
+            const auto oracle_anchors = oracle_batch.query_view(0u).ordered_fragment_seed_anchors(
+                query_view, 100u, 1, 20);
+            REQUIRE(oracle_anchors.size() == 1u);
+            REQUIRE(oracle_anchors.front().ref_position == 10u);
+            REQUIRE(oracle_anchors.front().query_position == 88u);
+            REQUIRE(oracle_anchors.front().is_reverse == 1u);
+            REQUIRE(oracle_anchors.front().query_span == 20u);
+            REQUIRE(oracle_anchors.front().flags == 0u);
+            REQUIRE(oracle_anchors.front().segment_id == 0u);
+            const auto oracle_snapshot = scratch->occurrence_capacity_snapshot();
+            REQUIRE(oracle_snapshot.route == query_occurrence_route::packed);
+            REQUIRE(oracle_snapshot.packed_size == 1u);
+            REQUIRE(oracle_snapshot.wide_size == 0u);
+            REQUIRE(oracle_snapshot.query_plan_size == 1u);
+            REQUIRE(oracle_snapshot.query_plan_reserve_request == 1u);
+            REQUIRE(oracle_snapshot.query_plan_capacity >= 1u);
+            REQUIRE(oracle_batch.stats().peak_query_plan_capacity_bytes ==
+                    static_cast<std::uint64_t>(oracle_snapshot.query_plan_capacity) * 24u);
+            REQUIRE_FALSE(oracle_snapshot.bucket_direct_matcher_active);
+            scratch->complete_wave_after_join();
+            return true;
+        });
+    REQUIRE(checked);
 }
 
 TEST_CASE("fixed and dynamic probes reject selected payload corruption",

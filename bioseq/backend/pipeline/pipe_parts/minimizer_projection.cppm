@@ -9,6 +9,7 @@ module;
 export module bioseq.pipeline.pipe:minimizer_projection;
 
 import std;
+export import bioseq.pipeline.query_sketch_plan_contract;
 import :stage_graph;
 import bioseq.common.logging;
 import bioseq.common.templating;
@@ -145,7 +146,8 @@ export {
                  const ::bioseq::simd::alignment_kernels<p_alphabet>& alignment_kernels,
                  const ::bioseq::simd::minimap2_parameters& params,
                  block_aligner_execution_stats* forbidden_block_stats,
-                 scalar_pipeline_execution_stats* scalar_execution_stats) {
+                 scalar_pipeline_execution_stats* scalar_execution_stats,
+                 bioseq::parallelism::worker_context_factory worker_factory = {}) {
                 if (forbidden_block_stats != nullptr) {
                     abort_forbidden_ksw2_fallback(*forbidden_block_stats);
                 }
@@ -158,7 +160,8 @@ export {
                     alignment_kernels,
                     params,
                     /*block_execution_stats=*/nullptr,
-                    scalar_execution_stats);
+                    scalar_execution_stats,
+                    worker_factory);
             }
 
             [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
@@ -204,7 +207,8 @@ export {
                  const ::bioseq::simd::alignment_kernels<p_alphabet>& alignment_kernels,
                  const ::bioseq::simd::minimap2_parameters& params,
                  block_aligner_execution_stats* block_execution_stats,
-                 scalar_pipeline_execution_stats* /*scalar_execution_stats*/) {
+                 scalar_pipeline_execution_stats* /*scalar_execution_stats*/,
+                 bioseq::parallelism::worker_context_factory worker_factory = {}) {
                 ::bioseq::simd::align_regions<
                     ::bioseq::simd::base_alignment_algorithm::block_aligner>(regions,
                                                                              anchors,
@@ -213,7 +217,9 @@ export {
                                                                              scoring_matrix,
                                                                              alignment_kernels,
                                                                              params,
-                                                                             block_execution_stats);
+                                                                             block_execution_stats,
+                                                                             nullptr,
+                                                                             worker_factory);
             }
 
             [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
@@ -312,148 +318,6 @@ export {
         };
     };
 
-    // =============================================================================
-    // Metadata surface — full definitions
-    // =============================================================================
-    //
-    // Full description types follow the algorithm traits that provide their
-    // computed properties.
-
-    struct stage_algorithm_description {
-        std::string name;
-        std::vector<named_property> parameters;
-        std::vector<named_property> computed_properties;
-        std::optional<std::string> extra_description;
-        ::bioseq::simd_dispatch::highway_kernel_mask highway_kernels{};
-    };
-
-    struct stage_description {
-        std::string stage_name;
-        std::optional<stage_algorithm_description> algorithm;
-        std::optional<std::string> extra_description;
-
-        /**
-         * @brief Pre-allocation upper bound the stage reserves before driving its
-         * kernel ( — "reserve correctness").
-         *
-         * Populated by every stage that opens an `arena_slab<p_element>` of bounded size
-         * (minimizer_stage, seed_hit_stage, chain_stage, region_stage).  Set to
-         * `std::nullopt` for stages that mutate in-place or whose output size
-         * is `0` (index_stage, sink_stage, etc.).  The EXPLAIN renderer surfaces
-         * this as a per-stage `[reserved: N]` line so a reader can verify
-         * `actual ≤ reserved` against the runtime instrumentation log.
-         */
-        std::optional<std::size_t> estimated_batch_size;
-    };
-
-    struct pipeline_description {
-        std::vector<stage_description> stages;
-    };
-
-    inline constexpr std::string_view query_sketch_stage_name = "QuerySketchStage";
-
-    /** Cold EXPLAIN-only query-sketch route. Never a dispatch-chain dimension. */
-    enum class query_sketch_route : std::uint8_t {
-        recompute_capable,
-        compatible_persisted_only,
-    };
-
-    /**
-     * Resolve the query-sketch Highway function without adding the minimizer
-     * algorithm as another describe-template dimension.  scalar and Vulkan
-     * sketching are concrete non-Highway routes and therefore map to an empty
-     * set. p_alphabet validity is established by the caller's authoritative typed
-     * dispatch before this code-independent algorithm/route planner runs.
-     * Compatible-persisted query preparation performs no Highway work. bounded ntHash
-     * ntHash retains its W10/K15 gate. Unknown route or algorithm values remain
-     * fail-closed rather than being silently advertised as scalar.
-     */
-    [[nodiscard]] constexpr std::optional<::bioseq::simd_dispatch::highway_kernel_mask>
-    planned_query_minimizer_highway_kernels(const ::bioseq::simd::minimap2_parameters& params,
-                                            const query_sketch_route route) noexcept {
-        using algorithm_type = ::bioseq::simd::minimizer_algorithm;
-        using p_kernel = ::bioseq::simd_dispatch::highway_kernel;
-        if (route != query_sketch_route::recompute_capable &&
-            route != query_sketch_route::compatible_persisted_only) {
-            return std::nullopt;
-        }
-        switch (params.minimizer_algorithm) {
-        case algorithm_type::scalar:
-        case algorithm_type::vulkan_minimap_integer:
-            return ::bioseq::simd_dispatch::highway_kernel_mask{};
-        case algorithm_type::simd_minimap2_reference:
-            if (route == query_sketch_route::compatible_persisted_only) {
-                return ::bioseq::simd_dispatch::highway_kernel_mask{};
-            }
-            return ::bioseq::simd_dispatch::highway_kernel_mask_for(
-                p_kernel::minimizer_minimap2_reference);
-        case algorithm_type::two_stack_nthash:
-            return ::bioseq::simd_dispatch::highway_kernel_mask_for(
-                p_kernel::minimizer_two_stack_nthash);
-        case algorithm_type::bounded_nthash_simd:
-            if (params.window_size != 10 || params.kmer_size != 15) {
-                return std::nullopt;
-            }
-            return ::bioseq::simd_dispatch::highway_kernel_mask_for(
-                p_kernel::minimizer_bounded_nthash);
-        }
-        return std::nullopt;
-    }
-
-    static_assert(
-        []() consteval {
-            using algorithm_type = ::bioseq::simd::minimizer_algorithm;
-            using p_kernel = ::bioseq::simd_dispatch::highway_kernel;
-            using route_type = query_sketch_route;
-            const auto make_params = [](const algorithm_type algorithm,
-                                        const std::int32_t window_size = 10,
-                                        const std::int32_t kmer_size = 15) consteval {
-                ::bioseq::simd::minimap2_parameters params{};
-                params.minimizer_algorithm = algorithm;
-                params.window_size = window_size;
-                params.kmer_size = kmer_size;
-                return params;
-            };
-            const auto slow = planned_query_minimizer_highway_kernels(
-                make_params(algorithm_type::simd_minimap2_reference),
-                route_type::recompute_capable);
-            const auto slow_persisted = planned_query_minimizer_highway_kernels(
-                make_params(algorithm_type::simd_minimap2_reference),
-                route_type::compatible_persisted_only);
-            const auto exact = planned_query_minimizer_highway_kernels(
-                make_params(algorithm_type::two_stack_nthash),
-                route_type::compatible_persisted_only);
-            const auto bounded = planned_query_minimizer_highway_kernels(
-                make_params(algorithm_type::bounded_nthash_simd), route_type::recompute_capable);
-            const auto bounded_wrong_window = planned_query_minimizer_highway_kernels(
-                make_params(algorithm_type::bounded_nthash_simd, 9, 15),
-                route_type::recompute_capable);
-            const auto bounded_wrong_kmer = planned_query_minimizer_highway_kernels(
-                make_params(algorithm_type::bounded_nthash_simd, 10, 14),
-                route_type::compatible_persisted_only);
-            const auto scalar = planned_query_minimizer_highway_kernels(
-                make_params(algorithm_type::scalar), route_type::recompute_capable);
-            const auto vulkan = planned_query_minimizer_highway_kernels(
-                make_params(algorithm_type::vulkan_minimap_integer),
-                route_type::compatible_persisted_only);
-            return slow.has_value() &&
-                   *slow == ::bioseq::simd_dispatch::highway_kernel_mask_for(
-                                p_kernel::minimizer_minimap2_reference) &&
-                   slow_persisted.has_value() && slow_persisted->none() && exact.has_value() &&
-                   *exact == ::bioseq::simd_dispatch::highway_kernel_mask_for(
-                                 p_kernel::minimizer_two_stack_nthash) &&
-                   bounded.has_value() &&
-                   *bounded == ::bioseq::simd_dispatch::highway_kernel_mask_for(
-                                   p_kernel::minimizer_bounded_nthash) &&
-                   !bounded_wrong_window.has_value() && !bounded_wrong_kmer.has_value() &&
-                   scalar.has_value() && scalar->none() && vulkan.has_value() && vulkan->none() &&
-                   !planned_query_minimizer_highway_kernels(
-                        make_params(algorithm_type::simd_minimap2_reference),
-                        static_cast<route_type>(0xffu))
-                        .has_value();
-        }(),
-        "query-sketch Highway planning must remain route- and algorithm-exact");
-
     /**
      * The describe cascade intentionally pins the executable pipeline at the
      * prebuilt-minimizer entry point, so its stage chain has no minimizer_stage.
@@ -475,15 +339,6 @@ export {
         algorithm.highway_kernels = *kernels;
         stage.algorithm = std::move(algorithm);
         return stage;
-    }
-
-    /** Number of semantic query-sketch owners in a structured description. */
-    [[nodiscard]] inline std::size_t
-    query_sketch_stage_owner_count(const pipeline_description& description) noexcept {
-        return static_cast<std::size_t>(
-            std::ranges::count_if(description.stages, [](const stage_description& stage) noexcept {
-                return stage.stage_name == query_sketch_stage_name && stage.algorithm.has_value();
-            }));
     }
 
     // =============================================================================

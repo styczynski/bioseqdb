@@ -14,6 +14,9 @@ using namespace bioseq_int_tests;
 using namespace bioseq_int_tests::mmsearch_test_support;
 
 namespace {
+inline constexpr std::string_view k_ordinary_vulkan_scan =
+    "mmsearch_ordinary_vulkan_scan_int";
+
 void check_single_guc_parity(std::string_view guc) {
     auto ctx = fresh_context({k_hoe});
     seed_hoe_fixture(ctx, k_hoe);
@@ -25,6 +28,121 @@ void check_single_guc_parity(std::string_view guc) {
     expect_invariant_under_guc_toggle(ctx, sql, guc);
 }
 }  // namespace
+
+#if defined(BIOSEQ_TEST_INDEXES)
+TEST_CASE(
+    "ordinary Vulkan seeding preserves per-target offsets and the selected host suffix",
+    "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
+    struct route_case {
+        std::string_view index_name;
+        std::string_view base_alignment;
+    };
+    constexpr std::array routes{
+        route_case{"minimizers_per_fragment", "ksw2"},
+        route_case{"minimizers_per_fragment", "block_aligner"},
+        route_case{"minimizers_per_sequence", "ksw2"},
+        route_case{"minimizers_per_sequence", "block_aligner"},
+    };
+    const std::string source = high_entropy_sequence(1400u);
+    const std::string query = source.substr(500u, 160u);
+    const std::string target_one =
+        source.substr(0u, 200u) + query + source.substr(850u, 240u);
+    const std::string target_two =
+        source.substr(250u, 73u) + query + source.substr(1100u, 211u);
+    const std::string query_literal = format_literal(
+        query, seq_typmod{.alphabet = "dna4", .width = 32});
+
+    for (const auto& route : routes) {
+        DYNAMIC_SECTION(route.index_name << "/" << route.base_alignment) {
+            auto ctx = fresh_context({k_ordinary_vulkan_scan});
+            exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
+            create_seq_table(
+                ctx,
+                seq_table_spec{
+                    .name = std::string{k_ordinary_vulkan_scan},
+                    .typmod = {.alphabet = "dna4", .width = 32},
+                    .seq_columns = 1,
+                    .using_bioseq = true,
+                },
+                {
+                    seq_row{.pk = 1, .sequences = {target_one}},
+                    seq_row{.pk = 2, .sequences = {target_two}},
+                });
+            exec_sqlf(ctx,
+                "SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
+                k_ordinary_vulkan_scan,
+                route.index_name);
+            REQUIRE(index_table_row_count(
+                        ctx, route.index_name, k_ordinary_vulkan_scan) == 0);
+            exec_sql(ctx, fmt::format(
+                "SET max_parallel_workers_per_gather = 0;"
+                "SET bioseq.index.sequence_read.enabled = off;"
+                "SET bioseq.aligner.minimizer.algorithm = 'vulkan_minimap_integer';"
+                "SET bioseq.aligner.chaining.algorithm = 'scalar_minimap2';"
+                "SET bioseq.aligner.base_alignment.algorithm = '{}';"
+                "SET bioseq.aligner.vulkan.enabled = on;"
+                "SET bioseq.aligner.vulkan.seed_lookup.enabled = on;"
+                "SET bioseq.aligner.vulkan.index_cache.enabled = on;"
+                "SET bioseq.aligner.vulkan.fused_frontend.enabled = off;"
+                "SET bioseq.aligner.vulkan.index_build.enabled = on;"
+                "SET bioseq.aligner.vulkan.alignment_extension.enabled = off;",
+                route.base_alignment));
+
+            const std::string sql = fmt::format(
+                "SELECT pk, bioseq.query_start(pk), bioseq.query_end(pk), "
+                "       bioseq.target_start(pk), bioseq.target_end(pk), "
+                "       bioseq.is_reverse(pk), bioseq.mapq(pk), "
+                "       bioseq.cigar(pk), bioseq.has_cigar(pk) "
+                "FROM {} WHERE mmsearch(seq0, {}, "
+                " aligner_options(kmer_size=>15, window_size=>10, "
+                "                 min_chain_score=>10, best_n=>1, "
+                "                 index_read_requirement=>1)) "
+                "ORDER BY pk;",
+                k_ordinary_vulkan_scan,
+                query_literal);
+            const auto plan = explain_text<false>(ctx, sql);
+            REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+            REQUIRE(plan_contains(plan, "| chain_stage: Minimap2 Scalar"));
+            REQUIRE_FALSE(plan_contains(plan, "| chain_stage: Vulkan tiled DP"));
+            REQUIRE_FALSE(plan_contains(plan, "GPU CIGAR"));
+            REQUIRE_FALSE(plan_contains(plan, "GPU MAPQ"));
+
+            if (selected_vulkan_runtime_untrusted(ctx)) {
+                const auto error = sql_error(ctx, sql);
+                REQUIRE(error.sqlstate == "XX000");
+                REQUIRE(error.contains("Vulkan aligner execution failed"));
+                REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+                continue;
+            }
+
+            reset_mmsearch_source_counters(ctx);
+            const auto rows = query_rows(ctx, sql);
+            REQUIRE(rows.size() == 2u);
+            constexpr std::array<std::uint64_t, 2u> expected_target_starts{200u, 73u};
+            for (std::size_t index = 0u; index < rows.size(); ++index) {
+                const auto& row = rows[index];
+                REQUIRE(row.size() == 9u);
+                for (const auto& value : row) {
+                    REQUIRE(value.has_value());
+                }
+                REQUIRE(std::stoull(*row[0]) == index + 1u);
+                REQUIRE(std::stoull(*row[1]) == 0u);
+                REQUIRE(std::stoull(*row[2]) == query.size());
+                REQUIRE(std::stoull(*row[3]) == expected_target_starts[index]);
+                REQUIRE(std::stoull(*row[4]) ==
+                        expected_target_starts[index] + query.size());
+                REQUIRE(*row[5] == "f");
+                const auto mapq = std::stoll(*row[6]);
+                REQUIRE(mapq >= 0);
+                REQUIRE(mapq <= 60);
+                REQUIRE(is_valid_cigar(*row[7]));
+                REQUIRE(*row[8] == "t");
+            }
+            require_mmsearch_source_resources_balanced(ctx);
+        }
+    }
+}
+#endif
 
 TEST_CASE("mmsearch parity: bioseq.vectorization.enabled on/off agree",
           "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
@@ -194,14 +312,14 @@ TEST_CASE("bioseq.edit drives exact GateKeeper Vulkan prefilter attestation",
           "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
     auto ctx = fresh_context({k_gatekeeper_edits});
     constexpr std::string_view query =
-        "CGGCTTATCAGATAATGGCTTGAGACGGCAGGTCTGGGGTCTCAGCCGTAGCCATATCCAAAGA";
+        "CCCCAAGAAACAAAGTGTTGAGAATAACTAGCTACCAGGTATGCAATCATAAAGAGGACCGCAAGGTGATCAACA";
     constexpr std::string_view four_edits =
-        "CGGCTTATCAGATAATGGCTTGAGAGGGCCGGTGTGGTGTCTCAGCCGTAGCCATATCCAAAGA";
+        "CCCCAAGAAACAAAGTGTTGAGAATAACAAGCTAGCAGGAATGCATTCATAAAGAGGACCGCAAGGTGATCAACA";
     constexpr std::string_view thirteen_edits =
-        "CGGCTTATCAGATAATGGCTTGATCGTTGCTTAGATTTTAGTCAGCCGTAGCCATATCCAAAGA";
-    static_assert(query.size() == 64u);
-    static_assert(four_edits.size() == 64u);
-    static_assert(thirteen_edits.size() == 64u);
+        "CCCCAAGAAACAAAGTGTTGAGAATTAGTTGGTTCGACGAAAGGATTGAAAAAGAGGACCGCAAGGTGATCAACA";
+    static_assert(query.size() == 75u);
+    static_assert(four_edits.size() == 75u);
+    static_assert(thirteen_edits.size() == 75u);
 
     create_seq_table(
         ctx,
@@ -219,9 +337,13 @@ TEST_CASE("bioseq.edit drives exact GateKeeper Vulkan prefilter attestation",
 
     exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
     exec_sql(ctx, "SET bioseq.aligner.base_alignment.algorithm = 'ksw2';");
-    exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';");
+    exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'simd_minimap2_reference';");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.enabled = on;");
     exec_sql(ctx, "SET bioseq.aligner.chaining.minimum_score = 10;");
+    // The shared 24-base terminal contexts preserve both k=15/w=10 terminal
+    // minimizer windows; these literals delimit one measured 64-base mandatory
+    // fill, whose two endpoint anchors are intentional fixture admission.
+    exec_sql(ctx, "SET bioseq.aligner.chaining.minimum_seed_count = 2;");
 
     const std::string query_literal = format_literal(
         query, seq_typmod{.alphabet = "dna4", .width = 32});
@@ -230,7 +352,7 @@ TEST_CASE("bioseq.edit drives exact GateKeeper Vulkan prefilter attestation",
         "       bioseq.cigar(seq0) "
         "FROM {} "
         "WHERE mmsearch(seq0, {}, "
-        "      aligner_options(kmer_size => 7, window_size => 1, "
+        "      aligner_options(kmer_size => 15, window_size => 10, "
         "                      min_chain_score => 1, best_n => 0, "
         "                      vulkan_enabled => true)) "
         "  AND bioseq.edit(seq0) < 5 "
@@ -244,7 +366,7 @@ TEST_CASE("bioseq.edit drives exact GateKeeper Vulkan prefilter attestation",
         "         bioseq.cigar(seq0) AS cigar "
         "  FROM {} "
         "  WHERE mmsearch(seq0, {}, "
-        "        aligner_options(kmer_size => 7, window_size => 1, "
+        "        aligner_options(kmer_size => 15, window_size => 10, "
         "                        min_chain_score => 1, best_n => 0, "
         "                        vulkan_enabled => true))"
         ") "
@@ -256,7 +378,7 @@ TEST_CASE("bioseq.edit drives exact GateKeeper Vulkan prefilter attestation",
     const std::string implicit_vulkan_capability_sql = fmt::format(
         "SELECT pk, bioseq.edit(seq0) FROM {} "
         "WHERE mmsearch(seq0, {}, "
-        "      aligner_options(kmer_size => 7, window_size => 1, "
+        "      aligner_options(kmer_size => 15, window_size => 10, "
         "                      min_chain_score => 1, best_n => 0)) "
         "  AND bioseq.edit(seq0) < 5 ORDER BY pk;",
         k_gatekeeper_edits,
@@ -264,7 +386,7 @@ TEST_CASE("bioseq.edit drives exact GateKeeper Vulkan prefilter attestation",
     const std::string explicit_false_sql = fmt::format(
         "SELECT pk, bioseq.edit(seq0) FROM {} "
         "WHERE mmsearch(seq0, {}, "
-        "      aligner_options(kmer_size => 7, window_size => 1, "
+        "      aligner_options(kmer_size => 15, window_size => 10, "
         "                      min_chain_score => 1, best_n => 0, "
         "                      vulkan_enabled => false)) "
         "  AND bioseq.edit(seq0) < 5 ORDER BY pk;",

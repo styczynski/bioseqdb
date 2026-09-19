@@ -26,12 +26,14 @@ export module bioseq.postgres.table:custom_scan_per_row_join_paths_carrier_analy
 import std;
 import bioseq.postgres.support;
 
-import :custom_scan_oid_expression_support_semantic_analysis;
-import :custom_scan_semantic_payload_callback_contracts;
-import :custom_scan_join_ownership_carrier_lineage;
-import :custom_scan_join_ownership_descendant_neutralization;
+import :custom_scan_oid_expression_support_oid_catalog;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_join_ownership_carrier_lineage_contracts;
+import :custom_scan_join_ownership_descendant_path_contracts;
+import :custom_scan_join_ownership_path_owner_contracts;
 import :custom_scan_join_ownership_target_contracts;
-import :custom_scan_slice_path_plan_construction;
+export import :custom_scan_per_row_join_paths_carrier_contracts;
 
 using namespace bioseq::postgres::support;
 

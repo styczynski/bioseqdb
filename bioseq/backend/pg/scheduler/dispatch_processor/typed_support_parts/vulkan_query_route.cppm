@@ -4,28 +4,36 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+extern "C" {
+#include "postgres.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <new>
 
 export module bioseq.postgres.scheduler.dispatch_processor.typed_support.vulkan_query_route;
 
 import std;
-import bioseq.postgres.scheduler.dispatch_processor;
-import bioseq.postgres.support;
+import bioseq.common.checked_arithmetic;
+import bioseq.alignment.contracts;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.minimizer_physical_registry;
 import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.pipeline.minimap_port;
 import bioseq.pipeline.pipe;
+import bioseq.pipeline.vulkan_decline;
 import bioseq.highway.dispatch_contract;
 import bioseq.gpu.vulkan.runtime;
-import bioseq.postgres.types.compact_sequence;
 import bioseq.instrumentation.clock;
-import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.storage.layout;
 import bioseq.storage.scanner;
-import bioseq.postgres.storage.scanner;
 import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
@@ -36,60 +44,317 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 struct gpu_batch_query_sidecar {
     std::size_t row_index = 0;
     sequence_size_t query_len = 0;
+    std::uint32_t ordinal = 0;
 };
+
+/**
+ * A checked contiguous projection from a physical scanner batch into one
+ * Vulkan query submission.  Shared-target batches use `{0, batch_size}`;
+ * ordinary scans use one `{row, 1}` partition per row so each MPS submission
+ * owns an independently consumable query authorization.
+ */
+struct vulkan_query_row_partition {
+    std::size_t first_row = 0u;
+    std::size_t row_count = 0u;
+
+    /** @return True when this nonempty partition is contained by `capacity`. */
+    [[nodiscard]] constexpr bool valid(const std::size_t capacity) const noexcept {
+        return row_count != 0u && first_row <= capacity && row_count <= capacity - first_row;
+    }
+
+    /** @return True when `row` is one of this submission's physical rows. */
+    [[nodiscard]] constexpr bool contains(const std::size_t row) const noexcept {
+        return row >= first_row && row - first_row < row_count;
+    }
+
+    /** @return The dense submission index for `row`, or no value outside the partition. */
+    [[nodiscard]] constexpr std::optional<std::size_t>
+    local_index(const std::size_t row) const noexcept {
+        return contains(row) ? std::optional<std::size_t>{row - first_row} : std::nullopt;
+    }
+};
+
+static_assert(vulkan_query_row_partition{.first_row = 7u, .row_count = 1u}.valid(8u));
+static_assert(vulkan_query_row_partition{.first_row = 7u, .row_count = 1u}.contains(7u));
+static_assert(!vulkan_query_row_partition{.first_row = 7u, .row_count = 1u}.contains(6u));
+static_assert(!vulkan_query_row_partition{.first_row = 7u, .row_count = 2u}.valid(8u));
+static_assert(!vulkan_query_row_partition{.first_row = 8u, .row_count = 0u}.valid(8u));
+
+/**
+ * Resolve the generated physical minimizer record before any record-dependent
+ * query or target owner is instantiated. Runtime k/w remain values in the
+ * returned selection; the generated visitor alone binds the concrete record.
+ */
+template <class p_sequence,
+          std::size_t p_batch_capacity,
+          class p_sequence_header,
+          class p_scanner_context>
+[[nodiscard]] auto select_vulkan_batch_minimizer_layout(
+    const std::size_t batch_size,
+    const std::uint8_t storage_unit_byte_width,
+    const p_sequence_header* query_hdr,
+    const std::array<const p_sequence_header*, p_batch_capacity>* per_row_query_hdrs,
+    const std::array<const p_sequence_header*, p_batch_capacity>& target_hdrs,
+    const pipe::statement_execution_plan_owner& execution_plan,
+    const p_scanner_context* scanner_pg_ctx) {
+    if (!execution_plan || batch_size == 0u || batch_size > p_batch_capacity) {
+        throw std::invalid_argument{"Vulkan physical selection requires one nonempty bounded wave"};
+    }
+    using range_type = compact_sequence_range<p_sequence>;
+    using alphabet_type = typename range_type::traits::alphabet_type;
+    using storage_unit_type = typename range_type::traits::storage_unit;
+    if (storage_unit_byte_width != sizeof(storage_unit_type)) {
+        throw std::invalid_argument{"Vulkan physical selection changed packed storage width"};
+    }
+
+    std::uint64_t maximum_sequence_bp = 0u;
+    const auto include = [maximum_sequence_bp_owner =
+                              std::addressof(maximum_sequence_bp)](
+                             const std::uint64_t bp) {
+        *maximum_sequence_bp_owner = std::max(*maximum_sequence_bp_owner, bp);
+    };
+    for (std::size_t row = 0u; row < batch_size; ++row) {
+        const p_sequence_header* const row_query =
+            per_row_query_hdrs != nullptr ? (*per_row_query_hdrs)[row] : query_hdr;
+        if (row_query != nullptr) {
+            include(row_query->bp_size);
+        } else if (scanner_pg_ctx != nullptr &&
+                   scanner_pg_ctx->query_recipe_datums[row] != Datum{0}) {
+            include(scanner_pg_ctx->query_recipe_descriptors[row].bp_length);
+        } else if (scanner_pg_ctx != nullptr &&
+                   scanner_pg_ctx->query_locators[row].has_value()) {
+            include(scanner_pg_ctx->query_locators[row]->logical_length);
+        } else {
+            throw std::invalid_argument{"Vulkan physical selection has no query extent"};
+        }
+
+        if (scanner_pg_ctx != nullptr &&
+            scanner_pg_ctx->target_recipe_datums[row] != Datum{0}) {
+            include(scanner_pg_ctx->target_recipe_descriptors[row].bp_length);
+        } else if (scanner_pg_ctx != nullptr &&
+                   scanner_pg_ctx->target_locators[row].has_value()) {
+            include(scanner_pg_ctx->target_locators[row]->logical_length);
+        } else if (target_hdrs[row] != nullptr) {
+            include(target_hdrs[row]->bp_size);
+        } else {
+            throw std::invalid_argument{"Vulkan physical selection has no target extent"};
+        }
+    }
+    if (maximum_sequence_bp == 0u || execution_plan->frozen_parameters.kmer_size <= 0 ||
+        execution_plan->frozen_parameters.window_size <= 0 ||
+        execution_plan->frozen_parameters.kmer_size >
+            static_cast<std::int32_t>((std::numeric_limits<std::uint16_t>::max)()) ||
+        execution_plan->frozen_parameters.window_size >
+            static_cast<std::int32_t>((std::numeric_limits<std::uint16_t>::max)())) {
+        throw std::invalid_argument{"Vulkan physical selection has invalid extent or runtime k/w"};
+    }
+    if constexpr (!std::same_as<storage_unit_type, std::uint32_t> &&
+                  !std::same_as<storage_unit_type, std::uint64_t>) {
+        throw std::invalid_argument{
+            "Vulkan physical selection has no registered 32/64-bit packed input record"};
+    }
+    const auto algorithm = execution_plan->frozen_parameters.minimizer_algorithm;
+    const auto runtime_k =
+        static_cast<std::uint16_t>(execution_plan->frozen_parameters.kmer_size);
+    const auto runtime_w =
+        static_cast<std::uint16_t>(execution_plan->frozen_parameters.window_size);
+    // The generated registry's storage-width axis describes the minimizer
+    // hash lane, not the compact-sequence input owner. Preserve the canonical
+    // registered-shape choice used by minimap_port: reference/Vulkan K20 uses
+    // the 64-bit lane; the current K15 route uses the 32-bit lane.
+    if (algorithm == minimizer_algorithm::vulkan_minimap_integer && runtime_k > 15u) {
+        return bioseq::minimizers::select_minimizer_physical_layout<alphabet_type,
+                                                                     std::uint64_t>(
+            algorithm, maximum_sequence_bp, runtime_k, runtime_w);
+    }
+    return bioseq::minimizers::select_minimizer_physical_layout<alphabet_type,
+                                                                 std::uint32_t>(
+        algorithm, maximum_sequence_bp, runtime_k, runtime_w);
+}
+
+/** @brief Admits one fresh query-side vector before its only capacity allocation. */
+template <class p_value>
+void prepare_vulkan_query_host_capacity(
+    std::vector<p_value>& values,
+    bioseq::parallelism::memory_permit& retained_permit,
+    std::size_t count) {
+    if (values.capacity() != 0u || !values.empty() || retained_permit ||
+        count > values.max_size()) {
+        throw std::invalid_argument{"Vulkan query vector is not a fresh bounded owner"};
+    }
+    if (count == 0u)
+        return;
+    const auto bytes = bioseq::common::checked_mul(
+        static_cast<std::uint64_t>(count), sizeof(p_value));
+    const auto bound = bytes ? bioseq::common::checked_mul(
+        *bytes, bioseq::parallelism::k_vector_preallocation_headroom_factor)
+        : std::optional<std::uint64_t>{};
+    if (!bound) {
+        throw std::length_error{"Vulkan query vector capacity overflows admission"};
+    }
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    auto pending_permit = admission.try_reserve(*bound);
+    if (!pending_permit) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error{
+            "Vulkan query vector physical admission was rejected"};
+    }
+    // Adjacent declaration order also covers allocator/constructor exceptions.
+    std::vector<p_value> pending_values;
+    auto* const pending_values_owner = std::addressof(pending_values);
+    auto* const pending_permit_owner = std::addressof(pending_permit);
+    const auto materialization = admission.materialize(
+        *pending_permit,
+        [pending_values_owner, pending_permit_owner, count]() {
+            pending_values_owner->reserve(count);
+            const auto actual = bioseq::common::checked_mul(
+                static_cast<std::uint64_t>(pending_values_owner->capacity()),
+                sizeof(p_value));
+            if (!actual || *actual > (*pending_permit_owner)->bytes()) {
+                throw std::length_error{"Vulkan query allocation exceeds admitted capacity"};
+            }
+            (*pending_permit_owner)->shrink_to(*actual);
+            std::uint64_t fully_touched = 0u;
+            if constexpr (std::is_trivially_copyable_v<p_value> &&
+                          std::is_default_constructible_v<p_value>) {
+                pending_values_owner->resize(pending_values_owner->capacity());
+                std::memset(pending_values_owner->data(),
+                            0,
+                            static_cast<std::size_t>(*actual));
+                pending_values_owner->clear();
+                fully_touched = *actual;
+            }
+            return bioseq::parallelism::memory_materialization_snapshot{
+                .actual_allocation_bytes = *actual,
+                .fully_touched_bytes = fully_touched,
+                .is_host_visible = true,
+                .is_host_coherent = true,
+                .is_process_footprint_reflected = true,
+            };
+        });
+    const auto actual = static_cast<std::uint64_t>(pending_values.capacity()) * sizeof(p_value);
+    if (materialization.allocation_snapshot.actual_allocation_bytes != actual ||
+        materialization.admitted_bytes != actual ||
+        materialization.is_permit_released == static_cast<bool>(*pending_permit)) {
+        throw std::logic_error{"Vulkan query materialization did not reconcile physical storage"};
+    }
+    values.swap(pending_values);
+    retained_permit = std::move(*pending_permit);
+}
 
 /**
  * Retains every query-side owner and device authority across the persisted or
  * resident Vulkan route selected by the root coordinator.
  */
-template <class p_sequence> struct vulkan_query_batch_state {
-    using minimizer_type = minimap_sketch_data;
+template <class p_sequence, std::size_t p_batch_capacity, class p_minimizer_type>
+struct vulkan_query_batch_state {
+    using minimizer_type = p_minimizer_type;
+    using sketch_result_type =
+        bioseq::gpu::vulkan::vulkan_batch_sketch_result<minimizer_type>;
+
+    // The frozen statement and full query batch outlive all record/view aliases.
+    pipe::statement_execution_plan_owner execution_plan;
+    vulkan_query_row_partition submitted_rows{};
+    std::shared_ptr<sketch_result_type> query_sketch_owner;
     using gpu_row_alphabet = typename compact_sequence_range<p_sequence>::traits::alphabet_type;
     using gpu_row_view = bioseq::storage::lazy_sequence_view<gpu_row_alphabet>;
     using gpu_admitted_owner = bioseq::storage::admitted_packed_sequence<gpu_row_alphabet>;
 
+    bioseq::parallelism::memory_permit gpu_query_admitted_owners_permit;
     std::vector<gpu_admitted_owner> gpu_query_admitted_owners;
-    std::array<std::optional<gpu_row_view>, dispatch_batch_capacity> gpu_query_recipe_views{};
-    std::array<std::optional<gpu_row_view>, dispatch_batch_capacity> gpu_target_recipe_views{};
-    std::array<std::optional<std::size_t>, dispatch_batch_capacity> gpu_query_resident{};
-    std::size_t window_size{};
-    std::size_t kmer_size{};
-    std::shared_ptr<bioseq::gpu::vulkan::vulkan_batch_sketch_memory_retention>
-        query_sketch_memory_retention;
-    std::vector<bioseq::gpu::vulkan::gpu_seed_query_record_wire> query_records;
+    std::array<std::optional<gpu_row_view>, p_batch_capacity> gpu_query_recipe_views{};
+    std::array<std::optional<gpu_row_view>, p_batch_capacity> gpu_target_recipe_views{};
+    std::array<std::optional<std::size_t>, p_batch_capacity> gpu_query_resident{};
+    std::span<const bioseq::gpu::vulkan::gpu_seed_query_record_wire> query_records;
     bioseq::gpu::vulkan::vulkan_device_minimizer_span<minimizer_type> query_minimizer_device_span{};
     bioseq::gpu::vulkan::device_query_sketch_authorization query_sketch_authority{};
+    bioseq::parallelism::memory_permit query_sidecars_permit;
     std::vector<gpu_batch_query_sidecar> query_sidecars;
+    bioseq::parallelism::memory_permit row_to_query_index_permit;
     std::vector<std::uint32_t> row_to_query_index;
-    pipe::ordered_sketch_query_gate_storage query_gate;
     std::uint64_t gpu_query_sketch_host_ns{};
+
+    /** @return The submitted query index for one physical row, if authenticated. */
+    [[nodiscard]] std::optional<std::size_t>
+    query_index_for_row(const std::size_t row) const noexcept {
+        const auto local = submitted_rows.local_index(row);
+        if (!local || *local >= row_to_query_index.size()) {
+            return std::nullopt;
+        }
+        const std::uint32_t query_index = row_to_query_index[*local];
+        if (query_index == (std::numeric_limits<std::uint32_t>::max)() ||
+            query_index >= query_sidecars.size()) {
+            return std::nullopt;
+        }
+        return static_cast<std::size_t>(query_index);
+    }
+
+    /** @brief Retains the exact downloaded GPU query subrange without copying records. */
+    [[nodiscard]] pipe::minimizer_batch_view<minimizer_type>
+    host_query_minimizers(std::size_t query_index) const {
+        if (!execution_plan || !query_sketch_owner ||
+            !query_sketch_owner->host_readback_completed || query_index >= query_records.size()) {
+            throw std::logic_error{"Vulkan suffix has no completed owned query sketch"};
+        }
+        const auto& record = query_records[query_index];
+        const std::shared_ptr<const std::vector<minimizer_type>> host_owner(
+            query_sketch_owner, std::addressof(query_sketch_owner->host_minimizers));
+        return pipe::minimizer_batch_view<minimizer_type>::from_shared_host(
+            host_owner, record.minimizer_offset, record.minimizer_count);
+    }
 };
 
 /**
  * Admits recipe/locator query inputs and produces the one device-only query
  * sketch state consumed by either Vulkan target route.
  */
-template <class p_sequence>
-void prepare_vulkan_query_route(
-    const size_t batch_size,
+template <class p_sequence,
+          std::size_t p_batch_capacity,
+          class p_minimizer_type,
+          class p_sequence_header,
+          class p_scanner_context,
+          class p_source_view_resolver>
+void prepare_vulkan_query_route_rows(
+    const vulkan_query_row_partition submitted_rows,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const bioseq::pg_types::seq* query_hdr,
-    const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>* per_row_query_hdrs,
-    const minimap2_parameters& dispatch_params,
-    batch_processor::scanner_pg_context* scanner_pg_ctx,
+    const p_sequence_header* query_hdr,
+    const std::array<const p_sequence_header*, p_batch_capacity>* per_row_query_hdrs,
+    pipe::statement_execution_plan_owner execution_plan,
+    p_scanner_context* scanner_pg_ctx,
     const bool per_row_query_mode,
-    vulkan_query_batch_state<p_sequence>& state) {
-    using gpu_row_alphabet = typename vulkan_query_batch_state<p_sequence>::gpu_row_alphabet;
-    using gpu_row_view = typename vulkan_query_batch_state<p_sequence>::gpu_row_view;
+    const std::uint64_t broadcast_query_ordinal,
+    p_source_view_resolver& source_view_for_row,
+    vulkan_query_batch_state<p_sequence, p_batch_capacity, p_minimizer_type>& state) {
+    const std::size_t batch_size = submitted_rows.row_count;
+    if (!execution_plan || state.execution_plan || state.query_sketch_owner ||
+        !submitted_rows.valid(p_batch_capacity)) {
+        throw std::invalid_argument{"Vulkan query preparation requires one fresh statement-owned batch"};
+    }
+    switch (execution_plan->route) {
+    case pipe::seed_chain_route::vulkan_seed_host_chain:
+    case pipe::seed_chain_route::vulkan_seed_vulkan_chain:
+        break;
+    case pipe::seed_chain_route::host_seed_host_chain:
+    case pipe::seed_chain_route::host_seed_vulkan_chain:
+        throw std::invalid_argument{"host seeding cannot enter Vulkan query preparation"};
+    }
+    state.execution_plan = std::move(execution_plan);
+    state.submitted_rows = submitted_rows;
+    const auto& dispatch_params = state.execution_plan->frozen_parameters;
+    using state_type = vulkan_query_batch_state<p_sequence, p_batch_capacity, p_minimizer_type>;
+    using gpu_row_alphabet = typename state_type::gpu_row_alphabet;
+    using gpu_row_view = typename state_type::gpu_row_view;
     auto& gpu_query_admitted_owners = state.gpu_query_admitted_owners;
-    gpu_query_admitted_owners.reserve(batch_size);
+    prepare_vulkan_query_host_capacity(gpu_query_admitted_owners,
+        state.gpu_query_admitted_owners_permit, batch_size);
     auto& gpu_query_recipe_views = state.gpu_query_recipe_views;
     auto& gpu_target_recipe_views = state.gpu_target_recipe_views;
     auto& gpu_query_resident = state.gpu_query_resident;
     bool any_source_view = false;
     if (scanner_pg_ctx != nullptr) {
-        for (std::size_t row = 0u; row < batch_size && !any_source_view; ++row) {
+        for (std::size_t local_row = 0u; local_row < batch_size && !any_source_view;
+             ++local_row) {
+            const std::size_t row = submitted_rows.first_row + local_row;
             any_source_view = scanner_pg_ctx->query_recipe_datums[row] != Datum{0} ||
                               scanner_pg_ctx->target_recipe_datums[row] != Datum{0} ||
                               scanner_pg_ctx->query_locators[row].has_value() ||
@@ -102,88 +367,8 @@ void prepare_vulkan_query_route(
             throw bioseq::gpu::vulkan::vulkan_runtime_error(
                 "Vulkan recipe batch has no read-session arena");
         }
-        auto source_view_for_row = [scanner_pg_ctx, alphabet_code, storage_unit_byte_width](
-                                       const std::size_t row,
-                                       const bool query_operand) -> std::optional<gpu_row_view> {
-            const Datum recipe = query_operand ? scanner_pg_ctx->query_recipe_datums[row]
-                                               : scanner_pg_ctx->target_recipe_datums[row];
-            const auto& locator = query_operand ? scanner_pg_ctx->query_locators[row]
-                                                : scanner_pg_ctx->target_locators[row];
-            if (recipe != Datum{0} && locator.has_value()) {
-                throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                    "Vulkan source operand overlaps recipe and locator ownership");
-            }
-            Datum source_datum = recipe;
-            pg_sequence_descriptor descriptor =
-                query_operand ? scanner_pg_ctx->query_recipe_descriptors[row]
-                              : scanner_pg_ctx->target_recipe_descriptors[row];
-            const std::uint8_t source_alphabet =
-                query_operand ? scanner_pg_ctx->query_alphabet_code : alphabet_code;
-            const std::uint8_t source_width = query_operand
-                                                  ? scanner_pg_ctx->query_storage_unit_byte_width
-                                                  : storage_unit_byte_width;
-            if (locator.has_value()) {
-                const std::size_t letters_per_unit = bioseq::storage::packed_letters_per_unit(
-                    source_width, static_cast<std::uint8_t>(p_sequence::letter_bit_width));
-                if (letters_per_unit == 0u) {
-                    throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                        "Vulkan locator has invalid packed geometry");
-                }
-                const std::uint64_t remainder = locator->logical_length % letters_per_unit;
-                const std::uint64_t padding = remainder == 0u ? 0u : letters_per_unit - remainder;
-                if (padding > (std::numeric_limits<std::uint16_t>::max)()) {
-                    throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                        "Vulkan locator padding exceeds ABI");
-                }
-                bioseq::pg_types::seq* stub =
-                    bioseq::postgres::support::invoke_pg_as_cpp([scanner_pg_ctx,
-                                                                 source_alphabet,
-                                                                 source_width,
-                                                                 padding,
-                                                                 source_locator = *locator] {
-                        return bioseq::storage::alloc_locator_stub_in(
-                            scanner_pg_ctx->parent_mctx,
-                            source_alphabet,
-                            source_width,
-                            static_cast<std::uint16_t>(padding),
-                            source_locator.logical_length,
-                            source_locator);
-                    });
-                source_datum = bioseq::storage::promote_pg_sequence_locator(
-                    scanner_pg_ctx->source_provider,
-                    static_cast<AttrNumber>(query_operand ? scanner_pg_ctx->mmsearch_query_attno
-                                                          : scanner_pg_ctx->mmsearch_seq_attno),
-                    PointerGetDatum(stub),
-                    scanner_pg_ctx->parent_mctx);
-                descriptor = bioseq::postgres::support::invoke_pg_as_cpp(
-                    [source_datum] { return ::classify_and_describe_sequence(source_datum); });
-                if (descriptor.bp_length != locator->logical_length) {
-                    throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                        "Vulkan locator promotion changed sequence length");
-                }
-            }
-            if (source_datum == Datum{0}) {
-                return std::nullopt;
-            }
-            const bool expanded = descriptor.kind == pg_sequence_datum_kind::expanded_read_only ||
-                                  descriptor.kind == pg_sequence_datum_kind::expanded_read_write;
-            if (!expanded || !descriptor.alphabet_bound ||
-                descriptor.alphabet_code != source_alphabet ||
-                descriptor.storage_unit_byte_width != source_width) {
-                throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                    "Vulkan source facade metadata is invalid");
-            }
-            auto* source_owner = bioseq::postgres::support::invoke_pg_as_cpp(
-                [scanner_pg_ctx, source_datum, descriptor] {
-                    return ::make_pg_sequence_call_owner<gpu_row_alphabet>(
-                        *scanner_pg_ctx->read_session, source_datum, descriptor);
-                });
-            const auto* observer =
-                query_operand ? std::addressof(scanner_pg_ctx->mmsearch_query_payload_observer)
-                              : std::addressof(scanner_pg_ctx->mmsearch_target_payload_observer);
-            return source_owner->view().with_payload_allocation_observer(observer);
-        };
-        for (std::size_t row = 0u; row < batch_size; ++row) {
+        for (std::size_t local_row = 0u; local_row < batch_size; ++local_row) {
+            const std::size_t row = submitted_rows.first_row + local_row;
             const auto query_source = source_view_for_row(row, /*query_operand=*/true);
             if (query_source.has_value()) {
                 const gpu_row_view original = *query_source;
@@ -206,7 +391,12 @@ void prepare_vulkan_query_route(
                         "Vulkan query recipe packed-region admission was rejected");
                 }
                 gpu_query_admitted_owners.push_back(bioseq::storage::materialize_packed_sequence(
-                    original, 0u, original.bp_size(), storage_unit_byte_width, std::move(*permit)));
+                    original,
+                    0u,
+                    original.bp_size(),
+                    storage_unit_byte_width,
+                    std::move(*permit),
+                    bioseq::storage::packed_materialization_policy::require_native_copy));
                 gpu_query_resident[row] = gpu_query_admitted_owners.size() - 1u;
                 gpu_query_recipe_views[row] = gpu_query_admitted_owners.back().view();
             }
@@ -216,32 +406,32 @@ void prepare_vulkan_query_route(
             }
         }
     }
-    state.window_size = static_cast<std::size_t>(dispatch_params.window_size);
-    state.kmer_size = static_cast<std::size_t>(dispatch_params.kmer_size);
-    const std::size_t window_size = state.window_size;
-    const std::size_t kmer_size = state.kmer_size;
-    // The resident query sketch remains device-only.  A fair
-    // no-index target build is complete and query-independent;
-    // host-materialising query hashes to filter that build
-    // would create a direct-match accelerator, not an index.
-    auto& query_sketch_memory_retention = state.query_sketch_memory_retention;
+    const std::size_t window_size = static_cast<std::size_t>(dispatch_params.window_size);
+    const std::size_t kmer_size = static_cast<std::size_t>(dispatch_params.kmer_size);
+    // Preserve the GPU-produced sketch for the ordinary host suffix. The same
+    // authenticated readback supplies the statement-complete hash union for a
+    // persisted or transient MPF target; every matching target occurrence is retained.
     auto& query_records = state.query_records;
     auto& query_minimizer_device_span = state.query_minimizer_device_span;
     auto& query_sketch_authority = state.query_sketch_authority;
     auto& query_sidecars = state.query_sidecars;
     auto& row_to_query_index = state.row_to_query_index;
+    prepare_vulkan_query_host_capacity(row_to_query_index,
+        state.row_to_query_index_permit, batch_size);
     row_to_query_index.assign(batch_size, std::numeric_limits<std::uint32_t>::max());
-    auto& query_gate = state.query_gate;
+    bioseq::parallelism::memory_permit batch_query_uploads_permit;
     std::vector<bioseq::gpu::vulkan::sequence_upload_view> batch_query_uploads;
     const auto gpu_batch_now_ns = []() -> std::uint64_t {
         return static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
     };
     const std::uint64_t gpu_query_sketch_begin_ns = gpu_batch_now_ns();
 
-    query_sidecars.reserve(batch_size);
-    batch_query_uploads.reserve(batch_size);
-    for (std::size_t row_index = 0; row_index < batch_size; ++row_index) {
-        const bioseq::pg_types::seq* row_query_hdr =
+    prepare_vulkan_query_host_capacity(query_sidecars, state.query_sidecars_permit, batch_size);
+    prepare_vulkan_query_host_capacity(
+        batch_query_uploads, batch_query_uploads_permit, batch_size);
+    for (std::size_t local_row = 0u; local_row < batch_size; ++local_row) {
+        const std::size_t row_index = submitted_rows.first_row + local_row;
+        const p_sequence_header* row_query_hdr =
             per_row_query_mode ? (*per_row_query_hdrs)[row_index] : query_hdr;
         const bool recipe_query = gpu_query_resident[row_index].has_value();
         if (row_query_hdr != nullptr && recipe_query) {
@@ -249,12 +439,24 @@ void prepare_vulkan_query_route(
                 "Vulkan query recipe overlaps a flat query");
         }
         if (row_query_hdr == nullptr && !recipe_query) {
-            continue;
+            throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                "Vulkan query wave contains an unowned query row");
         }
         if (row_query_hdr != nullptr &&
             (row_query_hdr->alphabet_code != alphabet_code ||
              row_query_hdr->storage_unit_byte_width != storage_unit_byte_width)) {
-            continue;
+            throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                "Vulkan query wave changed its selected physical typmod");
+        }
+        const std::uint64_t logical_ordinal =
+            scanner_pg_ctx != nullptr && scanner_pg_ctx->explicit_query_ordinals
+                ? scanner_pg_ctx->query_ordinals[row_index]
+            : per_row_query_mode ? static_cast<std::uint64_t>(row_index)
+                                 : broadcast_query_ordinal;
+        if (logical_ordinal >
+            static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())) {
+            throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                "Vulkan query ordinal exceeds the canonical seed wire domain");
         }
         const std::uint32_t query_index = static_cast<std::uint32_t>(batch_query_uploads.size());
         sequence_size_t query_length = 0u;
@@ -277,16 +479,17 @@ void prepare_vulkan_query_route(
         query_sidecars.push_back(gpu_batch_query_sidecar{
             .row_index = row_index,
             .query_len = query_length,
+            .ordinal = static_cast<std::uint32_t>(logical_ordinal),
         });
-        row_to_query_index[row_index] = query_index;
+        row_to_query_index[local_row] = query_index;
     }
     if (!batch_query_uploads.empty()) {
         const auto rank_lut =
             bioseq::gpu::vulkan::make_vulkan_rank_lut<compact_sequence_range<p_sequence>>();
         auto gpu_batch_sketch =
-            bioseq::gpu::vulkan::collect_minimap_sketch_data_vulkan_upload_batch_result(
-                std::span<const bioseq::gpu::vulkan::sequence_upload_view>{
-                    batch_query_uploads.data(), batch_query_uploads.size()},
+            bioseq::gpu::vulkan::collect_minimap_sketch_data_vulkan_upload_batch_result<
+                p_minimizer_type>(
+                std::span<const bioseq::gpu::vulkan::sequence_upload_view>{batch_query_uploads},
                 rank_lut,
                 window_size,
                 kmer_size,
@@ -294,12 +497,69 @@ void prepare_vulkan_query_route(
         if (!gpu_batch_sketch) {
             pipe::throw_vulkan_declined("Vulkan batched query minimizer sketch");
         }
-        query_records = std::move(gpu_batch_sketch->query_records);
-        query_sketch_memory_retention = gpu_batch_sketch->memory_retention;
-        query_minimizer_device_span = gpu_batch_sketch->device_span();
-        query_sketch_authority = std::move(gpu_batch_sketch->query_authority);
+        bioseq::gpu::vulkan::materialize_authorized_query_minimizers(
+            *gpu_batch_sketch, bioseq::gpu::vulkan::runtime::instance());
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        state.query_sketch_owner =
+            std::allocate_shared<typename state_type::sketch_result_type>(
+                admitted_alignment_node_allocator<typename state_type::sketch_result_type>{},
+                std::move(*gpu_batch_sketch));
+#else
+        state.query_sketch_owner =
+            std::make_shared<typename state_type::sketch_result_type>(
+                std::move(*gpu_batch_sketch));
+#endif
+        if (state.query_sketch_owner.use_count() != 1u) {
+            throw std::logic_error{
+                "Vulkan query shared owner did not retain its sole control allocation"};
+        }
+        query_records = state.query_sketch_owner->query_records;
+        query_minimizer_device_span = state.query_sketch_owner->device_span();
+        query_sketch_authority = std::move(state.query_sketch_owner->query_authority);
+    }
+    if (query_sidecars.size() != batch_size || query_records.size() != batch_size ||
+        row_to_query_index.size() != batch_size) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error(
+            "Vulkan query sketch did not publish one physical record per submitted row");
     }
     state.gpu_query_sketch_host_ns = gpu_batch_now_ns() - gpu_query_sketch_begin_ns;
+}
+
+/**
+ * Prepare the canonical shared-target query wave.  This compatibility-preserving
+ * facade is the only entry used by the existing BatchJoin route; ordinary scans
+ * call `prepare_vulkan_query_route_rows` with a checked singleton partition.
+ */
+template <class p_sequence,
+          std::size_t p_batch_capacity,
+          class p_minimizer_type,
+          class p_sequence_header,
+          class p_scanner_context,
+          class p_source_view_resolver>
+void prepare_vulkan_query_route(
+    const size_t batch_size,
+    const uint8_t alphabet_code,
+    const uint8_t storage_unit_byte_width,
+    const p_sequence_header* query_hdr,
+    const std::array<const p_sequence_header*, p_batch_capacity>* per_row_query_hdrs,
+    pipe::statement_execution_plan_owner execution_plan,
+    p_scanner_context* scanner_pg_ctx,
+    const bool per_row_query_mode,
+    const std::uint64_t broadcast_query_ordinal,
+    p_source_view_resolver& source_view_for_row,
+    vulkan_query_batch_state<p_sequence, p_batch_capacity, p_minimizer_type>& state) {
+    prepare_vulkan_query_route_rows<p_sequence, p_batch_capacity, p_minimizer_type>(
+        vulkan_query_row_partition{.first_row = 0u, .row_count = batch_size},
+        alphabet_code,
+        storage_unit_byte_width,
+        query_hdr,
+        per_row_query_hdrs,
+        std::move(execution_plan),
+        scanner_pg_ctx,
+        per_row_query_mode,
+        broadcast_query_ordinal,
+        source_view_for_row,
+        state);
 }
 
 } // namespace bioseq::simd::typed_dispatch::typed_support_detail

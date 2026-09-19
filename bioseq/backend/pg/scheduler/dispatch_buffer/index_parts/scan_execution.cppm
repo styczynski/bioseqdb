@@ -36,32 +36,175 @@ extern "C" {
 module bioseq.postgres.scheduler.dispatch_buffer:scan_execution;
 
 import bioseq.postgres.scheduler.dispatch_buffer;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+import :accounting;
+#endif
+import :active_policy_accounting;
 
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
 import bioseq.postgres.configuration.core;
-import bioseq.indexing.type;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.storage.lazy_sequence; // allocation observer for route-aware sequence payload tracing
+import bioseq.postgres.storage.indexing.active_read_policy_resolver;
 import bioseq.postgres.scheduler.dispatch_processor; // fixed-shape batch_processor, heavy pipeline in its own module
+import bioseq.indexing.gpu_minimizer_index;
+import bioseq.alignment.contracts;
 import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.minimap_port;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.pipe;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
-import bioseq.storage.scanner;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner; // statement-owned source provider for locator targets
 import bioseq.parallelism.memory_admission;
 import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.column.table_access;
 
 namespace bioseq::scheduler {
+
+namespace {
+
+using scanner_context = ::bioseq::simd::batch_processor::scanner_pg_context;
+
+/** @return True only for aliases of the scanner's immutable statement owner. */
+[[nodiscard]] bool scanner_plan_matches(
+    const scanner_context& scanner,
+    const ::bioseq::simd::pipe::statement_execution_plan_owner& execution_plan) noexcept {
+    return scanner.execution_plan && execution_plan &&
+           scanner.execution_plan.get() == execution_plan.get() &&
+           !scanner.execution_plan.owner_before(execution_plan) &&
+           !execution_plan.owner_before(scanner.execution_plan);
+}
+
+/** Prepare one persisted or transient MPF owner for an ordinary scan row. */
+void prepare_ordinary_scan_mpf_target(
+    void* opaque_processor,
+    scanner_context& scanner,
+    const std::size_t row,
+    const std::uint64_t target_bp_size,
+    const std::uint8_t target_alphabet_code,
+    const std::uint8_t target_storage_unit_byte_width,
+    ::bioseq::simd::pipe::statement_execution_plan_owner execution_plan,
+    scanner_context::gpu_mpf_target_owner& prepared_target) {
+    auto* const processor = static_cast<::bioseq::simd::batch_processor*>(opaque_processor);
+    if (processor == nullptr || row >= ::bioseq::simd::dispatch_batch_capacity ||
+        target_bp_size == 0u || scanner.target_rownos[row] < 0 ||
+        !scanner_plan_matches(scanner, execution_plan)) {
+        throw std::logic_error{
+            "ordinary MPF Vulkan preparation changed row or statement ownership"};
+    }
+    const auto target_rowno = static_cast<std::uint64_t>(scanner.target_rownos[row]);
+    if (scanner.read_index_active) {
+        if (scanner.executor_read_context == nullptr) {
+            throw std::logic_error{
+                "ordinary persisted MPF Vulkan preparation has no executor read owner"};
+        }
+        processor->prepare_gpu_persisted_mpf_target(
+            scanner.db_oid,
+            scanner.tablespace_oid,
+            scanner.main_relfilenode,
+            scanner.user_relid,
+            scanner.mmsearch_seq_attno,
+            scanner.active_index,
+            target_rowno,
+            target_bp_size,
+            /*query_count=*/1u,
+            target_alphabet_code,
+            target_storage_unit_byte_width,
+            std::move(execution_plan),
+            *scanner.executor_read_context,
+            prepared_target);
+    } else {
+        prepared_target = scanner_context::gpu_mpf_target_owner{};
+        prepared_target.execution_plan = std::move(execution_plan);
+        prepared_target.target_rowno = static_cast<std::int64_t>(target_rowno);
+        prepared_target.target_bp_size = target_bp_size;
+        prepared_target.query_count = 1u;
+        prepared_target.operation_identity =
+            bioseq::indexing::next_gpu_source_direct_operation_identity();
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        prepared_target.resident_cache =
+            std::allocate_shared<bioseq::indexing::gpu_minimizer_index_cache>(
+                ::bioseq::simd::admitted_alignment_node_allocator<
+                    bioseq::indexing::gpu_minimizer_index_cache>{},
+                0u);
+#else
+        prepared_target.resident_cache =
+            std::make_shared<bioseq::indexing::gpu_minimizer_index_cache>(0u);
+#endif
+        prepared_target.persisted = false;
+    }
+    if (!prepared_target.source_ready() || prepared_target.target_rowno !=
+                                               scanner.target_rownos[row] ||
+        prepared_target.target_bp_size != target_bp_size ||
+        prepared_target.query_count != 1u) {
+        throw std::logic_error{
+            "ordinary MPF Vulkan preparation did not publish one exact row owner"};
+    }
+    scanner.persisted_generation_ids[row] =
+        prepared_target.persisted ? prepared_target.persisted_generation_id : 0u;
+    scanner.persisted_source_identities[row] =
+        prepared_target.persisted ? prepared_target.persisted_source_identity : 0u;
+}
+
+/** Prepare one persisted or transient MPS owner for an ordinary scan row. */
+void prepare_ordinary_scan_mps_target(
+    void* opaque_processor,
+    scanner_context& scanner,
+    const std::size_t row,
+    const std::uint64_t target_bp_size,
+    const std::uint8_t target_alphabet_code,
+    const std::uint8_t target_storage_unit_byte_width,
+    ::bioseq::simd::pipe::statement_execution_plan_owner execution_plan,
+    scanner_context::gpu_mps_target_owner& prepared_target) {
+    auto* const processor = static_cast<::bioseq::simd::batch_processor*>(opaque_processor);
+    if (processor == nullptr || row >= ::bioseq::simd::dispatch_batch_capacity ||
+        target_bp_size == 0u || scanner.target_rownos[row] < 0 ||
+        !scanner_plan_matches(scanner, execution_plan)) {
+        throw std::logic_error{
+            "ordinary MPS Vulkan preparation changed row or statement ownership"};
+    }
+    const auto target_rowno = static_cast<std::uint64_t>(scanner.target_rownos[row]);
+    if (scanner.read_index_active) {
+        if (scanner.executor_read_context == nullptr) {
+            throw std::logic_error{
+                "ordinary persisted MPS Vulkan preparation has no executor read owner"};
+        }
+        processor->prepare_gpu_persisted_grouped_soa_target(
+            scanner.db_oid,
+            scanner.tablespace_oid,
+            scanner.main_relfilenode,
+            scanner.user_relid,
+            scanner.mmsearch_seq_attno,
+            scanner.active_index,
+            target_rowno,
+            target_bp_size,
+            /*query_count=*/1u,
+            target_alphabet_code,
+            target_storage_unit_byte_width,
+            std::move(execution_plan),
+            *scanner.executor_read_context,
+            prepared_target);
+    } else {
+        prepared_target = scanner_context::gpu_mps_target_owner{};
+        prepared_target.execution_plan = std::move(execution_plan);
+        prepared_target.target_rowno = static_cast<std::int64_t>(target_rowno);
+        prepared_target.target_bp_size = target_bp_size;
+        prepared_target.query_count = 1u;
+        prepared_target.operation_identity =
+            bioseq::indexing::next_gpu_source_direct_operation_identity();
+        prepared_target.persisted = false;
+    }
+    const bool exact_source = prepared_target.source_ready() &&
+                              prepared_target.target_rowno == scanner.target_rownos[row] &&
+                              prepared_target.target_bp_size == target_bp_size &&
+                              prepared_target.query_count == 1u;
+    if (!exact_source || (scanner.read_index_active && !prepared_target.ready())) {
+        throw std::logic_error{
+            "ordinary MPS Vulkan preparation did not publish one exact row owner"};
+    }
+    scanner.persisted_generation_ids[row] =
+        prepared_target.persisted ? prepared_target.resident_view.generation_id : 0u;
+    scanner.persisted_source_identities[row] =
+        prepared_target.persisted ? prepared_target.resident_view.source_identity : 0u;
+}
+
+} // namespace
 
 /** @brief Implements the run batch and build cursors contract declared by the stable buffer facade.
  */
@@ -170,17 +313,11 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
 #else
     constexpr bool forced_flat_baseline = false;
 #endif
-    const bool vulkan_requested = ::bioseq::simd::pipe::vulkan_components_requested(base_params);
-    if (vulkan_requested && !::bioseq::simd::pipe::complete_all_gpu_tuple_selected(base_params)) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("Vulkan aligner execution failed"),
-                 errdetail("Vulkan complete-tuple admission: requested Vulkan components do not "
-                           "form the complete supported all-GPU tuple; generic CPU/SIMD biological "
-                           "fallback is forbidden"),
-                 errhint("Selected Vulkan execution has no CPU fallback; fix the Vulkan runtime or "
-                         "select a non-Vulkan algorithm before dispatch.")));
+    if (!execution_plan) {
+        throw std::logic_error{"scan execution has no immutable statement plan"};
     }
+    // The typed producer consumes this same plan and checks the selected seed
+    // location. A host seeder plus Vulkan chaining is not an all-GPU request.
     /* Selected Vulkan consumes source-backed inputs through typed lazy
      * views and owner-bearing admitted_packed_sequence uploads. It must not
      * ask the tuple buffer to EOH-flatten locators or recipes. */
@@ -373,8 +510,22 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     scanner_pg_ctx.caches = scanner_pg_cache;
     scanner_pg_ctx.parent_mctx = batch_payload_ctx;
     scanner_pg_ctx.snapshot = scan_snapshot;
+    scanner_pg_ctx.executor_read_context =
+        executor_read_context.has_value() ? std::addressof(*executor_read_context) : nullptr;
     scanner_pg_ctx.source_provider = source_provider;
     scanner_pg_ctx.persisted_gpu_operation_stats_sink = persisted_gpu_operation_stats_sink;
+    scanner_pg_ctx.downstream_active_wall = downstream_active_wall_tracker;
+    if (execution_plan->uses_vulkan_seed()) {
+        scanner_pg_ctx.execution_plan = execution_plan;
+        scanner_pg_ctx.ordinary_vulkan_target_preparation = {
+            .state = std::addressof(processor),
+            .prepare_mpf = &prepare_ordinary_scan_mpf_target,
+            .prepare_mps = &prepare_ordinary_scan_mps_target,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            .map_persisted_read_stats = &merge_generation_read_stats,
+#endif
+        };
+    }
     // Populate per-row locators for the target column. The production
     // scanner_pg path uses these. Last-fragment padding is recomputed
     // inside process_sequences where the template parameter p_sequence (and thus
@@ -442,6 +593,8 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         scanner_pg_ctx.target_rownos.fill(-1);
         scanner_pg_ctx.target_index_sources.fill(
             ::bioseq::pipeline_stats::target_index_source::none);
+        scanner_pg_ctx.persisted_generation_ids.fill(0u);
+        scanner_pg_ctx.persisted_source_identities.fill(0u);
     };
     /** @brief Copies locator, recipe, and rowno state from buffered entries into scanner_pg for active wave rows. */
     auto install_scanner_wave = [this, &scanner_pg_ctx](std::span<const size_t> rows) {
@@ -523,7 +676,11 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     };
     /** @brief Aborts the active read session and clears wave handles on an error path. */
     const auto release_active_wave_after_error_noexcept =
-        [this, &clear_active_wave_member_handles_noexcept]() noexcept {
+        [this,
+         &clear_active_wave_member_handles_noexcept,
+         &scanner_pg_ctx,
+         &target_hdrs,
+         &per_row_query_hdrs]() noexcept {
             scanner_pg_ctx.read_session = nullptr;
             ::abort_pg_sequence_read_session_noexcept(
                 std::exchange(active_wave_read_session, nullptr));
@@ -531,9 +688,13 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
             target_hdrs.fill(nullptr);
             per_row_query_hdrs.fill(nullptr);
             active_wave_permit.reset();
-        };
+    };
     /** @brief Verifies the read session finished, then clears wave handles and releases admission. */
-    const auto release_active_wave_checked = [this, &clear_active_wave_member_handles_noexcept]() {
+    const auto release_active_wave_checked =
+        [this,
+         &clear_active_wave_member_handles_noexcept,
+         &target_hdrs,
+         &per_row_query_hdrs]() {
         if (active_wave_read_session != nullptr) {
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
@@ -546,7 +707,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     };
     /** @brief Tears down the active wave and destroys scanner_pg sequence caches after failure. */
     const auto abandon_scanner_cache_noexcept =
-        [this, &release_active_wave_after_error_noexcept]() noexcept {
+        [this, &release_active_wave_after_error_noexcept, &scanner_pg_cache]() noexcept {
             release_active_wave_after_error_noexcept();
             if (scanner_pg_cache == nullptr) {
                 return;
@@ -608,7 +769,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                 }
 
                 ::bioseq::pipeline_stats::pipeline_execution_stats wave_stats{};
-                std::map<int32_t, std::vector<::bioseq::simd::match_result>> wave_match_map;
+                ::bioseq::simd::match_result_map wave_match_map;
                 if (per_row_mode()) {
                     wave_match_map =
                         processor.process_sequences(batch_size,
@@ -618,7 +779,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                                                     &per_row_query_hdrs,
                                                     target_hdrs,
                                                     query_ids,
-                                                    base_params,
+                                                    execution_plan,
                                                     ::bioseq::simd::batch_invocation_role::primary,
                                                     0,
                                                     wave_stats,
@@ -632,7 +793,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                                                     nullptr,
                                                     target_hdrs,
                                                     query_ids,
-                                                    base_params,
+                                                    execution_plan,
                                                     ::bioseq::simd::batch_invocation_role::primary,
                                                     0,
                                                     wave_stats,
@@ -662,7 +823,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                         nullptr,
                         target_hdrs,
                         query_ids,
-                        base_params,
+                        execution_plan,
                         ::bioseq::simd::batch_invocation_role::extra_query,
                         extra_broadcast_query_ordinal(
                             per_row_mode(), batch_size, extra_query_index),
@@ -772,7 +933,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
              ++match_index) {
             const ::bioseq::simd::match_result& match_candidate =
                 matches_for_entry->second[match_index];
-            if (base_params.do_cigar &&
+            if (base_aligner_params().do_cigar &&
                 (!match_candidate.has_cigar || match_candidate.cigar.empty())) {
                 bioseq_log<logging_level::debug>(
                     "[bioseq] pg: batch skip: degenerate match for entry index={} cursor m={} "

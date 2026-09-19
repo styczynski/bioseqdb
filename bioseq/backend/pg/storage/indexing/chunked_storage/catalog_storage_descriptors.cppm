@@ -3,15 +3,31 @@
  * @brief Defines generation storage descriptors and publication capabilities.
  */
 module;
-#include <bioseq/pg_compat.h>
+
 extern "C" {
+#include "postgres.h"
+
+#include "access/genam.h"
 #include "access/nbtree.h"
 #include "storage/relfilelocator.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/xid8.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <sys/types.h>
+
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:catalog_storage_descriptors;
+
 import std;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
 import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI

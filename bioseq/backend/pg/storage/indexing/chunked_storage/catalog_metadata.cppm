@@ -3,8 +3,10 @@
  * @brief Defines physical catalog naming, metadata-age tracking, locks, and generation identifiers.
  */
 module;
-#include <bioseq/pg_compat.h>
+
 extern "C" {
+#include "postgres.h"
+
 #include "access/heapam.h"
 #include "access/nbtree.h"
 #include "access/relation.h"
@@ -17,12 +19,23 @@ extern "C" {
 #include "commands/sequence.h"
 #include "executor/spi.h"
 #include "utils/builtins.h"
+#include "utils/errcodes.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:catalog_metadata;
+
 import std;
 import bioseq.common.logging;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid

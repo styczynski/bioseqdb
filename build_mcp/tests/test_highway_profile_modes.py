@@ -41,6 +41,7 @@ REMOVED_MODE_KEYS = frozenset({
     "cache-bench",
     "cache-bioseq-bench",
 })
+RUNTIME_PROFILE_MODE = build_presets.ALL_ALPHABETS_UNIT_INTEGRATION_MODE
 
 
 class HighwayProfilePresetContractTest(unittest.TestCase):
@@ -106,6 +107,34 @@ class HighwayProfileModeContractTest(unittest.TestCase):
         self.assertEqual(len(subagent_schema["oneOf"]), 8)
         for shape in subagent_schema["oneOf"]:
             self.assertFalse(shape["additionalProperties"])
+        create_shape = next(
+            shape for shape in subagent_schema["oneOf"]
+            if shape["title"] == "create"
+        )
+        expected_tiers = [
+            "contractor-intern", "intern", "contractor", "mid", "senior",
+            "specialist",
+        ]
+        self.assertEqual(
+            create_shape["properties"]["reasoning_effort"]["enum"],
+            expected_tiers,
+        )
+        self.assertEqual(
+            create_shape["properties"]["highest_spawn_tier"]["enum"],
+            [None, *expected_tiers],
+        )
+        self.assertIn(
+            "separate Cursor account quota",
+            create_shape["properties"]["reasoning_effort"]["description"],
+        )
+        repurpose_shape = next(
+            shape for shape in subagent_schema["oneOf"]
+            if shape["title"] == "repurpose"
+        )
+        self.assertEqual(
+            repurpose_shape["properties"]["highest_spawn_tier"]["enum"],
+            [None, *expected_tiers],
+        )
         remote_schema = definitions["remote-run"]["inputSchema"]
         for shape in remote_schema["oneOf"]:
             self.assertFalse(shape["additionalProperties"])
@@ -207,6 +236,36 @@ class HighwayProfileModeContractTest(unittest.TestCase):
                     REPOSITORY_ROOT / "build" / preset_name,
                 )
 
+        runtime = build_presets.MODES[RUNTIME_PROFILE_MODE]
+        ordinary = build_presets.MODES["unit-integration"]
+        self.assertFalse(runtime.requires_build_only)
+        self.assertEqual(runtime.targets, ordinary.targets)
+        self.assertEqual(runtime.commands, ordinary.commands)
+        self.assertIsNot(runtime.targets, ordinary.targets)
+        self.assertIsNot(runtime.commands, ordinary.commands)
+        self.assertTrue(runtime.build_targets_together)
+        self.assertTrue(runtime.install_extension)
+        self.assertEqual(runtime.lock_group, "tests")
+        self.assertEqual(runtime.binary_subdir, ordinary.binary_subdir)
+        self.assertEqual(runtime.preset_family, "test")
+        self.assertEqual(
+            runtime.required_cache_variables,
+            {**ordinary.required_cache_variables,
+             "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64"},
+        )
+        self.assertEqual(
+            build_presets.preset_for(RUNTIME_PROFILE_MODE, False),
+            "test-optimized-all-alphabets-uint64",
+        )
+        self.assertEqual(
+            build_presets.build_dir_for(RUNTIME_PROFILE_MODE, False),
+            REPOSITORY_ROOT / "build" / "test-optimized-all-alphabets-uint64",
+        )
+        self.assertEqual(
+            build_worker._build_target_groups_for(RUNTIME_PROFILE_MODE),
+            (tuple(ordinary.targets),),
+        )
+
     def test_modes_are_local_only_and_documented_as_build_only(self) -> None:
         documentation = build_presets.get_modes_short_documentation()
         local_schema = next(
@@ -239,6 +298,19 @@ class HighwayProfileModeContractTest(unittest.TestCase):
                     f"'{mode}'",
                     documentation,
                 )
+        self.assertNotIn(RUNTIME_PROFILE_MODE, build_presets.FIXED_BUILD_ONLY_MODES)
+        self.assertIn(RUNTIME_PROFILE_MODE, build_presets.REMOTE_RUN_REJECTED_MODES)
+        self.assertNotIn(RUNTIME_PROFILE_MODE, build_presets.REMOTE_RUN_BUILD_MODES)
+        self.assertIn(RUNTIME_PROFILE_MODE, local_schema["properties"]["mode"]["enum"])
+        self.assertNotIn(
+            RUNTIME_PROFILE_MODE, remote_build_shape["properties"]["mode"]["enum"])
+        self.assertIn(f"'{RUNTIME_PROFILE_MODE}'", documentation)
+        runtime_guard = next(
+            clause for clause in local_schema["allOf"]
+            if clause.get("if", {}).get("properties", {}).get("mode", {}).get("const")
+            == RUNTIME_PROFILE_MODE
+        )
+        self.assertEqual(runtime_guard["then"]["properties"]["debug"], {"const": False})
         self.assertIn("local build-only only", documentation)
         self.assertEqual(
             local_schema["properties"]["build_timeout_sec"]["maximum"],
@@ -303,6 +375,11 @@ class HighwayProfileInputGuardTest(unittest.TestCase):
                         message = build_worker.tool_start_build(mode, **request)
                         self.assertIn("fixed local compile gate", message)
                         self.assertIn("requires build_only=true", message)
+            self.assertIn(
+                "rejects debug=true",
+                build_worker.tool_start_build(
+                    RUNTIME_PROFILE_MODE, build_only=True, debug=True),
+            )
 
     def test_profiles_reject_baseline_and_receipt_runtime_controls(self) -> None:
         invalid_requests = (
@@ -345,13 +422,15 @@ class HighwayProfileInputGuardTest(unittest.TestCase):
             build_worker,
             "_ensure_build_worker_timesharing_policy",
         ), mock.patch.object(
-            process_state,
+            build_worker,
             "_load_state",
             side_effect=lambda: {
                 mode: {"reserved": True}
-                for mode in PROFILE_MODES
+                for mode in (*PROFILE_MODES, RUNTIME_PROFILE_MODE)
             },
-        ), mock.patch.object(process_state, "_stream_subprocess") as run:
+        ), mock.patch.object(
+            build_worker, "_stream_subprocess",
+        ) as run, mock.patch.object(build_worker, "_log") as log:
             for mode in PROFILE_MODES:
                 for request in invalid_requests:
                     with self.subTest(mode=mode, request=request):
@@ -359,6 +438,14 @@ class HighwayProfileInputGuardTest(unittest.TestCase):
                             build_worker._run_build_worker(mode, **request),
                             1,
                         )
+            log.reset_mock()
+            self.assertEqual(
+                build_worker._run_build_worker(
+                    RUNTIME_PROFILE_MODE, build_only=True, debug=True),
+                1,
+            )
+            log.assert_called_once_with(
+                f"{RUNTIME_PROFILE_MODE} uses a fixed optimized preset and rejects debug=true")
             run.assert_not_called()
 
     def test_synchronous_worker_fails_before_reserving_state(self) -> None:
@@ -384,6 +471,11 @@ class HighwayProfileInputGuardTest(unittest.TestCase):
                             build_worker._run_build_inline(mode, **request),
                             2,
                         )
+            self.assertEqual(
+                build_worker._run_build_inline(
+                    RUNTIME_PROFILE_MODE, build_only=True, debug=True),
+                2,
+            )
             load_state.assert_not_called()
 
 

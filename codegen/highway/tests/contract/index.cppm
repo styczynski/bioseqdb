@@ -14,7 +14,7 @@ module;
 #include <utility>
 #include <vector>
 
-module bioseq.codegen.highway:tests.contract;
+export module bioseq.codegen.highway:tests.contract;
 
 import :manifest;
 import :model;
@@ -1391,6 +1391,8 @@ inline void verify_typed_minimizer_binder() {
     plan.source_inventory.require_complete_table = false;
     plan.source_inventory.required_slots.clear();
     plan.source_inventory.slots.clear();
+    plan.source_inventory.minimizer_registry =
+        make_minimizer_registry(minimizer_registry_profile::baseline);
     append_fixture_source(plan, "minimizer_minimap2_reference", "minimizers");
     append_fixture_source(plan, "minimizer_two_stack_nthash", "minimizers");
     append_fixture_source(plan, "minimizer_bounded_nthash", "minimizers");
@@ -1456,6 +1458,15 @@ inline void verify_typed_minimizer_binder() {
         append_case(0U, "::seq::dna4", bytes, storage);
     }
 
+    const minimizer_registry_spec& typed_registry =
+        *plan.source_inventory.minimizer_registry;
+    std::size_t typed_reference_exports = 0u;
+    for (const minimizer_highway_owner_spec& registered_owner :
+         typed_registry.highway_owners) {
+        if (registered_owner.algorithm == "minimap2_reference") {
+            typed_reference_exports += registered_owner.storage_types.size();
+        }
+    }
     const generation_result generated = render_generation(plan);
     std::size_t checked_binders = 0U;
     std::size_t checked_minimizer_owner_units = 0U;
@@ -1463,6 +1474,21 @@ inline void verify_typed_minimizer_binder() {
         if (artifact.kind == artifact_kind::kernel_instantiation
             && artifact.source_key.starts_with("minimizer_")) {
             ++checked_minimizer_owner_units;
+            const std::size_t typed_output_layout_switches = occurrences(
+                artifact.content, "switch (invocation.output_layout)");
+            const std::size_t invalid_configuration_guards = occurrences(
+                artifact.content,
+                "minimizer_kernel_status::invalid_configuration");
+            const bool wrapper_rejection_guards_are_complete =
+                artifact.source_key == "minimizer_minimap2_reference"
+                    ? typed_output_layout_switches
+                              == occurrences(
+                                  artifact.content,
+                                  "minimap2_reference_admit<")
+                          && invalid_configuration_guards
+                                 == typed_output_layout_switches + 1U
+                    : typed_output_layout_switches == 0U
+                          && invalid_configuration_guards == 1U;
             require(
                 occurrences(
                     artifact.content,
@@ -1471,14 +1497,11 @@ inline void verify_typed_minimizer_binder() {
                            artifact.content,
                            "switch (invocation.sequence.storage_unit_bytes)")
                         == 2U
-                    && occurrences(
-                           artifact.content,
-                           "minimizer_kernel_status::invalid_configuration")
-                        == 1U
+                    && wrapper_rejection_guards_are_complete
                     && occurrences(
                            artifact.content, "    table.minimizers.") == 1U,
-                "each minimizer owner unit contains one typed wrapper and "
-                "one wrapper-to-slot assignment");
+                "each minimizer owner unit contains one typed wrapper with "
+                "complete rejection guards and one wrapper-to-slot assignment");
 
             if (artifact.source_key == "minimizer_minimap2_reference") {
                 require(
@@ -1489,14 +1512,19 @@ inline void verify_typed_minimizer_binder() {
                             "&minimizer_dispatch_minimap2_reference;")
                         && occurrences(
                                artifact.content,
-                               "minimap2_reference_case<") == 8U,
-                    "the minimap2-reference owner instantiates its complete case matrix");
+                               "minimap2_reference_admit<") == 8U
+                        && occurrences(
+                               artifact.content,
+                               "minimap2_reference_repr_")
+                            == typed_reference_exports * 2u,
+                    "the minimap2-reference owner declares and dispatches its "
+                    "complete registered export matrix");
                 const std::size_t dna4_u8 = artifact.content.find(
-                    "minimap2_reference_case<::seq::dna4,::std::uint8_t>");
+                    "minimap2_reference_admit<::seq::dna4, ::std::uint8_t>");
                 const std::size_t dna4_u16 = artifact.content.find(
-                    "minimap2_reference_case<::seq::dna4,::std::uint16_t>");
+                    "minimap2_reference_admit<::seq::dna4, ::std::uint16_t>");
                 const std::size_t dna5_u8 = artifact.content.find(
-                    "minimap2_reference_case<::seq::dna5,::std::uint8_t>");
+                    "minimap2_reference_admit<::seq::dna5, ::std::uint8_t>");
                 require(
                     dna4_u8 != std::string::npos
                         && dna4_u16 != std::string::npos
@@ -1755,22 +1783,79 @@ inline void verify_bounded_minimizer_representation_owners() {
     generation_plan plan = two_target_plan();
     append_fixture_source(plan, "minimizer_minimap2_reference", "minimizers");
     append_fixture_source(plan, "minimizer_bounded_nthash", "minimizers");
-    plan.source_inventory.minimizer_representation_instances = {
-        {"minimap2_reference_l15_k15", "minimap2_reference", "minimizer_minimap2_reference",
-         "::bioseq::minimizers::minimizer_representation<15u,15u>", {"u32", "u64"}},
-        {"minimap2_reference_l28_k15", "minimap2_reference", "minimizer_minimap2_reference",
-         "::bioseq::minimizers::minimizer_representation<28u,15u>", {"u32", "u64"}},
-        {"minimap2_reference_l33_k15", "minimap2_reference", "minimizer_minimap2_reference",
-         "::bioseq::minimizers::minimizer_representation<33u,15u>", {"u32", "u64"}},
-        {"minimap2_reference_l63_k15", "minimap2_reference", "minimizer_minimap2_reference",
-         "::bioseq::minimizers::minimizer_representation<63u,15u>", {"u32", "u64"}},
-        {"bounded_nthash_l15_k15", "bounded_nthash", "minimizer_bounded_nthash",
-         "::bioseq::minimizers::minimizer_representation<15u,15u>", {"u32", "u64"}},
-        {"bounded_nthash_l28_k15", "bounded_nthash", "minimizer_bounded_nthash",
-         "::bioseq::minimizers::minimizer_representation<28u,15u>", {"u32", "u64"}},
-        {"bounded_nthash_l63_k15", "bounded_nthash", "minimizer_bounded_nthash",
-         "::bioseq::minimizers::minimizer_representation<63u,15u>", {"u32", "u64"}},
-    };
+    plan.source_inventory.minimizer_registry =
+        make_minimizer_registry(minimizer_registry_profile::baseline);
+    validate_minimizer_registry(*plan.source_inventory.minimizer_registry);
+    const minimizer_registry_spec& baseline_registry =
+        *plan.source_inventory.minimizer_registry;
+    std::size_t baseline_exports = 0u;
+    std::size_t baseline_reference_exports = 0u;
+    std::size_t baseline_bounded_exports = 0u;
+    for (const minimizer_highway_owner_spec& owner :
+         baseline_registry.highway_owners) {
+        baseline_exports += owner.storage_types.size();
+        if (owner.algorithm == "minimap2_reference") {
+            baseline_reference_exports += owner.storage_types.size();
+        } else if (owner.algorithm == "bounded_nthash") {
+            baseline_bounded_exports += owner.storage_types.size();
+        }
+    }
+
+    const std::string registry_manifest = render_minimizer_registry_manifest(
+        baseline_registry);
+    const std::string registry_identity =
+        bioseq::common::sha256_hex(registry_manifest);
+    const std::string records = render_minimizer_physical_records_module(
+        baseline_registry, registry_identity);
+    const std::string visitor = render_minimizer_physical_registry_module(
+        baseline_registry, registry_identity);
+    require(
+        occurrences(registry_manifest, "\nrecord\t") == 7u
+            && occurrences(registry_manifest, "\nhighway-owner\t")
+                == baseline_registry.highway_owners.size()
+            && occurrences(
+                   registry_manifest,
+                   "\tsimd_minimap2_reference\tsimd_minimap2_reference\t"
+                   "::seq::dna5\t")
+                == 28u
+            && occurrences(
+                   registry_manifest,
+                   "\tvulkan_minimap_integer\tvulkan_minimap_integer\t")
+                == 56u
+            && records.contains(
+                "constexpr ::std::uint16_t minimizer_profile_alphabet_id()")
+            && records.contains(
+                "constexpr bool minimizer_profile_has_alphabet() noexcept")
+            && records.contains(
+                "::std::same_as<p_alphabet, ::seq::dna4>")
+            && records.contains(
+                "::std::same_as<p_alphabet, ::seq::dna5>")
+            && records.contains(
+                "find_minimizer_runtime_profile(")
+            && records.contains(
+                "find_minimizer_physical_record(")
+            && visitor.contains(
+                "visit_minimizer_physical_layout(")
+            && visitor.contains(
+                "binding->requested_algorithm != selection.requested_algorithm")
+            && visitor.contains(
+                "binding->effective_algorithm != selection.effective_algorithm")
+            && visitor.contains(
+                "binding->alphabet_id != selection.alphabet_id")
+            && visitor.contains(
+                "!minimizer_runtime_profile_accepts_shape(")
+            && visitor.contains(
+                "*binding, selection.runtime_kmer_size,")
+            && visitor.contains(
+                "selection.runtime_window_size)")
+            && visitor.contains(
+                "binding->packed_storage_bits != selection.packed_storage_bits")
+            && visitor.contains(
+                "binding->hash_width != selection.hash_width")
+            && occurrences(visitor, "case minimizer_physical_record_id::")
+                == 8u,
+        "early generated records expose the exact alphabet, lookup, identity, "
+        "and exhaustive visitor contracts");
 
     const generation_result generated = render_generation(plan);
     std::size_t owner_units = 0U;
@@ -1790,18 +1875,67 @@ inline void verify_bounded_minimizer_representation_owners() {
                 && artifact.content.contains("import std;")
                 && artifact.content.contains(
                     "import bioseq.sequences.kmers.highway_minimizer_contract;")
-                && occurrences(artifact.content, ") -> bool") == 2U
+                && artifact.content.contains(
+                    "static_assert(minimap2_reference_state_bits_per_rank<"
+                    "::seq::dna5> == 3u);")
+                && occurrences(artifact.content, ") -> bool")
+                    == baseline_exports
                 && !artifact.content.contains("std::uint16_t")
                 && !artifact.content.contains("std::array"),
-            "each representation owner is an ordinary two-width typed seam, "
-            "not widened neutral storage");
+            "each target receives one CMake-stable ordinary unit containing "
+            "the bounded generated export closure");
     }
     require(
-        owner_units == 14U
-            && minimap2_reference_wrappers == 16U
-            && bounded_nthash_wrappers == 12U,
-        "the two-target low profile renders exactly 7 owners / 14 typed "
-        "instantiations per target");
+        owner_units == 2U
+            && minimap2_reference_wrappers
+                == baseline_reference_exports * 2u
+            && bounded_nthash_wrappers == baseline_bounded_exports * 2u,
+        "the two-target baseline renders the complete registered owner/export "
+        "closure per target");
+
+    minimizer_registry_spec extended =
+        make_minimizer_registry(minimizer_registry_profile::extended);
+    validate_minimizer_registry(extended);
+    std::size_t extended_exports = 0u;
+    std::size_t extended_dna5_reference_owners = 0u;
+    std::size_t extended_dna5_reference_exports = 0u;
+    std::set<std::uint16_t> legacy_owner_ids;
+    bool legacy_owner_identities_preserved = true;
+    for (const minimizer_highway_owner_spec& owner : extended.highway_owners) {
+        extended_exports += owner.storage_types.size();
+        if (owner.id <= 19u) {
+            legacy_owner_ids.insert(owner.id);
+            const bool dna4_reference =
+                (owner.id <= 4u || owner.id >= 11u)
+                && owner.algorithm == "minimap2_reference"
+                && owner.alphabet_cpp_type == "::seq::dna4";
+            const bool dna4_bounded = owner.id >= 5u && owner.id <= 7u
+                && owner.algorithm == "bounded_nthash"
+                && owner.alphabet_cpp_type == "::seq::dna4";
+            const bool dna5_bounded = owner.id >= 8u && owner.id <= 10u
+                && owner.algorithm == "bounded_nthash"
+                && owner.alphabet_cpp_type == "::seq::dna5";
+            legacy_owner_identities_preserved =
+                legacy_owner_identities_preserved
+                && (dna4_reference || dna4_bounded || dna5_bounded);
+        }
+        if (owner.algorithm == "minimap2_reference"
+            && owner.alphabet_cpp_type == "::seq::dna5") {
+            ++extended_dna5_reference_owners;
+            extended_dna5_reference_exports += owner.storage_types.size();
+        }
+    }
+    require(
+        extended.records.size() == 13u
+            && extended.highway_owners.size()
+                > baseline_registry.highway_owners.size()
+            && extended_exports > baseline_exports
+            && extended_dna5_reference_owners == 13u
+            && extended_dna5_reference_exports == 26u
+            && legacy_owner_ids.size() == 19u
+            && legacy_owner_identities_preserved,
+        "extended minimizer registry retains legacy owner IDs and generates "
+        "the complete trait-ranked DNA5 reference closure");
 }
 
 }  // namespace contract_detail

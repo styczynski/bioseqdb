@@ -53,40 +53,79 @@ prepared_minimizer_fragment_reader::with_query_group_occurrences_(
     const query_occurrence_packing_layout* occurrence_layout = nullptr;
     const packed_query_occurrence* packed_occurrences = nullptr;
     const wide_query_occurrence* wide_occurrences = nullptr;
+    const packed_query_occurrence_h64* packed_occurrences_h64 = nullptr;
+    const wide_query_occurrence_h64* wide_occurrences_h64 = nullptr;
     std::size_t packed_occurrence_count = 0u;
     std::size_t wide_occurrence_count = 0u;
+    std::size_t packed_occurrence_h64_count = 0u;
+    std::size_t wide_occurrence_h64_count = 0u;
+    minimizer_scalar_width hash_width = minimizer_scalar_width::u32;
     if constexpr (p_oracle) {
         DEBUG_ASSERT(context.scratch != nullptr, "oracle occurrence view is prevalidated");
         occurrence_layout = &context.scratch->occurrence_layout_;
+        hash_width = context.scratch->occurrence_hash_width_;
         packed_occurrences = context.scratch->packed_occurrences_.data();
         wide_occurrences = context.scratch->wide_occurrences_.data();
+        packed_occurrences_h64 = context.scratch->packed_occurrences_h64_.data();
+        wide_occurrences_h64 = context.scratch->wide_occurrences_h64_.data();
         packed_occurrence_count = context.scratch->packed_occurrences_.size();
         wide_occurrence_count = context.scratch->wide_occurrences_.size();
+        packed_occurrence_h64_count = context.scratch->packed_occurrences_h64_.size();
+        wide_occurrence_h64_count = context.scratch->wide_occurrences_h64_.size();
     } else {
         DEBUG_ASSERT(context.bucket_direct_matcher != nullptr,
                      "production occurrence view is prevalidated");
         const bucket_direct_matcher_view& view = *context.bucket_direct_matcher;
         occurrence_layout = &view.occurrence_layout;
+        hash_width = view.hash_width;
         packed_occurrences = view.packed_occurrences;
         wide_occurrences = view.wide_occurrences;
+        packed_occurrences_h64 = view.packed_occurrences_h64;
+        wide_occurrences_h64 = view.wide_occurrences_h64;
         packed_occurrence_count = view.packed_occurrence_count;
         wide_occurrence_count = view.wide_occurrence_count;
+        packed_occurrence_h64_count = view.packed_occurrence_h64_count;
+        wide_occurrence_h64_count = view.wide_occurrence_h64_count;
     }
-    switch (occurrence_layout->route) {
-    case query_occurrence_route::packed:
-        DEBUG_ASSERT(begin_size <= packed_occurrence_count &&
-                         count_size <= packed_occurrence_count - begin_size,
-                     "packed group range is prevalidated");
-        return std::forward<p_visitor>(visitor)(
-            std::span<const packed_query_occurrence>{packed_occurrences + begin_size, count_size},
-            *occurrence_layout);
-    case query_occurrence_route::wide:
-        DEBUG_ASSERT(begin_size <= wide_occurrence_count &&
-                         count_size <= wide_occurrence_count - begin_size,
-                     "wide group range is prevalidated");
-        return std::forward<p_visitor>(visitor)(
-            std::span<const wide_query_occurrence>{wide_occurrences + begin_size, count_size},
-            *occurrence_layout);
+    const auto visit_native =
+        [begin_size,
+         count_size,
+         occurrence_layout,
+         &visitor]<class p_packed, class p_wide>(
+            const p_packed* packed,
+            const std::size_t packed_count,
+            const p_wide* wide,
+            const std::size_t wide_count)
+        -> std::optional<minimizer_generation_encoding_error> {
+        switch (occurrence_layout->route) {
+        case query_occurrence_route::packed:
+            DEBUG_ASSERT(begin_size <= packed_count && count_size <= packed_count - begin_size,
+                         "packed group range is prevalidated");
+            return std::forward<p_visitor>(visitor)(
+                std::span<const p_packed>{packed, packed_count}.subspan(begin_size, count_size),
+                *occurrence_layout);
+        case query_occurrence_route::wide:
+            DEBUG_ASSERT(begin_size <= wide_count && count_size <= wide_count - begin_size,
+                         "wide group range is prevalidated");
+            return std::forward<p_visitor>(visitor)(
+                std::span<const p_wide>{wide, wide_count}.subspan(begin_size, count_size),
+                *occurrence_layout);
+        }
+        return minimizer_generation_encoding_error::partition_id;
+    };
+    switch (hash_width) {
+    case minimizer_scalar_width::u32:
+        return visit_native(packed_occurrences,
+                            packed_occurrence_count,
+                            wide_occurrences,
+                            wide_occurrence_count);
+    case minimizer_scalar_width::u64:
+        return visit_native(packed_occurrences_h64,
+                            packed_occurrence_h64_count,
+                            wide_occurrences_h64,
+                            wide_occurrence_h64_count);
+    case minimizer_scalar_width::u16:
+        break;
     }
     return minimizer_generation_encoding_error::partition_id;
 }
@@ -107,11 +146,11 @@ prepared_minimizer_fragment_reader::accumulate_orientation_(
         return minimizer_generation_encoding_error::arithmetic_overflow;
     }
     block_query_anchor_layout& layout = context.scratch->block_query_layouts_[layout_ordinal];
-    const std::uint32_t query_strand =
-        static_cast<std::uint32_t>(context.queries[occurrence.batch_query_ordinal]
-                                       .minimizers[occurrence.query_ordinal]
-                                       .pos_strand_encoded() &
-                                   1u);
+    const auto position_strand = query_position_strand_(occurrence, context.queries);
+    if (!position_strand) {
+        return position_strand.error();
+    }
+    const std::uint32_t query_strand = static_cast<std::uint32_t>(*position_strand & 1u);
     const std::uint64_t forward =
         query_strand == 0u ? context.target_strand_zero : context.target_strand_one;
     const std::uint64_t reverse =
@@ -137,9 +176,13 @@ prepared_minimizer_fragment_reader::emit_fragment_anchor_(
         return minimizer_generation_encoding_error::partition_id;
     }
     const std::size_t query_ordinal = occurrence.batch_query_ordinal;
+    const auto position_strand = query_position_strand_(occurrence, context.queries);
+    if (!position_strand) {
+        return position_strand.error();
+    }
     const auto anchor =
         make_fragment_anchor_(packed_target_position,
-                              context.queries[query_ordinal].minimizers[occurrence.query_ordinal],
+                              *position_strand,
                               context.queries[query_ordinal].query_length,
                               static_cast<std::uint8_t>(context.queries[query_ordinal].kmer_size));
     if (!anchor || anchor->ref_position < context.block->reference_begin ||
@@ -216,7 +259,9 @@ prepared_minimizer_fragment_reader::partition_packed_occurrence_top_byte_(
         bucket_slot.end = payload_begin;
     }
     for (packed_query_occurrence& occurrence : occurrences) {
-        ++buckets[occurrence.hash >> 24u].end;
+        DEBUG_ASSERT(occurrence.hash <= (std::numeric_limits<std::uint32_t>::max)(),
+                     "compact occurrence hash stays in H32");
+        ++buckets[static_cast<std::uint8_t>(occurrence.hash >> 24u)].end;
     }
     for (std::size_t bucket_index = 1u; bucket_index < buckets.size(); ++bucket_index) {
         buckets[bucket_index].end += buckets[bucket_index - 1u].end - payload_begin;
@@ -420,15 +465,143 @@ prepared_minimizer_fragment_reader::visit_position_range_(
     return {};
 }
 
+[[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+prepared_minimizer_fragment_reader::visit_complete_control_groups(
+    void* context,
+    complete_control_group_visitor visitor) const {
+    if (!gpu_source_ready() || context == nullptr || visitor == nullptr ||
+        directory_.entries().size() != entry_count_) {
+        return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
+    }
+    std::uint64_t visited = 0u;
+    for (std::size_t ordinal = 0u; ordinal < entry_count_; ++ordinal) {
+        const entry_plan& plan = entry_plans_[ordinal];
+        if (plan.control_end < plan.control_begin || plan.control_end > mapped_payload_.size()) {
+            return std::unexpected(minimizer_generation_encoding_error::byte_count);
+        }
+        bool visitor_accepted = true;
+        const auto decoded = visit_controls_(
+            mapped_payload_.subspan(static_cast<std::size_t>(plan.control_begin),
+                                    static_cast<std::size_t>(plan.control_end - plan.control_begin)),
+            directory_.entries()[ordinal],
+            profile_,
+            [context, visitor, &visitor_accepted](
+                const grouped_soa_decoded_control& control) noexcept {
+                if (visitor_accepted) {
+                    visitor_accepted = visitor(context,
+                                               control.hash,
+                                               control.position_end - control.position_begin);
+                }
+            });
+        if (!decoded) {
+            return std::unexpected(decoded.error());
+        }
+        if (!visitor_accepted ||
+            plan.control_count > (std::numeric_limits<std::uint64_t>::max)() - visited) {
+            return std::unexpected(minimizer_generation_encoding_error::control_range);
+        }
+        visited += plan.control_count;
+    }
+    if (visited != manifest_.control_count) {
+        return std::unexpected(minimizer_generation_encoding_error::element_count);
+    }
+    return {};
+}
+
+[[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+prepared_minimizer_fragment_reader::visit_complete_postings(
+    void* context,
+    complete_posting_visitor visitor) const {
+    if (!gpu_source_ready() || context == nullptr || visitor == nullptr ||
+        directory_.entries().size() != entry_count_) {
+        return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
+    }
+    std::uint64_t visited_controls = 0u;
+    std::uint64_t visited_positions = 0u;
+    for (std::size_t ordinal = 0u; ordinal < entry_count_; ++ordinal) {
+        const entry_plan& plan = entry_plans_[ordinal];
+        if (plan.control_end < plan.control_begin || plan.position_end < plan.position_begin ||
+            plan.control_end > mapped_payload_.size() ||
+            plan.position_end > mapped_payload_.size()) {
+            return std::unexpected(minimizer_generation_encoding_error::byte_count);
+        }
+        std::optional<minimizer_generation_encoding_error> nested_error;
+        const auto decoded = visit_controls_(
+            mapped_payload_.subspan(static_cast<std::size_t>(plan.control_begin),
+                                    static_cast<std::size_t>(plan.control_end - plan.control_begin)),
+            directory_.entries()[ordinal],
+            profile_,
+            [this,
+             context,
+             visitor,
+             ordinal,
+             &plan,
+             &nested_error,
+             &visited_controls,
+             &visited_positions](const grouped_soa_decoded_control& control) noexcept {
+                if (nested_error) {
+                    return;
+                }
+                if (visited_controls == (std::numeric_limits<std::uint64_t>::max)()) {
+                    nested_error = minimizer_generation_encoding_error::arithmetic_overflow;
+                    return;
+                }
+                ++visited_controls;
+                const minimizer_position_segment_bounds core{
+                    .begin_bp = plan.reference_begin,
+                    .end_bp = plan.reference_end,
+                };
+                const auto positions = visit_position_range_(
+                    mapped_payload_.subspan(
+                        static_cast<std::size_t>(plan.position_begin),
+                        static_cast<std::size_t>(plan.position_end - plan.position_begin)),
+                    control,
+                    directory_.entries()[ordinal],
+                    core,
+                    profile_,
+                    [context,
+                     visitor,
+                     hash = control.hash,
+                     &nested_error,
+                     &visited_positions](std::uint64_t encoded_position) noexcept {
+                        if (nested_error) {
+                            return;
+                        }
+                        if (visited_positions ==
+                                (std::numeric_limits<std::uint64_t>::max)() ||
+                            !visitor(context, hash, encoded_position)) {
+                            nested_error = minimizer_generation_encoding_error::position_range;
+                            return;
+                        }
+                        ++visited_positions;
+                    });
+                if (!positions && !nested_error) {
+                    nested_error = positions.error();
+                }
+            });
+        if (!decoded) {
+            return std::unexpected(decoded.error());
+        }
+        if (nested_error) {
+            return std::unexpected(*nested_error);
+        }
+    }
+    if (visited_controls != manifest_.control_count ||
+        visited_positions != manifest_.position_count) {
+        return std::unexpected(minimizer_generation_encoding_error::element_count);
+    }
+    return {};
+}
+
 /// Maps a packed target position and query minimizer sketch into one chaining anchor.
 [[nodiscard]] inline std::expected<bioseq::chaining::anchor, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::make_fragment_anchor_(std::uint64_t packed_target,
-                                                          const minimap_sketch_data& minimizer,
+                                                          std::uint64_t query_position_strand,
                                                           sequence_size_t query_length,
                                                           std::uint8_t query_span) noexcept {
     const std::uint64_t ref_position = packed_target >> 1u;
     const std::uint32_t target_strand = static_cast<std::uint32_t>(packed_target & 1u);
-    const std::uint64_t encoded = minimizer.pos_strand_encoded();
+    const std::uint64_t encoded = query_position_strand;
     const std::uint32_t query_strand = static_cast<std::uint32_t>(encoded & 1u);
     const std::uint64_t forward_last = encoded >> 1u;
     if (ref_position >= (std::uint64_t{1} << 63u) || query_span == 0u ||
@@ -451,11 +624,12 @@ prepared_minimizer_fragment_reader::make_fragment_anchor_(std::uint64_t packed_t
 
 /// Scans trusted control counts for one block entry range and invokes a visitor for
 /// each matched query group.
-template <bool p_oracle, class p_visitor>
+template <bool p_oracle, class p_query_hash_plan, class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::visit_matched_control_counts_(
     const fragment_block_plan& block,
     fragment_probe_context& context,
+    std::span<const p_query_hash_plan> query_plans,
     p_visitor&& visitor) const noexcept {
     if constexpr (p_oracle) {
         DEBUG_ASSERT(context.query_plan_radix.size() ==
@@ -474,13 +648,18 @@ prepared_minimizer_fragment_reader::visit_matched_control_counts_(
         std::optional<minimizer_generation_encoding_error> callback_error;
         const auto decoded = visit_control_counts_planned_(
             ordinal,
-            [this, &callback_error, &active_bucket, &plan_cursor, &plan_end, &context, &visitor](
-                std::uint64_t hash, std::uint64_t local_count) noexcept {
+            [this,
+             &callback_error,
+             &active_bucket,
+             &plan_cursor,
+             &plan_end,
+             &context,
+             query_plans,
+             &visitor](std::uint64_t hash, std::uint64_t local_count) noexcept {
                 if (callback_error)
                     return;
-                const std::uint32_t hash32 = static_cast<std::uint32_t>(hash);
                 const auto matched_group = match_query_group_<p_oracle>(
-                    hash32, context, active_bucket, plan_cursor, plan_end);
+                    hash, context, query_plans, active_bucket, plan_cursor, plan_end);
                 if (!matched_group)
                     return;
                 callback_error = std::invoke(visitor, *matched_group, local_count);
@@ -500,11 +679,12 @@ prepared_minimizer_fragment_reader::visit_matched_control_counts_(
  * Optionally accumulates accepted or rejected prefix byte totals and can validate
  * rejected-prefix geometry without walking positions.
  */
-template <bool p_oracle, class p_visitor>
+template <bool p_oracle, class p_query_hash_plan, class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::visit_matched_controls_(
     const fragment_block_plan& block,
     fragment_probe_context& context,
+    std::span<const p_query_hash_plan> query_plans,
     p_visitor&& visitor,
     std::uint64_t* accepted_prefix_bytes,
     std::uint64_t* rejected_prefix_bytes,
@@ -538,6 +718,7 @@ prepared_minimizer_fragment_reader::visit_matched_controls_(
              &plan_cursor,
              &plan_end,
              &context,
+             query_plans,
              offset_width,
              &selected_entry,
              &previous_accepted_position_end,
@@ -549,9 +730,8 @@ prepared_minimizer_fragment_reader::visit_matched_controls_(
                 const std::size_t current_ordinal = control_ordinal++;
                 if (callback_error)
                     return;
-                const std::uint32_t hash32 = static_cast<std::uint32_t>(hash);
                 const auto matched_group = match_query_group_<p_oracle>(
-                    hash32, context, active_bucket, plan_cursor, plan_end);
+                    hash, context, query_plans, active_bucket, plan_cursor, plan_end);
                 if (!matched_group)
                     return;
                 const std::uint32_t global_count =
@@ -630,11 +810,12 @@ prepared_minimizer_fragment_reader::visit_matched_controls_(
  *
  * \tparam p_oracle Uses oracle scratch radix plans instead of the production matcher view.
  */
-template <bool p_oracle>
+template <bool p_oracle, class p_query_hash_plan>
 [[nodiscard, gnu::always_inline]] inline std::optional<
     prepared_minimizer_fragment_reader::query_occurrence_group>
-prepared_minimizer_fragment_reader::match_query_group_(std::uint32_t hash,
+prepared_minimizer_fragment_reader::match_query_group_(std::uint64_t hash,
                                                        const fragment_probe_context& context,
+                                                       std::span<const p_query_hash_plan> query_plans,
                                                        std::uint32_t& active_bucket,
                                                        std::uint32_t& plan_cursor,
                                                        std::uint32_t& plan_end) const noexcept {
@@ -649,16 +830,16 @@ prepared_minimizer_fragment_reader::match_query_group_(std::uint32_t hash,
             plan_cursor = context.query_plan_radix[bucket];
             plan_end = context.query_plan_radix[bucket + 1u];
         }
-        DEBUG_ASSERT(plan_cursor <= plan_end && plan_end <= context.plans.size(),
+        DEBUG_ASSERT(plan_cursor <= plan_end && plan_end <= query_plans.size(),
                      "oracle matcher bucket range is prevalidated");
-        while (plan_cursor < plan_end && context.plans[plan_cursor].hash < hash) {
+        while (plan_cursor < plan_end && query_plans[plan_cursor].hash < hash) {
             ++plan_cursor;
         }
-        if (plan_cursor == plan_end || context.plans[plan_cursor].hash != hash) {
+        if (plan_cursor == plan_end || query_plans[plan_cursor].hash != hash) {
             return std::nullopt;
         }
         const std::uint32_t matched_plan = plan_cursor++;
-        const query_wave_scratch::query_hash_plan& plan = context.plans[matched_plan];
+        const p_query_hash_plan& plan = query_plans[matched_plan];
         return query_occurrence_group{
             .hash = plan.hash,
             .occurrence_ref_begin = plan.occurrence_ref_begin,
@@ -696,7 +877,7 @@ prepared_minimizer_fragment_reader::match_query_group_(std::uint32_t hash,
                 last,
                 hash,
                 [occurrences, occurrence_count](std::uint32_t occurrence_ordinal,
-                                                std::uint32_t query_hash) noexcept {
+                                                std::uint64_t query_hash) noexcept {
                     DEBUG_ASSERT(occurrence_ordinal < occurrence_count,
                                  "production group offset is prevalidated");
                     return occurrences[occurrence_ordinal].hash < query_hash;
@@ -715,11 +896,27 @@ prepared_minimizer_fragment_reader::match_query_group_(std::uint32_t hash,
                 .counter_ordinal = static_cast<std::uint32_t>(found - view.group_offsets),
             };
         };
-        switch (view.occurrence_layout.route) {
-        case query_occurrence_route::packed:
-            return exact_group(view.packed_occurrences, view.packed_occurrence_count);
-        case query_occurrence_route::wide:
-            return exact_group(view.wide_occurrences, view.wide_occurrence_count);
+        switch (view.hash_width) {
+        case minimizer_scalar_width::u32:
+            switch (view.occurrence_layout.route) {
+            case query_occurrence_route::packed:
+                return exact_group(view.packed_occurrences, view.packed_occurrence_count);
+            case query_occurrence_route::wide:
+                return exact_group(view.wide_occurrences, view.wide_occurrence_count);
+            }
+            break;
+        case minimizer_scalar_width::u64:
+            switch (view.occurrence_layout.route) {
+            case query_occurrence_route::packed:
+                return exact_group(view.packed_occurrences_h64,
+                                   view.packed_occurrence_h64_count);
+            case query_occurrence_route::wide:
+                return exact_group(view.wide_occurrences_h64,
+                                   view.wide_occurrence_h64_count);
+            }
+            break;
+        case minimizer_scalar_width::u16:
+            break;
         }
         return std::nullopt;
     }
@@ -863,7 +1060,9 @@ prepared_minimizer_fragment_reader::process_fixed_emission_control_(
 template <bool p_oracle>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::probe_entry_h32_c16_count_(
-    fragment_probe_context& context, std::size_t entry_ordinal) const noexcept {
+    fragment_probe_context& context,
+    std::span<const query_wave_scratch::query_hash_plan> query_plans,
+    std::size_t entry_ordinal) const noexcept {
     DEBUG_ASSERT(context.scratch != nullptr && entry_ordinal < entry_count_ &&
                      context.pass == fragment_probe_pass::control_count,
                  "fixed count context is prevalidated");
@@ -914,8 +1113,8 @@ prepared_minimizer_fragment_reader::probe_entry_h32_c16_count_(
         last_hash = hash;
         previous_hash = hash;
 
-        const auto matched_group =
-            match_query_group_<p_oracle>(hash, context, active_bucket, plan_cursor, plan_end);
+        const auto matched_group = match_query_group_<p_oracle>(
+            hash, context, query_plans, active_bucket, plan_cursor, plan_end);
         if (!matched_group)
             continue;
         (void)reserve_query_occurrences_(
@@ -937,7 +1136,9 @@ prepared_minimizer_fragment_reader::probe_entry_h32_c16_count_(
 template <bool p_oracle, minimizer_scalar_width p_offset_width>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::probe_entry_h32_c16_p16_matched_(
-    fragment_probe_context& context, std::size_t entry_ordinal) const noexcept {
+    fragment_probe_context& context,
+    std::span<const query_wave_scratch::query_hash_plan> query_plans,
+    std::size_t entry_ordinal) const noexcept {
     static_assert(p_offset_width == minimizer_scalar_width::u16 ||
                   p_offset_width == minimizer_scalar_width::u32 ||
                   p_offset_width == minimizer_scalar_width::u64);
@@ -982,8 +1183,8 @@ prepared_minimizer_fragment_reader::probe_entry_h32_c16_p16_matched_(
                 mapped_payload_,
                 static_cast<std::size_t>(entry.hash_begin) +
                     control_ordinal * sizeof(std::uint32_t)));
-        const auto matched_group =
-            match_query_group_<p_oracle>(hash, context, active_bucket, plan_cursor, plan_end);
+        const auto matched_group = match_query_group_<p_oracle>(
+            hash, context, query_plans, active_bucket, plan_cursor, plan_end);
         if (!matched_group)
             continue;
         const std::uint32_t global_count =

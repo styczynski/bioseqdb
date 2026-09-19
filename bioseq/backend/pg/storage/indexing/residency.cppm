@@ -4,12 +4,19 @@
  *        assembled minimizer indexes.
  */
 module;
-#include <bioseq/pg_compat.h>
 
 extern "C" {
+#include "postgres.h"
+
 #include "access/xact.h"
+#include "utils/errcodes.h"
 #include "utils/inval.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
 #include <algorithm>
 #include <cstddef>
@@ -20,6 +27,7 @@ extern "C" {
 #include <span>
 #include <string_view>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 export module bioseq.postgres.storage.indexing.residency;

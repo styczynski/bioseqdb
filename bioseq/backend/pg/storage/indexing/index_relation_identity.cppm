@@ -3,10 +3,13 @@
  * @brief Reads the physical PostgreSQL identity used by index storage.
  */
 module;
-#include <bioseq/pg_compat.h>
 
 extern "C" {
+#include "postgres.h"
+
 #include "access/relation.h"
+#include "miscadmin.h"
+#include "utils/rel.h"
 }
 
 export module bioseq.postgres.storage.indexing.index_relation_identity;

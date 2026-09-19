@@ -3,33 +3,155 @@
  * @brief Grouped-SoA minimizer generation encoding and publication.
  */
 module;
-#include <bioseq/pg_compat.h>
+
+extern "C" {
+#include "postgres.h"
+
+#include "access/xact.h"
+#include "miscadmin.h"
+#include "utils/errcodes.h"
+#include "utils/snapmgr.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <cstdint>
+#include <limits>
 #include <new>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
 export module bioseq.postgres.storage.indexing.admin:grouped_soa;
-import std;
-import bioseq.postgres.storage.indexing.admin.diagnostic_support;
-import bioseq.common.seqan_adapter;
+
 import bioseq.common.logging;
+import bioseq.postgres.storage.indexing.admin.diagnostic_support;
+import bioseq.postgres.storage.indexing.admin.index_build_runtime;
+import bioseq.common.seqan_adapter;
 import bioseq.postgres.support;
-import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, is_locator_stub, decode_locator_from_stub
-import bioseq.storage.lazy_sequence; // make_resident_lazy_sequence
+import bioseq.storage.layout;
+import bioseq.storage.lazy_sequence_view;
 import bioseq.postgres.storage.scanner.lazy_binding_contract;
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.hash_major_minimizer_index;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.sequences.kmers; // minimizer/index APIs
 import bioseq.sequences.kmers.highway_minimizer_contract;
-import bioseq.highway.dispatch_contract;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.index_relation_identity;
-import bioseq.postgres.storage.indexing.admin.policy_catalog;
 import :hash_major;
 
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
+
+namespace bioseq::storage::indexing::detail {
+
+/// Avoid the allocating PostgreSQL error bridge on the ordinary no-interrupt path.
+/// A pending query-cancel ERROR crosses the bridge and unwinds statement-owned C++
+/// state; backend-termination/FATAL retains PostgreSQL's native terminal semantics.
+void check_generation_interrupts_as_cpp(void*) {
+    if (!INTERRUPTS_PENDING_CONDITION()) {
+        return;
+    }
+    bioseq::postgres::support::invoke_pg_as_cpp([] {
+        CHECK_FOR_INTERRUPTS();
+    });
+}
+
+} // namespace bioseq::storage::indexing::detail
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+namespace bioseq::storage::indexing::detail {
+
+// Preserve existing producer counters before the ordinary update_index wrapper
+// discards its validated publication. This is not a transaction-commit receipt.
+void log_e2e_minimizer_publication_execution(
+    const ready_minimizer_generation_publication& publication,
+    Oid user_relid,
+    std::int16_t column_attno,
+    std::string_view index_name,
+    std::uint64_t query_key) {
+    const char* receipt_kind = "";
+    const char* scan_counter = "";
+    const char* retry_counter = "";
+    std::uint64_t scans = 0, retries = 0, short_runs = 0;
+    std::uint64_t scalar_runs = 0, exact_runs = 0, bounded_runs = 0, vulkan_runs = 0;
+    std::uint64_t roundtrips = 0, downloaded = 0, window_splits = 0;
+    bool receipt_saturated = false, vulkan_saturated = false;
+
+    if (const auto* receipt =
+            std::get_if<bioseq::indexing::minimizer_fragment_generation_execution_receipt>(
+                &publication.execution())) {
+        receipt_kind = "fragment";
+        scan_counter = "producer_scan_count";
+        retry_counter = "geometry_retry_count";
+        scans = receipt->producer_scan_count;
+        retries = receipt->geometry_retry_count;
+        short_runs = receipt->short_core_runs;
+        scalar_runs = receipt->scalar_core_runs;
+        exact_runs = receipt->exact_simd_core_runs;
+        bounded_runs = receipt->bounded_nthash_core_runs;
+        vulkan_runs = receipt->vulkan_core_runs;
+        roundtrips = receipt->vulkan_stats.completed_roundtrips;
+        downloaded = receipt->vulkan_stats.downloaded_minimizers;
+        window_splits = receipt->vulkan_stats.gpu_window_splits;
+        receipt_saturated = receipt->saturated;
+        vulkan_saturated = receipt->vulkan_stats.saturated;
+    } else if (const auto* receipt =
+                   std::get_if<bioseq::indexing::minimizer_sequence_generation_execution_receipt>(
+                       &publication.execution())) {
+        receipt_kind = "sequence";
+        scan_counter = "replay_scan_count";
+        retry_counter = "replay_reroute_pass_count";
+        scans = receipt->replay_scan_count;
+        retries = receipt->replay_reroute_pass_count;
+        short_runs = receipt->short_core_runs;
+        scalar_runs = receipt->scalar_core_runs;
+        exact_runs = receipt->exact_simd_core_runs;
+        bounded_runs = receipt->bounded_nthash_core_runs;
+        vulkan_runs = receipt->vulkan_core_runs;
+        roundtrips = receipt->vulkan_stats.completed_roundtrips;
+        downloaded = receipt->vulkan_stats.downloaded_minimizers;
+        window_splits = receipt->vulkan_stats.gpu_window_splits;
+        receipt_saturated = receipt->saturated;
+        vulkan_saturated = receipt->vulkan_stats.saturated;
+    } else {
+        return;
+    }
+
+    bioseq_log<logging_level::info, logging_target::postgres>(
+        "[bioseq_e2e] event=validated_minimizer_publication_execution version=1 "
+        "receipt_kind={} backend_pid={} database_oid={} user_relid={} column_attno={} "
+        "index_name={} query_key={} generation_id={} source_identity={:016x} "
+        "source_content_checksum={:016x} storage_contract_checksum={:016x} "
+        "selected_backend={} {}={} {}={} short_core_runs={} scalar_core_runs={} "
+        "exact_simd_core_runs={} bounded_nthash_core_runs={} vulkan_core_runs={} "
+        "vulkan_completed_roundtrips={} vulkan_downloaded_minimizers={} "
+        "vulkan_gpu_window_splits={} receipt_saturated={} vulkan_saturated={}",
+        receipt_kind,
+        MyProcPid,
+        static_cast<unsigned>(MyDatabaseId),
+        static_cast<unsigned>(user_relid),
+        static_cast<int>(column_attno),
+        index_name,
+        query_key,
+        publication.generation_id(),
+        publication.source_identity(),
+        publication.source_content_checksum(),
+        publication.storage_contract_checksum(),
+        bioseq::minimizers::minimizer_sketch_backend_name(publication.selected_backend()),
+        scan_counter, scans, retry_counter, retries,
+        short_runs, scalar_runs, exact_runs, bounded_runs, vulkan_runs,
+        roundtrips, downloaded, window_splits, receipt_saturated, vulkan_saturated);
+}
+
+} // namespace bioseq::storage::indexing::detail
+#endif
 
 export namespace bioseq::storage::indexing {
 
@@ -43,6 +165,7 @@ export namespace bioseq::storage::indexing {
  * @param storage PostgreSQL generation storage authority.
  * @param sequence Snapshot-bound lazy sequence view.
  * @param source_binding Locator and source-snapshot binding.
+ * @param algorithm_identity Generated identity frozen before publication starts.
  * @param backend Exact producer backend.
  * @param kernels Required backend kernel table.
  * @return Published generation identity and execution receipt.
@@ -62,6 +185,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
         typename bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>::alphabet_type>
         sequence,
     bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range> source_binding,
+    const bioseq::indexing::minimizer_generation_algorithm_identity& algorithm_identity,
     bioseq::minimizers::minimizer_sketch_backend backend,
     const bioseq::minimizers::minimizer_kernels* kernels) {
     using source_binding_type = bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>;
@@ -99,8 +223,8 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
         ready_minimizer_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE,
                                      "READY minimizer generation backend is invalid");
     }
-    constexpr std::uint16_t k_window_size = 10u;
-    constexpr std::uint16_t k_kmer_size = 15u;
+    const std::uint16_t window_size = algorithm_identity.runtime_window_size;
+    const std::uint16_t kmer_size = algorithm_identity.runtime_kmer_size;
     constexpr std::uint64_t k_max_occ_cap =
         bioseq::indexing::k_grouped_soa_default_max_occurrence_cap;
     constexpr std::uint16_t k_alphabet_code = source_binding_type::alphabet_code();
@@ -109,6 +233,28 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
     const std::uint64_t persisted_segment_span_bp =
         is_fragment_index ? k_fragment_span_bp
                           : bioseq::indexing::k_minimizer_preferred_segment_span_bp;
+    const std::uint64_t algorithm_position_extent_bp =
+        is_fragment_index ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                          : locator.logical_length;
+    const auto selected_algorithm_identity =
+        bioseq::indexing::select_minimizer_generation_algorithm_identity_runtime(
+            algorithm_identity.requested_algorithm,
+            algorithm_position_extent_bp,
+            k_alphabet_code,
+            static_cast<std::uint8_t>(source_binding_type::storage_unit_byte_width() * 8u),
+            kmer_size,
+            window_size);
+    if (!selected_algorithm_identity ||
+        *selected_algorithm_identity != algorithm_identity ||
+        !bioseq::indexing::is_valid_minimizer_generation_algorithm_identity(
+            algorithm_identity,
+            bioseq::indexing::minimizer_producer_backend_identity_for_backend(backend)) ||
+        !bioseq::indexing::minimizer_generation_kernel_binding_is_valid(
+            backend, algorithm_identity, kernels)) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "READY minimizer generation algorithm identity is unavailable");
+    }
     if (static_cast<std::uint64_t>(sequence.bp_size()) != locator.logical_length) {
         ready_minimizer_error_as_cpp(
             ERRCODE_DATA_CORRUPTED,
@@ -131,16 +277,6 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                                      "READY minimizer storage identity disagrees with its source");
     }
 
-    if constexpr (k_alphabet_code != bioseq::indexing::k_minimizer_persisted_dna4_alphabet_code) {
-        if (backend == backend_type::bounded_nthash_simd) {
-            // Preserve the selected producer's typed capability reason before
-            // the grouped-SoA registry reports the broader profile mismatch.
-            throw bioseq::indexing::packed_bounded_nthash_index_runtime_error{
-                bioseq::indexing::packed_bounded_nthash_index_status::unsupported_alphabet,
-                "grouped minimizer generation preflight"};
-        }
-    }
-
     const bioseq::indexing::minimizer_scheme_identity scheme =
         bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
     const bioseq::indexing::minimizer_producer_identity producer_backend =
@@ -148,7 +284,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
     bioseq::indexing::grouped_soa_minimizer_profile profile{};
     {
         const auto derived_profile = bioseq::indexing::derive_grouped_soa_minimizer_profile(
-            scheme, k_alphabet_code, k_kmer_size, persisted_segment_span_bp, k_max_occ_cap);
+            scheme, k_alphabet_code, kmer_size, persisted_segment_span_bp, k_max_occ_cap);
         if (!derived_profile) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -257,12 +393,19 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
             .position_segment_span_bp = persisted_segment_span_bp,
             .alphabet_code = state->source.alphabet_code,
             .storage_unit_byte_width = state->source.storage_unit_byte_width,
-            .kmer_size = k_kmer_size,
-            .window_size = k_window_size,
+            .kmer_size = kmer_size,
+            .window_size = window_size,
             .minimizer_scheme_id = scheme.id,
             .minimizer_scheme_revision = scheme.revision,
+            .algorithm_identity = algorithm_identity,
             .max_occ_cap = k_max_occ_cap,
         };
+        const bioseq::indexing::cooperative_cancellation_checkpoint
+            generation_cancellation{
+                .context = nullptr,
+                .invoke_fn = &detail::check_generation_interrupts_as_cpp,
+            };
+        detail::check_generation_interrupts_as_cpp(nullptr);
         if (is_fragment_index) {
             auto encoded = fragment_index::encode_persisted_generation(
                 sequence,
@@ -272,7 +415,9 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                 options,
                 bioseq::indexing::grouped_soa_generation_limits{},
                 &state->fragment_execution,
-                state->source.alphabet_code);
+                state->source.alphabet_code,
+                storage.run_buffer_bytes(),
+                generation_cancellation);
             if (encoded) {
                 state->generation.emplace(std::move(*encoded));
                 state->execution = state->fragment_execution;
@@ -286,6 +431,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                 sequence,
                 backend,
                 kernels,
+                algorithm_identity,
                 /*core_span_bp=*/0,
                 bioseq::indexing::k_minimizer_preferred_segment_span_bp,
                 &state->sequence_execution,
@@ -308,6 +454,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                 }
             }
         }
+        detail::check_generation_interrupts_as_cpp(nullptr);
         if (state->generation.has_value()) {
             result.binding =
                 bioseq::indexing::make_minimizer_generation_publication_binding(*state->generation);
@@ -372,7 +519,8 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                 !execution->publication_accepted(result.binding) || !is_fragment_index ||
                 execution->selected_backend != backend || execution->minimizer_scheme != scheme ||
                 execution->target_length != locator.logical_length ||
-                execution->window_size != k_window_size || execution->kmer_size != k_kmer_size;
+                execution->window_size != window_size || execution->kmer_size != kmer_size ||
+                execution->algorithm_identity != algorithm_identity;
             producer_scans = execution->producer_scan_count;
             geometry_retries = execution->geometry_retry_count;
             scalar_runs = execution->scalar_core_runs;
@@ -387,7 +535,8 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                 !execution->matches_publication(result.binding) || !is_sequence_index ||
                 execution->selected_backend != backend || execution->minimizer_scheme != scheme ||
                 execution->target_length != locator.logical_length ||
-                execution->window_size != k_window_size || execution->kmer_size != k_kmer_size ||
+                execution->window_size != window_size || execution->kmer_size != kmer_size ||
+                execution->algorithm_identity != algorithm_identity ||
                 !result.minimizer_sequence_spill_resources_released;
             producer_scans = execution->replay_scan_count;
             geometry_retries = execution->replay_reroute_pass_count;
@@ -432,11 +581,12 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
             manifest.target_length != locator.logical_length ||
             manifest.alphabet_code != state->source.alphabet_code ||
             manifest.storage_unit_byte_width != state->source.storage_unit_byte_width ||
-            manifest.kmer_size != k_kmer_size || manifest.window_size != k_window_size ||
+            manifest.kmer_size != kmer_size || manifest.window_size != window_size ||
             manifest.minimizer_scheme_id != scheme.id ||
             manifest.minimizer_scheme_revision != scheme.revision ||
             manifest.producer_backend_id != producer_backend.id ||
             manifest.producer_identity_revision != producer_backend.revision ||
+            manifest.algorithm_identity != algorithm_identity ||
             manifest.gpu_abi_revision != profile.gpu_abi_revision ||
             manifest.max_occ_cap != k_max_occ_cap || manifest.position_segment_span_bp == 0 ||
             (is_fragment_index ? manifest.position_segment_span_bp != k_fragment_span_bp
@@ -449,6 +599,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
                                          "READY minimizer encoded manifest identity disagrees");
         }
 
+        detail::check_generation_interrupts_as_cpp(nullptr);
         state->ready_token.emplace(state->writer->validate_ready_generation(*state->generation));
         result.writer_rows = state->writer->row_count();
         result.writer_batches = state->writer->catalog_multi_insert_batches();
@@ -461,6 +612,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
             minimizer_generation_failure_injection::generation_storage_close,
             "generation_storage_close");
 
+        detail::check_generation_interrupts_as_cpp(nullptr);
         ready_minimizer_generation_published_head_receipt publication_receipt =
             publish_ready_minimizer_generation_head_pg(std::move(*state->ready_token));
         state->ready_token.reset();
@@ -476,10 +628,11 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
                 backend,
+                algorithm_identity,
                 state->source.alphabet_code,
                 state->source.storage_unit_byte_width,
-                k_kmer_size,
-                k_window_size,
+                kmer_size,
+                window_size,
                 k_max_occ_cap);
         if (!reread_expected) {
             ready_minimizer_error_as_cpp(ERRCODE_DATA_CORRUPTED,
@@ -570,6 +723,7 @@ inline void build_and_verify_grouped_soa_minimizer_generation_pg(
         typename bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>::alphabet_type>
         sequence,
     bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range> source_binding,
+    const bioseq::indexing::minimizer_generation_algorithm_identity& algorithm_identity,
     bioseq::minimizers::minimizer_sketch_backend backend,
     const bioseq::minimizers::minimizer_kernels* kernels) {
     const ready_minimizer_generation_publication publication =
@@ -580,6 +734,7 @@ inline void build_and_verify_grouped_soa_minimizer_generation_pg(
                                                               storage,
                                                               sequence,
                                                               source_binding,
+                                                              algorithm_identity,
                                                               backend,
                                                               kernels);
     const bool execution_kind_matches =
@@ -606,6 +761,10 @@ inline void build_and_verify_grouped_soa_minimizer_generation_pg(
                         index_name,
                         bioseq::minimizers::minimizer_sketch_backend_name(backend)));
     }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    detail::log_e2e_minimizer_publication_execution(
+        publication, user_relid, column_attno, index_name, sequence_rowno);
+#endif
 }
 
 // Keep one explicit production facade/binding instantiation as a narrow
@@ -626,6 +785,7 @@ build_and_publish_grouped_soa_minimizer_generation_pg<
     fragment_index_storage&,
     ready_minimizer_generation_compile_contract_detail::sequence_view,
     ready_minimizer_generation_compile_contract_detail::source_binding,
+    const bioseq::indexing::minimizer_generation_algorithm_identity&,
     bioseq::minimizers::minimizer_sketch_backend,
     const bioseq::minimizers::minimizer_kernels*);
 

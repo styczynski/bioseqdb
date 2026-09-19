@@ -1378,10 +1378,10 @@ def run_inspect(
     matches = all_matches[:max_matches]
 
     target_dir = binary_root / "CMakeFiles" / f"{target}.dir"
-    # Shared modules live in `bioseq_modules_nopg.dir`, an OBJECT library
-    # linked by every non-PG consumer. Code from those
-    # modules ends up in the consumer's binary but the per-TU `.s`/`.bc`
-    # artifacts only exist under the lib's build dir. Sweep both.
+    # Linked implementation owners retain their per-TU `.s`/`.bc` artifacts
+    # in their own build directories. Sweep only the target-specific owners
+    # supplied by the caller; PG-only pipeline owners must not leak into
+    # executable inspection evidence.
     shared_names = (shared_target_names if shared_target_names is not None
                     else ("bioseq_modules_nopg",))
     shared_lib_dirs = tuple(

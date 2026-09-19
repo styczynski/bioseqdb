@@ -17,3 +17,7 @@ export [[nodiscard]] const CustomPathMethods* bioseq_batch_join_path_methods() n
 export [[nodiscard]] const CustomScanMethods* bioseq_batch_join_scan_methods() noexcept;
 /** @brief Returns the path method table for per-row joins. */
 export [[nodiscard]] const CustomPathMethods* bioseq_per_row_join_path_methods() noexcept;
+/** @brief Returns the path method table for slice projection wrappers. */
+export [[nodiscard]] const CustomPathMethods& bioseq_slice_project_path_methods() noexcept;
+/** @brief Returns the scan method table for slice projection wrappers. */
+export [[nodiscard]] const CustomScanMethods& bioseq_slice_project_scan_methods() noexcept;

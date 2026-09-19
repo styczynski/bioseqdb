@@ -10,6 +10,9 @@ export import :provider_telemetry;
 export import :environment_attestation;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.prefilter.execution_contract;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+export import bioseq.pipeline.minimap_parameters_contract;
+#endif
 
 export namespace bioseq::pipeline_stats {
 
@@ -125,6 +128,26 @@ struct pipeline_operational_stats {
     block_aligner_stage_stats block_aligner_stats{};
     ::bioseq::prefilter::prefilter_execution_stats prefilter_stats{};
     bool prefilter_execution_stats_available = false;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    minimizer_algorithm_identity requested_minimizer_algorithm = minimizer_algorithm_identity::none;
+    minimizer_algorithm_identity observed_minimizer_algorithm = minimizer_algorithm_identity::none;
+    chaining_algorithm_identity requested_chaining_algorithm = chaining_algorithm_identity::none;
+    chaining_algorithm_identity observed_chaining_algorithm = chaining_algorithm_identity::none;
+    base_alignment_algorithm_identity requested_base_alignment_algorithm =
+        base_alignment_algorithm_identity::none;
+    base_alignment_algorithm_identity observed_base_alignment_algorithm =
+        base_alignment_algorithm_identity::none;
+#endif
+    std::uint64_t downstream_active_wall_ns = 0;
+    std::uint64_t downstream_active_wall_invocations = 0;
+    std::uint64_t downstream_active_wall_unavailable_invocations = 0;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    ::bioseq::simd::benchmark_e2e_interval_union_receipt benchmark_e2e_interval_union{};
+    std::uint64_t benchmark_e2e_interval_union_invocations = 0;
+    bool mapq_execution_available = false;
+    bool mapq_executed = false;
+    bool mapq_execution_conflict = false;
+#endif
     std::uint64_t cpu_seed_positions_rejected_outside_collection = 0;
     std::uint64_t gpu_partition_select_dispatches = 0;
     std::uint64_t gpu_partition_anchor_merge_dispatches = 0;
@@ -280,6 +303,91 @@ struct pipeline_operational_stats {
         }
     }
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    /// @brief Merge requested and operation-observed algorithm identities.
+    ///
+    /// Requested/observed disagreement is deliberately retained as a fallback
+    /// observation; only disagreement within either channel is a conflict.
+    void record_algorithm_identities(
+        const minimizer_algorithm_identity requested_minimizer,
+        const minimizer_algorithm_identity observed_minimizer,
+        const chaining_algorithm_identity requested_chaining,
+        const chaining_algorithm_identity observed_chaining,
+        const base_alignment_algorithm_identity requested_base_alignment,
+        const base_alignment_algorithm_identity observed_base_alignment) noexcept {
+        requested_minimizer_algorithm =
+            merge_minimizer_algorithm_identity(requested_minimizer_algorithm, requested_minimizer);
+        observed_minimizer_algorithm =
+            merge_minimizer_algorithm_identity(observed_minimizer_algorithm, observed_minimizer);
+        requested_chaining_algorithm =
+            merge_chaining_algorithm_identity(requested_chaining_algorithm, requested_chaining);
+        observed_chaining_algorithm =
+            merge_chaining_algorithm_identity(observed_chaining_algorithm, observed_chaining);
+        requested_base_alignment_algorithm = merge_base_alignment_algorithm_identity(
+            requested_base_alignment_algorithm, requested_base_alignment);
+        observed_base_alignment_algorithm = merge_base_alignment_algorithm_identity(
+            observed_base_alignment_algorithm, observed_base_alignment);
+        has_operational_identity_conflict =
+            has_operational_identity_conflict ||
+            requested_minimizer == minimizer_algorithm_identity::none ||
+            observed_minimizer == minimizer_algorithm_identity::none ||
+            requested_chaining == chaining_algorithm_identity::none ||
+            observed_chaining == chaining_algorithm_identity::none ||
+            ((requested_base_alignment == base_alignment_algorithm_identity::none) !=
+             (observed_base_alignment == base_alignment_algorithm_identity::none)) ||
+            requested_minimizer_algorithm == minimizer_algorithm_identity::mixed_invalid ||
+            observed_minimizer_algorithm == minimizer_algorithm_identity::mixed_invalid ||
+            requested_chaining_algorithm == chaining_algorithm_identity::mixed_invalid ||
+            observed_chaining_algorithm == chaining_algorithm_identity::mixed_invalid ||
+            requested_base_alignment_algorithm ==
+                base_alignment_algorithm_identity::mixed_invalid ||
+            observed_base_alignment_algorithm == base_alignment_algorithm_identity::mixed_invalid;
+    }
+#endif
+
+    /// @brief Record one exact invocation-level downstream interval union.
+    void record_downstream_active_wall(const std::uint64_t elapsed_ns,
+                                       const bool available) noexcept {
+        are_stats_saturated =
+            merge_counter(downstream_active_wall_invocations, 1u) || are_stats_saturated;
+        if (!available) {
+            are_stats_saturated =
+                merge_counter(downstream_active_wall_unavailable_invocations, 1u) ||
+                are_stats_saturated;
+            return;
+        }
+        are_stats_saturated =
+            merge_counter(downstream_active_wall_ns, elapsed_ns) || are_stats_saturated;
+    }
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    /** Publish the sole finalized statement-owned excluded-interval receipt. */
+    void record_benchmark_e2e_interval_union(
+        ::bioseq::simd::benchmark_e2e_interval_union_receipt receipt) noexcept {
+        if (benchmark_e2e_interval_union_invocations != 0u) {
+            benchmark_e2e_interval_union.available = false;
+            benchmark_e2e_interval_union.invalid = true;
+            benchmark_e2e_interval_union_invocations = (std::numeric_limits<std::uint64_t>::max)();
+            return;
+        }
+        benchmark_e2e_interval_union = std::move(receipt);
+        benchmark_e2e_interval_union_invocations = 1u;
+    }
+#endif
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    /// @brief Merge a completed MAPQ execution observation.
+    void record_mapq_execution(const bool executed) noexcept {
+        if (!mapq_execution_available) {
+            mapq_execution_available = true;
+            mapq_executed = executed;
+        } else if (mapq_executed != executed) {
+            mapq_execution_conflict = true;
+            has_operational_identity_conflict = true;
+        }
+    }
+#endif
+
     /// @brief Merge one operational delta without multiplying it by logical jobs.
     /// @param[in] rhs Operation-local delta to merge.
     void merge(const pipeline_operational_stats& rhs) noexcept {
@@ -304,6 +412,42 @@ struct pipeline_operational_stats {
         bool is_saturated = are_stats_saturated || rhs.are_stats_saturated;
         has_operational_identity_conflict =
             has_operational_identity_conflict || rhs.has_operational_identity_conflict;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (rhs.requested_minimizer_algorithm != minimizer_algorithm_identity::none ||
+            rhs.observed_minimizer_algorithm != minimizer_algorithm_identity::none ||
+            rhs.requested_chaining_algorithm != chaining_algorithm_identity::none ||
+            rhs.observed_chaining_algorithm != chaining_algorithm_identity::none ||
+            rhs.requested_base_alignment_algorithm != base_alignment_algorithm_identity::none ||
+            rhs.observed_base_alignment_algorithm != base_alignment_algorithm_identity::none) {
+            record_algorithm_identities(rhs.requested_minimizer_algorithm,
+                                        rhs.observed_minimizer_algorithm,
+                                        rhs.requested_chaining_algorithm,
+                                        rhs.observed_chaining_algorithm,
+                                        rhs.requested_base_alignment_algorithm,
+                                        rhs.observed_base_alignment_algorithm);
+        }
+        if (rhs.mapq_execution_available) {
+            record_mapq_execution(rhs.mapq_executed);
+        } else if (rhs.mapq_executed) {
+            mapq_execution_conflict = true;
+            has_operational_identity_conflict = true;
+        }
+        mapq_execution_conflict = mapq_execution_conflict || rhs.mapq_execution_conflict;
+        has_operational_identity_conflict =
+            has_operational_identity_conflict || mapq_execution_conflict;
+        if (rhs.benchmark_e2e_interval_union_invocations != 0u) {
+            if (benchmark_e2e_interval_union_invocations == 0u &&
+                rhs.benchmark_e2e_interval_union_invocations == 1u) {
+                benchmark_e2e_interval_union = rhs.benchmark_e2e_interval_union;
+                benchmark_e2e_interval_union_invocations = 1u;
+            } else {
+                benchmark_e2e_interval_union.available = false;
+                benchmark_e2e_interval_union.invalid = true;
+                benchmark_e2e_interval_union_invocations =
+                    (std::numeric_limits<std::uint64_t>::max)();
+            }
+        }
+#endif
         merge_report_once_identity(cpu_prepared_key_set_checksum,
                                    cpu_prepared_key_set_checksum_available,
                                    rhs.cpu_prepared_key_set_checksum,
@@ -320,6 +464,14 @@ struct pipeline_operational_stats {
         for (std::size_t i = 0; i < timing.size(); ++i) {
             add(timing[i].host_wall_ns, rhs.timing[i].host_wall_ns);
             add(timing[i].gpu_device_ns, rhs.timing[i].gpu_device_ns);
+        }
+        add(downstream_active_wall_ns, rhs.downstream_active_wall_ns);
+        add(downstream_active_wall_invocations, rhs.downstream_active_wall_invocations);
+        add(downstream_active_wall_unavailable_invocations,
+            rhs.downstream_active_wall_unavailable_invocations);
+        if (rhs.downstream_active_wall_unavailable_invocations >
+            rhs.downstream_active_wall_invocations) {
+            is_saturated = true;
         }
         add(gpu_runtime_init_ns, rhs.gpu_runtime_init_ns);
         add(gpu_pipeline_cache_loads, rhs.gpu_pipeline_cache_loads);
@@ -559,6 +711,9 @@ struct pipeline_operational_stats {
     }
 };
 
+static_assert(std::is_trivially_copyable_v<pipeline_operational_stats>);
+static_assert(std::is_standard_layout_v<pipeline_operational_stats>);
+
 /// Saturating statement/node aggregate of job and operational stats.
 struct pipeline_execution_stats {
     executed_backend requested_backend = executed_backend::none;
@@ -609,8 +764,19 @@ struct pipeline_execution_stats {
 
     /// @brief Validate and merge one logical target-query stats exactly once.
     /// @param[in] job Complete job-level attestation to merge.
-    void merge_job(const pipeline_job_execution_stats& job) noexcept {
-        bool attested = is_job_execution_stats_valid(job);
+    void merge_job(const pipeline_job_execution_stats& job
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                   , const bool authenticated_query_empty_recomputed_bypass = false
+#endif
+                   ) noexcept {
+        bool attested = is_job_execution_stats_valid(job
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            , operational.observed_minimizer_algorithm
+            , operational.observed_chaining_algorithm
+            , operational.observed_base_alignment_algorithm
+            , authenticated_query_empty_recomputed_bypass
+#endif
+        );
         if ((requested_backend != executed_backend::none &&
              requested_backend != job.requested_backend) ||
             (actual_backend != executed_backend::none && actual_backend != job.actual_backend) ||
@@ -806,12 +972,71 @@ struct pipeline_execution_stats {
         for (std::size_t i = 0; i < k_pipeline_stage_count; ++i) {
             const auto stage = static_cast<pipeline_stage>(i);
             const stage_coverage& coverage = stats.stages.coverage[i];
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            if (stats.actual_backend == executed_backend::hybrid_cpu_vulkan) {
+                const bool query_empty_recomputed_target_stage =
+                    stats.actual_target_index_source == target_index_source::recomputed &&
+                    stats.operational.observed_minimizer_algorithm ==
+                        minimizer_algorithm_identity::vulkan_minimap_integer &&
+                    (stage == pipeline_stage::target_sketch ||
+                     stage == pipeline_stage::target_index_build);
+                if (!is_hybrid_stage_coverage_exclusive(coverage,
+                        stats.actual_target_index_source, stage,
+                        stats.operational.observed_minimizer_algorithm,
+                        stats.operational.observed_chaining_algorithm,
+                        stats.operational.observed_base_alignment_algorithm,
+                        stats.attempted_alignment_jobs) ||
+                    (is_front_end_eligibility_required(stats.actual_target_index_source, stage) &&
+                     !query_empty_recomputed_target_stage &&
+                     coverage.eligible_jobs != stats.attempted_alignment_jobs)) {
+                    return false;
+                }
+                continue;
+            }
+            const execution_engine expected_engine = expected_execution_engine(
+                stats.actual_backend == executed_backend::mixed_cpu ? executed_backend::scalar_cpu
+                                                                    : stats.actual_backend,
+                stats.actual_target_index_source,
+                stage);
+#else
             const execution_engine expected_engine = expected_execution_engine(
                 stats.actual_backend, stats.actual_target_index_source, stage);
+#endif
             if (coverage.fallback_jobs != 0 ||
                 coverage.eligible_jobs > stats.attempted_alignment_jobs) {
                 return false;
             }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            if (stats.actual_backend == executed_backend::mixed_cpu) {
+                const std::size_t scalar = engine_index(execution_engine::scalar_cpu);
+                const std::size_t simd = engine_index(execution_engine::simd_cpu);
+                const bool selectable_cpu_stage = stage == pipeline_stage::query_sketch ||
+                                                  stage == pipeline_stage::target_sketch ||
+                                                  stage == pipeline_stage::chain_score ||
+                                                  stage == pipeline_stage::chain_backtrack ||
+                                                  stage == pipeline_stage::left_extension ||
+                                                  stage == pipeline_stage::gap_extension ||
+                                                  stage == pipeline_stage::right_extension;
+                if (selectable_cpu_stage) {
+                    for (std::size_t engine = 0; engine < coverage.executed_jobs.size(); ++engine) {
+                        if (engine != scalar && engine != simd &&
+                            coverage.executed_jobs[engine] != 0) {
+                            return false;
+                        }
+                    }
+                    if (coverage.executed_jobs[scalar] + coverage.executed_jobs[simd] !=
+                        coverage.eligible_jobs) {
+                        return false;
+                    }
+                    if (is_front_end_eligibility_required(stats.actual_target_index_source,
+                                                          stage) &&
+                        coverage.eligible_jobs != stats.attempted_alignment_jobs) {
+                        return false;
+                    }
+                    continue;
+                }
+            }
+#endif
             if (expected_engine == execution_engine::count) {
                 if (coverage.eligible_jobs != 0)
                     return false;
@@ -832,6 +1057,20 @@ struct pipeline_execution_stats {
                 return false;
             }
         }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (stats.actual_backend == executed_backend::hybrid_cpu_vulkan &&
+            stats.actual_target_index_source == target_index_source::recomputed &&
+            stats.operational.observed_minimizer_algorithm ==
+                minimizer_algorithm_identity::vulkan_minimap_integer) {
+            const auto target_sketch = stats.stages.coverage[
+                stage_index(pipeline_stage::target_sketch)].eligible_jobs;
+            const auto target_index = stats.stages.coverage[
+                stage_index(pipeline_stage::target_index_build)].eligible_jobs;
+            if (target_sketch != target_index) {
+                return false;
+            }
+        }
+#endif
         return true;
     }
 
@@ -1087,5 +1326,8 @@ struct pipeline_execution_stats {
         }
     }
 };
+
+static_assert(std::is_trivially_copyable_v<pipeline_execution_stats>);
+static_assert(std::is_standard_layout_v<pipeline_execution_stats>);
 
 } // namespace bioseq::pipeline_stats

@@ -3,35 +3,41 @@
  * @brief Validates aligner overrides and final SIMD chaining policy.
  */
 module;
-#include <bioseq/pg_compat.h>
 
 extern "C" {
-#include "catalog/namespace.h"
-#include "catalog/pg_aggregate.h"
-#include "catalog/pg_language_d.h"
-#include "catalog/pg_proc.h"
-#include "commands/extension.h"
-#include "optimizer/appendinfo.h"
-#include "optimizer/planmain.h"
-#include "storage/dsm.h"
-#include "storage/shmem.h"
-#include "utils/inval.h"
-#include "utils/syscache.h"
+#include "postgres.h"
 
-#include "rewrite/rewriteManip.h"
+#include "access/htup_details.h"
+#include "access/tupdesc.h"
+#include "fmgr.h"
+#include "nodes/pg_list.h"
+#include "nodes/primnodes.h"
+#include "storage/itemptr.h"
+#include "utils/errcodes.h"
+#include "utils/typcache.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
 
 export module bioseq.postgres.table:custom_scan_semantic_payload_aligner_semantics;
 
-import std;
 import bioseq.indexing.type;
-import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.postgres.support;
 
-import :custom_scan_runtime_support;
-import :custom_scan_oid_expression_support;
-
-import :custom_scan_semantic_payload_payload_codec;
+import :custom_scan_aligner_options_codec_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
+export import :custom_scan_planner_aligner_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -204,7 +210,7 @@ export {
                                    bioseq::simd::minimap2_parameters& params,
                                    bioseq::indexing::index_read_requirement& index_read_requirement,
                                    const bioseq_stub_oids& oids,
-                                   bool* vulkan_enabled_explicit = nullptr) {
+                                   bool* vulkan_enabled_explicit) {
         if (vulkan_enabled_explicit != nullptr) {
             *vulkan_enabled_explicit = false;
         }

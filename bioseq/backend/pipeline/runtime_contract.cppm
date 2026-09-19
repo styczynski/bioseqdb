@@ -4,12 +4,52 @@
  */
 module;
 
+#include <bitset>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <type_traits>
+#include <vector>
 
 export module bioseq.pipeline.runtime_contract;
 
 export namespace bioseq::simd_dispatch {
+
+/**
+ * @brief Kernel families bound by one fixed Highway target.
+ *
+ * Each enumerator owns one bit in highway_kernel_mask. The `count` sentinel is
+ * excluded from the mask and is never a runnable kernel.
+ */
+enum class highway_kernel : std::uint8_t {
+    /** Minimap2 reference minimizer extraction. */
+    minimizer_minimap2_reference,
+    /** Two-stack ntHash minimizer extraction. */
+    minimizer_two_stack_nthash,
+    /** Bounded-window ntHash minimizer extraction. */
+    minimizer_bounded_nthash,
+    /** SIMD dynamic-programming anchor chaining. */
+    chaining_chain_anchors_simd,
+    /** SIMD SneakySnake batch prefiltering. */
+    prefilter_sneaky_snake_simd_batch,
+    /** Single-region KSW2 alignment. */
+    alignment_ksw2,
+    /** Cross-region batched KSW2 alignment. */
+    alignment_ksw2_batched,
+    /** Block-based global alignment. */
+    alignment_block_aligner,
+    /** Number of kernel families. */
+    count,
+};
+
+/** @brief Number of callable kernel families represented by the dispatch mask. */
+inline constexpr std::size_t highway_kernel_count =
+    static_cast<std::size_t>(highway_kernel::count);
+
+/** @brief Bit mask over all callable Highway kernel families. */
+using highway_kernel_mask = std::bitset<highway_kernel_count>;
 
 /// Target-neutral masks selected by the single registered Highway dispatcher.
 struct highway_dispatch_plan final {
@@ -103,3 +143,55 @@ enum class minimizer_algorithm : std::uint8_t {
 };
 
 }  // namespace bioseq::simd
+
+export namespace bioseq::simd::pipe {
+
+/** @brief One stable name/value property rendered in pipeline descriptions. */
+struct named_property {
+    std::string name;
+    std::string value;
+};
+
+/** @brief Algorithm identity and resolved properties for one pipeline stage. */
+struct stage_algorithm_description {
+    std::string name;
+    std::vector<named_property> parameters;
+    std::vector<named_property> computed_properties;
+    std::optional<std::string> extra_description;
+    ::bioseq::simd_dispatch::highway_kernel_mask highway_kernels{};
+};
+
+/** @brief Stable EXPLAIN description of one executable pipeline stage. */
+struct stage_description {
+    std::string stage_name;
+    std::optional<stage_algorithm_description> algorithm;
+    std::optional<std::string> extra_description;
+
+    /**
+     * @brief Pre-allocation upper bound the stage reserves before driving its
+     * kernel ( — "reserve correctness").
+     *
+     * Populated by every stage that opens an `arena_slab<p_element>` of bounded size
+     * (minimizer_stage, seed_hit_stage, chain_stage, region_stage). Set to
+     * `std::nullopt` for stages that mutate in-place or whose output size
+     * is `0` (index_stage, sink_stage, etc.). The EXPLAIN renderer surfaces
+     * this as a per-stage `[reserved: N]` line so a reader can verify
+     * `actual ≤ reserved` against the runtime instrumentation log.
+     */
+    std::optional<std::size_t> estimated_batch_size;
+};
+
+/** @brief Ordered description of the exact executable pipeline. */
+struct pipeline_description {
+    std::vector<stage_description> stages;
+};
+
+inline constexpr std::string_view query_sketch_stage_name = "QuerySketchStage";
+
+/** Cold EXPLAIN-only query-sketch route. Never a dispatch-chain dimension. */
+enum class query_sketch_route : std::uint8_t {
+    recompute_capable,
+    compatible_persisted_only,
+};
+
+}  // namespace bioseq::simd::pipe

@@ -2,9 +2,14 @@
  * @file hash_major_diagnostic_identity.cppm
  * @brief Derives diagnostic tokens from authenticated hash-major identities.
  */
+module;
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
 export module bioseq.postgres.scheduler.dispatch_processor.hash_major_diagnostic_identity;
 
-import std;
 import bioseq.indexing.storage;
 
 export namespace bioseq::simd {

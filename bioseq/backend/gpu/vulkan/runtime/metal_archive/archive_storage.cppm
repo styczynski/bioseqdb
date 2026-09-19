@@ -792,8 +792,29 @@ class open_private_metal_archive {
                 "private Metal archive name remained or was recreated after unlink");
         }
         struct stat fd_status{};
-        if (::fstat(fd_, &fd_status) != 0 ||
-            sealed_shader_cache_detail::regular_file_identity_from_stat(fd_status) != identity_) {
+        if (::fstat(fd_, &fd_status) != 0) {
+            return std::unexpected("unlinked private Metal archive descriptor identity changed");
+        }
+        const auto unlinked_identity =
+            sealed_shader_cache_detail::regular_file_identity_from_stat(fd_status);
+        // unlink(2) legitimately decrements st_nlink and advances ctime for the
+        // still-open inode.  Preserve every immutable content/descriptor field,
+        // require that no filesystem name remains, and allow only that expected
+        // nondecreasing status-change timestamp transition.
+        const bool ctime_not_older =
+            unlinked_identity.changed_seconds > identity_.changed_seconds ||
+            (unlinked_identity.changed_seconds == identity_.changed_seconds &&
+             unlinked_identity.changed_nanoseconds >= identity_.changed_nanoseconds);
+        const bool immutable_identity_matches =
+            S_ISREG(fd_status.st_mode) && fd_status.st_uid == ::geteuid() &&
+            (fd_status.st_mode & (S_IRWXG | S_IRWXO)) == 0 && fd_status.st_nlink == 0 &&
+            unlinked_identity.device == identity_.device &&
+            unlinked_identity.inode == identity_.inode &&
+            unlinked_identity.size == identity_.size &&
+            unlinked_identity.modified_seconds == identity_.modified_seconds &&
+            unlinked_identity.modified_nanoseconds == identity_.modified_nanoseconds &&
+            ctime_not_older;
+        if (!immutable_identity_matches) {
             return std::unexpected("unlinked private Metal archive descriptor identity changed");
         }
         const int fd = std::exchange(fd_, -1);

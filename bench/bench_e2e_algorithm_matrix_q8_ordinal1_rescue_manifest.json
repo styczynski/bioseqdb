@@ -1,0 +1,1292 @@
+{
+  "schema": "bioseq.e2e.algorithm-matrix-q8-rescue",
+  "version": 2,
+  "ordinal": 1,
+  "created_at": "2026-08-26T03:54:04+02:00",
+  "purpose": "Sealed four-way local rescue execution partition for canonical q8 ordinal-1 ownership.",
+  "campaign_binding": {
+    "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+    "campaign_digest": "e1efe2033ea95f729e147725d2807f9c94eccb83d9cd8711879034c09e70168a",
+    "canonical_manifest": "bench/bench_e2e_algorithm_matrix_q8_campaign_manifest.json",
+    "canonical_manifest_sha256": "428e155f98f16a2085afccf88dcd4d29d92246ce9d70fdfa5965481142870d46",
+    "query_prefix_proof": "bench/bench_e2e_algorithm_matrix_q8_query_prefix_proof.json"
+  },
+  "parent": {
+    "path": "bench/e2e_algorithm_matrix_q8_shards/bench_e2e_algorithm_matrix_q8_campaign_shard_m2_d4_k15_w10_no_index_scalar_scalar_minimap2.json",
+    "config_sha256": "fa8c8d1dcbff474bd29468e506e4453cf16d0f96f47f802b7f772d87ffc72230",
+    "role": "shard",
+    "shard_kind": "no_index_micro",
+    "expected_result_cells": 4,
+    "expected_raw_records": 20,
+    "expected_stable_keys_sha256": "4c8078493969a8205f08837761917b37d174743e676d867ebc67118f49680c22",
+    "allowed_nonblocking_rule_names": [],
+    "declared_metric_names": [
+      "wall_clock_ns",
+      "region_total_ns",
+      "tuple_accepted",
+      "match_count",
+      "expected_match_count",
+      "correct_match_count",
+      "exact_primary_count_accepted",
+      "correct_cigar_count",
+      "cigar_replay_count",
+      "mapq_result_count",
+      "pipeline_validation_accepted",
+      "stage_engine_matrix_valid",
+      "backend_declines",
+      "backend_fallbacks",
+      "prefilter_activity_count",
+      "measured_region_ns_manual",
+      "cigar_or_mapq_interval_union_ns",
+      "outer_e2e_minus_cigar_or_mapq_union_ns",
+      "benchmark_e2e_interval_schema_revision",
+      "benchmark_e2e_interval_available",
+      "benchmark_e2e_interval_count",
+      "benchmark_e2e_cigar_interval_count",
+      "benchmark_e2e_mapq_interval_count",
+      "benchmark_e2e_interval_finalization_count",
+      "downstream_active_wall_ns",
+      "downstream_active_wall_available",
+      "downstream_work_ns",
+      "mapq_execution_available",
+      "mapq_executed"
+    ],
+    "expected_all_records_disposition": null,
+    "cells": [
+      {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_fragment\",\"scalar\",\"scalar_minimap2\",\"ksw2\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_fragment",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "ksw2"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 0,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "ksw2",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_fragment",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      },
+      {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_sequence\",\"scalar\",\"scalar_minimap2\",\"ksw2\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_sequence",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "ksw2"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 1,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "ksw2",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_sequence",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      },
+      {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_fragment\",\"scalar\",\"scalar_minimap2\",\"block_aligner\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_fragment",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "block_aligner"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 2,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "block_aligner",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_fragment",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      },
+      {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_sequence\",\"scalar\",\"scalar_minimap2\",\"block_aligner\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_sequence",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "block_aligner"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 3,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "block_aligner",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_sequence",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      }
+    ]
+  },
+  "build_receipt": {
+    "artifact_counts": {
+      "compile_commands": 1527,
+      "compiled_objects": 1364,
+      "generated_highway_sources": 204,
+      "inspect_listings": 0,
+      "install_scripts": 24,
+      "linked_artifacts": 9,
+      "runtime_artifacts": 1,
+      "targets": 3
+    },
+    "authorized_artifacts": [
+      {
+        "mode": 420,
+        "relative_path": "_deps/cereal-build/cmake_install.cmake",
+        "sha256": "239382ddc0c27ffc90f13485952fbb5d9d6da6030f6cc9fd02abe7de9c8a67de",
+        "size": 1473
+      },
+      {
+        "mode": 420,
+        "relative_path": "_deps/cereal-subbuild/cmake_install.cmake",
+        "sha256": "94135924d278fb029aa28fc8c1873f3e032087ad98c0e3af70441d84467ca9e9",
+        "size": 1948
+      },
+      {
+        "mode": 420,
+        "relative_path": "_deps/kseq++-build/cmake_install.cmake",
+        "sha256": "ad35cd191f77407d83f7207fcc06da757753dd0227e3ebfb21f2f523e846a522",
+        "size": 3788
+      },
+      {
+        "mode": 420,
+        "relative_path": "_deps/kseq++-subbuild/cmake_install.cmake",
+        "sha256": "a4194dd7557320715de80ef265e5a1d4ba3034c486e398ffc01f32e8065f0023",
+        "size": 1948
+      },
+      {
+        "mode": 420,
+        "relative_path": "_deps/use_ccache-build/cmake_install.cmake",
+        "sha256": "f909f4f5db6b7ea23d0b07904e4fe20d440d593f21a54474201aabcd2e4c9ec3",
+        "size": 1488
+      },
+      {
+        "mode": 420,
+        "relative_path": "_deps/use_ccache-subbuild/cmake_install.cmake",
+        "sha256": "2f82777d6dad9954c4bb26442f8b879d9038cf7115e221c4f53970214dfa8577",
+        "size": 1960
+      },
+      {
+        "mode": 493,
+        "relative_path": "bioseq/bioseq-minimap2-e2e",
+        "sha256": "b2cc8f766bfacc72a050cf8b90a8511a1c7c222345c09cff1b01af0362675056",
+        "size": 1490192
+      },
+      {
+        "mode": 420,
+        "relative_path": "bioseq/bioseq.control",
+        "sha256": "25ef36d7667fd62febe6e4d608e830ee1fe9315691e64e3d0fc9d49c95b2977c",
+        "size": 114
+      },
+      {
+        "mode": 493,
+        "relative_path": "bioseq/bioseq.dylib",
+        "sha256": "8465cf78aa3663e1d30c1cb4f1f9909e189b7083ab6d2c7378fb20cc5534224e",
+        "size": 56187296
+      },
+      {
+        "mode": 420,
+        "relative_path": "bioseq/bioseq.dylib.dSYM/Contents/Resources/DWARF/bioseq.dylib",
+        "sha256": "6cce8dd49cb1cf31174c2af13f46f141c7c155e2e337be8c78d085bc8be48008",
+        "size": 62347764
+      },
+      {
+        "mode": 493,
+        "relative_path": "bioseq/bioseq_benchmark_e2e",
+        "sha256": "edbf8263a7959d100d6d813a27272838d46948da126acc78309d8e507c7766a3",
+        "size": 28955192
+      },
+      {
+        "mode": 493,
+        "relative_path": "bioseq/bioseq_gpu_archive_builder",
+        "sha256": "743a7745afac0b1e603a92b651aca4202a09ffd20031aaa9b5e06103118324f4",
+        "size": 60008
+      },
+      {
+        "mode": 420,
+        "relative_path": "bioseq/cmake_install.cmake",
+        "sha256": "6aa47c056b2bc0f2fc887a45a28d4a074444f35e3e55b9637033cad390cb0faa",
+        "size": 4905
+      },
+      {
+        "mode": 420,
+        "relative_path": "bioseq/generated/sql/profiles/production/bioseq--1.0.sql",
+        "sha256": "25cfd0dcb9f156f3863702de8a381234e330939439f0e3b3b92c2e422a1c00e4",
+        "size": 119077
+      },
+      {
+        "mode": 420,
+        "relative_path": "bioseq/generated/sql/profiles/test_indexes/bioseq--1.0.sql",
+        "sha256": "d25aa3758217cc1d65781804f6dbc71e5fd1262fefb20514f92c1738dd7b17cb",
+        "size": 119383
+      },
+      {
+        "mode": 493,
+        "relative_path": "bioseq_caching/artifacts/cache_production/Debug/bioseq_cache.dylib",
+        "sha256": "fdca62760f6763486c4ad77f172053cffe948b192c3fac595d2b0b252d7b55e4",
+        "size": 1221600
+      },
+      {
+        "mode": 420,
+        "relative_path": "bioseq_caching/artifacts/cache_production/Debug/bioseq_cache.dylib.dSYM/Contents/Resources/DWARF/bioseq_cache.dylib",
+        "sha256": "e1b89b7cb5e8688def0948393bc0a65d95767440f194b89b6fef6777d74e497a",
+        "size": 254110
+      },
+      {
+        "mode": 420,
+        "relative_path": "bioseq_caching/bioseq_cache.control",
+        "sha256": "896bc913507581c31cf9c8d047015bd17543c204edb423374bc156aa713e859c",
+        "size": 184
+      },
+      {
+        "mode": 420,
+        "relative_path": "bioseq_caching/cmake_install.cmake",
+        "sha256": "ac77f91f4bdef7c437b8d191fb8badfff58fd404d61c4a6f28193eee451e9ca2",
+        "size": 3633
+      },
+      {
+        "mode": 420,
+        "relative_path": "bioseq_caching/core/cmake_install.cmake",
+        "sha256": "ea4d5e819a5387381581b76205af6e15372a531f3a66de098948ed05cd42ffb7",
+        "size": 1457
+      },
+      {
+        "mode": 420,
+        "relative_path": "bioseq_caching/generated/sql/profiles/production/bioseq_cache--1.0.sql",
+        "sha256": "d5fb2ad585854d9f93b9c488011665da305e2f4fc05ac95d9b96ee8f0d182ec8",
+        "size": 3006
+      },
+      {
+        "mode": 420,
+        "relative_path": "cmake_install.cmake",
+        "sha256": "61e763d31280fac4e0b42ad5df2148eaaf67fd2fbb02a435d200c5928a041432",
+        "size": 4299
+      },
+      {
+        "mode": 420,
+        "relative_path": "codegen/generator-build/cmake_install.cmake",
+        "sha256": "022dadaf0debec5cbe19298c02b2a3e848817b75e56fb63802f664f02578aa32",
+        "size": 2085
+      },
+      {
+        "mode": 420,
+        "relative_path": "codegen/namespace_materialization/tests/integration/module_canary/cmake_install.cmake",
+        "sha256": "92ed063ec04ef024a90f301cfb1fbb97e65fe46d27fa052a1e19770b8f9dfa94",
+        "size": 1549
+      },
+      {
+        "mode": 420,
+        "relative_path": "codegen/namespace_materialization/tests/integration/owner_canary/cmake_install.cmake",
+        "sha256": "30d7265b381a8b630648bfc63047ae2d1ae8b7bb7855b85b2426050329371e66",
+        "size": 1547
+      },
+      {
+        "mode": 420,
+        "relative_path": "common/cache_provider_api/cmake_install.cmake",
+        "sha256": "01dfc0fa1a60f31742337c34d944abea46e1a0718783bc356dfc1bbcc4b45ef1",
+        "size": 1469
+      },
+      {
+        "mode": 420,
+        "relative_path": "common/checked_arithmetic/cmake_install.cmake",
+        "sha256": "69b206ff1e22e9c59afa97c876ec740b85296763fa717d146d44015c6021aec8",
+        "size": 1469
+      },
+      {
+        "mode": 420,
+        "relative_path": "common/durable_file_io/cmake_install.cmake",
+        "sha256": "8a9f251d1952988597ddb6eb2432b15c05a87a32c785596511ea86d8022873ed",
+        "size": 1463
+      },
+      {
+        "mode": 420,
+        "relative_path": "common/memory_budget/cmake_install.cmake",
+        "sha256": "5b639daf402b8e7fcb053e6b5d468ab5809654847a8cc6adb94e3d20f30d4043",
+        "size": 1459
+      },
+      {
+        "mode": 420,
+        "relative_path": "common/postgres/sql_boundary/cmake_install.cmake",
+        "sha256": "cfd7269f5d783c2e77cb10b35b4144413e4c8c66e04424d780d756be8e46f7ae",
+        "size": 1475
+      },
+      {
+        "mode": 420,
+        "relative_path": "common/postgres/support/cmake_install.cmake",
+        "sha256": "1d042ee0fc098a5fd769d07f31fd7868c22b61281a9e575e0cf62ff6dd14dace",
+        "size": 1674
+      },
+      {
+        "mode": 420,
+        "relative_path": "main/papers/cmake_install.cmake",
+        "sha256": "94c92687c130c75e6e70215c6a08e8424032daa3cd6b41e63177f5b89ba44a23",
+        "size": 1441
+      },
+      {
+        "mode": 493,
+        "relative_path": "vcpkg_installed/arm64-osx/debug/lib/libvulkan.1.4.341.dylib",
+        "sha256": "77dfde3470533df408153e03aea2d54a055389857bf9880a7159d621c558ba4b",
+        "size": 901112
+      },
+      {
+        "artifact_kind": "vcpkg-shared-library-alias",
+        "link_target": "libvulkan.1.4.341.dylib",
+        "mode": 493,
+        "relative_path": "vcpkg_installed/arm64-osx/debug/lib/libvulkan.1.dylib",
+        "size": 23,
+        "symlink_chain": [
+          {
+            "link_target": "libvulkan.1.4.341.dylib",
+            "mode": 493,
+            "relative_path": "vcpkg_installed/arm64-osx/debug/lib/libvulkan.1.dylib",
+            "size": 23
+          }
+        ],
+        "target_mode": 493,
+        "target_relative_path": "vcpkg_installed/arm64-osx/debug/lib/libvulkan.1.4.341.dylib",
+        "target_sha256": "77dfde3470533df408153e03aea2d54a055389857bf9880a7159d621c558ba4b",
+        "target_size": 901112
+      },
+      {
+        "artifact_kind": "vcpkg-shared-library-alias",
+        "link_target": "libvulkan.1.dylib",
+        "mode": 493,
+        "relative_path": "vcpkg_installed/arm64-osx/debug/lib/libvulkan.dylib",
+        "size": 17,
+        "symlink_chain": [
+          {
+            "link_target": "libvulkan.1.dylib",
+            "mode": 493,
+            "relative_path": "vcpkg_installed/arm64-osx/debug/lib/libvulkan.dylib",
+            "size": 17
+          },
+          {
+            "link_target": "libvulkan.1.4.341.dylib",
+            "mode": 493,
+            "relative_path": "vcpkg_installed/arm64-osx/debug/lib/libvulkan.1.dylib",
+            "size": 23
+          }
+        ],
+        "target_mode": 493,
+        "target_relative_path": "vcpkg_installed/arm64-osx/debug/lib/libvulkan.1.4.341.dylib",
+        "target_sha256": "77dfde3470533df408153e03aea2d54a055389857bf9880a7159d621c558ba4b",
+        "target_size": 901112
+      },
+      {
+        "mode": 493,
+        "relative_path": "vcpkg_installed/arm64-osx/lib/libvulkan.1.4.341.dylib",
+        "sha256": "7d58c2fe5b6aa0c1f1566eb89d33ebc4cf7950a8c153ba2b1051b6f7506b2d92",
+        "size": 676280
+      },
+      {
+        "artifact_kind": "vcpkg-shared-library-alias",
+        "link_target": "libvulkan.1.4.341.dylib",
+        "mode": 493,
+        "relative_path": "vcpkg_installed/arm64-osx/lib/libvulkan.1.dylib",
+        "size": 23,
+        "symlink_chain": [
+          {
+            "link_target": "libvulkan.1.4.341.dylib",
+            "mode": 493,
+            "relative_path": "vcpkg_installed/arm64-osx/lib/libvulkan.1.dylib",
+            "size": 23
+          }
+        ],
+        "target_mode": 493,
+        "target_relative_path": "vcpkg_installed/arm64-osx/lib/libvulkan.1.4.341.dylib",
+        "target_sha256": "7d58c2fe5b6aa0c1f1566eb89d33ebc4cf7950a8c153ba2b1051b6f7506b2d92",
+        "target_size": 676280
+      },
+      {
+        "artifact_kind": "vcpkg-shared-library-alias",
+        "link_target": "libvulkan.1.dylib",
+        "mode": 493,
+        "relative_path": "vcpkg_installed/arm64-osx/lib/libvulkan.dylib",
+        "size": 17,
+        "symlink_chain": [
+          {
+            "link_target": "libvulkan.1.dylib",
+            "mode": 493,
+            "relative_path": "vcpkg_installed/arm64-osx/lib/libvulkan.dylib",
+            "size": 17
+          },
+          {
+            "link_target": "libvulkan.1.4.341.dylib",
+            "mode": 493,
+            "relative_path": "vcpkg_installed/arm64-osx/lib/libvulkan.1.dylib",
+            "size": 23
+          }
+        ],
+        "target_mode": 493,
+        "target_relative_path": "vcpkg_installed/arm64-osx/lib/libvulkan.1.4.341.dylib",
+        "target_sha256": "7d58c2fe5b6aa0c1f1566eb89d33ebc4cf7950a8c153ba2b1051b6f7506b2d92",
+        "target_size": 676280
+      },
+      {
+        "mode": 420,
+        "relative_path": "vcpkg_installed/arm64-osx/share/libpq/postgresql/system_constraints.sql",
+        "sha256": "09407a5554a7b4310fc1aa7570c010e151e0f89ad4fb6d659dd6acc870725a01",
+        "size": 8895
+      },
+      {
+        "mode": 420,
+        "relative_path": "vendor/cmake_install.cmake",
+        "sha256": "357130828f73b045d4ca0e8d68cf14c717c858c49889553a0725d0044ff51d08",
+        "size": 2017
+      },
+      {
+        "mode": 420,
+        "relative_path": "vendor/fmt/cmake_install.cmake",
+        "sha256": "a5c56279f0decfb1a2a18880e6e53ea3b2d670c515ae7a34bae838d5de33a894",
+        "size": 5518
+      },
+      {
+        "mode": 420,
+        "relative_path": "vendor/safestringlib/cmake_install.cmake",
+        "sha256": "4ab5779255d0af5eac48dabd96288255f32612b05ff24b31bcac7cd4a586040d",
+        "size": 1459
+      },
+      {
+        "mode": 420,
+        "relative_path": "vendor/seqan3/cmake_install.cmake",
+        "sha256": "a009b7dfb877d6d53691861b7743ecebfc52fbc2ba2dd6fce80aec4594157cae",
+        "size": 2742
+      }
+    ],
+    "binary_subdir": "bioseq",
+    "build_dir": "/Users/styczynski/Code/bioseqdb/build/bench-e2e-opt",
+    "build_phase_completed_at": 1787724375.723519,
+    "build_phase_duration_sec": 2.288205146789551,
+    "build_phase_started_at": 1787724373.435314,
+    "build_receipt_id": "br_7d3103c3a6f867a41c4028e335e1403b",
+    "build_timeout_sec": null,
+    "configuration": {
+      "build_ninja_sha256": "15775b0649fd0b83c05c15357a14826777953cb704d53f30b1e2966b9e2b51af",
+      "cmake_cache_sha256": "ee2f9ed4854d8747f5400c4271525a40a15358c5efcde120e68a94a7a997a219",
+      "compile_commands_sha256": "67af8be8eb3bc2b1b017bebc6e1daf5d482b240f3deb6d87ec1ee7aafc5aca4e",
+      "compiler_contract": {
+        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "",
+        "BIOSEQ_TEST_INDEXES": "OFF",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm@22/bin/clang++",
+        "CMAKE_CXX_COMPILER_ID": null,
+        "CMAKE_CXX_COMPILER_VERSION": null,
+        "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer"
+      },
+      "configure_stamp_sha256": "a5d3c5f21d9d7a7ae6b5a912cc7891062fa4f437380919771a206548b355fda5"
+    },
+    "configure_completed_at": 1787724373.456715,
+    "configure_duration_sec": 0.021401166915893555,
+    "content_sha256": "eb9bdca1b0cdf519e8abb73021596d12a4af5db80a7465355253fde06f8c7672",
+    "created_at": 1787724376.230171,
+    "debug": false,
+    "exit_code": 0,
+    "fresh": false,
+    "host": {
+      "machine": "arm64",
+      "node": "Piotrs-MacBook-Pro.local",
+      "release": "24.6.0",
+      "system": "Darwin"
+    },
+    "kind": "bioseq-build-receipt",
+    "mode": "benchmark-e2e",
+    "preset": "bench-e2e-opt",
+    "preset_family": "e2e",
+    "runtime_artifacts": [
+      {
+        "executable": true,
+        "path": "/Users/styczynski/Code/bioseqdb/build/bench-e2e-opt/bioseq/bioseq_benchmark_e2e",
+        "sha256": "edbf8263a7959d100d6d813a27272838d46948da126acc78309d8e507c7766a3",
+        "size": 28955192
+      }
+    ],
+    "schema_revision": 2,
+    "source_commit": "13b123fce99d338af7d978e55fdf777aaf59996e",
+    "source_graph_fingerprint": "07d0643cf449c6d1bb894a4d70dc51213ce4eba87adc382af6927865223ffcc1",
+    "source_repository_root": "/Users/styczynski/Code/bioseqdb",
+    "status": "completed",
+    "target_timings": [
+      {
+        "co_scheduled": false,
+        "completed_at": 1787724374.021356,
+        "duration_sec": 0.5612380504608154,
+        "started_at": 1787724373.460118,
+        "target": "postgresql_bioseq_cache",
+        "targets": [
+          "postgresql_bioseq_cache"
+        ]
+      },
+      {
+        "co_scheduled": false,
+        "completed_at": 1787724375.31569,
+        "duration_sec": 1.2924449443817139,
+        "started_at": 1787724374.023245,
+        "target": "postgresql_bioseq",
+        "targets": [
+          "postgresql_bioseq"
+        ]
+      },
+      {
+        "co_scheduled": false,
+        "completed_at": 1787724375.7216141,
+        "duration_sec": 0.4039151668548584,
+        "started_at": 1787724375.317699,
+        "target": "bioseq_benchmark_e2e",
+        "targets": [
+          "bioseq_benchmark_e2e"
+        ]
+      }
+    ],
+    "targets": [
+      "postgresql_bioseq_cache",
+      "postgresql_bioseq",
+      "bioseq_benchmark_e2e"
+    ],
+    "termination_evidence": null
+  },
+  "children": [
+    {
+      "ordinal": 0,
+      "path": "bench/e2e_algorithm_matrix_q8_rescue_shards/bench_e2e_algorithm_matrix_q8_ordinal1_rescue_m2_d4_k15_w10_no_index_scalar_scalar_minimap2_fragment_ksw2.json",
+      "config_sha256": "b3f2e425d24e86ae473f542a3b0fa7ea7d4513b225e3960f65c53fdc8f5187dc",
+      "parent_test_case_index": 0,
+      "parent_tuple_index": 0,
+      "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_fragment\",\"scalar\",\"scalar_minimap2\",\"ksw2\"]",
+      "stable_key_sha256": "292bbacaa86221bf25714d6ecd14cc553f0e5e11686d7f5381abe32be818480d",
+      "expected_stable_keys_sha256": "292bbacaa86221bf25714d6ecd14cc553f0e5e11686d7f5381abe32be818480d",
+      "expected_result_cells": 1,
+      "expected_raw_records": 5,
+      "repetitions_per_cell": 5,
+      "canonical_cell": {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_fragment\",\"scalar\",\"scalar_minimap2\",\"ksw2\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_fragment",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "ksw2"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 0,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "ksw2",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_fragment",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      },
+      "execution_cell": {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_fragment\",\"scalar\",\"scalar_minimap2\",\"ksw2\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_fragment",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "ksw2"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 0,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "ksw2",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_fragment",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      },
+      "report": {
+        "path": "reporting/bioseq_benchmark_e2e/report_9.json",
+        "sha256": "a6337c9ec1675e31db574d0798eef679cb48e734563df3e18903012bef93e011",
+        "size": 889620,
+        "raw_sidecar": {
+          "path": "reporting/bioseq_benchmark_e2e/report_9.raw.jsonl",
+          "sha256": "15a741d4302484ac9c46f9f9ca563d7ef587436901605df596d1067416111eff",
+          "size": 853001
+        },
+        "run_id": "9:2026-08-26T06:27:44Z:20724",
+        "schedule_sorted_checksum": "dba127bb2d544230"
+      },
+      "worker_log": {
+        "path": "/tmp/bioseq_build_mcp_benchmark-e2e_20260826-082737.log",
+        "sha256": "72be912032929ce03fe9b6e1ed2566e3fe59fd47c142fb368500b16ea1448bcc",
+        "size": 45727
+      },
+      "run_receipt_id": "rr_f5c3b0b95787c1ac2783ef782b0d5e21",
+      "run_receipt_sha256": "070eb6735496d9bc6d2de2c36ca1fc2b94079eb59e86fc17b35b9b51af47aec7",
+      "run_receipt": {
+        "authorized_artifacts_sha256": "9ba58ad4b17fcf129ebe2c85f76fae2e86615ba419e43598a0b28bc388ef9bcb",
+        "bench_e2e_config": {
+          "path": "/Users/styczynski/Code/bioseqdb/bench/e2e_algorithm_matrix_q8_rescue_shards/bench_e2e_algorithm_matrix_q8_ordinal1_rescue_m2_d4_k15_w10_no_index_scalar_scalar_minimap2_fragment_ksw2.json",
+          "sha256": "b3f2e425d24e86ae473f542a3b0fa7ea7d4513b225e3960f65c53fdc8f5187dc"
+        },
+        "bench_flags": [
+          "--filter",
+          "benchmark=bench_e2e"
+        ],
+        "build_receipt_id": "rr_f5c3b0b95787c1ac2783ef782b0d5e21",
+        "content_sha256": "070eb6735496d9bc6d2de2c36ca1fc2b94079eb59e86fc17b35b9b51af47aec7",
+        "created_at": 1787726753.8505752,
+        "exit_code": 0,
+        "host": {
+          "machine": "arm64",
+          "node": "Piotrs-MacBook-Pro.local",
+          "release": "24.6.0",
+          "system": "Darwin"
+        },
+        "kind": "bioseq-run-receipt",
+        "mode": "benchmark-e2e",
+        "reports": [
+          {
+            "path": "/Users/styczynski/Code/bioseqdb/reporting/bioseq_benchmark_e2e/report_9.json",
+            "sha256": "a6337c9ec1675e31db574d0798eef679cb48e734563df3e18903012bef93e011",
+            "size": 889620
+          }
+        ],
+        "reused_build_receipt": "br_7d3103c3a6f867a41c4028e335e1403b",
+        "reused_build_receipt_content_sha256": "eb9bdca1b0cdf519e8abb73021596d12a4af5db80a7465355253fde06f8c7672",
+        "runtime_artifacts": [
+          {
+            "executable": true,
+            "path": "/Users/styczynski/Code/bioseqdb/build/bench-e2e-opt/bioseq/bioseq_benchmark_e2e",
+            "sha256": "edbf8263a7959d100d6d813a27272838d46948da126acc78309d8e507c7766a3",
+            "size": 28955192
+          }
+        ],
+        "schema_revision": 1,
+        "source_commit": "13b123fce99d338af7d978e55fdf777aaf59996e",
+        "source_graph_fingerprint": "07d0643cf449c6d1bb894a4d70dc51213ce4eba87adc382af6927865223ffcc1",
+        "status": "completed",
+        "test_flags": []
+      }
+    },
+    {
+      "ordinal": 1,
+      "path": "bench/e2e_algorithm_matrix_q8_rescue_shards/bench_e2e_algorithm_matrix_q8_ordinal1_rescue_m2_d4_k15_w10_no_index_scalar_scalar_minimap2_sequence_ksw2.json",
+      "config_sha256": "73177416cbe53b139a9309cd5078255c685414a38946fe67a8efe81a6f73d8c7",
+      "parent_test_case_index": 0,
+      "parent_tuple_index": 1,
+      "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_sequence\",\"scalar\",\"scalar_minimap2\",\"ksw2\"]",
+      "stable_key_sha256": "41886b0be89b5dd5429c563d356f3ecd4e3e6d3436a477a619f8e5bc15ab68e5",
+      "expected_stable_keys_sha256": "41886b0be89b5dd5429c563d356f3ecd4e3e6d3436a477a619f8e5bc15ab68e5",
+      "expected_result_cells": 1,
+      "expected_raw_records": 5,
+      "repetitions_per_cell": 5,
+      "canonical_cell": {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_sequence\",\"scalar\",\"scalar_minimap2\",\"ksw2\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_sequence",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "ksw2"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 1,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "ksw2",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_sequence",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      },
+      "execution_cell": {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_sequence\",\"scalar\",\"scalar_minimap2\",\"ksw2\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_sequence",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "ksw2"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 0,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "ksw2",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_sequence",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      },
+      "report": {
+        "path": "reporting/bioseq_benchmark_e2e/report_11.json",
+        "sha256": "cc8871c9d35908fd69e0877e11a122701c10f1e33314e059d5c014a71979f6f4",
+        "size": 890035,
+        "raw_sidecar": {
+          "path": "reporting/bioseq_benchmark_e2e/report_11.raw.jsonl",
+          "sha256": "61a62c5962fa76a3f73f03d032821b123df4decca82a216a32dce4fffd206d0f",
+          "size": 853188
+        },
+        "run_id": "11:2026-08-26T07:39:12Z:94526",
+        "schedule_sorted_checksum": "2a5d2e4f4ee447a6"
+      },
+      "worker_log": {
+        "path": "/tmp/bioseq_build_mcp_benchmark-e2e_20260826-093905.log",
+        "sha256": "796a085a3df6e296a49c4b60c89eff101a8e670cee828fcdc5ce89f656571b13",
+        "size": 206213
+      },
+      "run_receipt_id": "rr_f5a7f58b35eeee20a7d4b3d18daf7ed9",
+      "run_receipt_sha256": "c7925f9507512a49c548ed564ebd47f71641a5e3890b101d25542dd394d98795",
+      "run_receipt": {
+        "authorized_artifacts_sha256": "9ba58ad4b17fcf129ebe2c85f76fae2e86615ba419e43598a0b28bc388ef9bcb",
+        "bench_e2e_config": {
+          "path": "/Users/styczynski/Code/bioseqdb/bench/e2e_algorithm_matrix_q8_rescue_shards/bench_e2e_algorithm_matrix_q8_ordinal1_rescue_m2_d4_k15_w10_no_index_scalar_scalar_minimap2_sequence_ksw2.json",
+          "sha256": "73177416cbe53b139a9309cd5078255c685414a38946fe67a8efe81a6f73d8c7"
+        },
+        "bench_flags": [
+          "--filter",
+          "benchmark=bench_e2e"
+        ],
+        "build_receipt_id": "rr_f5a7f58b35eeee20a7d4b3d18daf7ed9",
+        "content_sha256": "c7925f9507512a49c548ed564ebd47f71641a5e3890b101d25542dd394d98795",
+        "created_at": 1787739941.5435252,
+        "exit_code": 0,
+        "host": {
+          "machine": "arm64",
+          "node": "Piotrs-MacBook-Pro.local",
+          "release": "24.6.0",
+          "system": "Darwin"
+        },
+        "kind": "bioseq-run-receipt",
+        "mode": "benchmark-e2e",
+        "reports": [
+          {
+            "path": "/Users/styczynski/Code/bioseqdb/reporting/bioseq_benchmark_e2e/report_11.json",
+            "sha256": "cc8871c9d35908fd69e0877e11a122701c10f1e33314e059d5c014a71979f6f4",
+            "size": 890035
+          }
+        ],
+        "reused_build_receipt": "br_7d3103c3a6f867a41c4028e335e1403b",
+        "reused_build_receipt_content_sha256": "eb9bdca1b0cdf519e8abb73021596d12a4af5db80a7465355253fde06f8c7672",
+        "runtime_artifacts": [
+          {
+            "executable": true,
+            "path": "/Users/styczynski/Code/bioseqdb/build/bench-e2e-opt/bioseq/bioseq_benchmark_e2e",
+            "sha256": "edbf8263a7959d100d6d813a27272838d46948da126acc78309d8e507c7766a3",
+            "size": 28955192
+          }
+        ],
+        "schema_revision": 1,
+        "source_commit": "13b123fce99d338af7d978e55fdf777aaf59996e",
+        "source_graph_fingerprint": "07d0643cf449c6d1bb894a4d70dc51213ce4eba87adc382af6927865223ffcc1",
+        "status": "completed",
+        "test_flags": []
+      }
+    },
+    {
+      "ordinal": 2,
+      "path": "bench/e2e_algorithm_matrix_q8_rescue_shards/bench_e2e_algorithm_matrix_q8_ordinal1_rescue_m2_d4_k15_w10_no_index_scalar_scalar_minimap2_fragment_block_aligner.json",
+      "config_sha256": "d5eaa70de244a9ad67ee92265e569844f7279663f6bcc2f7eb80fa6e781691ea",
+      "parent_test_case_index": 0,
+      "parent_tuple_index": 2,
+      "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_fragment\",\"scalar\",\"scalar_minimap2\",\"block_aligner\"]",
+      "stable_key_sha256": "b0fde23811ddb98d22cc773dc3b78838f38ba94b8c9dc3a17e55a5c75170f0d9",
+      "expected_stable_keys_sha256": "b0fde23811ddb98d22cc773dc3b78838f38ba94b8c9dc3a17e55a5c75170f0d9",
+      "expected_result_cells": 1,
+      "expected_raw_records": 5,
+      "repetitions_per_cell": 5,
+      "canonical_cell": {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_fragment\",\"scalar\",\"scalar_minimap2\",\"block_aligner\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_fragment",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "block_aligner"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 2,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "block_aligner",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_fragment",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      },
+      "execution_cell": {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_fragment\",\"scalar\",\"scalar_minimap2\",\"block_aligner\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_fragment",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "block_aligner"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 0,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "block_aligner",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_fragment",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      },
+      "report": {
+        "path": "reporting/bioseq_benchmark_e2e/report_10.json",
+        "sha256": "d81c29d95649746f81c0f5694abfb7435d1c1a8d9ee2736ce474035b644401da",
+        "size": 898647,
+        "raw_sidecar": {
+          "path": "reporting/bioseq_benchmark_e2e/report_10.raw.jsonl",
+          "sha256": "7dee5c421f80b5cd6939347051b4d411eb44c9281b22093f48401296df53e11b",
+          "size": 862145
+        },
+        "run_id": "10:2026-08-26T07:10:04Z:65015",
+        "schedule_sorted_checksum": "120b2efb2c7d7d46"
+      },
+      "worker_log": {
+        "path": "/tmp/bioseq_build_mcp_benchmark-e2e_20260826-090957.log",
+        "sha256": "f43a8e45f2793d5fd6ae8f45678bc0ec1fbdfb3df3c20042ef502134c69096bf",
+        "size": 46050
+      },
+      "run_receipt_id": "rr_3e7eab959234858337df1ebae6484516",
+      "run_receipt_sha256": "60a7142c77dee40d16078ab4b46a5f8f89f0e3ca532366be76a1eb265b3073f3",
+      "run_receipt": {
+        "authorized_artifacts_sha256": "9ba58ad4b17fcf129ebe2c85f76fae2e86615ba419e43598a0b28bc388ef9bcb",
+        "bench_e2e_config": {
+          "path": "/Users/styczynski/Code/bioseqdb/bench/e2e_algorithm_matrix_q8_rescue_shards/bench_e2e_algorithm_matrix_q8_ordinal1_rescue_m2_d4_k15_w10_no_index_scalar_scalar_minimap2_fragment_block_aligner.json",
+          "sha256": "d5eaa70de244a9ad67ee92265e569844f7279663f6bcc2f7eb80fa6e781691ea"
+        },
+        "bench_flags": [
+          "--filter",
+          "benchmark=bench_e2e"
+        ],
+        "build_receipt_id": "rr_3e7eab959234858337df1ebae6484516",
+        "content_sha256": "60a7142c77dee40d16078ab4b46a5f8f89f0e3ca532366be76a1eb265b3073f3",
+        "created_at": 1787729307.8171148,
+        "exit_code": 0,
+        "host": {
+          "machine": "arm64",
+          "node": "Piotrs-MacBook-Pro.local",
+          "release": "24.6.0",
+          "system": "Darwin"
+        },
+        "kind": "bioseq-run-receipt",
+        "mode": "benchmark-e2e",
+        "reports": [
+          {
+            "path": "/Users/styczynski/Code/bioseqdb/reporting/bioseq_benchmark_e2e/report_10.json",
+            "sha256": "d81c29d95649746f81c0f5694abfb7435d1c1a8d9ee2736ce474035b644401da",
+            "size": 898647
+          }
+        ],
+        "reused_build_receipt": "br_7d3103c3a6f867a41c4028e335e1403b",
+        "reused_build_receipt_content_sha256": "eb9bdca1b0cdf519e8abb73021596d12a4af5db80a7465355253fde06f8c7672",
+        "runtime_artifacts": [
+          {
+            "executable": true,
+            "path": "/Users/styczynski/Code/bioseqdb/build/bench-e2e-opt/bioseq/bioseq_benchmark_e2e",
+            "sha256": "edbf8263a7959d100d6d813a27272838d46948da126acc78309d8e507c7766a3",
+            "size": 28955192
+          }
+        ],
+        "schema_revision": 1,
+        "source_commit": "13b123fce99d338af7d978e55fdf777aaf59996e",
+        "source_graph_fingerprint": "07d0643cf449c6d1bb894a4d70dc51213ce4eba87adc382af6927865223ffcc1",
+        "status": "completed",
+        "test_flags": []
+      }
+    },
+    {
+      "ordinal": 3,
+      "path": "bench/e2e_algorithm_matrix_q8_rescue_shards/bench_e2e_algorithm_matrix_q8_ordinal1_rescue_m2_d4_k15_w10_no_index_scalar_scalar_minimap2_sequence_block_aligner.json",
+      "config_sha256": "628627e8acc1b07d0a9a0c9164d878529bfb85935810003be87027a71766b8ee",
+      "parent_test_case_index": 0,
+      "parent_tuple_index": 3,
+      "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_sequence\",\"scalar\",\"scalar_minimap2\",\"block_aligner\"]",
+      "stable_key_sha256": "6e54ef11da37978e2667046e94ad8ca8aa16746121d4d72ed2047459c636ee3b",
+      "expected_stable_keys_sha256": "6e54ef11da37978e2667046e94ad8ca8aa16746121d4d72ed2047459c636ee3b",
+      "expected_result_cells": 1,
+      "expected_raw_records": 5,
+      "repetitions_per_cell": 5,
+      "canonical_cell": {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_sequence\",\"scalar\",\"scalar_minimap2\",\"block_aligner\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_sequence",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "block_aligner"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 3,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "block_aligner",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_sequence",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      },
+      "execution_cell": {
+        "stable_key": "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-q8-v1\",\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\",\"bioseq\",\"minimizers_per_sequence\",\"scalar\",\"scalar_minimap2\",\"block_aligner\"]",
+        "identity": {
+          "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+          "dataset": "matrix_2gbp_dna4_k15_w10",
+          "alphabet": "dna4",
+          "target_size_gbp": 2,
+          "kmer_size": 15,
+          "window_size": 10,
+          "index_mode": "no_index",
+          "engine": "bioseq",
+          "bioseq_index_name": "minimizers_per_sequence",
+          "requested_minimizer_algorithm": "scalar",
+          "requested_chaining_algorithm": "scalar_minimap2",
+          "requested_base_alignment_algorithm": "block_aligner"
+        },
+        "test_case": "M2_D4_K15_W10",
+        "test_case_index": 0,
+        "algorithm": "bioseq_algorithm_matrix_no_index",
+        "tuple_index": 0,
+        "params": {
+          "_": 0,
+          "base_alignment_algorithm": "block_aligner",
+          "chaining_algorithm": "scalar_minimap2",
+          "minimizer_algorithm": "scalar",
+          "minimizer_index": "minimizers_per_sequence",
+          "pipeline_mode": "task_parallel",
+          "recompute_async_persistence": "off"
+        },
+        "allowed_statuses": [
+          "accepted",
+          "rejected"
+        ]
+      },
+      "report": {
+        "path": "reporting/bioseq_benchmark_e2e/report_12.json",
+        "sha256": "ecf52e561d5761d9085abf4501ce0af45194d05d94bca3cfb6e6171fc45c8766",
+        "size": 899503,
+        "raw_sidecar": {
+          "path": "reporting/bioseq_benchmark_e2e/report_12.raw.jsonl",
+          "sha256": "8c6e3038e91d5e1ab9378207bfd5a8db6172d20c5ff6d066b43b07edfe98465a",
+          "size": 862645
+        },
+        "run_id": "12:2026-08-26T10:59:16Z:26901",
+        "schedule_sorted_checksum": "68aadf6dc532bcb5"
+      },
+      "worker_log": {
+        "path": "/tmp/bioseq_build_mcp_benchmark-e2e_20260826-125909.log",
+        "sha256": "4428c000f80383c08130a71d100bc479ef095ebe588dbbcfe198d0b615fbc8be",
+        "size": 206748
+      },
+      "run_receipt_id": "rr_3d8c2f2baecf4642cd23585bb4250840",
+      "run_receipt_sha256": "28cc8991f4c72943a9445bf8fe431df23499cfd2eab8a5bf2889d7f5c7df0ed4",
+      "run_receipt": {
+        "authorized_artifacts_sha256": "9ba58ad4b17fcf129ebe2c85f76fae2e86615ba419e43598a0b28bc388ef9bcb",
+        "bench_e2e_config": {
+          "path": "/Users/styczynski/Code/bioseqdb/bench/e2e_algorithm_matrix_q8_rescue_shards/bench_e2e_algorithm_matrix_q8_ordinal1_rescue_m2_d4_k15_w10_no_index_scalar_scalar_minimap2_sequence_block_aligner.json",
+          "sha256": "628627e8acc1b07d0a9a0c9164d878529bfb85935810003be87027a71766b8ee"
+        },
+        "bench_flags": [
+          "--filter",
+          "benchmark=bench_e2e"
+        ],
+        "build_receipt_id": "rr_3d8c2f2baecf4642cd23585bb4250840",
+        "content_sha256": "28cc8991f4c72943a9445bf8fe431df23499cfd2eab8a5bf2889d7f5c7df0ed4",
+        "created_at": 1787750953.050376,
+        "exit_code": 0,
+        "host": {
+          "machine": "arm64",
+          "node": "Piotrs-MacBook-Pro.local",
+          "release": "24.6.0",
+          "system": "Darwin"
+        },
+        "kind": "bioseq-run-receipt",
+        "mode": "benchmark-e2e",
+        "reports": [
+          {
+            "path": "/Users/styczynski/Code/bioseqdb/reporting/bioseq_benchmark_e2e/report_12.json",
+            "sha256": "ecf52e561d5761d9085abf4501ce0af45194d05d94bca3cfb6e6171fc45c8766",
+            "size": 899503
+          }
+        ],
+        "reused_build_receipt": "br_7d3103c3a6f867a41c4028e335e1403b",
+        "reused_build_receipt_content_sha256": "eb9bdca1b0cdf519e8abb73021596d12a4af5db80a7465355253fde06f8c7672",
+        "runtime_artifacts": [
+          {
+            "executable": true,
+            "path": "/Users/styczynski/Code/bioseqdb/build/bench-e2e-opt/bioseq/bioseq_benchmark_e2e",
+            "sha256": "edbf8263a7959d100d6d813a27272838d46948da126acc78309d8e507c7766a3",
+            "size": 28955192
+          }
+        ],
+        "schema_revision": 1,
+        "source_commit": "13b123fce99d338af7d978e55fdf777aaf59996e",
+        "source_graph_fingerprint": "07d0643cf449c6d1bb894a4d70dc51213ce4eba87adc382af6927865223ffcc1",
+        "status": "completed",
+        "test_flags": []
+      }
+    }
+  ],
+  "union_proof": {
+    "child_config_count": 4,
+    "expected_result_cells": 4,
+    "expected_raw_records": 20,
+    "repetitions_per_cell": 5,
+    "repeat_indices": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "parent_union_exact": true,
+    "duplicate_cells_permitted": false,
+    "stable_keys_sha256": "4c8078493969a8205f08837761917b37d174743e676d867ebc67118f49680c22",
+    "only_permitted_config_differences": [
+      "/bench_e2e/matrix/over/bioseq_algorithm_matrix_no_index/base_alignment_algorithm",
+      "/bench_e2e/matrix/over/bioseq_algorithm_matrix_no_index/minimizer_index"
+    ],
+    "only_normalized_descriptor_axes": [
+      "test_case_index",
+      "tuple_index"
+    ],
+    "prefilter_enabled": false,
+    "pipeline_mode": "task_parallel",
+    "cigar_projection": true,
+    "mapq_projection": true,
+    "excluded_base_alignment_algorithms": [
+      "ksw2_batched"
+    ],
+    "partial_parent_records_are_provenance_only": true
+  },
+  "interrupted_parent_evidence": {
+    "reason": {
+      "classification": "terminate-and-split",
+      "summary": "The parent expands to four cells in round-robin order and cannot complete five repeats per cell within the 14,400-second watchdog window.",
+      "run_started_at": "2026-08-26T01:06:33.645553+02:00",
+      "hard_deadline": "2026-08-26T05:06:33.645553+02:00",
+      "watchdog_seconds": 14400,
+      "specialist_verdict_snapshot": {
+        "complete_sample_records": 8,
+        "repeats_per_cell": 2,
+        "mathematical_earliest_finish": "2026-08-26T06:34:27+02:00",
+        "finish_before_watchdog_possible": false
+      },
+      "post_exit_snapshot_note": "One additional complete record became durable before termination; the sealed post-exit artifact has nine samples with per-cell counts 2,2,2,3. No cell has five repeats, so the publication verdict is unchanged."
+    },
+    "partial_evidence": {
+      "classification": "nonpublishable_partial_evidence",
+      "raw_report": {
+        "path": "reporting/bioseq_benchmark_e2e/report_7.raw.jsonl",
+        "sha256": "0990b23717f62f439b3f6b14837d25055259788a3eeffcf992e28ee9551862f1",
+        "bytes": 1540846,
+        "complete_jsonl_lines": 10,
+        "header_lines": 1,
+        "complete_sample_records": 9,
+        "cell_complete_sample_counts": {
+          "minimizers_per_fragment__ksw2": 2,
+          "minimizers_per_fragment__block_aligner": 2,
+          "minimizers_per_sequence__ksw2": 3,
+          "minimizers_per_sequence__block_aligner": 2
+        },
+        "last_event_identity": {
+          "schema": 1,
+          "benchmark": "bench_e2e",
+          "test_case": "M2_D4_K15_W10",
+          "algorithm": "bioseq_algorithm_matrix_no_index",
+          "minimizer_index": "minimizers_per_sequence",
+          "base_alignment_algorithm": "ksw2",
+          "repeat": 2,
+          "tuple_index": 1,
+          "group_index": 0,
+          "raw_record_id": 8,
+          "record_checksum": "f7537f3c6144815d"
+        }
+      },
+      "framework_report": {
+        "path": "reporting/bioseq_benchmark_e2e/report_7.json",
+        "exists": false
+      },
+      "worker_log": {
+        "path": "/tmp/bioseq_build_mcp_benchmark-e2e_20260826-010633.log",
+        "sha256": "2b712d5313c975d638b4828bf2e027da4c59170567fb965492007f830702800a",
+        "bytes": 4684,
+        "lines": 70
+      },
+      "publication_rule": "No cell has five complete repeats; do not compute a median, accept timing, inspect fallback values, ingest into a ledger, Q8_RESULTS.yaml, or ALL_RESULTS.yaml."
+    },
+    "replacement_rule": "Complete child results replace, and must never be combined with, any report_7.raw.jsonl partial records. The partial report remains provenance-only evidence."
+  }
+}

@@ -3,25 +3,30 @@
  * @brief Index policy, catalog and shared publication failure contracts.
  */
 module;
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 
 extern "C" {
-#include "access/heapam.h"
-#include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "commands/tablespace.h"
-#include "executor/tuptable.h"
-#include "storage/buffile.h"
-#include "utils/inval.h"
-#include "utils/memutils.h"
-#include "utils/snapmgr.h"
+#include "postgres.h"
+
+#include "executor/spi.h"
+#include "utils/errcodes.h"
 }
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 export module bioseq.postgres.storage.indexing.admin.policy_catalog;
 export import bioseq.postgres.storage.indexing.admin.index_build_runtime;
-import std;
+export import bioseq.postgres.storage.indexing.admin.index_sketch_backend_policy;
 import bioseq.common.logging;
+import bioseq.postgres.storage.indexing.admin.minimizer_kernel_selection;
+import bioseq.postgres.storage.indexing.admin.scheme_untagged_fragment_guard;
 import bioseq.postgres.support;
 import bioseq.postgres.sql_boundary;
 import bioseq.postgres.configuration.aligner;
@@ -31,12 +36,8 @@ import bioseq.storage.layout;
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;
 import bioseq.common.seqan_adapter; // seqan3::char_is_valid_for
-import bioseq.indexing.minimizer_hashmap;
 import bioseq.pipeline.runtime_contract; // minimizer_algorithm
-import bioseq.sequences.kmers;           // minimizer/index APIs
 import bioseq.sequences.kmers.highway_minimizer_contract;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.storage.indexing.index_relation_identity;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::storage::indexing {
@@ -81,7 +82,7 @@ table_policy_spi_error_as_cpp(const char* stage,
  */
 [[nodiscard]] inline std::vector<policy_row>
 load_table_policy(Oid user_relid, Oid relfn, std::int16_t attno) {
-    const std::string sql = std::format("SELECT index_name, enabled, update_on_insert "
+    const std::string sql = fmt::format("SELECT index_name, enabled, update_on_insert "
                                         "FROM bioseq_internal.index_policy "
                                         "WHERE user_relid = {}::oid AND main_relfilenode = {}::oid "
                                         "AND column_attno = {}",
@@ -149,35 +150,6 @@ load_table_policy(Oid user_relid, Oid relfn, std::int16_t attno) {
 /// Record the successful publication age for one persisted index.
 void note_successful_write(Oid user_relid, Oid relfn, std::int16_t attno, std::string_view name);
 
-// Select the target index sketch backend from the minimizer producer itself.
-// Persisted minimizer semantics do not depend on the later chaining/alignment
-// choices: changing either stage must not silently relabel an explicitly
-// selected exact SIMD or bounded_nthash_simd index as scalar.
-/**
- * @brief Resolve the exact persisted minimizer producer selected by current GUCs.
- * @return The producer backend whose identity is persisted with the generation.
- */
-[[nodiscard]] inline bioseq::minimizers::minimizer_sketch_backend
-resolve_index_sketch_backend_from_gucs() noexcept {
-    using bioseq::minimizers::minimizer_sketch_backend;
-    using bioseq::simd::minimizer_algorithm;
-    if (bioseq::aligner::settings::vulkan::enabled &&
-        bioseq::aligner::settings::vulkan::index_build::enabled &&
-        static_cast<int>(bioseq::aligner::settings::minimizer::algorithm.get_value()) ==
-            static_cast<int>(minimizer_algorithm::vulkan_minimap_integer)) {
-        return minimizer_sketch_backend::vulkan_segment;
-    }
-    if (static_cast<int>(bioseq::aligner::settings::minimizer::algorithm.get_value()) ==
-        static_cast<int>(minimizer_algorithm::two_stack_nthash)) {
-        return minimizer_sketch_backend::exact_simd;
-    }
-    if (static_cast<int>(bioseq::aligner::settings::minimizer::algorithm.get_value()) ==
-        static_cast<int>(minimizer_algorithm::bounded_nthash_simd)) {
-        return minimizer_sketch_backend::bounded_nthash_simd;
-    }
-    return minimizer_sketch_backend::scalar;
-}
-
 /**
  * Bind the process-local table for one PostgreSQL maintenance operation.
  *
@@ -188,16 +160,7 @@ resolve_index_sketch_backend_from_gucs() noexcept {
 [[nodiscard]] inline const bioseq::minimizers::minimizer_kernels*
 selected_minimizer_kernels_for_operation(bioseq::minimizers::minimizer_sketch_backend backend,
                                          std::string_view operation) {
-    using backend_type = bioseq::minimizers::minimizer_sketch_backend;
-    if (backend != backend_type::exact_simd && backend != backend_type::bounded_nthash_simd) {
-        return nullptr;
-    }
-    const auto plan = bioseq::simd_dispatch::registered_highway_dispatch_plan();
-    const auto& binding =
-        bioseq::simd_dispatch::registered_highway_target_binding(plan.planned_target);
-    const auto* kernels = &binding.kernels->minimizers;
-    require_selected_minimizer_kernels(backend, kernels, operation);
-    return kernels;
+    return bind_selected_minimizer_kernels_for_operation(backend, operation);
 }
 
 /// Scheme-untagged minimizer fragment and sequence rows do not carry a
@@ -211,28 +174,7 @@ selected_minimizer_kernels_for_operation(bioseq::minimizers::minimizer_sketch_ba
 /// Silently substituting scalar or Exact is never permitted.
 [[noreturn]] inline void reject_bounded_nthash_for_scheme_untagged_fragment_layout(
     bioseq::minimizers::minimizer_sketch_backend backend, std::string_view operation) {
-    if (backend != bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd) {
-        bioseq_report<logging_level::error, logging_target::postgres>()
-            .with_sql_error_code(ERRCODE_INTERNAL_ERROR)
-            .with_message("scheme-untagged bounded ntHash persistence guard received "
-                          "a non-bounded-ntHash backend");
-        __builtin_unreachable();
-    }
-    bioseq::postgres::support::invoke_pg_as_cpp([operation] {
-        ereport(ERROR,
-                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("bounded_nthash_simd persistence requires the scheme-tagged "
-                        "READY generation layout"),
-                 errdetail("%.*s selected scheme-untagged minimizer storage, whose payload "
-                           "does not record a minimizer-scheme identity; "
-                           "persistence is rejected without fallback",
-                           static_cast<int>(operation.size()),
-                           operation.data()),
-                 errhint("Enable the controlled grouped-SoA persisted-generation "
-                         "route for locator-backed bioseq.update_index, or select "
-                         "Exact SIMD for the scheme-untagged index.")));
-    });
-    pg_unreachable();
+    reject_bounded_nthash_for_scheme_untagged_fragment_storage(backend, operation);
 }
 
 // ---- INSERT-time build ----------------------------------------------------

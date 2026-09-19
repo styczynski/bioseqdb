@@ -5,6 +5,16 @@
 module;
 // Anchor Highway in this global module fragment so target-specific definitions
 // imported through multiple module graphs share one translation-unit context.
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <initializer_list>
+#include <limits>
+#include <memory>
+#include <new>
+#include <string>
+
 #include <bioseq/pg_compat.h>
 #include <hwy/highway.h>
 
@@ -26,62 +36,36 @@ extern "C" {
 
 export module bioseq.postgres.table:custom_scan_per_row_join_execution;
 
-import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
 import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
 import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
+import bioseq.pipeline.pipe;
+import bioseq.postgres.scheduler.dispatch_buffer.api;
+import bioseq.postgres.support;
+import bioseq.postgres.table.alignment_execution;
+import bioseq.postgres.types.compact_sequence;
+import bioseq.sequences.compact_sequence_typmod;
 
-import :custom_scan_support;
-import :custom_scan_join_paths;
-import :custom_scan_scan_paths;
-import :custom_scan_plan_builders;
-import :custom_scan_match_ownership;
+import :table_access_method_contracts;
+import :custom_scan_join_ownership_descendant_neutralization_contracts;
+import :custom_scan_join_ownership_helper_presence_contracts;
+import :custom_scan_join_ownership_cost_contracts;
+import :custom_scan_join_ownership_alphabet_mismatch_contracts;
+import :custom_scan_match_analysis_match_owner_descriptor_contracts;
+import :custom_scan_match_analysis_descendant_neutralization_contracts;
+import :custom_scan_match_analysis_transformed_verification_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_planner_aligner_contracts;
+import :custom_scan_per_row_join_runtime_contracts;
+import :custom_scan_runtime_buffer_contracts;
+import :custom_scan_runtime_match_contracts;
+import :custom_scan_runtime_pipeline_contracts;
+import :custom_scan_execution_stats_contracts;
+import :custom_scan_semantic_payload_query_sketch_route_contracts;
 
-import :custom_scan_join_runtime;
-import :custom_scan_batch_join_execution;
+import :custom_scan_batch_join_execution_resource_lifecycle_contracts;
+import :custom_scan_batch_join_execution_tuple_production_contracts;
+export import :custom_scan_per_row_join_execution_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -196,6 +180,10 @@ export {
         runtime->query_slot_resno =
             static_cast<AttrNumber>(private_integer(k_per_row_query_slot_resno));
         runtime->child_column_count = private_integer(k_per_row_child_column_count);
+        const int raw_target_source_tid_resno =
+            private_integer(k_per_row_target_source_tid_resno);
+        const int raw_target_source_tableoid_resno =
+            private_integer(k_per_row_target_source_tableoid_resno);
         const int raw_alphabet = private_integer(k_per_row_alphabet_code);
         const int raw_width = private_integer(k_per_row_storage_unit_byte_width);
         const int raw_query_alphabet = private_integer(k_per_row_query_alphabet_code);
@@ -219,9 +207,22 @@ export {
         List* sites = sites_node == nullptr ? NIL : reinterpret_cast<List*>(sites_node);
         FuncExpr* mmsearch = try_cast_pg_node<FuncExpr>(
             reinterpret_cast<Node*>(list_nth(cscan->custom_private, k_per_row_mmsearch_expr)));
+        const bool source_identity_absent =
+            raw_target_source_tid_resno == InvalidAttrNumber &&
+            raw_target_source_tableoid_resno == InvalidAttrNumber;
+        const bool source_identity_carried =
+            raw_target_source_tid_resno > 0 &&
+            raw_target_source_tid_resno <= runtime->child_column_count &&
+            raw_target_source_tid_resno <=
+                static_cast<int>((std::numeric_limits<AttrNumber>::max)()) &&
+            raw_target_source_tableoid_resno > 0 &&
+            raw_target_source_tableoid_resno <= runtime->child_column_count &&
+            raw_target_source_tableoid_resno <=
+                static_cast<int>((std::numeric_limits<AttrNumber>::max)());
         if (version != k_bioseq_per_row_join_plan_version || !OidIsValid(target_relation_oid) ||
             target_storage_attno <= 0 || runtime->target_slot_resno <= 0 ||
             runtime->query_slot_resno <= 0 || runtime->child_column_count <= 0 ||
+            (!source_identity_absent && !source_identity_carried) ||
             raw_alphabet < 0 ||
             raw_alphabet > static_cast<int>(std::numeric_limits<std::uint8_t>::max()) ||
             (raw_width != 1 && raw_width != 2 && raw_width != 4 && raw_width != 8) ||
@@ -239,6 +240,10 @@ export {
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("BioseqPerRowMmsearch executor private ABI is invalid")));
         }
+        runtime->target_source_tid_resno =
+            static_cast<AttrNumber>(raw_target_source_tid_resno);
+        runtime->target_source_tableoid_resno =
+            static_cast<AttrNumber>(raw_target_source_tableoid_resno);
         runtime->alphabet_code = static_cast<std::uint8_t>(raw_alphabet);
         runtime->storage_unit_byte_width = static_cast<std::uint8_t>(raw_width);
         runtime->query_alphabet_code = static_cast<std::uint8_t>(raw_query_alphabet);
@@ -257,7 +262,9 @@ export {
         if (scan_desc == nullptr || runtime->child_column_count > scan_desc->natts ||
             list_length(sites) != scan_desc->natts - runtime->child_column_count ||
             runtime->target_slot_resno > runtime->child_column_count ||
-            runtime->query_slot_resno > runtime->child_column_count) {
+            runtime->query_slot_resno > runtime->child_column_count ||
+            runtime->target_source_tid_resno > runtime->child_column_count ||
+            runtime->target_source_tableoid_resno > runtime->child_column_count) {
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("BioseqPerRowMmsearch scan tuple layout is invalid")));
@@ -284,6 +291,24 @@ export {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATATYPE_MISMATCH),
                          errmsg("BioseqPerRowMmsearch operand type is invalid")));
+            }
+        }
+        if (source_identity_carried) {
+            Form_pg_attribute target_source_tid_attribute =
+                TupleDescAttr(scan_desc, runtime->target_source_tid_resno - 1);
+            Form_pg_attribute target_source_tableoid_attribute =
+                TupleDescAttr(scan_desc, runtime->target_source_tableoid_resno - 1);
+            if (target_source_tid_attribute->attisdropped ||
+                target_source_tid_attribute->atttypid != TIDOID ||
+                target_source_tid_attribute->atttypmod != -1 ||
+                OidIsValid(target_source_tid_attribute->attcollation) ||
+                target_source_tableoid_attribute->attisdropped ||
+                target_source_tableoid_attribute->atttypid != OIDOID ||
+                target_source_tableoid_attribute->atttypmod != -1 ||
+                OidIsValid(target_source_tableoid_attribute->attcollation)) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATATYPE_MISMATCH),
+                         errmsg("BioseqPerRowMmsearch target source identity type is invalid")));
             }
         }
         Bitmapset* placeholder_resnos = nullptr;
@@ -353,6 +378,17 @@ export {
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("transformed mmsearch target cannot require a persisted index")));
         }
+        const int plan_node_id = cscan->scan.plan.plan_node_id;
+        if (plan_node_id < 0) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("BioseqPerRowMmsearch plan node id is invalid")));
+        }
+        runtime->alignment_registration =
+            bioseq::postgres::table::alignment_execution::bind_alignment_node(
+                estate, static_cast<std::uint32_t>(plan_node_id));
+        params.downstream_active_wall = bioseq::postgres::table::alignment_execution::
+                borrow_downstream_active_wall_tracker(runtime->alignment_registration);
         params.do_cigar = false;
         params.compute_divergence = false;
         params.compute_mapq = false;
@@ -368,6 +404,9 @@ export {
                 params.compute_divergence || site.funcid == placeholder_oids.divergence_oid;
             params.compute_mapq = params.compute_mapq || site.funcid == placeholder_oids.mapq_oid;
         }
+        runtime->execution_plan =
+            bioseq::scheduler::make_postgres_statement_execution_plan(std::move(params));
+        [[maybe_unused]] const auto& frozen_params = runtime->execution_plan->frozen_parameters;
         Plan* child_plan = reinterpret_cast<Plan*>(linitial(cscan->custom_plans));
         batch_join_plan_helper_audit_first_failure helper_audit_failure{};
         if (batch_join_plan_has_unowned_executable_match_helper(
@@ -419,13 +458,11 @@ export {
                     (errcode(ERRCODE_DATATYPE_MISMATCH),
                      errmsg("BioseqPerRowMmsearch target storage column changed")));
         }
-        runtime->aligner_params = params;
-        runtime->aligner_params_captured = true;
         runtime->pipeline_desc = describe_pipeline_for_pg_alphabet(
-            params,
+            runtime->execution_plan,
             runtime->alphabet_code,
             query_sketch_plan_route_for(bioseq::indexing::index_read_requirement::require_absent));
-        runtime->buffer.configure_params(params,
+        runtime->buffer.configure_params(runtime->execution_plan,
                                          bioseq::indexing::index_read_requirement::require_absent,
                                          /*read_sequence_index=*/false,
                                          target_relation_oid,
@@ -448,18 +485,22 @@ export {
                                                    runtime->query_storage_unit_byte_width,
                                                    InvalidAttrNumber);
         pfree(column_name);
-        const int plan_node_id = cscan->scan.plan.plan_node_id;
-        if (plan_node_id < 0) {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("BioseqPerRowMmsearch plan node id is invalid")));
-        }
-        runtime->alignment_registration =
-            bioseq::postgres::table::alignment_execution::bind_alignment_node(
-                estate, static_cast<std::uint32_t>(plan_node_id));
         runtime->buffer.bind_persisted_gpu_operation_stats_sink(
             *bioseq::postgres::table::alignment_execution::
                 borrow_persisted_gpu_operation_accumulator(runtime->alignment_registration));
+        runtime->buffer.bind_downstream_active_wall_tracker(
+            *bioseq::postgres::table::alignment_execution::
+                borrow_downstream_active_wall_tracker(runtime->alignment_registration));
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (frozen_params.downstream_active_wall == nullptr ||
+            !frozen_params.downstream_active_wall
+                 ->begin_benchmark_e2e_statement_plan_proof(
+                     runtime->execution_plan,
+                     bioseq::simd::benchmark_e2e_statement_plan_shape::per_row_join)) {
+            throw std::logic_error{
+                "BioseqPerRowMmsearch admission changed its statement-plan control block"};
+        }
+#endif
     }
 
     /** @brief Initializes a per-row join while preserving PostgreSQL and C++ error boundaries. */
@@ -617,6 +658,30 @@ export {
             const Datum query = slot_getattr(child_slot, runtime->query_slot_resno, &query_is_null);
             if (target_is_null || query_is_null)
                 continue;
+            const bool has_source_identity = runtime->target_source_tid_resno > 0;
+            Oid source_relation_oid = InvalidOid;
+            ItemPointerData source_tid_copy{};
+            if (has_source_identity) {
+                bool source_tid_is_null = true;
+                bool source_tableoid_is_null = true;
+                const Datum source_tid_datum = slot_getattr(
+                    child_slot, runtime->target_source_tid_resno, &source_tid_is_null);
+                const Datum source_tableoid_datum = slot_getattr(
+                    child_slot, runtime->target_source_tableoid_resno, &source_tableoid_is_null);
+                ItemPointer source_tid =
+                    source_tid_is_null || source_tid_datum == Datum{0}
+                        ? nullptr
+                        : DatumGetItemPointer(source_tid_datum);
+                source_relation_oid =
+                    source_tableoid_is_null ? InvalidOid : DatumGetObjectId(source_tableoid_datum);
+                if (source_tid_is_null || source_tid == nullptr || !ItemPointerIsValid(source_tid) ||
+                    source_tableoid_is_null || !OidIsValid(source_relation_oid)) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("BioseqPerRowMmsearch target source identity is null or invalid")));
+                }
+                source_tid_copy = *source_tid;
+            }
             slice_async_owner_guard* async_owner = nullptr;
             for (const Datum operand : std::array{target, query}) {
                 auto* attachment = pg_sequence_trace_attachment_for_datum(operand);
@@ -633,7 +698,13 @@ export {
             if (async_owner != nullptr) {
                 runtime->buffer.bind_slice_async_owner(async_owner);
             }
-            runtime->buffer.submit_scan(child_slot);
+            if (has_source_identity) {
+                runtime->buffer.submit_scan_with_source_tid(
+                    child_slot, source_relation_oid, source_tid_copy);
+            } else {
+                // An inherited host recipe must not borrow an incidental parent-slot TID.
+                runtime->buffer.submit_scan_recipe_without_source_tid(child_slot);
+            }
             if (runtime->buffer.ready_to_dispatch()) {
                 if (runtime->buffer.run_batch_and_build_cursors()) {
                     auto delta = runtime->buffer.execution_stats();
@@ -831,7 +902,7 @@ export {
         explain_pipeline_execution_stats(
             runtime->aggregate_stats,
             es,
-            runtime->aligner_params_captured ? &runtime->aligner_params : nullptr,
+            runtime->execution_plan ? &runtime->execution_plan->frozen_parameters : nullptr,
             runtime->pipeline_desc.has_value() ? &*runtime->pipeline_desc : nullptr,
             query_sketch_plan_route_for(bioseq::indexing::index_read_requirement::require_absent),
             /*highway_dispatch_already_rendered=*/false);

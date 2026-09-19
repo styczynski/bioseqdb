@@ -6,10 +6,12 @@ module;
 
 #include <libassert/assert.hpp>
 
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+
 export module bioseq.postgres.storage.indexing.supported_indexes;
 
-import std;
-import bioseq.common.logging;
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;

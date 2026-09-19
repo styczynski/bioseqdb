@@ -27,11 +27,12 @@ import std;
 import bioseq.postgres.support;
 
 export import :custom_scan_slice_rewrite_path_tree;
-import :custom_scan_runtime_support;
-import :custom_scan_oid_expression_support_oid_catalog;
+export import :custom_scan_slice_rewrite_path_tagging_contracts;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
 import :custom_scan_slice_path_codec_contract;
-import :custom_scan_slice_path_carrier_lineage;
-import :custom_scan_slice_path_plan_construction;
+import :custom_scan_slice_path_expression_detection_contracts;
 
 using namespace bioseq::postgres::support;
 

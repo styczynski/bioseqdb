@@ -11,6 +11,8 @@
 
 #define MM_MAX_QLEN_FLANK 100
 
+import alignment;
+
 static void ksw_gen_simple_mat(int m, int8_t *mat, int8_t a, int8_t b, int8_t sc_ambi)
 {
 	int i, j;
@@ -1051,6 +1053,9 @@ void mm_update_dp_max(int qlen, int n_regs, mm_reg1_t *regs, float frac, int a, 
 mm_reg1_t *mm_align_skeleton(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, int qlen, const char *qstr, int *n_regs_, mm_reg1_t *regs, mm128_t *a)
 {
 	BENCH_INSTR_BLOCK("tool_minimap2.mm_align_skeleton");
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+	BIOSEQ_MINIMAP2_E2E_PHASE_SCOPE(BIOSEQ_MINIMAP2_E2E_PHASE_CIGAR);
+#endif
 	extern unsigned char seq_nt4_table[256];
 	int32_t i, n_regs = *n_regs_, n_a;
 	uint8_t *qseq0[2];

@@ -4,31 +4,30 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
-
 extern "C" {
+#include "postgres.h"
+
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/xact.h"
+#include "utils/errcodes.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <cstdint>
-#include <cstring>
-#include <exception>
 #include <limits>
-#include <memory>
 #include <new>
-#include <span>
-#include <type_traits>
-#include <utility>
 
 export module bioseq.postgres.storage.scanner:source_scanner_provider;
+
+export import bioseq.postgres.storage.scanner.snapshot_rebind;
 
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
@@ -47,7 +46,7 @@ import bioseq.sequences;                 // compact_sequence_range, compact_sequ
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.table.io; // begin_column_read/read_column_row_by_number
 import bioseq.parallelism.pool;
-import :fragment_scanner;
+import bioseq.postgres.storage.scanner.fragment_scanner;
 import :source_registry;
 
 export import :source_scanner_entry;
@@ -71,6 +70,22 @@ create_pg_sequence_source_provider(Relation owning_relation,
         });
 }
 
+/**
+ * Create a scan-owned provider through the scanner owner's out-of-line ABI.
+ *
+ * The ordinary inline API above remains available to scanner-local callers.
+ * Narrow cross-module factories use this boundary so their implementation
+ * units do not instantiate the registry and PostgreSQL exception bridge.
+ */
+[[nodiscard]] pg_sequence_source_provider*
+create_pg_sequence_source_provider_owner_boundary(
+    Relation owning_relation,
+    Snapshot authoritative_registered_snapshot)
+{
+    return create_pg_sequence_source_provider(owning_relation,
+                                              authoritative_registered_snapshot);
+}
+
 /// Create a source provider owned by standalone index administration.
 /// @param owning_relation Open relation whose physical identity is copied.
 /// @param authoritative_registered_snapshot Registered MVCC snapshot that must
@@ -88,43 +103,6 @@ create_standalone_pg_sequence_source_provider(Relation owning_relation,
                 authoritative_registered_snapshot,
                 pg_sequence_source_provider_kind::standalone_index);
         });
-}
-
-/** Rebind a scan provider to the registered snapshot restored from its
- * parallel DSM coordinate.  Upper owners may already retain leases on this
- * registry, so the registry is updated in place rather than replaced.  No
- * source domain may have observed the preceding snapshot.
- * @param provider Open scan provider owned by the current backend thread.
- * @param authoritative_registered_snapshot Replacement registered MVCC
- * snapshot that must outlive the provider and derived leases.
- * @throws PostgreSQL ERROR when the provider is invalid or a domain is active.
- */
-inline void
-rebind_pg_sequence_source_provider_snapshot(pg_sequence_source_provider* provider,
-                                            Snapshot authoritative_registered_snapshot) {
-    using namespace sequence_source_detail;
-    if (provider == nullptr || !provider->open ||
-        provider->kind != pg_sequence_source_provider_kind::scan ||
-        !registry_lease_is_live(provider->lease)) {
-        ereport(ERROR,
-                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                 errmsg("bioseq scan source provider cannot rebind its snapshot")));
-    }
-    auto* registry = provider->lease.registry;
-    if (authoritative_registered_snapshot == nullptr ||
-        !IsMVCCSnapshot(authoritative_registered_snapshot) ||
-        authoritative_registered_snapshot->regd_count == 0 ||
-        registry->authoritative_snapshot == nullptr) {
-        ereport(ERROR,
-                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                 errmsg("bioseq scan source provider requires a registered MVCC snapshot")));
-    }
-    if (registry->domains != nullptr) {
-        ereport(ERROR,
-                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                 errmsg("bioseq scan source provider cannot rebind after source activation")));
-    }
-    registry->authoritative_snapshot = authoritative_registered_snapshot;
 }
 
 /// Acquire an independent upper-owner lease from another live lease.

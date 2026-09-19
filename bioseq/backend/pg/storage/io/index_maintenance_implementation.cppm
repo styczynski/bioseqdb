@@ -4,7 +4,15 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+extern "C" {
+#include "postgres.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <cstdint>
 
 module bioseq.postgres.storage.io.index_maintenance;

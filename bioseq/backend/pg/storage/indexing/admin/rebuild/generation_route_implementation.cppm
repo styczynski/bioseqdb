@@ -7,12 +7,13 @@ module;
 #include <bioseq/pg_compat.h>
 
 #include <cstdint>
+#include <new>
+#include <string_view>
 
 module bioseq.postgres.storage.indexing.admin.rebuild.generation_route;
 
 import bioseq.postgres.storage.indexing.admin.rebuild.promoted_sequence;
-import bioseq.postgres.storage.indexing.admin:hash_major;
-import bioseq.postgres.storage.indexing.admin:grouped_soa;
+import bioseq.postgres.storage.indexing.admin;
 import bioseq.postgres.storage.indexing.admin.diagnostic_support;
 import bioseq.common.logging;
 import bioseq.postgres.support;
@@ -22,9 +23,11 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.scanner;
 import bioseq.sequences;
-import bioseq.indexing.hash_major_minimizer_index;
+import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.type;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.highway_minimizer_contract;
+import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.handles;
 
 namespace bioseq::storage::indexing::rebuild_detail {
@@ -52,10 +55,12 @@ inline void build_and_verify_hash_major_minimizer_generation(
     bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range> source_binding) {
     using source_binding_type = bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>;
     const sequence_locator& locator = source_binding.locator();
-    constexpr std::uint16_t k_window_size = 10u;
-    constexpr std::uint16_t k_kmer_size = 15u;
     constexpr std::uint16_t k_alphabet_code = source_binding_type::alphabet_code();
-    if (request.index_name == k_minimizers_per_fragment_index_name) {
+    // The selected MPS Vulkan reader consumes authenticated grouped-SoA, not
+    // hash-major controls. Preserve the selected sketch numerics and publish
+    // the existing physical format its actual consumer supports.
+    if (request.index_name == k_minimizers_per_fragment_index_name ||
+        request.backend == bioseq::minimizers::minimizer_sketch_backend::vulkan_segment) {
         build_and_verify_grouped_soa_minimizer_generation_pg(request.user_relation_oid,
                                                              request.column_attno,
                                                              request.index_name,
@@ -63,6 +68,7 @@ inline void build_and_verify_hash_major_minimizer_generation(
                                                              storage,
                                                              sequence,
                                                              source_binding,
+                                                             request.algorithm_identity,
                                                              request.backend,
                                                              request.kernels);
         return;
@@ -75,15 +81,15 @@ inline void build_and_verify_hash_major_minimizer_generation(
                                                              storage,
                                                              sequence,
                                                              source_binding,
+                                                             request.algorithm_identity,
                                                              request.backend,
                                                              request.kernels);
         return;
     } else {
         const auto profile = bioseq::indexing::hash_major_minimizer_profile_for_backend(
             request.backend,
+            request.algorithm_identity,
             k_alphabet_code,
-            k_kmer_size,
-            k_window_size,
             locator.logical_length);
         if (!profile) {
             build_and_verify_grouped_soa_minimizer_generation_pg(request.user_relation_oid,
@@ -93,6 +99,7 @@ inline void build_and_verify_hash_major_minimizer_generation(
                                                                  storage,
                                                                  sequence,
                                                                  source_binding,
+                                                                 request.algorithm_identity,
                                                                  request.backend,
                                                                  request.kernels);
             return;
@@ -105,6 +112,7 @@ inline void build_and_verify_hash_major_minimizer_generation(
                                                                  storage,
                                                                  sequence,
                                                                  source_binding,
+                                                                 request.algorithm_identity,
                                                                  request.backend,
                                                                  request.kernels);
         if (!publication.published || publication.generation_id == 0u ||

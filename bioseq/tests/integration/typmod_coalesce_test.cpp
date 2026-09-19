@@ -280,8 +280,15 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
     auto ctx = fresh_context({"typmod_join_narrow", "typmod_join_wide"});
     exec_sql(ctx,
         "SET bioseq.index.insert_maintenance.enabled = on;"
-        "SET bioseq.vectorization.enabled = on;");
-    const auto canonical_rows = hoe_seed_rows();
+        "SET bioseq.vectorization.enabled = on;"
+        "SET bioseq.aligner.chaining.minimum_score = 10;"
+        "SET bioseq.aligner.chaining.minimum_seed_count = 1;");
+    auto canonical_rows = hoe_seed_rows();
+    // Keep this width/route fixture independent of the shared short probes.
+    // The original pk2 query is 12 bp and cannot seed with the statement's
+    // frozen k=15.  This 29 bp exact substring of pk2's target also exceeds
+    // k+w-1, so both persisted and recomputed routes select a minimizer.
+    canonical_rows.at(1).sequences.at(1) = std::string(k_hoe_probe_sequence);
     create_seq_table(
         ctx,
         seq_table_spec{
@@ -326,12 +333,11 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
         "ON mmsearch(target.seq0[0:], query.seq1[0:]) "
         "ORDER BY target.pk, query.pk;";
 
-    /* Raw index reads consume the persisted minimizers_per_sequence k/w,
-     * while a transformed
-     * operand owns an explicit require-absent recompute route whose short-read
-     * heuristic may select another k/w.  Storage width is the variable under
-     * case, so compare each cross-width result with an identical-width oracle
-     * that has the same ownership/read-index route. */
+    /* Raw index reads consume persisted minimizers while transformed operands
+     * own an explicit require-absent recompute route.  Both routes retain the
+     * statement's frozen k/w and chain thresholds.  Storage width is the
+     * variable under test, so compare each cross-width result with an
+     * identical-width oracle that has the same ownership/read-index route. */
     const auto require_canonical_diagonal = [](
             const auto& rows,
             const std::set<std::string>& expected_diagonal_pks) {
@@ -347,8 +353,7 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
         }
         REQUIRE(diagonal_pks == expected_diagonal_pks);
     };
-    const std::set<std::string> eager_diagonal_pks{"1", "2", "3", "5"};
-    const std::set<std::string> persisted_diagonal_pks{"1", "3", "5"};
+    const std::set<std::string> canonical_diagonal_pks{"1", "2", "3", "5"};
 
     const std::string narrow_join_sql =
         "SELECT n.pk, w.pk FROM typmod_join_narrow AS n "
@@ -385,11 +390,9 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
             REQUIRE(wide_raw_oracle == narrow_raw_oracle);
             REQUIRE(wide_slice_oracle == narrow_slice_oracle);
             require_canonical_diagonal(
-                narrow_raw_oracle,
-                read_index_mode == "on"
-                    ? persisted_diagonal_pks : eager_diagonal_pks);
+                narrow_raw_oracle, canonical_diagonal_pks);
             require_canonical_diagonal(
-                narrow_slice_oracle, eager_diagonal_pks);
+                narrow_slice_oracle, canonical_diagonal_pks);
 
             for (const std::string* raw_sql :
                  std::array{&narrow_raw_oracle_sql, &wide_raw_oracle_sql,

@@ -4,25 +4,25 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
-
 extern "C" {
-#include "access/genam.h"
-#include "access/heapam.h"
-#include "access/table.h"
-#include "catalog/pg_collation_d.h"
-#include "executor/executor.h"
-#include "utils/timestamp.h"
+#include "postgres.h"
+
+#include "access/htup.h"
+#include "access/tupdesc.h"
+#include "catalog/pg_type_d.h"
+#include "datatype/timestamp.h"
+#include "executor/spi.h"
+#include "storage/itemptr.h"
 #include "utils/builtins.h"
-#include "utils/jsonb.h"
-#include "utils/fmgroids.h"
+#include "utils/errcodes.h"
 #include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/rel.h"
-#include "utils/snapmgr.h"
-#include "catalog/pg_type.h"
-#include "lib/stringinfo.h"
+#include "varatt.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
 #if defined(BIOSEQ_EXTERNAL_PG) && BIOSEQ_EXTERNAL_PG
 extern "C" {
@@ -31,315 +31,33 @@ void bioseq_external_scan_init(void);
 }
 #endif
 
-#include <algorithm>
-#include <array>
 #include <bit>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
-#include <limits>
-#include <new>
 #include <optional>
-#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
-#include <variant>
 #include <vector>
 
 module bioseq.postgres.extension;
 
 import bioseq.common.logging;
-import bioseq.postgres.column;
-import bioseq.postgres.extension.alignment.sql_rows;
 import bioseq.postgres.extension.sql_rows;
 import bioseq.postgres.support;
-import bioseq.postgres.sql_boundary;
-#if defined(BIOSEQ_TEST_INDEXES)
-import bioseq.postgres.support.row_codec_runtime_test_support;
-#endif
-import bioseq.postgres.support.sql_catalog_entities;
-import bioseq.postgres.extension.cache_provider;
-import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
-import bioseq.postgres.sql.generated.core.storage_manager_sequence_storage_manager.entity_handles;
-import bioseq.postgres.sql.generated.core.storage_metadata_core.entity_handles;
-#if defined(BIOSEQ_TEST_INDEXES)
-import bioseq.postgres.sql.generated.test_indexes.guc_registry;
-#else
-import bioseq.postgres.sql.generated.production.guc_registry;
-#endif
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.vectorization.execution;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.types.aggregates;
-import bioseq.sequences;
-import bioseq.postgres.storage.manager;
-import bioseq.postgres.storage.scanner;
-import bioseq.storage.lazy_sequence;
 import bioseq.indexing.type;
-import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.admin;
 import bioseq.postgres.storage.indexing.supported_indexes;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.parallelism.mode;
-import bioseq.common.seqan_adapter;
 import bioseq.postgres.column.table_access;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table;
-import bioseq.postgres.table.sql_rows;
 
 using namespace bioseq::postgres::support;
 
 namespace bioseq::pg::sql_routines {
-
-/**
- * @brief Lists registered indexes, policies, sizes, and ages for Bioseq sequence columns.
- *
- * The result combines configured policy, persisted shard size, and last
- * update time without requiring an index generation to exist.
- */
-bioseq::postgres::support::table_rows<
-    bioseq::postgres::sql_rows::list_metadata_row>
-list_metadata() {
-	namespace bsi = bioseq::storage::indexing;
-	namespace bidx = bioseq::indexing;
-	std::vector<bioseq::postgres::sql_rows::list_metadata_row> result;
-
-	const auto index_types = bsi::pg_supported_indexes::list_types();
-	const auto allows_on_insert =
-		bsi::pg_supported_indexes::allows_on_insert_flags();
-
-    bioseq::postgres::support::spi_session spi;
-	if (spi.connect() != SPI_OK_CONNECT) {
-        throw std::runtime_error{
-            "bioseq.list_metadata could not connect to SPI"};
-    }
-	const auto execute_spi = [](const char* statement, const bool read_only) {
-		return bioseq::postgres::support::invoke_pg_as_cpp(
-			[statement, read_only] {
-				return SPI_execute(statement, read_only, 0);
-			});
-	};
-	const auto quote_literal_owned = [](const std::string_view value) {
-		/*
-		 * Keep every C++ owner outside the PG_TRY bridge.  The leaf callback
-		 * captures only a stable raw pointer and returns PostgreSQL's owned
-		 * buffer; copying and freeing happen after the bridge has returned.
-		 */
-		const std::string input{value};
-		char* const quoted = bioseq::postgres::support::invoke_pg_as_cpp(
-			[input_data = input.c_str()] {
-				return quote_literal_cstr(input_data);
-			});
-		try {
-			std::string result{quoted};
-			bioseq::postgres::support::invoke_pg_as_cpp(
-				[quoted] { pfree(quoted); });
-			return result;
-		} catch (...) {
-			const std::exception_ptr original =
-				std::current_exception();
-			try {
-				bioseq::postgres::support::invoke_pg_as_cpp(
-					[quoted] { pfree(quoted); });
-			} catch (...) {
-				std::terminate();
-			}
-			std::rethrow_exception(original);
-		}
-	};
-
-	/* 1. every user bioseq-AM relation (exclude internal namespaces / names). */
-	std::vector<Oid> relation_oids;
-	if (execute_spi(
-			"SELECT c.oid FROM pg_class c JOIN pg_am am ON c.relam=am.oid "
-			"JOIN pg_namespace n ON c.relnamespace=n.oid "
-			"WHERE am.amname='bioseq' AND c.relkind='r' "
-			"AND n.nspname NOT IN ('bioseq_internal','pg_catalog','information_schema') "
-			"AND n.nspname NOT LIKE 'pg\\_temp%'", true) == SPI_OK_SELECT) {
-		for (std::uint64_t row_index = 0; row_index < SPI_processed;
-			 ++row_index) {
-			auto relation_cell = bioseq::postgres::support::pg_spi_cell::get(
-				SPI_tuptable->vals[row_index], SPI_tuptable->tupdesc, 1);
-			if (auto relation_oid = relation_cell.optional_oid()) {
-				relation_oids.push_back(*relation_oid);
-			}
-		}
-	}
-
-	/* 2. build the VALUES source: (rel, attno, attname, idx_name, idx_type, def_uoi, prefix). */
-	std::string source_values;
-	for (const Oid relation_oid : relation_oids) {
-		const auto relation_identity = bsi::index_relation_identity(relation_oid);
-		std::string column_query = fmt::format(
-			"SELECT a.attnum, a.attname FROM pg_attribute a JOIN pg_type t ON a.atttypid=t.oid "
-			"JOIN pg_namespace tn ON t.typnamespace=tn.oid WHERE a.attrelid={}::oid AND t.typname='seq' "
-			"AND tn.nspname IN ('bioseq','bioseq_internal') AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
-			static_cast<unsigned>(relation_oid));
-		if (execute_spi(column_query.c_str(), true) != SPI_OK_SELECT)
-		{
-			continue;
-		}
-		std::vector<std::pair<std::int16_t, std::string>> sequence_columns;
-		for (std::uint64_t row_index = 0; row_index < SPI_processed;
-			 ++row_index) {
-			auto attribute_cell = bioseq::postgres::support::pg_spi_cell::get(
-				SPI_tuptable->vals[row_index], SPI_tuptable->tupdesc, 1);
-			const std::int16_t attribute_number =
-				attribute_cell.optional<std::int16_t>().value_or(0);
-			char* attribute_name_data =
-				bioseq::postgres::support::invoke_pg_as_cpp(
-				[row_index] {
-					return SPI_getvalue(
-						SPI_tuptable->vals[row_index],
-						SPI_tuptable->tupdesc, 2);
-				});
-			sequence_columns.emplace_back(
-				attribute_number,
-				attribute_name_data == nullptr
-					? std::string{}
-					: std::string{attribute_name_data});
-			if (attribute_name_data != nullptr) {
-				bioseq::postgres::support::invoke_pg_as_cpp(
-					[attribute_name_data] { pfree(attribute_name_data); });
-			}
-		}
-		for (auto& [attribute_number, attribute_name] : sequence_columns) {
-			for (std::size_t index_type_index = 0;
-				 index_type_index < index_types.size(); ++index_type_index) {
-				const auto& index_type_entry = index_types[index_type_index];
-				const std::string index_name{index_type_entry.first};
-				const std::string index_type{
-					bidx::sequence_index_layout_name(index_type_entry.second)};
-				const bool default_update_on_insert =
-					bidx::is_default_update_on_insert_index(index_type_entry.first)
-					&& allows_on_insert[index_type_index];
-				const std::string relation_prefix = fmt::format(
-					"seqidx_{}_{:016x}_",
-					bsi::short_index_for(index_type_entry.first),
-					bsi::identity_hash64(
-						relation_identity.db_oid,
-						relation_identity.tablespace_oid,
-						relation_identity.relfilenode,
-						attribute_number,
-						index_type_entry.first));
-				if (!source_values.empty()) source_values += ",";
-				source_values += fmt::format(
-					"({}::oid,{}::int2,{},{},{},{},{})",
-					static_cast<unsigned>(relation_oid),
-					static_cast<int>(attribute_number),
-					quote_literal_owned(attribute_name),
-					quote_literal_owned(index_name),
-					quote_literal_owned(index_type),
-					default_update_on_insert ? "true" : "false",
-					quote_literal_owned(relation_prefix));
-			}
-		}
-	}
-
-	if (!source_values.empty()) {
-		std::string metadata_query = fmt::format(
-			"WITH src(rel,attno,attname,idx_name,idx_type,def_uoi,prefix) AS (VALUES {}) "
-			"SELECT src.rel::regclass, src.attno::int2, src.attname, src.idx_name, src.idx_type, "
-			"  CASE WHEN p.update_on_insert IS NOT NULL "
-			"       THEN (CASE WHEN p.update_on_insert THEN 'UPDATE_ON_INSERT' ELSE 'UPDATE_MANUALLY' END) "
-			"       WHEN src.def_uoi THEN 'UPDATE_ON_INSERT' ELSE 'UPDATE_MANUALLY' END, "
-			"  pg_size_pretty(COALESCE((SELECT SUM(pg_total_relation_size(ic.oid)) FROM pg_class ic "
-			"     JOIN pg_namespace inx ON ic.relnamespace=inx.oid "
-			"     WHERE inx.nspname='bioseq_internal' AND ic.relname LIKE src.prefix||'%'),0)::bigint), "
-			"  (SELECT now()-m.last_updated FROM bioseq_internal.metadata_age_log m "
-			"     WHERE m.user_relid=src.rel AND m.column_attno=src.attno AND m.index_name=src.idx_name LIMIT 1) "
-			"FROM src LEFT JOIN bioseq_internal.index_policy p "
-			"  ON p.user_relid=src.rel AND p.column_attno=src.attno AND p.index_name=src.idx_name "
-			"ORDER BY src.rel, src.attno, src.idx_name", source_values);
-		if (execute_spi(metadata_query.c_str(), true) == SPI_OK_SELECT) {
-			for (std::uint64_t row_index = 0; row_index < SPI_processed;
-				 ++row_index) {
-                HeapTuple tuple = SPI_tuptable->vals[row_index];
-                TupleDesc descriptor = SPI_tuptable->tupdesc;
-                const auto required_text =
-                    [tuple, descriptor](int column) {
-                        char* value =
-							bioseq::postgres::support::invoke_pg_as_cpp(
-								[tuple, descriptor, column] {
-									return SPI_getvalue(
-										tuple, descriptor, column);
-								});
-                        if (value == nullptr) {
-                            throw std::runtime_error{
-                                "bioseq.list_metadata produced a null "
-                                "required text field"};
-                        }
-                        std::string owned{value};
-						bioseq::postgres::support::invoke_pg_as_cpp(
-							[value] { pfree(value); });
-                        return owned;
-                    };
-                const auto table_name =
-                    bioseq::postgres::support::pg_spi_cell::get(
-                        tuple, descriptor, 1).optional_oid();
-                const auto column_attno =
-                    bioseq::postgres::support::pg_spi_cell::get(
-                        tuple, descriptor, 2)
-                        .optional<std::int16_t>();
-                if (!table_name.has_value()
-                    || !column_attno.has_value()) {
-                    throw std::runtime_error{
-                        "bioseq.list_metadata produced a null relation "
-                        "identity"};
-                }
-                std::optional<bioseq::postgres::support::interval_value>
-					time_since_update;
-                const auto time_since_update_cell =
-                    bioseq::postgres::support::pg_spi_cell::get(
-                        tuple, descriptor, 8);
-                if (!time_since_update_cell.is_null) {
-                    const auto* interval =
-                        reinterpret_cast<const Interval*>(
-							DatumGetPointer(
-								time_since_update_cell.value.raw()));
-                    if (interval == nullptr) {
-                        throw std::runtime_error{
-                            "bioseq.list_metadata produced an invalid "
-                            "interval"};
-                    }
-					time_since_update =
-						bioseq::postgres::support::interval_value{
-                        .microseconds = interval->time,
-                        .days = interval->day,
-                        .months = interval->month,
-                    };
-                }
-                result.push_back({
-                    .table_name = *table_name,
-                    .column_attno = *column_attno,
-                    .column_name = required_text(3),
-                    .index_name = required_text(4),
-                    .index_type = required_text(5),
-                    .update_policy = required_text(6),
-                    .storage_size = required_text(7),
-                    .time_since_update = time_since_update,
-                });
-			}
-		}
-	}
-
-	if (spi.finish() != SPI_OK_FINISH) {
-        throw std::runtime_error{
-            "bioseq.list_metadata could not finish SPI"};
-    }
-	return bioseq::postgres::support::table_rows<
-        bioseq::postgres::sql_rows::list_metadata_row>{
-            std::move(result)};
-}
 
 /**
  * @brief Rebuilds a named sequence index and returns the number of indexed sequences.
@@ -410,38 +128,6 @@ std::int64_t index_table_row_count(
 	std::string name) {
 	return bioseq::storage::indexing::
 		index_table_row_count_impl(rel, name);
-}
-
-/** @return Evidence that a cold no-index path has no persisted artifacts. */
-bioseq::postgres::support::named_output<
-	bioseq::postgres::sql_rows::inspect_cold_no_index_absence_row>
-inspect_cold_no_index_absence(
-	Oid rel,
-	std::string name) {
-	const auto audit =
-		bioseq::storage::indexing::cold_no_index_absence_audit_impl(rel, name);
-	const auto sql_bigint = [](const std::uint64_t value) {
-		if (!bioseq::indexing::sql_bigint_can_represent(value)) {
-			bioseq::postgres::support::raise_sql_error(
-				ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-				{.message =
-					"bioseq cold no-index audit value exceeds BIGINT"});
-		}
-		return static_cast<std::int64_t>(value);
-	};
-	return bioseq::postgres::support::named_output<
-		bioseq::postgres::sql_rows::inspect_cold_no_index_absence_row>{
-		bioseq::postgres::sql_rows::inspect_cold_no_index_absence_row{
-			sql_bigint(audit.target_rows),
-			audit.target_cardinality_metadata_only,
-			sql_bigint(audit.source_parent_rows_read),
-			sql_bigint(audit.source_fragment_rows_read),
-			sql_bigint(audit.source_decoded_bp),
-			sql_bigint(audit.physical_index_relations),
-			sql_bigint(audit.persisted_index_rows),
-			sql_bigint(audit.generation_objects),
-		},
-	};
 }
 
 /**

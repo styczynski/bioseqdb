@@ -15,6 +15,7 @@ import bioseq.indexing.minimizer_index;
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.hash_major_minimizer_index;
 import bioseq.common.checked_arithmetic;
+import bioseq.pipeline.runtime_contract;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.highway_minimizer_contract;
@@ -48,12 +49,19 @@ inline constexpr std::uint32_t k_grouped_soa_gpu_abi_revision = 3u;
 /// Magic word stored at the start of the grouped-SoA manifest extension.
 inline constexpr std::uint32_t k_grouped_soa_extension_magic = 0x42494f53u;
 /// Revision encoded in the grouped-SoA manifest extension.
-inline constexpr std::uint16_t k_grouped_soa_extension_layout_revision = 1u;
+inline constexpr std::uint16_t k_grouped_soa_extension_layout_revision = 2u;
 /// Exact byte length of the grouped-SoA manifest extension.
-inline constexpr std::uint16_t k_grouped_soa_extension_bytes = 32u;
+inline constexpr std::uint16_t k_grouped_soa_extension_bytes = 48u;
 /// Persisted supported_alphabets pack index for DNA4. This is an on-wire code,
 /// not the alphabet cardinality.
 inline constexpr std::uint16_t k_minimizer_persisted_dna4_alphabet_code = 0u;
+/// DNA5 wire identity comes from the same generated profile registry as queries.
+inline constexpr std::uint16_t k_minimizer_persisted_dna5_alphabet_code =
+    ::bioseq::minimizers::minimizer_profile_alphabet_id<seq::dna5>();
+static_assert(k_minimizer_persisted_dna4_alphabet_code ==
+              ::bioseq::minimizers::minimizer_profile_alphabet_id<seq::dna4>());
+/// Maximum producer-local position extent used by minimizer-fragment generation.
+inline constexpr std::uint64_t k_minimizer_fragment_algorithm_position_extent_bp = 32'768u;
 /// Largest hash produced by the persisted minimap k15 profile.
 inline constexpr std::uint32_t k_minimap_k15_max_hash = 0x3fffffffu;
 
@@ -207,6 +215,29 @@ minimizer_scheme_identity_for_backend(minimizer_sketch_backend backend) noexcept
     return {};
 }
 
+/**
+ * Return the algorithm genuinely executed by an explicitly named sketch backend.
+ *
+ * This mapping is for backend-oriented fixtures whose request surface predates
+ * the algorithm selector. Production plans carry their requested algorithm
+ * directly, including their generated requested/effective algorithm binding.
+ */
+[[nodiscard]] constexpr std::optional<::bioseq::simd::minimizer_algorithm>
+minimizer_algorithm_for_explicit_sketch_backend(minimizer_sketch_backend backend) noexcept {
+    using algorithm_type = ::bioseq::simd::minimizer_algorithm;
+    switch (backend) {
+    case minimizer_sketch_backend::scalar:
+        return algorithm_type::scalar;
+    case minimizer_sketch_backend::exact_simd:
+        return algorithm_type::two_stack_nthash;
+    case minimizer_sketch_backend::bounded_nthash_simd:
+        return algorithm_type::bounded_nthash_simd;
+    case minimizer_sketch_backend::vulkan_segment:
+        return algorithm_type::vulkan_minimap_integer;
+    }
+    return std::nullopt;
+}
+
 /// Biological scheme implied by one frozen physical producer identity. This
 /// retains the scheme mapping while preventing shared-scheme
 /// backends from relabelling one another.
@@ -319,12 +350,304 @@ is_supported_minimizer_generation_layout(minimizer_generation_layout layout) noe
     return layout == minimizer_generation_layout::grouped_soa_segment_local;
 }
 
-/// Exact scalar widths admitted by grouped-SoA storage.
-enum class minimizer_scalar_width : std::uint8_t {
-    u16 = 2u,
-    u32 = 4u,
-    u64 = 8u,
+/// Shared exact scalar-width tags; persisted ordinals remain 2, 4, and 8 bytes.
+using ::bioseq::minimizers::minimizer_scalar_width;
+
+/**
+ * Closed READY identity selected from the generated minimizer registry.
+ *
+ * Existing manifest fields carry alphabet, packed-input width, runtime k/w,
+ * and hash width on wire.  Keeping those axes here as well makes producer
+ * handoff and receipt comparisons value-complete; the codec reconstructs the
+ * duplicated values and standalone validation rejects any disagreement.
+ */
+struct minimizer_generation_algorithm_identity {
+    ::bioseq::simd::minimizer_algorithm requested_algorithm =
+        ::bioseq::simd::minimizer_algorithm::scalar;
+    ::bioseq::simd::minimizer_algorithm effective_algorithm =
+        ::bioseq::simd::minimizer_algorithm::scalar;
+    ::bioseq::minimizers::minimizer_physical_record_id physical_record_id =
+        ::bioseq::minimizers::minimizer_physical_record_id::invalid;
+    ::bioseq::minimizers::minimizer_highway_owner_id highway_owner_id =
+        ::bioseq::minimizers::minimizer_highway_owner_id::none;
+    std::uint16_t alphabet_id = 0u;
+    std::uint8_t record_position_log2 = 0u;
+    std::uint8_t physical_kmer_size = 0u;
+    minimizer_scalar_width hash_width = minimizer_scalar_width::u32;
+    std::uint8_t packed_storage_bits = 0u;
+    std::uint16_t runtime_kmer_size = 0u;
+    std::uint16_t runtime_window_size = 0u;
+    std::uint16_t payload_layout_abi_revision = 0u;
+
+    [[nodiscard]] bool
+    operator==(const minimizer_generation_algorithm_identity&) const = default;
 };
+
+static_assert(k_grouped_soa_payload_layout_abi_revision == 1u);
+static_assert(k_minimizer_producer_identity_revision == 1u);
+static_assert(k_grouped_soa_payload_layout_abi_revision ==
+              ::bioseq::minimizers::minimizer_profile_payload_layout_abi_revision);
+static_assert(k_minimizer_producer_identity_revision ==
+              ::bioseq::minimizers::minimizer_profile_producer_identity_revision);
+
+/// Resolve the runtime sketch route from an already selected effective algorithm.
+///
+/// Persisted callers must select the complete generated identity against the
+/// source alphabet and packed width first. The effective algorithm selects the
+/// producer while the complete identity preserves the original request.
+[[nodiscard]] constexpr std::optional<minimizer_sketch_backend>
+minimizer_sketch_backend_for_effective_algorithm(
+    ::bioseq::simd::minimizer_algorithm effective_algorithm) noexcept {
+    using algorithm_type = ::bioseq::simd::minimizer_algorithm;
+    switch (effective_algorithm) {
+    case algorithm_type::scalar:
+        return minimizer_sketch_backend::scalar;
+    case algorithm_type::simd_minimap2_reference:
+    case algorithm_type::two_stack_nthash:
+        return minimizer_sketch_backend::exact_simd;
+    case algorithm_type::bounded_nthash_simd:
+        return minimizer_sketch_backend::bounded_nthash_simd;
+    case algorithm_type::vulkan_minimap_integer:
+        return minimizer_sketch_backend::vulkan_segment;
+    }
+    return std::nullopt;
+}
+
+/// Map one completed algorithm to the physical generation producer that may attest it.
+[[nodiscard]] constexpr minimizer_producer_backend
+minimizer_producer_backend_for_effective_algorithm(
+    ::bioseq::simd::minimizer_algorithm algorithm) noexcept {
+    const auto backend = minimizer_sketch_backend_for_effective_algorithm(algorithm);
+    return backend ? minimizer_producer_backend_identity_for_backend(*backend).id
+                   : minimizer_producer_backend::invalid;
+}
+
+/// Validate the exact kernel slot required by one generated effective identity.
+///
+/// `exact_simd` is the persisted producer family shared by the generated
+/// minimap2-reference owner and the continuation-based two-stack owner.  The
+/// effective algorithm, never the requested name alone, selects the concrete
+/// table slot. Scalar and Vulkan owners do not consume a Highway table.
+[[nodiscard]] constexpr bool minimizer_generation_kernel_binding_is_valid(
+    minimizer_sketch_backend backend,
+    const minimizer_generation_algorithm_identity& identity,
+    const ::bioseq::minimizers::minimizer_kernels* kernels) noexcept {
+    using algorithm_type = ::bioseq::simd::minimizer_algorithm;
+    switch (backend) {
+    case minimizer_sketch_backend::scalar:
+        return identity.effective_algorithm == algorithm_type::scalar;
+    case minimizer_sketch_backend::exact_simd:
+        if (kernels == nullptr) {
+            return false;
+        }
+        if (identity.effective_algorithm == algorithm_type::simd_minimap2_reference) {
+            return kernels->minimap2_reference != nullptr;
+        }
+        if (identity.effective_algorithm == algorithm_type::two_stack_nthash) {
+            return kernels->two_stack_nthash != nullptr;
+        }
+        return false;
+    case minimizer_sketch_backend::bounded_nthash_simd:
+        return identity.effective_algorithm == algorithm_type::bounded_nthash_simd &&
+               kernels != nullptr && kernels->bounded_nthash != nullptr;
+    case minimizer_sketch_backend::vulkan_segment:
+        return identity.effective_algorithm == algorithm_type::vulkan_minimap_integer;
+    }
+    return false;
+}
+
+/// Convert one generated selector result into the complete persisted identity.
+[[nodiscard]] constexpr std::expected<minimizer_generation_algorithm_identity,
+                                      minimizer_generation_encoding_error>
+make_minimizer_generation_algorithm_identity(
+    const ::bioseq::minimizers::minimizer_physical_layout_selection& selection) noexcept {
+    using namespace ::bioseq::minimizers;
+    const auto* record = find_minimizer_physical_record(selection.record_id);
+    const auto* binding = find_minimizer_runtime_profile(selection.requested_algorithm,
+                                                         selection.alphabet_id,
+                                                         selection.runtime_kmer_size,
+                                                         selection.runtime_window_size,
+                                                         selection.record_position_log2,
+                                                         selection.packed_storage_bits);
+    using family_type = minimizer_physical_layout_family;
+    using algorithm_type = ::bioseq::simd::minimizer_algorithm;
+    const family_type expected_family =
+        selection.requested_algorithm == algorithm_type::bounded_nthash_simd ||
+                selection.requested_algorithm == algorithm_type::two_stack_nthash
+            ? family_type::fixed_u32_hash_legacy_k15
+            : selection.effective_algorithm == algorithm_type::scalar
+                ? family_type::minimap2_scalar_reference_exact_k
+                : family_type::minimap2_reference_exact_k;
+    if (record == nullptr || binding == nullptr || selection.family != expected_family ||
+        record->record_id != selection.record_id ||
+        record->position_log2 != selection.record_position_log2 ||
+        record->physical_kmer_size != selection.physical_kmer_size ||
+        binding->requested_algorithm != selection.requested_algorithm ||
+        binding->effective_algorithm != selection.effective_algorithm ||
+        binding->alphabet_id != selection.alphabet_id ||
+        !minimizer_runtime_profile_accepts_shape(
+            *binding, selection.runtime_kmer_size,
+            selection.runtime_window_size) ||
+        binding->packed_storage_bits != selection.packed_storage_bits ||
+        binding->record_id != selection.record_id || binding->hash_width != selection.hash_width) {
+        return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
+    }
+    return minimizer_generation_algorithm_identity{
+        .requested_algorithm = selection.requested_algorithm,
+        .effective_algorithm = selection.effective_algorithm,
+        .physical_record_id = selection.record_id,
+        .highway_owner_id = binding->highway_owner_id,
+        .alphabet_id = selection.alphabet_id,
+        .record_position_log2 = selection.record_position_log2,
+        .physical_kmer_size = selection.physical_kmer_size,
+        .hash_width = selection.hash_width,
+        .packed_storage_bits = selection.packed_storage_bits,
+        .runtime_kmer_size = selection.runtime_kmer_size,
+        .runtime_window_size = selection.runtime_window_size,
+        .payload_layout_abi_revision = k_grouped_soa_payload_layout_abi_revision,
+    };
+}
+
+/// Validate all generated-registry and producer axes without deriving from names.
+[[nodiscard]] constexpr bool is_valid_minimizer_generation_algorithm_identity(
+    const minimizer_generation_algorithm_identity& identity,
+    minimizer_producer_identity producer) noexcept {
+    using namespace ::bioseq::minimizers;
+    const auto* record = find_minimizer_physical_record(identity.physical_record_id);
+    const auto* binding = find_minimizer_runtime_profile(identity.requested_algorithm,
+                                                         identity.alphabet_id,
+                                                         identity.runtime_kmer_size,
+                                                         identity.runtime_window_size,
+                                                         identity.record_position_log2,
+                                                         identity.packed_storage_bits);
+    return is_supported_minimizer_producer_backend_identity(producer) && record != nullptr &&
+           binding != nullptr && identity.payload_layout_abi_revision ==
+                                     k_grouped_soa_payload_layout_abi_revision &&
+           identity.packed_storage_bits != 0u &&
+           identity.packed_storage_bits % 8u == 0u &&
+           record->record_id == identity.physical_record_id &&
+           record->position_log2 == identity.record_position_log2 &&
+           record->physical_kmer_size == identity.physical_kmer_size &&
+           binding->requested_algorithm == identity.requested_algorithm &&
+           binding->effective_algorithm == identity.effective_algorithm &&
+           binding->alphabet_id == identity.alphabet_id &&
+           minimizer_runtime_profile_accepts_shape(
+               *binding, identity.runtime_kmer_size,
+               identity.runtime_window_size) &&
+           binding->packed_storage_bits == identity.packed_storage_bits &&
+           binding->record_id == identity.physical_record_id &&
+           binding->hash_width == identity.hash_width &&
+           binding->highway_owner_id == identity.highway_owner_id &&
+           minimizer_producer_backend_for_effective_algorithm(identity.effective_algorithm) ==
+               producer.id;
+}
+
+/** Select one generated physical layout against its actual input width and position extent. */
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] inline std::expected<::bioseq::minimizers::minimizer_physical_layout_selection,
+                                   minimizer_generation_encoding_error>
+select_minimizer_generation_physical_layout(
+    ::bioseq::simd::minimizer_algorithm requested_algorithm,
+    std::uint64_t maximum_position_extent_bp,
+    std::uint8_t packed_storage_bits,
+    std::uint16_t runtime_kmer_size,
+    std::uint16_t runtime_window_size) noexcept {
+    try {
+        if (packed_storage_bits == 32u) {
+            return ::bioseq::minimizers::select_minimizer_physical_layout<p_alphabet,
+                                                                          std::uint32_t>(
+                requested_algorithm,
+                maximum_position_extent_bp,
+                runtime_kmer_size,
+                runtime_window_size);
+        }
+        if (packed_storage_bits == 64u) {
+            return ::bioseq::minimizers::select_minimizer_physical_layout<p_alphabet,
+                                                                          std::uint64_t>(
+                requested_algorithm,
+                maximum_position_extent_bp,
+                runtime_kmer_size,
+                runtime_window_size);
+        }
+    } catch (const std::exception&) {
+        return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
+    }
+    return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
+}
+
+/** Select and validate one producer-specific identity against its actual position extent. */
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] inline std::expected<minimizer_generation_algorithm_identity,
+                                   minimizer_generation_encoding_error>
+select_minimizer_generation_algorithm_identity(
+    ::bioseq::simd::minimizer_algorithm requested_algorithm,
+    std::uint64_t maximum_position_extent_bp,
+    std::uint8_t packed_storage_bits,
+    std::uint16_t runtime_kmer_size,
+    std::uint16_t runtime_window_size) noexcept {
+    const auto selection = select_minimizer_generation_physical_layout<p_alphabet>(
+        requested_algorithm,
+        maximum_position_extent_bp,
+        packed_storage_bits,
+        runtime_kmer_size,
+        runtime_window_size);
+    if (!selection) {
+        return std::unexpected(selection.error());
+    }
+    return make_minimizer_generation_algorithm_identity(*selection);
+}
+
+/** Select through the generated registry from a persisted runtime alphabet/width pair. */
+[[nodiscard]] inline std::expected<minimizer_generation_algorithm_identity,
+                                   minimizer_generation_encoding_error>
+select_minimizer_generation_algorithm_identity_runtime(
+    ::bioseq::simd::minimizer_algorithm requested_algorithm,
+    std::uint64_t maximum_position_extent_bp,
+    std::uint16_t alphabet_id,
+    std::uint8_t packed_storage_bits,
+    std::uint16_t runtime_kmer_size,
+    std::uint16_t runtime_window_size) noexcept {
+    try {
+        const auto selection =
+            ::bioseq::minimizers::select_minimizer_physical_layout(
+                requested_algorithm, maximum_position_extent_bp,
+                runtime_kmer_size, runtime_window_size, alphabet_id,
+                packed_storage_bits);
+        return make_minimizer_generation_algorithm_identity(selection);
+    } catch (const std::exception&) {
+        return std::unexpected(
+            minimizer_generation_encoding_error::storage_contract_mismatch);
+    }
+}
+
+/** Select one generated identity for the algorithm actually owned by a sketch backend. */
+[[nodiscard]] inline std::expected<minimizer_generation_algorithm_identity,
+                                   minimizer_generation_encoding_error>
+select_minimizer_generation_algorithm_identity_for_backend(
+    minimizer_sketch_backend backend,
+    std::uint64_t maximum_position_extent_bp,
+    std::uint16_t alphabet_id,
+    std::uint8_t packed_storage_bits,
+    std::uint16_t runtime_kmer_size,
+    std::uint16_t runtime_window_size) noexcept {
+    const auto algorithm = minimizer_algorithm_for_explicit_sketch_backend(backend);
+    if (!algorithm) {
+        return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
+    }
+    auto identity = select_minimizer_generation_algorithm_identity_runtime(
+        *algorithm,
+        maximum_position_extent_bp,
+        alphabet_id,
+        packed_storage_bits,
+        runtime_kmer_size,
+        runtime_window_size);
+    const minimizer_producer_identity producer =
+        minimizer_producer_backend_identity_for_backend(backend);
+    if (!identity || !is_valid_minimizer_generation_algorithm_identity(*identity, producer)) {
+        return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
+    }
+    return identity;
+}
 
 /// Selects how each grouped-SoA extent chooses its prefix width.
 enum class grouped_soa_offset_policy : std::uint8_t {
@@ -403,16 +726,17 @@ minimizer_scalar_width_max(minimizer_scalar_width width) noexcept {
 select_grouped_soa_hash_width(minimizer_scheme_identity scheme,
                               std::uint16_t alphabet_code,
                               std::uint16_t kmer_size) noexcept {
-    if (alphabet_code != k_minimizer_persisted_dna4_alphabet_code || kmer_size == 0u) {
+    if (!::bioseq::minimizers::minimizer_profile_has_alphabet_id(alphabet_code) ||
+        kmer_size == 0u) {
         return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     if (scheme == k_bounded_nthash_u32_r7_sum_scheme_identity) {
-        if (kmer_size != 15u) {
+        if (kmer_size > 31u) {
             return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         return minimizer_scalar_width::u32;
     }
-    if (scheme != k_minimap_scheme_identity || kmer_size > 28u) {
+    if (scheme != k_minimap_scheme_identity || kmer_size > 31u) {
         return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     if (kmer_size <= 8u)
@@ -499,7 +823,7 @@ derive_grouped_soa_minimizer_profile(const minimizer_generation_manifest& manife
 /// Return the exact manifest byte count for a supported layout.
 [[nodiscard]] constexpr std::size_t
 minimizer_manifest_encoded_bytes(minimizer_generation_layout layout) noexcept {
-    return layout == minimizer_generation_layout::grouped_soa_segment_local ? 160u : 0u;
+    return layout == minimizer_generation_layout::grouped_soa_segment_local ? 176u : 0u;
 }
 
 /// Return the exact directory-entry byte count for a validated profile.
@@ -638,7 +962,7 @@ struct minimizer_generation_head {
 struct minimizer_generation_manifest {
     static constexpr std::uint32_t magic = 0x42494F47u; // BIOG numeric tag
     static constexpr std::size_t header_bytes = 128u;
-    static constexpr std::size_t encoded_bytes = 160u;
+    static constexpr std::size_t encoded_bytes = 176u;
     static constexpr std::uint16_t uniform_segment_geometry_revision =
         k_minimizer_segment_geometry_revision;
 
@@ -667,6 +991,7 @@ struct minimizer_generation_manifest {
     std::uint16_t minimizer_scheme_revision = k_minimap_scheme_revision;
     minimizer_producer_backend producer_backend_id = minimizer_producer_backend::invalid;
     std::uint8_t producer_identity_revision = 0u;
+    minimizer_generation_algorithm_identity algorithm_identity{};
     minimizer_scalar_width hash_width = minimizer_scalar_width::u32;
     minimizer_scalar_width position_width = minimizer_scalar_width::u32;
     minimizer_scalar_width count_width = minimizer_scalar_width::u32;
@@ -695,6 +1020,7 @@ struct expected_minimizer_generation_identity {
     std::uint16_t minimizer_scheme_revision = k_invalid_minimizer_scheme_revision;
     minimizer_producer_backend producer_backend_id = minimizer_producer_backend::invalid;
     std::uint8_t producer_identity_revision = 0u;
+    minimizer_generation_algorithm_identity algorithm_identity{};
     std::optional<std::uint64_t> max_occ_cap{};
 
     [[nodiscard]] bool operator==(const expected_minimizer_generation_identity&) const = default;
@@ -707,6 +1033,7 @@ struct expected_minimizer_generation_identity {
 expected_grouped_soa_generation_identity_for_backend(
     minimizer_generation_layout layout,
     minimizer_sketch_backend backend,
+    const minimizer_generation_algorithm_identity& algorithm_identity,
     std::uint16_t alphabet_code,
     std::uint16_t storage_unit_byte_width,
     std::uint16_t kmer_size,
@@ -725,6 +1052,14 @@ expected_grouped_soa_generation_identity_for_backend(
         layout != minimizer_generation_layout::grouped_soa_segment_local || !max_occ_cap) {
         return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
+    if (!is_valid_minimizer_generation_algorithm_identity(algorithm_identity, producer_backend) ||
+        algorithm_identity.alphabet_id != alphabet_code ||
+        algorithm_identity.packed_storage_bits != storage_unit_byte_width * 8u ||
+        algorithm_identity.runtime_kmer_size != kmer_size ||
+        algorithm_identity.runtime_window_size != window_size ||
+        algorithm_identity.hash_width != profile->hash_width) {
+        return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
+    }
     return expected_minimizer_generation_identity{
         .layout = layout,
         .alphabet_code = alphabet_code,
@@ -736,6 +1071,7 @@ expected_grouped_soa_generation_identity_for_backend(
         .minimizer_scheme_revision = scheme.revision,
         .producer_backend_id = producer_backend.id,
         .producer_identity_revision = producer_backend.revision,
+        .algorithm_identity = algorithm_identity,
         .max_occ_cap = max_occ_cap,
     };
 }

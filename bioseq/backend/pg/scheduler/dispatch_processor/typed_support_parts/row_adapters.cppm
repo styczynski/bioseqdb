@@ -4,28 +4,31 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+extern "C" {
+#include "postgres.h"
+#include "utils/errcodes.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <new>
 
 export module bioseq.postgres.scheduler.dispatch_processor.typed_support.row_adapters;
 
-export import bioseq.postgres.scheduler.dispatch_processor.typed_support.source_provider_adapters;
 import std;
+export import bioseq.postgres.scheduler.dispatch_processor.typed_support.source_provider_adapters;
 import bioseq.postgres.scheduler.dispatch_processor.hash_major_diagnostic_identity;
 import bioseq.postgres.scheduler.dispatch_processor.checked_alignment_calls;
-import bioseq.postgres.support;
 import bioseq.indexing.type;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.hash_major_minimizer_index;
-import bioseq.sequences;
 import bioseq.pipeline.stats;
 import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.lazy_sequence;
-import bioseq.storage.size;
+import bioseq.pipeline.minimizer_execution_contract;
 import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
@@ -193,13 +196,31 @@ attach_retained_hash_major_query_stats(match_result_collection& collection,
     }
     if (stats.exact_simd_available) {
         collection.record_exact_simd_query_execution_stats(stats.exact_simd);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        collection.record_completed_minimizer_algorithm_identity(
+            minimizer_algorithm::two_stack_nthash);
+#endif
     }
     if (stats.bounded_nthash_available) {
         collection.record_bounded_nthash_query_execution_stats(stats.bounded_nthash);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        collection.record_completed_minimizer_algorithm_identity(
+            minimizer_algorithm::bounded_nthash_simd);
+#endif
     }
     if (stats.scalar_available) {
         collection.record_scalar_query_minimizer_execution_stats(stats.scalar);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        collection.record_completed_minimizer_algorithm_identity(minimizer_algorithm::scalar);
+#endif
     }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    // The checked bridge attests nonempty reference work before this attachment.
+    if (stats.checked_reference_simd_bridge_completed) {
+        collection.record_completed_minimizer_algorithm_identity(
+            minimizer_algorithm::simd_minimap2_reference);
+    }
+#endif
 }
 
 } // namespace bioseq::simd::typed_dispatch::typed_support_detail

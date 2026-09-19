@@ -4,13 +4,14 @@
  *
  * The adapter borrows an already-authenticated manifest, decoded directory,
  * and mapped payload.  It never owns a target-wide control or position image.
- * A source scan retains one cursor and heap node per nonempty position
- * fragment, plus at most one runtime-configured light run and one emission
- * chunk.  Heavy runs are reread from the immutable mapping instead of being
- * copied into scratch.
+ * A source scan retains one cursor with a fixed raw-control lookahead and one
+ * heap node per nonempty position fragment, plus at most one runtime-configured
+ * light run and one emission chunk. Heavy runs are reread from the immutable
+ * mapping instead of being copied into scratch.
  */
 module;
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -60,6 +61,9 @@ struct minimizer_fragment_compact_hash32_options {
     std::uint64_t buffered_run_position_cap =
         k_grouped_soa_default_max_occurrence_cap;
     std::size_t emission_chunk_positions = 4'096u;
+    /// Optional caller-thread checkpoint. PostgreSQL binds this during
+    /// publication; portable readers leave the default no-op binding.
+    cooperative_cancellation_checkpoint cancellation_checkpoint{};
 };
 
 /** @brief Records retained-memory and replay-cost estimates computed at open. */
@@ -77,6 +81,7 @@ struct minimizer_fragment_compact_hash32_prebuild_estimate {
     std::uint64_t prebuild_control_scalar_bytes_read = 0u;
     std::uint64_t minimum_prebuild_position_scalar_reads = 0u;
     std::uint64_t maximum_prebuild_position_scalar_reads = 0u;
+    /// Includes the fixed raw-control lookahead retained by each cursor.
     std::uint64_t fragment_cursor_scratch_bytes = 0u;
     std::uint64_t merge_heap_scratch_bytes = 0u;
     std::uint64_t matched_fragment_scratch_bytes = 0u;
@@ -113,6 +118,13 @@ struct minimizer_fragment_compact_hash32_scan_stats {
  */
 class minimizer_fragment_compact_hash32_adapter {
 private:
+  static constexpr std::size_t k_control_lookahead_capacity = 32u;
+  static constexpr std::size_t k_checkpoint_fragment_interval = 256u;
+  static constexpr std::uint64_t k_checkpoint_hash_interval = 256u;
+  static constexpr std::uint64_t k_checkpoint_position_interval = 4'096u;
+  static_assert(k_control_lookahead_capacity
+      <= (std::numeric_limits<std::uint8_t>::max)());
+
   /** @brief Provides move-stable dispatch identity to borrowed run sources. */
   struct source_token {
       minimizer_fragment_compact_hash32_adapter* owner = nullptr;
@@ -140,6 +152,14 @@ private:
       minimizer_scalar_width position_width = minimizer_scalar_width::u16;
   };
 
+  /** @brief Holds one raw grouped-SoA control record in bounded read-ahead. */
+  struct raw_control {
+      std::uint64_t hash = 0u;
+      std::uint64_t position_begin = 0u;
+      std::uint64_t position_end = 0u;
+      std::uint64_t saturated_count = 0u;
+  };
+
   /** @brief Tracks one fragment during the hash-ordered merge. */
   struct fragment_cursor {
       std::size_t entry_ordinal = 0u;
@@ -154,6 +174,10 @@ private:
       std::uint64_t previous_position_end = 0u;
       bool have_previous_hash = false;
       bool active = false;
+      std::array<raw_control, k_control_lookahead_capacity>
+          control_lookahead{};
+      std::uint8_t control_lookahead_size = 0u;
+      std::uint8_t control_lookahead_next = 0u;
       decoded_control current{};
   };
 
@@ -187,6 +211,11 @@ private:
     /// the adapter is moved (including the move into `std::expected`).
     std::unique_ptr<source_token> source_token_{};
     bool ready_ = false;
+
+    /// Poll the borrowed cancellation source on the synchronous scan thread.
+    void cancellation_checkpoint_() const {
+        options_.cancellation_checkpoint();
+    }
 
     /// Add two byte or count quantities without unsigned wraparound.
     [[nodiscard]] static constexpr bool checked_add_(
@@ -305,6 +334,89 @@ private:
         }
         cursor.layout = *layout;
         cursor.control_ordinal = 0u;
+        cursor.control_lookahead_size = 0u;
+        cursor.control_lookahead_next = 0u;
+        return {};
+    }
+
+    /// Read a bounded block of raw controls without exposing them to the merge heap.
+    [[nodiscard]] std::expected<void, direct_inverted_index_error>
+    refill_control_lookahead_(fragment_cursor& cursor) const noexcept {
+        const grouped_soa_bucket_directory_entry& entry =
+            entries_[cursor.entry_ordinal];
+        if (cursor.control_ordinal >= entry.control_element_count) {
+            return std::unexpected(
+                direct_inverted_index_error::source_read);
+        }
+        const std::uint64_t hash_width = static_cast<std::uint8_t>(
+            profile_.hash_width);
+        const std::uint64_t offset_width = static_cast<std::uint8_t>(
+            entry.shape_offset_width);
+        const std::uint64_t count_width = static_cast<std::uint8_t>(
+            profile_.count_width);
+        const std::uint64_t remaining =
+            entry.control_element_count - cursor.control_ordinal;
+        const std::uint64_t lookahead_size = std::min(
+            remaining,
+            static_cast<std::uint64_t>(k_control_lookahead_capacity));
+        cursor.control_lookahead_size = 0u;
+        cursor.control_lookahead_next = 0u;
+        for (std::uint64_t lookahead_ordinal = 0u;
+             lookahead_ordinal < lookahead_size;
+             ++lookahead_ordinal) {
+            std::uint64_t control_ordinal = 0u;
+            std::uint64_t hash_delta = 0u;
+            std::uint64_t prefix_delta = 0u;
+            std::uint64_t count_delta = 0u;
+            std::uint64_t hash_offset = 0u;
+            std::uint64_t prefix_offset = 0u;
+            std::uint64_t next_prefix_offset = 0u;
+            std::uint64_t count_offset = 0u;
+            if (!checked_add_(cursor.control_ordinal,
+                    lookahead_ordinal, control_ordinal)
+                || !checked_multiply_(control_ordinal,
+                    hash_width, hash_delta)
+                || !checked_multiply_(control_ordinal,
+                    offset_width, prefix_delta)
+                || !checked_multiply_(control_ordinal,
+                    count_width, count_delta)
+                || !checked_add_(cursor.entry_control_byte,
+                    hash_delta, hash_offset)
+                || !checked_add_(cursor.entry_control_byte,
+                    cursor.layout.prefix_offset, prefix_offset)
+                || !checked_add_(prefix_offset,
+                    prefix_delta, prefix_offset)
+                || !checked_add_(prefix_offset,
+                    offset_width, next_prefix_offset)
+                || !checked_add_(cursor.entry_control_byte,
+                    cursor.layout.count_offset, count_offset)
+                || !checked_add_(count_offset,
+                    count_delta, count_offset)) {
+                return std::unexpected(
+                    direct_inverted_index_error::arithmetic_overflow);
+            }
+            const auto hash = read_scalar_(
+                hash_offset, profile_.hash_width);
+            const auto begin = read_scalar_(
+                prefix_offset, entry.shape_offset_width);
+            const auto end = read_scalar_(
+                next_prefix_offset, entry.shape_offset_width);
+            const auto saturated = read_scalar_(
+                count_offset, profile_.count_width);
+            if (!hash || !begin || !end || !saturated) {
+                return std::unexpected(
+                    direct_inverted_index_error::source_read);
+            }
+            cursor.control_lookahead[
+                static_cast<std::size_t>(lookahead_ordinal)] = raw_control{
+                    .hash = *hash,
+                    .position_begin = *begin,
+                    .position_end = *end,
+                    .saturated_count = *saturated,
+                };
+        }
+        cursor.control_lookahead_size =
+            static_cast<std::uint8_t>(lookahead_size);
         return {};
     }
 
@@ -321,65 +433,46 @@ private:
             entry.shape_offset_width);
         const std::uint64_t count_width = static_cast<std::uint8_t>(
             profile_.count_width);
-        std::uint64_t hash_delta = 0u;
-        std::uint64_t prefix_delta = 0u;
-        std::uint64_t count_delta = 0u;
-        std::uint64_t hash_offset = 0u;
-        std::uint64_t prefix_offset = 0u;
-        std::uint64_t next_prefix_offset = 0u;
-        std::uint64_t count_offset = 0u;
-        if (cursor.control_ordinal >= entry.control_element_count
-            || !checked_multiply_(cursor.control_ordinal,
-                hash_width, hash_delta)
-            || !checked_multiply_(cursor.control_ordinal,
-                offset_width, prefix_delta)
-            || !checked_multiply_(cursor.control_ordinal,
-                count_width, count_delta)
-            || !checked_add_(cursor.entry_control_byte,
-                hash_delta, hash_offset)
-            || !checked_add_(cursor.entry_control_byte,
-                cursor.layout.prefix_offset, prefix_offset)
-            || !checked_add_(prefix_offset,
-                prefix_delta, prefix_offset)
-            || !checked_add_(prefix_offset,
-                offset_width, next_prefix_offset)
-            || !checked_add_(cursor.entry_control_byte,
-                cursor.layout.count_offset, count_offset)
-            || !checked_add_(count_offset,
-                count_delta, count_offset)) {
+        if (cursor.control_ordinal >= entry.control_element_count) {
             return std::unexpected(
                 direct_inverted_index_error::arithmetic_overflow);
         }
-        const auto hash = read_scalar_(
-            hash_offset, profile_.hash_width);
-        const auto begin = read_scalar_(
-            prefix_offset, entry.shape_offset_width);
-        const auto end = read_scalar_(
-            next_prefix_offset, entry.shape_offset_width);
-        const auto saturated = read_scalar_(
-            count_offset, profile_.count_width);
-        if (!hash || !begin || !end || !saturated) {
+        if (cursor.control_lookahead_next
+                > cursor.control_lookahead_size) {
             return std::unexpected(direct_inverted_index_error::source_read);
         }
+        if (cursor.control_lookahead_next
+                == cursor.control_lookahead_size) {
+            if (auto refilled = refill_control_lookahead_(cursor);
+                !refilled) {
+                return refilled;
+            }
+        }
+        const raw_control& raw = cursor.control_lookahead[
+            cursor.control_lookahead_next];
         const std::uint64_t cap_plus_one =
             profile_.max_occ_cap + 1u;
-        if (*hash > profile_.max_hash
-            || *hash > (std::numeric_limits<std::uint32_t>::max)()
-            || *end <= *begin
-            || *end > entry.position_element_count
-            || *saturated != std::min(*end - *begin, cap_plus_one)
+        if (raw.hash > profile_.max_hash
+            || raw.hash > (std::numeric_limits<std::uint32_t>::max)()
+            || raw.position_end <= raw.position_begin
+            || raw.position_end > entry.position_element_count
+            || raw.saturated_count
+                != std::min(raw.position_end - raw.position_begin,
+                    cap_plus_one)
             || (cursor.control_ordinal == 0u
-                && (*hash != entry.lo_hash || *begin != 0u))
+                && (raw.hash != entry.lo_hash
+                    || raw.position_begin != 0u))
             || (cursor.control_ordinal != 0u
-                && *begin != cursor.previous_position_end)
+                && raw.position_begin != cursor.previous_position_end)
             || (cursor.control_ordinal + 1u
                     == entry.control_element_count
-                && (*hash != entry.hi_hash
-                    || *end != entry.position_element_count))
+                && (raw.hash != entry.hi_hash
+                    || raw.position_end != entry.position_element_count))
             || (cursor.have_previous_hash
-                && *hash <= cursor.previous_hash)) {
+                && raw.hash <= cursor.previous_hash)) {
             return std::unexpected(
-                cursor.have_previous_hash && *hash <= cursor.previous_hash
+                cursor.have_previous_hash
+                        && raw.hash <= cursor.previous_hash
                     ? direct_inverted_index_error::order
                     : direct_inverted_index_error::source_read);
         }
@@ -391,19 +484,20 @@ private:
                 direct_inverted_index_error::arithmetic_overflow);
         }
         cursor.current = decoded_control{
-            .hash = static_cast<std::uint32_t>(*hash),
-            .position_begin = *begin,
-            .position_end = *end,
-            .exact_count = *end - *begin,
+            .hash = static_cast<std::uint32_t>(raw.hash),
+            .position_begin = raw.position_begin,
+            .position_end = raw.position_end,
+            .exact_count = raw.position_end - raw.position_begin,
             .position_extent_byte = position_extent_byte,
             .core_begin_bp = cursor.core_begin_bp,
             .core_end_bp = cursor.core_end_bp,
             .position_width = profile_.position_width,
         };
-        cursor.previous_hash = *hash;
-        cursor.previous_position_end = *end;
+        cursor.previous_hash = raw.hash;
+        cursor.previous_position_end = raw.position_end;
         cursor.have_previous_hash = true;
         cursor.active = true;
+        ++cursor.control_lookahead_next;
         ++controls_seen;
         accumulate_stats_(stats_.fragment_controls_read, 1u);
         accumulate_stats_(stats_.control_scalar_bytes_read,
@@ -417,15 +511,17 @@ private:
             const fragment_plan& plan,
             fragment_cursor& cursor,
             std::uint64_t& controls_seen) noexcept {
-        cursor = fragment_cursor{
-            .entry_ordinal = plan.entry_begin,
-            .entry_end = plan.entry_end,
-            .entry_control_byte = plan.first_control_byte,
-            .entry_position_relative_byte =
-                plan.first_position_relative_byte,
-            .core_begin_bp = plan.core_begin_bp,
-            .core_end_bp = plan.core_end_bp,
-        };
+        cursor.entry_ordinal = plan.entry_begin;
+        cursor.entry_end = plan.entry_end;
+        cursor.entry_control_byte = plan.first_control_byte;
+        cursor.entry_position_relative_byte =
+            plan.first_position_relative_byte;
+        cursor.core_begin_bp = plan.core_begin_bp;
+        cursor.core_end_bp = plan.core_end_bp;
+        cursor.previous_hash = 0u;
+        cursor.previous_position_end = 0u;
+        cursor.have_previous_hash = false;
+        cursor.active = false;
         if (auto configured = configure_entry_(cursor); !configured) {
             return configured;
         }
@@ -473,6 +569,7 @@ private:
         const std::uint64_t width = static_cast<std::uint8_t>(
             control.position_width);
         std::optional<std::uint64_t> previous{};
+        std::uint64_t positions_since_checkpoint = 0u;
         for (std::uint64_t ordinal = control.position_begin;
              ordinal < control.position_end;
              ++ordinal) {
@@ -514,6 +611,12 @@ private:
             if (auto accepted = visitor(encoded); !accepted) {
                 return accepted;
             }
+            ++positions_since_checkpoint;
+            if (positions_since_checkpoint
+                    == k_checkpoint_position_interval) {
+                cancellation_checkpoint_();
+                positions_since_checkpoint = 0u;
+            }
         }
         return {};
     }
@@ -522,6 +625,7 @@ private:
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     scan_(const compact_hash32_sorted_run_receiver& receiver) {
         ++stats_.source_scan_attempts;
+        cancellation_checkpoint_();
         try {
             std::vector<fragment_cursor> cursors;
             cursors.resize(fragments_.size());
@@ -538,6 +642,7 @@ private:
 
             std::uint64_t controls_seen = 0u;
             std::uint64_t logical_positions_emitted = 0u;
+            std::uint64_t hashes_since_checkpoint = 0u;
             for (std::size_t fragment = 0u;
                  fragment < fragments_.size(); ++fragment) {
                 if (auto initialized = initialize_cursor_(
@@ -550,6 +655,10 @@ private:
                     .fragment_ordinal =
                         static_cast<std::uint32_t>(fragment),
                 });
+                if ((fragment + 1u) % k_checkpoint_fragment_interval
+                        == 0u) {
+                    cancellation_checkpoint_();
+                }
             }
 
             while (!heap.empty()) {
@@ -716,12 +825,18 @@ private:
                         });
                     }
                 }
+                ++hashes_since_checkpoint;
+                if (hashes_since_checkpoint == k_checkpoint_hash_interval) {
+                    cancellation_checkpoint_();
+                    hashes_since_checkpoint = 0u;
+                }
             }
             if (controls_seen != manifest_.control_count
                 || logical_positions_emitted != manifest_.position_count) {
                 return std::unexpected(
                     direct_inverted_index_error::source_read);
             }
+            cancellation_checkpoint_();
             ++stats_.source_scans_completed;
             return {};
         } catch (const std::bad_alloc&) {

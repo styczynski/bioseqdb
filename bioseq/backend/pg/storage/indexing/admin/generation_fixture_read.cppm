@@ -4,6 +4,7 @@
  */
 module;
 #include <new>
+#include <fmt/format.h>
 #include <bioseq/pg_compat.h>
 
 #include "access/heapam.h"
@@ -150,10 +151,26 @@ read_minimizer_generation_integration_fixture_impl(
         result.source_padding_letters = source.padding_letters;
         identity.table_name = result.table_name;
 
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_for_backend(
+                backend,
+                index_name == k_minimizers_per_fragment_index_name
+                    ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                    : source.locator.logical_length,
+                source.alphabet_code,
+                static_cast<std::uint8_t>(source.storage_unit_byte_width * 8u),
+                kmer_size,
+                window_size);
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq minimizer generation fixture algorithm identity is not READY");
+        }
         const auto expected =
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 layout,
                 backend,
+                *algorithm_identity,
                 source.alphabet_code,
                 source.storage_unit_byte_width,
                 kmer_size,
@@ -775,10 +792,26 @@ read_minimizer_generation_full_payload_fixture_impl(
                                                source.locator.shard_index);
         result.selected_backend_name = bioseq::minimizers::minimizer_sketch_backend_name(backend);
         identity.table_name = result.table_name;
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_for_backend(
+                backend,
+                index_name == k_minimizers_per_fragment_index_name
+                    ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                    : source.locator.logical_length,
+                source.alphabet_code,
+                static_cast<std::uint8_t>(source.storage_unit_byte_width * 8u),
+                kmer_size,
+                window_size);
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq full-generation algorithm identity is not READY");
+        }
         const auto expected =
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 layout,
                 backend,
+                *algorithm_identity,
                 source.alphabet_code,
                 source.storage_unit_byte_width,
                 kmer_size,
@@ -1089,9 +1122,25 @@ void exercise_minimizer_generation_session_failure_impl(Oid rel_oid,
             admission.set_index_memory_cap_bytes(1);
             state->cap_changed = true;
         }
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_for_backend(
+                bioseq::minimizers::minimizer_sketch_backend::scalar,
+                index_name == k_minimizers_per_fragment_index_name
+                    ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                    : source.locator.logical_length,
+                source.alphabet_code,
+                static_cast<std::uint8_t>(source.storage_unit_byte_width * 8u),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::kmer_size),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::window_size));
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq minimizer session algorithm identity is not READY");
+        }
         auto expected = bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
             bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
             bioseq::minimizers::minimizer_sketch_backend::scalar,
+            *algorithm_identity,
             source.alphabet_code,
             source.storage_unit_byte_width,
             static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::kmer_size),

@@ -29,7 +29,7 @@ import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ElementTree
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 
@@ -38,6 +38,8 @@ from pathlib import Path
 import package_linux
 
 _DEFAULT_REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+
+ALL_ALPHABETS_UNIT_INTEGRATION_MODE = "unit-integration-all-alphabets-uint64"
 
 REPOSITORY_ROOT = Path(
     os.environ.get(
@@ -50,6 +52,39 @@ _HOST_DEFAULT_BUILD_PRESET = (
 
 DEFAULT_BUILD_PRESET = os.environ.get(
     "BIOSEQ_BUILD_PRESET", _HOST_DEFAULT_BUILD_PRESET)
+
+_NATIVE_LINUX_CLANG22_PRESET_RE = re.compile(
+    r"^(?:test-)?native-(arm64|x64)-clang22-linux"
+    r"(?:-e2e)?(?:-debug)?$")
+
+
+def _is_native_linux_clang22_preset(preset: str) -> bool:
+    """Return whether ``preset`` is one declared native Clang 22 family."""
+    return _NATIVE_LINUX_CLANG22_PRESET_RE.fullmatch(preset) is not None
+
+
+def _release_clang_e2e_preset_host_contract(
+        preset: str,
+) -> tuple[str, str, str | None, str | None] | None:
+    """Map supported release Clang E2E presets to their native host contract.
+
+    The returned fields are host system, host machine, vcpkg architecture,
+    and vcpkg triplet.  Darwin does not use the Linux vcpkg architecture
+    fields.  Exact names plus the closed native family keep arbitrary
+    ``*-e2e`` and every GCC/debug preset outside canonical campaign admission.
+    """
+    if preset == "bench-e2e-opt":
+        return "Darwin", "arm64", None, None
+    if preset == "aws-x64-linux-e2e":
+        return "Linux", "x86_64", "x64", "x64-linux-libcxx"
+    native = re.fullmatch(
+        r"native-(arm64|x64)-clang22-linux-e2e", preset)
+    if native is None:
+        return None
+    architecture = native.group(1)
+    if architecture == "arm64":
+        return "Linux", "aarch64", "arm64", "arm64-linux-libcxx"
+    return "Linux", "x86_64", "x64", "x64-linux-libcxx"
 
 def _default_debug_preset(production_preset: str) -> str:
     mapped = {
@@ -96,6 +131,34 @@ TEST_DEBUG_BUILD_PRESET = os.environ.get(
     "BIOSEQ_TEST_BUILD_PRESET_DEBUG",
     _default_test_preset(DEBUG_BUILD_PRESET),
 )
+
+def _default_e2e_preset(production_preset: str) -> str:
+    """Map a production toolchain preset to its isolated E2E evidence tree."""
+    mapped = {
+        "bench-opt": "bench-e2e-opt",
+        "bench-opt-debug": "bench-e2e-opt-debug",
+        "aws-x64-linux": "aws-x64-linux-e2e",
+        "aws-x64-linux-debug": "aws-x64-linux-e2e-debug",
+        "aws-x64-linux-gcc161": "aws-x64-linux-gcc161-e2e",
+        "aws-x64-linux-gcc161-debug":
+            "aws-x64-linux-gcc161-e2e-debug",
+    }.get(production_preset)
+    if mapped is not None:
+        return mapped
+    native = re.fullmatch(
+        r"(native-(?:arm64|x64)-clang22-linux)(-debug)?",
+        production_preset,
+    )
+    if native is not None:
+        return f"{native.group(1)}-e2e{native.group(2) or ''}"
+    raise RuntimeError(
+        "benchmark-e2e interval instrumentation requires an isolated preset; "
+        f"production preset {production_preset!r} has no E2E mapping")
+
+E2E_BUILD_PRESET_OVERRIDE = os.environ.get("BIOSEQ_E2E_BUILD_PRESET")
+
+E2E_DEBUG_BUILD_PRESET_OVERRIDE = os.environ.get(
+    "BIOSEQ_E2E_BUILD_PRESET_DEBUG")
 
 CACHE_BUILD_PRESET_OVERRIDE = os.environ.get("BIOSEQ_CACHE_BUILD_PRESET")
 
@@ -226,6 +289,18 @@ def preset_for(mode: str, debug: bool) -> str:
                 "Set BIOSEQ_TEST_BUILD_PRESET[_DEBUG] to a distinct preset "
                 "whose BIOSEQ_TEST_INDEXES cache value is ON.")
         return selected
+    if family == "e2e":
+        override = (E2E_DEBUG_BUILD_PRESET_OVERRIDE if debug
+                    else E2E_BUILD_PRESET_OVERRIDE)
+        selected = override or _default_e2e_preset(production)
+        if selected == production:
+            raise RuntimeError(
+                f"{mode} requires an isolated E2E preset; selected E2E "
+                f"preset equals production preset {production!r}. Set "
+                "BIOSEQ_E2E_BUILD_PRESET[_DEBUG] to a distinct preset whose "
+                "BIOSEQ_BENCHMARK_E2E_INTERVALS cache value is ON.")
+        _validate_e2e_preset_tree_ownership(selected, production)
+        return selected
     if family == "cache":
         override = (CACHE_DEBUG_BUILD_PRESET_OVERRIDE if debug
                     else CACHE_BUILD_PRESET_OVERRIDE)
@@ -318,7 +393,7 @@ class ModeDefinition:
     preset_override: Optional[str] = None
     """Cache entries that must be set before this mode's targets exist."""
     required_cache_variables: Optional[Dict[str, str]] = None
-    """Preset family: core, isolated core tests, cache-only, or combined."""
+    """Preset family: core, isolated tests/E2E, cache-only, or combined."""
     preset_family: str = "core"
     """Subdirectory below the active build tree containing command binaries."""
     binary_subdir: str = "bioseq"
@@ -333,7 +408,7 @@ class ModeDefinition:
 
     def __post_init__(self) -> None:
         if self.preset_family not in {
-                "core", "test", "cache", "cache-bioseq", "website"}:
+                "core", "test", "e2e", "cache", "cache-bioseq", "website"}:
             raise ValueError(
                 f"unsupported preset family {self.preset_family!r}")
         if self.uses_private_cluster and self.install_extension:
@@ -687,8 +762,9 @@ MODES: Dict[str, ModeDefinition] = {
         docs=("End-to-end SQL-driven benchmark. Drives PostgreSQL "
               "over libpq (tests/integration/support/index.cppm): "
               "bioseq.load + SELECT "
-              "mmsearch vs minimap2 over the 2/6 Gbp x dna4/dna5 x {no_index, "
-              "just_index} matrix. Like the integration tests it installs the "
+              "mmsearch vs minimap2 over the 2/4 Gbp x dna4/dna5 x "
+              "{W10K15,W15K20} x {no_index,just_index} campaign matrix. "
+              "Like the integration tests it installs the "
               "freshly-built extension first (the bench's bioseq.load/mmsearch "
               "must hit current code, not a stale installed copy)."),
         is_verb_plular=False,
@@ -696,6 +772,11 @@ MODES: Dict[str, ModeDefinition] = {
         # the running PostgreSQL and CREATE EXTENSIONs from the *installed* files.
         targets=["postgresql_bioseq_cache", "postgresql_bioseq",
                  "bioseq_benchmark_e2e"],
+        preset_family="e2e",
+        required_cache_variables={
+            "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+            "BIOSEQ_TEST_INDEXES": "OFF",
+        },
         install_extension=True,
         commands=[["bioseq_benchmark_e2e"]],
         reporting_subdir_name="bioseq_benchmark_e2e",
@@ -910,6 +991,22 @@ MODES: Dict[str, ModeDefinition] = {
     ),
 }
 
+# Execute the existing guarded DNA5 tests in the same wider tree used by the
+# compile gate. Keep that gate build-only and retain independent receipt ownership.
+MODES[ALL_ALPHABETS_UNIT_INTEGRATION_MODE] = replace(
+    MODES["unit-integration"],
+    label="All-alphabets uint64 unit/integration tests",
+    docs="Run existing DNA4/DNA5 unit and integration tests locally in the fixed optimized wider profile",
+    build_only_expected_duration_min=120.0,
+    preset_override="test-optimized-all-alphabets-uint64",
+    targets=list(MODES["unit-integration"].targets),
+    commands=[list(command) for command in MODES["unit-integration"].commands],
+    required_cache_variables={
+        **MODES["unit-integration"].required_cache_variables,
+        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
+    },
+)
+
 VALID_MODES: Set[str] = set(MODES.keys())
 
 LINT_MODES: frozenset[str] = frozenset({LINT_FOCUSED_MODE, LINT_FULL_MODE})
@@ -920,6 +1017,7 @@ LINT_MODES: frozenset[str] = frozenset({LINT_FOCUSED_MODE, LINT_FULL_MODE})
 # valid focused iteration request.
 CATCH_FILTER_MODES: frozenset[str] = frozenset({
     "unit-integration",
+    ALL_ALPHABETS_UNIT_INTEGRATION_MODE,
     "cache-unit",
     "cache-integration",
     "cache-bioseq-integration",
@@ -930,6 +1028,7 @@ FIXED_BUILD_ONLY_MODES: frozenset[str] = frozenset(
     if details.requires_build_only)
 
 REMOTE_RUN_REJECTED_MODES: Set[str] = {
+    ALL_ALPHABETS_UNIT_INTEGRATION_MODE,
     "website",
     "highway-gcc-canary",
     POSTGRES_ERROR_SAFETY_MODE,
@@ -984,7 +1083,11 @@ def _is_aws_gcc_preset(preset: str) -> bool:
     return normalized.startswith("aws-x64-linux-gcc161")
 
 def _is_aws_preset(preset: str) -> bool:
-    return _is_aws_clang_preset(preset) or _is_aws_gcc_preset(preset)
+    return (
+        _is_aws_clang_preset(preset)
+        or _is_aws_gcc_preset(preset)
+        or _is_native_linux_clang22_preset(preset)
+    )
 
 def _is_debug_preset(preset: str) -> bool:
     return preset.removeprefix("test-").endswith("-debug")
@@ -1311,6 +1414,163 @@ def _cmake_preset_payload_graph(
     if presets_file.name == "CMakePresets.json" and user_presets.exists():
         visit(user_presets)
     return tuple(records)
+
+def _resolved_cmake_preset_binary_dir(
+        preset: str,
+        *,
+        presets_file: Path = CMAKE_PRESETS_FILE,
+        environment: Mapping[str, str] | None = None) -> Path:
+    """Resolve one configure preset's inherited binaryDir fail closed."""
+    effective_environment = (
+        os.environ if environment is None else environment)
+    source_dir = presets_file.parent.resolve(strict=False)
+    presets: dict[str, tuple[dict[str, object], Path]] = {}
+    for lexical, source, payload, _ in _cmake_preset_payload_graph(
+            presets_file,
+            environment=effective_environment):
+        raw_presets = payload.get("configurePresets", [])
+        if not isinstance(raw_presets, list):
+            raise RuntimeError(
+                f"{source} does not contain a configurePresets array")
+        for raw_preset in raw_presets:
+            if not isinstance(raw_preset, dict):
+                raise RuntimeError(
+                    f"{source} contains a non-object configure preset")
+            name = raw_preset.get("name")
+            if not isinstance(name, str) or not name:
+                raise RuntimeError(
+                    f"{source} contains a configure preset without a name")
+            if name in presets:
+                raise RuntimeError(
+                    "CMake preset graph contains duplicate configure preset "
+                    f"{name!r}")
+            presets[name] = (raw_preset, lexical.parent)
+
+    resolved_templates: dict[str, tuple[str, Path] | None] = {}
+
+    def resolve_template(
+            name: str,
+            stack: tuple[str, ...]) -> tuple[str, Path] | None:
+        if name in resolved_templates:
+            return resolved_templates[name]
+        if name in stack:
+            cycle = " -> ".join((*stack, name))
+            raise RuntimeError(
+                f"CMake configure preset inheritance cycle: {cycle}")
+        record = presets.get(name)
+        if record is None:
+            raise RuntimeError(
+                f"CMake configure preset {name!r} is not declared in "
+                f"{presets_file}")
+        raw_preset, file_dir = record
+        raw_parents = raw_preset.get("inherits", [])
+        if isinstance(raw_parents, str):
+            parents = [raw_parents]
+        elif (
+            isinstance(raw_parents, list)
+            and all(isinstance(parent, str) and parent
+                    for parent in raw_parents)
+        ):
+            parents = raw_parents
+        else:
+            raise RuntimeError(
+                f"CMake configure preset {name!r} has invalid inherits")
+
+        selected_template: tuple[str, Path] | None = None
+        if "binaryDir" in raw_preset:
+            raw_binary_dir = raw_preset["binaryDir"]
+            if not isinstance(raw_binary_dir, str) or not raw_binary_dir:
+                raise RuntimeError(
+                    f"CMake configure preset {name!r} has invalid binaryDir")
+            selected_template = (raw_binary_dir, file_dir)
+        else:
+            for parent in parents:
+                inherited = resolve_template(parent, (*stack, name))
+                if inherited is not None:
+                    selected_template = inherited
+                    break
+        resolved_templates[name] = selected_template
+        return selected_template
+
+    resolved_template = resolve_template(preset, ())
+    if resolved_template is None:
+        raise RuntimeError(
+            f"CMake configure preset {preset!r} has no binaryDir")
+    template, file_dir = resolved_template
+    expanded = template
+    replacements = {
+        "${sourceDir}": str(source_dir),
+        "${sourceParentDir}": str(source_dir.parent),
+        "${sourceDirName}": source_dir.name,
+        "${presetName}": preset,
+        "${fileDir}": str(file_dir),
+        "${dollar}": "$",
+        "${pathListSep}": os.pathsep,
+    }
+    for macro, replacement in replacements.items():
+        expanded = expanded.replace(macro, replacement)
+
+    def replace_environment(match: re.Match[str]) -> str:
+        return effective_environment.get(match.group(1), "")
+
+    expanded = re.sub(
+        r"\$(?:p?env)\{([A-Za-z_][A-Za-z0-9_]*)\}",
+        replace_environment,
+        expanded,
+    )
+    if re.search(r"\$\{[^}]+\}|\$(?:p?env)\{[^}]+\}", expanded):
+        raise RuntimeError(
+            f"unsupported dynamic macro in binaryDir for preset {preset!r}: "
+            f"{template!r}")
+    binary_dir = Path(expanded)
+    if not binary_dir.is_absolute():
+        binary_dir = source_dir / binary_dir
+    return binary_dir.resolve(strict=False)
+
+def _validate_e2e_preset_tree_ownership(
+        selected: str,
+        production: str) -> None:
+    """Reject E2E presets which alias a production or non-owned build tree."""
+    selected_dir = _resolved_cmake_preset_binary_dir(selected)
+    production_dir = _resolved_cmake_preset_binary_dir(production)
+    expected_selected_dir = (
+        REPOSITORY_ROOT / "build" / selected).resolve(strict=False)
+    if selected_dir != expected_selected_dir:
+        raise RuntimeError(
+            f"benchmark-e2e preset {selected!r} resolves binaryDir to "
+            f"{selected_dir}, but the build worker owns only "
+            f"{expected_selected_dir}")
+    if selected_dir == production_dir:
+        raise RuntimeError(
+            f"benchmark-e2e preset {selected!r} aliases production preset "
+            f"{production!r} at {selected_dir}")
+
+    stamp = selected_dir / _CMAKE_CONFIGURE_STAMP_NAME
+    try:
+        metadata = stamp.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot inspect benchmark-e2e configure ownership stamp "
+            f"{stamp}: {exc}") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(
+            "benchmark-e2e configure ownership stamp must be a regular "
+            f"non-symlink file: {stamp}")
+    try:
+        document = json.loads(stamp.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot read benchmark-e2e configure ownership stamp "
+            f"{stamp}: {exc}") from exc
+    owner = document.get("inputs", {}).get("preset") \
+        if isinstance(document, dict) \
+        and isinstance(document.get("inputs"), dict) else None
+    if owner != selected:
+        raise RuntimeError(
+            f"benchmark-e2e build tree {selected_dir} is owned by preset "
+            f"{owner!r}, not {selected!r}")
 
 def _resolved_cmake_preset_cache_variables(
         preset: str,

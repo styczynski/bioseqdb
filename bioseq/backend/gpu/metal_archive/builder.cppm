@@ -56,11 +56,29 @@ void write_process_output(
 export int run_binary_archive_builder(
         const int argument_count,
         char** const arguments) {
+    if (argument_count == 4 &&
+        std::string_view{arguments[1]} == "--capture-moltenvk-command" &&
+        arguments[2] != nullptr && arguments[2][0] != '\0' &&
+        arguments[3] != nullptr && arguments[3][0] != '\0') {
+        const std::string transcript =
+            capture_moltenvk_command_library(arguments[2], arguments[3]);
+        write_process_output(STDOUT_FILENO, transcript);
+        constexpr std::string_view success_sentinel = "RESULT: ok\n";
+        const std::size_t result_marker = transcript.find("RESULT:");
+        return transcript.size() >= success_sentinel.size() &&
+                       std::string_view{transcript}.substr(
+                           transcript.size() - success_sentinel.size()) == success_sentinel &&
+                       result_marker == transcript.size() - success_sentinel.size()
+                   ? 0
+                   : 1;
+    }
     if (argument_count != 6) {
         constexpr std::string_view usage_text =
             "usage: bioseq_gpu_archive_builder <metallib_path> <archive_path>"
             " <entry_name> <max_total_threads_per_threadgroup> "
-            "<threadgroup_multiple>\n";
+            "<threadgroup_multiple>\n"
+            "   or: bioseq_gpu_archive_builder --capture-moltenvk-command "
+            "<source_output_path> <loader_image_path>\n";
         write_process_output(STDERR_FILENO, usage_text);
         return 2;
     }

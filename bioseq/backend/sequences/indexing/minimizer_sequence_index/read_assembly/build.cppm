@@ -6,24 +6,18 @@ module;
 
 #include <algorithm>
 #include <array>
-#include <atomic>
-#include <bit>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
-#include <expected>
-#include <iterator>
 #include <libassert/assert.hpp>
 #include <limits>
 #include <memory>
 #include <new>
-#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -112,7 +106,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     using detail::admitted_pair_run;
     /** Maps a core base interval to the generation collection range for that span. */
     const auto make_core_range = [&seq](sequence_size_t core_lo, sequence_size_t core_hi) {
-        auto range = make_generation_collection_range(seq, core_lo, core_hi, window_span);
+        auto range = make_generation_collection_range(seq, core_lo, core_hi, w, k);
         if (!range) {
             index_corruption_panic("minimizers_per_sequence build: invalid collection/core range");
         }
@@ -153,12 +147,15 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             if (core_hi <= core_lo) {
                 return;
             }
-            auto range = make_generation_collection_range(seq, core_lo, core_hi, window_span);
+            auto range = make_generation_collection_range(seq, core_lo, core_hi, w, k);
             if (!range || !collect_generation_core_run(seq,
                                                        alphabet_code,
                                                        backend,
                                                        kernels,
                                                        *range,
+                                                       w,
+                                                       k,
+                                                       nullptr,
                                                        collector,
                                                        out,
                                                        nullptr,

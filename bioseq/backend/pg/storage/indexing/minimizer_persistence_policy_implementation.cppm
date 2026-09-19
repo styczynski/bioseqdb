@@ -2,9 +2,18 @@
  * @file minimizer_persistence_policy_implementation.cppm
  * @brief Connects the narrow policy API to PostgreSQL catalog handles.
  */
+module;
+
+#include <bioseq/pg_compat.h>
+
+extern "C" {
+#include "utils/snapshot.h"
+}
+
+#include <cstdint>
+
 module bioseq.postgres.storage.indexing.minimizer_persistence_policy;
 
-import std;
 import bioseq.postgres.storage.indexing.handles;
 
 namespace bioseq::storage::indexing {

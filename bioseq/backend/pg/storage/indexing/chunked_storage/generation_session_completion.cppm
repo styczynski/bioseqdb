@@ -3,9 +3,10 @@
  * @brief Defines grouped-generation close paths and final authorization equations.
  */
 module;
-#include <bioseq/pg_compat.h>
+
+#include <cstdint>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_session_completion;
-import std;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
 import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
 import :catalog;

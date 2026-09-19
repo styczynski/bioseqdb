@@ -11,6 +11,8 @@ module;
 export module bioseq.tests.unit.indexing.persisted_minimizer_image_support;
 
 import std;
+import bioseq.pipeline.runtime_contract;
+import bioseq.common.seqan_adapter;
 import bioseq.indexing.storage;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_fragment_image;
@@ -309,6 +311,15 @@ struct image_fixture {
 
     const std::uint64_t raw_payload_crc =
         idx::crc64_ecma182(fixture.payload);
+    constexpr auto physical_layout =
+        bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+            bioseq::simd::minimizer_algorithm::scalar,
+            idx::k_minimizer_fragment_algorithm_position_extent_bp,
+            15u,
+            10u);
+    constexpr auto algorithm_identity =
+        idx::make_minimizer_generation_algorithm_identity(physical_layout);
+    static_assert(algorithm_identity.has_value());
     const idx::minimizer_generation_manifest generation_manifest{
         .layout = idx::minimizer_generation_layout::
             grouped_soa_segment_local,
@@ -340,6 +351,7 @@ struct image_fixture {
         .producer_backend_id = idx::minimizer_producer_backend::scalar,
         .producer_identity_revision =
             idx::k_minimizer_producer_identity_revision,
+        .algorithm_identity = *algorithm_identity,
         .hash_width = profile->hash_width,
         .position_width = profile->position_width,
         .count_width = profile->count_width,

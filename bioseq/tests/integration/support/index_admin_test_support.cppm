@@ -278,10 +278,19 @@ capture_preserved_ready_bioseq_source(
         "WHERE s.user_relid={}::oid;",
         expected_oid));
 
-    auto hydrated = query_rows(ctx, fmt::format(
-        "SELECT id::text, seq::text FROM {} "
-        "WHERE mmsearch(seq, {}) ORDER BY id;",
-        table, drop_preservation_probe_literal()));
+    rowset_t hydrated;
+    {
+        // The preservation probe is 29 bp.  Scope its explicit chain admission
+        // to hydration so the surrounding DROP-contract session is restored.
+        guc_scope minimum_score{
+            ctx, "bioseq.aligner.chaining.minimum_score", "10"};
+        guc_scope minimum_seed_count{
+            ctx, "bioseq.aligner.chaining.minimum_seed_count", "1"};
+        hydrated = query_rows(ctx, fmt::format(
+            "SELECT id::text, seq::text FROM {} "
+            "WHERE mmsearch(seq, {}) ORDER BY id;",
+            table, drop_preservation_probe_literal()));
+    }
 
     return preserved_ready_bioseq_source_evidence{
         .observed_oid = observed_oid,

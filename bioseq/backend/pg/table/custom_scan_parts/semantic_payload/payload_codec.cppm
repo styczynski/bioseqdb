@@ -27,6 +27,7 @@ import std;
 import bioseq.indexing.type;
 import bioseq.pipeline.minimap_port;
 import bioseq.postgres.support;
+export import :custom_scan_semantic_payload_payload_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -43,10 +44,8 @@ export {
      * storage, parallel plan transfer, and node serialization retain the exact
      * value without any process-local C++ pointer.  Floating-point parameters are
      * stored as their exact IEEE-754 binary32 bits in an INT8 Const.
-     */
+    */
     inline constexpr auto k_bioseq_semantic_payload_name = std::to_array("semantic_payload");
-    inline constexpr std::int32_t k_bioseq_semantic_payload_format_version = 1;
-    inline constexpr std::int32_t k_bioseq_semantic_payload_field_count = 42;
     inline constexpr int k_bioseq_semantic_payload_header_nodes = 3;
 
     /** @brief Identifies each field in the ordered scan-semantic payload. */
@@ -97,14 +96,6 @@ export {
 
     static_assert(static_cast<int>(bioseq_semantic_field::index_read_requirement) + 1 ==
                   k_bioseq_semantic_payload_field_count);
-
-    /** @brief Holds the executor-visible alignment and index policy frozen by the planner. */
-    struct frozen_scan_semantics {
-        bioseq::simd::minimap2_parameters params{};
-        bool read_sequence_index = false;
-        bioseq::indexing::index_read_requirement index_read_requirement =
-            bioseq::indexing::index_read_requirement::allow;
-    };
 
     /** @brief Allocates a PostgreSQL INT4 constant for a semantic payload field. */
     [[nodiscard]] Const* make_semantic_int4_const(const std::int32_t value) {

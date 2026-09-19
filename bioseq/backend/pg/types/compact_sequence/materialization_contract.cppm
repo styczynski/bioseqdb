@@ -2,10 +2,11 @@
  * @file materialization_contract.cppm
  * @brief Declares compact-sequence materialization categories shared across subsystems.
  */
+module;
+
+#include <cstdint>
 
 export module bioseq.postgres.types.compact_sequence.materialization_contract;
-
-import std;
 
 /// Mechanism that produced one compact-sequence materialization.
 export enum class materialization_mechanism : std::uint8_t {

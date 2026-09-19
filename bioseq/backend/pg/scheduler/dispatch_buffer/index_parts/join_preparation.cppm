@@ -38,28 +38,19 @@ module bioseq.postgres.scheduler.dispatch_buffer:join_preparation;
 import bioseq.postgres.scheduler.dispatch_buffer;
 
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
-import bioseq.postgres.configuration.core;
 import bioseq.indexing.type;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.storage.lazy_sequence; // allocation observer for route-aware sequence payload tracing
+import bioseq.indexing.gpu_minimizer_index;
+import bioseq.postgres.storage.indexing.active_read_policy_resolver;
+import bioseq.postgres.storage.indexing.cold_index_timing;
 import bioseq.postgres.scheduler.dispatch_processor; // fixed-shape batch_processor, heavy pipeline in its own module
-import bioseq.sequences;
+import bioseq.sequences.compact_sequence_typmod;
 import bioseq.sequences.simd;
 import bioseq.pipeline.minimap_port;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.pipe;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
-import bioseq.storage.scanner;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner; // statement-owned source provider for locator targets
-import bioseq.parallelism.memory_admission;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.column.table_access;
 
 namespace bioseq::scheduler {
 
@@ -121,8 +112,12 @@ void tuple_dispatch_buffer::begin_join_target(TupleTableSlot* target_slot) {
     join_target_outcomes_recorded = false;
     join_prepared_union_outcomes_recorded = false;
     join_prepared_build_checksum_recorded = false;
-    join_cpu_prepared_target = ::bioseq::simd::batch_processor::cpu_prepared_target{};
-    join_cpu_prepared_target.target_rowno = rowno;
+    join_cpu_prepared_target =
+        std::make_shared<::bioseq::simd::batch_processor::cpu_prepared_target>();
+    join_cpu_prepared_target->target_rowno = rowno;
+    join_gpu_prepared_mpf_target =
+        ::bioseq::simd::batch_processor::gpu_prepared_mpf_target{};
+    join_gpu_prepared_mpf_target.target_rowno = rowno;
     join_gpu_prepared_grouped_soa_target =
         ::bioseq::simd::batch_processor::gpu_prepared_grouped_soa_target{};
     join_gpu_prepared_grouped_soa_target.target_rowno = rowno;
@@ -133,25 +128,33 @@ void tuple_dispatch_buffer::begin_join_target(TupleTableSlot* target_slot) {
 void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection_thunk(
     void* state,
     ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
-    const ::bioseq::simd::minimap2_parameters& dispatched_params,
+    ::bioseq::simd::pipe::statement_execution_plan_owner dispatched_plan,
     const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations& typmod_ops) {
     auto* self = static_cast<tuple_dispatch_buffer*>(state);
     if (self == nullptr) {
         throw std::logic_error{"bioseq batch join Highway preparation owner is null"};
     }
-    self->prepare_join_cpu_after_highway_selection(scanner_pg_ctx, dispatched_params, typmod_ops);
+    self->prepare_join_cpu_after_highway_selection(scanner_pg_ctx, dispatched_plan, typmod_ops);
 }
 
 /** @brief Implements the prepare join cpu after highway selection contract declared by the stable
  * buffer facade. */
 void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection(
     ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
-    const ::bioseq::simd::minimap2_parameters& dispatched_params,
+    ::bioseq::simd::pipe::statement_execution_plan_owner dispatched_plan,
     const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations& typmod_ops) {
+    if (!execution_plan || !dispatched_plan ||
+        execution_plan.get() != dispatched_plan.get() ||
+        execution_plan.owner_before(dispatched_plan) ||
+        dispatched_plan.owner_before(execution_plan)) {
+        throw std::logic_error{"bioseq batch join preparation changed its statement owner"};
+    }
     if (!join_cpu_preparation_pending || join_pending_cpu_preparation_queries.empty() ||
-        !join_target_active || !join_target_prepared || !read_sequence_index_active ||
-        !join_active_read_policy.has_value() ||
-        ::bioseq::simd::pipe::vulkan_components_requested(base_params)) {
+        !join_target_active || !join_target_prepared ||
+        (!read_sequence_index_active &&
+         index_read_requirement !=
+             bioseq::indexing::index_read_requirement::require_absent) ||
+        !join_active_read_policy.has_value() || execution_plan->uses_vulkan_seed()) {
         throw std::logic_error{"bioseq batch join deferred CPU preparation state is invalid"};
     }
     if (scanner_pg_ctx.cpu_prepared_target != nullptr || scanner_pg_ctx.read_session == nullptr ||
@@ -278,7 +281,7 @@ void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection(
                 first = false;
             }
 
-            if (!join_cpu_prepared_target.bind_highway_dispatch_once(dispatched_params)) {
+            if (!join_cpu_prepared_target->bind_highway_dispatch_once(dispatched_plan)) {
                 throw std::logic_error{"bioseq batch join rejected its selected Highway binding"};
             }
             if (index_read_requirement ==
@@ -290,8 +293,8 @@ void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection(
                     user_relid,
                     static_cast<std::int16_t>(join_target_storage_seq_attno),
                     join_active_read_policy->index_name,
-                    static_cast<std::uint64_t>(join_cpu_prepared_target.target_rowno),
-                    join_cpu_prepared_target.target_bp_size,
+                    static_cast<std::uint64_t>(join_cpu_prepared_target->target_rowno),
+                    join_cpu_prepared_target->target_bp_size,
                     mmsearch_state.alphabet_code,
                     mmsearch_state.storage_unit_byte_width,
                     join_cpu_preparation_scratch.query_headers,
@@ -300,26 +303,33 @@ void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection(
                     scanner_pg_ctx.read_session,
                     std::addressof(mmsearch_query_payload_observer),
                     join_cpu_preparation_scratch.query_ordinals,
-                    dispatched_params,
+                    dispatched_plan,
                     *executor_read_context,
                     typmod_ops,
-                    join_cpu_prepared_target);
+                    *join_cpu_prepared_target);
             } else {
+                const auto union_storage =
+                    index_read_requirement ==
+                            bioseq::indexing::index_read_requirement::require_absent
+                        ? ::bioseq::simd::batch_processor::cpu_query_union_storage::
+                              canonical_hashes
+                        : ::bioseq::simd::batch_processor::cpu_query_union_storage::
+                              minimizer_sketch;
                 processor.prepare_cpu_shared_query_unions(
                     mmsearch_state.alphabet_code,
                     mmsearch_state.storage_unit_byte_width,
-                    join_cpu_prepared_target.target_bp_size,
+                    join_cpu_prepared_target->target_bp_size,
                     join_cpu_preparation_scratch.query_headers,
                     join_cpu_preparation_scratch.query_recipe_datums,
                     join_cpu_preparation_scratch.query_recipe_descriptors,
                     scanner_pg_ctx.read_session,
                     std::addressof(mmsearch_query_payload_observer),
                     join_cpu_preparation_scratch.query_ordinals,
-                    dispatched_params,
+                    dispatched_plan,
                     /*include_persisted_parameter_group=*/true,
-                    ::bioseq::simd::batch_processor::cpu_query_union_storage::minimizer_sketch,
+                    union_storage,
                     typmod_ops,
-                    join_cpu_prepared_target);
+                    *join_cpu_prepared_target);
             }
         } catch (...) {
             join_cpu_preparation_scratch.cpp_error = std::current_exception();
@@ -351,15 +361,15 @@ void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection(
         bioseq::postgres::support::invoke_pg_as_cpp([copy] { pfree(copy); });
     }
     join_cpu_preparation_scratch.clear_storage_noexcept();
-    if (!join_cpu_prepared_target.unions_ready ||
-        !join_cpu_prepared_target.highway_binding_matches(dispatched_params)) {
+    if (!join_cpu_prepared_target->unions_ready ||
+        !join_cpu_prepared_target->highway_binding_matches(dispatched_plan)) {
         throw std::logic_error{
             "bioseq batch join CPU preparation did not retain its Highway binding"};
     }
 
     join_pending_cpu_preparation_queries.clear();
     join_cpu_preparation_pending = false;
-    scanner_pg_ctx.cpu_prepared_target = &join_cpu_prepared_target;
+    scanner_pg_ctx.cpu_prepared_target = join_cpu_prepared_target;
 }
 
 /** @brief Implements the prepare join target queries contract declared by the stable buffer facade.
@@ -396,8 +406,37 @@ void tuple_dispatch_buffer::prepare_join_target_queries(
         join_cold_policy_stats, join_cold_policy_stats.policy_ns, policy_begin_ns);
     bioseq::storage::indexing::add_cold_index_buffer_usage(join_cold_policy_stats,
                                                            policy_buffer_begin);
-    const bool vulkan_requested = ::bioseq::simd::pipe::vulkan_components_requested(base_params);
-    if (read_sequence_index_active && !vulkan_requested) {
+    if (!execution_plan) {
+        throw std::logic_error{"join target preparation has no statement plan"};
+    }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    const auto attest_join_preparation = [this] {
+        auto* const plan_tracker = execution_plan->frozen_parameters.downstream_active_wall;
+        if (plan_tracker == nullptr || plan_tracker != downstream_active_wall_tracker ||
+            !plan_tracker->attest_benchmark_e2e_statement_plan_checkpoint(
+                execution_plan,
+                ::bioseq::simd::benchmark_e2e_statement_plan_checkpoint::join_preparation)) {
+            throw std::logic_error{
+                "bioseq batch join preparation changed its guarded statement-plan owner"};
+        }
+    };
+#endif
+    const bool vulkan_seed_requested = execution_plan->uses_vulkan_seed();
+    const bool active_mpf =
+        join_active_read_policy->index_name ==
+        bioseq::indexing::k_minimizers_per_fragment_index_name;
+    const bool active_mps =
+        join_active_read_policy->index_name ==
+        bioseq::indexing::k_minimizers_per_sequence_index_name;
+    if (!active_mpf && !active_mps) {
+        throw std::logic_error{"bioseq batch join selected an unknown target index layout"};
+    }
+    const bool prepared_host_target_requested =
+        !vulkan_seed_requested &&
+        (read_sequence_index_active ||
+         index_read_requirement ==
+             bioseq::indexing::index_read_requirement::require_absent);
+    if (prepared_host_target_requested) {
         std::uint64_t previous_ordinal = 0;
         bool first = true;
         for (const join_query_ref& query : all_queries) {
@@ -413,13 +452,149 @@ void tuple_dispatch_buffer::prepare_join_target_queries(
             first = false;
         }
         const std::uint64_t target_bp_size = buffered_entries.front().seq_bp_size();
-        join_cpu_prepared_target.target_bp_size = target_bp_size;
-        join_cpu_prepared_target.query_count = all_queries.size();
-        join_cpu_prepared_target.unions_ready = false;
+        join_cpu_prepared_target->target_bp_size = target_bp_size;
+        join_cpu_prepared_target->query_count = all_queries.size();
+        join_cpu_prepared_target->unions_ready = false;
         join_pending_cpu_preparation_queries.assign(all_queries.begin(), all_queries.end());
         join_cpu_preparation_pending = !join_pending_cpu_preparation_queries.empty();
         join_target_prepared = true;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        attest_join_preparation();
+#endif
         return;
+    }
+    /* The selected Vulkan frontend owns query sketching. Validate only stable
+     * query references here: detoasting, rewidth, host sketching, and native
+     * query-union preparation are forbidden before the generated physical
+     * minimizer visitor. */
+    if (vulkan_seed_requested) {
+        if (mmsearch_state.storage_unit_byte_width != 4u &&
+            mmsearch_state.storage_unit_byte_width != 8u) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("bioseq Vulkan seed route has no generated physical record for "
+                            "the selected packed storage width")));
+        }
+        std::uint64_t previous_ordinal = 0u;
+        bool first = true;
+        for (const join_query_ref& query : all_queries) {
+            if (query.query_slot == nullptr ||
+                query.ordinal >
+                    static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)()) ||
+                (!first && query.ordinal <= previous_ordinal)) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                         errmsg("bioseq batch join Vulkan query references are invalid or unordered")));
+            }
+            previous_ordinal = query.ordinal;
+            first = false;
+        }
+        const buffered_scan_entry& target = buffered_entries.front();
+        const std::uint64_t target_bp_size = target.seq_bp_size();
+        join_cpu_prepared_target->target_bp_size = target_bp_size;
+        join_cpu_prepared_target->query_count = all_queries.size();
+        join_cpu_prepared_target->unions_ready = false;
+
+        if (read_sequence_index_active) {
+            MemoryContext saved_context = CurrentMemoryContext;
+            ErrorData* volatile pg_error = nullptr;
+            std::exception_ptr cpp_error;
+            PG_TRY();
+            {
+                try {
+                    if (active_mpf) {
+                        processor.prepare_gpu_persisted_mpf_target(
+                            user_main_database_oid,
+                            user_main_tablespace_oid,
+                            user_main_relfilenode,
+                            user_relid,
+                            static_cast<std::int16_t>(join_target_storage_seq_attno),
+                            join_active_read_policy->index_name,
+                            static_cast<std::uint64_t>(join_gpu_prepared_mpf_target.target_rowno),
+                            target_bp_size,
+                            all_queries.size(),
+                            mmsearch_state.alphabet_code,
+                            mmsearch_state.storage_unit_byte_width,
+                            execution_plan,
+                            *executor_read_context,
+                            join_gpu_prepared_mpf_target);
+                    } else if (active_mps) {
+                        processor.prepare_gpu_persisted_grouped_soa_target(
+                            user_main_database_oid,
+                            user_main_tablespace_oid,
+                            user_main_relfilenode,
+                            user_relid,
+                            static_cast<std::int16_t>(join_target_storage_seq_attno),
+                            join_active_read_policy->index_name,
+                            static_cast<std::uint64_t>(
+                                join_gpu_prepared_grouped_soa_target.target_rowno),
+                            target_bp_size,
+                            all_queries.size(),
+                            mmsearch_state.alphabet_code,
+                            mmsearch_state.storage_unit_byte_width,
+                            execution_plan,
+                            *executor_read_context,
+                            join_gpu_prepared_grouped_soa_target);
+                    } else {
+                        throw std::logic_error{
+                            "bioseq batch join Vulkan preparation escaped MPF/MPS selection"};
+                    }
+                } catch (...) {
+                    cpp_error = std::current_exception();
+                }
+            }
+            PG_CATCH();
+            {
+                MemoryContextSwitchTo(saved_context);
+                pg_error = CopyErrorData();
+                FlushErrorState();
+            }
+            PG_END_TRY();
+            if (pg_error != nullptr) {
+                ErrorData* exact_error = pg_error;
+                throw bioseq::postgres::support::postgres_error{exact_error};
+            }
+            if (cpp_error != nullptr) {
+                std::rethrow_exception(cpp_error);
+            }
+            if ((active_mpf && !join_gpu_prepared_mpf_target.source_ready()) ||
+                (active_mps && !join_gpu_prepared_grouped_soa_target.ready())) {
+                throw std::logic_error{
+                    "bioseq batch join persisted Vulkan target did not retain its owner"};
+            }
+        } else if (active_mpf) {
+            join_gpu_prepared_mpf_target.execution_plan = execution_plan;
+            join_gpu_prepared_mpf_target.target_bp_size = target_bp_size;
+            join_gpu_prepared_mpf_target.query_count = all_queries.size();
+            join_gpu_prepared_mpf_target.operation_identity =
+                bioseq::indexing::next_gpu_source_direct_operation_identity();
+            join_gpu_prepared_mpf_target.resident_cache =
+                std::make_shared<bioseq::indexing::gpu_minimizer_index_cache>(0u);
+            if (!join_gpu_prepared_mpf_target.source_ready()) {
+                throw std::logic_error{
+                    "bioseq batch join no-index MPF source owner is invalid"};
+            }
+        } else {
+            join_gpu_prepared_grouped_soa_target.execution_plan = execution_plan;
+            join_gpu_prepared_grouped_soa_target.target_bp_size = target_bp_size;
+            join_gpu_prepared_grouped_soa_target.query_count = all_queries.size();
+            join_gpu_prepared_grouped_soa_target.operation_identity =
+                bioseq::indexing::next_gpu_source_direct_operation_identity();
+            join_gpu_prepared_grouped_soa_target.persisted = false;
+            if (!join_gpu_prepared_grouped_soa_target.source_ready()) {
+                throw std::logic_error{
+                    "bioseq batch join no-index MPS source owner is invalid"};
+            }
+        }
+        join_target_prepared = true;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        attest_join_preparation();
+#endif
+        return;
+    }
+    if (read_sequence_index_active) {
+        throw std::logic_error{
+            "bioseq batch join persisted CPU preparation escaped its early owner path"};
     }
     std::vector<const bioseq::pg_types::seq*> query_headers;
     std::vector<Datum> query_recipe_datums;
@@ -523,73 +698,23 @@ void tuple_dispatch_buffer::prepare_join_target_queries(
     }
     const buffered_scan_entry& target = buffered_entries.front();
     const std::uint64_t target_bp_size = target.seq_bp_size();
-    if (read_sequence_index_active) {
-        MemoryContext saved_context = CurrentMemoryContext;
-        ErrorData* volatile pg_error = nullptr;
-        std::exception_ptr cpp_error;
-        PG_TRY();
-        {
-            try {
-                if (!vulkan_requested) {
-                    throw std::logic_error{
-                        "bioseq batch join CPU preparation escaped deferred dispatch"};
-                }
-                processor.prepare_gpu_persisted_grouped_soa_target(
-                    user_main_database_oid,
-                    user_main_tablespace_oid,
-                    user_main_relfilenode,
-                    user_relid,
-                    static_cast<std::int16_t>(join_target_storage_seq_attno),
-                    join_active_read_policy->index_name,
-                    static_cast<std::uint64_t>(join_gpu_prepared_grouped_soa_target.target_rowno),
-                    target_bp_size,
-                    query_headers.size(),
-                    mmsearch_state.alphabet_code,
-                    mmsearch_state.storage_unit_byte_width,
-                    base_params,
-                    *executor_read_context,
-                    join_gpu_prepared_grouped_soa_target);
-            } catch (...) {
-                cpp_error = std::current_exception();
-            }
-        }
-        PG_CATCH();
-        {
-            MemoryContextSwitchTo(saved_context);
-            pg_error = CopyErrorData();
-            FlushErrorState();
-        }
-        PG_END_TRY();
-        if (pg_error != nullptr) {
-            query_headers.clear();
-            detoast_copies.clear();
-            ErrorData* exact_error = pg_error;
-            throw bioseq::postgres::support::postgres_error{exact_error};
-        }
-        if (cpp_error != nullptr) {
-            for (bioseq::pg_types::seq* copy : detoast_copies) {
-                bioseq::postgres::support::invoke_pg_as_cpp([copy] { pfree(copy); });
-            }
-            std::rethrow_exception(cpp_error);
-        }
-    } else {
-        /* no_index starts without a retained prepared target.  Building one
-         * in this pre-measurement lifecycle would invalidate cold semantics;
-         * the selected CPU/SIMD/GPU route must construct its own transient
-         * target index after timing begins and may not cross-fallback. */
-        join_cpu_prepared_target.target_bp_size = target_bp_size;
-        join_cpu_prepared_target.query_count = query_headers.size();
-        join_cpu_prepared_target.unions_ready = false;
-        join_gpu_prepared_grouped_soa_target.target_bp_size = target_bp_size;
-        join_gpu_prepared_grouped_soa_target.query_count = query_headers.size();
-        bioseq_log<logging_level::debug>(
-            "[bioseq] pg: batch join no_index retains no prepared target; "
-            "the selected backend must use its authentic transient index route");
-    }
+    /* no_index starts without a retained prepared CPU target. Building one
+     * in this pre-measurement lifecycle would invalidate cold semantics; the
+     * selected CPU/SIMD route constructs its authentic transient target after
+     * timing begins and may not cross-fallback. Vulkan routes returned above. */
+    join_cpu_prepared_target->target_bp_size = target_bp_size;
+    join_cpu_prepared_target->query_count = query_headers.size();
+    join_cpu_prepared_target->unions_ready = false;
+    bioseq_log<logging_level::debug>(
+        "[bioseq] pg: batch join no_index retains no prepared target; "
+        "the selected backend must use its authentic transient index route");
     for (bioseq::pg_types::seq* copy : detoast_copies) {
         bioseq::postgres::support::invoke_pg_as_cpp([copy] { pfree(copy); });
     }
     join_target_prepared = true;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    attest_join_preparation();
+#endif
 }
 
 /** @brief Implements the set join query batch contract declared by the stable buffer facade. */

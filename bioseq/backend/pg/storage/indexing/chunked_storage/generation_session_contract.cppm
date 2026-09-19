@@ -3,59 +3,30 @@
  * @brief Declares grouped-generation read contracts, ownership, and inline sink templates.
  */
 module;
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 
 extern "C" {
-#include "access/heapam.h"
-#include "access/nbtree.h"
-#include "access/parallel.h"
-#include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "access/transam.h"
-#include "access/xact.h"
-#include "catalog/indexing.h"
-#include "catalog/namespace.h" // RelnameGetRelid
-#include "catalog/pg_am_d.h"
-#include "catalog/pg_class.h"
-#include "catalog/pg_index.h"
-#include "catalog/pg_opclass_d.h"
-#include "catalog/pg_sequence.h"
-#include "catalog/pg_type_d.h"
-#include "commands/sequence.h"
-#include "commands/tablespace.h"
-#include "executor/instrument.h"
-#include "executor/spi.h"
-#include "executor/tuptable.h"
-#include "storage/buffile.h"
-#include "storage/dsm.h"
-#include "storage/fd.h"
-#include "storage/ipc.h"
-#include "storage/procarray.h"
-#include "storage/relfilelocator.h"
-#include "storage/shm_toc.h"
-#include "utils/builtins.h"
-#include "utils/inval.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/resowner.h"
-#include "utils/snapmgr.h"
-#include "utils/syscache.h"
-#include "utils/timestamp.h"
-#include "utils/xid8.h"
+#include "postgres.h"
 
-#include "common/relpath.h"
-#include "miscadmin.h"
-#include "port.h"
-#include "port/atomics.h"
+#include "access/genam.h"
+#include "access/htup.h"
+#include "access/sdir.h"
+#include "access/skey.h"
+#include "access/stratnum.h"
+#include "executor/instrument.h"
+#include "executor/tuptable.h"
+#include "storage/itemptr.h"
+#include "utils/fmgroids.h"
+#include "utils/relcache.h"
+#include "utils/snapshot.h"
 }
 
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_session_contract;
 import std;
 export import bioseq.postgres.storage.indexing.minimizer_read_stats;
@@ -75,7 +46,6 @@ import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimi
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
@@ -1116,6 +1086,50 @@ class index_storage_fragment_generation_read_session {
     /// Validate stage equations, close every PG resource, and return the receipt.
     [[nodiscard]] minimizer_generation_read_stats finish();
 };
+
+/// Normal open outcome with either an owned session or a classified relation failure.
+struct minimizer_generation_read_session_open_result {
+    std::optional<index_storage_fragment_generation_read_session> session{};
+    minimizer_generation_relation_inspection failure{
+        .kind = minimizer_generation_relation_kind::malformed,
+        .schema_error = minimizer_generation_schema_error::none,
+    };
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return session.has_value();
+    }
+};
+
+/// Bind classification and reading to one heap descriptor and its primary
+/// index. Unrelated secondary indexes are deliberately neither opened nor
+/// counted.
+/// A successful result owns both AccessShareLock references until finish(). An
+/// unsuccessful normal result owns neither.  PostgreSQL ERROR remains an
+/// exception so the transaction ResourceOwner retains its ordinary authority.
+[[nodiscard]] inline minimizer_generation_read_session_open_result
+open_exact_minimizer_generation_read_session_pg(std::string_view table_name,
+                                                std::string_view index_name,
+                                                std::uint64_t query_key,
+                                                const borrowed_executor_read_context& executor_read,
+                                                expected_minimizer_generation_identity expected) {
+    if (!executor_read.valid()) {
+        minimizer_generation_storage_error_as_cpp(
+            "generation read requires a valid borrowed executor context");
+    }
+    minimizer_generation_read_session_open_result result{};
+    try {
+        result.session.emplace(table_name,
+                               query_key,
+                               executor_read.snapshot(),
+                               expected,
+                               executor_read.tablespace_oid(),
+                               minimizer_generation_snapshot_registration::borrow_registered,
+                               index_name);
+    } catch (const minimizer_generation_relation_open_failure& failure) {
+        result.failure = failure.inspection;
+    }
+    return result;
+}
 
 static_assert(!std::is_default_constructible_v<index_storage_fragment_generation_read_session>);
 static_assert(!std::is_copy_constructible_v<index_storage_fragment_generation_read_session>);

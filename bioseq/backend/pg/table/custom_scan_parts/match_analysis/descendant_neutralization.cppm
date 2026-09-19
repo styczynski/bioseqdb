@@ -26,12 +26,13 @@ export module bioseq.postgres.table:custom_scan_match_analysis_descendant_neutra
 import std;
 import bioseq.postgres.support;
 
-import :custom_scan_runtime_support;
-import :custom_scan_semantic_payload_callback_contracts;
-import :custom_scan_match_finalization;
-import :custom_scan_join_ownership_carrier_lineage;
-import :custom_scan_match_analysis_carrier_validation;
-import :custom_scan_match_analysis_semantic_analysis;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_match_finalization_contracts;
+import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_match_analysis_carrier_validation_contracts;
+import :custom_scan_match_analysis_semantic_analysis_contracts;
+export import :custom_scan_match_analysis_descendant_neutralization_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -350,21 +351,5 @@ export {
         }
         return true;
     }
-
-    /** @brief Captures the first executable-helper ownership failure in a plan audit. */
-    struct batch_join_plan_helper_audit_first_failure {
-        const char* reason = "none";
-        const char* store = "none";
-        const char* custom_name = "none";
-        const char* boundary_encountered = "none";
-        int plan_node_tag = -1;
-        bool projection_capable = false;
-        int first_helper_resno = 0;
-        bool whole_helper_valid = false;
-        std::size_t finalized_batch_descendant_matches = 0u;
-        std::size_t finalized_base_descendant_matches = 0u;
-        std::size_t current_parent_matches = 0u;
-        bool recorded = false;
-    };
 
 } // export custom-scan partition declarations

@@ -21,31 +21,50 @@ extern "C" {
 #include "rewrite/rewriteManip.h"
 }
 
+// Keep libc++ declarations textual and ahead of the PostgreSQL dependency BMIs.
+// Importing the complete standard-library module here pushes Clang 22's source
+// location table past its 2 GiB limit before the final planner contracts load.
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <new>
+#include <optional>
+
 export module bioseq.postgres.table:custom_scan_scan_paths_path_construction;
 
-import std;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.logging;
 import bioseq.indexing.type;
-import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.postgres.column.table_access;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.external.path_builder_slot;
 import bioseq.postgres.support;
 import bioseq.postgres.table.batch_sort_scan;
 
+import :api;
 import :custom_scan_join_ownership;
 import :custom_scan_join_paths;
-import :custom_scan_batch_sort_source_routes;
+import :custom_scan_batch_sort_source_route_contracts;
 import :custom_scan_oid_expression_support;
-import :custom_scan_runtime_support;
-import :custom_scan_scan_paths_admission;
-import :custom_scan_scan_paths_cost_finalization;
-import :custom_scan_semantic_payload;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_planner_aligner_contracts;
+import :custom_scan_planner_diagnostic_contracts;
+import :custom_scan_planner_hook_state_contracts;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_planner_path_contracts;
+import :custom_scan_runtime_buffer_contracts;
+import :custom_scan_scan_paths_admission_contracts;
+import :custom_scan_scan_paths_cost_finalization_contracts;
 import :custom_scan_slice_path_codec_contract;
-import :custom_scan_slice_path_carrier_lineage;
-import :custom_scan_slice_rewrite_path_cloning;
-import :custom_scan_slice_rewrite_owner_admission;
+import :custom_scan_slice_path_carrier_contracts;
+import :custom_scan_slice_path_cost_contracts;
+import :custom_scan_slice_rewrite_path_contracts;
+import :custom_scan_slice_rewrite_path_tagging_contracts;
+import :custom_scan_slice_rewrite_owner_admission_contracts;
+import :custom_scan_slice_rewrite_upper_path_callback_contracts;
 
 using namespace bioseq::postgres::support;
 

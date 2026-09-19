@@ -701,11 +701,12 @@ struct vacuum_target_pair {
 /**
  * @brief Vacuum and analyze every fragment and sidecar shard owned by a table.
  * @param rel Parent relation OID. SQL NULL performs no maintenance.
- * @param context Call context used to enforce non-atomic procedure execution
- * and manage transaction boundaries.
  * @throws A translated PostgreSQL error or `std::runtime_error` when the call
  * is atomic, SPI state cannot be changed, or vacuum fails for a reason other
  * than a concurrently removed relation.
+ *
+ * The injected call context enforces non-atomic procedure execution and
+ * manages transaction boundaries; it is not a SQL-visible parameter.
  *
  * The procedure commits before each relation pair because PostgreSQL VACUUM
  * cannot execute inside the caller's transaction. A concurrently dropped shard

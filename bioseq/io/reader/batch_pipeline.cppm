@@ -16,7 +16,7 @@ module;
 #include <utility>
 #include <vector>
 
-module bioseq.io.reader:batch_pipeline;
+export module bioseq.io.reader:batch_pipeline;
 
 import :types;
 import bioseq.sequences;

@@ -4,18 +4,29 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
-
 extern "C" {
+#include "postgres.h"
+
 #include "storage/dsm_impl.h"
 
 #include "port/atomics.h"
 }
 
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <span>
+#include <string>
+#include <string_view>
+
 export module bioseq.postgres.scheduler.supervisor:persist_queue_publish;
 
 export import bioseq.postgres.scheduler.persist_target;
-import std;
 import bioseq.common.logging;
 
 namespace bioseq::postgres::scheduler {

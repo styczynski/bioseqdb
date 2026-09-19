@@ -29,15 +29,11 @@ import bioseq.postgres.support;
 
 import :custom_scan_oid_expression_support_oid_catalog;
 import :custom_scan_oid_expression_support_expression_analysis;
+export import :custom_scan_oid_expression_support_restriction_ownership_contracts;
 
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Tests whether a primary and fallback mmsearch use the admitted option pairing. */
-    [[nodiscard]] bool bounded_batch_fallback_options_are_supported(FuncExpr* primary,
-                                                                    FuncExpr* extra,
-                                                                    const bioseq_stub_oids& oids);
-
     /**
      * @brief Selects the bounded set of mmsearch restrictions one custom scan may own.
      *

@@ -96,6 +96,7 @@ CONTROLLER_KIND = "bioseq-native-package-run"
 CONTROLLER_STATES = frozenset(
     {"prepared", "active", "completed", "finalized", "collected", "failed"}
 )
+CLEANUP_EVIDENCE_SCHEMA_REVISION = 1
 COLLECTION_SCHEMA_REVISION = 2
 REMOTE_WORKSPACE = "/opt/bioseq-package-builder/workspace"
 REMOTE_ROOT = f"{REMOTE_WORKSPACE}/builds"
@@ -103,6 +104,11 @@ REMOTE_POETRY_VENV_ROOT = f"{REMOTE_WORKSPACE}/caches/poetry-venvs"
 REMOTE_PACKAGE_CMAKE_CACHE_ROOT = f"{REMOTE_WORKSPACE}/caches/package-cmake"
 REMOTE_PACKAGE_LIFECYCLE_LOCK = "/run/lock/bioseq-package-builder-controller.lock"
 REMOTE_PACKAGE_LIFECYCLE_LOCK_WAIT_SECONDS = 60
+REMOTE_BUILD_RUNTIME_MAX = "8h"
+REMOTE_BUILD_RUNTIME_MAX_SECONDS = 8 * 60 * 60
+REMOTE_BUILD_STOP_TIMEOUT = "90s"
+REMOTE_BUILD_WAIT_TIMEOUT_SECONDS = REMOTE_BUILD_RUNTIME_MAX_SECONDS + 5 * 60
+CONTROLLER_CLEANUP_TIMEOUT_SECONDS = 5 * 60
 SSM_CLEANUP_TIMEOUT_SECONDS = 120
 SSM_CANCEL_RESERVE_SECONDS = 30
 EC2_CLEANUP_STATE_TIMEOUT_SECONDS = 120
@@ -210,6 +216,7 @@ _CONTROLLER_BUILDER_KEYS = frozenset({
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
 SECURITY_GROUP_ID_RE = re.compile(r"^sg-[0-9a-f]{8,17}$")
+SECURITY_GROUP_RULE_ID_RE = re.compile(r"^sgr-[0-9a-f]{8,17}$")
 S3_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 CONTROLLER_DIAGNOSTIC_LIMIT = 4000
 
@@ -742,6 +749,251 @@ result = {
 print(json.dumps(result, sort_keys=True))
 if any(result.values()):
     raise SystemExit(70)
+""".strip()
+
+REMOTE_CONTROLLER_CLEANUP_SCRIPT = r"""
+import hashlib
+import json
+import os
+import pathlib
+import re
+import signal
+import subprocess
+import sys
+import time
+
+workspace = pathlib.PurePosixPath(sys.argv[1])
+unit_name = sys.argv[2]
+build_root = pathlib.PurePosixPath(sys.argv[3])
+expected_worker_argv = json.loads(sys.argv[4])
+remote_log_path = pathlib.PurePosixPath(sys.argv[5])
+manifest_path = pathlib.PurePosixPath(sys.argv[6])
+
+if (
+    not workspace.is_absolute()
+    or not build_root.is_absolute()
+    or build_root.parent != workspace / "builds"
+    or remote_log_path != build_root / "build.log"
+    or not manifest_path.is_absolute()
+    or manifest_path.parent != workspace / "builds"
+    or re.fullmatch(r"bioseq-package-[A-Za-z0-9_.@-]+\.service", unit_name) is None
+    or not isinstance(expected_worker_argv, list)
+    or any(not isinstance(value, str) or not value for value in expected_worker_argv)
+):
+    raise RuntimeError("receipt-bound package cleanup identity is malformed")
+
+
+def run(argv, *, check=True, timeout=30):
+    return subprocess.run(
+        argv,
+        check=check,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def unit_status():
+    result = run(
+        [
+            "systemctl",
+            "show",
+            unit_name,
+            "--property=LoadState",
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=Result",
+            "--property=ExecMainStatus",
+        ],
+        check=False,
+    )
+    values = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key] = value
+    expected = {"LoadState", "ActiveState", "SubState", "Result", "ExecMainStatus"}
+    if set(values) != expected:
+        raise RuntimeError("systemd returned incomplete exact-unit status")
+    return values
+
+
+def process_table():
+    rows = {}
+    for entry in pathlib.Path("/proc").glob("[0-9]*"):
+        try:
+            raw_argv = entry.joinpath("cmdline").read_bytes()
+            raw_stat = entry.joinpath("stat").read_text(encoding="ascii")
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        argv = [
+            value.decode("utf-8", "surrogateescape")
+            for value in raw_argv.rstrip(b"\0").split(b"\0")
+            if value
+        ]
+        closing = raw_stat.rfind(")")
+        fields = raw_stat[closing + 2 :].split() if closing >= 0 else []
+        if len(fields) < 20:
+            continue
+        rows[int(entry.name)] = {
+            "argv": argv,
+            "ppid": int(fields[1]),
+            "starttime": fields[19],
+        }
+    return rows
+
+
+def exact_worker_roots(rows):
+    if not expected_worker_argv:
+        return []
+    return sorted(
+        pid for pid, value in rows.items() if value["argv"] == expected_worker_argv
+    )
+
+
+def terminate_exact_workers():
+    rows = process_table()
+    roots = exact_worker_roots(rows)
+    owned = set(roots)
+    changed = True
+    while changed:
+        changed = False
+        for pid, value in rows.items():
+            if pid not in owned and value["ppid"] in owned:
+                owned.add(pid)
+                changed = True
+    identities = {pid: rows[pid]["starttime"] for pid in owned}
+
+    def still_owned(pid):
+        current = process_table().get(pid)
+        return current is not None and current["starttime"] == identities[pid]
+
+    for pid in sorted(owned, reverse=True):
+        if still_owned(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and any(still_owned(pid) for pid in owned):
+        time.sleep(0.2)
+    for pid in sorted(owned, reverse=True):
+        if still_owned(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and any(still_owned(pid) for pid in owned):
+        time.sleep(0.1)
+    survivors = sorted(pid for pid in owned if still_owned(pid))
+    if survivors:
+        raise RuntimeError(f"receipt-owned worker descendants survived: {survivors}")
+    return roots, sorted(owned)
+
+
+def exact_build_containers():
+    listed = run(["docker", "ps", "--no-trunc", "--quiet"])
+    container_ids = listed.stdout.split()
+    if not container_ids:
+        return []
+    inspected = json.loads(run(["docker", "inspect", *container_ids]).stdout)
+    if not isinstance(inspected, list) or len(inspected) != len(container_ids):
+        raise RuntimeError("Docker returned malformed cleanup identities")
+    prefix = str(build_root) + "/"
+    selected = []
+    for row in inspected:
+        if not isinstance(row, dict) or not isinstance(row.get("Mounts"), list):
+            raise RuntimeError("Docker returned a malformed cleanup row")
+        container_id = str(row.get("Id", ""))
+        if re.fullmatch(r"[0-9a-f]{12,64}", container_id) is None:
+            raise RuntimeError("Docker returned a malformed container ID")
+        if any(
+            isinstance(mount, dict)
+            and mount.get("Type") == "bind"
+            and isinstance(mount.get("Source"), str)
+            and (
+                mount["Source"] == str(build_root)
+                or mount["Source"].startswith(prefix)
+            )
+            for mount in row["Mounts"]
+        ):
+            selected.append(container_id)
+    return sorted(selected)
+
+
+def stop_exact_containers():
+    selected = exact_build_containers()
+    if selected:
+        run(["docker", "stop", "--time", "30", *selected], check=False, timeout=45)
+        survivors = exact_build_containers()
+        if survivors:
+            run(["docker", "kill", *survivors], check=False, timeout=15)
+    survivors = exact_build_containers()
+    if survivors:
+        raise RuntimeError(f"receipt-owned containers survived: {survivors}")
+    return selected
+
+
+def artifact_evidence(path):
+    candidate = pathlib.Path(path)
+    try:
+        metadata = candidate.stat()
+    except FileNotFoundError:
+        return {"present": False, "size": 0, "sha256": None}
+    if not candidate.is_file():
+        raise RuntimeError(f"cleanup evidence path is not a file: {path}")
+    digest = None
+    if candidate == pathlib.Path(manifest_path):
+        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    return {"present": True, "size": metadata.st_size, "sha256": digest}
+
+
+before = unit_status()
+unit_cancelled = before["LoadState"] == "loaded" and before["ActiveState"] not in {
+    "inactive",
+    "failed",
+}
+if unit_cancelled:
+    try:
+        run(["systemctl", "stop", unit_name], timeout=100)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        run(
+            ["systemctl", "kill", "--kill-who=all", "--signal=KILL", unit_name],
+            check=False,
+        )
+
+containers = stop_exact_containers()
+worker_roots, worker_processes = terminate_exact_workers()
+after = unit_status()
+if after["LoadState"] == "loaded" and after["ActiveState"] not in {"inactive", "failed"}:
+    run(
+        ["systemctl", "kill", "--kill-who=all", "--signal=KILL", unit_name],
+        check=False,
+    )
+    run(["systemctl", "stop", unit_name], check=False, timeout=15)
+    after = unit_status()
+if after["LoadState"] == "loaded" and after["ActiveState"] not in {"inactive", "failed"}:
+    raise RuntimeError(f"receipt-owned unit remained active: {after}")
+if exact_worker_roots(process_table()):
+    raise RuntimeError("receipt-owned worker root survived cleanup")
+if exact_build_containers():
+    raise RuntimeError("receipt-owned build container survived cleanup")
+
+result = {
+    "unit_name": unit_name,
+    "build_root": str(build_root),
+    "unit_before": before,
+    "unit_after": after,
+    "unit_cancelled": unit_cancelled,
+    "worker_roots": worker_roots,
+    "worker_processes": worker_processes,
+    "containers": containers,
+    "log": artifact_evidence(remote_log_path),
+    "manifest": artifact_evidence(manifest_path),
+    "build_root_preserved": pathlib.Path(build_root).is_dir(),
+}
+print(json.dumps(result, sort_keys=True))
 """.strip()
 
 RUN_ID_RE = re.compile(r"^(?P<timestamp>\d{8}T\d{6}Z)-(?P<revision>[0-9a-f]{12})$")
@@ -2157,6 +2409,74 @@ def close_ci_access(*, region: str, receipt: Path) -> dict[str, Any]:
     return payload
 
 
+def close_ci_access_owner(*, region: str, owner_token: str) -> dict[str, Any]:
+    """Revoke every exact ephemeral SSH rule owned by one workflow job token."""
+
+    owner_token_sha256, description = ci_access_owner(owner_token)
+    matrix = load_matrix()
+    identity = aws_preflight(region)
+    builders, records = discover_existing_builders(
+        region, matrix, ephemeral_ssh=False
+    )
+    del builders
+    group_id, _group = validated_builder_security_group(region, records)
+    payload = aws_json(
+        region,
+        "ec2",
+        "describe-security-group-rules",
+        "--filters",
+        f"Name=group-id,Values={group_id}",
+    )
+    rules = payload.get("SecurityGroupRules", [])
+    if not isinstance(rules, list):
+        raise PackageBuilderError("security-group rule ownership listing is malformed")
+    owned_rule_ids: list[str] = []
+    owned_cidrs: list[str] = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            raise PackageBuilderError("security-group rule ownership row is malformed")
+        if rule.get("Description") != description:
+            continue
+        rule_id = str(rule.get("SecurityGroupRuleId", ""))
+        cidr = str(rule.get("CidrIpv4", ""))
+        if (
+            rule.get("GroupId") != group_id
+            or rule.get("IsEgress") is not False
+            or rule.get("IpProtocol") != "tcp"
+            or rule.get("FromPort") != 22
+            or rule.get("ToPort") != 22
+            or SECURITY_GROUP_RULE_ID_RE.fullmatch(rule_id) is None
+        ):
+            raise PackageBuilderError(
+                "owner-matched CI ingress is not a canonical SSH rule"
+            )
+        normalize_ssh_cidr(cidr)
+        owned_rule_ids.append(rule_id)
+        owned_cidrs.append(cidr)
+    if len(set(owned_rule_ids)) != len(owned_rule_ids) or len(set(owned_cidrs)) != len(
+        owned_cidrs
+    ):
+        raise PackageBuilderError("owner-matched CI ingress contains duplicates")
+    if owned_rule_ids:
+        aws_no_output(
+            region,
+            "ec2",
+            "revoke-security-group-ingress",
+            "--group-id",
+            group_id,
+            "--security-group-rule-ids",
+            *sorted(owned_rule_ids),
+        )
+    return {
+        "account": identity["Account"],
+        "region": region,
+        "security_group_id": group_id,
+        "owner_token_sha256": owner_token_sha256,
+        "revoked_rule_ids": sorted(owned_rule_ids),
+        "revoked_cidrs": sorted(owned_cidrs),
+    }
+
+
 def latest_cached_ami(
     region: str,
     architecture: Architecture,
@@ -2623,15 +2943,15 @@ def remote_package_quiescence_script(
     return "\n".join(lines) + "\n"
 
 
-def run_ssm_shell_command(
+def run_ssm_shell_command_detailed(
     region: str,
     instance_ids: Sequence[str],
     *,
     script: str,
     comment: str,
     timeout_seconds: int = SSM_CLEANUP_TIMEOUT_SECONDS,
-) -> str:
-    """Run one bounded SSM shell command and require every exact target to pass."""
+) -> tuple[str, list[dict[str, Any]]]:
+    """Run one bounded SSM shell command and return its exact terminal rows."""
 
     expected = tuple(sorted(set(instance_ids)))
     if (
@@ -2775,6 +3095,26 @@ def run_ssm_shell_command(
         raise PackageBuilderError(
             "SSM package cleanup failed closed: " + "; ".join(failures)
         )
+    return command_id, rows
+
+
+def run_ssm_shell_command(
+    region: str,
+    instance_ids: Sequence[str],
+    *,
+    script: str,
+    comment: str,
+    timeout_seconds: int = SSM_CLEANUP_TIMEOUT_SECONDS,
+) -> str:
+    """Run one bounded SSM shell command and require every exact target to pass."""
+
+    command_id, _rows = run_ssm_shell_command_detailed(
+        region,
+        instance_ids,
+        script=script,
+        comment=comment,
+        timeout_seconds=timeout_seconds,
+    )
     return command_id
 
 
@@ -4477,6 +4817,9 @@ def launch_remote_build(
         "--property=Type=exec",
         "--property=User=ubuntu",
         "--property=Group=ubuntu",
+        f"--property=RuntimeMaxSec={REMOTE_BUILD_RUNTIME_MAX}",
+        f"--property=TimeoutStopSec={REMOTE_BUILD_STOP_TIMEOUT}",
+        "--property=KillMode=control-group",
         f"--property=WorkingDirectory={packaging_dir}",
         f"--property=StandardOutput=append:{remote_log_path}",
         f"--property=StandardError=append:{remote_log_path}",
@@ -4994,7 +5337,7 @@ def wait_remote_build(
     handle: RemoteBuildHandle,
     key_path: Path,
     *,
-    timeout_seconds: int = 24 * 60 * 60,
+    timeout_seconds: int = REMOTE_BUILD_WAIT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     terminal_status: dict[str, str] | None = None
@@ -8281,6 +8624,385 @@ def mark_controller_collected(
     return persist_controller_receipt(receipt_path, receipt, matrix=matrix)
 
 
+def controller_cleanup_script(
+    receipt: dict[str, Any], builder: Builder, outputs: dict[str, Any]
+) -> str:
+    """Return one lifecycle-locked, receipt-exact remote cleanup command."""
+
+    value = receipt["builders"][builder.architecture]
+    if value["python_environment"] is None:
+        worker_argv: tuple[str, ...] = ()
+    else:
+        worker_argv = controller_handle(receipt, builder, outputs).worker_argv
+    command = command_text(
+        [
+            "python3",
+            "-c",
+            REMOTE_CONTROLLER_CLEANUP_SCRIPT,
+            REMOTE_WORKSPACE,
+            str(value["unit_name"]),
+            str(value["build_root"]),
+            json.dumps(list(worker_argv), separators=(",", ":")),
+            str(value["remote_log_path"]),
+            str(value["manifest_path"]),
+        ]
+    )
+    return "\n".join(
+        [
+            "set -Eeuo pipefail",
+            f"exec 9>{shlex.quote(REMOTE_PACKAGE_LIFECYCLE_LOCK)}",
+            "flock --exclusive --wait "
+            f"{REMOTE_PACKAGE_LIFECYCLE_LOCK_WAIT_SECONDS} 9",
+            command,
+        ]
+    ) + "\n"
+
+
+def require_controller_cleanup_result(
+    value: object,
+    *,
+    receipt: dict[str, Any],
+    architecture: str,
+) -> dict[str, Any]:
+    """Validate the closed evidence emitted by one remote cleanup script."""
+
+    if not isinstance(value, dict):
+        raise PackageBuilderError(f"{architecture} cleanup result must be an object")
+    require_exact_keys(
+        value,
+        {
+            "unit_name",
+            "build_root",
+            "unit_before",
+            "unit_after",
+            "unit_cancelled",
+            "worker_roots",
+            "worker_processes",
+            "containers",
+            "log",
+            "manifest",
+            "build_root_preserved",
+        },
+        f"{architecture} cleanup result",
+    )
+    expected = receipt["builders"][architecture]
+    if (
+        value["unit_name"] != expected["unit_name"]
+        or value["build_root"] != expected["build_root"]
+        or type(value["unit_cancelled"]) is not bool
+        or type(value["build_root_preserved"]) is not bool
+    ):
+        raise PackageBuilderError(f"{architecture} cleanup identity is invalid")
+    for label in ("unit_before", "unit_after"):
+        status = value[label]
+        if not isinstance(status, dict):
+            raise PackageBuilderError(f"{architecture} cleanup {label} is malformed")
+        require_exact_keys(
+            status,
+            {"LoadState", "ActiveState", "SubState", "Result", "ExecMainStatus"},
+            f"{architecture} cleanup {label}",
+        )
+        if any(not isinstance(item, str) for item in status.values()):
+            raise PackageBuilderError(f"{architecture} cleanup {label} is malformed")
+    after = value["unit_after"]
+    if after["LoadState"] == "loaded" and after["ActiveState"] not in {
+        "inactive",
+        "failed",
+    }:
+        raise PackageBuilderError(f"{architecture} cleanup left its unit active")
+    for label in ("worker_roots", "worker_processes"):
+        pids = value[label]
+        if (
+            not isinstance(pids, list)
+            or any(type(pid) is not int or pid <= 0 for pid in pids)
+            or len(set(pids)) != len(pids)
+        ):
+            raise PackageBuilderError(f"{architecture} cleanup {label} is malformed")
+    containers = value["containers"]
+    if (
+        not isinstance(containers, list)
+        or any(re.fullmatch(r"[0-9a-f]{12,64}", str(item)) is None for item in containers)
+        or len(set(containers)) != len(containers)
+    ):
+        raise PackageBuilderError(f"{architecture} cleanup containers are malformed")
+    for label in ("log", "manifest"):
+        artifact = value[label]
+        if not isinstance(artifact, dict):
+            raise PackageBuilderError(f"{architecture} cleanup {label} is malformed")
+        require_exact_keys(
+            artifact,
+            {"present", "size", "sha256"},
+            f"{architecture} cleanup {label}",
+        )
+        if (
+            type(artifact["present"]) is not bool
+            or type(artifact["size"]) is not int
+            or artifact["size"] < 0
+            or (
+                artifact["sha256"] is not None
+                and re.fullmatch(r"[0-9a-f]{64}", str(artifact["sha256"])) is None
+            )
+        ):
+            raise PackageBuilderError(f"{architecture} cleanup {label} is malformed")
+    return value
+
+
+def controller_cleanup_result_from_rows(
+    rows: list[dict[str, Any]],
+    *,
+    instance_id: str,
+    receipt: dict[str, Any],
+    architecture: str,
+) -> dict[str, Any]:
+    """Extract the one JSON evidence row returned for an exact SSM target."""
+
+    if len(rows) != 1 or rows[0].get("InstanceId") != instance_id:
+        raise PackageBuilderError(
+            f"{architecture} cleanup SSM result omitted its exact instance"
+        )
+    candidates: list[object] = []
+    plugins = rows[0].get("CommandPlugins", [])
+    if not isinstance(plugins, list):
+        raise PackageBuilderError(f"{architecture} cleanup SSM plugins are malformed")
+    for plugin in plugins:
+        if not isinstance(plugin, dict):
+            raise PackageBuilderError(f"{architecture} cleanup SSM plugin is malformed")
+        for line in str(plugin.get("Output", "")).splitlines():
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and candidate.get("unit_name") == receipt[
+                "builders"
+            ][architecture]["unit_name"]:
+                candidates.append(candidate)
+    if len(candidates) != 1:
+        raise PackageBuilderError(
+            f"{architecture} cleanup did not return one exact evidence object"
+        )
+    return require_controller_cleanup_result(
+        candidates[0], receipt=receipt, architecture=architecture
+    )
+
+
+def cleanup_controller_run(args: argparse.Namespace) -> dict[str, Any]:
+    """Cancel only receipt-owned work and stop only receipt-owned instances."""
+
+    source_revision = str(args.source_revision)
+    if re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        raise PackageBuilderError("cleanup-run requires a full source revision")
+    matrix = load_matrix()
+    outputs, builders, records = discover_existing_infrastructure(args.region, matrix)
+    receipt_path = Path(args.receipt).expanduser().resolve()
+    evidence_path = Path(args.evidence).expanduser().resolve()
+    owner_token_sha256, _description = ci_access_owner(str(args.owner_token))
+    receipt = fetch_controller_receipt(
+        receipt_path,
+        matrix=matrix,
+        region=args.region,
+        bucket=str(outputs["package_bucket_name"]),
+        source_revision=source_revision,
+        required=not bool(args.if_present),
+    )
+    evidence: dict[str, Any] = {
+        "schema_revision": CLEANUP_EVIDENCE_SCHEMA_REVISION,
+        "created_at": utc_now(),
+        "region": args.region,
+        "source_revision": source_revision,
+        "receipt_present": receipt is not None,
+        "receipt_state_before": None,
+        "receipt_state_after": None,
+        "builders": {},
+        "errors": [],
+    }
+    if receipt is None:
+        write_json_atomic(evidence_path, evidence)
+        return evidence
+    receipt = require_controller_receipt(
+        receipt,
+        matrix=matrix,
+        label="workflow-finalizer controller receipt",
+        expected_region=args.region,
+        expected_account=str(outputs["account_id"]),
+        expected_bucket=str(outputs["package_bucket_name"]),
+        builders=builders,
+        expected_source_revision=source_revision,
+        expected_owner_token_sha256=owner_token_sha256,
+    )
+    state_before = str(receipt["state"])
+    evidence["receipt_state_before"] = state_before
+    errors: list[str] = []
+    current_states = {
+        name: instance_state(records[name]) for name in matrix.architectures
+    }
+
+    def make_running(name: str) -> None:
+        state = current_states[name]
+        if state == "pending":
+            wait_for_ec2_state(args.region, builders[name].instance_id, "running")
+            current_states[name] = "running"
+            state = "running"
+        if state == "running":
+            wait_for_ssm_online(
+                args.region,
+                builders[name].instance_id,
+                timeout_seconds=CONTROLLER_CLEANUP_TIMEOUT_SECONDS,
+            )
+        elif state not in {"stopped", "stopping"}:
+            raise PackageBuilderError(
+                f"{name} cleanup cannot proceed from instance state {state!r}"
+            )
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(builders), thread_name_prefix="bioseq-controller-cleanup-ready"
+    ) as executor:
+        futures = {
+            executor.submit(make_running, name): name for name in matrix.architectures
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                future.result()
+            except Exception as error:
+                errors.append(f"{name} readiness: {error}")
+
+    def clean_builder(name: str) -> tuple[str, list[dict[str, Any]]]:
+        command_id, rows = run_ssm_shell_command_detailed(
+            args.region,
+            [builders[name].instance_id],
+            script=controller_cleanup_script(receipt, builders[name], outputs),
+            comment=f"Bioseq receipt-owned package cleanup ({name})",
+            timeout_seconds=CONTROLLER_CLEANUP_TIMEOUT_SECONDS,
+        )
+        result = controller_cleanup_result_from_rows(
+            rows,
+            instance_id=builders[name].instance_id,
+            receipt=receipt,
+            architecture=name,
+        )
+        return command_id, [result]
+
+    runnable = [
+        name for name in matrix.architectures if current_states[name] == "running"
+    ]
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, len(runnable)),
+        thread_name_prefix="bioseq-controller-cleanup",
+    ) as executor:
+        futures = {executor.submit(clean_builder, name): name for name in runnable}
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                command_id, results = future.result()
+                evidence["builders"][name] = {
+                    "instance_id": builders[name].instance_id,
+                    "instance_state_before": current_states[name],
+                    "stop_owned": receipt["builders"][name]["stop_owned"],
+                    "cleanup_command_id": command_id,
+                    "remote": results[0],
+                }
+            except Exception as error:
+                errors.append(f"{name} remote cleanup: {error}")
+    for name in matrix.architectures:
+        if name not in evidence["builders"]:
+            evidence["builders"][name] = {
+                "instance_id": builders[name].instance_id,
+                "instance_state_before": current_states[name],
+                "stop_owned": receipt["builders"][name]["stop_owned"],
+                "cleanup_command_id": None,
+                "remote": None,
+            }
+
+    # Cost cleanup is intentionally narrower than the public `stop` command:
+    # finalization may run before collection, but only an instance recorded as
+    # stopped/stopping before launch is lifecycle-owned by this workflow.
+    def stop_owned_builder(name: str) -> tuple[str, str | None]:
+        if current_states[name] == "running" and not any(
+            error.startswith(f"{name} ") for error in errors
+        ):
+            not_after_epoch = int(time.time()) + (
+                CONTROLLER_CLEANUP_TIMEOUT_SECONDS - SSM_CANCEL_RESERVE_SECONDS
+            )
+            command_id = run_ssm_shell_command(
+                args.region,
+                [builders[name].instance_id],
+                script=remote_package_quiescence_script(
+                    poweroff=True, not_after_epoch=not_after_epoch
+                ),
+                comment=f"Bioseq controller-owned package builder stop ({name})",
+                timeout_seconds=CONTROLLER_CLEANUP_TIMEOUT_SECONDS,
+            )
+            wait_for_ec2_state(
+                args.region,
+                builders[name].instance_id,
+                "stopped",
+                timeout_seconds=CONTROLLER_CLEANUP_TIMEOUT_SECONDS,
+            )
+            return "stopped", command_id
+        elif current_states[name] == "stopping":
+            wait_for_ec2_state(
+                args.region,
+                builders[name].instance_id,
+                "stopped",
+                timeout_seconds=CONTROLLER_CLEANUP_TIMEOUT_SECONDS,
+            )
+            return "stopped", None
+        return current_states[name], None
+
+    owned = [
+        name
+        for name in matrix.architectures
+        if receipt["builders"][name]["stop_owned"]
+    ]
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, len(owned)),
+        thread_name_prefix="bioseq-controller-owned-stop",
+    ) as executor:
+        futures = {executor.submit(stop_owned_builder, name): name for name in owned}
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                final_state, command_id = future.result()
+                current_states[name] = final_state
+                if command_id is not None:
+                    evidence["builders"][name]["poweroff_command_id"] = command_id
+            except Exception as error:
+                errors.append(f"{name} owned instance stop: {error}")
+
+    for name in matrix.architectures:
+        evidence["builders"][name]["instance_state_after"] = current_states[name]
+        if (
+            receipt["builders"][name]["stop_owned"]
+            and current_states[name] != "stopped"
+        ):
+            errors.append(
+                f"{name} controller-owned instance remained {current_states[name]}"
+            )
+
+    if state_before in {"prepared", "active"}:
+        receipt["state"] = "failed"
+        diagnostic = (
+            "workflow finalizer cleanup incomplete: " + "; ".join(errors)
+            if errors
+            else "workflow finalizer cancelled receipt-owned package workers"
+        )
+        receipt["diagnostics"] = [diagnostic[-CONTROLLER_DIAGNOSTIC_LIMIT:]]
+        try:
+            receipt = persist_controller_receipt(
+                receipt_path, receipt, matrix=matrix
+            )
+        except Exception as error:
+            errors.append(f"controller receipt finalization: {error}")
+    evidence["receipt_state_after"] = receipt["state"]
+    evidence["errors"] = [value[-CONTROLLER_DIAGNOSTIC_LIMIT:] for value in errors]
+    write_json_atomic(evidence_path, evidence)
+    if errors:
+        raise PackageBuilderError(
+            "workflow-finalizer package cleanup failed: " + "; ".join(errors)
+        )
+    return evidence
+
+
 def cmd_validate(args: argparse.Namespace) -> None:
     matrix = load_matrix()
     selection = select_matrix(args, matrix)
@@ -8383,6 +9105,18 @@ def cmd_close_ci_access(args: argparse.Namespace) -> None:
     payload = close_ci_access(
         region=args.region, receipt=Path(args.receipt).expanduser().resolve()
     )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def cmd_close_ci_access_owner(args: argparse.Namespace) -> None:
+    payload = close_ci_access_owner(
+        region=args.region, owner_token=str(args.owner_token)
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def cmd_cleanup_run(args: argparse.Namespace) -> None:
+    payload = cleanup_controller_run(args)
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
@@ -8759,6 +9493,26 @@ def build_parser() -> argparse.ArgumentParser:
     close_access_parser.add_argument("--region", default=DEFAULT_REGION)
     close_access_parser.add_argument("--receipt", required=True)
     close_access_parser.set_defaults(handler=cmd_close_ci_access)
+
+    close_access_owner_parser = subparsers.add_parser(
+        "close-ci-access-owner",
+        help="revoke only ephemeral ingress matching one exact workflow owner token",
+    )
+    close_access_owner_parser.add_argument("--region", default=DEFAULT_REGION)
+    close_access_owner_parser.add_argument("--owner-token", required=True)
+    close_access_owner_parser.set_defaults(handler=cmd_close_ci_access_owner)
+
+    cleanup_parser = subparsers.add_parser(
+        "cleanup-run",
+        help="cancel only receipt-owned package work and preserve cleanup evidence",
+    )
+    cleanup_parser.add_argument("--region", default=DEFAULT_REGION)
+    cleanup_parser.add_argument("--receipt", required=True)
+    cleanup_parser.add_argument("--source-revision", required=True)
+    cleanup_parser.add_argument("--owner-token", required=True)
+    cleanup_parser.add_argument("--evidence", required=True)
+    cleanup_parser.add_argument("--if-present", action="store_true")
+    cleanup_parser.set_defaults(handler=cmd_cleanup_run)
 
     stop_parser = subparsers.add_parser(
         "stop", help="stop the exact tagged builders without deleting reusable resources"

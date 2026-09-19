@@ -165,11 +165,11 @@ template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
 /** Arena-backed dynamic-programming state for the single-affine recurrence. */
 class ksw_dp_state {
 public:
-    int8_t*  diff_up_base       = nullptr;  ///< Vertical score-difference rows.
-    int8_t*  diff_left_base     = nullptr;  ///< Horizontal score-difference rows.
-    int8_t*  gap_e_offset_base  = nullptr;  ///< Horizontal gap offsets.
-    int8_t*  gap_f_offset_base  = nullptr;  ///< Vertical gap offsets.
-    int8_t*  diag_score_base    = nullptr;  ///< Generic-score diagonal rows.
+    ksw2_partial_score_type* diff_up_base = nullptr;  ///< Vertical score-difference rows.
+    ksw2_partial_score_type* diff_left_base = nullptr;  ///< Horizontal score-difference rows.
+    ksw2_partial_score_type* gap_e_offset_base = nullptr;  ///< Horizontal gap offsets.
+    ksw2_partial_score_type* gap_f_offset_base = nullptr;  ///< Vertical gap offsets.
+    ksw2_partial_score_type* diag_score_base = nullptr;  ///< Generic-score diagonal rows.
     uint8_t* target_bytes       = nullptr;  ///< Encoded target ranks.
     uint8_t* query_reversed     = nullptr;  ///< Encoded query ranks in DP order.
 
@@ -177,8 +177,8 @@ public:
     ksw_dp_state() = default;
 
     /** Allocate single-affine state for the requested sequence extents. */
-    ksw_dp_state(size_t target_length, size_t query_length, size_t vector_bytes)
-        : ksw_dp_state(target_length, query_length, vector_bytes, 5, /*zero_state_arrays=*/true) {}
+    explicit ksw_dp_state(const ksw2_storage_plan& plan)
+        : ksw_dp_state(plan, /*zero_state_arrays=*/true) {}
 
     /** Return the number of vector slots in one target row. */
     [[nodiscard]] int target_vector_count() const noexcept { return target_vec_count_; }
@@ -195,7 +195,7 @@ public:
     }
 
     /** Fill one state array with one byte value. */
-    void fill_array(int8_t* base, uint8_t value) noexcept {
+    void fill_array(ksw2_partial_score_type* base, uint8_t value) noexcept {
         std::memset(base, value, array_byte_count());
     }
 
@@ -212,16 +212,15 @@ protected:
     // diag_score array (the last DP-state slot) is still zero-filled
     // because the generic-score code path may read it before writing,
     // and it's only one stride wide.
-    ksw_dp_state(size_t target_length, size_t query_length, size_t vector_bytes,
-               int state_array_count, bool zero_state_arrays)
-        : target_vec_count_(static_cast<int>((target_length + vector_bytes - 1) / vector_bytes))
-        , query_vec_count_(static_cast<int>((query_length + vector_bytes - 1) / vector_bytes))
-        , vec_bytes_(vector_bytes)
+    ksw_dp_state(const ksw2_storage_plan& plan, bool zero_state_arrays)
+        : target_vec_count_(static_cast<int>(plan.target_vector_count))
+        , query_vec_count_(static_cast<int>(plan.query_vector_count))
+        , vec_bytes_(plan.vector_bytes)
     {
-        const size_t state_array_byte_count = static_cast<size_t>(target_vec_count_) * vector_bytes;
-        const size_t storage_byte_count  = (static_cast<size_t>(state_array_count + 1) * target_vec_count_
-                              + static_cast<size_t>(query_vec_count_) + 1) * vector_bytes;
-        storage_ = context::current().alloc_align_array<int8_t, 64>(storage_byte_count);
+        const size_t state_array_count = plan.state_array_count;
+        const size_t state_array_byte_count = plan.state_array_bytes;
+        storage_ = context::current().alloc_align_array<ksw2_partial_score_type, 64>(
+            plan.state_bytes);
         const size_t initialized_state_bytes = static_cast<size_t>(state_array_count) * state_array_byte_count;
         if (zero_state_arrays) {
             std::memset(storage_.data(), 0, initialized_state_bytes);
@@ -238,7 +237,7 @@ protected:
             storage_[initialized_state_bytes] = 0;
         }
 
-        int8_t* storage_base = storage_.data();
+        ksw2_partial_score_type* storage_base = storage_.data();
         diff_up_base      = storage_base;
         diff_left_base    = diff_up_base      + state_array_byte_count;
         gap_e_offset_base = diff_left_base    + state_array_byte_count;
@@ -250,7 +249,7 @@ protected:
             storage_base + static_cast<size_t>(state_array_count + 1) * state_array_byte_count);
     }
 
-    [[nodiscard]] int8_t* array_pointer(int index) noexcept {
+    [[nodiscard]] ksw2_partial_score_type* array_pointer(int index) noexcept {
         return storage_.data()
             + static_cast<size_t>(index) * target_vec_count_ * vec_bytes_;
     }
@@ -258,27 +257,26 @@ protected:
     int target_vec_count_ = 0;
     int query_vec_count_  = 0;
     size_t vec_bytes_     = 0;
-    std::span<int8_t> storage_;
+    std::span<ksw2_partial_score_type> storage_;
 };
 
 /** Extended DP state carrying the second affine-gap recurrence. */
 class ksw_dual_affine_dp_state : public ksw_dp_state {
 public:
-    int8_t* gap_e2_offset_base = nullptr;  ///< Long horizontal-gap offsets.
-    int8_t* gap_f2_offset_base = nullptr;  ///< Long vertical-gap offsets.
+    ksw2_partial_score_type* gap_e2_offset_base = nullptr;  ///< Long horizontal-gap offsets.
+    ksw2_partial_score_type* gap_f2_offset_base = nullptr;  ///< Long vertical-gap offsets.
 
     /** Construct an empty dual-affine state handle. */
     ksw_dual_affine_dp_state() = default;
 
     /** Allocate dual-affine state for the requested sequence extents. */
-    ksw_dual_affine_dp_state(size_t target_length, size_t query_length, size_t vector_bytes)
+    explicit ksw_dual_affine_dp_state(const ksw2_storage_plan& plan)
         // Skip the broad zero-fill: align_ksw2_core fills arrays 0..5
         // explicitly via fill_leading_arrays(4, -q-e) +
         // fill_array(x2|y2, -q2-e2) right after construction. The
         // diag_score slot (array 6) still gets a one-stride zero-fill
         // inside the parent constructor.
-        : ksw_dp_state(target_length, query_length, vector_bytes, 7,
-                     /*zero_state_arrays=*/false)
+        : ksw_dp_state(plan, /*zero_state_arrays=*/false)
     {
         gap_e2_offset_base = array_pointer(4);
         gap_f2_offset_base = array_pointer(5);
@@ -303,17 +301,14 @@ public:
     ksw_backtrack_matrix() noexcept = default;
 
     /** Allocate storage for the admitted anti-diagonals and band capacity. */
-    void allocate(int anti_diagonal_count, int band_vector_capacity, size_t vector_bytes) {
-        vec_bytes_ = vector_bytes;
-        cols_in_vectors_ = band_vector_capacity;
-        byte_cols_per_row_ = band_vector_capacity * static_cast<int>(vector_bytes);
-        total_vector_slots_ =
-            static_cast<size_t>(anti_diagonal_count) * cols_in_vectors_ + 1;
-        const size_t total_bytes = total_vector_slots_ * vector_bytes;
+    void allocate(const ksw2_storage_plan& plan) {
+        vec_bytes_ = plan.vector_bytes;
+        cols_in_vectors_ = static_cast<int>(plan.band_vector_capacity);
+        byte_cols_per_row_ = static_cast<int>(plan.band_vector_capacity * plan.vector_bytes);
+        total_vector_slots_ = plan.backtrack_vector_slots;
         auto& alignment_context = context::current();
-        storage_ = alignment_context.alloc_align_array<int8_t, 64>(total_bytes);
-        band_range_ = alignment_context.alloc_align_array<int32_t>(
-            2 * static_cast<size_t>(anti_diagonal_count));
+        storage_ = alignment_context.alloc_align_array<int8_t, 64>(plan.backtrack_bytes);
+        band_range_ = alignment_context.alloc_align_array<int32_t>(plan.band_bound_elements);
     }
 
     /** Return whether traceback storage has been allocated. */
@@ -365,6 +360,16 @@ private:
 // =============================================================================
 
 /** Reconstruct a packed CIGAR from the banded traceback matrix. */
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+inline void ksw_backtrack_cigar(
+    const ksw_backtrack_matrix& matrix,
+    bool use_rotated_coordinates,
+    bool output_reversed,
+    int minimum_intron_length,
+    int starting_row,
+    int starting_column,
+    alignment_result_vector<std::uint32_t>& output_cigar)
+#else
 inline void ksw_backtrack_cigar(
     const ksw_backtrack_matrix& matrix,
     bool use_rotated_coordinates,
@@ -373,6 +378,7 @@ inline void ksw_backtrack_cigar(
     int starting_row,
     int starting_column,
     std::vector<uint32_t>& output_cigar)
+#endif
 {
     output_cigar.clear();
     // The traceback walks (starting_row + starting_column + 1) cells. Each cell

@@ -4,11 +4,19 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+extern "C" {
+#include "postgres.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <cstdint>
+#include <string_view>
 
 export module bioseq.postgres.scheduler.persist_target;
-
-import std;
 
 export namespace bioseq::postgres::scheduler {
 

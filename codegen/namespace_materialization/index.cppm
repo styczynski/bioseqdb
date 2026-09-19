@@ -26,9 +26,9 @@ export module bioseq.codegen.namespace_materialization;
 
 export import :manifest;
 export import :model;
-import :tests.contract;
-import :renderer;
-import :validator;
+export import :tests.contract;
+export import :renderer;
+export import :validator;
 import bioseq.codegen.structural_analysis;
 import bioseq.codegen.support;
 

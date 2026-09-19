@@ -3,9 +3,27 @@
  * @brief Implements scan, exact-row fetch, and parallel-scan TableAM callbacks.
  */
 module;
+
+extern "C" {
+#include "postgres.h"
+
+#include "access/skey.h"
+#include "access/tableam.h"
+#include "access/xact.h"
+#include "executor/tuptable.h"
+#include "nodes/bitmapset.h"
+#include "nodes/nodes.h"
+#include "nodes/pg_list.h"
+#include "storage/itemptr.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
+#include "utils/snapmgr.h"
+}
+
 #include <algorithm>
-#include <bioseq/pg_compat.h>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <map>
 #include <new>
@@ -14,6 +32,7 @@ module;
 #include <type_traits>
 #include <utility>
 #include <vector>
+
 export module bioseq.postgres.table:access_method_scan_callbacks;
 
 import bioseq.postgres.storage.physical;

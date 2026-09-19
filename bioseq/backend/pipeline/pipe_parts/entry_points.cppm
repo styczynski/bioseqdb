@@ -21,6 +21,7 @@ import bioseq.common.memory_budget;
 import bioseq.highway.dispatch_contract;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.sequences.kmers.two_stack_minimizers;
 import bioseq.sequences.cigar;
 import bioseq.alignment;
@@ -33,6 +34,7 @@ import bioseq.chaining.simd;
 import bioseq.chaining.rmq;
 import bioseq.chaining.vulkan;
 import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.runtime_contract;
 import bioseq.pipeline.stats;
 import bioseq.prefilter.types;
 import bioseq.prefilter.sneaky_snake;
@@ -526,10 +528,10 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_index_batch_owned(
         bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
         bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-        const ::bioseq::simd::pipe::minimizer_batch_view<::bioseq::minimizers::minimap_sketch_data>&
+        ::bioseq::simd::pipe::minimizer_batch_view<::bioseq::minimizers::minimap_sketch_data>
             query_minimizers,
         const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
-        const minimap2_parameters& params = minimap2_parameters{},
+        pipe::statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false);
@@ -537,9 +539,20 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_index_vector_owned(
         bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
         bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-        const std::vector<::bioseq::minimizers::minimap_sketch_data>& query_minimizers,
+        std::shared_ptr<const std::vector<::bioseq::minimizers::minimap_sketch_data>> query_minimizers,
         const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
-        const minimap2_parameters& params = minimap2_parameters{},
+        pipe::statement_execution_plan_owner execution_plan,
+        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
+        bool allow_gpu_target_index_build = false);
+
+    [[nodiscard, gnu::noinline]] match_result_collection
+    minimap_port_fragment_index_physical_owned(
+        bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
+        bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
+        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
+        const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
+        pipe::statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false);
@@ -547,9 +560,9 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection minimap_port_hash_major_owned(
         bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
         bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-        const std::vector<::bioseq::minimizers::minimap_sketch_data>& query_minimizers,
+        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
         const ::bioseq::indexing::hash_major_minimizer_selective_reader& prebuilt_target_index,
-        const minimap2_parameters& params = minimap2_parameters{},
+        pipe::statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false);
@@ -557,9 +570,9 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection minimap_port_grouped_soa_owned(
         bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
         bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-        const std::vector<::bioseq::minimizers::minimap_sketch_data>& query_minimizers,
+        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
         const ::bioseq::indexing::prepared_grouped_soa_query_reader& prebuilt_target_index,
-        const minimap2_parameters& params = minimap2_parameters{},
+        pipe::statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false);
@@ -567,10 +580,10 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_query_owned(
         bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
         bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-        const std::vector<::bioseq::minimizers::minimap_sketch_data>& query_minimizers,
+        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
         const ::bioseq::indexing::prepared_fragment_anchor_batch::query_handle&
             prebuilt_target_index,
-        const minimap2_parameters& params = minimap2_parameters{},
+        pipe::statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false);
@@ -578,10 +591,10 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_index_batch_owned(
         bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
         bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-        const ::bioseq::simd::pipe::minimizer_batch_view<::bioseq::minimizers::minimap_sketch_data>&
+        ::bioseq::simd::pipe::minimizer_batch_view<::bioseq::minimizers::minimap_sketch_data>
             query_minimizers,
         const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
-        const minimap2_parameters& params = minimap2_parameters{},
+        pipe::statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false);
@@ -589,9 +602,20 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_index_vector_owned(
         bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
         bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-        const std::vector<::bioseq::minimizers::minimap_sketch_data>& query_minimizers,
+        std::shared_ptr<const std::vector<::bioseq::minimizers::minimap_sketch_data>> query_minimizers,
         const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
-        const minimap2_parameters& params = minimap2_parameters{},
+        pipe::statement_execution_plan_owner execution_plan,
+        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+        bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
+        bool allow_gpu_target_index_build = false);
+
+    [[nodiscard, gnu::noinline]] match_result_collection
+    minimap_port_fragment_index_physical_owned(
+        bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
+        bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
+        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
+        const ::bioseq::indexing::minimizer_hashmap_fragment_index& prebuilt_target_index,
+        pipe::statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false);
@@ -599,9 +623,9 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection minimap_port_hash_major_owned(
         bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
         bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-        const std::vector<::bioseq::minimizers::minimap_sketch_data>& query_minimizers,
+        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
         const ::bioseq::indexing::hash_major_minimizer_selective_reader& prebuilt_target_index,
-        const minimap2_parameters& params = minimap2_parameters{},
+        pipe::statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false);
@@ -609,9 +633,9 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection minimap_port_grouped_soa_owned(
         bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
         bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-        const std::vector<::bioseq::minimizers::minimap_sketch_data>& query_minimizers,
+        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
         const ::bioseq::indexing::prepared_grouped_soa_query_reader& prebuilt_target_index,
-        const minimap2_parameters& params = minimap2_parameters{},
+        pipe::statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false);
@@ -619,10 +643,10 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection minimap_port_fragment_query_owned(
         bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
         bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-        const std::vector<::bioseq::minimizers::minimap_sketch_data>& query_minimizers,
+        const ::bioseq::minimizers::minimizer_physical_batch_owner& query_minimizers,
         const ::bioseq::indexing::prepared_fragment_anchor_batch::query_handle&
             prebuilt_target_index,
-        const minimap2_parameters& params = minimap2_parameters{},
+        pipe::statement_execution_plan_owner execution_plan,
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
         bool allow_gpu_target_index_build = false);
@@ -640,9 +664,13 @@ export {
     [[nodiscard]] match_result_collection
     minimap2_port_impl(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                       const std::vector<p_minimizer>& query_minimizers,
+                       pipe::minimizer_batch_view<p_minimizer> query_minimizers,
                        std::vector<p_minimizer> target_minimizers,
-                       const minimap2_parameters& params = minimap2_parameters{}) {
+                       pipe::statement_execution_plan_owner execution_plan) {
+        if (!execution_plan) {
+            throw std::invalid_argument("target preparation requires its statement plan");
+        }
+        const auto& params = execution_plan->frozen_parameters;
         static const auto* _desc = bioseq::instrumentation::register_static_region("minimap2_port");
         auto _scope = bioseq::instrumentation::region(_desc);
         const sequence_size_t target_len = target_seq.bp_size();
@@ -666,12 +694,12 @@ export {
             p_alphabet,
             p_minimizer,
             minimizer_hashmap_fragment_index,
-            std::vector<p_minimizer>>(
+            pipe::minimizer_batch_view<p_minimizer>>(
             query_seq,
             target_seq,
             query_minimizers,
             target_index,
-            params,
+            execution_plan,
             nullptr,
             {},
             is_gpu_target_index_build,
@@ -692,9 +720,13 @@ export {
     [[nodiscard]] match_result_collection minimap2_port_with_fixed_vulkan_target_handoff_impl(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-        const std::vector<p_minimizer>& query_minimizers,
+        pipe::minimizer_batch_view<p_minimizer> query_minimizers,
         fixed_vulkan_target_host_owner<p_minimizer> target_host,
-        const minimap2_parameters& params) {
+        pipe::statement_execution_plan_owner execution_plan) {
+        if (!execution_plan) {
+            throw std::invalid_argument("Vulkan target handoff requires its statement plan");
+        }
+        const auto& params = execution_plan->frozen_parameters;
         pipe::direct_resident_operation_stats ledger{};
         ledger.operation_identity = bioseq::indexing::next_gpu_source_direct_operation_identity();
         pipe::direct_resident_receipt_guard receipt_guard{&ledger};
@@ -891,12 +923,12 @@ export {
                 p_alphabet,
                 p_minimizer,
                 minimizer_hashmap_fragment_index,
-                std::vector<p_minimizer>>(
+                pipe::minimizer_batch_view<p_minimizer>>(
                 query_seq,
                 target_seq,
                 query_minimizers,
                 empty_target_index,
-                params,
+                execution_plan,
                 operation_gpu_cache ? &*operation_gpu_cache : nullptr,
                 cache_identity,
                 /*allow_gpu_target_index_build=*/false,
@@ -1097,7 +1129,24 @@ export {
         bounded_nthash_execution_stats bounded_nthash{};
         bool bounded_nthash_available = false;
         partial_vulkan_execution_stats partial_vulkan{};
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        minimizer_algorithm observed_algorithm = minimizer_algorithm::scalar;
+        bool observed_algorithm_available = false;
+#endif
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        [[nodiscard]] bool payload_empty() const noexcept {
+            return !scalar_available && scalar == scalar_minimizer_execution_stats{} &&
+                   !exact_simd_available && exact_simd == two_stack_execution_stats{} &&
+                   !bounded_nthash_available &&
+                   bounded_nthash == bounded_nthash_execution_stats{} &&
+                   partial_vulkan == partial_vulkan_execution_stats{};
+        }
+
+        [[nodiscard]] bool empty() const noexcept {
+            return payload_empty() && !observed_algorithm_available;
+        }
+#else
         [[nodiscard]] bool empty() const noexcept {
             return !scalar_available && scalar == scalar_minimizer_execution_stats{} &&
                    !exact_simd_available && exact_simd == two_stack_execution_stats{} &&
@@ -1105,6 +1154,7 @@ export {
                    bounded_nthash == bounded_nthash_execution_stats{} &&
                    partial_vulkan == partial_vulkan_execution_stats{};
         }
+#endif
     };
 
     /// Transfer a fixed Vulkan host vector and whichever one accounting authority
@@ -1222,12 +1272,25 @@ export {
         minimizer_sketch_execution_stats stats{};
         stats.partial_vulkan.sketch_dispatches =
             adopted.adoption.dispatch_token.completed_roundtrips;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        stats.observed_algorithm = minimizer_algorithm::vulkan_minimap_integer;
+        stats.observed_algorithm_available = true;
+#endif
         return fixed_vulkan_target_sketch<p_minimizer>{std::move(adopted), stats};
     }
 
     [[nodiscard]] inline bool minimizer_sketch_stats_matches_selected_route(
         ::bioseq::simd::minimizer_algorithm selected,
         const minimizer_sketch_execution_stats& stats) noexcept {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        const bool exact_identity = stats.observed_algorithm_available &&
+            (stats.observed_algorithm == selected ||
+             (selected == minimizer_algorithm::simd_minimap2_reference &&
+              stats.observed_algorithm == minimizer_algorithm::scalar));
+        if (!exact_identity) {
+            return false;
+        }
+#endif
         if (selected == ::bioseq::simd::minimizer_algorithm::scalar) {
             return stats.scalar_available && stats.scalar.is_coherent() &&
                    !stats.exact_simd_available && stats.exact_simd == two_stack_execution_stats{} &&
@@ -1259,7 +1322,11 @@ export {
                    stats.bounded_nthash == bounded_nthash_execution_stats{} &&
                    stats.partial_vulkan.is_exact_sketch_token_consistent();
         }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        return selected == minimizer_algorithm::simd_minimap2_reference && stats.payload_empty();
+#else
         return stats.empty();
+#endif
     }
 
     enum class minimizer_sketch_role : std::uint8_t {
@@ -1316,12 +1383,12 @@ export {
     [[nodiscard, gnu::noinline]] match_result_collection
     minimap_port_raw_owned(bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
                            bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-                           const minimap2_parameters& params = minimap2_parameters{});
+                           pipe::statement_execution_plan_owner execution_plan);
 
     [[nodiscard, gnu::noinline]] match_result_collection
     minimap_port_raw_owned(bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
                            bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-                           const minimap2_parameters& params = minimap2_parameters{});
+                           pipe::statement_execution_plan_owner execution_plan);
 
     } // namespace bioseq::simd
 

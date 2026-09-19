@@ -46,7 +46,6 @@ import bioseq.postgres.column.table_access;
 import :access_callback_state;
 import :access_identity;
 import :access_common;
-import :access_hooks;
 
 /** Pending sequence-source authority retained for one speculative parent row. */
 struct pending_speculative_sources {

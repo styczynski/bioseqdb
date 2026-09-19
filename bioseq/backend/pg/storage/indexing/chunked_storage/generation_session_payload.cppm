@@ -3,8 +3,14 @@
  * @brief Defines grouped-generation payload planning and section admission.
  */
 module;
-#include <bioseq/pg_compat.h>
+
+// Clang 22 must see these textual libc++ declarations before deserializing
+// header-backed dependency BMIs; importing std first makes aligned operator new
+// appear as two unrelated candidates during container allocation.
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_session_payload;
+
 import std;
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
 import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI

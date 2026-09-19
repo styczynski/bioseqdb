@@ -29,23 +29,27 @@ import bioseq.highway.dispatch_contract;
 import bioseq.indexing.type;
 import bioseq.postgres.column.table_access;
 import bioseq.postgres.support;
-import bioseq.postgres.types.compact_sequence;
+import bioseq.sequences.compact_sequence_typmod;
 
-import :custom_scan_runtime_support;
-import :custom_scan_oid_expression_support_semantic_analysis;
-import :custom_scan_semantic_payload_aligner_semantics;
-import :custom_scan_semantic_payload_callback_contracts;
-import :custom_scan_join_ownership_carrier_lineage;
-import :custom_scan_join_ownership_sequence_typmod;
-import :custom_scan_join_ownership_descendant_neutralization;
-import :custom_scan_join_ownership_semantic_admission;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_runtime_buffer_contracts;
+import :custom_scan_oid_expression_support_oid_catalog;
+import :custom_scan_planner_aligner_contracts;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_join_ownership_carrier_lineage_contracts;
+import :custom_scan_join_ownership_sequence_typmod_validation_contracts;
+import :custom_scan_join_ownership_descendant_path_contracts;
+import :custom_scan_join_ownership_semantic_admission_contracts;
 import :custom_scan_join_ownership_target_contracts;
 import :custom_scan_slice_path_codec_contract;
-import :custom_scan_slice_path_carrier_lineage;
-import :custom_scan_slice_rewrite_path_cloning;
-import :custom_scan_per_row_join_paths_carrier_analysis;
-import :custom_scan_per_row_join_paths_target_normalization;
-import :custom_scan_per_row_join_paths_path_reconstruction;
+import :custom_scan_slice_path_carrier_contracts;
+import :custom_scan_slice_rewrite_path_contracts;
+import :custom_scan_slice_rewrite_path_tagging_contracts;
+import :custom_scan_per_row_join_paths_carrier_contracts;
+import :custom_scan_per_row_join_paths_target_normalization_contracts;
+import :custom_scan_per_row_join_paths_reconstruction_contracts;
+export import :custom_scan_per_row_join_paths_transformed_admission_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -175,6 +179,32 @@ export {
         required_vars = list_concat(required_vars, list_copy(owner_setrefs_carrier_vars));
         required_vars = list_concat(required_vars, pull_var_clause(query_expression, pull_flags));
         required_vars = list_concat(required_vars, list_copy(owner_support.passthrough_vars));
+        /* A transformed result slot does not retain the source scan's physical
+         * slot identity.  For a direct relation, carry both components explicitly:
+         * ctid is unique only within the relation named by tableoid.  A parent
+         * inheritance RTE can place different physical relations below one Append;
+         * retaining its existing host-only owner avoids forging one parent identity
+         * or widening every append child.  A leaf child RTE has inh=false and is
+         * therefore authenticated independently.  These remain private child
+         * requirements and never widen the public owner target. */
+        if (!target_rte->inh) {
+            per_row_append_unique_expression(
+                required_vars,
+                reinterpret_cast<Node*>(makeVar(target_source->varno,
+                                                 SelfItemPointerAttributeNumber,
+                                                 TIDOID,
+                                                 -1,
+                                                 InvalidOid,
+                                                 0)));
+            per_row_append_unique_expression(
+                required_vars,
+                reinterpret_cast<Node*>(makeVar(target_source->varno,
+                                                 TableOidAttributeNumber,
+                                                 OIDOID,
+                                                 -1,
+                                                 InvalidOid,
+                                                 0)));
+        }
         for (Node* required : postgres_list<Node>(required_vars)) {
             Var* var = try_cast_pg_node<Var>(required);
             const bool row_identity = per_row_is_exact_row_identity_var(var);

@@ -3,34 +3,57 @@
  * @brief Owns SliceProject DSM attachment, publication, and rescan resources.
  */
 module;
-#include <bioseq/pg_compat.h>
-
 extern "C" {
+#include "postgres.h"
+
+#include "access/parallel.h"
+#include "access/tupdesc.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_language_d.h"
 #include "catalog/pg_proc.h"
 #include "commands/extension.h"
+#include "executor/executor.h"
+#include "executor/tuptable.h"
+#include "nodes/execnodes.h"
+#include "nodes/pg_list.h"
+#include "nodes/value.h"
 #include "optimizer/appendinfo.h"
 #include "optimizer/planmain.h"
+#include "port/atomics.h"
 #include "storage/dsm.h"
+#include "storage/shm_toc.h"
 #include "storage/shmem.h"
+#include "utils/errcodes.h"
+#include "utils/expandeddatum.h"
 #include "utils/inval.h"
+#include "utils/memutils.h"
 #include "utils/syscache.h"
 
 #include "rewrite/rewriteManip.h"
 }
 
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+
 export module bioseq.postgres.table:custom_scan_slice_execution_resource_lifecycle;
 
-import std;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.storage.scanner;
 import bioseq.postgres.support;
+import bioseq.postgres.table.scan_state;
 import bioseq.postgres.types.compact_sequence;
 
 import :custom_scan_execution_method_contracts;
-import :custom_scan_runtime_support;
+import :custom_scan_scan_runtime_state_contracts;
 import :custom_scan_slice_path_codec_contract;
 import :custom_scan_slice_path_runtime_contract;
 

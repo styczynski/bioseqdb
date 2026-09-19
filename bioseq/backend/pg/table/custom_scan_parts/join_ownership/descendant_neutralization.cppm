@@ -29,10 +29,12 @@ import :custom_scan_plan_abi_constants;
 import :custom_scan_oid_expression_support_oid_catalog;
 import :custom_scan_oid_expression_support_expression_analysis;
 import :custom_scan_planner_method_contracts;
-import :custom_scan_slice_path_plan_construction;
 import :custom_scan_slice_rewrite_path_tree;
 import :custom_scan_join_ownership_carrier_lineage;
+export import :custom_scan_join_ownership_path_owner_contracts;
 import :custom_scan_join_ownership_target_contracts;
+export import :custom_scan_join_ownership_descendant_path_contracts;
+export import :custom_scan_join_ownership_descendant_neutralization_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -155,20 +157,6 @@ export {
         }
     }
 
-    /** @brief Counts executable mmsearch copies remaining below a transformed owner. */
-    struct per_row_mmsearch_plan_audit {
-        std::size_t executable_qual_copies = 0u;
-        std::size_t vector_qual_copies = 0u;
-        std::size_t storage_qual_copies = 0u;
-        std::size_t descendant_owner_copies = 0u;
-
-        /** @brief Reports whether no residual or descendant owner copy remains. */
-        [[nodiscard]] bool clean() const noexcept {
-            return executable_qual_copies == 0u && vector_qual_copies == 0u &&
-                   storage_qual_copies == 0u && descendant_owner_copies == 0u;
-        }
-    };
-
     /** @brief Adds all mmsearch occurrences in one expression to an audit counter. */
     void per_row_audit_mmsearch_expression(Node* expression,
                                            std::size_t& destination,
@@ -236,7 +224,7 @@ export {
     void per_row_audit_mmsearch_plan(Plan* plan,
                                      per_row_mmsearch_plan_audit& audit,
                                      bioseq_stub_oids const& oids,
-                                     FuncExpr* exact_owner_candidate = nullptr) {
+                                     FuncExpr* exact_owner_candidate) {
         if (plan == nullptr)
             return;
         per_row_audit_mmsearch_expression(
@@ -440,42 +428,6 @@ export {
         set_pathtarget_cost_width(root, projected);
         return reinterpret_cast<Path*>(
             create_projection_path(root, child->parent, child, projected));
-    }
-
-    /** @brief Summarizes exact helper ownership found in a path subtree. */
-    struct per_row_descendant_ownership {
-        CustomPath* owner = nullptr;
-        std::size_t matches = 0u;
-        bool invalid_owner_abi = false;
-        bool unsupported_wrapper = false;
-    };
-
-    /** @brief Decodes the target recipe from a known BatchJoin or per-row CustomPath ABI. */
-    [[nodiscard]] Node* per_row_known_path_owner_recipe(CustomPath* custom, bool& invalid) {
-        if (custom == nullptr)
-            return nullptr;
-        const bool raw_owner = custom->methods == bioseq_batch_join_path_methods();
-        const bool transformed_owner = custom->methods == bioseq_per_row_join_path_methods();
-        if (!raw_owner && !transformed_owner)
-            return nullptr;
-        const int expected_version =
-            raw_owner ? k_bioseq_batch_join_plan_version : k_bioseq_per_row_join_plan_version;
-        const int expected_children = raw_owner ? 2 : 1;
-        const int expected_fields = raw_owner ? k_bioseq_batch_join_path_private_fields
-                                              : k_bioseq_per_row_join_path_private_fields;
-        Node* version = list_length(custom->custom_private) == expected_fields
-                            ? reinterpret_cast<Node*>(linitial(custom->custom_private))
-                            : nullptr;
-        Node* recipe = list_length(custom->custom_private) == expected_fields
-                           ? reinterpret_cast<Node*>(list_nth(custom->custom_private, 4))
-                           : nullptr;
-        if (version == nullptr || !IsA(version, Integer) || intVal(version) != expected_version ||
-            list_length(custom->custom_paths) != expected_children || recipe == nullptr ||
-            exprType(recipe) != get_cached_stub_oids().bioseq_seq_type_oid) {
-            invalid = true;
-            return nullptr;
-        }
-        return recipe;
     }
 
     /** @brief Finds exact helper owners through supported planner path wrappers. */
@@ -869,24 +821,6 @@ export {
         return path;
     }
 
-    /**
-     * @brief Summarizes base-scan helper ownership below a reconstructed owner.
-     *
-     * A reconstructed transformed owner is deliberately narrower than the
-     * incumbent join relation: helpers owned by the new PerRow node must not leak
-     * into a descendant BioseqScan or an older BatchJoin.  PostgreSQL Path nodes
-     * are shared, so normalize only after slice_project_clone_mutable_path_spine()
-     * has made every supported container private.  Availability is scoped to the
-     * current subtree: a descendant-owned helper is retained at its owner and
-     * above it, but is removed from every child below that owner.
-     */
-    struct per_row_base_helper_ownership {
-        CustomPath* owner = nullptr;
-        std::size_t matches = 0u;
-        bool invalid_owner_abi = false;
-        bool unsupported_wrapper = false;
-    };
-
     /** @brief Decodes the match-helper function from a plain or PHV identity. */
     [[nodiscard]] FuncExpr*
     per_row_helper_identity_function(Node* identity, bioseq_stub_oids const& oids) noexcept {
@@ -894,59 +828,6 @@ export {
             return batch_join_match_helper_phv_function(placeholder, oids);
         }
         return batch_join_well_formed_match_helper(identity, oids);
-    }
-
-    /** @brief Decodes the primary owned target recipe from a base-scan CustomPath ABI. */
-    [[nodiscard]] Node* per_row_base_scan_owner_recipe(CustomPath* custom, bool& invalid) {
-        if (custom == nullptr || custom->methods != bioseq_column_scan_path_methods()) {
-            return nullptr;
-        }
-        Node* recipe = nullptr;
-        for (Node* private_node : postgres_list<Node>(custom->custom_private)) {
-            if (private_node == nullptr || !IsA(private_node, List))
-                continue;
-            List* tag = reinterpret_cast<List*>(private_node);
-            Node* magic = list_length(tag) >= 1 ? reinterpret_cast<Node*>(linitial(tag)) : nullptr;
-            if (magic == nullptr || !IsA(magic, Integer) ||
-                intVal(magic) != k_bioseq_mmsearch_owner_magic)
-                continue;
-            Node* version =
-                list_length(tag) == 3 ? reinterpret_cast<Node*>(list_nth(tag, 1)) : nullptr;
-            Node* expressions_node =
-                list_length(tag) == 3 ? reinterpret_cast<Node*>(list_nth(tag, 2)) : nullptr;
-            List* expressions = expressions_node != nullptr && IsA(expressions_node, List)
-                                    ? reinterpret_cast<List*>(expressions_node)
-                                    : NIL;
-            FuncExpr* mmsearch =
-                expressions == NIL
-                    ? nullptr
-                    : try_cast_pg_node<FuncExpr>(reinterpret_cast<Node*>(linitial(expressions)));
-            if (recipe != nullptr || version == nullptr || !IsA(version, Integer) ||
-                intVal(version) != k_bioseq_mmsearch_owner_version || mmsearch == nullptr ||
-                list_length(expressions) > 2 ||
-                !is_mmsearch_funcid(mmsearch->funcid, get_cached_stub_oids()) ||
-                (list_length(mmsearch->args) != 2 && list_length(mmsearch->args) != 3) ||
-                list_length(custom->custom_restrictinfo) != list_length(expressions)) {
-                invalid = true;
-                return nullptr;
-            }
-            for (Node* expression : postgres_list<Node>(expressions)) {
-                FuncExpr* owned = try_cast_pg_node<FuncExpr>(expression);
-                if (owned == nullptr ||
-                    !is_mmsearch_funcid(owned->funcid, get_cached_stub_oids()) ||
-                    (list_length(owned->args) != 2 && list_length(owned->args) != 3)) {
-                    invalid = true;
-                    return nullptr;
-                }
-            }
-            recipe = reinterpret_cast<Node*>(linitial(mmsearch->args));
-            if (recipe == nullptr ||
-                exprType(recipe) != get_cached_stub_oids().bioseq_seq_type_oid) {
-                invalid = true;
-                return nullptr;
-            }
-        }
-        return recipe;
     }
 
 } // export custom-scan partition declarations

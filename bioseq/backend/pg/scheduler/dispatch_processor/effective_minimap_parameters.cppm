@@ -2,9 +2,12 @@
  * @file effective_minimap_parameters.cppm
  * @brief Derives short-pair minimap parameters when defaults are unchanged.
  */
+module;
+
+#include <cstddef>
+
 export module bioseq.postgres.scheduler.dispatch_processor.effective_minimap_parameters;
 
-import std;
 import bioseq.pipeline.minimap_port;
 
 export namespace bioseq::simd {

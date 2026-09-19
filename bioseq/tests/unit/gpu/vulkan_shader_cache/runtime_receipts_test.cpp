@@ -3,14 +3,13 @@
  * @brief Tests immutable Metal archive configuration and runtime receipts.
  */
 
+#include <catch2/catch_test_macros.hpp>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vulkan/vulkan.h>
-
-#include <catch2/catch_test_macros.hpp>
 
 import std;
 import bioseq.gpu.vulkan.shader_cache;
@@ -34,53 +33,54 @@ namespace {
 accepted_runtime_metal_archive_configuration() {
     temporary_directory temp;
     constexpr std::string_view digest = "0123456789abcdef";
-    const gv::shader_variant_key key = gv::make_shader_key(
-        gv::shader_kind::chain_tiled_dp_u64, 32u, 32u, 0u);
+    const gv::shader_variant_key key =
+        gv::make_shader_key(gv::shader_kind::chain_tiled_dp_u64, 32u, 32u, 0u);
     const std::array keys{key};
     REQUIRE(gv::cache_binary_archive_paths(temp.path, key).size() == 2u);
     write_fake_sealed_shader_artifacts(temp.path, keys);
     REQUIRE(gv::seal_shader_cache_manifest(temp.path, digest, keys));
-    auto loaded = gv::load_validated_sealed_shader_cache_seed(
-        temp.path, digest, keys);
+    auto loaded = gv::load_validated_sealed_shader_cache_seed(temp.path, digest, keys);
     REQUIRE(loaded);
-    const auto seed = std::make_shared<const gv::sealed_shader_cache_seed_image>(
-        std::move(*loaded));
+    const auto seed =
+        std::make_shared<const gv::sealed_shader_cache_seed_image>(std::move(*loaded));
     gv::runtime_metal_archive_configuration configuration{};
     configuration.seed_image = seed;
     configuration.vulkan_device_uuid[0] = 0x42u;
     configuration.metal_device_registry_id = 0x1234u;
-    for (std::size_t ordinal = 0u;
-         ordinal < seed->artifacts().size(); ++ordinal) {
+    for (std::size_t ordinal = 0u; ordinal < seed->artifacts().size(); ++ordinal) {
         const auto& artifact = seed->artifacts()[ordinal];
-        if (artifact.descriptor.kind
-            != gv::sealed_shader_cache_artifact_kind::metal_binary_archive) {
+        if (artifact.descriptor.kind ==
+            gv::sealed_shader_cache_artifact_kind::moltenvk_command_library) {
+            configuration.command_artifact_ordinal = static_cast<std::uint32_t>(ordinal);
+            const auto command =
+                gv::sealed_shader_cache_detail::parse_moltenvk_command_library_bundle(
+                    artifact.bytes);
+            REQUIRE(command);
+            configuration.command_library = *command;
             continue;
         }
-        const auto* qualification =
-            gv::sealed_shader_cache_detail::find_artifact_image(
-                seed->artifacts(),
-                gv::sealed_shader_cache_artifact_kind::
-                    metal_binary_archive_qualification,
-                artifact.descriptor.key_index,
-                artifact.descriptor.filename + ".qualification");
+        if (artifact.descriptor.kind !=
+            gv::sealed_shader_cache_artifact_kind::metal_binary_archive) {
+            continue;
+        }
+        const auto* qualification = gv::sealed_shader_cache_detail::find_artifact_image(
+            seed->artifacts(),
+            gv::sealed_shader_cache_artifact_kind::metal_binary_archive_qualification,
+            artifact.descriptor.key_index,
+            artifact.descriptor.filename + ".qualification");
         REQUIRE(qualification != nullptr);
-        const auto parsed = gv::sealed_shader_cache_detail::
-            parse_metal_archive_qualification_receipt(qualification->bytes);
+        const auto parsed =
+            gv::sealed_shader_cache_detail::parse_metal_archive_qualification_receipt(
+                qualification->bytes);
         REQUIRE(parsed);
         if (configuration.qualification_receipt_count == 0u) {
-            configuration.qualification_wire_revision =
-                parsed->wire_revision;
-            configuration.helper_wire_revision =
-                parsed->helper_wire_revision;
-            configuration.helper_build_identity =
-                parsed->helper_build_identity;
+            configuration.qualification_wire_revision = parsed->wire_revision;
+            configuration.helper_wire_revision = parsed->helper_wire_revision;
+            configuration.helper_build_identity = parsed->helper_build_identity;
             configuration.helper_source = parsed->helper_source;
-            configuration.helper_executable_size =
-                parsed->helper_executable_size;
-            configuration.helper_executable_sha256 =
-                parsed->helper_executable_sha256;
-            configuration.helper_metal_registry_id =
-                parsed->helper_metal_registry_id;
+            configuration.helper_executable_size = parsed->helper_executable_size;
+            configuration.helper_executable_sha256 = parsed->helper_executable_sha256;
+            configuration.helper_metal_registry_id = parsed->helper_metal_registry_id;
         }
         ++configuration.qualification_receipt_count;
         configuration.archives.push_back(gv::runtime_metal_archive_spec{
@@ -95,11 +95,10 @@ accepted_runtime_metal_archive_configuration() {
     return configuration;
 }
 
-[[nodiscard]] gv::runtime_metal_archive_pipeline_audit
-accepted_runtime_metal_archive_audit() {
+[[nodiscard]] gv::runtime_metal_archive_pipeline_audit accepted_runtime_metal_archive_audit() {
     const auto configuration = accepted_runtime_metal_archive_configuration();
-    const auto archive_identity = gv::make_runtime_metal_archive_set_identity(
-        configuration.archives);
+    const auto archive_identity =
+        gv::make_runtime_metal_archive_set_identity(configuration.archives);
     gv::runtime_metal_archive_pipeline_audit audit{};
     audit.receipt_identity = 7u;
     audit.scope_identity = 8u;
@@ -118,11 +117,9 @@ accepted_runtime_metal_archive_audit() {
     audit.seed_load_ns = seed_receipt.load_ns();
     audit.seed_admission_count = seed_receipt.admission_count();
     audit.seed_peak_admitted_bytes = seed_receipt.peak_admitted_bytes();
-    audit.seed_retained_capacity_bytes =
-        seed_receipt.retained_capacity_bytes();
+    audit.seed_retained_capacity_bytes = seed_receipt.retained_capacity_bytes();
     audit.seed_admission_saturated = seed_receipt.admission_saturated();
-    audit.shader_key = gv::make_shader_key(
-        gv::shader_kind::chain_tiled_dp_u64, 32u, 32u, 0u);
+    audit.shader_key = gv::make_shader_key(gv::shader_kind::chain_tiled_dp_u64, 32u, 32u, 0u);
     audit.expected_entry_name = "main0";
     audit.observed_entry_name = audit.expected_entry_name;
     audit.matched_descriptor_functions = 1u;
@@ -156,10 +153,8 @@ accepted_runtime_metal_archive_audit() {
         .helper_build_identity = "bioseq_gpu_archive_builder",
         .helper_source = "installed-sibling",
         .helper_executable_size = configuration.helper_executable_size,
-        .helper_executable_sha256 =
-            configuration.helper_executable_sha256,
-        .helper_metal_registry_id =
-            configuration.helper_metal_registry_id,
+        .helper_executable_sha256 = configuration.helper_executable_sha256,
+        .helper_metal_registry_id = configuration.helper_metal_registry_id,
         .vulkan_device_uuid = audit.runtime_vulkan_device_uuid,
         .api_version = audit.api_version,
         .driver_version = audit.driver_version,
@@ -173,29 +168,22 @@ accepted_runtime_metal_archive_audit() {
         .saturated = false,
     };
     audit.cache_qualification.identity =
-        gv::runtime_metal_archive_process_qualification_identity(
-            audit.cache_qualification);
+        gv::runtime_metal_archive_process_qualification_identity(audit.cache_qualification);
     audit.pipeline_create_ns = 17u;
-    audit.expected_metal_registry_id =
-        configuration.metal_device_registry_id;
-    audit.command_loader_metal_registry_id =
-        configuration.metal_device_registry_id;
+    audit.expected_metal_registry_id = configuration.metal_device_registry_id;
+    audit.command_loader_metal_registry_id = configuration.metal_device_registry_id;
     audit.command_source_methods_present = 2u;
     audit.command_source_wrapper_methods = 2u;
     audit.loader_metal_registry_id = configuration.metal_device_registry_id;
-    audit.intercepted_metal_registry_id =
-        configuration.metal_device_registry_id;
+    audit.intercepted_metal_registry_id = configuration.metal_device_registry_id;
     audit.scoped_interceptions = 1u;
     audit.descriptor_replacements = 1u;
     audit.fail_on_miss_enforcements = 1u;
     audit.same_descriptor_negative_controls = 1u;
     audit.negative_control_misses = 1u;
-    audit.expected_negative_error_domain =
-        configuration.archives.front().negative_error_domain;
-    audit.expected_negative_error_code =
-        configuration.archives.front().negative_error_code;
-    audit.observed_negative_error_domain =
-        audit.expected_negative_error_domain;
+    audit.expected_negative_error_domain = configuration.archives.front().negative_error_domain;
+    audit.expected_negative_error_code = configuration.archives.front().negative_error_code;
+    audit.observed_negative_error_domain = audit.expected_negative_error_domain;
     audit.observed_negative_error_code = audit.expected_negative_error_code;
     audit.original_sync_negative_calls = 1u;
     audit.actual_sync_calls = 1u;
@@ -204,7 +192,7 @@ accepted_runtime_metal_archive_audit() {
     return audit;
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("immutable live gate uses cached scalar configuration result",
           "[component:bioseq][layer:unit][feature:gpu_runtime]") {
@@ -221,8 +209,7 @@ TEST_CASE("immutable live gate uses cached scalar configuration result",
 
 TEST_CASE("immutable Metal archive configuration binds the exact ordered set",
           "[component:bioseq][layer:unit][feature:gpu_runtime][resource:filesystem]") {
-    auto& admission =
-        bioseq::parallelism::memory_admission_controller::instance();
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     auto accepted = accepted_runtime_metal_archive_configuration();
     REQUIRE(accepted.is_valid());
     const std::uint64_t retained_seed_bytes =
@@ -232,25 +219,19 @@ TEST_CASE("immutable Metal archive configuration binds the exact ordered set",
     // The first qualification also process-retains the installed helper. Keep
     // that intentional singleton reservation in the baseline while proving
     // that this configuration's seed and derived image release independently.
-    const std::uint64_t process_qualification_baseline =
-        reserved_with_seed - retained_seed_bytes;
-    const auto identity = gv::make_runtime_metal_archive_set_identity(
-        accepted.archives);
+    const std::uint64_t process_qualification_baseline = reserved_with_seed - retained_seed_bytes;
+    const auto identity = gv::make_runtime_metal_archive_set_identity(accepted.archives);
     CHECK(identity.is_valid());
     CHECK(identity.archive_count == 2u);
     CHECK(identity.total_size > 0u);
     {
-        const auto admitted =
-            gv::make_runtime_metal_archive_configuration_image(
-                accepted.seed_image,
-                accepted.vulkan_device_uuid,
-                accepted.metal_device_registry_id);
+        const auto admitted = gv::make_runtime_metal_archive_configuration_image(
+            accepted.seed_image, accepted.vulkan_device_uuid, accepted.metal_device_registry_id);
         REQUIRE(admitted);
         REQUIRE((*admitted)->is_valid());
         CHECK((*admitted)->configuration() == accepted);
         CHECK((*admitted)->retained_capacity_bytes() > 0u);
-        CHECK((*admitted)->retained_capacity_bytes()
-              <= (*admitted)->peak_admitted_bytes());
+        CHECK((*admitted)->retained_capacity_bytes() <= (*admitted)->peak_admitted_bytes());
     }
     CHECK(admission.reserved_bytes() == reserved_with_seed);
 
@@ -332,28 +313,22 @@ TEST_CASE("immutable Metal archive configuration binds the exact ordered set",
     SECTION("every byte identity component changes the ordered set") {
         auto changed = accepted;
         changed.archives[0].artifact_filename += ".other";
-        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives)
-              != identity);
+        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives) != identity);
         changed = accepted;
         ++changed.archives[0].artifact_ordinal;
-        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives)
-              != identity);
+        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives) != identity);
         changed = accepted;
         ++changed.archives[0].size;
-        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives)
-              != identity);
+        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives) != identity);
         changed = accepted;
         changed.archives[0].sha256[1] = 0x77u;
-        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives)
-              != identity);
+        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives) != identity);
         changed = accepted;
         changed.archives[0].negative_error_domain += ".other";
-        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives)
-              != identity);
+        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives) != identity);
         changed = accepted;
         ++changed.archives[0].negative_error_code;
-        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives)
-              != identity);
+        CHECK(gv::make_runtime_metal_archive_set_identity(changed.archives) != identity);
     }
     accepted = {};
     CHECK(admission.reserved_bytes() == process_qualification_baseline);
@@ -361,15 +336,13 @@ TEST_CASE("immutable Metal archive configuration binds the exact ordered set",
 
 TEST_CASE("immutable Metal archive pipeline receipt is strict and retained",
           "[component:bioseq][layer:unit][feature:gpu_runtime][resource:filesystem]") {
-    STATIC_REQUIRE(!std::is_copy_constructible_v<
-                   gv::runtime_metal_archive_pipeline_receipt>);
-    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
-                   gv::runtime_metal_archive_pipeline_receipt>);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<gv::runtime_metal_archive_pipeline_receipt>);
+    STATIC_REQUIRE(
+        std::is_nothrow_move_constructible_v<gv::runtime_metal_archive_pipeline_receipt>);
 
     const auto accepted = accepted_runtime_metal_archive_audit();
     REQUIRE(accepted.is_internally_consistent());
-    CHECK(gv::runtime_metal_archive_pipeline_receipt::
-          self_test_move_and_reuse_contract(accepted));
+    CHECK(gv::runtime_metal_archive_pipeline_receipt::self_test_move_and_reuse_contract(accepted));
 
     SECTION("exact expected and loaded archive sets must agree") {
         auto invalid = accepted;
@@ -436,8 +409,7 @@ TEST_CASE("immutable Metal archive pipeline receipt is strict and retained",
         invalid.seed_admission_count = 0u;
         CHECK_FALSE(invalid.is_internally_consistent());
         invalid = accepted;
-        invalid.seed_retained_capacity_bytes =
-            invalid.seed_peak_admitted_bytes + 1u;
+        invalid.seed_retained_capacity_bytes = invalid.seed_peak_admitted_bytes + 1u;
         CHECK_FALSE(invalid.is_internally_consistent());
         invalid = accepted;
         invalid.seed_admission_saturated = true;
@@ -551,12 +523,8 @@ TEST_CASE("immutable Metal archive pipeline receipt is strict and retained",
         reject([](auto& value) { --value.private_files_created; });
         reject([](auto& value) { --value.private_files_unlinked; });
         reject([](auto& value) { value.live_private_paths = 1u; });
-        reject([](auto& value) {
-            value.pipeline_filesystem_hash_passes = 1u;
-        });
-        reject([](auto& value) {
-            value.pipeline_filesystem_hashed_bytes = 1u;
-        });
+        reject([](auto& value) { value.pipeline_filesystem_hash_passes = 1u; });
+        reject([](auto& value) { value.pipeline_filesystem_hashed_bytes = 1u; });
         reject([](auto& value) { value.helper_source = "test-env-override"; });
         reject([](auto& value) { value.helper_metal_registry_id = 0u; });
         reject([](auto& value) { value.vulkan_device_uuid[0] ^= 0x80u; });
@@ -577,42 +545,123 @@ TEST_CASE("immutable Metal archive pipeline receipt is strict and retained",
 
 TEST_CASE("runtime pipeline PREPARED and USED receipts are causal and one-shot",
           "[component:bioseq][layer:unit][feature:gpu_runtime][resource:filesystem]") {
-    STATIC_REQUIRE(!std::is_copy_constructible_v<
-                   gv::runtime_pipeline_operation_token>);
-    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
-                   gv::runtime_pipeline_operation_token>);
-    STATIC_REQUIRE(!std::is_copy_constructible_v<
-                   gv::persisted_grouped_soa_coordinate_accepted_operation>);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<gv::runtime_pipeline_operation_token>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<gv::runtime_pipeline_operation_token>);
+    STATIC_REQUIRE(
+        !std::is_copy_constructible_v<gv::persisted_grouped_soa_coordinate_accepted_operation>);
     STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
                    gv::persisted_grouped_soa_coordinate_accepted_operation>);
-    STATIC_REQUIRE(!std::is_copy_constructible_v<
-                   gv::runtime_gpu_cache_metrics_delta>);
-    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
-                   gv::runtime_gpu_cache_metrics_delta>);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<gv::runtime_gpu_cache_metrics_delta>);
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<gv::runtime_gpu_cache_metrics_delta>);
 
-    auto& admission =
-        bioseq::parallelism::memory_admission_controller::instance();
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const auto base_audit = accepted_runtime_metal_archive_audit();
     REQUIRE(base_audit.is_internally_consistent());
     // Constructing the first audit also once-qualifies and process-retains the
     // installed helper executable. That reservation intentionally lives until
     // process shutdown, so leak checks begin after this process-wide baseline.
-    const std::uint64_t reserved_after_process_qualification =
-        admission.reserved_bytes();
-    CHECK(gv::runtime_pipeline_operation_token::
-          self_test_causal_collector_contract(
-              base_audit));
-    CHECK(admission.reserved_bytes()
-          == reserved_after_process_qualification);
-    CHECK(gv::runtime::
-          self_test_persisted_grouped_soa_finalizer_preclaim_contract(
-              base_audit));
-    CHECK(admission.reserved_bytes()
-          == reserved_after_process_qualification);
-    CHECK(gv::runtime::self_test_gpu_cache_partial_delta_contract(
-        base_audit));
-    CHECK(admission.reserved_bytes()
-          == reserved_after_process_qualification);
+    const std::uint64_t reserved_after_process_qualification = admission.reserved_bytes();
+    CHECK(gv::runtime_pipeline_operation_token::self_test_causal_collector_contract(base_audit));
+    CHECK(admission.reserved_bytes() == reserved_after_process_qualification);
+    CHECK(gv::runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(base_audit));
+    CHECK(admission.reserved_bytes() == reserved_after_process_qualification);
+    CHECK(gv::runtime::self_test_gpu_cache_partial_delta_contract(base_audit));
+    CHECK(admission.reserved_bytes() == reserved_after_process_qualification);
+#if defined(BIOSEQ_TEST_INDEXES)
+    CHECK(gv::runtime::self_test_selected_pipeline_finalizer_transaction_contract(base_audit));
+    CHECK(admission.reserved_bytes() == reserved_after_process_qualification);
+#endif
+}
+
+TEST_CASE("MPS Vulkan seed adapter uses non-consuming authorized readback and a seed-only "
+          "receipt with exact job boundaries",
+          "[component:bioseq][layer:unit][feature:gpu_runtime]") {
+    using readback_signature = void (gv::runtime::*)(
+        const gv::device_query_sketch_authorization&,
+        const gv::buffer&,
+        std::uint64_t,
+        std::uint32_t,
+        std::uint32_t,
+        std::uint32_t,
+        std::uint32_t,
+        std::span<const gv::gpu_seed_query_record_wire>,
+        std::span<std::byte>);
+    STATIC_REQUIRE(std::is_same_v<
+                   decltype(&gv::runtime::readback_authorized_query_minimizers),
+                   readback_signature>);
+    STATIC_REQUIRE(std::same_as<
+                   decltype(std::declval<const gv::device_query_sketch_authorization&>()
+                                .logical_minimizer_bytes()),
+                   std::uint64_t>);
+    STATIC_REQUIRE(sizeof(gv::gpu_anchor_wire) == 24u);
+    STATIC_REQUIRE(alignof(gv::gpu_anchor_wire) == 8u);
+    STATIC_REQUIRE(gv::k_gpu_dispatch_storage_descriptor_capacity ==
+                   gv::k_gpu_dispatch_descriptor_set_capacity * 9u);
+    STATIC_REQUIRE(gv::gpu_dispatch_job_capacity(1u, 10u) ==
+                   gv::k_gpu_dispatch_storage_descriptor_capacity / 10u);
+    STATIC_REQUIRE(gv::gpu_dispatch_job_capacity(4u, 19u) * 4u <=
+                   gv::k_gpu_dispatch_descriptor_set_capacity);
+    STATIC_REQUIRE(gv::gpu_dispatch_job_capacity(4u, 19u) * 19u <=
+                   gv::k_gpu_dispatch_storage_descriptor_capacity);
+    STATIC_REQUIRE(gv::gpu_dispatch_job_capacity(25u, 130u) * 25u <=
+                   gv::k_gpu_dispatch_descriptor_set_capacity);
+    STATIC_REQUIRE(gv::gpu_dispatch_job_capacity(25u, 130u) * 130u <=
+                   gv::k_gpu_dispatch_storage_descriptor_capacity);
+    STATIC_REQUIRE(gv::gpu_dispatch_job_capacity(0u, 10u) == 0u);
+    STATIC_REQUIRE(gv::gpu_dispatch_job_capacity(1u, 0u) == 0u);
+    STATIC_REQUIRE(!std::is_copy_constructible_v<gv::grouped_soa_seed_anchor_result>);
+    STATIC_REQUIRE(
+        std::is_nothrow_move_constructible_v<gv::grouped_soa_seed_anchor_result>);
+
+    const gv::grouped_soa_seed_anchor_result empty_result{};
+    CHECK(empty_result.owned_anchor_capacity_bytes() == 0u);
+    CHECK(empty_result.owned_job_capacity_bytes() == 0u);
+    CHECK_FALSE(static_cast<bool>(empty_result.host_anchor_permit));
+    CHECK_FALSE(static_cast<bool>(empty_result.host_job_permit));
+    CHECK_FALSE(empty_result.host_anchor_capacity_reflected);
+    CHECK_FALSE(empty_result.host_job_capacity_reflected);
+
+    std::array wires{
+        gv::gpu_anchor_wire{17u, 31u, 0u, 15u, 0u, 0u},
+        gv::gpu_anchor_wire{17u, 29u, 0u, 15u, 0u, 0u},
+        gv::gpu_anchor_wire{21u, 37u, 1u, 15u, 0u, 0u},
+    };
+    const auto normalized = gv::normalize_gpu_anchor_equal_ref_ties(wires);
+    REQUIRE(normalized.gpu_ref_order_checked);
+    REQUIRE(normalized.gpu_ref_order_accepted);
+    CHECK(normalized.canonical_tie_run_count == 1u);
+    CHECK(normalized.canonical_tie_anchor_count == 2u);
+    const auto audit = gv::audit_gpu_anchor_canonical_order(wires);
+    REQUIRE(audit.canonical_order_checked);
+    REQUIRE(audit.canonical_order_accepted);
+    CHECK(audit.anchor_count == wires.size());
+
+    auto changed = wires;
+    ++changed[1].query_position;
+    const auto changed_audit = gv::audit_gpu_anchor_canonical_order(changed);
+    CHECK(changed_audit.digest_lo != audit.digest_lo);
+    CHECK(changed_audit.digest_hi != audit.digest_hi);
+    auto malformed = wires;
+    malformed.front().is_reverse = 2u;
+    CHECK_FALSE(gv::audit_gpu_anchor_canonical_order(malformed)
+                    .canonical_order_accepted);
+    malformed = wires;
+    std::swap(malformed.front(), malformed.back());
+    CHECK_FALSE(gv::audit_gpu_anchor_canonical_order(malformed)
+                    .canonical_order_accepted);
+
+    const std::array jobs{
+        gv::grouped_soa_seed_wire_job_span{0u, 0u, 0u},
+        gv::grouped_soa_seed_wire_job_span{1u, 0u, 2u},
+        gv::grouped_soa_seed_wire_job_span{2u, 2u, 1u},
+    };
+    CHECK(gv::grouped_soa_seed_wire_jobs_cover(jobs, wires.size()));
+    auto invalid_jobs = jobs;
+    invalid_jobs[1].offset = 1u;
+    CHECK_FALSE(gv::grouped_soa_seed_wire_jobs_cover(invalid_jobs, wires.size()));
+    invalid_jobs = jobs;
+    invalid_jobs[2].ordinal = 1u;
+    CHECK_FALSE(gv::grouped_soa_seed_wire_jobs_cover(invalid_jobs, wires.size()));
 }
 
 TEST_CASE("runtime GPU environment identity is canonical and byte exact",
@@ -626,15 +675,13 @@ TEST_CASE("runtime GPU environment identity is canonical and byte exact",
         features.pipeline_cache_uuid[i] = static_cast<std::uint8_t>(i);
     }
     const auto identity = gv::canonical_vulkan_driver_identity(features);
-    CHECK(std::string(identity.data())
-          == "api=01020304;driver=a0b0c0d0;vendor=0000106b;"
-             "device=0000002a;pcuuid=000102030405060708090a0b0c0d0e0f");
-    const auto terminator = std::find(
-        identity.begin(), identity.end(), '\0');
+    CHECK(std::string(identity.data()) ==
+          "api=01020304;driver=a0b0c0d0;vendor=0000106b;"
+          "device=0000002a;pcuuid=000102030405060708090a0b0c0d0e0f");
+    const auto terminator = std::find(identity.begin(), identity.end(), '\0');
     REQUIRE(terminator != identity.end());
-    CHECK(std::all_of(
-        std::next(terminator), identity.end(),
-        [](char byte) { return byte == '\0'; }));
+    CHECK(
+        std::all_of(std::next(terminator), identity.end(), [](char byte) { return byte == '\0'; }));
 
     auto changed = features;
     ++changed.api_version;
@@ -649,8 +696,7 @@ TEST_CASE("runtime GPU environment identity is canonical and byte exact",
     ++changed.device_id;
     CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
     changed = features;
-    std::swap(changed.pipeline_cache_uuid[0],
-              changed.pipeline_cache_uuid[1]);
+    std::swap(changed.pipeline_cache_uuid[0], changed.pipeline_cache_uuid[1]);
     CHECK(gv::canonical_vulkan_driver_identity(changed) != identity);
 }
 
@@ -685,8 +731,7 @@ TEST_CASE("runtime GPU cache delta is bounded by its pre-finalizer maximum",
 TEST_CASE("grouped-SoA radix pass count is exact at byte boundaries",
           "[component:bioseq][layer:unit][feature:gpu_runtime]") {
     const auto passes = [](std::uint64_t target_end) {
-        return gv::runtime_grouped_soa_radix_pass_count(
-            0u, target_end + 1u);
+        return gv::runtime_grouped_soa_radix_pass_count(0u, target_end + 1u);
     };
     CHECK(passes(0u) == 1u);                      // 1 coord + strand
     CHECK(passes(0x7fu) == 1u);                   // 7 coord + strand
@@ -701,8 +746,7 @@ TEST_CASE("grouped-SoA radix pass count is exact at byte boundaries",
     CHECK(passes(499'999'999u) == 4u);            // XXL_HIFI: 29 + strand
     CHECK(passes(std::uint64_t{1} << 62u) == 8u); // 63 coord + strand
     CHECK_FALSE(gv::runtime_grouped_soa_radix_pass_count(0u, 0u));
-    CHECK_FALSE(gv::runtime_grouped_soa_radix_pass_count(
-        0u, (std::uint64_t{1} << 63u) + 1u));
-    CHECK_FALSE(gv::runtime_grouped_soa_radix_pass_count(
-        (std::numeric_limits<std::uint64_t>::max)(), 2u));
+    CHECK_FALSE(gv::runtime_grouped_soa_radix_pass_count(0u, (std::uint64_t{1} << 63u) + 1u));
+    CHECK_FALSE(
+        gv::runtime_grouped_soa_radix_pass_count((std::numeric_limits<std::uint64_t>::max)(), 2u));
 }

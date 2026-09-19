@@ -26,6 +26,9 @@ export module bioseq.postgres.table:custom_scan_slice_path_runtime_contract;
 import std;
 import bioseq.postgres.storage.scanner;
 import bioseq.postgres.types.compact_sequence;
+export import :custom_scan_slice_path_diagnostic_fixture_contracts;
+export import :custom_scan_planner_method_contracts;
+export import :custom_scan_slice_execution_method_contracts;
 
 export {
     enum class slice_dsm_publish_state : std::uint8_t {
@@ -145,8 +148,6 @@ export {
     [[nodiscard]] bool
     slice_project_rearm_worker_for_rescan_noexcept(slice_project_state* state) noexcept;
 
-    [[nodiscard]] CustomExecMethods const& bioseq_slice_project_exec_methods() noexcept;
-    [[nodiscard]] CustomScanMethods const& bioseq_slice_project_scan_methods() noexcept;
     /* A nested SliceProject must initialize its child's trace before it can bind
      * the parent projector, while child initialization calls back through the
      * parent-aware binding path. This forward declaration closes that genuine

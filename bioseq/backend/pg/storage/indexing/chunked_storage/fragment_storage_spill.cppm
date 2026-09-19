@@ -6,8 +6,24 @@ module;
 #include <bioseq/pg_compat.h>
 extern "C" {
 #include "utils/memutils.h"
+
 #include "miscadmin.h"
 }
+
+// Clang 22 must see these textual libc++ declarations before deserializing
+// header-backed dependency BMIs; importing std first makes aligned operator new
+// appear as two unrelated candidates during container allocation.
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <optional>
+#include <span>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:fragment_storage_spill;
 import std;
 import bioseq.common.logging;
@@ -28,7 +44,7 @@ export namespace bioseq::storage::indexing {
  * @param[in] sorted Hash-position pairs in canonical sorted order.
  * @return Zero-based identifier of the added run.
  */
-inline std::size_t fragment_index_storage::spill_sorted_run(
+std::size_t fragment_index_storage::spill_sorted_run(
     std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted) {
     return sorted_runs_ensure_().spill_sorted_run(sorted);
 }
@@ -38,7 +54,7 @@ inline std::size_t fragment_index_storage::spill_sorted_run(
  * @param[in] sorted Owned hash-position pairs in canonical sorted order.
  * @return Zero-based identifier of the added run.
  */
-inline std::size_t fragment_index_storage::spill_sorted_run_owned(
+std::size_t fragment_index_storage::spill_sorted_run_owned(
     std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted) {
     return sorted_runs_ensure_().spill_sorted_run_owned(std::move(sorted));
 }
@@ -50,7 +66,7 @@ inline std::size_t fragment_index_storage::spill_sorted_run_owned(
  * @param[in] permit Admission token transferred with the vector capacity.
  * @return Zero-based identifier of the added run.
  */
-inline std::size_t fragment_index_storage::spill_sorted_run_owned_admitted(
+std::size_t fragment_index_storage::spill_sorted_run_owned_admitted(
     std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted,
     std::uint64_t admitted_bytes,
     bioseq::parallelism::memory_permit permit) {
@@ -62,8 +78,7 @@ inline std::size_t fragment_index_storage::spill_sorted_run_owned_admitted(
  * @brief Demotes resident general runs until the requested admission may fit.
  * @param[in] bytes_needed Additional working-set bytes requested by the caller.
  */
-inline void
-fragment_index_storage::demote_resident_runs_until_available(std::uint64_t bytes_needed) {
+void fragment_index_storage::demote_resident_runs_until_available(std::uint64_t bytes_needed) {
     if (sorted_runs_.has_value()) {
         sorted_runs_->demote_resident_runs_until_available(bytes_needed);
     }
@@ -77,8 +92,7 @@ fragment_index_storage::demote_resident_runs_until_available(std::uint64_t bytes
  *
  * @return Generation token and initial mutation revision for spill replay.
  */
-inline direct_minimizer_spill_storage_binding
-fragment_index_storage::begin_segment_spill_generation() {
+direct_minimizer_spill_storage_binding fragment_index_storage::begin_segment_spill_generation() {
     if (segment_spill_pg_poisoned_) {
         minimizer_generation_storage_error_as_cpp(
             "poisoned minimizer-sequence spill storage reused after PostgreSQL error");
@@ -94,11 +108,13 @@ fragment_index_storage::begin_segment_spill_generation() {
             runs.abandon_after_pg_error_noexcept();
         }
         segment_sorted_runs_.clear();
+        active_segment_write_buffer_owner_.reset();
         segment_spill_binding_ = {};
         segment_spill_pg_poisoned_ = true;
         throw;
     }
     segment_sorted_runs_.clear();
+    active_segment_write_buffer_owner_.reset();
     std::uint64_t token = next_segment_spill_generation_token_.load(std::memory_order_relaxed);
     for (;;) {
         if (token == 0) {
@@ -120,7 +136,7 @@ fragment_index_storage::begin_segment_spill_generation() {
 }
 
 /// @brief Advances the spill mutation revision or invalidates it on overflow.
-inline void fragment_index_storage::record_segment_spill_mutation_() noexcept {
+void fragment_index_storage::record_segment_spill_mutation_() noexcept {
     if (!segment_spill_binding_.valid()) {
         return;
     }
@@ -137,7 +153,7 @@ inline void fragment_index_storage::record_segment_spill_mutation_() noexcept {
  * @param[in] sorted Hash-position pairs in canonical sorted order.
  * @return Zero-based identifier of the added run within the segment.
  */
-inline std::size_t fragment_index_storage::spill_sorted_segment_run(
+std::size_t fragment_index_storage::spill_sorted_segment_run(
     std::uint32_t position_segment,
     std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted) {
     if (segment_spill_pg_poisoned_) {
@@ -163,11 +179,37 @@ inline std::size_t fragment_index_storage::spill_sorted_segment_run(
             segment_sorted_runs_.begin() + static_cast<std::ptrdiff_t>(offset),
             segment_run_entry_type{position_segment, sorted_pair_run_store{}});
     }
-    // sorted_pair_run_store may compact/demote physical runs internally. Those
-    // transformations preserve the exact canonical pair stream. The mutation
-    // revision increment names the logical run injection, not its
-    // eventual memory-vs-BufFile representation.
     try {
+        if (!active_segment_write_buffer_owner_.has_value()) {
+            // Validate a pre-existing destination honestly while allowing the
+            // first segment to acquire its writer lazily in spill_sorted_run.
+            if (!iterator->second.try_transfer_completed_write_buffer_to(iterator->second)) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer-sequence spill writer ownership is invalid");
+            }
+            active_segment_write_buffer_owner_ = position_segment;
+        } else if (*active_segment_write_buffer_owner_ != position_segment) {
+            // The destination entry and its admitted metadata already exist.
+            // Re-find the source by ordinal because insertion may relocate it.
+            const auto source = std::lower_bound(
+                segment_sorted_runs_.begin(),
+                segment_sorted_runs_.end(),
+                *active_segment_write_buffer_owner_,
+                [](const segment_run_entry_type& entry, std::uint32_t segment) {
+                    return entry.first < segment;
+                });
+            if (source == segment_sorted_runs_.end() ||
+                source->first != *active_segment_write_buffer_owner_ ||
+                !source->second.try_transfer_completed_write_buffer_to(iterator->second)) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer-sequence spill writer transfer is invalid");
+            }
+            active_segment_write_buffer_owner_ = position_segment;
+        }
+        // sorted_pair_run_store may compact/demote physical runs internally. Those
+        // transformations preserve the exact canonical pair stream. The mutation
+        // revision increment names the logical run injection, not its
+        // eventual memory-vs-BufFile representation.
         const std::size_t run = iterator->second.spill_sorted_run(sorted);
         inject_minimizer_generation_failure_as_cpp(
             minimizer_generation_failure_injection::minimizer_sequence_spill,
@@ -179,6 +221,7 @@ inline std::size_t fragment_index_storage::spill_sorted_segment_run(
             (void)segment;
             runs.abandon_after_pg_error_noexcept();
         }
+        active_segment_write_buffer_owner_.reset();
         segment_spill_binding_ = {};
         segment_spill_pg_poisoned_ = true;
         throw;
@@ -196,9 +239,9 @@ inline std::size_t fragment_index_storage::spill_sorted_segment_run(
  * @param[in] target_length Total target length in bases.
  * @return `true` when all pairs were valid and the replacement was published.
  */
-inline bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
-                                                         std::uint64_t new_span,
-                                                         std::uint64_t target_length) {
+bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
+                                                  std::uint64_t new_span,
+                                                  std::uint64_t target_length) {
     if (!segment_spill_binding_.valid() || old_span == 0 || new_span == 0) {
         if (segment_spill_pg_poisoned_) {
             minimizer_generation_storage_error_as_cpp(
@@ -211,6 +254,7 @@ inline bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
         bioseq::parallelism::memory_permit permit;
         std::vector<segment_run_entry_type> values;
     } rerouted;
+    std::optional<std::uint32_t> rerouted_active_write_buffer_owner;
     // Bounds transient replay ownership to one admitted pair batch.
     struct admitted_pair_batch {
         bioseq::parallelism::memory_permit permit;
@@ -263,7 +307,9 @@ inline bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
     };
     // Finds or creates the sorted-run store for one replacement segment.
     const auto rerouted_store =
-        [&rerouted, &ensure_capacity](std::uint32_t segment) -> sorted_pair_run_store& {
+        [&rerouted,
+         &rerouted_active_write_buffer_owner,
+         &ensure_capacity](std::uint32_t segment) -> sorted_pair_run_store& {
         auto iterator = std::lower_bound(rerouted.values.begin(),
                                          rerouted.values.end(),
                                          segment,
@@ -279,10 +325,41 @@ inline bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
                 rerouted.values.begin() + static_cast<std::ptrdiff_t>(offset),
                 segment_run_entry_type{segment, sorted_pair_run_store{}});
         }
+        if (!rerouted_active_write_buffer_owner.has_value()) {
+            if (!iterator->second.try_transfer_completed_write_buffer_to(iterator->second)) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer-sequence reroute writer ownership is invalid");
+            }
+            rerouted_active_write_buffer_owner = segment;
+        } else if (*rerouted_active_write_buffer_owner != segment) {
+            // The destination metadata is already admitted. Re-find the source
+            // by ordinal because destination insertion may have relocated it.
+            const auto source = std::lower_bound(
+                rerouted.values.begin(),
+                rerouted.values.end(),
+                *rerouted_active_write_buffer_owner,
+                [](const segment_run_entry_type& entry, std::uint32_t value) {
+                    return entry.first < value;
+                });
+            if (source == rerouted.values.end() ||
+                source->first != *rerouted_active_write_buffer_owner ||
+                !source->second.try_transfer_completed_write_buffer_to(iterator->second)) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer-sequence reroute writer transfer is invalid");
+            }
+            rerouted_active_write_buffer_owner = segment;
+        }
         return iterator->second;
     };
     bool valid = true;
     try {
+        // Reroute consumes immutable source runs. Drop every completed source
+        // writer before the first reader or replacement allocation is admitted.
+        for (auto& [segment, runs] : segment_sorted_runs_) {
+            (void)segment;
+            runs.release_completed_write_buffer();
+        }
+        active_segment_write_buffer_owner_.reset();
         for (auto& [old_segment, runs] : segment_sorted_runs_) {
             runs.merge_runs([&valid,
                              new_span,
@@ -349,6 +426,7 @@ inline bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
                 });
             });
             if (!valid) {
+                active_segment_write_buffer_owner_.reset();
                 segment_spill_binding_ = {};
                 segment_spill_pg_poisoned_ = true;
                 return false;
@@ -370,6 +448,7 @@ inline bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
             (void)segment;
             runs.abandon_after_pg_error_noexcept();
         }
+        active_segment_write_buffer_owner_.reset();
         segment_spill_binding_ = {};
         segment_spill_pg_poisoned_ = true;
         throw;
@@ -382,18 +461,20 @@ inline bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
             (void)segment;
             runs.release_runs_noexcept();
         }
+        active_segment_write_buffer_owner_.reset();
         segment_spill_binding_ = {};
         segment_spill_pg_poisoned_ = true;
         throw;
     }
     segment_sorted_runs_.swap(rerouted.values);
     std::swap(segment_sorted_runs_metadata_permit_, rerouted.permit);
+    active_segment_write_buffer_owner_ = rerouted_active_write_buffer_owner;
     record_segment_spill_mutation_();
     return true;
 }
 
 /// @brief Returns current resource and merge counters for the general run store.
-inline sorted_run_store_stats fragment_index_storage::sorted_run_stats() const noexcept {
+sorted_run_store_stats fragment_index_storage::sorted_run_stats() const noexcept {
     return sorted_runs_.has_value() ? sorted_runs_->stats() : sorted_run_store_stats{};
 }
 
@@ -403,7 +484,7 @@ inline sorted_run_store_stats fragment_index_storage::sorted_run_stats() const n
  * The snapshot is taken before run resources are released so file and resident
  * byte counts describe the completed row build.
  */
-inline void fragment_index_storage::snapshot_sorted_run_stats_before_release() {
+void fragment_index_storage::snapshot_sorted_run_stats_before_release() {
     if (!sorted_runs_.has_value()) {
         return;
     }
@@ -457,7 +538,7 @@ inline void fragment_index_storage::snapshot_sorted_run_stats_before_release() {
 }
 
 /// @brief Releases every run without invoking a checked PostgreSQL boundary.
-inline void fragment_index_storage::release_runs_noexcept() noexcept {
+void fragment_index_storage::release_runs_noexcept() noexcept {
     if (sorted_runs_.has_value()) {
         sorted_runs_->release_runs_noexcept();
         sorted_runs_.reset();
@@ -467,6 +548,7 @@ inline void fragment_index_storage::release_runs_noexcept() noexcept {
         runs.release_runs_noexcept();
     }
     segment_sorted_runs_.clear();
+    active_segment_write_buffer_owner_.reset();
     record_segment_spill_mutation_();
 }
 
@@ -476,7 +558,7 @@ inline void fragment_index_storage::release_runs_noexcept() noexcept {
  * A PostgreSQL error poisons the spill binding and abandons remaining handles
  * so transaction abort can reclaim their PostgreSQL-owned resources.
  */
-inline void fragment_index_storage::release_runs() {
+void fragment_index_storage::release_runs() {
     try {
         if (sorted_runs_.has_value()) {
             sorted_runs_->release_runs();
@@ -487,6 +569,7 @@ inline void fragment_index_storage::release_runs() {
             runs.release_runs();
         }
         segment_sorted_runs_.clear();
+        active_segment_write_buffer_owner_.reset();
         record_segment_spill_mutation_();
     } catch (const bioseq::postgres::support::postgres_error&) {
         if (sorted_runs_.has_value()) {
@@ -498,6 +581,7 @@ inline void fragment_index_storage::release_runs() {
             runs.abandon_after_pg_error_noexcept();
         }
         segment_sorted_runs_.clear();
+        active_segment_write_buffer_owner_.reset();
         segment_spill_binding_ = {};
         segment_spill_pg_poisoned_ = true;
         throw;
@@ -510,7 +594,7 @@ inline void fragment_index_storage::release_runs() {
  * No PostgreSQL cleanup function is called. The failing transaction remains
  * responsible for memory contexts, relation references, and temporary files.
  */
-inline void fragment_index_storage::abandon_after_pg_error_noexcept() noexcept {
+void fragment_index_storage::abandon_after_pg_error_noexcept() noexcept {
     if (sorted_runs_.has_value()) {
         sorted_runs_->abandon_after_pg_error_noexcept();
         sorted_runs_.reset();
@@ -520,6 +604,7 @@ inline void fragment_index_storage::abandon_after_pg_error_noexcept() noexcept {
         runs.abandon_after_pg_error_noexcept();
     }
     segment_sorted_runs_.clear();
+    active_segment_write_buffer_owner_.reset();
     segment_spill_binding_ = {};
     segment_spill_pg_poisoned_ = true;
 
@@ -542,7 +627,7 @@ inline void fragment_index_storage::abandon_after_pg_error_noexcept() noexcept {
 }
 
 /// @brief Closes run stores and deletes the handle-owned memory context.
-inline void fragment_index_storage::close_checked() {
+void fragment_index_storage::close_checked() {
     release_runs();
     chunk_cache_.clear();
     chunk_cache_bytes_ = 0;
@@ -619,17 +704,10 @@ inline void write_serialized_index_chunk_pg(Oid user_relid,
     }
 }
 
-/**
- * @brief Records a successful serialized index refresh in the age catalog.
- * @param[in] user_relid Owning user relation OID.
- * @param[in] main_relfilenode Current main relation relfilenode.
- * @param[in] column_attno One-based PostgreSQL column number.
- * @param[in] index_name Refreshed index policy name.
- */
-inline void mark_serialized_index_write_successful_pg(Oid user_relid,
-                                                      Oid main_relfilenode,
-                                                      std::int16_t column_attno,
-                                                      std::string_view index_name) {
+void mark_serialized_index_write_successful_pg(Oid user_relid,
+                                               Oid main_relfilenode,
+                                               std::int16_t column_attno,
+                                               std::string_view index_name) {
     static_cast<void>(
         upsert_metadata_age_log_pg(user_relid, main_relfilenode, column_attno, index_name));
 }

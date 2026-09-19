@@ -26,11 +26,10 @@ export module bioseq.postgres.table:custom_scan_per_row_join_paths_path_reconstr
 import std;
 import bioseq.postgres.support;
 
-import :custom_scan_join_ownership_carrier_lineage;
-import :custom_scan_join_ownership_descendant_neutralization;
+import :custom_scan_join_ownership_carrier_lineage_contracts;
+import :custom_scan_join_ownership_descendant_path_contracts;
 import :custom_scan_slice_rewrite_path_tree;
-import :custom_scan_per_row_join_paths_carrier_analysis;
-import :custom_scan_per_row_join_paths_target_normalization;
+export import :custom_scan_per_row_join_paths_reconstruction_contracts;
 
 using namespace bioseq::postgres::support;
 

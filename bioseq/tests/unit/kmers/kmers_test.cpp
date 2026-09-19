@@ -273,8 +273,40 @@ static void check_generated_reference_rejects_coordinate(
     REQUIRE(pairs.empty());
 }
 
+template<typename p_alphabet, typename p_storage_unit>
+static void check_generated_reference_supports_coordinate(
+    std::vector<p_alphabet>& data,
+    const std::string& coordinate)
+{
+    sketch_collector collector;
+    const auto result = invoke_generated_minimizer_coordinate<
+        p_alphabet, p_storage_unit>(
+            data,
+            ::bioseq::simd_dispatch::highway_kernel::
+                minimizer_minimap2_reference,
+            ::bioseq::minimizers::minimizer_kernel_algorithm::
+                minimap2_reference,
+            collector);
+    const auto& sketches = collector.extract_sketches_data();
+
+    CAPTURE(coordinate);
+    REQUIRE(result.is_ok());
+    REQUIRE(result.stats.algorithm
+            == ::bioseq::minimizers::minimizer_kernel_algorithm::
+                minimap2_reference);
+    REQUIRE(result.stats.target
+            == ::bioseq::simd_dispatch::highway_test_target_binding().target);
+    REQUIRE(result.emitted == sketches.size());
+    REQUIRE(result.emitted > 0u);
+    REQUIRE_FALSE(sketches.empty());
+    REQUIRE(result.stats.reference.kernel_calls == 1u);
+    REQUIRE(result.stats.reference.last_storage_unit_bytes
+            == sizeof(p_storage_unit));
+}
+
 TEST_CASE(
-    "generated fixed-target reference SIMD rejects unsupported coordinates",
+    "generated fixed-target reference SIMD admits registered word coordinates "
+    "and rejects narrow coordinates",
     "[component:bioseq][layer:unit][feature:minimizer][resource:highway]")
 {
     SECTION("dna4/u8") {
@@ -296,11 +328,11 @@ TEST_CASE(
             seq::dna5, std::uint16_t>(minimizer_test_dna5_sequence, "dna5/u16");
     }
     SECTION("dna5/u32") {
-        check_generated_reference_rejects_coordinate<
+        check_generated_reference_supports_coordinate<
             seq::dna5, std::uint32_t>(minimizer_test_dna5_sequence, "dna5/u32");
     }
     SECTION("dna5/u64") {
-        check_generated_reference_rejects_coordinate<
+        check_generated_reference_supports_coordinate<
             seq::dna5, std::uint64_t>(minimizer_test_dna5_sequence, "dna5/u64");
     }
 }
@@ -352,15 +384,8 @@ static void check_generated_bounded_nthash_rejects_coordinate(
     REQUIRE(result.status
             == ::bioseq::minimizers::minimizer_kernel_status::
                 invalid_configuration);
-    constexpr auto expected_family = [] {
-        if constexpr (std::same_as<p_alphabet, seq::dna5>) {
-            return ::bioseq::minimizers::bounded_nthash_status::
-                unsupported_alphabet;
-        } else {
-            return ::bioseq::minimizers::bounded_nthash_status::
-                unsupported_storage;
-        }
-    }();
+    constexpr auto expected_family =
+        ::bioseq::minimizers::bounded_nthash_status::unsupported_storage;
     REQUIRE(result.family_status
             == static_cast<std::uint32_t>(expected_family));
     REQUIRE(result.stats.algorithm
@@ -402,12 +427,12 @@ TEST_CASE(
         check_generated_bounded_nthash_rejects_coordinate<seq::dna5, std::uint16_t>(
             minimizer_test_dna5_sequence, "dna5/u16");
     }
-    SECTION("dna5/u32 fails closed") {
-        check_generated_bounded_nthash_rejects_coordinate<seq::dna5, std::uint32_t>(
+    SECTION("dna5/u32 is supported") {
+        check_generated_bounded_nthash_supports_coordinate<seq::dna5, std::uint32_t>(
             minimizer_test_dna5_sequence, "dna5/u32");
     }
-    SECTION("dna5/u64 fails closed") {
-        check_generated_bounded_nthash_rejects_coordinate<seq::dna5, std::uint64_t>(
+    SECTION("dna5/u64 is supported") {
+        check_generated_bounded_nthash_supports_coordinate<seq::dna5, std::uint64_t>(
             minimizer_test_dna5_sequence, "dna5/u64");
     }
 }

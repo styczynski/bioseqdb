@@ -3,22 +3,37 @@
  * @brief Implements policy operations that instantiate chunked storage handles.
  */
 module;
-#include <bioseq/pg_compat.h>
 
 extern "C" {
+#include "postgres.h"
+
 #include "access/relation.h"
 #include "catalog/namespace.h"
+#include "utils/errcodes.h"
 #include "utils/lsyscache.h"
 }
 
+// Clang 22 must see these textual libc++ declarations before deserializing
+// header-backed dependency BMIs; importing std first makes aligned operator new
+// appear as two unrelated candidates during container allocation.
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <new>
+#include <optional>
+#include <string>
+#include <string_view>
+
 module bioseq.postgres.storage.indexing.admin.policy_catalog;
 
-import std;
+import bioseq.indexing.type;
+import bioseq.pipeline.runtime_contract;
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.minimizer_build_stats;
+import bioseq.postgres.storage.indexing.fragment_handle;
+import bioseq.postgres.storage.indexing.index_relation_identity;
 import bioseq.postgres.storage.indexing.supported_indexes;
 import bioseq.storage.lazy_sequence;
 import bioseq.postgres.types.compact_sequence;
@@ -37,7 +52,9 @@ void note_policy_on_insert_writes(Oid user_relid,
                                   const pg_supported_indexes& idx) {
     constexpr auto k_index_types = pg_supported_indexes::list_types();
     for (std::size_t i = 0; i < k_index_types.size(); ++i) {
-        if (idx.enabled[i] && idx.policy[i] == index_update_policy::update_on_insert) {
+        if (idx.enabled[i]
+            && idx.policy[i]
+                == bioseq::indexing::index_update_policy::update_on_insert) {
             note_successful_write(user_relid, relfn, attno, k_index_types[i].first);
         }
     }
@@ -66,7 +83,8 @@ void index_build_on_insert(Oid user_relid,
             const bool minimizer = k_index_types[i].first == k_minimizers_per_fragment_index_name ||
                                    k_index_types[i].first == k_minimizers_per_sequence_index_name;
             if (minimizer && idx.enabled[i] &&
-                idx.policy[i] == index_update_policy::update_on_insert) {
+                idx.policy[i]
+                    == bioseq::indexing::index_update_policy::update_on_insert) {
                 bioseq::postgres::support::invoke_pg_as_cpp([index_name = k_index_types[i].first] {
                     ereport(ERROR,
                             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -85,14 +103,45 @@ void index_build_on_insert(Oid user_relid,
             }
         }
     }
-    const auto backend = resolve_index_sketch_backend_from_gucs();
+    const auto requested_algorithm =
+        static_cast<bioseq::simd::minimizer_algorithm>(
+            static_cast<int>(bioseq::aligner::settings::minimizer::algorithm.get_value()));
+    if (requested_algorithm ==
+        bioseq::simd::minimizer_algorithm::simd_minimap2_reference) {
+        constexpr auto k_index_types = pg_supported_indexes::list_types();
+        for (std::size_t i = 0; i < k_index_types.size(); ++i) {
+            const bool minimizer =
+                k_index_types[i].first == k_minimizers_per_fragment_index_name ||
+                k_index_types[i].first == k_minimizers_per_sequence_index_name;
+            if (minimizer && idx.enabled[i] &&
+                idx.policy[i] == bioseq::indexing::index_update_policy::update_on_insert) {
+                bioseq::postgres::support::invoke_pg_as_cpp(
+                    [index_name = k_index_types[i].first] {
+                        ereport(
+                            ERROR,
+                            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                             errmsg("minimap2-reference INSERT index generation is not READY"),
+                             errdetail("index %.*s has no algorithm-identity-bearing INSERT "
+                                       "storage route",
+                                       static_cast<int>(index_name.size()),
+                                       index_name.data()),
+                             errhint("Disable INSERT maintenance and publish this index with "
+                                     "bioseq.update_index using grouped-SoA generation.")));
+                    });
+                pg_unreachable();
+            }
+        }
+    }
+    const auto backend = resolve_index_sketch_backend(requested_algorithm);
     const bioseq::minimizers::minimizer_kernels* const minimizer_kernels =
         selected_minimizer_kernels_for_operation(backend, "bioseq INSERT index build");
     if (backend == bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd) {
         constexpr auto k_index_types = pg_supported_indexes::list_types();
         for (std::size_t i = 0; i < k_index_types.size(); ++i) {
             if (k_index_types[i].second == sequence_index_layout::fragment_chunks &&
-                idx.enabled[i] && idx.policy[i] == index_update_policy::update_on_insert) {
+                idx.enabled[i]
+                && idx.policy[i]
+                    == bioseq::indexing::index_update_policy::update_on_insert) {
                 reject_bounded_nthash_for_scheme_untagged_fragment_layout(
                     backend, "bioseq INSERT index build");
             }
@@ -137,16 +186,16 @@ void index_build_on_insert(Oid user_relid,
                     rid.db_oid, rid.tablespace_oid, rid.relfilenode, attno, name);
                 return qcache
                     .emplace(name,
-                             open_sequence_storage(user_relid,
-                                                   rid.db_oid,
-                                                   rid.tablespace_oid,
-                                                   rid.relfilenode,
-                                                   attno,
-                                                   name,
-                                                   loc,
-                                                   rowno,
-                                                   nullptr,
-                                                   mctx))
+                             open_sequence_storage_handle(user_relid,
+                                                          rid.db_oid,
+                                                          rid.tablespace_oid,
+                                                          rid.relfilenode,
+                                                          attno,
+                                                          name,
+                                                          loc,
+                                                          rowno,
+                                                          nullptr,
+                                                          mctx))
                     .first->second;
             };
             try {

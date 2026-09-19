@@ -282,9 +282,9 @@ TEST_CASE("vulkan source-direct cache keys cannot upload or replace",
     rejects_identity([](auto& value) { value.table_size = 0u; });
     rejects_identity([](auto& value) { value.position_count = 0u; });
     rejects_identity([](auto& value) { value.table_size = 4u; });
-    rejects_identity([](auto& value) { value.alphabet_size = 3u; });
-    rejects_identity([](auto& value) { value.kmer_size = 14u; });
-    rejects_identity([](auto& value) { value.window_size = 9u; });
+    rejects_identity([](auto& value) { value.alphabet_size = 0u; });
+    rejects_identity([](auto& value) { value.kmer_size = 32u; });
+    rejects_identity([](auto& value) { value.window_size = 257u; });
     rejects_identity([](auto& value) { value.minimizer_size = 16u; });
     rejects_identity([](auto& value) { value.minimizer_alignment = 16u; });
     rejects_identity([](auto& value) { value.minimizer_hash_bits = 29u; });

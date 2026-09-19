@@ -188,6 +188,15 @@ public:
         };
         const size_t lane_count = hn::Lanes(block_aligner_simd_tag{});
         plan.simd_lane_count = static_cast<std::uint8_t>(lane_count);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        using ksw2_byte_tag = hn::ScalableTag<ksw2_partial_score_type>;
+        using ksw2_full_tag = hn::ScalableTag<ksw2_full_score_type>;
+        static_assert(std::same_as<hn::TFromD<ksw2_byte_tag>, ksw2_partial_score_type>);
+        static_assert(std::same_as<hn::TFromD<ksw2_full_tag>, ksw2_full_score_type>);
+        plan.ksw2_byte_lane_count =
+            hn::Lanes(ksw2_byte_tag{});
+        plan.ksw2_full_score_bytes = sizeof(hn::TFromD<ksw2_full_tag>);
+#endif
         plan.is_contract_supported = scoring_matrix.is_block_layout_valid()
             && validate_block_aligner_contract(parameters, lane_count)
                 == block_aligner_contract_error::none;
@@ -317,6 +326,13 @@ public:
                 are_coordinates_valid);
             std::abort();
         }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (query_length > (std::numeric_limits<size_t>::max)() - target_length) {
+            abort_block_aligner_invariant("Block result CIGAR bound overflow");
+        }
+        result.cigar.set_logical_bounds(
+            query_length + target_length, query_length + target_length);
+#endif
         const std::uint64_t configuration_identity =
             ::bioseq::simd::block_aligner_configuration_identity(
                 parameters, scoring_matrix.block_semantic_identity(), p_is_reversed);
@@ -411,6 +427,8 @@ public:
 
         const size_t minimum_block_size = std::max(parameters.minimum_block_size, lane_count);
         const size_t maximum_block_size = std::max(parameters.maximum_block_size, lane_count);
+        const auto storage_plan = require_block_storage_plan(
+            query_length, target_length, maximum_block_size, parameters.is_trace_enabled);
 
         // Convert positive q/e into the reference's negative gap costs.
         const int8_t negative_gap_open = static_cast<int8_t>(
@@ -447,7 +465,11 @@ public:
             ++construction_stats->scratch_allocations;
             construction_stats->trace_allocations += is_trace_enabled ? 1u : 0u;
         }
-        block_aligner_scratch scratch(query_length, target_length, maximum_block_size, is_trace_enabled);
+        if (query_padded.storage_elements() != storage_plan.query_padded_bytes ||
+            target_padded.storage_elements() != storage_plan.reference_padded_bytes) {
+            abort_block_aligner_invariant("padded allocation disagrees with Block storage plan");
+        }
+        block_aligner_scratch scratch(query_length, target_length, storage_plan);
         scratch.clear(simd_tag, query_length, target_length, maximum_block_size, is_trace_enabled);
 
         int32_t score = 0;

@@ -1,0 +1,201 @@
+{
+  "schema_version": 4,
+  "contract": {
+    "schema": "bioseq.e2e.algorithm-matrix-all-results",
+    "version": 2,
+    "campaign_id": "bioseq-e2e-algorithm-matrix-local-v1",
+    "campaign_digest": "011fbb1ef33a214ab80d3568c2341e8d0f8311f82e21a5955bdcb93b3c63b979",
+    "campaign_contract": "bench/bench_e2e_algorithm_matrix_campaign_contract.json",
+    "campaign_contract_sha256": "e80407ca3a515ca04ac7ad616f0c7f5e0ef477f3e09884ec8ab93370e8c55933",
+    "encoding": "JSON (YAML 1.2 subset)",
+    "raw_framework_schema": 1,
+    "raw_payload_schema": "bioseq.e2e.raw-sample",
+    "raw_payload_schema_version": 11,
+    "old_or_mixed_schema_policy": "reject",
+    "minimum_accepted_repeats": 5,
+    "stable_key_schema": "bioseq-e2e-cell-v2",
+    "stable_key_fields": [
+      "campaign_id",
+      "dataset",
+      "alphabet",
+      "target_size_gbp",
+      "kmer_size",
+      "window_size",
+      "index_mode",
+      "engine",
+      "bioseq_index_name",
+      "requested_minimizer_algorithm",
+      "requested_chaining_algorithm",
+      "requested_base_alignment_algorithm"
+    ],
+    "stable_key_encoding": "compact JSON array of ordered field values",
+    "repeat_identity": "stable_key plus repeat",
+    "duplicate_policy": "reject duplicate stable_key/repeat evidence",
+    "idempotency_policy": "unchanged evidence is a no-op",
+    "metric_a": {},
+    "metric_b": {},
+    "timing_acceptance": {},
+    "clock_semantics": {},
+    "match_parity": {},
+    "result_row_timing_fields": [
+      "run_count",
+      "outer_e2e_ns_p50",
+      "outer_e2e_minus_cigar_or_mapq_union_ns_p50"
+    ],
+    "non_timing_result_fields": []
+  },
+  "campaign": {
+    "name": "local_e2e_algorithm_matrix",
+    "campaign_id": "bioseq-e2e-algorithm-matrix-local-v1",
+    "campaign_digest": "011fbb1ef33a214ab80d3568c2341e8d0f8311f82e21a5955bdcb93b3c63b979",
+    "status": "in_progress",
+    "last_updated_at": "2026-01-01T00:00:00Z",
+    "execution_scope": "local_campaign",
+    "remote_execution_invoked": false,
+    "measurements_collected": 0,
+    "benchmark_runs_started": 1,
+    "accepted_calibration_records": 0,
+    "excluded_calibration_records": 1,
+    "active_calibration_runs": 0,
+    "pending_calibration_runs": 0,
+    "results_are_publishable": false,
+    "no_results_reason": "No q1024 result reports have been merged."
+  },
+  "matrix_contract": {
+    "target_size_gbp": [2, 4],
+    "alphabet": ["dna4", "dna5"],
+    "window_kmer": [
+      {"window_size": 10, "kmer_size": 15},
+      {"window_size": 15, "kmer_size": 20}
+    ],
+    "query_count": 1024,
+    "cigar_projection": true,
+    "mapq_projection": true,
+    "prefilter_enabled": false,
+    "index_mode": ["no_index", "just_index"],
+    "bioseq_index_name": [
+      "minimizers_per_fragment",
+      "minimizers_per_sequence"
+    ],
+    "repetitions_per_cell": 5,
+    "minimizer_algorithms": [
+      "scalar",
+      "simd_minimap2_reference",
+      "two_stack_nthash",
+      "vulkan_minimap_integer",
+      "bounded_nthash_simd"
+    ],
+    "chaining_algorithms": [
+      "scalar_minimap2",
+      "simd_minimap2",
+      "range_minimum_query",
+      "vulkan_tiled_dynamic_programming"
+    ],
+    "base_alignment_algorithms": ["ksw2", "block_aligner"],
+    "explicitly_excluded_base_alignment_algorithms": ["ksw2_batched"],
+    "bioseq_result_cells": 1280,
+    "minimap2_baseline_result_cells": 16,
+    "expected_result_cells": 1296,
+    "expected_raw_records": 6480
+  },
+  "wiring": {
+    "campaign_contract": "bench/bench_e2e_algorithm_matrix_campaign_contract.json",
+    "shard_generator": "bench/generate_e2e_algorithm_matrix_shards.py",
+    "serial_shard_directory": "bench/e2e_algorithm_matrix_shards",
+    "serial_shard_count": 88,
+    "builder_config_override": "exact manifest-owned config",
+    "mcp_run_only_example": {},
+    "automatic_consumer": "build_mcp/build_worker.py",
+    "manual_consumer_invocation": "bench/aggregate_e2e_algorithm_matrix.py",
+    "proof_policy": "exact campaign authority",
+    "shard_resume": "revalidate all processed reports"
+  },
+  "aggregation_state": {
+    "campaign_id": "bioseq-e2e-algorithm-matrix-local-v1",
+    "campaign_digest": "011fbb1ef33a214ab80d3568c2341e8d0f8311f82e21a5955bdcb93b3c63b979",
+    "canonical_result_cell_count": 1296,
+    "canonical_membership_complete": false,
+    "canonical_statuses_valid": true,
+    "missing_canonical_cell_count": 1296,
+    "processed_reports": [],
+    "report_count": 0,
+    "raw_record_count": 0,
+    "result_cell_count": 0,
+    "accepted_cell_count": 0,
+    "rejected_cell_count": 0,
+    "invalid_cell_count": 0,
+    "pending_cell_count": 0
+  },
+  "results": [],
+  "calibration": {
+    "schema_version": 1,
+    "publication_eligible": false,
+    "separation_policy": "Calibration records are never q1024 results.",
+    "q1": {
+      "status": "excluded",
+      "query_count": 1,
+      "reason": "query_count_not_significant",
+      "run_count": 5,
+      "outer_e2e_ns_p50": 1,
+      "outer_e2e_minus_cigar_or_mapq_union_ns_p50": 1,
+      "parity_comment": "Synthetic deterministic fixture."
+    },
+    "q8": {
+      "status": "complete",
+      "query_count": 8,
+      "accepted": [],
+      "running": [],
+      "pending_next": []
+    }
+  },
+  "execution_environment": {},
+  "publication_methodology": {
+    "status": "pending",
+    "query_count": 1024,
+    "target_size_gbp": [2, 4],
+    "alphabet": ["dna4", "dna5"],
+    "window_kmer": [
+      {"window_size": 10, "kmer_size": 15},
+      {"window_size": 15, "kmer_size": 20}
+    ],
+    "index_mode": ["no_index", "just_index"],
+    "cigar_projection": true,
+    "mapq_projection": true,
+    "prefilter_enabled": false,
+    "engines": {},
+    "minimizer_algorithms": [
+      "scalar",
+      "simd_minimap2_reference",
+      "two_stack_nthash",
+      "vulkan_minimap_integer",
+      "bounded_nthash_simd"
+    ],
+    "chaining_algorithms": [
+      "scalar_minimap2",
+      "simd_minimap2",
+      "range_minimum_query",
+      "vulkan_tiled_dynamic_programming"
+    ],
+    "base_alignment_algorithms": ["ksw2", "block_aligner"],
+    "excluded_base_alignment_algorithms": ["ksw2_batched"],
+    "minimum_run_count": 5,
+    "reported_timing_fields_only": [
+      "run_count",
+      "outer_e2e_ns_p50",
+      "outer_e2e_minus_cigar_or_mapq_union_ns_p50"
+    ],
+    "metric_a": "outer E2E median",
+    "metric_b": "outer E2E minus interval-union median",
+    "correctness_requirement": "exact match parity",
+    "algorithm_audit_requirement": "selected and observed identities agree",
+    "calibration_inference_policy": "q1 and q8 do not infer q1024 results"
+  },
+  "publication_state": {
+    "status": "pending",
+    "query_count": 1024,
+    "result_collection": "results",
+    "result_count": 0,
+    "calibration_results_included": false
+  },
+  "status": "in_progress"
+}

@@ -3,30 +3,35 @@
  * @brief Post-load policy lookup and index maintenance.
  */
 module;
-#include <bioseq/pg_compat.h>
-
-#include "access/heapam.h"
-#include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "commands/tablespace.h"
-#include "executor/tuptable.h"
-#include "utils/inval.h"
-#include "utils/memutils.h"
-#include "utils/snapmgr.h"
 
 extern "C" {
-#include "storage/buffile.h"
+#include "postgres.h"
+
+#include "executor/spi.h"
+#include "fmgr.h"
+#include "utils/builtins.h"
+#include "utils/errcodes.h"
+#include "varatt.h"
 }
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <vector>
+
+#include <fmt/format.h>
+
 export module bioseq.postgres.storage.indexing.admin:rebuild_post_load;
-import std;
-import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.indexing.type;
-import bioseq.postgres.storage.indexing.handles;
+import bioseq.postgres.storage.indexing.index_relation_identity;
 import bioseq.postgres.storage.indexing.admin.policy_catalog;
 import bioseq.postgres.storage.indexing.supported_indexes;
-import :rebuild_api;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::storage::indexing {
@@ -294,7 +299,7 @@ load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int
     for (std::size_t i = 0; i < k_index_types.size(); ++i) {
         if (!idx.enabled[i])
             continue;
-        if (idx.policy[i] != index_update_policy::update_on_insert)
+        if (idx.policy[i] != bioseq::indexing::index_update_policy::update_on_insert)
             continue;
         // Use a distinct SPI portal/executor frame so sidecar DDL, snapshot
         // changes, and relcache invalidations are contained before bioseq.load resumes.

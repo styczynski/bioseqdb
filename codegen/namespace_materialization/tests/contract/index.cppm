@@ -1187,7 +1187,7 @@ inline constexpr std::array<std::string_view, 8U>
         "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna5::width_w8",
     };
 
-inline void verify_production_scheduler_golden() {
+[[nodiscard]] inline generation_plan verify_production_scheduler_golden() {
     generation_plan plan = production_scheduler_plan();
     require(
         plan.topology.topology_digest
@@ -1288,12 +1288,13 @@ inline void verify_production_scheduler_golden() {
         role_golden{
             "attach_retained_hash_major_query_stats", "root", false, true},
         role_golden{
-            "with_source_provider_pg_locator", "root,scanner_pg", false, true},
+            "with_source_provider_pg_locator", "root", false, true},
         role_golden{
-            "with_pg_sequence_recipe", "root,scanner_pg", false, true},
+            "with_pg_sequence_recipe", "root", false, true},
         role_golden{
             "with_source_provider_pg_target", "root,scanner_pg", false, true},
-        role_golden{"process_scanner_pg_row_typed", "scanner_pg", false, true},
+        role_golden{
+            "process_scanner_pg_row_typed", "scanner_pg", false, true},
         role_golden{
             "process_inmemory_standard_row_typed",
             "inmemory_standard",
@@ -1314,7 +1315,8 @@ inline void verify_production_scheduler_golden() {
             "inmemory_chunked_segmented",
             false,
             true},
-        role_golden{"process_inmemory_row_typed", "inmemory", false, true},
+        role_golden{
+            "process_inmemory_row_typed", "root,inmemory", false, true},
         role_golden{"process_sequences_typed", "root", false, true},
         role_golden{"process_scanner_pg_row", "scanner_pg", true, false},
         role_golden{"process_inmemory_row", "inmemory", true, false},
@@ -1369,6 +1371,7 @@ inline void verify_production_scheduler_golden() {
                 && inside_support == expected.support_member,
             "production scheduler support/role map drifted");
     }
+    return plan;
 }
 
 inline void verify_production_pipe_owner_golden() {
@@ -1484,13 +1487,15 @@ inline void verify_production_pipe_owner_golden() {
             "minimap_port_fragment_index_batch_owned", "fragment_index"},
         owner_golden{
             "minimap_port_fragment_index_vector_owned", "fragment_index"},
+        owner_golden{
+            "minimap_port_fragment_index_physical_owned", "fragment_index"},
         owner_golden{"minimap_port_hash_major_owned", "hash_major"},
         owner_golden{"minimap_port_grouped_soa_owned", "grouped_soa"},
         owner_golden{"minimap_port_fragment_query_owned", "fragment_query"},
     };
     require(
         plan.topology.region.controlled_declarations.size() == owners.size(),
-        "pipe owns seven external definitions across six routes");
+        "pipe owns eight external definitions across six routes");
     for (std::size_t index = 0U; index < owners.size(); ++index) {
         const owned_declaration& declaration =
             plan.topology.region.controlled_declarations[index];
@@ -1558,9 +1563,9 @@ inline void verify_production_pipe_owner_golden() {
         }
     }
     require(
-        rendered_definitions == 14U,
-        "twelve pipe units own fourteen definitions because each alphabet's "
-        "fragment-index coordinate owns batch then vector");
+        rendered_definitions == 16U,
+        "twelve pipe units own sixteen definitions because each alphabet's "
+        "fragment-index coordinate owns batch, vector, then physical owner");
 
     generation_plan dna4 = production_pipe_plan("dna4_uint64");
     const generation_result dna4_generated = render_generation(dna4, false);
@@ -1572,38 +1577,39 @@ inline void verify_production_pipe_owner_golden() {
         "dna4 pipe profile has exactly six body-bearing owner units");
 }
 
-inline void verify_production_declaration_heads_and_probes() {
-    generation_plan plan = production_scheduler_plan();
+inline void verify_production_declaration_heads_and_probes(
+    const generation_plan& plan) {
     const generation_result generated = render_generation(plan, false);
     constexpr std::array expected_heads{
         std::pair{
             std::string_view{"process_scanner_pg_row"},
             std::string_view{
-                "300c0cbac4ea28744b51893ad1688fb17bfee0df9c78bbcd64751f764967b3ca"}},
+                "31bebd238b7abefabf70085641e760eb5f454bb346240be32dd818ec89d49cd9"}},
         std::pair{
             std::string_view{"process_inmemory_row"},
             std::string_view{
-                "e5ac396d95e4783b3efc99d38053f9a700b2088b5af85dee19879c875a742736"}},
+                "26c211282b95daf7199c1f9e3eb204ae6b31c2c89e265bb36c759db7e63f6361"}},
         std::pair{
             std::string_view{"process_inmemory_standard_row"},
             std::string_view{
-                "53c8202eeb1f468660e70c26e9ca33247ed989718ac8c866dea76b191cd3c06b"}},
+                "186df63124f8fdea161df9d7cf75b20c47b2ee3bdb58b8a80e8f239c17b1eae7"}},
         std::pair{
             std::string_view{"process_inmemory_segmented_row"},
             std::string_view{
-                "0c3dcbabc2cb6be1376a20c95afc014c08662d312b86af5d19adef5a5fc8e88a"}},
+                "c7d632d3df7211c8bf58d08e07ac2af313a1bdb9db25be380b5a016e1c37385a"}},
         std::pair{
             std::string_view{"process_inmemory_chunked_row"},
             std::string_view{
-                "b9e3562bed804b67f4529e8f404cc8c85ef3e3c7a8157fab27a19181bf93d700"}},
+                "9bcf0c3782ffdd11880c4eba121e6e76941a2b56d06daad9d7bf637c8ca6d73e"}},
         std::pair{
             std::string_view{"process_inmemory_chunked_segmented_row"},
             std::string_view{
-                "955fc7b563c8d3de235ebcde6f4d81e6ae83ccc54847a65cea82713e550f9325"}},
+                "dec1a2dbf332dae9888dd6f934cd80493e168716942f5d75309ac55716506ab2"}},
         std::pair{
             std::string_view{"process_sequences"},
             std::string_view{
-                "0e2611246a40e4734b730623f55ea29ec3c0005d51904e4fe28f20514c4a2558"}},
+                // The public root retains the immutable statement plan by value.
+                "2b8488a4dfa3ef6a978bff59121302342476f9d765d3a4ca65cf666442a7c071"}},
     };
     require(
         generated.artifacts.size() == 66U,
@@ -1661,6 +1667,27 @@ inline void verify_production_declaration_heads_and_probes() {
                     0U, 7U, 14U, 21U, 28U, 35U, 42U, 49U},
         "scheduler API/probe/implementation cardinalities drifted");
     require(
+        occurrences(
+            api->content,
+            "import bioseq.postgres.scheduler.dispatch_processor;") == 1U
+            && occurrences(api->content, "\nimport ") == 1U,
+        "scheduler API must depend only on its public signature owner");
+    require(
+        occurrences(
+            selector->content,
+            "import bioseq.postgres.scheduler.dispatch_processor;") == 1U
+            && occurrences(
+                selector->content,
+                "import :typed_flat_api;") == 1U
+            && occurrences(
+                selector->content,
+                "import bioseq.common.logging;") == 1U
+            && occurrences(selector->content, "\nimport ") == 3U
+            && selector->content.contains(
+                "#include <libassert/assert.hpp>"),
+        "scheduler selector must retain only its signature, API, and "
+        "diagnostic owners");
+    require(
         !api->content.contains(":cpu_preparation")
             && !selector->content.contains(":cpu_preparation"),
         "scheduler preparation support must remain private to body-bearing units");
@@ -1669,6 +1696,11 @@ inline void verify_production_declaration_heads_and_probes() {
         structural_analysis::scan_token_slice(api->relative_path, api->content);
     const materialization_coordinate& representative =
         plan.topology.coordinates.front();
+    const materialization_coordinate& scanner_representative =
+        plan.topology.coordinates.at(1U);
+    require(
+        coordinate_case(scanner_representative, "shape") == "scanner_pg",
+        "scheduler scanner representative must retain its reviewed shape");
     for (const auto& [name, expected_digest] : expected_heads) {
         const auto source_entry = std::ranges::find(
             plan.topology.region.controlled_declarations,
@@ -1682,9 +1714,12 @@ inline void verify_production_declaration_heads_and_probes() {
             "scheduler declaration-head golden entry is missing");
         const std::string source_head = render_entry_head(
             plan, *source_entry, representative, false);
+        const std::string actual_digest = normalized_token_digest(source_head);
         require(
-            normalized_token_digest(source_head) == expected_digest,
-            "authored scheduler declaration-head digest drifted");
+            actual_digest == expected_digest,
+            "authored scheduler declaration-head digest drifted: "
+                + std::string{name} + " expected=" + std::string{expected_digest}
+                + " actual=" + actual_digest);
 
         std::set<std::string, std::less<>> api_qualified_names;
         for (const structural_analysis::declaration_record& declaration :
@@ -1708,8 +1743,101 @@ inline void verify_production_declaration_heads_and_probes() {
             "generated API must own each exact entry head in all eight identities");
     }
 
+    generation_plan missing_root_header = plan;
+    missing_root_header.source_text = replace_once(
+        std::move(missing_root_header.source_text),
+        "#include <array>\n",
+        "#include <deque>\n");
+    require_rejected(
+        [&] {
+            static_cast<void>(
+                scheduler_implementation_global_module_fragment(
+                    missing_root_header, representative));
+        },
+        "scheduler root GMF pruning must reject a missing reviewed header "
+        "anchor");
+    require_rejected(
+        [&] {
+            static_cast<void>(rewrite_scheduler_root_std_qualifiers(
+                plan,
+                representative,
+                "auto value = std::deque<int>{};"));
+        },
+        "scheduler root std rewriting must reject an unaudited standard entity");
+    require_rejected(
+        [&] {
+            static_cast<void>(
+                scheduler_implementation_global_module_fragment(
+                    missing_root_header, scanner_representative));
+        },
+        "scheduler scanner GMF pruning must reject a missing reviewed header "
+        "anchor");
+    generation_plan missing_scanner_postgres_block = plan;
+    missing_scanner_postgres_block.source_text = replace_once(
+        std::move(missing_scanner_postgres_block.source_text),
+        "#undef Min\n",
+        "#undef Mip\n");
+    require_rejected(
+        [&] {
+            static_cast<void>(
+                scheduler_implementation_global_module_fragment(
+                    missing_scanner_postgres_block,
+                    scanner_representative));
+        },
+        "scheduler scanner GMF pruning must reject a missing PostgreSQL "
+        "anchor");
+    require_rejected(
+        [&] {
+            static_cast<void>(rewrite_scheduler_scanner_qualifiers(
+                plan,
+                scanner_representative,
+                "auto value = std::deque<int>{};"));
+        },
+        "scheduler scanner std rewriting must reject an unaudited standard "
+        "entity");
+    require(
+        rewrite_scheduler_scanner_qualifiers(
+            plan,
+            scanner_representative,
+            "void probe(AttrNumber, Datum, uint8_t, "
+            "std::optional<std::vector<std::uint8_t>>);")
+            == "void probe(typed_support_detail::scanner_attr_number, "
+               "typed_support_detail::scanner_datum, "
+               "typed_support_detail::scanner_std::uint8_t, "
+               "typed_support_detail::scanner_std::optional<"
+               "typed_support_detail::scanner_std::vector<"
+               "typed_support_detail::scanner_std::uint8_t>>);",
+        "scheduler scanner must rewrite the exact reviewed PostgreSQL and "
+        "standard entities through its light owner");
+
     constexpr std::array<std::size_t, 7U> head_index_by_shape{
         6U, 0U, 1U, 2U, 3U, 4U, 5U};
+    constexpr std::array<std::string_view, 10U>
+        scheduler_root_pruned_standard_headers{
+            "#include <array>\n",
+            "#include <cstddef>\n",
+            "#include <cstdint>\n",
+            "#include <limits>\n",
+            "#include <map>\n",
+            "#include <memory>\n",
+            "#include <optional>\n",
+            "#include <stdexcept>\n",
+            "#include <utility>\n",
+            "#include <vector>\n",
+        };
+    constexpr std::array<std::string_view, 10U>
+        scheduler_scanner_pruned_standard_headers{
+            "#include <array>\n",
+            "#include <cstddef>\n",
+            "#include <cstdint>\n",
+            "#include <limits>\n",
+            "#include <map>\n",
+            "#include <memory>\n",
+            "#include <optional>\n",
+            "#include <stdexcept>\n",
+            "#include <utility>\n",
+            "#include <vector>\n",
+        };
     for (const materialization_coordinate& coordinate :
          plan.topology.coordinates) {
         const std::size_t identity_index = coordinate.ordinal / 7U;
@@ -1723,12 +1851,228 @@ inline void verify_production_declaration_heads_and_probes() {
         require(
             occurrences(
                 implementation.content,
-                "import :cpu_preparation;") == 1U
+                "import :cpu_preparation;") == 0U
+                && !implementation.content.contains(
+                    "import :typed_flat_api;")
                 && occurrences(
                     implementation.content,
                     "namespace " + std::string{identity} + " {")
                     == 1U,
-            "each scheduler implementation must import preparation support and own its exact identity namespace");
+            "scheduler bodies must avoid the aggregate API and preparation "
+            "partitions, and every implementation must "
+            "own its exact identity namespace");
+        const bool root_shape = shape_index == 0U;
+        const bool scanner_shape = shape_index == 1U;
+        const bool standard_shape = shape_index == 3U || shape_index == 5U;
+        const bool segmented_shape = shape_index == 4U || shape_index == 6U;
+        for (const std::string_view header
+             : scheduler_root_pruned_standard_headers) {
+            const bool scanner_prunes_header =
+                std::ranges::find(
+                    scheduler_scanner_pruned_standard_headers,
+                    header)
+                != scheduler_scanner_pruned_standard_headers.end();
+            require(
+                implementation.content.contains(header)
+                    == !(root_shape
+                         || (scanner_shape && scanner_prunes_header)),
+                "scheduler root/scanner implementations must prune exactly "
+                "the reviewed standard headers");
+        }
+        require(implementation.content.contains("#include <new>\n") &&
+                    occurrences(implementation.content, "typed_support_detail::root_std::") ==
+                        // match_result_map removes four qualifiers; the plan-owner
+                        // guard adds one logic_error qualifier.
+                        (root_shape ? 62U : 0U) &&
+                    (!root_shape || occurrences(implementation.content, "std::") == 62U),
+                "scheduler root must retain the allocator anchor and bind exactly "
+                "the reviewed standard entities through root_std");
+        require(
+            occurrences(
+                implementation.content,
+                "typed_support_detail::scanner_std::")
+                    == (scanner_shape ? 24U : 0U)
+                && occurrences(
+                       implementation.content,
+                       "typed_support_detail::scanner_attr_number")
+                    == 0U
+                && occurrences(
+                       implementation.content,
+                       "typed_support_detail::scanner_datum")
+                    == 0U
+                && occurrences(
+                       implementation.content,
+                       "typed_support_detail::scanner_std::uint8_t")
+                    == (scanner_shape ? 7U : 0U)
+                && (!scanner_shape
+                    || (occurrences(implementation.content, "std::") == 24U
+                        && occurrences(implementation.content, "uint8_t")
+                            == 7U
+                        && !implementation.content.contains("AttrNumber")
+                        && !implementation.content.contains("Datum"))),
+            "scheduler scanner must bind exactly the reviewed PostgreSQL and "
+            "standard entities through its light owner");
+        require(
+            implementation.content.contains("#include \"postgres.h\"\n")
+                    == !scanner_shape
+                && implementation.content.contains(
+                       "#include \"access/attnum.h\"\n")
+                    == !scanner_shape
+                && implementation.content.contains("#undef Min\n")
+                    == !scanner_shape
+                && implementation.content.contains("#undef Max\n")
+                    == !scanner_shape
+                && implementation.content.contains("#undef snprintf\n")
+                    == !scanner_shape
+                && implementation.content.contains("#undef vsnprintf\n")
+                    == !scanner_shape,
+            "only the scanner implementation may narrow its reviewed "
+            "PostgreSQL global-module-fragment block");
+        require(
+            implementation.content.contains("#include \"c.h\"\n")
+                    == scanner_shape
+                && implementation.content.contains(
+                       "#include \"utils/palloc.h\"\n")
+                    == scanner_shape,
+            "the scanner implementation must retain exactly the module-local "
+            "PostgreSQL palloc anchor");
+        require(
+            !implementation.content.contains(
+                "import bioseq.postgres.storage.indexing.chunked_storage;")
+                && !implementation.content.contains(
+                       "import bioseq.postgres.storage.indexing.fragment_handle;")
+                && implementation.content.contains(
+                       "import bioseq.postgres.scheduler.dispatch_processor."
+                       "source_provider_promotion;")
+                    == (root_shape || scanner_shape)
+                && implementation.content.contains(
+                       "import bioseq.postgres.scheduler.dispatch_processor."
+                       "fragment_storage_opener;")
+                    == scanner_shape
+                && implementation.content.contains(
+                       "import bioseq.storage.layout;")
+                    == (root_shape || scanner_shape)
+                && implementation.content.contains(
+                       "import bioseq.sequences;")
+                && implementation.content.contains(
+                       "import bioseq.postgres.scheduler.dispatch_processor."
+                       "typed_support.source_provider_adapters;")
+                    == root_shape
+                && implementation.content.contains(
+                       "import bioseq.postgres.scheduler.dispatch_processor."
+                       "typed_support.scanner_row;")
+                    == scanner_shape
+                && implementation.content.contains(
+                       "import bioseq.postgres.scheduler.dispatch_processor."
+                       "typed_support.root_coordination;")
+                    == root_shape
+                && implementation.content.contains(
+                       "import bioseq.postgres.scheduler.dispatch_processor."
+                       "typed_support.cpu_batch_route;")
+                    == root_shape
+                && implementation.content.contains(
+                       "import bioseq.postgres.scheduler.dispatch_processor."
+                       "typed_support.policy_stats;")
+                    == (root_shape || shape_index == 2U)
+                && implementation.content.contains(
+                       "import bioseq.postgres.scheduler.dispatch_processor."
+                       "typed_support.pg_alignment_errors;")
+                    == standard_shape
+                && implementation.content.contains(
+                       "import bioseq.postgres.scheduler.dispatch_processor."
+                       "checked_alignment_calls;")
+                    == segmented_shape
+                && (!root_shape
+                    || (!implementation.content.contains(
+                            "import bioseq.indexing.minimizer_hashmap;")
+                        && !implementation.content.contains(
+                            "import bioseq.common.seqan_adapter;")
+                        && !implementation.content.contains(
+                            "import bioseq.storage.lazy_sequence;")))
+                && (!scanner_shape
+                    || (!implementation.content.contains(
+                            "import bioseq.highway.dispatch_contract;")
+                        && !implementation.content.contains(
+                            "import bioseq.postgres.support;")
+                        && !implementation.content.contains(
+                            "import bioseq.indexing.minimizer_hashmap;"))),
+            "scheduler implementation imports must follow the selected body shape");
+        std::size_t local_identity_alias_count = 0U;
+        for (const binding_record& binding : plan.topology.region.bindings) {
+            if (binding.role != axis_role::identity
+                || binding.declaration.kind
+                    != structural_analysis::declaration_kind::alias) {
+                continue;
+            }
+            ++local_identity_alias_count;
+            require(
+                occurrences(
+                    implementation.content,
+                    render_binding_declaration(
+                        plan, binding, coordinate, false)) == 1U,
+                "scheduler body must materialize each exact selected identity "
+                "alias once");
+        }
+
+        const bool leaf_sibling_context = root_shape || shape_index == 2U;
+        std::size_t sibling_declaration_count = 0U;
+        std::size_t scanner_sibling_declaration_count = 0U;
+        for (const owned_declaration& declaration : plan.topology.region.controlled_declarations) {
+            if (!declaration.generated_api_entry)
+                continue;
+            std::string prototype = render_entry_head(plan, declaration, coordinate, false);
+            prototype =
+                rewrite_scheduler_root_std_qualifiers(plan, coordinate, std::move(prototype));
+            prototype += ';';
+            if (coordinate_matches(coordinate, declaration.clauses)) {
+                require(occurrences(implementation.content, prototype) == 0U,
+                        "scheduler body must not redeclare its own generated entry");
+                continue;
+            }
+            const bool leaf_entry = declaration.entry_role == "inmemory_standard" ||
+                                    declaration.entry_role == "inmemory_segmented" ||
+                                    declaration.entry_role == "inmemory_chunked" ||
+                                    declaration.entry_role == "inmemory_chunked_segmented";
+            const bool scanner_entry = declaration.entry_role == "scanner_pg";
+            const bool sibling_required =
+                (leaf_sibling_context && leaf_entry) || (root_shape && scanner_entry);
+            const std::size_t expected_occurrences = sibling_required ? 1U : 0U;
+            sibling_declaration_count += expected_occurrences;
+            if (scanner_entry) {
+                scanner_sibling_declaration_count += expected_occurrences;
+            }
+            require(occurrences(implementation.content, prototype) == expected_occurrences,
+                    "scheduler body emitted a non-required or omitted a required "
+                    "sibling entry declaration");
+        }
+        require(local_identity_alias_count == 1U &&
+                    sibling_declaration_count ==
+                        (root_shape ? 5U : (leaf_sibling_context ? 4U : 0U)) &&
+                    scanner_sibling_declaration_count == (root_shape ? 1U : 0U),
+                "scheduler local API context must contain one identity alias and "
+                "exactly one scanner plus four leaf declarations for root, or "
+                "only four leaf declarations for inmemory");
+        const auto selected_entry = std::ranges::find(
+            plan.topology.region.controlled_declarations,
+            name,
+            [](const owned_declaration& declaration) {
+                return declaration.declaration.name;
+            });
+        require(
+            selected_entry
+                != plan.topology.region.controlled_declarations.end(),
+            "selected scheduler implementation entry is missing");
+        std::string expected_definition_head = render_entry_head(
+            plan, *selected_entry, coordinate, false);
+        if (root_shape) {
+            expected_definition_head = rewrite_scheduler_root_std_qualifiers(
+                plan, coordinate, std::move(expected_definition_head));
+        } else if (scanner_shape) {
+            expected_definition_head = rewrite_scheduler_scanner_qualifiers(
+                plan, coordinate, std::move(expected_definition_head));
+        }
+        const std::string expected_definition_digest =
+            normalized_token_digest(expected_definition_head);
         const structural_analysis::translation_unit implementation_unit =
             structural_analysis::scan_token_slice(
                 implementation.relative_path, implementation.content);
@@ -1739,7 +2083,7 @@ inline void verify_production_declaration_heads_and_probes() {
             ++definition_matches;
             require(
                 declaration_head_digest(implementation.content, declaration)
-                        == expected_digest
+                        == expected_definition_digest
                     && declaration.qualified_name
                         == std::string{identity} + "::" + std::string{name},
                 "generated implementation declaration-head digest drifted");
@@ -3201,9 +3545,11 @@ inline void run_namespace_materialization_contract_tests() {
     detail::verify_configure_structural_digest_mutations();
     detail::verify_scheduler_highway_separation();
     detail::verify_scheduler_profile_policy();
-    detail::verify_production_scheduler_golden();
+    const generation_plan validated_scheduler_plan =
+        detail::verify_production_scheduler_golden();
     detail::verify_production_pipe_owner_golden();
-    detail::verify_production_declaration_heads_and_probes();
+    detail::verify_production_declaration_heads_and_probes(
+        validated_scheduler_plan);
     detail::verify_exact_edits();
     detail::verify_coordinate_axis_domains();
     detail::verify_record_probe_provenance_placement();

@@ -6674,6 +6674,104 @@ class module_edges_factory final
     std::vector<module_graph_unit>& output_;
 };
 
+class structural_module_graph_consumer final
+    : public clang::ASTConsumer {
+  public:
+    structural_module_graph_consumer(
+        std::vector<module_graph_unit>& module_graph_output,
+        std::vector<translation_unit>& structural_output,
+        std::shared_ptr<conditional_state> conditions,
+        std::string source_path,
+        std::string compiler_profile)
+        : module_edges_(module_graph_output),
+          structural_(
+              structural_output,
+              std::move(conditions),
+              std::move(source_path),
+              std::move(compiler_profile)) {
+    }
+
+    void HandleTranslationUnit(clang::ASTContext& context) override {
+        module_edges_.HandleTranslationUnit(context);
+        // The former graph pass rejected compiler errors before SQL started
+        // structural collection. Preserve that diagnostic precedence.
+        if (!context.getDiagnostics().hasErrorOccurred()) {
+            structural_.HandleTranslationUnit(context);
+        }
+    }
+
+  private:
+    module_edges_consumer module_edges_;
+    structural_consumer structural_;
+};
+
+class structural_module_graph_action final
+    : public clang::ASTFrontendAction {
+  public:
+    structural_module_graph_action(
+        std::vector<module_graph_unit>& module_graph_output,
+        std::vector<translation_unit>& structural_output,
+        std::string compiler_profile)
+        : module_graph_output_(module_graph_output),
+          structural_output_(structural_output),
+          compiler_profile_(std::move(compiler_profile)),
+          conditions_(std::make_shared<conditional_state>()) {
+    }
+
+    bool BeginSourceFileAction(
+        clang::CompilerInstance& compiler) override {
+        compiler.getPreprocessor().addPPCallbacks(
+            std::make_unique<condition_callbacks>(
+                *conditions_,
+                compiler.getSourceManager(),
+                compiler.getLangOpts()));
+        return clang::ASTFrontendAction::BeginSourceFileAction(
+            compiler);
+    }
+
+    std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(
+        clang::CompilerInstance&,
+        llvm::StringRef input_file) override {
+        return std::make_unique<structural_module_graph_consumer>(
+            module_graph_output_,
+            structural_output_,
+            conditions_,
+            input_file.str(),
+            compiler_profile_);
+    }
+
+  private:
+    std::vector<module_graph_unit>& module_graph_output_;
+    std::vector<translation_unit>& structural_output_;
+    std::string compiler_profile_;
+    std::shared_ptr<conditional_state> conditions_;
+};
+
+class structural_module_graph_factory final
+    : public clang::tooling::FrontendActionFactory {
+  public:
+    structural_module_graph_factory(
+        std::vector<module_graph_unit>& module_graph_output,
+        std::vector<translation_unit>& structural_output,
+        std::string compiler_profile)
+        : module_graph_output_(module_graph_output),
+          structural_output_(structural_output),
+          compiler_profile_(std::move(compiler_profile)) {
+    }
+
+    std::unique_ptr<clang::FrontendAction> create() override {
+        return std::make_unique<structural_module_graph_action>(
+            module_graph_output_,
+            structural_output_,
+            compiler_profile_);
+    }
+
+  private:
+    std::vector<module_graph_unit>& module_graph_output_;
+    std::vector<translation_unit>& structural_output_;
+    std::string compiler_profile_;
+};
+
 void append_expanded_argument(
     const std::string& argument,
     clang::tooling::CommandLineArguments& output) {
@@ -8666,9 +8764,10 @@ derive_active_import_artifact_paths(
     const pcm_artifact_paths& artifacts) {
     direct_arguments.push_back(
         "-fmodule-output=" + artifacts.pcm.string());
-    direct_arguments.emplace_back("-fmodules-reduced-bmi");
-    // The driver writes the reduced BMI above and a transient full BMI to
-    // `-o`; unlike `-c`, this performs no discarded object/backend action.
+    // The driver writes the full BMI to `-o`; unlike `-c`, this performs no
+    // discarded object/backend action.  Reduced BMIs are intentionally not
+    // requested because Clang 22 corrupts source locations and allocation
+    // declarations in complete generated template consumers.
     direct_arguments.emplace_back("--precompile");
     direct_arguments.push_back(source_spelling.string());
     direct_arguments.emplace_back("-o");
@@ -9916,6 +10015,64 @@ namespace {
     if (tool.run(&factory) != 0) {
         throw std::runtime_error(
             "Clang structural compile-database pass reported errors");
+    }
+    return result;
+}
+
+[[nodiscard]] structural_module_graph_scan
+scan_translation_units_and_module_graph_from_database(
+    const std::vector<std::filesystem::path>& source_paths,
+    const std::filesystem::path& compile_database,
+    std::string_view compiler_profile,
+    const std::filesystem::path& pcm_root) {
+    const std::string compilation_signature =
+        bioseq::common::sha256_hex(
+            read_artifact_bytes(compile_database)
+            + "\n" + std::string{compiler_profile}
+            + "\n" + pcm_root.generic_string()
+            + "\n" + std::string{CLANG_VERSION_STRING});
+    structural_module_graph_scan result{
+        .structural = {
+            .clang_release = CLANG_VERSION_STRING,
+            .compilation_signature = compilation_signature,
+        },
+        .graph = {
+            .clang_release = CLANG_VERSION_STRING,
+            .compilation_signature = compilation_signature,
+        },
+    };
+    std::unique_ptr<clang::tooling::CompilationDatabase> database =
+        clang_backend::load_compile_database(compile_database);
+    const bool has_compiler_profile = !compiler_profile.empty();
+    const bool has_pcm_root = !pcm_root.empty();
+    if (has_compiler_profile != has_pcm_root) {
+        throw std::runtime_error(
+            "compile-database scan received incomplete owned authority: "
+            "compiler_profile and pcm_root must be provided together");
+    }
+    if (has_compiler_profile) {
+        clang_backend::validate_owned_compile_database(
+            *database,
+            source_paths,
+            compiler_profile,
+            pcm_root);
+    }
+    const clang_backend::scoped_compile_database_cwd cwd{
+        compile_database};
+    const std::vector<std::string> units =
+        clang_backend::buildable_units(*database, source_paths);
+    const clang_backend::satisfiable_compilation_database
+        satisfiable{*database};
+    clang::tooling::ClangTool tool{satisfiable, units};
+    tool.appendArgumentsAdjuster(
+        clang_backend::structural_arguments_adjuster());
+    clang_backend::structural_module_graph_factory factory{
+        result.graph.units,
+        result.structural.translation_units,
+        std::string{compiler_profile}};
+    if (tool.run(&factory) != 0) {
+        throw std::runtime_error(
+            "Clang module-graph compile-database pass reported errors");
     }
     return result;
 }
@@ -11511,6 +11668,12 @@ prepare_compilation_environment(
             configured_pcm_root,
             compiler_profile,
             authority);
+    // The synthetic database is derived and published inside this preparation.
+    // Keep its completion-authority and hash coverage, but do not expose it as
+    // an external depfile input to the custom command that creates it.
+    std::erase(
+        prepared.dependencies,
+        clang_backend::absolute_normalized_path(synthetic_database));
     prepared.dependencies.push_back(
         clang_backend::absolute_normalized_path(
             raw_compile_database));
@@ -12069,6 +12232,12 @@ prepare_dependency_compilation_environment(
             pcm_root,
             compiler_profile,
             manifest_authority);
+    // The sealed database is derived and published inside this preparation.
+    // Keep its completion-authority and hash coverage, but do not expose it as
+    // an external depfile input to the custom command that creates it.
+    std::erase(
+        prepared.dependencies,
+        clang_backend::absolute_normalized_path(sealed_database));
     const auto matches_identity =
         [](const frontend_action_record& action,
            const dependency_module_identity& identity) {

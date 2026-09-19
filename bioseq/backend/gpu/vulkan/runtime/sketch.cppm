@@ -22,6 +22,38 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+namespace {
+
+/** @brief Runtime-local proof for one completed authorized download. */
+struct authorized_readback_receipt {
+    runtime_buffer_identity source{};
+    runtime_buffer_identity destination{};
+    std::uint64_t authorization_identity = 0u;
+    std::uint64_t destination_offset = 0u;
+    std::uint64_t copied_bytes = 0u;
+    bool submitted = false;
+    bool completed = false;
+    bool command_reset = false;
+};
+
+/** @brief Match a local receipt to the exact submitted identities and byte extent. */
+[[nodiscard]] inline bool authorized_readback_receipt_matches(
+    const authorized_readback_receipt& receipt,
+    const runtime_buffer_identity& expected_source,
+    const runtime_buffer_identity& expected_destination,
+    std::uint64_t expected_authorization_identity,
+    std::uint64_t expected_destination_offset,
+    std::uint64_t expected_bytes) noexcept {
+    return receipt.source.is_valid() && receipt.destination.is_valid() &&
+           receipt.source == expected_source && receipt.destination == expected_destination &&
+           receipt.authorization_identity == expected_authorization_identity &&
+           receipt.destination_offset == expected_destination_offset &&
+           receipt.copied_bytes == expected_bytes && receipt.submitted && receipt.completed &&
+           receipt.command_reset;
+}
+
+} // namespace
+
 /// @brief Runs one count, scan, and emit sketch roundtrip with host materialization.
 /// @param[in] packed_sequence Borrowed packed sequence bytes consumed before return.
 /// @param[in] rank_lut Rank translation table copied into the arena.
@@ -175,7 +207,7 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
         shader_kind::ordered_sketch_tile,
         k_sketch_local_size,
-        std::max<std::uint32_t>(window_size, 1u));
+        choose_ordered_sketch_window_capacity(window_size));
     const compute_pipeline scan_block_pipe =
         get_compute_pipeline_locked(shader_kind::prefix_scan_block, 1u, 1u);
     const compute_pipeline scan_add_pipe =
@@ -446,7 +478,7 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
         shader_kind::ordered_sketch_tile,
         k_sketch_local_size,
-        std::max<std::uint32_t>(window_size, 1u));
+        choose_ordered_sketch_window_capacity(window_size));
     const compute_pipeline scan_block_pipe =
         get_compute_pipeline_locked(shader_kind::prefix_scan_block, 1u, 1u);
     const compute_pipeline scan_add_pipe =
@@ -704,6 +736,8 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
             vulkan_handle_identity(result.minimizer_words.memory);
         result.query_authority.buffer_bytes_ = result.minimizer_words.bytes;
         result.query_authority.allocation_bytes_ = result.minimizer_words.allocation_bytes;
+        result.query_authority.logical_minimizer_bytes_ = minimizer_device_bytes(
+            params.minimizer_word_kind, params.minimizer_words32, result.count);
         result.query_authority.minimizer_count_ = result.count;
         result.query_authority.window_size_ = params.window_size;
         result.query_authority.kmer_size_ = params.kmer_size;
@@ -750,5 +784,266 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
     return result;
 }
+
+/// @brief Authenticates every private field of a device-only query sketch.
+std::uint64_t runtime::validate_query_sketch_authorization_locked(
+    const device_query_sketch_authorization& authorization,
+    const buffer& device_words,
+    std::uint64_t expected_minimizer_count,
+    std::uint32_t expected_word_kind,
+    std::uint32_t expected_words32_per_record,
+    std::uint32_t expected_hash_shift,
+    std::uint32_t expected_pos_bits,
+    std::span<const gpu_seed_query_record_wire> expected_query_records) const {
+    const bool typed_word_shape =
+        (expected_word_kind == 1u && expected_words32_per_record == 1u) ||
+        (expected_word_kind == 2u && expected_words32_per_record == 2u) ||
+        (expected_word_kind == 3u && expected_words32_per_record == 4u);
+    const auto exact_bytes = bioseq::common::checked_mul(
+        expected_minimizer_count,
+        static_cast<std::uint64_t>(expected_words32_per_record) * sizeof(std::uint32_t));
+    if (!typed_word_shape || !exact_bytes.has_value() ||
+        *exact_bytes > (std::numeric_limits<std::size_t>::max)() ||
+        !authorization.is_valid() || authorization.runtime_ != this ||
+        authorization.identity_ == 0u || !device_words.is_valid() ||
+        device_words.owner != this ||
+        authorization.buffer_ != device_words.buffer_handle ||
+        authorization.memory_identity_ != vulkan_handle_identity(device_words.memory) ||
+        authorization.buffer_bytes_ != device_words.bytes ||
+        authorization.allocation_bytes_ != device_words.allocation_bytes ||
+        authorization.logical_minimizer_bytes_ != *exact_bytes ||
+        *exact_bytes > device_words.bytes ||
+        authorization.minimizer_count_ != expected_minimizer_count ||
+        authorization.minimizer_word_kind_ != expected_word_kind ||
+        authorization.minimizer_words32_per_record_ != expected_words32_per_record ||
+        authorization.hash_shift_ != expected_hash_shift ||
+        authorization.pos_bits_ != expected_pos_bits ||
+        authorization.device_uuid_ != features_.device_uuid ||
+        authorization.query_records_.size() != expected_query_records.size()) {
+        throw vulkan_runtime_error(
+            "authorized query-minimizer readback identity or typed extent mismatch");
+    }
+    for (std::size_t index = 0u; index < expected_query_records.size(); ++index) {
+        const gpu_seed_query_record_wire& sealed = authorization.query_records_[index];
+        const gpu_seed_query_record_wire& expected = expected_query_records[index];
+        if (sealed.minimizer_offset != expected.minimizer_offset ||
+            sealed.minimizer_count != expected.minimizer_count ||
+            sealed.query_len != expected.query_len || sealed.flags != expected.flags) {
+            throw vulkan_runtime_error(
+                "authorized query-minimizer readback partition mismatch");
+        }
+    }
+    return *exact_bytes;
+}
+
+/// @brief Performs one private, authorized device-to-host minimizer copy.
+void runtime::readback_authorized_query_minimizers(
+    const device_query_sketch_authorization& authorization,
+    const buffer& device_words,
+    std::uint64_t expected_minimizer_count,
+    std::uint32_t expected_word_kind,
+    std::uint32_t expected_words32_per_record,
+    std::uint32_t expected_hash_shift,
+    std::uint32_t expected_pos_bits,
+    std::span<const gpu_seed_query_record_wire> expected_query_records,
+    std::span<std::byte> destination) {
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw vulkan_runtime_error(
+            "readback_authorized_query_minimizers on unavailable device");
+    }
+    const std::uint64_t exact_bytes = validate_query_sketch_authorization_locked(
+        authorization,
+        device_words,
+        expected_minimizer_count,
+        expected_word_kind,
+        expected_words32_per_record,
+        expected_hash_shift,
+        expected_pos_bits,
+        expected_query_records);
+    if (destination.size() != static_cast<std::size_t>(exact_bytes)) {
+        throw vulkan_runtime_error(
+            "authorized query-minimizer readback destination is not exact");
+    }
+    if (exact_bytes == 0u)
+        return;
+
+    gpu_arena& arena = reusable_gpu_arena();
+    gpu_arena_trim_guard trim{arena};
+    if (!arena.ensure_admitted_capacity(0u, 0u, exact_bytes)) {
+        throw vulkan_runtime_error(
+            "authorized query-minimizer readback backing admission failed");
+    }
+    const gpu_arena_slice download = arena.allocate_download(exact_bytes, 16u);
+    if (!download.is_valid() || download.buffer->mapped == nullptr) {
+        throw vulkan_runtime_error(
+            "authorized query-minimizer readback arena is unavailable");
+    }
+
+    authorized_readback_receipt receipt{
+        .source = make_runtime_buffer_identity(&device_words),
+        .destination = make_runtime_buffer_identity(download.buffer),
+        .authorization_identity = authorization.identity_,
+        .destination_offset = download.offset,
+        .copied_bytes = exact_bytes,
+    };
+
+    check_vk(vkResetCommandBuffer(command_buffer_, 0),
+             "reset(authorized_query_minimizer_readback)");
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check_vk(vkBeginCommandBuffer(command_buffer_, &begin),
+             "begin(authorized_query_minimizer_readback)");
+    VkMemoryBarrier compute_to_transfer{};
+    compute_to_transfer.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    compute_to_transfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    compute_to_transfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(command_buffer_,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0u,
+                         1u,
+                         &compute_to_transfer,
+                         0u,
+                         nullptr,
+                         0u,
+                         nullptr);
+    const VkBufferCopy copy{0u, download.offset, exact_bytes};
+    vkCmdCopyBuffer(command_buffer_,
+                    device_words.buffer_handle,
+                    download.buffer->buffer_handle,
+                    1u,
+                    &copy);
+    VkMemoryBarrier transfer_to_host{};
+    transfer_to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    transfer_to_host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    transfer_to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(command_buffer_,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT,
+                         0u,
+                         1u,
+                         &transfer_to_host,
+                         0u,
+                         nullptr,
+                         0u,
+                         nullptr);
+    receipt.submitted = true;
+    submit_and_wait(device_,
+                    queue_,
+                    command_buffer_,
+                    fence_,
+                    "submit(authorized_query_minimizer_readback)");
+    receipt.completed = true;
+    check_vk(vkResetCommandBuffer(command_buffer_, 0),
+             "reset(authorized_query_minimizer_readback-post)");
+    receipt.command_reset = true;
+
+    if (!authorized_readback_receipt_matches(
+            receipt,
+            make_runtime_buffer_identity(&device_words),
+            make_runtime_buffer_identity(download.buffer),
+            authorization.identity_,
+            download.offset,
+            exact_bytes)) {
+        throw vulkan_runtime_error(
+            "authorized query-minimizer readback completion receipt mismatch");
+    }
+    std::memcpy(destination.data(),
+                static_cast<const std::byte*>(download.buffer->mapped) + download.offset,
+                destination.size());
+    if (!trim.release_now()) {
+        throw vulkan_runtime_error(
+            "authorized query-minimizer readback arena did not become idle");
+    }
+}
+
+#if defined(BIOSEQ_TEST_INDEXES)
+bool runtime::self_test_authorized_readback_receipt_contract() {
+    std::byte source_object{};
+    std::byte destination_object{};
+    std::byte owner_object{};
+    const auto* owner = reinterpret_cast<const runtime*>(std::addressof(owner_object));
+    const runtime_buffer_identity source{
+        .object = reinterpret_cast<const buffer*>(std::addressof(source_object)),
+        .owner = owner,
+        .buffer_handle = 11u,
+        .memory_handle = 12u,
+        .bytes = 128u,
+        .allocation_bytes = 160u,
+    };
+    const runtime_buffer_identity destination{
+        .object = reinterpret_cast<const buffer*>(std::addressof(destination_object)),
+        .owner = owner,
+        .buffer_handle = 21u,
+        .memory_handle = 22u,
+        .bytes = 256u,
+        .allocation_bytes = 320u,
+    };
+    constexpr std::uint64_t authorization_identity = 31u;
+    constexpr std::uint64_t destination_offset = 32u;
+    constexpr std::uint64_t exact_bytes = 64u;
+    const authorized_readback_receipt exact{
+        .source = source,
+        .destination = destination,
+        .authorization_identity = authorization_identity,
+        .destination_offset = destination_offset,
+        .copied_bytes = exact_bytes,
+        .submitted = true,
+        .completed = true,
+        .command_reset = true,
+    };
+    if (!authorized_readback_receipt_matches(exact,
+                                             source,
+                                             destination,
+                                             authorization_identity,
+                                             destination_offset,
+                                             exact_bytes)) {
+        return false;
+    }
+
+    auto short_receipt = exact;
+    short_receipt.copied_bytes = exact_bytes - 1u;
+    auto long_receipt = exact;
+    long_receipt.copied_bytes = exact_bytes + 1u;
+    auto unsubmitted_receipt = exact;
+    unsubmitted_receipt.submitted = false;
+    auto incomplete_receipt = exact;
+    incomplete_receipt.completed = false;
+    auto unreset_receipt = exact;
+    unreset_receipt.command_reset = false;
+    return !authorized_readback_receipt_matches(short_receipt,
+                                                source,
+                                                destination,
+                                                authorization_identity,
+                                                destination_offset,
+                                                exact_bytes) &&
+           !authorized_readback_receipt_matches(long_receipt,
+                                                source,
+                                                destination,
+                                                authorization_identity,
+                                                destination_offset,
+                                                exact_bytes) &&
+           !authorized_readback_receipt_matches(unsubmitted_receipt,
+                                                source,
+                                                destination,
+                                                authorization_identity,
+                                                destination_offset,
+                                                exact_bytes) &&
+           !authorized_readback_receipt_matches(incomplete_receipt,
+                                                source,
+                                                destination,
+                                                authorization_identity,
+                                                destination_offset,
+                                                exact_bytes) &&
+           !authorized_readback_receipt_matches(unreset_receipt,
+                                                source,
+                                                destination,
+                                                authorization_identity,
+                                                destination_offset,
+                                                exact_bytes);
+}
+#endif
 
 } // namespace bioseq::gpu::vulkan

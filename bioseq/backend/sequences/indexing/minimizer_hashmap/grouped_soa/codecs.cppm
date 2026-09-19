@@ -9,6 +9,7 @@ module;
 export module bioseq.indexing.minimizer_hashmap:grouped_soa_codecs;
 
 import std;
+import bioseq.pipeline.runtime_contract;
 import :exact_simd;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
@@ -127,6 +128,18 @@ validate_manifest_standalone(const minimizer_generation_manifest& manifest) noex
         manifest.gpu_abi_revision != profile->gpu_abi_revision) {
         return minimizer_generation_encoding_error::storage_contract_mismatch;
     }
+    const auto& algorithm_identity = manifest.algorithm_identity;
+    if (!is_valid_minimizer_generation_algorithm_identity(algorithm_identity, producer_backend) ||
+        (manifest.storage_unit_byte_width != sizeof(std::uint32_t) &&
+         manifest.storage_unit_byte_width != sizeof(std::uint64_t)) ||
+        algorithm_identity.alphabet_id != manifest.alphabet_code ||
+        algorithm_identity.packed_storage_bits != manifest.storage_unit_byte_width * 8u ||
+        algorithm_identity.runtime_kmer_size != manifest.kmer_size ||
+        algorithm_identity.runtime_window_size != manifest.window_size ||
+        algorithm_identity.hash_width != manifest.hash_width ||
+        algorithm_identity.payload_layout_abi_revision != profile->payload_layout_abi_revision) {
+        return minimizer_generation_encoding_error::storage_contract_mismatch;
+    }
     if (manifest.segment_geometry_revision !=
         minimizer_generation_manifest::uniform_segment_geometry_revision) {
         return minimizer_generation_encoding_error::segment_geometry_revision;
@@ -221,8 +234,8 @@ decode_minimizer_generation_head(std::span<const std::byte> input) noexcept {
     return head;
 }
 
-/// Encode a standalone-valid grouped-SoA manifest as exactly 160 bytes,
-/// including the frozen 32-byte profile extension.
+/// Encode a standalone-valid grouped-SoA manifest as exactly 176 bytes,
+/// including the revision-2 48-byte profile and READY-identity extension.
 [[nodiscard]] constexpr std::expected<encoded_minimizer_manifest,
                                       minimizer_generation_encoding_error>
 encode_minimizer_generation_manifest_record(
@@ -277,6 +290,26 @@ encode_minimizer_generation_manifest_record(
     write_le<std::uint8_t>(bytes, 142, static_cast<std::uint8_t>(manifest.position_semantics));
     write_le<std::uint64_t>(bytes, 144, manifest.max_hash);
     write_le<std::uint64_t>(bytes, 152, manifest.max_occ_cap);
+    write_le<std::uint8_t>(bytes,
+                           160,
+                           static_cast<std::uint8_t>(
+                               manifest.algorithm_identity.requested_algorithm));
+    write_le<std::uint8_t>(bytes,
+                           161,
+                           static_cast<std::uint8_t>(
+                               manifest.algorithm_identity.effective_algorithm));
+    write_le<std::uint8_t>(bytes, 162, manifest.algorithm_identity.record_position_log2);
+    write_le<std::uint16_t>(bytes,
+                            164,
+                            static_cast<std::uint16_t>(
+                                manifest.algorithm_identity.physical_record_id));
+    write_le<std::uint16_t>(bytes,
+                            166,
+                            static_cast<std::uint16_t>(
+                                manifest.algorithm_identity.highway_owner_id));
+    write_le<std::uint16_t>(bytes,
+                            168,
+                            manifest.algorithm_identity.payload_layout_abi_revision);
     return output;
 }
 
@@ -296,7 +329,7 @@ encode_minimizer_generation_manifest(const minimizer_generation_manifest& manife
     return encoded->storage;
 }
 
-/// Decode the exact 160-byte grouped-SoA manifest.
+/// Decode the exact 176-byte grouped-SoA manifest.
 [[nodiscard]] constexpr std::expected<minimizer_generation_manifest,
                                       minimizer_generation_encoding_error>
 decode_minimizer_generation_manifest(std::span<const std::byte> input) noexcept {
@@ -348,7 +381,8 @@ decode_minimizer_generation_manifest(std::span<const std::byte> input) noexcept 
         read_le<std::uint16_t>(input, 134) != k_grouped_soa_extension_bytes) {
         return std::unexpected(minimizer_generation_encoding_error::unsupported_storage_layout);
     }
-    if (input[143] != std::byte{0}) {
+    if (input[143] != std::byte{0} || input[163] != std::byte{0} ||
+        !all_zero(input, 170, 176)) {
         return std::unexpected(minimizer_generation_encoding_error::reserved_nonzero);
     }
     manifest.hash_width = static_cast<minimizer_scalar_width>(read_le<std::uint8_t>(input, 136));
@@ -365,6 +399,32 @@ decode_minimizer_generation_manifest(std::span<const std::byte> input) noexcept 
         static_cast<grouped_soa_position_semantics>(read_le<std::uint8_t>(input, 142));
     manifest.max_hash = read_le<std::uint64_t>(input, 144);
     manifest.max_occ_cap = read_le<std::uint64_t>(input, 152);
+    const auto physical_record_id =
+        static_cast<::bioseq::minimizers::minimizer_physical_record_id>(
+            read_le<std::uint16_t>(input, 164));
+    const auto* physical_record =
+        ::bioseq::minimizers::find_minimizer_physical_record(physical_record_id);
+    manifest.algorithm_identity = minimizer_generation_algorithm_identity{
+        .requested_algorithm = static_cast<::bioseq::simd::minimizer_algorithm>(
+            read_le<std::uint8_t>(input, 160)),
+        .effective_algorithm = static_cast<::bioseq::simd::minimizer_algorithm>(
+            read_le<std::uint8_t>(input, 161)),
+        .physical_record_id = physical_record_id,
+        .highway_owner_id = static_cast<::bioseq::minimizers::minimizer_highway_owner_id>(
+            read_le<std::uint16_t>(input, 166)),
+        .alphabet_id = manifest.alphabet_code,
+        .record_position_log2 = read_le<std::uint8_t>(input, 162),
+        .physical_kmer_size =
+            physical_record == nullptr ? 0u : physical_record->physical_kmer_size,
+        .hash_width = manifest.hash_width,
+        .packed_storage_bits = manifest.storage_unit_byte_width == sizeof(std::uint32_t)
+                                   ? 32u
+                               : manifest.storage_unit_byte_width == sizeof(std::uint64_t) ? 64u
+                                                                                           : 0u,
+        .runtime_kmer_size = manifest.kmer_size,
+        .runtime_window_size = manifest.window_size,
+        .payload_layout_abi_revision = read_le<std::uint16_t>(input, 168),
+    };
     if (manifest.generation_id == 0 || !sql_bigint_can_represent(manifest.generation_id)) {
         return std::unexpected(minimizer_generation_encoding_error::generation_id);
     }
@@ -379,7 +439,7 @@ inline constexpr std::size_t k_max_generation_head_bytes = k_hash_major_minimize
 /// Largest supported tagged generation-manifest encoding.
 inline constexpr std::size_t k_max_manifest_bytes = k_hash_major_minimizer_manifest_bytes;
 static_assert(minimizer_generation_head::encoded_bytes == 64u);
-static_assert(minimizer_generation_manifest::encoded_bytes == 160u);
+static_assert(minimizer_generation_manifest::encoded_bytes == 176u);
 static_assert(k_max_generation_head_bytes == 224u);
 static_assert(k_max_manifest_bytes == 336u);
 
@@ -447,26 +507,27 @@ decode_tagged_minimizer_generation_manifest(std::span<const std::byte> input) no
 /// persisted biological semantics.
 [[nodiscard]] constexpr std::expected<hash_major_minimizer_storage_profile,
                                       hash_major_minimizer_error>
-hash_major_minimizer_profile_for_backend(minimizer_sketch_backend backend,
-                                         std::uint16_t alphabet_code,
-                                         std::uint16_t kmer_size,
-                                         std::uint16_t window_size,
-                                         std::uint64_t target_length) noexcept {
+hash_major_minimizer_profile_for_backend(
+    minimizer_sketch_backend backend,
+    const minimizer_generation_algorithm_identity& algorithm_identity,
+    std::uint16_t alphabet_code,
+    std::uint64_t target_length) noexcept {
     const minimizer_scheme_identity scheme = minimizer_scheme_identity_for_backend(backend);
     const minimizer_producer_identity producer =
         minimizer_producer_backend_identity_for_backend(backend);
     if (!is_supported_minimizer_scheme_identity(scheme.id, scheme.revision) ||
-        !is_supported_minimizer_producer_backend_identity(producer) || alphabet_code != 0u ||
-        kmer_size != 15u || window_size != 10u) {
+        !is_supported_minimizer_producer_backend_identity(producer) ||
+        !is_valid_minimizer_generation_algorithm_identity(algorithm_identity, producer) ||
+        algorithm_identity.alphabet_id != alphabet_code) {
         return std::unexpected(hash_major_minimizer_error::storage_contract_mismatch);
     }
     const hash_major_minimizer_storage_profile profile{
         .hash_scheme_identity = scheme.id,
         .hash_scheme_revision = scheme.revision,
         .alphabet_code = alphabet_code,
-        .kmer_size = kmer_size,
-        .window_size = window_size,
-        .hash_width_bytes = 4u,
+        .kmer_size = algorithm_identity.runtime_kmer_size,
+        .window_size = algorithm_identity.runtime_window_size,
+        .hash_width_bytes = static_cast<std::uint8_t>(algorithm_identity.hash_width),
         .stored_posting_width_bytes =
             hash_major_minimizer_uses_u32_postings(target_length) ? 4u : 8u,
         .position_encoding_revision = 1u,

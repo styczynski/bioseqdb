@@ -3,10 +3,10 @@
  * @brief Contracts for sequence, table, and relation-cleanup storage adapters.
  */
 module;
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 
 extern "C" {
+#include "postgres.h"
+
 #include "access/heapam.h"
 #include "access/nbtree.h"
 #include "access/parallel.h"
@@ -36,6 +36,7 @@ extern "C" {
 #include "storage/relfilelocator.h"
 #include "storage/shm_toc.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -51,11 +52,25 @@ extern "C" {
 #include "port/atomics.h"
 }
 
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#ifdef NDEBUG
+#include <libassert/assert-macros.hpp>
+#else
+#include <libassert/assert.hpp>
+#endif
+
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:sequence_storage_contract;
 import std;
 import bioseq.common.logging;
@@ -65,6 +80,7 @@ import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_
 import bioseq.postgres.support.datums;
 import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
+import bioseq.postgres.storage.scanner.lazy_binding; // PostgreSQL-backed lazy sequence access
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
@@ -74,7 +90,6 @@ import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimi
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range

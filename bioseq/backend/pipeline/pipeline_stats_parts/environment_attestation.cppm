@@ -317,6 +317,10 @@ struct pipeline_job_execution_stats {
 /// @return `true` when `backend` names scalar, SIMD, or Vulkan execution.
 [[nodiscard]] constexpr bool is_concrete_backend(executed_backend backend) noexcept {
     return backend == executed_backend::scalar_cpu || backend == executed_backend::simd_cpu ||
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+           backend == executed_backend::mixed_cpu ||
+           backend == executed_backend::hybrid_cpu_vulkan ||
+#endif
            backend == executed_backend::vulkan_gpu;
 }
 
@@ -424,6 +428,13 @@ merge_simd_alignment_algorithm_identity(simd_alignment_algorithm_identity lhs,
     if (backend == executed_backend::simd_cpu) {
         return is_concrete_simd_alignment_algorithm_identity(requested) && requested == observed;
     }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    if (backend == executed_backend::mixed_cpu ||
+        backend == executed_backend::hybrid_cpu_vulkan) {
+        return requested != simd_alignment_algorithm_identity::mixed_invalid &&
+               requested == observed;
+    }
+#endif
     return requested == simd_alignment_algorithm_identity::none &&
            observed == simd_alignment_algorithm_identity::none;
 }
@@ -443,6 +454,12 @@ merge_simd_alignment_algorithm_identity(simd_alignment_algorithm_identity lhs,
     if (backend == executed_backend::simd_cpu) {
         return is_concrete_simd_chaining_policy_identity(requested) && requested == observed;
     }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    if (backend == executed_backend::mixed_cpu ||
+        backend == executed_backend::hybrid_cpu_vulkan) {
+        return requested != simd_chaining_policy_identity::mixed_invalid && requested == observed;
+    }
+#endif
     return requested == simd_chaining_policy_identity::none &&
            observed == simd_chaining_policy_identity::none;
 }
@@ -524,7 +541,12 @@ is_environment_valid_for_backend(const execution_environment_snapshot& environme
         !execution_environment_snapshot::has_valid_highway_fields(environment)) {
         return false;
     }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    if (backend == executed_backend::scalar_cpu || backend == executed_backend::simd_cpu ||
+        backend == executed_backend::mixed_cpu) {
+#else
     if (backend == executed_backend::scalar_cpu || backend == executed_backend::simd_cpu) {
+#endif
         return !environment.is_gpu_environment_available &&
                is_all_zero(environment.gpu_device_uuid) &&
                is_all_zero(environment.gpu_driver_identity) &&
@@ -534,7 +556,11 @@ is_environment_valid_for_backend(const execution_environment_snapshot& environme
                environment.gpu_pipeline_cache_manifest_checksum == 0 &&
                environment.gpu_pipeline_cache_hit == optional_observation_bool::not_applicable;
     }
-    if (backend != executed_backend::vulkan_gpu)
+    if (backend != executed_backend::vulkan_gpu
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        && backend != executed_backend::hybrid_cpu_vulkan
+#endif
+    )
         return false;
     const bool common_gpu_identity_valid =
         environment.is_gpu_environment_available && !is_all_zero(environment.gpu_device_uuid) &&
@@ -553,6 +579,38 @@ is_environment_valid_for_backend(const execution_environment_snapshot& environme
     return false;
 }
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+[[nodiscard]] constexpr execution_engine expected_execution_engine(
+    executed_backend backend, target_index_source source, pipeline_stage stage) noexcept;
+[[nodiscard]] constexpr bool is_stage_coverage_exclusive(
+    const stage_coverage& coverage, execution_engine expected_engine) noexcept;
+
+/// Validate a mixed CPU stage without weakening fixed host/scalar stages.
+[[nodiscard]] constexpr bool is_mixed_cpu_stage_coverage_exclusive(
+    const stage_coverage& coverage, target_index_source source, pipeline_stage stage) noexcept {
+    const bool selectable_cpu_stage =
+        stage == pipeline_stage::query_sketch || stage == pipeline_stage::target_sketch ||
+        stage == pipeline_stage::chain_score || stage == pipeline_stage::chain_backtrack ||
+        stage == pipeline_stage::left_extension || stage == pipeline_stage::gap_extension ||
+        stage == pipeline_stage::right_extension;
+    if (!selectable_cpu_stage) {
+        return is_stage_coverage_exclusive(
+            coverage, expected_execution_engine(executed_backend::scalar_cpu, source, stage));
+    }
+    if (coverage.eligible_jobs > 1 || coverage.fallback_jobs != 0)
+        return false;
+    const std::size_t scalar = engine_index(execution_engine::scalar_cpu);
+    const std::size_t simd = engine_index(execution_engine::simd_cpu);
+    for (std::size_t i = 0; i < coverage.executed_jobs.size(); ++i) {
+        if (coverage.executed_jobs[i] > 1 ||
+            (i != scalar && i != simd && coverage.executed_jobs[i] != 0)) {
+            return false;
+        }
+    }
+    return coverage.executed_jobs[scalar] + coverage.executed_jobs[simd] ==
+           coverage.eligible_jobs;
+}
+#endif
 /// @brief Return the sole permitted execution engine for a stage and mode.
 ///
 /// `execution_engine::count`
@@ -678,11 +736,151 @@ is_stage_coverage_exclusive(const stage_coverage& coverage,
     return false;
 }
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+/**
+ * Validate hybrid coverage against the existing operation-observed identities.
+ *
+ * No algorithm identity or engine is stored a second time. Index construction
+ * and partitioning may be host MPF or device MPS operations; their authenticated
+ * layout receipt is checked by the producer. Biological seed/chain/alignment
+ * engines and the host tail are exact here, independent of that storage choice.
+ */
+[[nodiscard]] constexpr bool is_hybrid_stage_coverage_exclusive(
+    const stage_coverage& coverage,
+    target_index_source source,
+    pipeline_stage stage,
+    minimizer_algorithm_identity minimizer,
+    chaining_algorithm_identity chaining,
+    base_alignment_algorithm_identity alignment,
+    std::uint64_t maximum_jobs = 1u) noexcept {
+    execution_engine sketch_engine = execution_engine::count;
+    switch (minimizer) {
+    case minimizer_algorithm_identity::scalar:
+        sketch_engine = execution_engine::scalar_cpu;
+        break;
+    case minimizer_algorithm_identity::simd_minimap2_reference:
+    case minimizer_algorithm_identity::two_stack_nthash:
+    case minimizer_algorithm_identity::bounded_nthash_simd:
+        sketch_engine = execution_engine::simd_cpu;
+        break;
+    case minimizer_algorithm_identity::vulkan_minimap_integer:
+        sketch_engine = execution_engine::vulkan_gpu;
+        break;
+    case minimizer_algorithm_identity::none:
+    case minimizer_algorithm_identity::mixed_invalid:
+        return false;
+    }
+    execution_engine chain_engine = execution_engine::count;
+    switch (chaining) {
+    case chaining_algorithm_identity::scalar_minimap2:
+    case chaining_algorithm_identity::range_minimum_query:
+        chain_engine = execution_engine::scalar_cpu;
+        break;
+    case chaining_algorithm_identity::simd_minimap2:
+        chain_engine = execution_engine::simd_cpu;
+        break;
+    case chaining_algorithm_identity::vulkan_tiled_dynamic_programming:
+        chain_engine = execution_engine::vulkan_gpu;
+        break;
+    case chaining_algorithm_identity::none:
+    case chaining_algorithm_identity::mixed_invalid:
+        return false;
+    }
+    execution_engine alignment_engine = execution_engine::count;
+    switch (alignment) {
+    case base_alignment_algorithm_identity::ksw2:
+        alignment_engine = execution_engine::scalar_cpu;
+        break;
+    case base_alignment_algorithm_identity::block_aligner:
+        alignment_engine = execution_engine::simd_cpu;
+        break;
+    case base_alignment_algorithm_identity::none:
+    case base_alignment_algorithm_identity::vulkan_simple_cigar:
+    case base_alignment_algorithm_identity::mixed_invalid:
+        return false;
+    }
+    const bool device_seed = sketch_engine == execution_engine::vulkan_gpu;
+    const bool device_chain = chain_engine == execution_engine::vulkan_gpu;
+    if ((!device_seed && !device_chain) || !is_concrete_target_index_source(source) ||
+        coverage.fallback_jobs != 0u || coverage.eligible_jobs > maximum_jobs) {
+        return false;
+    }
+    execution_engine primary =
+        expected_execution_engine(executed_backend::scalar_cpu, source, stage);
+    execution_engine alternate = execution_engine::count;
+    switch (stage) {
+    case pipeline_stage::query_sketch:
+        primary = sketch_engine;
+        break;
+    case pipeline_stage::target_sketch:
+        primary = source == target_index_source::recomputed
+            ? sketch_engine : execution_engine::count;
+        break;
+    case pipeline_stage::target_index_build:
+        if (device_seed && source == target_index_source::recomputed)
+            alternate = execution_engine::vulkan_gpu;
+        break;
+    case pipeline_stage::partition_selection:
+        if (device_seed && source == target_index_source::persisted)
+            alternate = execution_engine::vulkan_gpu;
+        break;
+    case pipeline_stage::device_index_upload:
+        primary = device_seed ? execution_engine::vulkan_gpu : execution_engine::count;
+        break;
+    case pipeline_stage::seed_lookup:
+        primary = device_seed ? execution_engine::vulkan_gpu : execution_engine::scalar_cpu;
+        break;
+    case pipeline_stage::chain_score:
+        primary = chain_engine;
+        break;
+    case pipeline_stage::chain_backtrack:
+        // Vulkan scores/predecessors feed the existing host backtracking code.
+        primary = device_chain ? execution_engine::scalar_cpu : chain_engine;
+        break;
+    case pipeline_stage::left_extension:
+    case pipeline_stage::gap_extension:
+    case pipeline_stage::right_extension:
+        primary = alignment_engine;
+        break;
+    case pipeline_stage::persisted_index_decode:
+    case pipeline_stage::region_generation:
+    case pipeline_stage::primary_secondary_reduction:
+    case pipeline_stage::divergence_estimation:
+    case pipeline_stage::mapq:
+    case pipeline_stage::target_window_plan:
+    case pipeline_stage::target_window_io:
+    case pipeline_stage::target_window_upload:
+    case pipeline_stage::cigar_job_generation:
+    case pipeline_stage::count:
+        break;
+    }
+    std::uint64_t executed_total = 0u;
+    for (std::size_t engine = 0u; engine < coverage.executed_jobs.size(); ++engine) {
+        const auto executed = coverage.executed_jobs[engine];
+        const bool allowed = engine == engine_index(primary) ||
+                             engine == engine_index(alternate);
+        if ((!allowed && executed != 0u) ||
+            executed > coverage.eligible_jobs - executed_total) {
+            return false;
+        }
+        executed_total += executed;
+    }
+    return executed_total == coverage.eligible_jobs;
+}
+#endif
+
 /// @brief Validate one complete logical target-query stats record fail-closed.
 /// @param[in] job Job-level attestation to validate.
 /// @return `true` when identities, environment, coordinates, and stages all agree.
 [[nodiscard]] constexpr bool
-is_job_execution_stats_valid(const pipeline_job_execution_stats& job) noexcept {
+is_job_execution_stats_valid(const pipeline_job_execution_stats& job
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    , minimizer_algorithm_identity observed_minimizer = minimizer_algorithm_identity::none
+    , chaining_algorithm_identity observed_chaining = chaining_algorithm_identity::none
+    , base_alignment_algorithm_identity observed_alignment = base_alignment_algorithm_identity::none
+    , bool authenticated_query_empty_recomputed_bypass = false
+#endif
+) noexcept {
     if (!is_concrete_backend(job.requested_backend) ||
         job.requested_backend != job.actual_backend ||
         !is_simd_chaining_policy_identity_valid_for_backend(job.actual_backend,
@@ -698,6 +896,14 @@ is_job_execution_stats_valid(const pipeline_job_execution_stats& job) noexcept {
         !is_environment_valid_for_backend(job.environment, job.actual_backend)) {
         return false;
     }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    if (authenticated_query_empty_recomputed_bypass &&
+        (job.actual_backend != executed_backend::hybrid_cpu_vulkan ||
+         job.actual_target_index_source != target_index_source::recomputed ||
+         observed_minimizer != minimizer_algorithm_identity::vulkan_minimap_integer)) {
+        return false;
+    }
+#endif
     if (job.logical_target_row > k_sql_bigint_value_max ||
         job.query_ordinal > k_sql_bigint_value_max) {
         return false;
@@ -713,13 +919,47 @@ is_job_execution_stats_valid(const pipeline_job_execution_stats& job) noexcept {
     }
     for (std::size_t i = 0; i < k_pipeline_stage_count; ++i) {
         const auto stage = static_cast<pipeline_stage>(i);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        const execution_engine expected_engine = expected_execution_engine(
+            job.actual_backend == executed_backend::mixed_cpu ||
+                    job.actual_backend == executed_backend::hybrid_cpu_vulkan
+                ? executed_backend::scalar_cpu : job.actual_backend,
+            job.actual_target_index_source,
+            stage);
+        const bool coverage_valid =
+            job.actual_backend == executed_backend::hybrid_cpu_vulkan
+                ? is_hybrid_stage_coverage_exclusive(job.stages.coverage[i],
+                    job.actual_target_index_source, stage, observed_minimizer,
+                    observed_chaining, observed_alignment)
+            : job.actual_backend == executed_backend::mixed_cpu
+                ? is_mixed_cpu_stage_coverage_exclusive(
+                      job.stages.coverage[i], job.actual_target_index_source, stage)
+                : is_stage_coverage_exclusive(job.stages.coverage[i], expected_engine);
+#else
         const execution_engine expected_engine =
             expected_execution_engine(job.actual_backend, job.actual_target_index_source, stage);
         if (!is_stage_coverage_exclusive(job.stages.coverage[i], expected_engine)) {
             return false;
         }
+#endif
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        if (!coverage_valid) {
+            return false;
+        }
+        const bool bypassed_recomputed_target_stage =
+            authenticated_query_empty_recomputed_bypass &&
+            (stage == pipeline_stage::target_sketch ||
+             stage == pipeline_stage::target_index_build);
+        if (bypassed_recomputed_target_stage &&
+            job.stages.coverage[i].eligible_jobs != 0u) {
+            return false;
+        }
+#endif
         if (expected_engine != execution_engine::count &&
             is_front_end_eligibility_required(job.actual_target_index_source, stage) &&
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+            !bypassed_recomputed_target_stage &&
+#endif
             job.stages.coverage[i].eligible_jobs != 1) {
             return false;
         }

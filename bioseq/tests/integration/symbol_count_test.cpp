@@ -61,7 +61,7 @@ TEST_CASE("scalar literal symbol_count returns the real tally (dna5)",
     REQUIRE(error.contains("bioseq.seq alphabet \"dna5\" is not supported"));
     REQUIRE(error.contains("Valid alphabets: 'dna4'"));
 #else
-    // 'NNNNN' is five N's; in dna5 the rank of N is 4, so N=5 and every other
+    // 'NNNNN' is five N's; in dna5 the rank of N is 3, so N=5 and every other
     // letter is 0. The typmod packs dna5 in 3 bits/char (width 32 is fine).
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
@@ -198,7 +198,12 @@ TEST_CASE("inline Sequence PostgreSQL leaves preserve exact error and same-backe
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
     auto ctx = fresh_context({k_bioseq_column});
     seed_small_bioseq_column(ctx, k_bioseq_column);
-    exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
+    // Keep the access method from hydrating the locator through a primary-key
+    // IndexScan, while enabling the stored symbol-count path that traverses
+    // the injected PostgreSQL sequence leaves.
+    guc_scope index_scans_disabled(ctx, "enable_indexscan", "off");
+    guc_scope sequence_index_reads_enabled(
+        ctx, "bioseq.index.sequence_read.enabled", "on");
     const std::string read_sql = fmt::format(
         "SELECT bioseq.symbol_count(seq0, 'A') FROM {} WHERE pk = 1;",
         k_bioseq_column);

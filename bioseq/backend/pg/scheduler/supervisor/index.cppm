@@ -4,9 +4,9 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
-
 extern "C" {
+#include "postgres.h"
+
 #include "storage/condition_variable.h"
 #include "storage/dsm_impl.h"
 #include "utils/snapshot.h"
@@ -14,6 +14,18 @@ extern "C" {
 #include "miscadmin.h"
 #include "port/atomics.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <optional>
+#include <string>
+#include <string_view>
 
 export module bioseq.postgres.scheduler.supervisor;
 

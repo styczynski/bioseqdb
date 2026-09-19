@@ -508,6 +508,44 @@ struct minimizer_wire_traits<p_record_type> {
 };
 
 /**
+ * @brief ABI-preserving name for the traits-normalized nucleotide LUT lane.
+ *
+ * The public shader ABI originally named value 1 after DNA5.  Its actual
+ * contract is broader: packed ranks are decoded with the uploaded nt4 LUT and
+ * the rolling state consumes the normalized two-bit codes.  Keep the numeric
+ * value and shader behavior unchanged while avoiding a DNA5-only host gate.
+ */
+inline constexpr alphabet_kernel_kind k_lut_normalized_nucleotide_kernel =
+    alphabet_kernel_kind::dna5_nt4;
+static_assert(
+    static_cast<std::uint8_t>(k_lut_normalized_nucleotide_kernel) == 1u);
+
+/**
+ * @brief Selects the shader alphabet key from nucleotide traits and packing.
+ * @tparam p_alphabet Logical alphabet.
+ * @tparam p_bits_per_char Packed rank width.
+ * @tparam p_alphabet_size Number of logical ranks.
+ * @return Direct DNA4-compatible lane, normalized nucleotide LUT lane, or
+ * `generic` for the existing rank-prefix semantics.
+ */
+template <class p_alphabet,
+          std::size_t p_bits_per_char,
+          std::size_t p_alphabet_size>
+[[nodiscard]] constexpr alphabet_kernel_kind
+alphabet_kernel_kind_for_shape() noexcept {
+    if constexpr (seqan3::nucleotide_alphabet<p_alphabet>) {
+        // Only the known DNA4 rank order can bypass the normalization LUT.
+        // A new four-rank nucleotide alphabet may permute those ranks.
+        if constexpr (std::same_as<p_alphabet, seq::dna4>
+                      && p_bits_per_char == 2u && p_alphabet_size == 4u) {
+            return alphabet_kernel_kind::dna4_nt4;
+        }
+        return k_lut_normalized_nucleotide_kernel;
+    }
+    return alphabet_kernel_kind::generic;
+}
+
+/**
  * @brief Selects the shader alphabet key from a sequence type.
  * @tparam p_sequence Packed sequence exposing storage traits.
  * @return Specialized nucleotide key or `generic`.
@@ -515,15 +553,10 @@ struct minimizer_wire_traits<p_record_type> {
 template <class p_sequence>
 [[nodiscard]] constexpr alphabet_kernel_kind choose_alphabet_kernel() {
     using traits = typename std::remove_cvref_t<p_sequence>::traits;
-    if constexpr (seqan3::nucleotide_alphabet<typename traits::alphabet_type>) {
-        if constexpr (traits::bits_per_char == 2 && traits::alphabet_size == 4) {
-            return alphabet_kernel_kind::dna4_nt4;
-        }
-        if constexpr (traits::bits_per_char == 3 && traits::alphabet_size == 5) {
-            return alphabet_kernel_kind::dna5_nt4;
-        }
-    }
-    return alphabet_kernel_kind::generic;
+    return alphabet_kernel_kind_for_shape<
+        typename traits::alphabet_type,
+        traits::bits_per_char,
+        traits::alphabet_size>();
 }
 
 /**
@@ -533,26 +566,81 @@ template <class p_sequence>
  */
 template <class p_traits>
 [[nodiscard]] constexpr alphabet_kernel_kind alphabet_kernel_kind_of_traits() noexcept {
-    if constexpr (seqan3::nucleotide_alphabet<typename p_traits::alphabet_type>) {
-        if constexpr (p_traits::bits_per_char == 2 && p_traits::alphabet_size == 4) {
-            return alphabet_kernel_kind::dna4_nt4;
-        }
-        if constexpr (p_traits::bits_per_char == 3 && p_traits::alphabet_size == 5) {
-            return alphabet_kernel_kind::dna5_nt4;
-        }
+    return alphabet_kernel_kind_for_shape<
+        typename p_traits::alphabet_type,
+        p_traits::bits_per_char,
+        p_traits::alphabet_size>();
+}
+
+/** @brief Tests packed metadata against the shader's physical decoder ABI. */
+[[nodiscard]] constexpr bool vulkan_minimizer_packed_shape_supported(
+    std::size_t unit_bits,
+    std::size_t bits_per_char,
+    std::size_t letters_per_unit,
+    std::size_t alphabet_size,
+    std::uint64_t char_mask) noexcept {
+    const bool unit_width_supported =
+        unit_bits == 8u || unit_bits == 16u || unit_bits == 32u
+        || unit_bits == 64u;
+    if (!unit_width_supported || alphabet_size == 0u || alphabet_size > 256u
+        || bits_per_char == 0u || bits_per_char > 32u
+        || bits_per_char > unit_bits) {
+        return false;
     }
-    return alphabet_kernel_kind::generic;
+    const std::uint64_t expected_char_mask =
+        bits_per_char == 32u
+            ? std::numeric_limits<std::uint32_t>::max()
+            : (std::uint64_t{1u} << bits_per_char) - 1u;
+    const std::uint64_t rank_capacity =
+        std::uint64_t{1u} << bits_per_char;
+    return letters_per_unit == unit_bits / bits_per_char
+        && letters_per_unit != 0u && char_mask == expected_char_mask
+        && alphabet_size <= rank_capacity;
 }
 
 /**
  * @brief Tests whether shader metadata can represent an alphabet shape.
  * @tparam p_traits Packed sequence traits.
- * @return `true` when alphabet size and symbol width fit the ABI.
+ * @return `true` when alphabet and packed storage fit the decoder ABI.
  */
 template <class p_traits>
 [[nodiscard]] constexpr bool vulkan_minimizer_alphabet_shape_supported() noexcept {
-    return p_traits::alphabet_size <= 256 && p_traits::bits_per_char != 0
-        && p_traits::bits_per_char <= 32;
+    if constexpr (!requires {
+        typename p_traits::storage_unit;
+        p_traits::bits_per_char;
+        p_traits::alphabet_size;
+        p_traits::char_mask;
+    }) {
+        return false;
+    } else {
+        constexpr std::size_t unit_bits =
+            sizeof(typename p_traits::storage_unit) * 8u;
+        constexpr std::size_t bits_per_char = p_traits::bits_per_char;
+        constexpr std::size_t packed_letters_per_unit =
+            bits_per_char == 0u ? 0u : unit_bits / bits_per_char;
+        return vulkan_minimizer_packed_shape_supported(
+            unit_bits,
+            bits_per_char,
+            packed_letters_per_unit,
+            p_traits::alphabet_size,
+            static_cast<std::uint64_t>(p_traits::char_mask));
+    }
+}
+
+/** @brief Tests runtime k against one selected shader rolling width. */
+[[nodiscard]] constexpr bool vulkan_minimizer_kmer_size_supported(
+    alphabet_kernel_kind alphabet_kind,
+    std::size_t bits_per_char,
+    std::size_t kmer_size) noexcept {
+    if (bits_per_char == 0u || bits_per_char > 32u) {
+        return false;
+    }
+    const std::size_t step_bits =
+        alphabet_kind == alphabet_kernel_kind::generic
+            ? bits_per_char
+            : std::size_t{2u};
+    return kmer_size != 0u && kmer_size <= 64u / step_bits
+        && kmer_size <= 32u;
 }
 
 /**
@@ -568,11 +656,10 @@ template <class p_traits>
     if constexpr (!vulkan_minimizer_alphabet_shape_supported<p_traits>()) {
         return false;
     } else {
-        constexpr std::size_t step_bits =
-            alphabet_kernel_kind_of_traits<p_traits>() == alphabet_kernel_kind::generic
-                ? p_traits::bits_per_char
-                : std::size_t{2};
-        return kmer_size != 0 && kmer_size <= 64 / step_bits && kmer_size <= 32;
+        return vulkan_minimizer_kmer_size_supported(
+            alphabet_kernel_kind_of_traits<p_traits>(),
+            p_traits::bits_per_char,
+            kmer_size);
     }
 }
 
@@ -599,7 +686,13 @@ template <class p_traits>
 }
 
 /**
- * @brief Builds forward and reverse nt4 codes for every alphabet rank.
+ * @brief Builds forward and reverse codes for every alphabet rank.
+ *
+ * Nucleotide ranks are normalized through the existing minimap2 nt4 helper,
+ * including their trait-defined complement.  The non-nucleotide `generic`
+ * lane retains its existing narrow meaning: ranks zero through three are the
+ * only canonical codes, higher ranks are ambiguous, and the packed rank width
+ * remains the rolling width.  It is not an arbitrary-alphabet hash algorithm.
  * @tparam p_sequence Packed sequence type supplying alphabet traits.
  * @return Shader rank lookup table.
  */
@@ -614,13 +707,18 @@ template <class p_sequence>
         if constexpr (seqan3::nucleotide_alphabet<alphabet_type>) {
             code = bioseq::simd::nt4_normalize<alphabet_type>(
                 static_cast<std::uint8_t>(rank));
-            rc_code = code < 4u ? (code ^ 3u) : 4u;
+            const std::uint32_t complement_rank =
+                static_cast<std::uint32_t>(traits::letter_complement(
+                    static_cast<typename traits::storage_unit>(rank)));
+            rc_code = complement_rank < traits::alphabet_size
+                ? bioseq::simd::nt4_normalize<alphabet_type>(
+                    static_cast<std::uint8_t>(complement_rank))
+                : 4u;
         } else {
-            const bool ambiguous = traits::bits_per_char > 2 && rank >= 4u;
             const std::uint32_t comp_rank = static_cast<std::uint32_t>(
                 traits::letter_complement(static_cast<typename traits::storage_unit>(rank)));
-            code = ambiguous ? 4u : rank;
-            rc_code = (traits::bits_per_char > 2 && comp_rank >= 4u) ? 4u : comp_rank;
+            code = rank < 4u ? rank : 4u;
+            rc_code = comp_rank < 4u ? comp_rank : 4u;
         }
         lut.rank_to_code[rank] = code;
         lut.rank_to_rc_code[rank] = rc_code;

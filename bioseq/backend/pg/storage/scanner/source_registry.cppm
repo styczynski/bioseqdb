@@ -4,31 +4,37 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
-
 extern "C" {
-#include "access/xact.h"
+#include "postgres.h"
+
+#include "access/attnum.h"
 #include "access/relation.h"
 #include "access/table.h"
+#include "access/xact.h"
+#include "storage/lockdefs.h"
+#include "utils/errcodes.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
 }
 
-#include <algorithm>
-#include <array>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <exception>
 #include <limits>
-#include <memory>
 #include <new>
 #include <span>
-#include <type_traits>
-#include <utility>
 
 export module bioseq.postgres.storage.scanner:source_registry;
+
+export import bioseq.postgres.storage.scanner.source_provider_contract;
+export import bioseq.postgres.storage.scanner.source_test_contract;
 
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
@@ -54,216 +60,7 @@ export namespace bioseq::storage {
 // Shared PostgreSQL source registry and transaction-scoped source domains.
 // ---------------------------------------------------------------------------
 
-/// Ownership boundary that permits reclaiming unused source domains.
-enum class pg_sequence_source_sweep_boundary : std::uint8_t {
-    /// Base provider has ended.
-    provider_end,
-    /// Upper executor owner released a route lease.
-    upper_lease_end,
-    /// Executor rescan may reuse an unchanged binding.
-    rescan,
-    /// Standalone index owner has ended.
-    standalone_end,
-    /// Top-level transaction cleanup is running.
-    transaction_end,
-    /// Creating subtransaction is ending.
-    subtransaction_end,
-};
-
-/// Executor owner that created a source provider.
-enum class pg_sequence_source_provider_kind : std::uint8_t {
-    /// Provider follows a table scan lifecycle.
-    scan,
-    /// Provider follows standalone index administration.
-    standalone_index,
-};
-
-namespace sequence_source_detail {
-struct pg_sequence_source_domain;
-}
-
-/**
- * Transaction-owned registry for one verified relation/storage/snapshot flow.
- * It contains no Relation pointer and is never shared through DSM.
- */
-struct pg_sequence_source_registry {
-    /// Backend thread on which every registry operation must run.
-    pg_sequence_backend_thread_token backend_thread;
-    /// User-visible parent relation OID.
-    Oid user_relid = InvalidOid;
-    /// Database component of the parent physical identity.
-    Oid database_oid = InvalidOid;
-    /// Tablespace component of the parent physical identity.
-    Oid tablespace_oid = InvalidOid;
-    /// File component of the parent physical identity.
-    Oid main_relfilenode = InvalidOid;
-    /// Storage-generation identity authenticated when the provider is created.
-    std::uint64_t main_storage_id = 0u;
-    /* Bioseq's metapage storage id is the immutable binding generation.  Keep
-     * the named copy in the registry key so a rel/attno pair can never reuse a
-     * domain after its physical binding has been replaced. */
-    std::uint64_t binding_generation = 0u;
-    /// Borrowed registered MVCC snapshot governing source-catalog lookup.
-    Snapshot authoritative_snapshot = nullptr;
-    /// Subtransaction that created this registry.
-    SubTransactionId creating_subid = InvalidSubTransactionId;
-    /// Backend-local generation authenticating leases.
-    std::uint64_t generation = 0u;
-    /// Registry-owned linked list of source domains.
-    sequence_source_detail::pg_sequence_source_domain* domains = nullptr;
-    /// Link in the backend-local registry list.
-    pg_sequence_source_registry* next = nullptr;
-    /// Number of provider and upper-owner lease tokens.
-    std::uint32_t active_leases = 0u;
-    /// Whether authenticated leases may resolve new source lookups.
-    bool accepting_lookups = false;
-    /// Whether the base provider has released its token.
-    bool provider_closed = false;
-    /// Sticky lease-accounting failure.
-    bool lease_fault = false;
-    /// Whether top-level transaction cleanup detached the registry.
-    bool xact_ended = false;
-};
-
-/** A checked upper/provider retain on a registry. */
-struct pg_sequence_source_registry_lease {
-    /// Borrowed registry control while `owned` is true.
-    pg_sequence_source_registry* registry = nullptr;
-    /// Generation that must match the current registry generation.
-    std::uint64_t provider_generation = 0u;
-    /// Whether this object owns one active-lease count.
-    bool owned = false;
-};
-
-/** Provider control owned by a base scan or standalone index owner. */
-struct pg_sequence_source_provider {
-    /// Provider-owned initial registry lease.
-    pg_sequence_source_registry_lease lease{};
-    /// Link in the backend-local provider list.
-    pg_sequence_source_provider* next = nullptr;
-    /// Executor lifecycle that owns this provider.
-    pg_sequence_source_provider_kind kind =
-        pg_sequence_source_provider_kind::scan;
-    /// Whether provider operations may still use `lease`.
-    bool open = false;
-};
-
-/** One source-provider route retained by an upper executor owner. */
-struct pg_sequence_source_route {
-    /// Parent relation axis of the route key.
-    Oid relation_oid = InvalidOid;
-    /// Independently retained registry lease.
-    pg_sequence_source_registry_lease lease{};
-};
-
-static_assert(std::is_trivially_copyable_v<pg_sequence_source_route>);
-
-/** Query-lifetime routing for joins, appends and nested upper wrappers.
- *
- * A PostgreSQL self join has independent registries even when every binding
- * names the same physical relation. The provider generation is therefore the
- * route key. `relation_oid` supplies the physical-relation axis. Two routes stay inline
- * for the common binary-join case. Larger legal plans grow in the executor's
- * query MemoryContext, before any new lease is retained.
- */
-struct pg_sequence_source_route_set {
-    /// Inline storage for the common one- or two-route plan.
-    std::array<pg_sequence_source_route, 2u> inline_routes{};
-    /// Memory-context-owned storage used after inline capacity is exceeded.
-    pg_sequence_source_route* dynamic_routes = nullptr;
-    /// Number of entries available in `dynamic_routes`.
-    std::size_t dynamic_capacity = 0u;
-    /// Number of live route entries.
-    std::size_t count = 0u;
-    /// Query-lifetime context owning dynamic storage.
-    MemoryContext allocation_context = nullptr;
-};
-
 #ifdef BIOSEQ_TEST_INDEXES
-/// One-shot failure sites covering source-domain construction and cleanup.
-enum class sequence_source_failure : std::uint8_t {
-  none,
-  provider_after_registry_control,
-  provider_after_provider_control,
-  domain_after_control,
-  domain_after_context,
-  domain_after_owner,
-  domain_after_snapshot,
-  domain_after_caches,
-  close_before_caches,
-  close_before_snapshot,
-  close_before_before_locks,
-  close_before_locks,
-  close_before_after_locks,
-  read_before_scanner,
-  mmsearch_output_after_promotion,
-};
-
-/// Test-only counters for provider, registry, domain and facade lifetimes.
-struct sequence_source_stats {
-  std::uint64_t registries_created = 0u;
-  std::uint64_t registries_destroyed = 0u;
-  std::uint64_t providers_created = 0u;
-  std::uint64_t providers_destroyed = 0u;
-  std::uint64_t scan_providers_created = 0u;
-  std::uint64_t standalone_providers_created = 0u;
-  std::uint64_t domains_created = 0u;
-  std::uint64_t domains_reused = 0u;
-  std::uint64_t domains_destroyed = 0u;
-  std::uint64_t cache_sets_created = 0u;
-  std::uint64_t cache_sets_destroyed = 0u;
-  std::uint64_t snapshots_registered = 0u;
-  std::uint64_t snapshots_unregistered = 0u;
-  std::uint64_t scanner_entries_created = 0u;
-  std::uint64_t scanner_entry_hits = 0u;
-  std::uint64_t leases_acquired = 0u;
-  std::uint64_t leases_released = 0u;
-  std::uint64_t provider_closed_with_upper_leases = 0u;
-  std::uint64_t last_upper_lease_after_provider_end = 0u;
-  std::uint64_t cleanup_commit = 0u;
-  std::uint64_t cleanup_abort = 0u;
-  std::uint64_t sweeps = 0u;
-  std::uint64_t swept_domains = 0u;
-  std::uint64_t subxact_promotions = 0u;
-  std::uint64_t subxact_aborts = 0u;
-  std::uint64_t pre_prepare_rejections = 0u;
-  std::uint64_t release_before_locks = 0u;
-  std::uint64_t release_locks = 0u;
-  std::uint64_t release_after_locks = 0u;
-  std::uint64_t wrong_thread_rejections = 0u;
-  std::uint64_t refcount_faults = 0u;
-  std::uint64_t lease_faults = 0u;
-  std::uint64_t fault_injections = 0u;
-  std::uint64_t read_fault_injections = 0u;
-  std::uint64_t mmsearch_output_context_resets = 0u;
-  std::uint64_t mmsearch_output_locator_promotions = 0u;
-  std::uint64_t mmsearch_output_pg_error_restores = 0u;
-  std::uint64_t mmsearch_output_restore_mismatches = 0u;
-  std::uint64_t facade_source_stream_callbacks = 0u;
-  std::uint64_t facade_source_resident_probes = 0u;
-  std::uint64_t facade_declared_materializations = 0u;
-  std::uint64_t facade_completed_materializations = 0u;
-  std::uint64_t facade_poison_hits = 0u;
-  std::uint64_t live_registries = 0u;
-  std::uint64_t live_providers = 0u;
-  std::uint64_t live_domains = 0u;
-  std::uint64_t live_leases = 0u;
-  std::uint64_t live_cache_sets = 0u;
-  std::uint64_t live_snapshots = 0u;
-};
-
-inline thread_local sequence_source_failure g_pg_sequence_source_failure =
-    sequence_source_failure::none;
-inline thread_local sequence_source_stats
-    g_pg_sequence_source_stats{};
-
-/// Arm one source-domain failure site for the next matching operation.
-/// @param point One-shot failure site, or `none` to disable injection.
-inline void
-arm_pg_sequence_source_failure(sequence_source_failure point) noexcept {
-  g_pg_sequence_source_failure = point;
-}
-
 /// Clear source-domain and facade failure injection state.
 inline void disarm_pg_sequence_source_failure() noexcept {
   g_pg_sequence_source_failure = sequence_source_failure::none;
@@ -284,73 +81,6 @@ inline void reset_pg_sequence_source_stats() noexcept {
 
 namespace sequence_source_detail {
 
-/// Source-domain construction and cleanup state.
-enum class domain_lifecycle : std::uint8_t {
-  constructing,
-  live,
-  cleaning,
-  faulted,
-  invalid,
-  released,
-};
-
-/// ResourceOwner release stages already completed for one domain.
-enum class owner_release_stage_bits : std::uint8_t {
-    none = 0u,
-    before_locks = 1u,
-    locks = 2u,
-    after_locks = 4u,
-};
-
-/// Convert one release stage into its stored bit mask.
-/// @param stage ResourceOwner release stage.
-/// @return Underlying single-bit mask.
-[[nodiscard]] constexpr std::uint8_t stage_bit(
-        owner_release_stage_bits stage) noexcept {
-    return static_cast<std::uint8_t>(stage);
-}
-
-/// Transaction-owned source domain with a registered snapshot, read cache and
-/// staged ResourceOwner cleanup state.
-struct pg_sequence_source_domain {
-    /// Backend thread on which reads and cleanup must run.
-    pg_sequence_backend_thread_token backend_thread;
-    /// Borrowed registry while the registry token is owned.
-    pg_sequence_source_registry* registry = nullptr;
-    /// Link in the owning registry's domain list.
-    pg_sequence_source_domain* next = nullptr;
-    /// Transaction-child context owning scanners and read-cache allocation.
-    MemoryContext payload_context = nullptr;
-    /// Transaction-child owner for snapshot, relation, and lock resources.
-    ResourceOwner resource_owner = nullptr;
-    /// MVCC snapshot registered on `resource_owner`.
-    Snapshot registered_snapshot = nullptr;
-    /// Read-side fragment cache owned by `payload_context` and `resource_owner`.
-    seq_caches* read_caches = nullptr;
-    /// One-based parent sequence attribute number.
-    AttrNumber column_attno = InvalidAttrNumber;
-    /// Persisted alphabet and packed-unit width.
-    compact_sequence_stdc_type_params stored_type{};
-    /// Physical storage generation authenticated by the registry.
-    std::uint64_t binding_generation = 0u;
-    /// Subtransaction that created this domain.
-    SubTransactionId creating_subid = InvalidSubTransactionId;
-    /// Backend-local identity generation.
-    std::uint64_t generation = 0u;
-    /// Registry token plus retained expanded-value and scanner references.
-    std::uint32_t refcount = 0u;
-    /// Construction and cleanup lifecycle.
-    domain_lifecycle lifecycle = domain_lifecycle::constructing;
-    /// ResourceOwner release phases already attempted.
-    std::uint8_t released_owner_stages = 0u;
-    /// Whether the registry owns one reference count.
-    bool registry_token_owned = false;
-    /// Hint that only the registry token remains.
-    bool reclaimable_hint = false;
-    /// Sticky reference-count failure that prevents further reads.
-    bool refcount_fault = false;
-};
-
 /// Type-erased scanner cached by one source-read session.
 struct source_scanner_entry {
     /// Retained domain supplying snapshot and fragment caches.
@@ -360,6 +90,9 @@ struct source_scanner_entry {
     /// Type-erased logical-rank read callback.
     void (*read_ranks)(source_scanner_entry&, sequence_transform,
                        std::uint64_t, std::span<std::uint8_t>) = nullptr;
+    /// Type-erased identity-oriented native packed-unit read callback.
+    void (*read_packed_units)(source_scanner_entry&, std::uint64_t,
+                              std::span<std::uint8_t>) = nullptr;
     /// Checked successful-finalization callback.
     void (*finish)(source_scanner_entry&) = nullptr;
     /// Failure cleanup callback that does not propagate errors.
@@ -424,26 +157,6 @@ collect_pg_sequence_source_stats() noexcept {
     ++result.live_providers;
   }
   return result;
-}
-#endif
-
-#ifdef BIOSEQ_TEST_INDEXES
-/// Raise the armed source-domain failure at its exact PostgreSQL leaf.
-/// @param point Failure site being entered.
-/// @throws PostgreSQL ERROR when `point` is armed.
-inline void inject_pg_sequence_source_failure(sequence_source_failure point) {
-    if (g_pg_sequence_source_failure != point) {
-        return;
-    }
-    g_pg_sequence_source_failure = sequence_source_failure::none;
-    ++g_pg_sequence_source_stats.fault_injections;
-    if (point == sequence_source_failure::read_before_scanner) {
-        ++g_pg_sequence_source_stats.read_fault_injections;
-    }
-    ereport(ERROR,
-        (errcode(ERRCODE_INTERNAL_ERROR),
-         errmsg("injected PostgreSQL sequence source-domain failure"),
-         errdetail("failure point %u", static_cast<unsigned>(point))));
 }
 #endif
 
@@ -582,18 +295,6 @@ inline void release_domain(void* opaque) noexcept {
             == domain.registry->binding_generation;
 }
 
-/// Validate lease ownership, generation, lookup state and backend thread.
-/// @param lease Candidate provider or upper-owner lease.
-/// @return Whether this thread may use it for source lookup.
-[[nodiscard]] inline bool registry_lease_is_live(
-        const pg_sequence_source_registry_lease& lease) noexcept {
-    return lease.owned && lease.registry != nullptr
-        && !lease.registry->lease_fault
-        && lease.provider_generation == lease.registry->generation
-        && lease.registry->accepting_lookups
-        && lease.registry->backend_thread.is_current();
-}
-
 } // namespace sequence_source_detail
 
 #ifdef BIOSEQ_TEST_INDEXES
@@ -603,55 +304,6 @@ pg_sequence_source_stats() noexcept {
     return sequence_source_detail::collect_pg_sequence_source_stats();
 }
 #endif
-
-/* Output-lifetime diagnostics share the source-domain test counter surface.
- * Production callers retain an unconditional, inlinable no-op. */
-/// Record an output memory-context reset in test builds.
-inline void note_mmsearch_output_context_reset_for_test() noexcept {
-#ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_stats
-        .mmsearch_output_context_resets;
-#endif
-}
-
-/// Record whether an output value required locator promotion.
-/// @param promoted_locator Whether promotion occurred.
-inline void note_mmsearch_output_locator_promotion_for_test(
-        const bool promoted_locator) noexcept {
-#ifdef BIOSEQ_TEST_INDEXES
-    if (promoted_locator) {
-        ++g_pg_sequence_source_stats
-            .mmsearch_output_locator_promotions;
-    }
-#else
-    (void)promoted_locator;
-#endif
-}
-
-/// Record whether output state was restored after a PostgreSQL error.
-/// @param state_restored Whether the output owner returned to its prior state.
-inline void note_mmsearch_output_pg_error_restore_for_test(
-        const bool state_restored) noexcept {
-#ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_source_stats
-        .mmsearch_output_pg_error_restores;
-    if (!state_restored) {
-        ++g_pg_sequence_source_stats
-            .mmsearch_output_restore_mismatches;
-    }
-#else
-    (void)state_restored;
-#endif
-}
-
-/// Raise the armed failure immediately after output locator promotion.
-/// @throws PostgreSQL ERROR when the test failure site is armed.
-inline void inject_mmsearch_output_after_promotion_failure_for_test() {
-#ifdef BIOSEQ_TEST_INDEXES
-    sequence_source_detail::inject_pg_sequence_source_failure(
-        sequence_source_failure::mmsearch_output_after_promotion);
-#endif
-}
 
 namespace sequence_source_detail {
 

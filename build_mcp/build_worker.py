@@ -7,6 +7,7 @@ from typing import List, Dict, Set, Optional, Any, Mapping
 import argparse
 import base64
 import contextlib
+import copy
 import ctypes
 import errno
 import fcntl
@@ -33,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from build_presets import (
+    ALL_ALPHABETS_UNIT_INTEGRATION_MODE,
     BENCH_CLI_MODES,
     CATCH_FILTER_MODES,
     CMAKE_PRESETS_FILE,
@@ -59,6 +61,8 @@ from build_presets import (
     _is_aws_gcc_preset,
     _is_aws_preset,
     _is_debug_preset,
+    _is_native_linux_clang22_preset,
+    _release_clang_e2e_preset_host_contract,
     _resolved_cmake_preset_cache_variables,
     _unit_test_filter_to_cli_args,
     build_dir_for,
@@ -90,8 +94,12 @@ from integrity import (
 )
 from postgres_runtime import (
     _cmake_install_cmd,
+    _cleanup_owned_postgresql_backends,
     _postgresql_discovery_cache_reset_args,
     _postgresql_e2e_restart_shell_command,
+    _postgresql_guard_service_boundary_provider,
+    _legacy_q1024_global_postgresql_zero_evidence,
+    _postgresql_recovery_service_boundary_provider,
     _prepare_postgresql_test_database,
     _restart_postgresql,
 )
@@ -100,13 +108,19 @@ from postgres_safety import (
     _run_postgres_error_safety_worker,
 )
 from process_state import (
+    BUILD_TIMEOUT_TERM_GRACE_SEC,
     LOG_DIR,
     REMOTE_STATE_FILE,
     STATE_FILE,
     _ProcessIdentity,
     _await_guarded_worker_arm,
+    _await_q1024_watchdog_arm,
     _build_worker_descendant_environment,
     _capture_process_identity,
+    _claim_q1024_postgresql_cleanup,
+    _claim_q1024_postgresql_revalidation,
+    _finish_q1024_postgresql_cleanup,
+    _finish_q1024_postgresql_revalidation,
     _get_build_receipt,
     _global_lock,
     _guarded_process_snapshot,
@@ -863,29 +877,38 @@ def _inspect_artifact_candidates(
 INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
     "bioseq_benchmark": InspectTargetDefinition(
         mode="benchmark", artifact_names=("bioseq_benchmark",),
-        shared_target_names=("bioseq_modules_nopg",)),
+        shared_target_names=("bioseq_modules_nopg",
+                             "bioseq_highway_fixed_target",
+                             "bioseq_runtime_core")),
     "bioseq_io_benchmark": InspectTargetDefinition(
         mode="benchmark-io", artifact_names=("bioseq_io_benchmark",),
-        shared_target_names=("bioseq_modules_nopg",)),
+        shared_target_names=("bioseq_modules_nopg", "bioseq_runtime_core")),
     "bioseq_unit_tests": InspectTargetDefinition(
         mode="unit-integration", artifact_names=("bioseq_unit_tests",),
-        shared_target_names=("bioseq_modules_nopg",)),
+        shared_target_names=("bioseq_modules_nopg",
+                             "bioseq_highway_fixed_target",
+                             "bioseq_runtime_core")),
     "bioseq_integration_tests": InspectTargetDefinition(
         mode="unit-integration",
         artifact_names=("bioseq_integration_tests",),
-        shared_target_names=("bioseq_modules_nopg",)),
+        shared_target_names=("bioseq_modules_nopg",
+                             "bioseq_highway_fixed_target",
+                             "bioseq_runtime_core")),
     "bioseq_benchmark_e2e_contract_tests": InspectTargetDefinition(
         mode="unit-integration",
         artifact_names=("bioseq_benchmark_e2e_contract_tests",),
-        shared_target_names=("bioseq_modules_nopg",)),
+        shared_target_names=("bioseq_modules_nopg", "bioseq_runtime_core")),
     "bioseq_benchmark_framework_contract_tests": InspectTargetDefinition(
         mode="unit-integration",
         artifact_names=("bioseq_benchmark_framework_contract_tests",),
-        shared_target_names=("bioseq_modules_nopg",)),
+        shared_target_names=("bioseq_modules_nopg", "bioseq_runtime_core")),
     "postgresql_bioseq": InspectTargetDefinition(
         mode="benchmark-e2e",
         artifact_names=("bioseq.dylib", "bioseq.so", "bioseq.dll"),
-        shared_target_names=("bioseq_modules_nopg",)),
+        shared_target_names=("bioseq_modules_nopg",
+                             "bioseq_highway_fixed_target",
+                             "bioseq_runtime_core",
+                             "bioseq_pipeline_dispatch_owners")),
     "postgresql_bioseq_cache": InspectTargetDefinition(
         mode="cache-unit",
         artifact_names=("bioseq_cache.dylib", "bioseq_cache.so",
@@ -1384,7 +1407,39 @@ _PAPERS_EXCLUDED_PATHSPECS = (
     ":(top,exclude,glob)main/papers/**",
 )
 
-def _source_graph_fingerprint(repository_root: Path) -> str:
+
+def _require_control_deadline(
+        deadline: float | None, operation: str) -> None:
+    """Stop cooperative receipt/control work at its absolute wall deadline."""
+    if deadline is not None and time.time() >= deadline:
+        raise TimeoutError(f"deadline reached during {operation}")
+
+
+def _remaining_control_timeout(
+        deadline: float | None, maximum_seconds: float,
+        operation: str) -> float:
+    _require_control_deadline(deadline, operation)
+    if deadline is None:
+        return maximum_seconds
+    return min(maximum_seconds, max(0.001, deadline - time.time()))
+
+
+def _deadline_sha256_file(path: Path, deadline: float | None) -> str:
+    """Hash one file while cooperatively enforcing a receipt deadline."""
+    if deadline is None:
+        return sha256_file(path)
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            _require_control_deadline(deadline, f"hashing {path}")
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
+
+
+def _source_graph_fingerprint(
+        repository_root: Path, *, deadline: float | None = None) -> str:
     """Hash the checked-out build inputs without hashing generated outputs.
 
     The package snapshot's explicit lifted-source allowlist is the single
@@ -1393,24 +1448,33 @@ def _source_graph_fingerprint(repository_root: Path) -> str:
     production binary receipt. Tracked deletions are represented explicitly,
     while ignored generated output never enters the digest.
     """
+    _require_control_deadline(deadline, "source-graph fingerprint setup")
     repository_root = repository_root.resolve(strict=True)
-    completed = subprocess.run(
-        [
-            "git", "-C", str(repository_root), "ls-files", "-z",
-            "--cached", "--others", "--exclude-standard",
-            "--", *_BUILD_SOURCE_FINGERPRINT_PATHS,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        timeout=60,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                "git", "-C", str(repository_root), "ls-files", "-z",
+                "--cached", "--others", "--exclude-standard",
+                "--", *_BUILD_SOURCE_FINGERPRINT_PATHS,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=_remaining_control_timeout(
+                deadline, 60.0, "source-graph enumeration"),
+        )
+    except subprocess.TimeoutExpired as exc:
+        if deadline is not None and time.time() >= deadline:
+            raise TimeoutError(
+                "deadline reached during source-graph enumeration") from exc
+        raise RuntimeError("source-graph enumeration timed out") from exc
     if completed.returncode != 0:
         raise RuntimeError(
             "could not enumerate source graph: "
             + completed.stderr.decode("utf-8", errors="replace").strip())
     digest = hashlib.sha256()
     for raw_path in sorted(completed.stdout.split(b"\0")):
+        _require_control_deadline(deadline, "source-graph fingerprint")
         if not raw_path:
             continue
         relative = raw_path.decode("utf-8", errors="surrogateescape")
@@ -1443,21 +1507,31 @@ def _source_graph_fingerprint(repository_root: Path) -> str:
         file_digest = hashlib.sha256()
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                _require_control_deadline(deadline, "source-graph fingerprint")
                 file_digest.update(chunk)
         digest.update(file_digest.digest())
         digest.update(b"\0")
     return digest.hexdigest()
 
-def _git_commit(repository_root: Path, ref: str = "HEAD") -> str:
-    completed = subprocess.run(
-        ["git", "-C", str(repository_root), "rev-parse", "--verify",
-         f"{ref}^{{commit}}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        text=True,
-        timeout=30,
-    )
+def _git_commit(
+        repository_root: Path, ref: str = "HEAD",
+        *, deadline: float | None = None) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository_root), "rev-parse", "--verify",
+             f"{ref}^{{commit}}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+            timeout=_remaining_control_timeout(
+                deadline, 30.0, "source commit validation"),
+        )
+    except subprocess.TimeoutExpired as exc:
+        if deadline is not None and time.time() >= deadline:
+            raise TimeoutError(
+                "deadline reached during source commit validation") from exc
+        raise RuntimeError("source commit validation timed out") from exc
     if completed.returncode != 0:
         raise RuntimeError(
             f"cannot resolve git ref {ref!r}: {completed.stderr.strip()}")
@@ -1466,7 +1540,8 @@ def _git_commit(repository_root: Path, ref: str = "HEAD") -> str:
         raise RuntimeError(f"git returned malformed commit id {commit!r}")
     return commit
 
-def _build_configuration_evidence(build_dir: Path) -> dict[str, object]:
+def _build_configuration_evidence(
+        build_dir: Path, *, deadline: float | None = None) -> dict[str, object]:
     """Return the stable compiler/configuration identity of a built tree."""
     cache_path = build_dir / "CMakeCache.txt"
     ninja_path = build_dir / "build.ninja"
@@ -1484,15 +1559,17 @@ def _build_configuration_evidence(build_dir: Path) -> dict[str, object]:
         "BIOSEQ_TEMPLATE_FLATTEN_PROFILE",
     )
     return {
-        "cmake_cache_sha256": sha256_file(cache_path),
-        "build_ninja_sha256": sha256_file(ninja_path),
+        "cmake_cache_sha256": _deadline_sha256_file(cache_path, deadline),
+        "build_ninja_sha256": _deadline_sha256_file(ninja_path, deadline),
         "compile_commands_sha256": (
-            sha256_file(build_dir / "compile_commands.json")
+            _deadline_sha256_file(
+                build_dir / "compile_commands.json", deadline)
             if (build_dir / "compile_commands.json").is_file()
             else None
         ),
         "configure_stamp_sha256": (
-            sha256_file(stamp_path) if stamp_path.is_file() else None
+            _deadline_sha256_file(stamp_path, deadline)
+            if stamp_path.is_file() else None
         ),
         "compiler_contract": {
             key: _cmake_cache_value(build_dir, key)
@@ -1500,7 +1577,9 @@ def _build_configuration_evidence(build_dir: Path) -> dict[str, object]:
         },
     }
 
-def _stable_artifact_digest(path: Path) -> tuple[os.stat_result, str]:
+def _stable_artifact_digest(
+        path: Path, *, deadline: float | None = None
+) -> tuple[os.stat_result, str]:
     """Hash one non-symlink artifact and reject replacement while reading."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -1513,6 +1592,7 @@ def _stable_artifact_digest(path: Path) -> tuple[os.stat_result, str]:
             raise RuntimeError(f"artifact is not a regular file: {path}")
         digest = hashlib.sha256()
         while True:
+            _require_control_deadline(deadline, f"hashing artifact {path}")
             chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
@@ -1546,16 +1626,19 @@ def _stable_artifact_digest(path: Path) -> tuple[os.stat_result, str]:
     return after, digest.hexdigest()
 
 def _runtime_artifact_evidence(
-        mode: str, build_dir: Path) -> list[dict[str, object]]:
+        mode: str, build_dir: Path, *, deadline: float | None = None
+) -> list[dict[str, object]]:
     """Seal every directly executed mode command for no-rebuild reuse."""
     bin_dir = build_dir / MODES[mode].binary_subdir
     evidence: list[dict[str, object]] = []
     for command in MODES[mode].commands:
+        _require_control_deadline(deadline, "runtime-artifact validation")
         if not command:
             continue
         path = bin_dir / command[0]
         try:
-            metadata, digest = _stable_artifact_digest(path)
+            metadata, digest = _stable_artifact_digest(
+                path, deadline=deadline)
         except RuntimeError as exc:
             raise RuntimeError(
                 f"required runtime artifact is unavailable: {path}: "
@@ -1871,7 +1954,8 @@ def _receipt_authorized_artifact_evidence(
         mode: str,
         build_dir: Path,
         *,
-        debug: bool) -> list[dict[str, object]]:
+        debug: bool,
+        deadline: float | None = None) -> list[dict[str, object]]:
     """Seal every build-tree artifact a receipt can execute/install/inspect.
 
     Command binaries alone are insufficient authority: receipt-pinned runs
@@ -1880,6 +1964,7 @@ def _receipt_authorized_artifact_evidence(
     selection intentionally broader than the immediate command list so a
     changed install plan or locally linked dependency also invalidates reuse.
     """
+    _require_control_deadline(deadline, "authorized-artifact validation")
     build_dir = build_dir.resolve(strict=True)
     bin_dir = (build_dir / MODES[mode].binary_subdir).resolve(strict=False)
     selected: set[Path] = set()
@@ -1888,6 +1973,7 @@ def _receipt_authorized_artifact_evidence(
     ] = {}
 
     def select_regular(path: Path, *, required: bool = False) -> bool:
+        _require_control_deadline(deadline, "authorized-artifact selection")
         try:
             metadata = path.lstat()
         except OSError:
@@ -1930,6 +2016,7 @@ def _receipt_authorized_artifact_evidence(
 
     # Every directly executed command is mandatory.
     for command in MODES[mode].commands:
+        _require_control_deadline(deadline, "authorized-artifact selection")
         if command:
             select_regular(bin_dir / command[0], required=True)
 
@@ -1950,6 +2037,7 @@ def _receipt_authorized_artifact_evidence(
         select_regular(cache_artifact_manifest, required=True)
         cache_artifacts = _cache_native_artifacts(bin_dir)
         for key in cache_artifact_keys:
+            _require_control_deadline(deadline, "authorized-artifact selection")
             value = cache_artifacts[key]
             if not value:
                 raise RuntimeError(
@@ -1995,6 +2083,7 @@ def _receipt_authorized_artifact_evidence(
     # target may also be a phony/custom target, so only the two extension
     # targets have a mandatory native linked output contract.
     for target in MODES[mode].targets:
+        _require_control_deadline(deadline, "authorized-artifact selection")
         select_regular(bin_dir / target)
         extension_names = _RECEIPT_EXTENSION_TARGET_NAMES.get(target)
         if extension_names is None:
@@ -2019,6 +2108,7 @@ def _receipt_authorized_artifact_evidence(
     # the cache/provider DSOs, and platform-local helper executables.
     if build_dir.is_dir():
         for path in build_dir.rglob("*"):
+            _require_control_deadline(deadline, "authorized-artifact walk")
             try:
                 metadata = path.lstat()
             except OSError as exc:
@@ -2081,7 +2171,8 @@ def _receipt_authorized_artifact_evidence(
     evidence: list[dict[str, object]] = []
     regular_evidence: dict[Path, dict[str, object]] = {}
     for path in sorted(selected, key=lambda item: str(item)):
-        metadata, digest = _stable_artifact_digest(path)
+        metadata, digest = _stable_artifact_digest(
+            path, deadline=deadline)
         item: dict[str, object] = {
             "relative_path": str(path.relative_to(build_dir)),
             "size": metadata.st_size,
@@ -2092,6 +2183,7 @@ def _receipt_authorized_artifact_evidence(
         regular_evidence[path] = item
 
     for alias_path in sorted(library_aliases, key=str):
+        _require_control_deadline(deadline, "authorized-artifact alias validation")
         expected = library_aliases[alias_path]
         before = _receipt_vcpkg_library_alias_snapshot(
             alias_path, build_dir)
@@ -2100,7 +2192,7 @@ def _receipt_authorized_artifact_evidence(
                 "receipted vcpkg library alias changed while sealed: "
                 f"{alias_path}")
         target_metadata, target_digest = _stable_artifact_digest(
-            before.terminal_path)
+            before.terminal_path, deadline=deadline)
         after = _receipt_vcpkg_library_alias_snapshot(alias_path, build_dir)
         if after is None or after != before or after != expected:
             raise RuntimeError(
@@ -2140,7 +2232,10 @@ def _receipt_authorized_artifact_evidence(
         })
     return sorted(evidence, key=lambda item: str(item["relative_path"]))
 
-def _build_artifact_counts(build_dir: Path, mode: str) -> dict[str, int]:
+def _build_artifact_counts(
+        build_dir: Path, mode: str, *, deadline: float | None = None
+) -> dict[str, int]:
+    _require_control_deadline(deadline, "artifact-count validation")
     compile_commands_path = build_dir / "compile_commands.json"
     compile_commands_count = 0
     if compile_commands_path.is_file():
@@ -2154,11 +2249,10 @@ def _build_artifact_counts(build_dir: Path, mode: str) -> dict[str, int]:
     generated_root = build_dir / "bioseq" / "generated" / "highway"
     generated_sources = 0
     if generated_root.is_dir():
-        generated_sources = sum(
-            1
-            for path in generated_root.rglob("*")
-            if path.is_file() and path.suffix in {".cppm", ".cpp"}
-        )
+        for path in generated_root.rglob("*"):
+            _require_control_deadline(deadline, "generated-source count")
+            if path.is_file() and path.suffix in {".cppm", ".cpp"}:
+                generated_sources += 1
     compiled_objects = 0
     linked_artifacts = 0
     install_scripts = 0
@@ -2167,6 +2261,7 @@ def _build_artifact_counts(build_dir: Path, mode: str) -> dict[str, int]:
     bin_dir = (build_dir / MODES[mode].binary_subdir).resolve(strict=False)
     if build_dir.is_dir():
         for path in build_dir.rglob("*"):
+            _require_control_deadline(deadline, "artifact-count walk")
             try:
                 metadata = path.lstat()
             except OSError:
@@ -2191,6 +2286,7 @@ def _build_artifact_counts(build_dir: Path, mode: str) -> dict[str, int]:
             if suffix in {".bc", ".s"}:
                 inspect_listings += 1
     for command in MODES[mode].commands:
+        _require_control_deadline(deadline, "runtime-artifact count")
         if not command:
             continue
         path = bin_dir / command[0]
@@ -2217,8 +2313,11 @@ def _validate_build_receipt(
         expected_mode: str | None = None,
         expected_debug: bool | None = None,
         verify_source: bool = True,
+        deadline: float | None = None,
 ) -> tuple[dict[str, object] | None, str | None]:
+    _require_control_deadline(deadline, "build-receipt validation")
     receipt = _get_build_receipt(receipt_id)
+    _require_control_deadline(deadline, "build-receipt load")
     if receipt is None:
         return None, f"unknown build receipt {receipt_id!r}"
     required_keys = {
@@ -2288,13 +2387,14 @@ def _validate_build_receipt(
     if verify_source:
         try:
             observed_source = _source_graph_fingerprint(
-                source_repository_root)
+                source_repository_root, deadline=deadline)
         except RuntimeError as exc:
             return None, f"cannot validate build receipt source graph: {exc}"
         if observed_source != receipt.get("source_graph_fingerprint"):
             return None, "build receipt source graph no longer matches"
     try:
-        observed_commit = _git_commit(source_repository_root)
+        observed_commit = _git_commit(
+            source_repository_root, deadline=deadline)
     except RuntimeError as exc:
         return None, f"cannot validate build receipt commit: {exc}"
     if observed_commit != receipt.get("source_commit"):
@@ -2305,13 +2405,15 @@ def _validate_build_receipt(
     if receipt["targets"] != list(MODES[mode].targets):
         return None, "build receipt target set no longer matches the mode"
     try:
-        observed_configuration = _build_configuration_evidence(build_dir)
+        observed_configuration = _build_configuration_evidence(
+            build_dir, deadline=deadline)
     except RuntimeError as exc:
         return None, str(exc)
     if observed_configuration != receipt.get("configuration"):
         return None, "build receipt compiler/configuration evidence no longer matches"
     try:
-        observed_artifacts = _runtime_artifact_evidence(mode, build_dir)
+        observed_artifacts = _runtime_artifact_evidence(
+            mode, build_dir, deadline=deadline)
     except RuntimeError as exc:
         return None, str(exc)
     if observed_artifacts != receipt.get("runtime_artifacts"):
@@ -2322,6 +2424,7 @@ def _validate_build_receipt(
                 mode,
                 build_dir,
                 debug=receipt["debug"],
+                deadline=deadline,
             )
         )
     except RuntimeError as exc:
@@ -2331,7 +2434,8 @@ def _validate_build_receipt(
         return None, (
             "build receipt authorized install/inspect artifacts no longer "
             "match")
-    if _build_artifact_counts(build_dir, mode) != receipt.get(
+    if _build_artifact_counts(
+            build_dir, mode, deadline=deadline) != receipt.get(
             "artifact_counts"):
         return None, "build receipt artifact counts no longer match"
     observed_host = {
@@ -2342,9 +2446,132 @@ def _validate_build_receipt(
     }
     if receipt.get("host") != observed_host:
         return None, "build receipt host identity no longer matches"
+    _require_control_deadline(deadline, "build-receipt validation")
     receipt["source_repository_root"] = str(source_repository_root)
     receipt["build_dir"] = str(build_dir)
     return receipt, None
+
+
+def _canonical_algorithm_matrix_clang_e2e_receipt_error(
+        receipt: Mapping[str, object]) -> str | None:
+    """Validate one release Clang E2E receipt for canonical matrix reuse.
+
+    Generic receipt validation authenticates source, host, configuration, and
+    runtime artifacts. This narrower campaign gate additionally binds the
+    declared E2E preset to its native host and requires the optimization,
+    libc++, and interval-instrumentation contract used by matrix evidence.
+    """
+    if (
+        receipt.get("mode") != "benchmark-e2e"
+        or receipt.get("debug") is not False
+        or receipt.get("preset_family") != "e2e"
+        or receipt.get("binary_subdir") != "bioseq"
+    ):
+        return "receipt is not a debug=false benchmark-e2e/bioseq authority"
+
+    preset = receipt.get("preset")
+    if not isinstance(preset, str):
+        return "receipt preset is malformed"
+    host_contract = _release_clang_e2e_preset_host_contract(preset)
+    if host_contract is None:
+        return "preset is not a supported release Clang E2E family"
+    expected_system, expected_machine, target_arch, target_triplet = (
+        host_contract)
+    host = receipt.get("host")
+    if not isinstance(host, dict):
+        return "receipt host identity is malformed"
+    if (
+        host.get("system") != expected_system
+        or host.get("machine") != expected_machine
+    ):
+        return (
+            f"preset {preset!r} does not match receipt host "
+            f"{host.get('system')!r}/{host.get('machine')!r}"
+        )
+
+    configuration = receipt.get("configuration")
+    compiler_contract = (
+        configuration.get("compiler_contract")
+        if isinstance(configuration, dict) else None
+    )
+    if not isinstance(compiler_contract, dict):
+        return "receipt compiler contract is malformed"
+    compiler = compiler_contract.get("CMAKE_CXX_COMPILER")
+    if not isinstance(compiler, str) or not Path(compiler).is_absolute():
+        return "receipt C++ compiler is not an absolute path"
+    compiler_name = Path(compiler).name
+    if re.fullmatch(r"clang\+\+(?:-22)?", compiler_name) is None:
+        return "receipt C++ compiler is not Clang 22"
+    if (
+        "llvm-22" not in compiler
+        and "llvm@22" not in compiler
+        and compiler_name != "clang++-22"
+    ):
+        return "receipt C++ compiler path does not identify LLVM 22"
+    compiler_id = compiler_contract.get("CMAKE_CXX_COMPILER_ID")
+    if compiler_id is not None and compiler_id not in {"Clang", "AppleClang"}:
+        return "receipt C++ compiler ID is not Clang"
+    compiler_version = compiler_contract.get("CMAKE_CXX_COMPILER_VERSION")
+    if compiler_version is not None:
+        if not isinstance(compiler_version, str):
+            return "receipt C++ compiler version is malformed"
+        version = re.fullmatch(
+            r"22\.(\d+)\.(\d+)(?:[-+].*)?", compiler_version)
+        if (
+            version is None
+            or (int(version.group(1)), int(version.group(2))) < (1, 6)
+        ):
+            return "receipt C++ compiler must be Clang >=22.1.6 and <23"
+
+    flags = compiler_contract.get("CMAKE_CXX_FLAGS")
+    if not isinstance(flags, str):
+        return "receipt C++ flags are malformed"
+    try:
+        flag_tokens = shlex.split(flags)
+    except ValueError:
+        return "receipt C++ flags cannot be parsed"
+    required_flags = {"-O3", "-DNDEBUG", "-fno-omit-frame-pointer"}
+    if not required_flags.issubset(flag_tokens):
+        return "receipt C++ flags do not prove the release contract"
+    stdlib_flags = [
+        token for token in flag_tokens if token.startswith("-stdlib=")
+    ]
+    if expected_system == "Linux":
+        if stdlib_flags != ["-stdlib=libc++"]:
+            return "receipt Linux C++ flags do not prove the libc++ ABI"
+    elif stdlib_flags not in ([], ["-stdlib=libc++"]):
+        return "receipt Darwin C++ flags select a non-libc++ ABI"
+    optimization_flags = [
+        token for token in flag_tokens
+        if re.fullmatch(r"-O(?:[0-3]|fast|g|s|z)", token)
+    ]
+    if optimization_flags != ["-O3"]:
+        return "receipt C++ flags contain a non-canonical optimization level"
+    if any(
+        token.startswith("-g")
+        or token.startswith("-fsanitize")
+        or token in {"-fomit-frame-pointer", "-UNDEBUG"}
+        for token in flag_tokens
+    ):
+        return "receipt C++ flags contain debug/sanitizer/release suppression"
+
+    build_dir_text = receipt.get("build_dir")
+    if not isinstance(build_dir_text, str) or not build_dir_text:
+        return "receipt build directory is malformed"
+    build_dir = Path(build_dir_text)
+    if _cmake_cache_bool(
+            build_dir, "BIOSEQ_BENCHMARK_E2E_INTERVALS") is not True:
+        return "receipt build does not enable E2E interval instrumentation"
+    if _cmake_cache_bool(build_dir, "BIOSEQ_TEST_INDEXES") is not False:
+        return "receipt build does not disable test indexes"
+    if expected_system == "Linux":
+        if _cmake_cache_value(
+                build_dir, "VCPKG_TARGET_ARCHITECTURE") != target_arch:
+            return "receipt vcpkg architecture does not match its Linux host"
+        if _cmake_cache_value(
+                build_dir, "VCPKG_TARGET_TRIPLET") != target_triplet:
+            return "receipt vcpkg triplet does not match its Linux host"
+    return None
 
 def _seal_successful_build_receipt(
         *,
@@ -2415,22 +2642,32 @@ def _seal_run_receipt(
         bench_flags: list[str],
         test_flags: list[str],
         bench_e2e_config: str | None,
+        deadline: float | None = None,
 ) -> dict[str, object]:
+    _require_control_deadline(deadline, "run-receipt sealing")
+    campaign_selected = _is_algorithm_matrix_campaign_config(bench_e2e_config)
     report_evidence: list[dict[str, object]] = []
     for path in report_files:
-        resolved = path.resolve(strict=True)
-        metadata = resolved.stat()
+        _require_control_deadline(deadline, "run-report sealing")
+        resolved = (
+            _campaign_internal_regular_file(path, "campaign run receipt report")
+            if campaign_selected else path.resolve(strict=True))
+        metadata = resolved.lstat() if campaign_selected else resolved.stat()
         report_evidence.append({
             "path": str(resolved),
             "size": metadata.st_size,
-            "sha256": sha256_file(resolved),
+            "sha256": _deadline_sha256_file(resolved, deadline),
         })
     config_evidence = None
     if bench_e2e_config is not None:
-        config_path = Path(bench_e2e_config).resolve(strict=True)
+        config_path = (
+            _campaign_regular_repository_file(
+                bench_e2e_config, "campaign run receipt config")
+            if campaign_selected
+            else Path(bench_e2e_config).resolve(strict=True))
         config_evidence = {
             "path": str(config_path),
-            "sha256": sha256_file(config_path),
+            "sha256": _deadline_sha256_file(config_path, deadline),
         }
     receipt: dict[str, object] = {
         "kind": "bioseq-run-receipt",
@@ -2456,7 +2693,9 @@ def _seal_run_receipt(
         "reports": report_evidence,
     }
     receipt["content_sha256"] = canonical_json_sha256(receipt)
+    _require_control_deadline(deadline, "run-receipt publication")
     _store_build_receipt(receipt)
+    _require_control_deadline(deadline, "run-receipt publication")
     return receipt
 
 
@@ -2489,6 +2728,3786 @@ def _next_report_path(reporting_dir: Path) -> Path:
     next_ordinal = max(ordinals, default=-1) + 1
     return reporting_dir / f"report_{next_ordinal}.json"
 
+
+_ALGORITHM_MATRIX_CAMPAIGN_ID = "bioseq-e2e-algorithm-matrix-local-v1"
+_ALGORITHM_MATRIX_CAMPAIGN_DIGEST = (
+    "011fbb1ef33a214ab80d3568c2341e8d0f8311f82e21a5955bdcb93b3c63b979")
+_ALGORITHM_MATRIX_Q8_CAMPAIGN_ID = (
+    "bioseq-e2e-algorithm-matrix-local-q8-v1")
+_ALGORITHM_MATRIX_Q8_CAMPAIGN_DIGEST = (
+    "e1efe2033ea95f729e147725d2807f9c94eccb83d9cd8711879034c09e70168a")
+_ALGORITHM_MATRIX_Q1_CALIBRATION_MANIFEST = (
+    "bench/bench_e2e_algorithm_matrix_q1_calibration_manifest.json")
+# Updated only when the deterministic q1 panel sealer changes the manifest.
+_ALGORITHM_MATRIX_Q1_CALIBRATION_MANIFEST_SHA256 = (
+    "4c49297a10c59c44d10bf98d01365215a27c3d44c230ed546a1cb337ef01bf63")
+_ALGORITHM_MATRIX_Q1_CALIBRATION_CONFIGS = (
+    "bench/e2e_algorithm_matrix_q1_calibration_shards/"
+    "bench_e2e_algorithm_matrix_q1_calibration_m2_d4_k15_w10_"
+    "isolated_minimap2_no_index.json",
+    "bench/e2e_algorithm_matrix_q1_calibration_shards/"
+    "bench_e2e_algorithm_matrix_q1_calibration_m2_d4_k15_w10_no_index_"
+    "scalar_scalar_minimap2_fragment_ksw2.json",
+    "bench/e2e_algorithm_matrix_q1_calibration_shards/"
+    "bench_e2e_algorithm_matrix_q1_calibration_m2_d4_k15_w10_no_index_"
+    "scalar_scalar_minimap2_fragment_block_aligner.json",
+    "bench/e2e_algorithm_matrix_q1_calibration_shards/"
+    "bench_e2e_algorithm_matrix_q1_calibration_m2_d4_k15_w10_no_index_"
+    "scalar_scalar_minimap2_sequence_ksw2.json",
+    "bench/e2e_algorithm_matrix_q1_calibration_shards/"
+    "bench_e2e_algorithm_matrix_q1_calibration_m2_d4_k15_w10_no_index_"
+    "scalar_scalar_minimap2_sequence_block_aligner.json",
+)
+_ALGORITHM_MATRIX_DEADLINE_MANIFEST = (
+    "bench/bench_e2e_algorithm_matrix_deadline_manifest.json")
+_ALGORITHM_MATRIX_DEADLINE_MANIFEST_SHA256 = (
+    "73cd6928e7430c46bff2836f0bb0820565e9d5c9b0011939ff4aad9fbe771fa0")
+_ALGORITHM_MATRIX_DEADLINE_CAMPAIGN_ID = (
+    "bioseq-e2e-algorithm-matrix-deadline-v1")
+_ALGORITHM_MATRIX_DEADLINE_CAMPAIGN_DIGEST = (
+    "3d03b3aea29a5418721ba5899c58a698f568ca10dddf9f00eaab42adf450a3b0")
+_ALGORITHM_MATRIX_DEADLINE_DIRECTORY = (
+    "bench/e2e_algorithm_matrix_deadline_shards")
+_ALGORITHM_MATRIX_DEADLINE_NORMAL_TIMEOUT_SECONDS = 14_400
+_ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS = 172_800
+_Q1024_WHOLE_INVOCATION_TIMEOUT_SECONDS = 43_200
+_Q1024_CLEANUP_RESERVE_SECONDS = 300
+_Q1024_POSTGRES_APPLICATION_NAME_PREFIX = "bioseq-q1024-"
+_ALGORITHM_MATRIX_Q1024_SINGLETON0058_EXTENDED_TIMEOUT_MANIFEST = (
+    "bench/bench_e2e_algorithm_matrix_q1024_singleton0058_"
+    "extended_timeout_authority.json")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0058_EXTENDED_TIMEOUT_MANIFEST_SHA256 = (
+    "69e8d149406c8d84592be3847b6651959a0fc11660c2ea5d2f6869acf85a9a2d")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0058_EXTENDED_TIMEOUT_AUTHORITY_DIGEST = (
+    "64a9d461d3bcafd8715891fbc92c7dd8a0f0da552b092499e3fc10c947351bd2")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0058_CONFIG = (
+    "bench/e2e_algorithm_matrix_shards/"
+    "bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+    "0058_15aceb88564a0756.json")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0058_CONFIG_SHA256 = (
+    "92d84607060b0fe7225f4b7d0f146b47777668f70d96db1c3127c929481e6af0")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0058_STABLE_KEY = (
+    "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-v1\","
+    "\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\","
+    "\"bioseq\",\"minimizers_per_fragment\",\"bounded_nthash_simd\","
+    "\"simd_minimap2\",\"block_aligner\"]")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0058_STABLE_KEY_SHA256 = (
+    "15aceb88564a07568553f1e73a271786d919737f9f3c93653657d1847ef5322a")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0068_EXTENDED_TIMEOUT_MANIFEST = (
+    "bench/bench_e2e_algorithm_matrix_q1024_singleton0068_"
+    "extended_timeout_authority.json")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0068_EXTENDED_TIMEOUT_MANIFEST_SHA256 = (
+    "01f036513541df316dfccb374bc2e97907d82e51e4b08870fc47d4e432717af0")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0068_EXTENDED_TIMEOUT_AUTHORITY_DIGEST = (
+    "7d810d0450813b5ceb3c6db764c5ad269ed21836c519b0b58aa4a21c3cfdb0b1")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0068_CONFIG = (
+    "bench/e2e_algorithm_matrix_shards/"
+    "bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+    "0068_2496323c88e8add2.json")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0068_CONFIG_SHA256 = (
+    "7cbedf6a5ccc42f304e37b6a1faffbc4c3e19d6fb592c237ecdc3a141ad14b44")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0068_STABLE_KEY = (
+    "bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-v1\","
+    "\"matrix_2gbp_dna4_k15_w10\",\"dna4\",2,15,10,\"no_index\","
+    "\"bioseq\",\"minimizers_per_fragment\",\"bounded_nthash_simd\","
+    "\"range_minimum_query\",\"block_aligner\"]")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0068_STABLE_KEY_SHA256 = (
+    "2496323c88e8add288fbd281ec0df05618b57a4b7425473db3092894d37cfa61")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0068_HARD_STOP_AT = (
+    "2026-09-02T18:30:00+02:00")
+_ALGORITHM_MATRIX_Q1024_SINGLETON0068_HARD_STOP_EPOCH = 1_788_366_600
+_ALGORITHM_MATRIX_DEADLINE_V2_MANIFEST = (
+    "bench/bench_e2e_algorithm_matrix_deadline_v2_manifest.json")
+_ALGORITHM_MATRIX_DEADLINE_V2_MANIFEST_SHA256 = (
+    "bf2abc14dbda84079d6384e330b1fdc752e1754360cc61d9fec42af1e2d1b31c")
+_ALGORITHM_MATRIX_DEADLINE_V2_CHECKPOINT_SHA256 = (
+    "401751c75a95e8814d0a1a62d289b093c9a097b43789dc55ec89b4f4b86e4053")
+_ALGORITHM_MATRIX_DEADLINE_V2_CAMPAIGN_ID = (
+    "bioseq-e2e-algorithm-matrix-deadline-v2")
+_ALGORITHM_MATRIX_DEADLINE_V2_CAMPAIGN_DIGEST = (
+    "44a85360a5e975ec8a6d70ac0b06486c51d748770c2ada46106d2ccc5db4728a")
+_ALGORITHM_MATRIX_DEADLINE_V2_DIRECTORY = (
+    "bench/e2e_algorithm_matrix_deadline_v2_shards")
+_ALGORITHM_MATRIX_DEADLINE_V2_EXPECTED_SHARDS = 60
+_ALGORITHM_MATRIX_DEADLINE_V2_EXPECTED_RAW_RECORDS = 300
+_ALGORITHM_MATRIX_DEADLINE_V2_DEADLINE_SECONDS = 604_800
+_ALGORITHM_MATRIX_DEADLINE_V2_ESTIMATED_WALL_SECONDS = 586_467
+_ALGORITHM_MATRIX_DEADLINE_V2_LINEAGE = {
+    "parent_campaign_id": _ALGORITHM_MATRIX_DEADLINE_CAMPAIGN_ID,
+    "parent_campaign_digest": _ALGORITHM_MATRIX_DEADLINE_CAMPAIGN_DIGEST,
+    "parent_manifest": _ALGORITHM_MATRIX_DEADLINE_MANIFEST,
+    "parent_manifest_sha256": _ALGORITHM_MATRIX_DEADLINE_MANIFEST_SHA256,
+    "parent_shard_directory": _ALGORITHM_MATRIX_DEADLINE_DIRECTORY,
+    "parent_shard_tree_sha256": (
+        "297634d7b22f4ca05bef640282acd09c92e17cd23b544ce624e1c59ba4838270"),
+    "parent_expected_shards": 59,
+    "parent_expected_raw_records": 295,
+    "parent_artifact_policy": "immutable_exact_parent_authority",
+}
+_ALGORITHM_MATRIX_STABLE_KEY_FIELDS = [
+    "campaign_id",
+    "dataset",
+    "alphabet",
+    "target_size_gbp",
+    "kmer_size",
+    "window_size",
+    "index_mode",
+    "engine",
+    "bioseq_index_name",
+    "requested_minimizer_algorithm",
+    "requested_chaining_algorithm",
+    "requested_base_alignment_algorithm",
+]
+_ALGORITHM_MATRIX_MIXED_PERSISTED_METRIC_NAMES = [
+    "wall_clock_ns",
+    "region_total_ns",
+    "tuple_accepted",
+    "match_count",
+    "expected_match_count",
+    "correct_match_count",
+    "exact_primary_count_accepted",
+    "correct_cigar_count",
+    "cigar_replay_count",
+    "mapq_result_count",
+    "pipeline_validation_accepted",
+    "stage_engine_matrix_valid",
+    "backend_declines",
+    "backend_fallbacks",
+    "prefilter_activity_count",
+    "measured_region_ns_manual",
+    "cigar_or_mapq_interval_union_ns",
+    "outer_e2e_minus_cigar_or_mapq_union_ns",
+    "benchmark_e2e_interval_schema_revision",
+    "benchmark_e2e_interval_available",
+    "benchmark_e2e_interval_count",
+    "benchmark_e2e_cigar_interval_count",
+    "benchmark_e2e_mapq_interval_count",
+    "benchmark_e2e_interval_finalization_count",
+    "downstream_active_wall_ns",
+    "downstream_active_wall_available",
+    "downstream_work_ns",
+    "mapq_execution_available",
+    "mapq_executed",
+]
+_ALGORITHM_MATRIX_EXACT_BENCH_FILTER = {"benchmarks": ["bench_e2e"]}
+_ALGORITHM_MATRIX_EXACT_BENCH_FLAGS = ["--filter", "benchmark=bench_e2e"]
+_ALGORITHM_MATRIX_RUNTIME_ENVIRONMENT = {
+    "BIOSEQ_E2E_KEEP_ARTIFACTS": "0",
+    "BIOSEQ_E2E_RETAIN_MATRIX_JUST_INDEX_TARGET": "0",
+    "BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP": "0",
+    "BIOSEQ_E2E_SKIP_MINIMAP2_BASELINE_SETUP": "0",
+    "BIOSEQ_E2E_JUST_INDEX_SETUP_ONLY": "",
+    "BIOSEQ_E2E_JUST_INDEX_SETUP_PIPELINE_MODE": "task_parallel",
+}
+_ALGORITHM_MATRIX_CAMPAIGN_PROFILES = (
+    {
+        "name": "q1024",
+        "campaign_id": _ALGORITHM_MATRIX_CAMPAIGN_ID,
+        "campaign_digest": _ALGORITHM_MATRIX_CAMPAIGN_DIGEST,
+        "monolith": "bench/bench_e2e_algorithm_matrix_campaign.json",
+        "shard_directory": "bench/e2e_algorithm_matrix_shards",
+        "shard_pattern": (
+            r"bench/e2e_algorithm_matrix_shards/"
+            r"bench_e2e_algorithm_matrix_campaign_shard_[a-z0-9_]+\.json"),
+        "manifest": "bench/bench_e2e_algorithm_matrix_campaign_contract.json",
+        "singleton_partition_manifest": (
+            "bench/bench_e2e_algorithm_matrix_q1024_singleton_partition_manifest.json"),
+        "singleton_partition_manifest_sha256": (
+            "6bfe0681b46087860b7d873cd868da8e70be5ecab85b817e6979a29fce6f2c3a"),
+        "packed_partition_manifest": (
+            "bench/bench_e2e_algorithm_matrix_q1024_packed_partition_manifest.json"),
+        "packed_partition_manifest_sha256": (
+            "5351e563a269c013a4a6674c6bea8bce0ef24016d1c4965582d9df670c7252ae"),
+        "packed_pattern": (
+            r"bench/e2e_algorithm_matrix_q1024_packed_shards/"
+            r"bench_e2e_algorithm_matrix_q1024_packed_[a-z0-9_]+\.json"),
+        "singleton_pattern": (
+            r"bench/e2e_algorithm_matrix_shards/"
+            r"bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+            r"[0-9]{4}_[0-9a-f]{16}\.json"),
+        "required_shards": 88,
+        "ledger": "ALL_RESULTS.yaml",
+        "ledger_schema_version": 6,
+        "legacy_empty_ledger_schema_version": 4,
+        "ledger_contract_schema": "bioseq.e2e.algorithm-matrix-all-results",
+        "ledger_contract_version": 4,
+        "legacy_empty_ledger_contract_version": 2,
+        "query_prefix_proof": None,
+    },
+    {
+        "name": "q8",
+        "campaign_id": _ALGORITHM_MATRIX_Q8_CAMPAIGN_ID,
+        "campaign_digest": _ALGORITHM_MATRIX_Q8_CAMPAIGN_DIGEST,
+        "monolith": "bench/bench_e2e_algorithm_matrix_q8_campaign.json",
+        "shard_directory": "bench/e2e_algorithm_matrix_q8_shards",
+        "shard_pattern": (
+            r"bench/e2e_algorithm_matrix_q8_shards/"
+            r"bench_e2e_algorithm_matrix_q8_campaign_shard_[a-z0-9_]+\.json"),
+        "manifest": (
+            "bench/bench_e2e_algorithm_matrix_q8_campaign_manifest.json"),
+        "singleton_partition_manifest": None,
+        "singleton_partition_manifest_sha256": None,
+        "packed_partition_manifest": None,
+        "packed_partition_manifest_sha256": None,
+        "packed_pattern": None,
+        "singleton_pattern": None,
+        "required_shards": 256,
+        "ledger": "Q8_RESULTS.yaml",
+        "ledger_schema_version": 1,
+        "legacy_empty_ledger_schema_version": None,
+        "ledger_contract_schema": (
+            "bioseq.e2e.algorithm-matrix-q8-working-results"),
+        "ledger_contract_version": 1,
+        "legacy_empty_ledger_contract_version": None,
+        "query_prefix_proof": (
+            "bench/bench_e2e_algorithm_matrix_q8_query_prefix_proof.json"),
+    },
+)
+
+_ALGORITHM_MATRIX_OBSERVED_RUNG_PROFILES = tuple(
+    {
+        "name": "observed_rung",
+        "query_count": query_count,
+        "campaign_digest": campaign_digest,
+        "manifest": (
+            f"bench/bench_e2e_algorithm_matrix_q{query_count}_"
+            "observed_campaign_manifest.json"),
+        "monolith": monolith,
+        "shard_directory": (
+            f"bench/e2e_algorithm_matrix_q{query_count}_observed_shards"),
+        "shard_pattern": (
+            rf"bench/e2e_algorithm_matrix_q{query_count}_observed_shards/"
+            rf"bench_e2e_algorithm_matrix_q{query_count}_observed_shard_"
+            r"[a-z0-9_]+\.json"),
+        "singleton_partition_manifest": (
+            f"bench/bench_e2e_algorithm_matrix_q{query_count}_"
+            "observed_singleton_partition_manifest.json"),
+        "singleton_partition_manifest_sha256": singleton_manifest_sha256,
+        "singleton_directory": (
+            f"bench/e2e_algorithm_matrix_q{query_count}_observed_singletons"),
+        "singleton_pattern": (
+            rf"bench/e2e_algorithm_matrix_q{query_count}_observed_singletons/"
+            rf"bench_e2e_algorithm_matrix_q{query_count}_observed_singleton_"
+            r"[0-9]{4}_[0-9a-f]{16}\.json"),
+    }
+    for query_count, campaign_digest, monolith, singleton_manifest_sha256 in (
+        (
+            2,
+            "e73930afc46ea87a4328e41e43a728f9ff7d827a5f6486bfe85a4f5e28ed3c7c",
+            "bench/bench_e2e_algorithm_matrix_q2_campaign.json",
+            "4ee3826dd40105a171ceeb1edf1fd8410d73ecda981d89daa7e424a9840ed14d",
+        ),
+        (
+            8,
+            "f4dde934669b83e775f93aa52f8f7321b64392e3e9889cc13be050e69b08a792",
+            "bench/bench_e2e_algorithm_matrix_q8_observed_campaign.json",
+            "0426c9baccdd5301ef3290d79521eb7e95f259fae62549fd66c94d155d6cd9e5",
+        ),
+        (
+            16,
+            "7d503a21a8dca3524de339485cf82934720a5e526c53b4c4cdc51732a9a28505",
+            "bench/bench_e2e_algorithm_matrix_q16_campaign.json",
+            "fa1a9d90aa0805d1fe3c4dced93faa0fc525409266b57fc5e186ce33fca5fd53",
+        ),
+        (
+            32,
+            "d5dd19e67e2eb2315947a1148ad7eac475db95124d1af84c433416dc4e9160ee",
+            "bench/bench_e2e_algorithm_matrix_q32_campaign.json",
+            "103c81eb16d43d2aacf50bbc84c7cb4ab8d6ded0003c2961d30f282914d0284d",
+        ),
+        (
+            64,
+            "f1f75a12fc29816152d4acc7493a4c9b8c09e994bc04be8dc7c0aec1490e365a",
+            "bench/bench_e2e_algorithm_matrix_q64_campaign.json",
+            "419f84df201df48c58ac8bf0481c924d4e81272de0da1f45b98013dd0d6e8e10",
+        ),
+        (
+            128,
+            "c7778fe98036dfd78dc26a94a0511d386216999adb5ebd7dfd107c873e233817",
+            "bench/bench_e2e_algorithm_matrix_q128_campaign.json",
+            "4b797bc3e083846aeb87833b6c08f674926880675261da54453948d775f3e348",
+        ),
+        (
+            256,
+            "60c24a00f29e46c3ecaa5c7c0edf3056cce8b33f338d83bb966b26f1790f9443",
+            "bench/bench_e2e_algorithm_matrix_q256_campaign.json",
+            "c751bd020190e09486810624fd9ac49caed8037b54529789fafe9283c897ca9a",
+        ),
+        (
+            512,
+            "399cf6416e0d687633a7dfc0687963b88cec11db7e05482414a29e715eff2c48",
+            "bench/bench_e2e_algorithm_matrix_q512_campaign.json",
+            "11b3aca82bc385e88286dd55dd9e9de4655b5655d5685271f56c2747a0abb907",
+        ),
+        (
+            1024,
+            "df2d45776d637271f453cca213027b03f03ede56c887a19fa3e8d736bd2d0857",
+            "bench/bench_e2e_algorithm_matrix_q1024_observed_campaign.json",
+            "4913ed26a424736cef6cc86e8749eabcc6266957ac901c9a7261fe1a78c19ca1",
+        ),
+    )
+)
+
+
+def _legacy_q1024_matrix_contract() -> dict[str, object]:
+    return {
+        "target_size_gbp": [2, 4],
+        "alphabet": ["dna4", "dna5"],
+        "window_kmer": [
+            {"window_size": 10, "kmer_size": 15},
+            {"window_size": 15, "kmer_size": 20},
+        ],
+        "query_count": 1024,
+        "cigar_projection": True,
+        "mapq_projection": True,
+        "prefilter_enabled": False,
+        "index_mode": ["no_index", "just_index"],
+        "bioseq_index_name": [
+            "minimizers_per_fragment", "minimizers_per_sequence"],
+        "repetitions_per_cell": 5,
+        "minimizer_algorithms": [
+            "scalar", "simd_minimap2_reference", "two_stack_nthash",
+            "vulkan_minimap_integer", "bounded_nthash_simd",
+        ],
+        "chaining_algorithms": [
+            "scalar_minimap2", "simd_minimap2", "range_minimum_query",
+            "vulkan_tiled_dynamic_programming",
+        ],
+        "base_alignment_algorithms": ["ksw2", "block_aligner"],
+        "explicitly_excluded_base_alignment_algorithms": ["ksw2_batched"],
+        "bioseq_result_cells": 1280,
+        "minimap2_baseline_result_cells": 16,
+        "expected_result_cells": 1296,
+        "expected_raw_records": 6480,
+    }
+
+
+def _q1024_deadline_v2_checkpoint_is_exact(value: object) -> bool:
+    """Worker-side recognition of the immutable nonpublication checkpoint."""
+    if not isinstance(value, dict):
+        return False
+    try:
+        raw = json.dumps(
+            value, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError):
+        return False
+    authority = value.get("authority")
+    deadline = (
+        authority.get("deadline_v2_manifest")
+        if isinstance(authority, dict) else None)
+    coverage = value.get("coverage")
+    deadline_coverage = (
+        coverage.get("deadline_v2")
+        if isinstance(coverage, dict) else None)
+    literal_coverage = (
+        coverage.get("literal_q1024")
+        if isinstance(coverage, dict) else None)
+    anchors = value.get("q1024_anchors")
+    return (
+        hashlib.sha256(raw).hexdigest()
+            == _ALGORITHM_MATRIX_DEADLINE_V2_CHECKPOINT_SHA256
+        and value.get("schema")
+            == "bioseq.e2e.deadline-v2-audited-checkpoint"
+        and value.get("version") == 1
+        and value.get("status") == "INCOMPLETE_LITERAL_Q1024_COVERAGE"
+        and value.get("updated_through") == "s058"
+        and value.get("active_excluded") == "s059"
+        and isinstance(deadline, dict)
+        and deadline.get("path") == _ALGORITHM_MATRIX_DEADLINE_V2_MANIFEST
+        and deadline.get("sha256")
+            == _ALGORITHM_MATRIX_DEADLINE_V2_MANIFEST_SHA256
+        and isinstance(deadline_coverage, dict)
+        and deadline_coverage.get("terminal_audited_shards") == 59
+        and deadline_coverage.get("total_durable_terminal_records") == 295
+        and isinstance(literal_coverage, dict)
+        and literal_coverage.get("expected_cells") == 1296
+        and literal_coverage.get("accepted_cells") == 3
+        and literal_coverage.get("complete") is False
+        and isinstance(anchors, list)
+        and [anchor.get("shard") for anchor in anchors
+             if isinstance(anchor, dict)] == ["s056", "s057", "s058"]
+    )
+
+
+def _legacy_q1024_ledger_is_exactly_empty(
+        document: object,
+        campaign_id: str,
+        campaign_digest: str,
+) -> bool:
+    """Worker-side equivalent of the aggregator's legacy-empty predicate."""
+    legacy_fields = {
+        "schema_version", "contract", "campaign", "matrix_contract", "wiring",
+        "aggregation_state", "results", "calibration", "execution_environment",
+        "publication_methodology", "publication_state", "status",
+    }
+    if (not isinstance(document, dict)
+            or set(document) not in {
+                frozenset(legacy_fields),
+                frozenset(legacy_fields | {"deadline_v2_checkpoint"}),
+            }):
+        return False
+    if ("deadline_v2_checkpoint" in document
+            and not _q1024_deadline_v2_checkpoint_is_exact(
+                document["deadline_v2_checkpoint"])):
+        return False
+    contract = document.get("contract")
+    if (document.get("schema_version") != 4
+            or not isinstance(contract, dict)
+            or set(contract) != {
+                "schema", "version", "campaign_id", "campaign_digest",
+                "campaign_contract", "campaign_contract_sha256", "encoding",
+                "raw_framework_schema", "raw_payload_schema",
+                "raw_payload_schema_version", "old_or_mixed_schema_policy",
+                "minimum_accepted_repeats", "stable_key_schema",
+                "stable_key_fields", "stable_key_encoding", "repeat_identity",
+                "duplicate_policy", "idempotency_policy", "metric_a", "metric_b",
+                "timing_acceptance", "clock_semantics", "match_parity",
+                "result_row_timing_fields", "non_timing_result_fields",
+            }
+            or contract.get("schema")
+                != "bioseq.e2e.algorithm-matrix-all-results"
+            or contract.get("version") != 2
+            or contract.get("campaign_id") != campaign_id
+            or contract.get("campaign_digest") != campaign_digest
+            or contract.get("raw_framework_schema") != 1
+            or contract.get("raw_payload_schema") != "bioseq.e2e.raw-sample"
+            or contract.get("raw_payload_schema_version") != 11
+            or contract.get("minimum_accepted_repeats") != 5
+            or contract.get("stable_key_fields")
+                != _ALGORITHM_MATRIX_STABLE_KEY_FIELDS
+            or contract.get("result_row_timing_fields") != [
+                "run_count", "outer_e2e_ns_p50",
+                "outer_e2e_minus_cigar_or_mapq_union_ns_p50",
+            ]):
+        return False
+    if document.get("results") != [] or document.get("status") != "in_progress":
+        return False
+    if document.get("matrix_contract") != _legacy_q1024_matrix_contract():
+        return False
+    if (not isinstance(document.get("wiring"), dict)
+            or set(document["wiring"]) != {
+                "campaign_contract", "shard_generator", "serial_shard_directory",
+                "serial_shard_count", "builder_config_override",
+                "mcp_run_only_example", "automatic_consumer",
+                "manual_consumer_invocation", "proof_policy", "shard_resume",
+            }) \
+            or not isinstance(document.get("execution_environment"), dict):
+        return False
+
+    state = document.get("aggregation_state")
+    if not isinstance(state, dict) or set(state) != {
+        "campaign_id", "campaign_digest", "canonical_result_cell_count",
+        "canonical_membership_complete", "canonical_statuses_valid",
+        "missing_canonical_cell_count", "processed_reports", "report_count",
+        "raw_record_count", "result_cell_count", "accepted_cell_count",
+        "rejected_cell_count", "invalid_cell_count", "pending_cell_count",
+    }:
+        return False
+    if (state.get("campaign_id") != campaign_id
+            or state.get("campaign_digest") != campaign_digest
+            or state.get("canonical_membership_complete") is not False
+            or state.get("canonical_statuses_valid") is not True
+            or state.get("processed_reports") != []):
+        return False
+    exact_state_counts = {
+        "canonical_result_cell_count": 1296,
+        "missing_canonical_cell_count": 1296,
+        "report_count": 0,
+        "raw_record_count": 0,
+        "result_cell_count": 0,
+        "accepted_cell_count": 0,
+        "rejected_cell_count": 0,
+        "invalid_cell_count": 0,
+        "pending_cell_count": 0,
+    }
+    if any(type(state.get(field)) is not int or state[field] != expected
+           for field, expected in exact_state_counts.items()):
+        return False
+
+    calibration = document.get("calibration")
+    if not isinstance(calibration, dict) or set(calibration) != {
+        "schema_version", "publication_eligible", "separation_policy", "q1", "q8",
+    } or calibration.get("schema_version") != 1 \
+            or calibration.get("publication_eligible") is not False \
+            or not isinstance(calibration.get("separation_policy"), str):
+        return False
+    q1 = calibration.get("q1")
+    q8 = calibration.get("q8")
+    if (not isinstance(q1, dict)
+            or set(q1) != {
+                "status", "query_count", "reason", "run_count",
+                "outer_e2e_ns_p50",
+                "outer_e2e_minus_cigar_or_mapq_union_ns_p50", "parity_comment",
+            }
+            or q1.get("status") != "excluded"
+            or q1.get("query_count") != 1
+            or q1.get("reason") != "query_count_not_significant"
+            or type(q1.get("run_count")) is not int
+            or q1.get("run_count") != 5
+            or type(q1.get("outer_e2e_ns_p50")) is not int
+            or type(q1.get(
+                "outer_e2e_minus_cigar_or_mapq_union_ns_p50")) is not int
+            or not isinstance(q1.get("parity_comment"), str)
+            or not isinstance(q8, dict)
+            or set(q8) != {
+                "status", "query_count", "accepted", "running", "pending_next",
+            }
+            or q8.get("status") not in {"in_progress", "complete"}
+            or q8.get("query_count") != 8):
+        return False
+    calibration_lists: list[list[object]] = []
+    for field in ("accepted", "running", "pending_next"):
+        value = q8.get(field)
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            return False
+        calibration_lists.append(value)
+    calibration_ids = [
+        item.get("id") for values in calibration_lists for item in values
+    ]
+    if (any(not isinstance(value, str) or not value for value in calibration_ids)
+            or len(calibration_ids) != len(set(calibration_ids))):
+        return False
+    accepted_calibration, running_calibration, pending_calibration = (
+        len(values) for values in calibration_lists)
+    expected_q8_status = (
+        "complete" if running_calibration == 0 and pending_calibration == 0
+        else "in_progress")
+    if q8.get("status") != expected_q8_status:
+        return False
+
+    campaign = document.get("campaign")
+    if not isinstance(campaign, dict) or set(campaign) != {
+        "name", "campaign_id", "campaign_digest", "status", "last_updated_at",
+        "execution_scope", "remote_execution_invoked", "measurements_collected",
+        "benchmark_runs_started", "accepted_calibration_records",
+        "excluded_calibration_records", "active_calibration_runs",
+        "pending_calibration_runs", "results_are_publishable", "no_results_reason",
+    }:
+        return False
+    if (campaign.get("name") != "local_e2e_algorithm_matrix"
+            or campaign.get("campaign_id") != campaign_id
+            or campaign.get("campaign_digest") != campaign_digest
+            or campaign.get("status") != "in_progress"
+            or not isinstance(campaign.get("last_updated_at"), str)
+            or not campaign["last_updated_at"]
+            or campaign.get("execution_scope") != "local_campaign"
+            or campaign.get("remote_execution_invoked") is not False
+            or campaign.get("results_are_publishable") is not False
+            or not isinstance(campaign.get("no_results_reason"), str)
+            or not campaign["no_results_reason"]):
+        return False
+    exact_campaign_counts = {
+        "measurements_collected": 0,
+        "benchmark_runs_started": 1 + accepted_calibration + running_calibration,
+        "accepted_calibration_records": accepted_calibration,
+        "excluded_calibration_records": 1,
+        "active_calibration_runs": running_calibration,
+        "pending_calibration_runs": pending_calibration,
+    }
+    if any(type(campaign.get(field)) is not int or campaign[field] != expected
+           for field, expected in exact_campaign_counts.items()):
+        return False
+
+    publication_state = document.get("publication_state")
+    if publication_state != {
+        "status": "pending",
+        "query_count": 1024,
+        "result_collection": "results",
+        "result_count": 0,
+        "calibration_results_included": False,
+    } or type(publication_state.get("result_count")) is not int \
+            or publication_state.get("calibration_results_included") is not False:
+        return False
+    methodology = document.get("publication_methodology")
+    if not isinstance(methodology, dict) or set(methodology) != {
+        "status", "query_count", "target_size_gbp", "alphabet", "window_kmer",
+        "index_mode", "cigar_projection", "mapq_projection", "prefilter_enabled",
+        "engines", "minimizer_algorithms", "chaining_algorithms",
+        "base_alignment_algorithms", "excluded_base_alignment_algorithms",
+        "minimum_run_count", "reported_timing_fields_only", "metric_a", "metric_b",
+        "correctness_requirement", "algorithm_audit_requirement",
+        "calibration_inference_policy",
+    }:
+        return False
+    if (methodology.get("status") != "pending"
+            or methodology.get("query_count") != 1024
+            or methodology.get("cigar_projection") is not True
+            or methodology.get("mapq_projection") is not True
+            or methodology.get("prefilter_enabled") is not False
+            or methodology.get("base_alignment_algorithms")
+                != ["ksw2", "block_aligner"]
+            or methodology.get("excluded_base_alignment_algorithms")
+                != ["ksw2_batched"]
+            or methodology.get("minimum_run_count") != 5
+            or methodology.get("reported_timing_fields_only") != [
+                "run_count", "outer_e2e_ns_p50",
+                "outer_e2e_minus_cigar_or_mapq_union_ns_p50",
+            ]):
+        return False
+    return True
+
+
+_BENCHMARK_E2E_CONFIG_IDENTITY_ENV = "BIOSEQ_E2E_CONFIG_OVERRIDE"
+_BENCHMARK_E2E_CONFIG_OPEN_ENV = "BIOSEQ_E2E_CONFIG_OPEN_PATH"
+_BENCHMARK_E2E_CONFIG_ENVIRONMENT_KEYS = (
+    _BENCHMARK_E2E_CONFIG_IDENTITY_ENV,
+    _BENCHMARK_E2E_CONFIG_OPEN_ENV,
+)
+
+
+def _canonical_campaign_relative_path(value: str, label: str) -> str:
+    """Reject lexical/canonical aliases before any path resolution."""
+    if (not isinstance(value, str) or not value
+            or value.startswith("/") or "\\" in value
+            or any(ord(character) < 0x20 or ord(character) == 0x7F
+                   for character in value)):
+        raise ValueError(f"{label} must be a canonical repository-relative path")
+    components = value.split("/")
+    if any(component in {"", ".", ".."} for component in components):
+        raise ValueError(f"{label} contains a lexical path alias")
+    if Path(value).as_posix() != value:
+        raise ValueError(f"{label} is not in canonical repository form")
+    return value
+
+
+def _campaign_regular_repository_file(value: str, label: str) -> Path:
+    """Require real directory components and one regular non-symlink leaf."""
+    relative = _canonical_campaign_relative_path(value, label)
+    current = REPOSITORY_ROOT
+    components = relative.split("/")
+    for index, component in enumerate(components):
+        current = current / component
+        metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(f"{label} may not traverse a symlink: {current}")
+        if index + 1 == len(components):
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError(
+                    f"{label} must be a regular non-symlink file: {current}")
+        elif not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(
+                f"{label} parent component is not a directory: {current}")
+    return current
+
+
+def _campaign_internal_regular_file(path: Path, label: str) -> Path:
+    """Verify an internally constructed repository path without resolving it."""
+    try:
+        relative = path.relative_to(REPOSITORY_ROOT).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"{label} must stay inside the repository") from exc
+    verified = _campaign_regular_repository_file(relative, label)
+    if verified != path:
+        raise ValueError(f"{label} is not lexically canonical")
+    return verified
+
+
+def _strict_json_object(path: Path, label: str) -> tuple[dict, bytes]:
+    """Read one duplicate-free finite JSON object for campaign authority."""
+    def object_from_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key {key!r}")
+            result[key] = value
+        return result
+
+    def reject_constant(value):
+        raise ValueError(f"non-finite JSON token {value!r}")
+
+    _campaign_internal_regular_file(path, label)
+    raw = path.read_bytes()
+    value = json.loads(
+        raw.decode("utf-8"),
+        object_pairs_hook=object_from_pairs,
+        parse_constant=reject_constant,
+    )
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} root must be an object")
+    return value, raw
+
+
+def _q1024_singleton_partition_authority(
+        *,
+        config_path: str,
+        profile: Mapping[str, object],
+        campaign_contract: Mapping[str, object],
+        campaign_contract_raw: bytes,
+) -> tuple[dict | None, str | None]:
+    """Validate one exact member of the pinned q1024 execution partition."""
+    pattern = profile.get("singleton_pattern")
+    if not isinstance(pattern, str) or re.fullmatch(pattern, config_path) is None:
+        return None, "q1024 singleton path does not match the reserved syntax"
+    try:
+        manifest_relative = str(profile["singleton_partition_manifest"])
+        manifest_path = _campaign_regular_repository_file(
+            manifest_relative, "q1024 singleton partition manifest")
+        manifest, manifest_raw = _strict_json_object(
+            manifest_path, "q1024 singleton partition manifest")
+        expected_manifest_sha = profile.get(
+            "singleton_partition_manifest_sha256")
+        if (not isinstance(expected_manifest_sha, str)
+                or hashlib.sha256(manifest_raw).hexdigest()
+                    != expected_manifest_sha):
+            return None, "q1024 singleton partition SHA-256 is not pinned current"
+        if set(manifest) != {
+                "schema", "version", "campaign_binding",
+                "partition_contract", "parents", "children"}:
+            return None, "q1024 singleton partition has the wrong exact shape"
+        binding = manifest.get("campaign_binding")
+        partition = manifest.get("partition_contract")
+        parents = manifest.get("parents")
+        children = manifest.get("children")
+        ownership = campaign_contract.get("shard_ownership")
+        entries = campaign_contract.get("configs")
+        if (manifest.get("schema")
+                != "bioseq.e2e.algorithm-matrix-q1024-singleton-partition"
+                or manifest.get("version") != 1
+                or not isinstance(binding, dict)
+                or binding != {
+                    "campaign_id": profile["campaign_id"],
+                    "campaign_digest": profile["campaign_digest"],
+                    "canonical_manifest": profile["manifest"],
+                    "canonical_manifest_sha256": hashlib.sha256(
+                        campaign_contract_raw).hexdigest(),
+                    "canonical_parent_config_count": 88,
+                    "canonical_result_cells": 1296,
+                    "canonical_raw_records": 6480,
+                    "canonical_stable_keys_sha256": (
+                        ownership.get("stable_keys_sha256")
+                        if isinstance(ownership, dict) else None),
+                }
+                or not isinstance(partition, dict)
+                or not isinstance(parents, list) or len(parents) != 88
+                or not isinstance(children, list) or len(children) != 1296
+                or not isinstance(entries, list)):
+            return None, "q1024 singleton campaign binding/cardinality is invalid"
+        claimed_partition_digest = partition.get("partition_digest")
+        digest_payload = copy.deepcopy(manifest)
+        digest_payload["partition_contract"].pop("partition_digest", None)
+        if (not isinstance(claimed_partition_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", claimed_partition_digest)
+                or canonical_json_sha256(digest_payload)
+                    != claimed_partition_digest
+                or partition.get("child_config_count") != 1296
+                or partition.get("cells_per_child") != 1
+                or partition.get("records_per_child") != 5
+                or partition.get("repetitions_per_cell") != 5
+                or partition.get("repeat_indices") != list(range(5))
+                or partition.get("normalization_axes")
+                    != ["test_case_index", "tuple_index"]
+                or partition.get("canonical_ownership_preserved") is not True
+                or partition.get("parent_unions_exact") is not True
+                or partition.get("global_union_exact") is not True
+                or partition.get("stable_keys_sha256")
+                    != binding.get("canonical_stable_keys_sha256")
+                or partition.get("metric_count_distribution")
+                    != {"15": 512, "21": 16, "29": 768}
+                or partition.get("cell_disposition_distribution") != {
+                    "timed_bioseq": 768,
+                    "minimap2_baseline": 16,
+                    "rejected_setup": 480,
+                    "rejected_sql": 32,
+                }
+                or partition.get("prefilter_enabled") is not False
+                or partition.get("pipeline_mode") != "task_parallel"
+                or partition.get("cold_no_index_persistence") != "off"
+                or partition.get("cigar_projection") is not True
+                or partition.get("mapq_projection") is not True
+                or partition.get("base_alignment_algorithms")
+                    != ["ksw2", "block_aligner"]
+                or partition.get("excluded_base_alignment_algorithms")
+                    != ["ksw2_batched"]
+                or partition.get("q1_or_q8_membership_permitted") is not False
+                or partition.get("reserved_filename_regex") != pattern
+                or partition.get("deterministic_first_launch") != (
+                    "bench/e2e_algorithm_matrix_shards/"
+                    "bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+                    "0081_423ec685980909f5.json")
+                or partition.get("partition_digest_algorithm") != (
+                    "sha256-canonical-json-without-partition_digest")):
+            return None, "q1024 singleton partition contract is invalid"
+
+        canonical_parents = {
+            entry.get("path"): entry for entry in entries
+            if isinstance(entry, dict) and entry.get("role") == "shard"
+        }
+        parent_ordinals: dict[str, set[int]] = {}
+        if len(canonical_parents) != 88:
+            return None, "q1024 canonical parent membership changed"
+        for parent_ordinal, proof in enumerate(parents):
+            if (not isinstance(proof, dict)
+                    or set(proof) != {
+                        "ordinal", "path", "config_sha256",
+                        "expected_result_cells", "expected_raw_records",
+                        "expected_stable_keys_sha256", "child_ordinals"}
+                    or proof.get("ordinal") != parent_ordinal):
+                return None, "q1024 singleton parent proof is malformed"
+            parent = canonical_parents.get(proof.get("path"))
+            child_ordinals = proof.get("child_ordinals")
+            if (parent is None or not isinstance(child_ordinals, list)
+                    or len(child_ordinals)
+                        != parent.get("expected_result_cells")
+                    or any(isinstance(value, bool) or not isinstance(value, int)
+                           for value in child_ordinals)
+                    or proof.get("config_sha256")
+                        != parent.get("config_sha256")
+                    or proof.get("expected_result_cells")
+                        != parent.get("expected_result_cells")
+                    or proof.get("expected_raw_records")
+                        != parent.get("expected_raw_records")
+                    or proof.get("expected_stable_keys_sha256")
+                        != parent.get("expected_stable_keys_sha256")):
+                return None, "q1024 singleton parent binding is invalid"
+            parent_ordinals[str(proof["path"])] = set(child_ordinals)
+
+        exact_child_keys = {
+            "ordinal", "path", "config_sha256", "parent_path",
+            "parent_config_sha256", "parent_expected_stable_keys_sha256",
+            "parent_test_case_index", "parent_tuple_index", "stable_key",
+            "stable_key_sha256", "expected_stable_keys_sha256",
+            "expected_result_cells", "expected_raw_records",
+            "repetitions_per_cell", "declared_metric_names",
+            "expected_all_records_disposition", "canonical_cell",
+            "execution_cell",
+        }
+        selected = None
+        all_keys: list[str] = []
+        parent_keys: dict[str, list[str]] = {
+            path: [] for path in canonical_parents}
+        metric_counts: dict[int, int] = {}
+        dispositions = {
+            "timed_bioseq": 0, "minimap2_baseline": 0,
+            "rejected_setup": 0, "rejected_sql": 0,
+        }
+        for ordinal, child in enumerate(children):
+            if (not isinstance(child, dict) or set(child) != exact_child_keys
+                    or child.get("ordinal") != ordinal):
+                return None, "q1024 singleton child proof is malformed"
+            path = child.get("path")
+            parent_path = child.get("parent_path")
+            stable_key = child.get("stable_key")
+            canonical_cell = child.get("canonical_cell")
+            execution_cell = child.get("execution_cell")
+            parent = canonical_parents.get(parent_path)
+            if (not isinstance(path, str) or re.fullmatch(pattern, path) is None
+                    or not isinstance(stable_key, str)
+                    or not isinstance(canonical_cell, dict)
+                    or not isinstance(execution_cell, dict)
+                    or parent is None
+                    or ordinal not in parent_ordinals[str(parent_path)]):
+                return None, "q1024 singleton child identity is invalid"
+            stable_sha = hashlib.sha256(stable_key.encode("utf-8")).hexdigest()
+            expected_path = (
+                "bench/e2e_algorithm_matrix_shards/"
+                "bench_e2e_algorithm_matrix_campaign_shard_singleton_"
+                f"{ordinal:04d}_{stable_sha[:16]}.json")
+            normalized = copy.deepcopy(canonical_cell)
+            normalized["test_case_index"] = 0
+            normalized["tuple_index"] = 0
+            parent_cells = parent.get("cells")
+            parent_matches = [
+                cell for cell in parent_cells
+                if isinstance(parent_cells, list) and isinstance(cell, dict)
+                and cell.get("test_case_index")
+                    == child.get("parent_test_case_index")
+                and cell.get("tuple_index") == child.get("parent_tuple_index")
+            ] if isinstance(parent_cells, list) else []
+            identity = canonical_cell.get("identity")
+            metrics = child.get("declared_metric_names")
+            disposition = child.get("expected_all_records_disposition")
+            if (path != expected_path
+                    or child.get("stable_key_sha256") != stable_sha
+                    or child.get("expected_stable_keys_sha256") != stable_sha
+                    or child.get("expected_result_cells") != 1
+                    or child.get("expected_raw_records") != 5
+                    or child.get("repetitions_per_cell") != 5
+                    or len(parent_matches) != 1
+                    or canonical_cell != parent_matches[0]
+                    or execution_cell != normalized
+                    or canonical_cell.get("stable_key") != stable_key
+                    or not isinstance(identity, dict)
+                    or tuple(identity) != tuple(_ALGORITHM_MATRIX_STABLE_KEY_FIELDS)
+                    or identity.get("campaign_id") != profile["campaign_id"]
+                    or child.get("parent_config_sha256")
+                        != parent.get("config_sha256")
+                    or child.get("parent_expected_stable_keys_sha256")
+                        != parent.get("expected_stable_keys_sha256")
+                    or not isinstance(metrics, list)
+                    or len(metrics) not in {15, 21, 29}
+                    or disposition not in {None, "rejected_setup", "rejected_sql"}):
+                return None, "q1024 singleton child ownership proof is invalid"
+            expected_metric_count = (
+                15 if disposition is not None else
+                21 if identity.get("engine") == "minimap2" else 29)
+            if len(metrics) != expected_metric_count:
+                return None, "q1024 singleton metric/disposition proof is invalid"
+            bucket = disposition or (
+                "minimap2_baseline"
+                if identity.get("engine") == "minimap2" else "timed_bioseq")
+            dispositions[bucket] += 1
+            metric_counts[len(metrics)] = metric_counts.get(len(metrics), 0) + 1
+            all_keys.append(stable_key)
+            parent_keys[str(parent_path)].append(stable_key)
+            if path == config_path:
+                if selected is not None:
+                    return None, "q1024 singleton path is duplicated"
+                selected = child
+        if (len(set(all_keys)) != 1296
+                or hashlib.sha256(
+                    "\n".join(sorted(all_keys)).encode("utf-8")).hexdigest()
+                    != partition.get("stable_keys_sha256")
+                or metric_counts != {15: 512, 21: 16, 29: 768}
+                or dispositions != {
+                    "timed_bioseq": 768, "minimap2_baseline": 16,
+                    "rejected_setup": 480, "rejected_sql": 32,
+                }):
+            return None, "q1024 singleton global union is invalid"
+        for parent_path, keys in parent_keys.items():
+            parent = canonical_parents[parent_path]
+            if hashlib.sha256(
+                    "\n".join(sorted(keys)).encode("utf-8")).hexdigest() \
+                    != parent.get("expected_stable_keys_sha256"):
+                return None, "q1024 singleton parent union is invalid"
+        if selected is None:
+            return None, "q1024 singleton config is not manifest-owned"
+        selected_path = _campaign_regular_repository_file(
+            config_path, "q1024 singleton config")
+        if sha256_file(selected_path) != selected.get("config_sha256"):
+            return None, "q1024 singleton config bytes differ from the manifest"
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return None, f"cannot validate q1024 singleton partition: {exc}"
+    return {
+        "execution_role": "q1024_singleton",
+        "partition_manifest": manifest_relative,
+        "partition_manifest_sha256": expected_manifest_sha,
+        "singleton": selected,
+    }, None
+
+
+def _q1024_packed_partition_authority(
+        *,
+        config_path: str,
+        profile: Mapping[str, object],
+        campaign_contract: Mapping[str, object],
+        campaign_contract_raw: bytes,
+        singleton_stable_key: str | None = None,
+) -> tuple[dict | None, str | None]:
+    """Validate packed membership and reject superseded singleton alternatives."""
+    try:
+        manifest_relative = str(profile["packed_partition_manifest"])
+        manifest_path = _campaign_regular_repository_file(
+            manifest_relative, "q1024 packed partition manifest")
+        manifest, manifest_raw = _strict_json_object(
+            manifest_path, "q1024 packed partition manifest")
+        expected_manifest_sha = profile.get("packed_partition_manifest_sha256")
+        if (not isinstance(expected_manifest_sha, str)
+                or hashlib.sha256(manifest_raw).hexdigest()
+                    != expected_manifest_sha):
+            return None, "q1024 packed partition SHA-256 is not pinned current"
+        if set(manifest) != {
+                "schema", "version", "campaign_binding", "execution_contract",
+                "packed_members", "adoptions", "retained_singletons",
+                "optional_singletons", "execution_plan"}:
+            return None, "q1024 packed partition has the wrong exact shape"
+        binding = manifest.get("campaign_binding")
+        contract = manifest.get("execution_contract")
+        members = manifest.get("packed_members")
+        adoptions = manifest.get("adoptions")
+        ownership = campaign_contract.get("shard_ownership")
+        entries = campaign_contract.get("configs")
+        singleton_manifest_relative = str(profile["singleton_partition_manifest"])
+        if (manifest.get("schema")
+                != "bioseq.e2e.algorithm-matrix-q1024-packed-partition"
+                or manifest.get("version") != 1
+                or not isinstance(binding, dict)
+                or binding != {
+                    "campaign_id": profile["campaign_id"],
+                    "campaign_digest": profile["campaign_digest"],
+                    "canonical_manifest": profile["manifest"],
+                    "canonical_manifest_sha256": hashlib.sha256(
+                        campaign_contract_raw).hexdigest(),
+                    "singleton_manifest": singleton_manifest_relative,
+                    "singleton_manifest_sha256": profile[
+                        "singleton_partition_manifest_sha256"],
+                    "deadline_v2_manifest": (
+                        "bench/bench_e2e_algorithm_matrix_deadline_v2_manifest.json"),
+                    "deadline_v2_manifest_sha256": (
+                        "bf2abc14dbda84079d6384e330b1fdc752e1754360cc61d9fec42af1e2d1b31c"),
+                    "deadline_v2_campaign_id": (
+                        "bioseq-e2e-algorithm-matrix-deadline-v2"),
+                    "deadline_v2_campaign_digest": (
+                        "44a85360a5e975ec8a6d70ac0b06486c51d748770c2ada46106d2ccc5db4728a"),
+                }
+                or not isinstance(contract, dict)
+                or not isinstance(members, list) or len(members) != 25
+                or not isinstance(adoptions, list) or len(adoptions) != 4
+                or not isinstance(ownership, dict)
+                or not isinstance(entries, list)):
+            return None, "q1024 packed campaign binding/cardinality is invalid"
+        digest = contract.get("partition_digest")
+        digest_payload = copy.deepcopy(manifest)
+        digest_payload["execution_contract"].pop("partition_digest", None)
+        if (not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                or canonical_json_sha256(digest_payload) != digest):
+            return None, "q1024 packed partition digest is invalid"
+
+        canonical_cells = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("role") != "monolithic":
+                continue
+            cells = entry.get("cells")
+            if not isinstance(cells, list):
+                return None, "q1024 canonical monolith cells are malformed"
+            canonical_cells = {
+                cell.get("stable_key"): cell for cell in cells
+                if isinstance(cell, dict) and isinstance(cell.get("stable_key"), str)}
+        if len(canonical_cells) != 1296:
+            return None, "q1024 canonical stable-key union changed"
+
+        exact_member_keys = {
+            "ordinal", "id", "kind", "path", "config_sha256",
+            "source_parent_path", "source_parent_config_sha256",
+            "expected_result_cells", "expected_raw_records",
+            "repetitions_per_cell", "stable_keys",
+            "expected_stable_keys_sha256", "allowed_nonblocking_rule_names",
+            "declared_metric_names", "expected_all_records_disposition",
+            "planned_supported_cells", "planned_selector_rejection_cells",
+            "canonical_cells", "execution_cells",
+        }
+        selected = None
+        packed_keys: list[str] = []
+        packed_paths: set[str] = set()
+        packed_ids: set[str] = set()
+        packed_cells = 0
+        for ordinal, member in enumerate(members):
+            if (not isinstance(member, dict) or set(member) != exact_member_keys
+                    or member.get("ordinal") != ordinal
+                    or not isinstance(member.get("id"), str)
+                    or member["id"] in packed_ids
+                    or member.get("kind") not in {
+                        "canonical_parent", "generated_persisted_residual",
+                        "generated_minimap2_pair"}
+                    or not isinstance(member.get("path"), str)
+                    or member["path"] in packed_paths
+                    or not isinstance(member.get("config_sha256"), str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{64}", member["config_sha256"]) is None
+                    or not isinstance(member.get("stable_keys"), list)
+                    or not isinstance(member.get("expected_result_cells"), int)
+                    or member["expected_result_cells"] <= 0
+                    or member.get("expected_raw_records")
+                        != member["expected_result_cells"] * 5
+                    or member.get("repetitions_per_cell") != 5
+                    or len(member["stable_keys"])
+                        != member["expected_result_cells"]
+                    or len(set(member["stable_keys"])) != len(member["stable_keys"])
+                    or any(key not in canonical_cells for key in member["stable_keys"])
+                    or hashlib.sha256(
+                        "\n".join(sorted(member["stable_keys"])).encode("utf-8")
+                    ).hexdigest() != member.get("expected_stable_keys_sha256")):
+                return None, "q1024 packed member proof is malformed"
+            planned_supported = member.get("planned_supported_cells")
+            planned_rejections = member.get(
+                "planned_selector_rejection_cells")
+            if (isinstance(planned_supported, bool)
+                    or not isinstance(planned_supported, int)
+                    or planned_supported < 0
+                    or isinstance(planned_rejections, bool)
+                    or not isinstance(planned_rejections, int)
+                    or planned_rejections < 0
+                    or planned_supported + planned_rejections
+                        != member["expected_result_cells"]):
+                return None, "q1024 packed member support plan is malformed"
+            if (member["kind"] == "generated_persisted_residual"
+                    and planned_supported > 0
+                    and (member.get("expected_all_records_disposition")
+                            is not None
+                        or member.get("declared_metric_names")
+                            != _ALGORITHM_MATRIX_MIXED_PERSISTED_METRIC_NAMES)):
+                return None, (
+                    "supported generated persisted residual retains "
+                    "all-rejected metadata")
+            packed_ids.add(member["id"])
+            packed_paths.add(member["path"])
+            packed_keys.extend(member["stable_keys"])
+            packed_cells += member["expected_result_cells"]
+            if member["path"] == config_path:
+                selected = member
+        if (packed_cells != 150 or len(packed_keys) != 150
+                or len(set(packed_keys)) != 150):
+            return None, "q1024 packed member union changed"
+
+        exact_adoption_keys = {
+            "ordinal", "source_ordinal", "source_path",
+            "source_config_sha256", "source_stable_key",
+            "source_stable_key_sha256", "canonical_stable_key",
+            "canonical_stable_key_sha256", "canonical_singleton_path",
+            "canonical_singleton_config_sha256", "expected_result_cells",
+            "expected_raw_records", "repetitions_per_cell",
+            "declared_metric_names", "expected_all_records_disposition",
+            "canonical_cell", "execution_cell", "run_receipt_config",
+            "run_receipt_id", "sealed_artifacts",
+            "ingestion_policy",
+        }
+        adopted_keys: list[str] = []
+        for ordinal, adoption in enumerate(adoptions):
+            if (not isinstance(adoption, dict)
+                    or set(adoption) != exact_adoption_keys
+                    or adoption.get("ordinal") != ordinal
+                    or adoption.get("source_ordinal") != 56 + ordinal
+                    or not isinstance(adoption.get("canonical_stable_key"), str)
+                    or adoption["canonical_stable_key"] not in canonical_cells
+                    or adoption.get("canonical_stable_key_sha256")
+                        != hashlib.sha256(
+                            adoption["canonical_stable_key"].encode("utf-8")
+                        ).hexdigest()
+                    or adoption.get("expected_result_cells") != 1
+                    or adoption.get("expected_raw_records") != 5
+                    or adoption.get("repetitions_per_cell") != 5):
+                return None, "q1024 adoption proof is malformed"
+            receipt_config = adoption.get("run_receipt_config")
+            if (not isinstance(receipt_config, dict)
+                    or set(receipt_config) != {"path", "sha256"}
+                    or not isinstance(receipt_config.get("path"), str)
+                    or receipt_config.get("sha256")
+                        != adoption.get("source_config_sha256")):
+                return None, "q1024 adoption receipt-config proof is malformed"
+            receipt_id = adoption.get("run_receipt_id")
+            if ((ordinal < 3 and (not isinstance(receipt_id, str)
+                    or re.fullmatch(r"rr_[0-9a-f]{32}", receipt_id) is None))
+                    or (ordinal == 3 and receipt_id is not None)):
+                return None, "q1024 adoption run-receipt proof is malformed"
+            adopted_keys.append(adoption["canonical_stable_key"])
+        replacement_keys = set(packed_keys) | set(adopted_keys)
+        fallback_keys = set(canonical_cells) - replacement_keys
+        if (len(set(adopted_keys)) != 4
+                or set(adopted_keys) & set(packed_keys)
+                or len(replacement_keys) != 154
+                or len(fallback_keys) != 1142
+                or contract.get("authority_mode") != "hybrid_exact_disjoint"
+                or contract.get("packed_config_count") != 25
+                or contract.get("packed_result_cells") != 150
+                or contract.get("adopted_config_count") != 4
+                or contract.get("adopted_result_cells") != 4
+                or contract.get("superseded_singleton_cells") != 154
+                or contract.get("singleton_fallback_cells") != 1142
+                or contract.get("hybrid_execution_config_count") != 1171
+                or contract.get("canonical_result_cells") != 1296
+                or contract.get("canonical_raw_records") != 6480
+                or contract.get("repetitions_per_cell") != 5
+                or contract.get("exact_nonoverlapping") is not True
+                or contract.get("canonical_union_exact") is not True
+                or contract.get("duplicate_stable_key_repeat_permitted") is not False
+                or contract.get("canonical_stable_keys_sha256")
+                    != ownership.get("stable_keys_sha256")
+                or contract.get("packed_stable_keys_sha256")
+                    != hashlib.sha256(
+                        "\n".join(sorted(packed_keys)).encode("utf-8")
+                    ).hexdigest()
+                or contract.get("adopted_stable_keys_sha256")
+                    != hashlib.sha256(
+                        "\n".join(sorted(adopted_keys)).encode("utf-8")
+                    ).hexdigest()
+                or contract.get("superseded_stable_keys_sha256")
+                    != hashlib.sha256(
+                        "\n".join(sorted(replacement_keys)).encode("utf-8")
+                    ).hexdigest()
+                or contract.get("singleton_fallback_stable_keys_sha256")
+                    != hashlib.sha256(
+                        "\n".join(sorted(fallback_keys)).encode("utf-8")
+                    ).hexdigest()
+                or contract.get("prefilter_enabled") is not False
+                or contract.get("cigar_projection") is not True
+                or contract.get("mapq_projection") is not True
+                or contract.get("excluded_base_alignment_algorithms")
+                    != ["ksw2_batched"]
+                or contract.get("deterministic_first_ingestion") != (
+                    "bench/e2e_algorithm_matrix_deadline_v2_shards/"
+                    "bench_e2e_algorithm_matrix_deadline_v2_s056_q1024_"
+                    "q1024_anchor_m2_d4_k15_w10_no_index_minimap2.json")):
+            return None, "q1024 packed hybrid ownership contract is invalid"
+
+        if singleton_stable_key is not None:
+            if singleton_stable_key in replacement_keys:
+                return None, (
+                    "q1024 singleton is superseded by exact packed/adopted ownership")
+            return None, None
+        packed_pattern = profile.get("packed_pattern")
+        if selected is None:
+            if (isinstance(packed_pattern, str)
+                    and re.fullmatch(packed_pattern, config_path) is not None):
+                return None, "q1024 packed path is not manifest-owned"
+            return None, None
+        selected_path = _campaign_regular_repository_file(
+            config_path, "q1024 packed config")
+        if sha256_file(selected_path) != selected.get("config_sha256"):
+            return None, "q1024 packed config bytes differ from the manifest"
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return None, f"cannot validate q1024 packed partition: {exc}"
+    return {
+        "execution_role": "q1024_packed",
+        "partition_manifest": manifest_relative,
+        "partition_manifest_sha256": expected_manifest_sha,
+        "packed_member": copy.deepcopy(selected),
+    }, None
+
+
+def _walk_nested_items(value: object):
+    """Yield nested JSON object fields for closed configuration checks."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield key, child
+            yield from _walk_nested_items(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_nested_items(child)
+
+
+def _q1024_singleton0058_extended_timeout_authority(
+        config_path: str,
+        campaign_authority: Mapping[str, object],
+) -> tuple[dict | None, str | None]:
+    """Validate the additive benchmark-only timeout for canonical child 58."""
+    if config_path != _ALGORITHM_MATRIX_Q1024_SINGLETON0058_CONFIG:
+        return None, None
+    try:
+        manifest_path = _campaign_regular_repository_file(
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0058_EXTENDED_TIMEOUT_MANIFEST,
+            "q1024 singleton0058 extended-timeout authority")
+        manifest, manifest_raw = _strict_json_object(
+            manifest_path,
+            "q1024 singleton0058 extended-timeout authority")
+        manifest_sha = hashlib.sha256(manifest_raw).hexdigest()
+        if manifest_sha != (
+                _ALGORITHM_MATRIX_Q1024_SINGLETON0058_EXTENDED_TIMEOUT_MANIFEST_SHA256):
+            return None, (
+                "q1024 singleton0058 extended-timeout authority SHA-256 is "
+                "not pinned current")
+        if set(manifest) != {
+                "schema", "version", "authority", "campaign_binding",
+                "runtime_contract", "selected_config", "preservation"}:
+            return None, (
+                "q1024 singleton0058 extended-timeout authority has the wrong "
+                "exact shape")
+        authority = manifest.get("authority")
+        campaign_binding = manifest.get("campaign_binding")
+        runtime = manifest.get("runtime_contract")
+        selected = manifest.get("selected_config")
+        preservation = manifest.get("preservation")
+        if (manifest.get("schema")
+                != "bioseq.e2e.algorithm-matrix-q1024-extended-timeout-authority"
+                or manifest.get("version") != 1
+                or authority != {
+                    "authority_id": (
+                        "bioseq-e2e-q1024-singleton0058-"
+                        "extended-timeout-v1"),
+                    "authority_digest_algorithm": (
+                        "sha256-canonical-json-without-authority_digest"),
+                    "authority_digest": (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0058_EXTENDED_TIMEOUT_AUTHORITY_DIGEST),
+                }
+                or campaign_binding != {
+                    "campaign_id": _ALGORITHM_MATRIX_CAMPAIGN_ID,
+                    "campaign_digest": _ALGORITHM_MATRIX_CAMPAIGN_DIGEST,
+                    "singleton_partition_manifest": (
+                        "bench/bench_e2e_algorithm_matrix_q1024_"
+                        "singleton_partition_manifest.json"),
+                    "singleton_partition_manifest_sha256": (
+                        _ALGORITHM_MATRIX_CAMPAIGN_PROFILES[0][
+                            "singleton_partition_manifest_sha256"]),
+                    "child_ordinal": 58,
+                }
+                or runtime != {
+                    "mode": "benchmark-e2e",
+                    "run_only_required": True,
+                    "exact_benchmark_filter": (
+                        _ALGORITHM_MATRIX_EXACT_BENCH_FILTER),
+                    "normal_timeout_seconds": (
+                        _ALGORITHM_MATRIX_DEADLINE_NORMAL_TIMEOUT_SECONDS),
+                    "extended_timeout_seconds": (
+                        _ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS),
+                    "selected_config_count": 1,
+                    "benchmark_only": True,
+                }
+                or selected != {
+                    "path": _ALGORITHM_MATRIX_Q1024_SINGLETON0058_CONFIG,
+                    "config_sha256": (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0058_CONFIG_SHA256),
+                    "stable_key": (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0058_STABLE_KEY),
+                    "stable_key_sha256": (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0058_STABLE_KEY_SHA256),
+                    "query_count": 1024,
+                    "repetitions": 5,
+                    "expected_records": 5,
+                    "cigar_projection": True,
+                    "mapq_projection": True,
+                    "prefilter_enabled": False,
+                    "ksw2_batched_excluded": True,
+                }
+                or preservation != {
+                    "existing_deadline_v1_manifest_unchanged": True,
+                    "existing_deadline_v2_manifest_unchanged": True,
+                    "existing_results_and_artifact_seals_unchanged": True,
+                    "nonselected_configs_keep_normal_timeout": True,
+                }):
+            return None, (
+                "q1024 singleton0058 extended-timeout authority contract is "
+                "invalid")
+        digest_payload = copy.deepcopy(manifest)
+        digest_payload["authority"].pop("authority_digest", None)
+        if canonical_json_sha256(digest_payload) != (
+                _ALGORITHM_MATRIX_Q1024_SINGLETON0058_EXTENDED_TIMEOUT_AUTHORITY_DIGEST):
+            return None, (
+                "q1024 singleton0058 extended-timeout canonical digest is "
+                "invalid")
+        config = _campaign_regular_repository_file(
+            config_path, "q1024 singleton0058 extended-timeout config")
+        if sha256_file(config) != (
+                _ALGORITHM_MATRIX_Q1024_SINGLETON0058_CONFIG_SHA256):
+            return None, (
+                "q1024 singleton0058 config bytes differ from the timeout "
+                "authority seal")
+        if hashlib.sha256(
+                _ALGORITHM_MATRIX_Q1024_SINGLETON0058_STABLE_KEY.encode(
+                    "utf-8")).hexdigest() != (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0058_STABLE_KEY_SHA256):
+            return None, (
+                "q1024 singleton0058 timeout stable-key seal is invalid")
+        singleton = campaign_authority.get("singleton")
+        if (campaign_authority.get("name") != "q1024"
+                or campaign_authority.get("execution_role")
+                    != "q1024_singleton"
+                or campaign_authority.get("singleton_partition_manifest_sha256")
+                    != campaign_binding["singleton_partition_manifest_sha256"]
+                or not isinstance(singleton, dict)
+                or singleton.get("ordinal") != 58
+                or singleton.get("path") != config_path
+                or singleton.get("config_sha256")
+                    != selected["config_sha256"]
+                or singleton.get("stable_key") != selected["stable_key"]
+                or singleton.get("stable_key_sha256")
+                    != selected["stable_key_sha256"]
+                or singleton.get("repetitions_per_cell") != 5
+                or singleton.get("expected_raw_records") != 5
+                or singleton.get("expected_all_records_disposition") is not None):
+            return None, (
+                "q1024 singleton0058 timeout authority is not bound to the "
+                "canonical supported-timing child")
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return None, (
+            "cannot validate q1024 singleton0058 extended-timeout authority: "
+            f"{exc}")
+    return {
+        "name": "q1024_singleton0058_extended_timeout",
+        "manifest": (
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0058_EXTENDED_TIMEOUT_MANIFEST),
+        "manifest_sha256": manifest_sha,
+        "authority_digest": (
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0058_EXTENDED_TIMEOUT_AUTHORITY_DIGEST),
+        "config_sha256": (
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0058_CONFIG_SHA256),
+        "stable_key_sha256": (
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0058_STABLE_KEY_SHA256),
+        "runtime_timeout_seconds": (
+            _ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS),
+    }, None
+
+
+def _q1024_singleton0068_extended_timeout_authority(
+        config_path: str,
+        campaign_authority: Mapping[str, object],
+) -> tuple[dict | None, str | None]:
+    """Validate the deadline-capped benchmark timeout for child 68."""
+    if config_path != _ALGORITHM_MATRIX_Q1024_SINGLETON0068_CONFIG:
+        return None, None
+    try:
+        manifest_path = _campaign_regular_repository_file(
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0068_EXTENDED_TIMEOUT_MANIFEST,
+            "q1024 singleton0068 extended-timeout authority")
+        manifest, manifest_raw = _strict_json_object(
+            manifest_path,
+            "q1024 singleton0068 extended-timeout authority")
+        manifest_sha = hashlib.sha256(manifest_raw).hexdigest()
+        if manifest_sha != (
+                _ALGORITHM_MATRIX_Q1024_SINGLETON0068_EXTENDED_TIMEOUT_MANIFEST_SHA256):
+            return None, (
+                "q1024 singleton0068 extended-timeout authority SHA-256 is "
+                "not pinned current")
+        if set(manifest) != {
+                "schema", "version", "authority", "campaign_binding",
+                "runtime_contract", "selected_config", "preservation"}:
+            return None, (
+                "q1024 singleton0068 extended-timeout authority has the wrong "
+                "exact shape")
+        authority = manifest.get("authority")
+        campaign_binding = manifest.get("campaign_binding")
+        runtime = manifest.get("runtime_contract")
+        selected = manifest.get("selected_config")
+        preservation = manifest.get("preservation")
+        if (manifest.get("schema")
+                != "bioseq.e2e.algorithm-matrix-q1024-extended-timeout-authority"
+                or manifest.get("version") != 1
+                or authority != {
+                    "authority_id": (
+                        "bioseq-e2e-q1024-singleton0068-"
+                        "extended-timeout-v1"),
+                    "authority_digest_algorithm": (
+                        "sha256-canonical-json-without-authority_digest"),
+                    "authority_digest": (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0068_EXTENDED_TIMEOUT_AUTHORITY_DIGEST),
+                }
+                or campaign_binding != {
+                    "campaign_id": _ALGORITHM_MATRIX_CAMPAIGN_ID,
+                    "campaign_digest": _ALGORITHM_MATRIX_CAMPAIGN_DIGEST,
+                    "singleton_partition_manifest": (
+                        "bench/bench_e2e_algorithm_matrix_q1024_"
+                        "singleton_partition_manifest.json"),
+                    "singleton_partition_manifest_sha256": (
+                        _ALGORITHM_MATRIX_CAMPAIGN_PROFILES[0][
+                            "singleton_partition_manifest_sha256"]),
+                    "child_ordinal": 68,
+                }
+                or runtime != {
+                    "mode": "benchmark-e2e",
+                    "run_only_required": True,
+                    "exact_benchmark_filter": (
+                        _ALGORITHM_MATRIX_EXACT_BENCH_FILTER),
+                    "normal_timeout_seconds": (
+                        _ALGORITHM_MATRIX_DEADLINE_NORMAL_TIMEOUT_SECONDS),
+                    "extended_timeout_seconds": (
+                        _ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS),
+                    "hard_stop_at": (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0068_HARD_STOP_AT),
+                    "hard_stop_epoch": (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0068_HARD_STOP_EPOCH),
+                    "selected_config_count": 1,
+                    "benchmark_only": True,
+                }
+                or selected != {
+                    "path": _ALGORITHM_MATRIX_Q1024_SINGLETON0068_CONFIG,
+                    "config_sha256": (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0068_CONFIG_SHA256),
+                    "stable_key": (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0068_STABLE_KEY),
+                    "stable_key_sha256": (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0068_STABLE_KEY_SHA256),
+                    "query_count": 1024,
+                    "repetitions": 5,
+                    "expected_records": 5,
+                    "cigar_projection": True,
+                    "mapq_projection": True,
+                    "prefilter_enabled": False,
+                    "ksw2_batched_excluded": True,
+                }
+                or preservation != {
+                    "existing_deadline_v1_manifest_unchanged": True,
+                    "existing_deadline_v2_manifest_unchanged": True,
+                    "existing_results_and_artifact_seals_unchanged": True,
+                    "nonselected_configs_keep_normal_timeout": True,
+                }):
+            return None, (
+                "q1024 singleton0068 extended-timeout authority contract is "
+                "invalid")
+        digest_payload = copy.deepcopy(manifest)
+        digest_payload["authority"].pop("authority_digest", None)
+        if canonical_json_sha256(digest_payload) != (
+                _ALGORITHM_MATRIX_Q1024_SINGLETON0068_EXTENDED_TIMEOUT_AUTHORITY_DIGEST):
+            return None, (
+                "q1024 singleton0068 extended-timeout canonical digest is "
+                "invalid")
+        config = _campaign_regular_repository_file(
+            config_path, "q1024 singleton0068 extended-timeout config")
+        if sha256_file(config) != (
+                _ALGORITHM_MATRIX_Q1024_SINGLETON0068_CONFIG_SHA256):
+            return None, (
+                "q1024 singleton0068 config bytes differ from the timeout "
+                "authority seal")
+        if hashlib.sha256(
+                _ALGORITHM_MATRIX_Q1024_SINGLETON0068_STABLE_KEY.encode(
+                    "utf-8")).hexdigest() != (
+                        _ALGORITHM_MATRIX_Q1024_SINGLETON0068_STABLE_KEY_SHA256):
+            return None, (
+                "q1024 singleton0068 timeout stable-key seal is invalid")
+        singleton = campaign_authority.get("singleton")
+        if (campaign_authority.get("name") != "q1024"
+                or campaign_authority.get("execution_role")
+                    != "q1024_singleton"
+                or campaign_authority.get("singleton_partition_manifest_sha256")
+                    != campaign_binding["singleton_partition_manifest_sha256"]
+                or not isinstance(singleton, dict)
+                or singleton.get("ordinal") != 68
+                or singleton.get("path") != config_path
+                or singleton.get("config_sha256")
+                    != selected["config_sha256"]
+                or singleton.get("stable_key") != selected["stable_key"]
+                or singleton.get("stable_key_sha256")
+                    != selected["stable_key_sha256"]
+                or singleton.get("repetitions_per_cell") != 5
+                or singleton.get("expected_raw_records") != 5
+                or singleton.get("expected_all_records_disposition") is not None):
+            return None, (
+                "q1024 singleton0068 timeout authority is not bound to the "
+                "canonical supported-timing child")
+        if time.time() >= _ALGORITHM_MATRIX_Q1024_SINGLETON0068_HARD_STOP_EPOCH:
+            return None, (
+                "q1024 singleton0068 extended-timeout authority has expired")
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return None, (
+            "cannot validate q1024 singleton0068 extended-timeout authority: "
+            f"{exc}")
+    return {
+        "name": "q1024_singleton0068_extended_timeout",
+        "manifest": (
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0068_EXTENDED_TIMEOUT_MANIFEST),
+        "manifest_sha256": manifest_sha,
+        "authority_digest": (
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0068_EXTENDED_TIMEOUT_AUTHORITY_DIGEST),
+        "config_sha256": (
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0068_CONFIG_SHA256),
+        "stable_key_sha256": (
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0068_STABLE_KEY_SHA256),
+        "runtime_timeout_seconds": (
+            _ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS),
+        "hard_stop_at": _ALGORITHM_MATRIX_Q1024_SINGLETON0068_HARD_STOP_AT,
+        "hard_stop_epoch": (
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0068_HARD_STOP_EPOCH),
+    }, None
+
+
+def _q1024_extended_timeout_authority(
+        config_path: str,
+        campaign_authority: Mapping[str, object],
+) -> tuple[dict | None, str | None]:
+    """Validate either independent q1024 extended-timeout authority."""
+    for validator in (
+            _q1024_singleton0058_extended_timeout_authority,
+            _q1024_singleton0068_extended_timeout_authority):
+        authority, error = validator(config_path, campaign_authority)
+        if error is not None or authority is not None:
+            return authority, error
+    return None, None
+
+
+def _deadline_campaign_authority(
+        config_path: str,
+        *,
+        validate_current_source_bindings: bool = True,
+) -> tuple[dict | None, str | None]:
+    """Validate one exact member of the production deadline campaign."""
+    directory_prefix = _ALGORITHM_MATRIX_DEADLINE_DIRECTORY + "/"
+    textual_member = config_path.startswith(directory_prefix)
+    deadline_directory = REPOSITORY_ROOT / _ALGORITHM_MATRIX_DEADLINE_DIRECTORY
+    if not textual_member:
+        try:
+            candidate = Path(config_path).expanduser()
+            if not candidate.is_absolute():
+                candidate = REPOSITORY_ROOT / candidate
+            if candidate.resolve(strict=True).parent == deadline_directory.resolve(
+                    strict=True):
+                return None, (
+                    "deadline campaign config must use one exact manifest-owned "
+                    "repository-relative path; aliases are forbidden")
+        except (OSError, RuntimeError, ValueError):
+            pass
+        return None, None
+
+    try:
+        manifest_path = _campaign_regular_repository_file(
+            _ALGORITHM_MATRIX_DEADLINE_MANIFEST,
+            "deadline campaign manifest")
+        manifest, manifest_raw = _strict_json_object(
+            manifest_path, "deadline campaign manifest")
+        manifest_sha = hashlib.sha256(manifest_raw).hexdigest()
+        if manifest_sha != _ALGORITHM_MATRIX_DEADLINE_MANIFEST_SHA256:
+            return None, "deadline campaign manifest SHA-256 is not pinned current"
+        if set(manifest) != {
+                "schema", "version", "campaign", "source_bindings",
+                "calibration_anchors", "runtime_contract", "coverage",
+                "deadline_exclusions", "publication_contract",
+                "deterministic_first_shard", "schedule"}:
+            return None, "deadline campaign manifest has the wrong exact shape"
+        campaign = manifest.get("campaign")
+        runtime = manifest.get("runtime_contract")
+        publication = manifest.get("publication_contract")
+        source_bindings = manifest.get("source_bindings")
+        schedule = manifest.get("schedule")
+        first = manifest.get("deterministic_first_shard")
+        if (manifest.get("schema")
+                != "bioseq.e2e.algorithm-matrix-deadline-campaign"
+                or manifest.get("version") != 1
+                or not isinstance(campaign, dict)
+                or campaign.get("campaign_id")
+                    != _ALGORITHM_MATRIX_DEADLINE_CAMPAIGN_ID
+                or campaign.get("campaign_digest")
+                    != _ALGORITHM_MATRIX_DEADLINE_CAMPAIGN_DIGEST
+                or campaign.get("q1_membership") != 0
+                or campaign.get("q1_is_estimate_reference_only") is not True
+                or campaign.get("repetitions_per_cell") != 5
+                or campaign.get("expected_shards") != 59
+                or campaign.get("expected_result_cells") != 59
+                or campaign.get("expected_raw_records") != 295
+                or campaign.get("estimated_wall_seconds", 475_200) >= 475_200
+                or campaign.get("deadline_seconds") != 475_200
+                or campaign.get("operational_margin_seconds", 0) <= 0
+                or not isinstance(runtime, dict)
+                or runtime.get("mode") != "benchmark-e2e"
+                or runtime.get("run_only_required") is not True
+                or runtime.get("exact_benchmark_filter")
+                    != _ALGORITHM_MATRIX_EXACT_BENCH_FILTER
+                or runtime.get("prefilter_enabled") is not False
+                or runtime.get("cigar_projection") is not True
+                or runtime.get("mapq_projection") is not True
+                or runtime.get("ksw2_batched_excluded") is not True
+                or runtime.get("runtime_proof_counters_retained") is not True
+                or runtime.get("normal_timeout_seconds")
+                    != _ALGORITHM_MATRIX_DEADLINE_NORMAL_TIMEOUT_SECONDS
+                or runtime.get("extended_timeout_seconds")
+                    != _ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS
+                or runtime.get("extended_timeout_shard_count") != 1
+                or runtime.get("sequential_only") is not True
+                or publication != {
+                    "classification": "production_all_results_candidate_rows",
+                    "q1_calibration": False,
+                    "merge_into_ALL_RESULTS_yaml":
+                        "eligible_after_terminal_per_shard_audit",
+                    "automatic_merge_during_run_only": False,
+                    "required_terminal_gate": (
+                        "five records, accepted or harness-proven rejection, exact "
+                        "parity, runtime proof counters, fallback comments, and "
+                        "sealed run receipt"),
+                    "merge_into_Q8_RESULTS_yaml": False,
+                    "existing_ledgers_unchanged_by_generation": True,
+                }
+                or not isinstance(source_bindings, dict)
+                or not isinstance(schedule, list) or len(schedule) != 59
+                or not isinstance(first, dict)):
+            return None, "deadline campaign runtime/publication contract is invalid"
+        digest_payload = copy.deepcopy(manifest)
+        digest_payload["campaign"].pop("campaign_digest", None)
+        if canonical_json_sha256(digest_payload) \
+                != _ALGORITHM_MATRIX_DEADLINE_CAMPAIGN_DIGEST:
+            return None, "deadline campaign canonical digest is invalid"
+        if validate_current_source_bindings:
+            for relative, expected_sha in source_bindings.items():
+                source_path = _campaign_regular_repository_file(
+                    relative, "deadline source binding")
+                if (not isinstance(expected_sha, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
+                        or sha256_file(source_path) != expected_sha):
+                    return None, "deadline campaign source binding is stale"
+
+        exact_entry_keys = {
+            "ordinal", "path", "config_sha256", "stable_key",
+            "stable_key_sha256", "identity", "repetitions",
+            "expected_records", "allowed_statuses", "expected_disposition",
+            "metric_names", "timed_estimate_seconds", "fixed_seconds",
+            "contingency_multiplier", "estimated_wall_seconds",
+            "runtime_timeout_seconds",
+        }
+        selected = None
+        unique_paths: set[str] = set()
+        unique_keys: set[str] = set()
+        extended_entries = []
+        estimated_total = 0
+        for ordinal, entry in enumerate(schedule):
+            if (not isinstance(entry, dict) or set(entry) != exact_entry_keys
+                    or entry.get("ordinal") != ordinal
+                    or entry.get("repetitions") != 5
+                    or entry.get("expected_records") != 5
+                    or not isinstance(entry.get("path"), str)
+                    or not entry["path"].startswith(directory_prefix)
+                    or not isinstance(entry.get("config_sha256"), str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{64}", entry["config_sha256"]) is None
+                    or not isinstance(entry.get("stable_key"), str)
+                    or hashlib.sha256(
+                        entry["stable_key"].encode("utf-8")).hexdigest()
+                        != entry.get("stable_key_sha256")
+                    or not isinstance(entry.get("identity"), dict)
+                    or entry["identity"].get("campaign_id")
+                        != _ALGORITHM_MATRIX_DEADLINE_CAMPAIGN_ID
+                    or not isinstance(entry.get("metric_names"), list)
+                    or entry.get("runtime_timeout_seconds") not in {
+                        _ALGORITHM_MATRIX_DEADLINE_NORMAL_TIMEOUT_SECONDS,
+                        _ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS}
+                    or entry.get("estimated_wall_seconds", 0) <= 0
+                    or entry["estimated_wall_seconds"]
+                        >= entry["runtime_timeout_seconds"]
+                    or entry["path"] in unique_paths
+                    or entry["stable_key"] in unique_keys):
+                return None, "deadline campaign schedule entry is malformed"
+            unique_paths.add(entry["path"])
+            unique_keys.add(entry["stable_key"])
+            estimated_total += entry["estimated_wall_seconds"]
+            candidate_path = _campaign_regular_repository_file(
+                entry["path"], "deadline campaign config")
+            if sha256_file(candidate_path) != entry["config_sha256"]:
+                return None, "deadline campaign config bytes differ from the seal"
+            if entry["runtime_timeout_seconds"] \
+                    == _ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS:
+                extended_entries.append(entry)
+            if entry["path"] == config_path:
+                selected = entry
+        if (estimated_total != campaign.get("estimated_wall_seconds")
+                or len(extended_entries) != 1
+                or extended_entries[0].get("ordinal") != 58
+                or extended_entries[0]["identity"] != {
+                    "campaign_id": _ALGORITHM_MATRIX_DEADLINE_CAMPAIGN_ID,
+                    "tier": "q1024_anchor",
+                    "query_count": 1024,
+                    "dataset": "M2_D4_K15_W10",
+                    "index_mode": "just_index",
+                    "engine": "bioseq",
+                    "bioseq_index_name": "minimizers_per_fragment",
+                    "requested_minimizer_algorithm": "scalar",
+                    "requested_chaining_algorithm": "scalar_minimap2",
+                    "requested_base_alignment_algorithm": "ksw2",
+                }
+                or first.get("path") != schedule[0]["path"]
+                or first.get("config_sha256") != schedule[0]["config_sha256"]
+                or selected is None):
+            return None, "deadline campaign membership/timeout seal is invalid"
+
+        config_path_object = _campaign_regular_repository_file(
+            config_path, "selected deadline config")
+        config, _ = _strict_json_object(
+            config_path_object, "selected deadline config")
+        benchmark = config.get("bench_e2e")
+        cases = config.get("test_cases")
+        if (not isinstance(benchmark, dict)
+                or benchmark.get("fast") is not False
+                or not isinstance(cases, dict) or len(cases) != 1
+                or benchmark.get("matrix", {}).get("for")
+                    != {next(iter(cases)): 5}
+                or len(benchmark.get("matrix", {}).get("over", {})) != 1
+                or "ksw2_batched" in json.dumps(config, sort_keys=True)):
+            return None, "selected deadline config execution shape is invalid"
+        data = next(iter(cases.values())).get("data")
+        if (not isinstance(data, dict)
+                or data.get("fragment_count")
+                    != selected["identity"].get("query_count")
+                or data.get("cigar_projection") is not True
+                or data.get("mapq_projection") is not True):
+            return None, "selected deadline config query/projection is invalid"
+        for key, value in _walk_nested_items(config):
+            if (key.lower() in {"prefilter", "prefilter_enabled", "use_prefilter"}
+                    and value not in (False, 0, None, "off")):
+                return None, "selected deadline config enables prefilter"
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return None, f"cannot validate deadline campaign authority: {exc}"
+    return {
+        "name": "deadline",
+        "execution_role": "deadline_singleton",
+        "manifest": _ALGORITHM_MATRIX_DEADLINE_MANIFEST,
+        "manifest_sha256": manifest_sha,
+        "campaign_digest": _ALGORITHM_MATRIX_DEADLINE_CAMPAIGN_DIGEST,
+        "selected_shard": copy.deepcopy(selected),
+        "runtime_timeout_seconds": selected["runtime_timeout_seconds"],
+        "automatic_merge": False,
+        "all_results_eligible_after_terminal_audit": True,
+        "q8_results_eligible": False,
+    }, None
+
+
+def _deadline_campaign_v2_authority(
+        config_path: str) -> tuple[dict | None, str | None]:
+    """Validate one exact v2 member and its immutable v1 lineage."""
+    directory_prefix = _ALGORITHM_MATRIX_DEADLINE_V2_DIRECTORY + "/"
+    textual_member = config_path.startswith(directory_prefix)
+    deadline_directory = (
+        REPOSITORY_ROOT / _ALGORITHM_MATRIX_DEADLINE_V2_DIRECTORY)
+    if not textual_member:
+        try:
+            candidate = Path(config_path).expanduser()
+            if not candidate.is_absolute():
+                candidate = REPOSITORY_ROOT / candidate
+            if candidate.resolve(strict=True).parent == deadline_directory.resolve(
+                    strict=True):
+                return None, (
+                    "deadline v2 config must use one exact manifest-owned "
+                    "repository-relative path; aliases are forbidden")
+        except (OSError, RuntimeError, ValueError):
+            pass
+        return None, None
+
+    try:
+        manifest_path = _campaign_regular_repository_file(
+            _ALGORITHM_MATRIX_DEADLINE_V2_MANIFEST,
+            "deadline v2 manifest")
+        manifest, manifest_raw = _strict_json_object(
+            manifest_path, "deadline v2 manifest")
+        manifest_sha = hashlib.sha256(manifest_raw).hexdigest()
+        if manifest_sha != _ALGORITHM_MATRIX_DEADLINE_V2_MANIFEST_SHA256:
+            return None, "deadline v2 manifest SHA-256 is not pinned current"
+        if set(manifest) != {
+                "schema", "version", "lineage", "campaign", "source_bindings",
+                "calibration_anchors", "runtime_contract", "coverage",
+                "deadline_exclusions", "publication_contract",
+                "deterministic_first_shard", "schedule"}:
+            return None, "deadline v2 manifest has the wrong exact shape"
+        lineage = manifest.get("lineage")
+        campaign = manifest.get("campaign")
+        runtime = manifest.get("runtime_contract")
+        publication = manifest.get("publication_contract")
+        source_bindings = manifest.get("source_bindings")
+        schedule = manifest.get("schedule")
+        first = manifest.get("deterministic_first_shard")
+        expected_shards = campaign.get("expected_shards") \
+            if isinstance(campaign, dict) else None
+        expected_raw_records = campaign.get("expected_raw_records") \
+            if isinstance(campaign, dict) else None
+        if (manifest.get("schema")
+                != "bioseq.e2e.algorithm-matrix-deadline-campaign"
+                or manifest.get("version") != 2
+                or lineage != _ALGORITHM_MATRIX_DEADLINE_V2_LINEAGE
+                or not isinstance(campaign, dict)
+                or campaign.get("campaign_id")
+                    != _ALGORITHM_MATRIX_DEADLINE_V2_CAMPAIGN_ID
+                or campaign.get("campaign_digest")
+                    != _ALGORITHM_MATRIX_DEADLINE_V2_CAMPAIGN_DIGEST
+                or campaign.get("q1_membership") != 0
+                or campaign.get("q1_is_estimate_reference_only") is not True
+                or campaign.get("repetitions_per_cell") != 5
+                or type(expected_shards) is not int
+                or expected_shards
+                    != _ALGORITHM_MATRIX_DEADLINE_V2_EXPECTED_SHARDS
+                or campaign.get("expected_result_cells") != expected_shards
+                or type(expected_raw_records) is not int
+                or expected_raw_records
+                    != _ALGORITHM_MATRIX_DEADLINE_V2_EXPECTED_RAW_RECORDS
+                or expected_raw_records != expected_shards * 5
+                or campaign.get("estimated_wall_seconds")
+                    != _ALGORITHM_MATRIX_DEADLINE_V2_ESTIMATED_WALL_SECONDS
+                or campaign.get("deadline_seconds")
+                    != _ALGORITHM_MATRIX_DEADLINE_V2_DEADLINE_SECONDS
+                or campaign.get("estimated_wall_seconds")
+                    >= campaign.get("deadline_seconds")
+                or campaign.get("operational_margin_seconds")
+                    != campaign.get("deadline_seconds")
+                        - campaign.get("estimated_wall_seconds")
+                or not isinstance(runtime, dict)
+                or runtime.get("mode") != "benchmark-e2e"
+                or runtime.get("run_only_required") is not True
+                or runtime.get("exact_benchmark_filter")
+                    != _ALGORITHM_MATRIX_EXACT_BENCH_FILTER
+                or runtime.get("prefilter_enabled") is not False
+                or runtime.get("cigar_projection") is not True
+                or runtime.get("mapq_projection") is not True
+                or runtime.get("ksw2_batched_excluded") is not True
+                or runtime.get("runtime_proof_counters_retained") is not True
+                or runtime.get("normal_timeout_seconds")
+                    != _ALGORITHM_MATRIX_DEADLINE_NORMAL_TIMEOUT_SECONDS
+                or runtime.get("extended_timeout_seconds")
+                    != _ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS
+                or runtime.get("extended_timeout_shard_count") != 2
+                or runtime.get("sequential_only") is not True
+                or publication != {
+                    "classification": "production_all_results_candidate_rows",
+                    "q1_calibration": False,
+                    "merge_into_ALL_RESULTS_yaml":
+                        "eligible_after_terminal_per_shard_audit",
+                    "automatic_merge_during_run_only": False,
+                    "required_terminal_gate": (
+                        "five records, accepted or harness-proven rejection, exact "
+                        "parity, runtime proof counters, fallback comments, and "
+                        "sealed run receipt"),
+                    "merge_into_Q8_RESULTS_yaml": False,
+                    "existing_ledgers_unchanged_by_generation": True,
+                }
+                or not isinstance(source_bindings, dict)
+                or not isinstance(schedule, list)
+                or len(schedule) != expected_shards
+                or not isinstance(first, dict)):
+            return None, "deadline v2 runtime/publication contract is invalid"
+
+        parent_manifest_path = _campaign_regular_repository_file(
+            _ALGORITHM_MATRIX_DEADLINE_MANIFEST,
+            "deadline v2 parent manifest")
+        parent_manifest, parent_raw = _strict_json_object(
+            parent_manifest_path, "deadline v2 parent manifest")
+        if hashlib.sha256(parent_raw).hexdigest() \
+                != _ALGORITHM_MATRIX_DEADLINE_MANIFEST_SHA256:
+            return None, "deadline v2 parent manifest SHA-256 changed"
+        parent_schedule = parent_manifest.get("schedule")
+        if (not isinstance(parent_schedule, list) or len(parent_schedule) != 59
+                or not isinstance(parent_schedule[0], dict)
+                or not isinstance(parent_schedule[0].get("path"), str)):
+            return None, "deadline v2 parent schedule is malformed"
+        parent_authority, parent_error = _deadline_campaign_authority(
+            parent_schedule[0]["path"],
+            validate_current_source_bindings=False,
+        )
+        if (parent_error is not None or parent_authority is None
+                or parent_authority.get("manifest_sha256")
+                    != _ALGORITHM_MATRIX_DEADLINE_MANIFEST_SHA256
+                or parent_authority.get("campaign_digest")
+                    != _ALGORITHM_MATRIX_DEADLINE_CAMPAIGN_DIGEST):
+            return None, (
+                "deadline v2 immutable parent authority is invalid: "
+                f"{parent_error or 'identity mismatch'}")
+
+        for relative, expected_sha in source_bindings.items():
+            source_path = _campaign_regular_repository_file(
+                relative, "deadline v2 source binding")
+            if (not isinstance(expected_sha, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
+                    or sha256_file(source_path) != expected_sha):
+                return None, "deadline v2 source binding is stale"
+
+        exact_entry_keys = {
+            "ordinal", "path", "config_sha256", "stable_key",
+            "stable_key_sha256", "identity", "repetitions",
+            "expected_records", "allowed_statuses", "expected_disposition",
+            "metric_names", "timed_estimate_seconds", "fixed_seconds",
+            "contingency_multiplier", "estimated_wall_seconds",
+            "runtime_timeout_seconds",
+        }
+        selected = None
+        unique_paths: set[str] = set()
+        unique_keys: set[str] = set()
+        unique_hashes: set[str] = set()
+        extended_entries = []
+        estimated_total = 0
+        for ordinal, entry in enumerate(schedule):
+            if (not isinstance(entry, dict) or set(entry) != exact_entry_keys
+                    or entry.get("ordinal") != ordinal
+                    or entry.get("repetitions") != 5
+                    or entry.get("expected_records") != 5
+                    or not isinstance(entry.get("path"), str)
+                    or not entry["path"].startswith(directory_prefix)
+                    or not isinstance(entry.get("config_sha256"), str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{64}", entry["config_sha256"]) is None
+                    or not isinstance(entry.get("stable_key"), str)
+                    or not entry["stable_key"].startswith(
+                        "bioseq-e2e-deadline-cell-v2:")
+                    or hashlib.sha256(
+                        entry["stable_key"].encode("utf-8")).hexdigest()
+                        != entry.get("stable_key_sha256")
+                    or not isinstance(entry.get("identity"), dict)
+                    or entry["identity"].get("campaign_id")
+                        != _ALGORITHM_MATRIX_DEADLINE_V2_CAMPAIGN_ID
+                    or not isinstance(entry.get("metric_names"), list)
+                    or entry.get("runtime_timeout_seconds") not in {
+                        _ALGORITHM_MATRIX_DEADLINE_NORMAL_TIMEOUT_SECONDS,
+                        _ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS}
+                    or entry.get("estimated_wall_seconds", 0) <= 0
+                    or entry["estimated_wall_seconds"]
+                        >= entry["runtime_timeout_seconds"]
+                    or entry["path"] in unique_paths
+                    or entry["stable_key"] in unique_keys
+                    or entry["config_sha256"] in unique_hashes):
+                return None, "deadline v2 schedule entry is malformed"
+            unique_paths.add(entry["path"])
+            unique_keys.add(entry["stable_key"])
+            unique_hashes.add(entry["config_sha256"])
+            estimated_total += entry["estimated_wall_seconds"]
+            candidate_path = _campaign_regular_repository_file(
+                entry["path"], "deadline v2 config")
+            if sha256_file(candidate_path) != entry["config_sha256"]:
+                return None, "deadline v2 config bytes differ from the seal"
+            if entry["runtime_timeout_seconds"] \
+                    == _ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS:
+                extended_entries.append(entry)
+            if entry["path"] == config_path:
+                selected = entry
+        expected_extended_identities = [
+            {
+                "campaign_id": _ALGORITHM_MATRIX_DEADLINE_V2_CAMPAIGN_ID,
+                "tier": "q1024_anchor",
+                "query_count": 1024,
+                "dataset": "M2_D4_K15_W10",
+                "index_mode": "just_index",
+                "engine": "bioseq",
+                "bioseq_index_name": "minimizers_per_fragment",
+                "requested_minimizer_algorithm": "scalar",
+                "requested_chaining_algorithm": "scalar_minimap2",
+                "requested_base_alignment_algorithm": "ksw2",
+            },
+            {
+                "campaign_id": _ALGORITHM_MATRIX_DEADLINE_V2_CAMPAIGN_ID,
+                "tier": "q1024_anchor",
+                "query_count": 1024,
+                "dataset": "M2_D4_K15_W10",
+                "index_mode": "no_index",
+                "engine": "bioseq",
+                "bioseq_index_name": "minimizers_per_fragment",
+                "requested_minimizer_algorithm": "scalar",
+                "requested_chaining_algorithm": "scalar_minimap2",
+                "requested_base_alignment_algorithm": "ksw2",
+            },
+        ]
+        if (estimated_total != campaign.get("estimated_wall_seconds")
+                or len(unique_paths) != expected_shards
+                or len(unique_keys) != expected_shards
+                or len(unique_hashes) != expected_shards
+                or len(extended_entries)
+                    != runtime.get("extended_timeout_shard_count")
+                or [entry.get("ordinal") for entry in extended_entries]
+                    != [58, 59]
+                or [entry.get("identity") for entry in extended_entries]
+                    != expected_extended_identities
+                or first.get("path") != schedule[0]["path"]
+                or first.get("config_sha256") != schedule[0]["config_sha256"]
+                or selected is None):
+            return None, "deadline v2 membership/timeout seal is invalid"
+
+        config_path_object = _campaign_regular_repository_file(
+            config_path, "selected deadline v2 config")
+        config, _ = _strict_json_object(
+            config_path_object, "selected deadline v2 config")
+        benchmark = config.get("bench_e2e")
+        cases = config.get("test_cases")
+        if (not isinstance(benchmark, dict)
+                or benchmark.get("fast") is not False
+                or not isinstance(cases, dict) or len(cases) != 1
+                or benchmark.get("matrix", {}).get("for")
+                    != {next(iter(cases)): 5}
+                or len(benchmark.get("matrix", {}).get("over", {})) != 1
+                or "ksw2_batched" in json.dumps(config, sort_keys=True)):
+            return None, "selected deadline v2 config execution shape is invalid"
+        data = next(iter(cases.values())).get("data")
+        if (not isinstance(data, dict)
+                or data.get("fragment_count")
+                    != selected["identity"].get("query_count")
+                or data.get("cigar_projection") is not True
+                or data.get("mapq_projection") is not True):
+            return None, "selected deadline v2 query/projection is invalid"
+        for key, value in _walk_nested_items(config):
+            if (key.lower() in {"prefilter", "prefilter_enabled", "use_prefilter"}
+                    and value not in (False, 0, None, "off")):
+                return None, "selected deadline v2 config enables prefilter"
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return None, f"cannot validate deadline v2 authority: {exc}"
+    return {
+        "name": "deadline",
+        "execution_role": "deadline_singleton",
+        "manifest": _ALGORITHM_MATRIX_DEADLINE_V2_MANIFEST,
+        "manifest_sha256": manifest_sha,
+        "campaign_id": _ALGORITHM_MATRIX_DEADLINE_V2_CAMPAIGN_ID,
+        "campaign_version": 2,
+        "campaign_digest": _ALGORITHM_MATRIX_DEADLINE_V2_CAMPAIGN_DIGEST,
+        "lineage": copy.deepcopy(lineage),
+        "selected_shard": copy.deepcopy(selected),
+        "runtime_timeout_seconds": selected["runtime_timeout_seconds"],
+        "automatic_merge": False,
+        "all_results_eligible_after_terminal_audit": True,
+        "q8_results_eligible": False,
+    }, None
+
+
+def _q1_calibration_panel_authority(
+        config_path: str) -> tuple[dict | None, str | None]:
+    """Validate one exact member of the pinned, nonpublication q1 panel."""
+    selected = config_path in _ALGORITHM_MATRIX_Q1_CALIBRATION_CONFIGS
+    q1_directory = (
+        REPOSITORY_ROOT / "bench/e2e_algorithm_matrix_q1_calibration_shards")
+    if not selected:
+        try:
+            candidate = Path(config_path).expanduser()
+            if not candidate.is_absolute():
+                candidate = REPOSITORY_ROOT / candidate
+            resolved = candidate.resolve(strict=True)
+            if resolved.parent == q1_directory.resolve(strict=True):
+                return None, (
+                    "q1 calibration config must use one exact manifest-owned "
+                    "repository-relative path; aliases and unsealed members are "
+                    "forbidden")
+        except (OSError, RuntimeError, ValueError):
+            pass
+        return None, None
+
+    try:
+        manifest_path = _campaign_regular_repository_file(
+            _ALGORITHM_MATRIX_Q1_CALIBRATION_MANIFEST,
+            "q1 calibration manifest")
+        manifest, manifest_raw = _strict_json_object(
+            manifest_path, "q1 calibration manifest")
+        manifest_sha = hashlib.sha256(manifest_raw).hexdigest()
+        if manifest_sha != _ALGORITHM_MATRIX_Q1_CALIBRATION_MANIFEST_SHA256:
+            return None, "q1 calibration manifest SHA-256 is not pinned current"
+        if set(manifest) != {
+                "schema", "schema_version", "created_at", "updated_at",
+                "identity", "status", "purpose", "panel_contract",
+                "prefix_proof", "transformation_contract", "cells",
+                "runtime_contract", "nonpublication_rule"}:
+            return None, "q1 calibration manifest has the wrong exact shape"
+        panel = manifest.get("panel_contract")
+        runtime = manifest.get("runtime_contract")
+        nonpublication = manifest.get("nonpublication_rule")
+        proof_binding = manifest.get("prefix_proof")
+        cells = manifest.get("cells")
+        if (manifest.get("schema")
+                != "bioseq.e2e_algorithm_matrix_q1_calibration_manifest"
+                or manifest.get("schema_version") != 2
+                or manifest.get("identity") != "Q1_CALIBRATION_PANEL"
+                or manifest.get("status") != "local_only_static_configuration"
+                or not isinstance(panel, dict)
+                or panel.get("result_cells") != 5
+                or panel.get("repetitions_per_cell") != 5
+                or panel.get("repeat_indices") != list(range(5))
+                or panel.get("expected_raw_records") != 25
+                or panel.get("exact_nonoverlapping") is not True
+                or panel.get("cell_ids") != [
+                    "minimap2_no_index", "fragment_ksw2",
+                    "fragment_block_aligner", "sequence_ksw2",
+                    "sequence_block_aligner"]
+                or not isinstance(runtime, dict)
+                or runtime.get("mode") != "benchmark-e2e"
+                or runtime.get("exact_benchmark_filter")
+                    != _ALGORITHM_MATRIX_EXACT_BENCH_FILTER
+                or runtime.get("fast") is not False
+                or runtime.get("prefilter") is not False
+                or runtime.get("pipeline_mode") != "task_parallel"
+                or runtime.get("recompute_async_persistence") != "off"
+                or runtime.get("cigar_projection") is not True
+                or runtime.get("mapq_projection") is not True
+                or runtime.get("keep_benchmark_artifacts") is not False
+                or runtime.get("repetitions_per_cell") != 5
+                or runtime.get("ksw2_batched_permitted") is not False
+                or runtime.get(
+                    "exact_parity_and_fallback_attestation_required") is not True
+                or not isinstance(runtime.get("priority"), dict)
+                or runtime["priority"].get("darwin_worker_nice") != 0
+                or runtime["priority"].get(
+                    "fail_before_launch_if_worker_nice_is_not_zero") is not True
+                or runtime["priority"].get(
+                    "runner_and_postgresql_backend_nice_observation_per_run")
+                    is not True
+                or runtime["priority"].get(
+                    "postgresql_inheritance_claimed") is not False
+                or not isinstance(nonpublication, dict)
+                or nonpublication.get("merge_authority") != "none"
+                or nonpublication.get(
+                    "q1_must_not_enter_Q8_RESULTS_yaml") is not True
+                or nonpublication.get(
+                    "q1_must_not_enter_ALL_RESULTS_yaml") is not True
+                or not isinstance(cells, list) or len(cells) != 5
+                or not isinstance(proof_binding, dict)
+                or proof_binding.get("path")
+                    != "bench/bench_e2e_algorithm_matrix_q1_calibration_prefix_proof.json"
+                or proof_binding.get("verdict")
+                    != "proven_exact_first_query_prefix_of_q8_against_current_source"):
+            return None, "q1 calibration panel/runtime contract is invalid"
+
+        exact_cell_keys = {
+            "ordinal", "id", "role", "path", "config_sha256",
+            "q8_source_path", "q8_source_sha256", "test_case",
+            "execution_identity", "metric_names", "metric_count",
+            "repetitions", "expected_records", "measured_evidence",
+        }
+        selected_cell = None
+        expected_bindings = []
+        data_projection = None
+        required_attestation_metrics = {
+            "tuple_accepted", "match_count", "expected_match_count",
+            "correct_match_count", "exact_primary_count_accepted",
+            "correct_cigar_count", "cigar_replay_count", "mapq_result_count",
+            "pipeline_validation_accepted", "stage_engine_matrix_valid",
+            "backend_declines", "backend_fallbacks", "prefilter_activity_count",
+        }
+        for ordinal, (cell, expected_path) in enumerate(zip(
+                cells, _ALGORITHM_MATRIX_Q1_CALIBRATION_CONFIGS,
+                strict=True)):
+            if (not isinstance(cell, dict) or set(cell) != exact_cell_keys
+                    or cell.get("ordinal") != ordinal
+                    or cell.get("path") != expected_path
+                    or cell.get("test_case") != "M2_D4_K15_W10_Q1_CALIBRATION"
+                    or cell.get("repetitions") != 5
+                    or cell.get("expected_records") != 5
+                    or not isinstance(cell.get("config_sha256"), str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{64}", cell["config_sha256"]) is None
+                    or not isinstance(cell.get("q8_source_path"), str)
+                    or not isinstance(cell.get("q8_source_sha256"), str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{64}", cell["q8_source_sha256"]) is None
+                    or not isinstance(cell.get("metric_names"), list)
+                    or cell.get("metric_count") != len(cell["metric_names"])
+                    or not isinstance(cell.get("execution_identity"), dict)):
+                return None, "q1 calibration cell binding is malformed"
+            q1_path = _campaign_regular_repository_file(
+                expected_path, "q1 calibration config")
+            if sha256_file(q1_path) != cell["config_sha256"]:
+                return None, "q1 calibration config bytes differ from the manifest"
+            q8_path = _campaign_regular_repository_file(
+                cell["q8_source_path"], "q1 calibration q8 source")
+            if sha256_file(q8_path) != cell["q8_source_sha256"]:
+                return None, "q1 calibration q8 source bytes differ from the manifest"
+            config, _ = _strict_json_object(q1_path, "q1 calibration config")
+            cases = config.get("test_cases")
+            bench = config.get("bench_e2e")
+            if (not isinstance(cases, dict)
+                    or set(cases) != {"M2_D4_K15_W10_Q1_CALIBRATION"}
+                    or not isinstance(bench, dict)
+                    or bench.get("fast") is not False
+                    or bench.get("tags") != [
+                        "e2e", "algorithm-matrix", "calibration-shard",
+                        "q1-calibration"]
+                    or bench.get("matrix", {}).get("for")
+                        != {"M2_D4_K15_W10_Q1_CALIBRATION": 5}):
+                return None, "q1 calibration config execution shape is invalid"
+            data = cases["M2_D4_K15_W10_Q1_CALIBRATION"].get("data")
+            metrics = bench.get("matrix", {}).get("metrics")
+            over = bench.get("matrix", {}).get("over")
+            if (not isinstance(data, dict)
+                    or data.get("fragment_count") != 1
+                    or data.get("cigar_projection") is not True
+                    or data.get("mapq_projection") is not True
+                    or data.get("keep_benchmark_artifacts") is True
+                    or not isinstance(metrics, dict)
+                    or list(metrics) != cell["metric_names"]
+                    or not isinstance(over, dict)):
+                return None, "q1 calibration query/metrics contract is invalid"
+            serialized = json.dumps(config, sort_keys=True)
+            if "ksw2_batched" in serialized:
+                return None, "q1 calibration forbids ksw2_batched"
+            for key, value in _walk_nested_items(config):
+                if (key.lower() in {
+                        "prefilter", "prefilter_enabled", "use_prefilter"}
+                        and value not in (False, 0, None, "off")):
+                    return None, "q1 calibration prefilter must remain disabled"
+            projection = copy.deepcopy(data)
+            projection.pop("fragment_count")
+            if data_projection is None:
+                data_projection = projection
+            elif data_projection != projection:
+                return None, "q1 calibration generation data differs by cell"
+            identity = cell["execution_identity"]
+            if identity.get("engine") == "minimap2":
+                if (set(over) != {"minimap2_no_index"}
+                        or cell["metric_count"] != 21):
+                    return None, "q1 minimap2 baseline identity is invalid"
+            elif identity.get("engine") == "bioseq":
+                if (set(over) != {"bioseq_algorithm_matrix_no_index"}
+                        or cell["metric_count"] != 29
+                        or not required_attestation_metrics.issubset(metrics)):
+                    return None, "q1 Bioseq attestation metrics are incomplete"
+                axes = over["bioseq_algorithm_matrix_no_index"]
+                actual_identity = {
+                    "algorithm": "bioseq_algorithm_matrix_no_index",
+                    "engine": "bioseq",
+                    "index_mode": "no_index",
+                    "minimizer_algorithm": axes.get("minimizer_algorithm", [None])[0],
+                    "chaining_algorithm": axes.get("chaining_algorithm", [None])[0],
+                    "base_alignment_algorithm": axes.get(
+                        "base_alignment_algorithm", [None])[0],
+                    "minimizer_index": axes.get("minimizer_index", [None])[0],
+                }
+                if (identity != actual_identity
+                        or axes.get("pipeline_mode") != ["task_parallel"]
+                        or axes.get("recompute_async_persistence") != ["off"]):
+                    return None, "q1 Bioseq execution identity is invalid"
+            else:
+                return None, "q1 calibration engine identity is invalid"
+            expected_bindings.append({
+                "ordinal": ordinal,
+                "id": cell["id"],
+                "q1_path": expected_path,
+                "q1_sha256": cell["config_sha256"],
+                "q8_source_path": cell["q8_source_path"],
+                "q8_source_sha256": cell["q8_source_sha256"],
+                "q1_fragment_count": 1,
+                "q8_fragment_count": 8,
+            })
+            if expected_path == config_path:
+                selected_cell = cell
+        if selected_cell is None:
+            return None, "q1 calibration config is not manifest-owned"
+
+        proof_path = _campaign_regular_repository_file(
+            proof_binding["path"], "q1 calibration prefix proof")
+        proof, proof_raw = _strict_json_object(
+            proof_path, "q1 calibration prefix proof")
+        proof_sha = hashlib.sha256(proof_raw).hexdigest()
+        source_bindings = proof.get("current_source_bindings")
+        generation = proof.get("generation_data_without_fragment_count")
+        validation = proof.get("validation_scope")
+        reasoning = proof.get("deterministic_prefix_reasoning")
+        if (proof_sha != proof_binding.get("sha256")
+                or set(proof) != {
+                    "schema", "schema_version", "identity", "verdict",
+                    "config_bindings", "current_source_bindings",
+                    "generation_data_without_fragment_count",
+                    "deterministic_prefix_reasoning", "validation_scope"}
+                or proof.get("schema")
+                    != "bioseq.e2e_algorithm_matrix_q1_calibration_prefix_proof"
+                or proof.get("schema_version") != 2
+                or proof.get("identity") != "Q1_CALIBRATION_PANEL"
+                or proof.get("verdict") != proof_binding.get("verdict")
+                or proof.get("config_bindings") != expected_bindings
+                or not isinstance(source_bindings, dict)
+                or set(source_bindings) != {
+                    "bench/e2e/index.cppm",
+                    "bioseq/backend/sequences/generation/sequence_generator.cppm"}
+                or any(sha256_file(_campaign_regular_repository_file(
+                    path, "q1 prefix-proof source")) != digest
+                    for path, digest in source_bindings.items())
+                or not isinstance(generation, dict)
+                or generation.get("value") != data_projection
+                or generation.get("canonical_json_sha256")
+                    != canonical_json_sha256(data_projection)
+                or not isinstance(reasoning, dict)
+                or reasoning.get("fragment_count_is_query_count") is not True
+                or reasoning.get("reference_independent_of_fragment_count")
+                    is not True
+                or reasoning.get("q1_fragment_indices") != [0]
+                or reasoning.get("q8_fragment_indices") != list(range(8))
+                or reasoning.get("formal_relation")
+                    != "q1_queries == q8_queries[0:1]"
+                or not isinstance(validation, dict)
+                or validation.get("pair_count") != 5
+                or validation.get("q1_cells") != 5
+                or validation.get("q1_records") != 25
+                or validation.get("exact_q8_to_q1_transformation") is not True
+                or validation.get("all_other_json_content_matches") is not True):
+            return None, "q1 calibration prefix-proof binding is invalid"
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, IndexError) as exc:
+        return None, f"cannot validate q1 calibration authority: {exc}"
+    return {
+        "name": "q1",
+        "execution_role": "q1_calibration_singleton",
+        "manifest": _ALGORITHM_MATRIX_Q1_CALIBRATION_MANIFEST,
+        "manifest_sha256": manifest_sha,
+        "query_prefix_proof": proof_binding["path"],
+        "query_prefix_proof_sha256": proof_sha,
+        "selected_cell": copy.deepcopy(selected_cell),
+        "nonpublication": True,
+    }, None
+
+
+def _observed_rung_singleton_partition_authority(
+        *, config_path: str, profile: Mapping[str, object],
+        campaign_contract: Mapping[str, object],
+        campaign_contract_raw: bytes,
+) -> tuple[dict | None, str | None]:
+    """Validate one selected child of a pinned observed-rung partition."""
+    pattern = profile.get("singleton_pattern")
+    if not isinstance(pattern, str) or re.fullmatch(pattern, config_path) is None:
+        return None, "observed singleton path does not match the reserved syntax"
+    try:
+        query_count = int(profile["query_count"])
+        manifest_relative = str(profile["singleton_partition_manifest"])
+        manifest_path = _campaign_regular_repository_file(
+            manifest_relative,
+            f"q{query_count} observed singleton partition manifest")
+        manifest, manifest_raw = _strict_json_object(
+            manifest_path,
+            f"q{query_count} observed singleton partition manifest")
+        expected_manifest_sha = profile.get(
+            "singleton_partition_manifest_sha256")
+        if (not isinstance(expected_manifest_sha, str)
+                or hashlib.sha256(manifest_raw).hexdigest()
+                    != expected_manifest_sha):
+            return None, (
+                "observed singleton partition SHA-256 is not pinned current")
+        if set(manifest) != {
+                "schema", "version", "campaign_binding",
+                "partition_contract", "parents", "children"}:
+            return None, "observed singleton partition has the wrong exact shape"
+        binding = manifest.get("campaign_binding")
+        partition = manifest.get("partition_contract")
+        parents = manifest.get("parents")
+        children = manifest.get("children")
+        campaign = campaign_contract.get("campaign")
+        source = campaign_contract.get("source")
+        rung = campaign_contract.get("rung")
+        ownership = campaign_contract.get("shard_ownership")
+        entries = campaign_contract.get("configs")
+        if (manifest.get("schema") != (
+                "bioseq.e2e.algorithm-matrix-observed-rung-"
+                "singleton-partition")
+                or manifest.get("version") != 1
+                or not isinstance(binding, dict)
+                or not isinstance(campaign, dict)
+                or not isinstance(source, dict)
+                or not isinstance(rung, dict)
+                or not isinstance(ownership, dict)
+                or not isinstance(entries, list)
+                or binding != {
+                    "campaign_id": _ALGORITHM_MATRIX_CAMPAIGN_ID,
+                    "campaign_digest": profile["campaign_digest"],
+                    "execution_contract_id": (
+                        f"bioseq-e2e-algorithm-matrix-local-q{query_count}-"
+                        "observed-v1"),
+                    "result_status_contract": "observed_status_v1",
+                    "query_count": query_count,
+                    "canonical_manifest": profile["manifest"],
+                    "canonical_manifest_sha256": hashlib.sha256(
+                        campaign_contract_raw).hexdigest(),
+                    "canonical_config": source.get("full_config"),
+                    "canonical_config_sha256": source.get(
+                        "full_config_sha256"),
+                    "canonical_parent_config_count": 256,
+                    "canonical_result_cells": 1296,
+                    "canonical_raw_records": 6480,
+                    "canonical_stable_keys_sha256": ownership.get(
+                        "stable_keys_sha256"),
+                    "fixture_projection_sha256": rung.get(
+                        "fixture_projection_sha256"),
+                    "predecessor_execution_contract_id": rung.get(
+                        "predecessor_execution_contract_id"),
+                }
+                or not isinstance(partition, dict)
+                or not isinstance(parents, list) or len(parents) != 256
+                or not isinstance(children, list) or len(children) != 1296):
+            return None, (
+                "observed singleton campaign binding/cardinality is invalid")
+        claimed_partition_digest = partition.get("partition_digest")
+        digest_payload = copy.deepcopy(manifest)
+        digest_payload["partition_contract"].pop("partition_digest", None)
+        first_launch = (
+            f"bench/e2e_algorithm_matrix_q{query_count}_observed_singletons/"
+            f"bench_e2e_algorithm_matrix_q{query_count}_observed_singleton_"
+            "0000_0ed6b7419bc8e21f.json")
+        if (not isinstance(claimed_partition_digest, str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", claimed_partition_digest) is None
+                or canonical_json_sha256(digest_payload)
+                    != claimed_partition_digest
+                or partition != {
+                    "child_config_count": 1296,
+                    "cells_per_child": 1,
+                    "records_per_child": 5,
+                    "repetitions_per_cell": 5,
+                    "repeat_indices": list(range(5)),
+                    "normalization_axes": [
+                        "test_case_index", "tuple_index"],
+                    "canonical_ownership_preserved": True,
+                    "parent_unions_exact": True,
+                    "global_union_exact": True,
+                    "stable_keys_sha256": binding.get(
+                        "canonical_stable_keys_sha256"),
+                    "metric_count_distribution": {"21": 16, "29": 1280},
+                    "cell_disposition_distribution": {
+                        "timed_bioseq": 1280,
+                        "minimap2_baseline": 16,
+                    },
+                    "accepted_only": True,
+                    "prefilter_enabled": False,
+                    "pipeline_mode": "task_parallel",
+                    "cold_no_index_persistence": "off",
+                    "cigar_projection": True,
+                    "mapq_projection": True,
+                    "paired_minimap2_oracle": False,
+                    "base_alignment_algorithms": ["ksw2", "block_aligner"],
+                    "excluded_base_alignment_algorithms": ["ksw2_batched"],
+                    "cross_rung_membership_permitted": False,
+                    "reserved_filename_regex": pattern,
+                    "deterministic_first_launch": first_launch,
+                    "partition_digest_algorithm": (
+                        "sha256-canonical-json-without-partition_digest"),
+                    "partition_digest": claimed_partition_digest,
+                }):
+            return None, "observed singleton partition contract is invalid"
+
+        canonical_parents = {
+            entry.get("path"): entry for entry in entries
+            if isinstance(entry, dict) and entry.get("role") == "shard"}
+        if len(canonical_parents) != 256:
+            return None, "observed singleton canonical parent membership changed"
+        parent_ordinals: dict[str, set[int]] = {}
+        all_claimed_ordinals: list[int] = []
+        for parent_ordinal, proof in enumerate(parents):
+            if (not isinstance(proof, dict)
+                    or set(proof) != {
+                        "ordinal", "path", "config_sha256",
+                        "expected_result_cells", "expected_raw_records",
+                        "expected_stable_keys_sha256", "child_ordinals"}
+                    or proof.get("ordinal") != parent_ordinal):
+                return None, "observed singleton parent proof is malformed"
+            parent = canonical_parents.get(proof.get("path"))
+            child_ordinals = proof.get("child_ordinals")
+            if (parent is None or not isinstance(child_ordinals, list)
+                    or len(child_ordinals)
+                        != parent.get("expected_result_cells")
+                    or any(isinstance(value, bool) or not isinstance(value, int)
+                           for value in child_ordinals)
+                    or proof.get("config_sha256")
+                        != parent.get("config_sha256")
+                    or proof.get("expected_result_cells")
+                        != parent.get("expected_result_cells")
+                    or proof.get("expected_raw_records")
+                        != parent.get("expected_raw_records")
+                    or proof.get("expected_stable_keys_sha256")
+                        != parent.get("expected_stable_keys_sha256")
+                    or parent.get("expected_all_records_disposition") is not None
+                    or parent.get("allowed_nonblocking_rule_names") != []):
+                return None, "observed singleton parent binding is invalid"
+            parent_ordinals[str(proof["path"])] = set(child_ordinals)
+            all_claimed_ordinals.extend(child_ordinals)
+        if (len(all_claimed_ordinals) != 1296
+                or sorted(all_claimed_ordinals) != list(range(1296))):
+            return None, "observed singleton parent ordinal partition is invalid"
+
+        exact_child_keys = {
+            "ordinal", "path", "config_sha256", "parent_path",
+            "parent_config_sha256", "parent_expected_stable_keys_sha256",
+            "parent_test_case_index", "parent_tuple_index", "stable_key",
+            "stable_key_sha256", "expected_stable_keys_sha256",
+            "expected_result_cells", "expected_raw_records",
+            "repetitions_per_cell", "declared_metric_names",
+            "expected_all_records_disposition", "canonical_cell",
+            "execution_cell",
+        }
+        selected = None
+        all_keys: list[str] = []
+        parent_keys: dict[str, list[str]] = {
+            path: [] for path in canonical_parents}
+        metric_counts: dict[int, int] = {}
+        dispositions = {"timed_bioseq": 0, "minimap2_baseline": 0}
+        for ordinal, child in enumerate(children):
+            if (not isinstance(child, dict) or set(child) != exact_child_keys
+                    or child.get("ordinal") != ordinal):
+                return None, "observed singleton child proof is malformed"
+            path = child.get("path")
+            parent_path = child.get("parent_path")
+            stable_key = child.get("stable_key")
+            canonical_cell = child.get("canonical_cell")
+            execution_cell = child.get("execution_cell")
+            parent = canonical_parents.get(parent_path)
+            if (not isinstance(path, str) or re.fullmatch(pattern, path) is None
+                    or not isinstance(stable_key, str)
+                    or not isinstance(canonical_cell, dict)
+                    or not isinstance(execution_cell, dict)
+                    or parent is None
+                    or ordinal not in parent_ordinals[str(parent_path)]):
+                return None, "observed singleton child identity is invalid"
+            stable_sha = hashlib.sha256(stable_key.encode("utf-8")).hexdigest()
+            expected_path = (
+                f"bench/e2e_algorithm_matrix_q{query_count}_"
+                "observed_singletons/"
+                f"bench_e2e_algorithm_matrix_q{query_count}_"
+                "observed_singleton_"
+                f"{ordinal:04d}_{stable_sha[:16]}.json")
+            normalized = copy.deepcopy(canonical_cell)
+            normalized["test_case_index"] = 0
+            normalized["tuple_index"] = 0
+            parent_cells = parent.get("cells")
+            parent_matches = [
+                cell for cell in parent_cells
+                if isinstance(cell, dict)
+                and cell.get("test_case_index")
+                    == child.get("parent_test_case_index")
+                and cell.get("tuple_index")
+                    == child.get("parent_tuple_index")
+            ] if isinstance(parent_cells, list) else []
+            identity = canonical_cell.get("identity")
+            metrics = child.get("declared_metric_names")
+            expected_metric_count = (
+                21 if isinstance(identity, dict)
+                and identity.get("engine") == "minimap2" else 29)
+            if (path != expected_path
+                    or child.get("stable_key_sha256") != stable_sha
+                    or child.get("expected_stable_keys_sha256") != stable_sha
+                    or child.get("expected_result_cells") != 1
+                    or child.get("expected_raw_records") != 5
+                    or child.get("repetitions_per_cell") != 5
+                    or child.get("expected_all_records_disposition") is not None
+                    or len(parent_matches) != 1
+                    or canonical_cell != parent_matches[0]
+                    or execution_cell != normalized
+                    or canonical_cell.get("stable_key") != stable_key
+                    or canonical_cell.get("allowed_statuses") != ["accepted"]
+                    or not isinstance(identity, dict)
+                    or tuple(identity) != tuple(
+                        _ALGORITHM_MATRIX_STABLE_KEY_FIELDS)
+                    or identity.get("campaign_id")
+                        != _ALGORITHM_MATRIX_CAMPAIGN_ID
+                    or child.get("parent_config_sha256")
+                        != parent.get("config_sha256")
+                    or child.get("parent_expected_stable_keys_sha256")
+                        != parent.get("expected_stable_keys_sha256")
+                    or not isinstance(metrics, list)
+                    or metrics != parent.get("declared_metric_names")
+                    or len(metrics) != expected_metric_count):
+                return None, (
+                    "observed singleton child ownership/status proof is invalid")
+            bucket = (
+                "minimap2_baseline"
+                if identity.get("engine") == "minimap2" else "timed_bioseq")
+            dispositions[bucket] += 1
+            metric_counts[len(metrics)] = metric_counts.get(len(metrics), 0) + 1
+            all_keys.append(stable_key)
+            parent_keys[str(parent_path)].append(stable_key)
+            if path == config_path:
+                if selected is not None:
+                    return None, "observed singleton path is duplicated"
+                selected = child
+        if (len(set(all_keys)) != 1296
+                or hashlib.sha256(
+                    "\n".join(sorted(all_keys)).encode("utf-8")).hexdigest()
+                    != partition.get("stable_keys_sha256")
+                or metric_counts != {21: 16, 29: 1280}
+                or dispositions != {
+                    "timed_bioseq": 1280,
+                    "minimap2_baseline": 16,
+                }):
+            return None, "observed singleton global union is invalid"
+        for parent_path, keys in parent_keys.items():
+            parent = canonical_parents[parent_path]
+            if hashlib.sha256(
+                    "\n".join(sorted(keys)).encode("utf-8")).hexdigest() \
+                    != parent.get("expected_stable_keys_sha256"):
+                return None, "observed singleton parent union is invalid"
+        if selected is None:
+            return None, "observed singleton config is not manifest-owned"
+        selected_path = _campaign_regular_repository_file(
+            config_path, "observed singleton config")
+        if sha256_file(selected_path) != selected.get("config_sha256"):
+            return None, "observed singleton config bytes differ from the manifest"
+
+        parent_path = _campaign_regular_repository_file(
+            str(selected["parent_path"]), "observed singleton parent config")
+        parent_config, _ = _strict_json_object(
+            parent_path, "observed singleton parent config")
+        selected_config, _ = _strict_json_object(
+            selected_path, "observed singleton config")
+        canonical_cell = selected["canonical_cell"]
+        test_case = canonical_cell["test_case"]
+        algorithm = canonical_cell["algorithm"]
+        expected_config = copy.deepcopy(parent_config)
+        expected_config["test_cases"] = {
+            test_case: copy.deepcopy(parent_config["test_cases"][test_case])}
+        expected_config["params"] = {
+            algorithm: copy.deepcopy(parent_config["params"][algorithm])}
+        parent_axes = parent_config["bench_e2e"]["matrix"]["over"][algorithm]
+        child_axes = {
+            parameter: [canonical_cell["params"][parameter]]
+            for parameter in parent_axes}
+        benchmark = expected_config["bench_e2e"]
+        benchmark["tags"] = [
+            "e2e", "algorithm-matrix", "campaign-singleton",
+            f"q{query_count}-observed"]
+        benchmark["description"] = (
+            f"Sealed observed q{query_count} singleton execution descriptor "
+            f"for canonical cell {selected['stable_key_sha256']}.")
+        benchmark["matrix"]["for"] = {test_case: 5}
+        benchmark["matrix"]["over"] = {algorithm: child_axes}
+        expected_config["regression_rules"] = []
+        data = expected_config["test_cases"][test_case]["data"]
+        if (selected_config != expected_config
+                or data.get("fragment_count") != query_count
+                or data.get("cigar_projection") is not True
+                or data.get("mapq_projection") is not True
+                or data.get("paired_minimap2_oracle", False) is not False):
+            return None, (
+                "observed singleton config changed its parent projection/stats")
+    except (OSError, RuntimeError, UnicodeError, ValueError, KeyError,
+            TypeError, IndexError) as exc:
+        return None, f"cannot validate observed singleton partition: {exc}"
+    return {
+        "execution_role": "observed_rung_singleton",
+        "partition_manifest": manifest_relative,
+        "partition_manifest_sha256": expected_manifest_sha,
+        "selected_config": copy.deepcopy(selected),
+        "canonical_parent": copy.deepcopy(
+            canonical_parents[str(selected["parent_path"])]),
+        "nonpublication": True,
+    }, None
+
+
+def _observed_rung_campaign_authority(
+        config_path: str) -> tuple[dict | None, str | None]:
+    """Bind one v2 observed-rung member without authorizing a ledger merge."""
+    selected_profiles = [
+        profile for profile in _ALGORITHM_MATRIX_OBSERVED_RUNG_PROFILES
+        if config_path == profile["monolith"]
+        or config_path.startswith(f"{profile['shard_directory']}/")
+        or config_path.startswith(f"{profile['singleton_directory']}/")
+    ]
+    if not selected_profiles:
+        # Exact canonical absolute paths are normalized by the public override
+        # validator before this helper is called. Direct aliases into a reserved
+        # observed-rung location must not fall through as ordinary overrides.
+        try:
+            candidate = Path(config_path).expanduser()
+            if not candidate.is_absolute():
+                candidate = REPOSITORY_ROOT / candidate
+            resolved = candidate.resolve(strict=True)
+            canonical_root = REPOSITORY_ROOT.resolve(strict=True)
+            for profile in _ALGORITHM_MATRIX_OBSERVED_RUNG_PROFILES:
+                monolith = canonical_root / str(profile["monolith"])
+                shard_directory = (
+                    canonical_root / str(profile["shard_directory"]))
+                singleton_directory = (
+                    canonical_root / str(profile["singleton_directory"]))
+                if (resolved == monolith
+                        or shard_directory in resolved.parents
+                        or singleton_directory in resolved.parents):
+                    return None, (
+                        "observed-rung config must use one exact manifest-owned "
+                        "repository-relative path; absolute, lexical, and symlink "
+                        "aliases are forbidden")
+        except (OSError, RuntimeError, ValueError):
+            # Missing and out-of-tree ordinary overrides remain owned by the
+            # public override validator.
+            pass
+        return None, None
+    if len(selected_profiles) != 1:
+        return None, "observed-rung config identity matches multiple profiles"
+    profile = selected_profiles[0]
+
+    try:
+        config_path = _canonical_campaign_relative_path(
+            config_path, "observed-rung config")
+        query_count = int(profile["query_count"])
+        rung_query_counts = tuple(
+            int(candidate["query_count"])
+            for candidate in _ALGORITHM_MATRIX_OBSERVED_RUNG_PROFILES)
+        rung_index = rung_query_counts.index(query_count)
+        predecessor_query_count = (
+            rung_query_counts[rung_index - 1] if rung_index else None)
+        predecessor_execution_contract_id = (
+            f"bioseq-e2e-algorithm-matrix-local-q{predecessor_query_count}-"
+            "observed-v1"
+            if predecessor_query_count is not None else None)
+
+        manifest_path = _campaign_regular_repository_file(
+            str(profile["manifest"]),
+            f"q{query_count} observed-rung manifest",
+        )
+        manifest, manifest_raw = _strict_json_object(
+            manifest_path, f"q{query_count} observed-rung manifest")
+        if set(manifest) != {
+                "schema", "version", "campaign", "source", "configs",
+                "shard_ownership", "rung"}:
+            return None, "observed-rung manifest has the wrong exact shape"
+
+        campaign = manifest.get("campaign")
+        exact_campaign_keys = {
+            "campaign_id", "campaign_digest_algorithm", "stable_key_schema",
+            "stable_key_fields", "repetitions_per_cell",
+            "expected_result_cells", "expected_raw_records",
+            "required_shard_configs", "publication_status_contract",
+            "query_count", "result_status_contract", "execution_contract_id",
+            "campaign_digest",
+        }
+        if not isinstance(campaign, dict) or set(campaign) != exact_campaign_keys:
+            return None, "observed-rung campaign has the wrong exact shape"
+        digest_payload = copy.deepcopy(manifest)
+        del digest_payload["campaign"]["campaign_digest"]
+        expected_campaign_digest = str(profile["campaign_digest"])
+        if (manifest.get("schema")
+                != "bioseq.e2e.algorithm-matrix-campaign"
+                or manifest.get("version") != 2
+                or campaign.get("campaign_id")
+                    != _ALGORITHM_MATRIX_CAMPAIGN_ID
+                or campaign.get("campaign_digest_algorithm")
+                    != "sha256-canonical-json-without-campaign_digest"
+                or campaign.get("stable_key_schema") != "bioseq-e2e-cell-v2"
+                or campaign.get("stable_key_fields")
+                    != _ALGORITHM_MATRIX_STABLE_KEY_FIELDS
+                or campaign.get("repetitions_per_cell") != 5
+                or campaign.get("expected_result_cells") != 1296
+                or campaign.get("expected_raw_records") != 6480
+                or campaign.get("required_shard_configs") != 256
+                or campaign.get("publication_status_contract") != {
+                    "status_source": "observed",
+                    "minimap2": ["accepted"],
+                    "bioseq": ["accepted"],
+                    "rejected_dispositions": ["rejected_setup", "rejected_sql"],
+                    "nonpublishable_statuses": [
+                        "rejected", "invalid", "pending"],
+                }
+                or campaign.get("query_count") != query_count
+                or campaign.get("result_status_contract")
+                    != "observed_status_v1"
+                or campaign.get("execution_contract_id") != (
+                    f"bioseq-e2e-algorithm-matrix-local-q{query_count}-"
+                    "observed-v1")
+                or campaign.get("campaign_digest") != expected_campaign_digest
+                or canonical_json_sha256(digest_payload)
+                    != expected_campaign_digest):
+            return None, "observed-rung campaign identity/digest is invalid"
+
+        source = manifest.get("source")
+        if (not isinstance(source, dict)
+                or set(source) != {
+                    "full_config", "full_config_sha256", "generator"}
+                or source.get("full_config") != profile["monolith"]
+                or not isinstance(source.get("full_config_sha256"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", source["full_config_sha256"]) is None
+                or source.get("generator")
+                    != "bench/generate_e2e_algorithm_matrix_shards.py"):
+            return None, "observed-rung source binding is invalid"
+        full_config_path = _campaign_regular_repository_file(
+            source["full_config"], "observed-rung full config")
+        if sha256_file(full_config_path) != source["full_config_sha256"]:
+            return None, "observed-rung full-config digest changed"
+
+        rung = manifest.get("rung")
+        exact_rung_keys = {
+            "schema", "version", "query_count", "ladder_query_counts",
+            "predecessor_query_count", "predecessor_execution_contract_id",
+            "query_ordinal_interval", "projection",
+            "fixture_projection_sha256", "matrix_contract",
+            "canonical_campaign_binding",
+        }
+        if (not isinstance(rung, dict) or set(rung) != exact_rung_keys
+                or rung.get("schema")
+                    != "bioseq.e2e.algorithm-matrix-observed-rung"
+                or rung.get("version") != 1
+                or rung.get("query_count") != query_count
+                or rung.get("ladder_query_counts") != list(rung_query_counts)
+                or rung.get("predecessor_query_count")
+                    != predecessor_query_count
+                or rung.get("predecessor_execution_contract_id")
+                    != predecessor_execution_contract_id
+                or rung.get("query_ordinal_interval") != {
+                    "begin": 0, "end_exclusive": query_count}
+                or rung.get("projection")
+                    != "exact_fixed_seed_ordered_prefix_of_q1024"
+                or not isinstance(rung.get("fixture_projection_sha256"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", rung["fixture_projection_sha256"]) is None
+                or rung.get("matrix_contract") != {
+                    "all_axes_preserved": True,
+                    "repetitions_per_cell": 5,
+                    "prefilter_enabled": False,
+                    "base_alignment_algorithms": ["ksw2", "block_aligner"],
+                    "excluded_base_alignment_algorithms": ["ksw2_batched"],
+                }):
+            return None, "observed-rung ladder/projection contract is invalid"
+
+        canonical_binding = rung.get("canonical_campaign_binding")
+        if (not isinstance(canonical_binding, dict)
+                or set(canonical_binding) != {
+                    "campaign_id", "campaign_digest", "manifest",
+                    "manifest_sha256", "config", "config_sha256"}
+                or canonical_binding.get("campaign_id")
+                    != _ALGORITHM_MATRIX_CAMPAIGN_ID
+                or canonical_binding.get("campaign_digest")
+                    != _ALGORITHM_MATRIX_CAMPAIGN_DIGEST
+                or canonical_binding.get("manifest")
+                    != "bench/bench_e2e_algorithm_matrix_campaign_contract.json"
+                or canonical_binding.get("config")
+                    != "bench/bench_e2e_algorithm_matrix_campaign.json"
+                or not isinstance(
+                    canonical_binding.get("manifest_sha256"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    canonical_binding["manifest_sha256"]) is None
+                or not isinstance(canonical_binding.get("config_sha256"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    canonical_binding["config_sha256"]) is None):
+            return None, "observed-rung canonical q1024 binding is invalid"
+        canonical_manifest_path = _campaign_regular_repository_file(
+            canonical_binding["manifest"], "observed-rung canonical manifest")
+        canonical_config_path = _campaign_regular_repository_file(
+            canonical_binding["config"], "observed-rung canonical config")
+        if (sha256_file(canonical_manifest_path)
+                != canonical_binding["manifest_sha256"]
+                or sha256_file(canonical_config_path)
+                    != canonical_binding["config_sha256"]):
+            return None, "observed-rung canonical q1024 source bytes changed"
+
+        entries = manifest.get("configs")
+        ownership = manifest.get("shard_ownership")
+        exact_entry_keys = {
+            "path", "config_sha256", "role", "shard_kind",
+            "expected_result_cells", "expected_raw_records",
+            "expected_stable_keys_sha256", "allowed_nonblocking_rule_names",
+            "declared_metric_names", "expected_all_records_disposition", "cells",
+        }
+        if (not isinstance(entries, list) or len(entries) != 257
+                or not isinstance(ownership, dict)
+                or set(ownership) != {
+                    "exact_nonoverlapping", "shard_paths",
+                    "stable_keys_sha256", "resume_semantics"}
+                or ownership.get("exact_nonoverlapping") is not True
+                or not isinstance(ownership.get("shard_paths"), list)
+                or len(ownership["shard_paths"]) != 256):
+            return None, "observed-rung config ownership is invalid"
+        monolith_count = 0
+        shard_paths = []
+        for entry in entries:
+            if (not isinstance(entry, dict) or set(entry) != exact_entry_keys
+                    or not isinstance(entry.get("path"), str)
+                    or not isinstance(entry.get("config_sha256"), str)
+                    or re.fullmatch(
+                        r"[0-9a-f]{64}", entry["config_sha256"]) is None):
+                return None, "observed-rung config entry shape is invalid"
+            if entry.get("role") == "monolithic":
+                monolith_count += 1
+                if (entry["path"] != profile["monolith"]
+                        or entry.get("shard_kind") is not None):
+                    return None, "observed-rung monolith identity changed"
+            elif entry.get("role") == "shard":
+                if re.fullmatch(
+                        str(profile["shard_pattern"]), entry["path"]) is None:
+                    return None, "observed-rung shard path escaped its profile"
+                shard_paths.append(entry["path"])
+            else:
+                return None, "observed-rung config role is invalid"
+        if (monolith_count != 1 or len(shard_paths) != 256
+                or ownership["shard_paths"] != shard_paths):
+            return None, "observed-rung monolith/shard topology changed"
+
+        if re.fullmatch(
+                str(profile["singleton_pattern"]), config_path) is not None:
+            singleton_authority, singleton_error = (
+                _observed_rung_singleton_partition_authority(
+                    config_path=config_path,
+                    profile=profile,
+                    campaign_contract=manifest,
+                    campaign_contract_raw=manifest_raw,
+                ))
+            if singleton_error is not None or singleton_authority is None:
+                return None, (
+                    singleton_error
+                    or "observed singleton execution authority is missing")
+            authority = dict(profile)
+            authority.update(singleton_authority)
+            authority["manifest_sha256"] = hashlib.sha256(
+                manifest_raw).hexdigest()
+            return authority, None
+
+        selected_entries = [
+            entry for entry in entries if entry["path"] == config_path]
+        if len(selected_entries) != 1:
+            return None, "observed-rung config path is not manifest-owned"
+        selected_entry = selected_entries[0]
+        expected_role = (
+            "monolithic" if config_path == profile["monolith"] else "shard")
+        if selected_entry["role"] != expected_role:
+            return None, "observed-rung selected config role changed"
+        canonical_config_path = _campaign_regular_repository_file(
+            config_path, "observed-rung selected config")
+        if sha256_file(canonical_config_path) != selected_entry["config_sha256"]:
+            return None, "observed-rung selected config bytes changed"
+    except (OSError, RuntimeError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return None, f"cannot validate observed-rung authority: {exc}"
+
+    authority = dict(profile)
+    authority.update({
+        "execution_role": "observed_rung_topology",
+        "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        "selected_config": copy.deepcopy(selected_entry),
+        "nonpublication": True,
+    })
+    return authority, None
+
+
+def _algorithm_matrix_campaign_authority_status(
+        config_path: str | None) -> tuple[dict | None, str | None]:
+    """Bind one sealed algorithm-matrix config to its execution authority."""
+    if config_path is None:
+        return None, None
+    if not isinstance(config_path, str) or not config_path:
+        return None, "campaign config path must be a non-empty string"
+
+    deadline_authority, deadline_error = _deadline_campaign_authority(config_path)
+    if deadline_error is not None or deadline_authority is not None:
+        return deadline_authority, deadline_error
+
+    deadline_v2_authority, deadline_v2_error = (
+        _deadline_campaign_v2_authority(config_path))
+    if deadline_v2_error is not None or deadline_v2_authority is not None:
+        return deadline_v2_authority, deadline_v2_error
+
+    q1_authority, q1_error = _q1_calibration_panel_authority(config_path)
+    if q1_error is not None or q1_authority is not None:
+        return q1_authority, q1_error
+
+    observed_authority, observed_error = (
+        _observed_rung_campaign_authority(config_path))
+    if observed_error is not None or observed_authority is not None:
+        return observed_authority, observed_error
+
+    selected_profiles = [
+        profile for profile in _ALGORITHM_MATRIX_CAMPAIGN_PROFILES
+        if config_path == profile["monolith"]
+        or re.fullmatch(profile["shard_pattern"], config_path) is not None
+        or (isinstance(profile.get("packed_pattern"), str)
+            and re.fullmatch(profile["packed_pattern"], config_path) is not None)
+    ]
+    if not selected_profiles:
+        # Campaign artifacts are irrelevant to ordinary explicit overrides.
+        # Still reject an alias that resolves into either sealed campaign.
+        try:
+            candidate = Path(config_path).expanduser()
+            if not candidate.is_absolute():
+                candidate = REPOSITORY_ROOT / candidate
+            resolved = candidate.resolve(strict=True)
+            canonical_root = REPOSITORY_ROOT.resolve(strict=True)
+            for profile in _ALGORITHM_MATRIX_CAMPAIGN_PROFILES:
+                monolith = canonical_root / profile["monolith"]
+                shard_directory = canonical_root / profile["shard_directory"]
+                packed_pattern = profile.get("packed_pattern")
+                relative = resolved.relative_to(canonical_root).as_posix()
+                if (resolved == monolith
+                        or resolved.parent == shard_directory
+                        and re.fullmatch(
+                            profile["shard_pattern"], relative) is not None
+                        or isinstance(packed_pattern, str)
+                        and re.fullmatch(packed_pattern, relative) is not None):
+                    return None, (
+                        "campaign config must use its exact canonical repository-"
+                        "relative manifest path; absolute, lexical, and symlink "
+                        "aliases are forbidden")
+        except (OSError, RuntimeError, ValueError):
+            # The ordinary override validator owns missing/out-of-tree errors.
+            pass
+        return None, None
+    if len(selected_profiles) != 1:
+        return None, "campaign config identity matches multiple profiles"
+    profile = selected_profiles[0]
+
+    try:
+        manifest_path = REPOSITORY_ROOT / profile["manifest"]
+        contract, contract_raw = _strict_json_object(
+            manifest_path, f"{profile['name']} campaign manifest")
+        if set(contract) != {
+                "schema", "version", "campaign", "source", "configs",
+                "shard_ownership"}:
+            return None, "canonical campaign contract has the wrong exact shape"
+        campaign = contract["campaign"]
+        if not isinstance(campaign, dict) or set(campaign) != {
+                "campaign_id", "campaign_digest_algorithm", "stable_key_schema",
+                "stable_key_fields", "repetitions_per_cell",
+                "expected_result_cells", "expected_raw_records",
+                "required_shard_configs", "publication_status_contract",
+                "campaign_digest"}:
+            return None, "canonical campaign identity has the wrong exact shape"
+        claimed_digest = campaign["campaign_digest"]
+        digest_payload = copy.deepcopy(contract)
+        del digest_payload["campaign"]["campaign_digest"]
+        recomputed_digest = canonical_json_sha256(digest_payload)
+        if (contract.get("schema") != "bioseq.e2e.algorithm-matrix-campaign"
+                or contract.get("version") != 1
+                or campaign.get("campaign_id") != profile["campaign_id"]
+                or claimed_digest != profile["campaign_digest"]
+                or claimed_digest != recomputed_digest):
+            return None, "canonical campaign contract identity/digest is invalid"
+        required_shards = profile["required_shards"]
+        if (campaign.get("campaign_digest_algorithm")
+                != "sha256-canonical-json-without-campaign_digest"
+                or campaign.get("stable_key_schema") != "bioseq-e2e-cell-v2"
+                or campaign.get("stable_key_fields")
+                    != _ALGORITHM_MATRIX_STABLE_KEY_FIELDS
+                or campaign.get("repetitions_per_cell") != 5
+                or campaign.get("expected_result_cells") != 1296
+                or campaign.get("expected_raw_records") != 6480
+                or campaign.get("required_shard_configs") != required_shards):
+            return None, "canonical campaign cardinality/key contract is invalid"
+        entries = contract.get("configs")
+        ownership = contract.get("shard_ownership")
+        if (not isinstance(entries, list)
+                or len(entries) != required_shards + 1
+                or not isinstance(ownership, dict)
+                or ownership.get("exact_nonoverlapping") is not True
+                or not isinstance(ownership.get("shard_paths"), list)
+                or len(ownership["shard_paths"]) != required_shards):
+            return None, "canonical campaign config membership is invalid"
+        exact_entry_keys = {
+            "path", "config_sha256", "role", "shard_kind",
+            "expected_result_cells", "expected_raw_records",
+            "expected_stable_keys_sha256", "allowed_nonblocking_rule_names",
+            "declared_metric_names", "expected_all_records_disposition", "cells",
+        }
+        monolith_count = 0
+        shard_paths = []
+        for entry in entries:
+            if (not isinstance(entry, dict) or set(entry) != exact_entry_keys
+                    or not isinstance(entry.get("path"), str)
+                    or not isinstance(entry.get("config_sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", entry["config_sha256"])):
+                return None, (
+                    "canonical campaign config entries have the wrong exact shape")
+            if entry.get("role") == "monolithic":
+                monolith_count += 1
+                if (entry["path"] != profile["monolith"]
+                        or entry.get("shard_kind") is not None):
+                    return None, "canonical campaign monolith identity changed"
+            elif entry.get("role") == "shard":
+                if re.fullmatch(
+                        profile["shard_pattern"], entry["path"]) is None:
+                    return None, "canonical campaign shard path escaped its profile"
+                shard_paths.append(entry["path"])
+            else:
+                return None, "canonical campaign config role is invalid"
+            _campaign_regular_repository_file(
+                entry["path"], "canonical campaign config entry")
+        if (monolith_count != 1 or len(shard_paths) != required_shards
+                or ownership["shard_paths"] != shard_paths):
+            return None, "canonical campaign monolith/shard topology changed"
+
+        singleton_authority = None
+        packed_authority = None
+        singleton_pattern = profile.get("singleton_pattern")
+        is_singleton = (
+            isinstance(singleton_pattern, str)
+            and re.fullmatch(singleton_pattern, config_path) is not None)
+        if is_singleton:
+            singleton_authority, singleton_error = (
+                _q1024_singleton_partition_authority(
+                    config_path=config_path,
+                    profile=profile,
+                    campaign_contract=contract,
+                    campaign_contract_raw=contract_raw,
+                ))
+            if singleton_error is not None or singleton_authority is None:
+                return None, singleton_error or (
+                    "q1024 singleton partition authority is missing")
+            if profile.get("name") == "q1024":
+                selected_singleton = singleton_authority.get("singleton")
+                singleton_stable_key = (
+                    selected_singleton.get("stable_key")
+                    if isinstance(selected_singleton, dict) else None)
+                _, packed_error = _q1024_packed_partition_authority(
+                    config_path=config_path,
+                    profile=profile,
+                    campaign_contract=contract,
+                    campaign_contract_raw=contract_raw,
+                    singleton_stable_key=singleton_stable_key,
+                )
+                if packed_error is not None:
+                    return None, packed_error
+                singleton_authority["singleton_partition_manifest"] = (
+                    singleton_authority["partition_manifest"])
+                singleton_authority["singleton_partition_manifest_sha256"] = (
+                    singleton_authority["partition_manifest_sha256"])
+                singleton_authority["partition_manifest"] = profile[
+                    "packed_partition_manifest"]
+                singleton_authority["partition_manifest_sha256"] = profile[
+                    "packed_partition_manifest_sha256"]
+            canonical_path = _campaign_regular_repository_file(
+                config_path, "q1024 singleton config")
+        else:
+            if profile.get("name") == "q1024":
+                packed_authority, packed_error = (
+                    _q1024_packed_partition_authority(
+                        config_path=config_path,
+                        profile=profile,
+                        campaign_contract=contract,
+                        campaign_contract_raw=contract_raw,
+                    ))
+                if packed_error is not None:
+                    return None, packed_error
+            if packed_authority is not None:
+                canonical_path = _campaign_regular_repository_file(
+                    config_path, "q1024 packed config")
+            else:
+                selected_entries = [
+                    entry for entry in entries if entry.get("path") == config_path]
+                if len(selected_entries) != 1:
+                    return None, (
+                        "campaign config must use its exact canonical repository-relative "
+                        "contract, packed-partition, or singleton-partition path; "
+                        "absolute, lexical, symlink, hardlink, and copied aliases are "
+                        "forbidden")
+                canonical_path = _campaign_regular_repository_file(
+                    config_path, "campaign config")
+                candidate_digest = sha256_file(canonical_path)
+                expected_digest = selected_entries[0].get("config_sha256")
+                if (not isinstance(expected_digest, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+                        or candidate_digest != expected_digest):
+                    return None, (
+                        "campaign config bytes differ from the canonical digest")
+
+        prefix_proof_sha256 = None
+        proof_relative = profile["query_prefix_proof"]
+        if proof_relative is not None:
+            proof_path = REPOSITORY_ROOT / proof_relative
+            proof, proof_raw = _strict_json_object(
+                proof_path, "q8 query-prefix proof")
+            campaign_binding = proof.get("campaign_binding")
+            q1024_binding = proof.get("q1024_binding")
+            query_contract = proof.get("query_generation_contract")
+            timeout_contract = proof.get("timeout_and_shard_contract")
+            ownership_contract = proof.get("ownership_and_resume_contract")
+            rescue_authority = proof.get("rescue_execution_authority")
+            rescue_manifest_relative = (
+                rescue_authority.get("manifest")
+                if isinstance(rescue_authority, dict) else None)
+            rescue_manifest_raw = None
+            if (rescue_manifest_relative
+                    == "bench/bench_e2e_algorithm_matrix_q8_ordinal1_rescue_manifest.json"):
+                rescue_manifest_path = _campaign_regular_repository_file(
+                    rescue_manifest_relative, "q8 rescue manifest")
+                _, rescue_manifest_raw = _strict_json_object(
+                    rescue_manifest_path, "q8 rescue manifest")
+            source = contract.get("source")
+            if (set(proof) != {
+                    "schema", "version", "verdict", "campaign_binding",
+                    "q1024_binding", "query_generation_contract",
+                    "matrix_and_repeat_contract", "timeout_and_shard_contract",
+                    "ownership_and_resume_contract",
+                    "rescue_execution_authority"}
+                    or proof.get("schema")
+                        != "bioseq.e2e.algorithm-matrix-q8-prefix-proof"
+                    or proof.get("version") != 2
+                    or proof.get("verdict")
+                        != "proven_exact_fixed_seed_ordered_prefix"
+                    or not isinstance(campaign_binding, dict)
+                    or campaign_binding.get("campaign_id")
+                        != profile["campaign_id"]
+                    or campaign_binding.get("campaign_digest")
+                        != profile["campaign_digest"]
+                    or campaign_binding.get("manifest") != profile["manifest"]
+                    or campaign_binding.get("manifest_sha256")
+                        != hashlib.sha256(contract_raw).hexdigest()
+                    or not isinstance(source, dict)
+                    or campaign_binding.get("config") != source.get("full_config")
+                    or campaign_binding.get("config_sha256")
+                        != source.get("full_config_sha256")
+                    or not isinstance(q1024_binding, dict)
+                    or q1024_binding.get("campaign_id")
+                        != _ALGORITHM_MATRIX_CAMPAIGN_ID
+                    or q1024_binding.get("campaign_digest")
+                        != _ALGORITHM_MATRIX_CAMPAIGN_DIGEST
+                    or not isinstance(query_contract, dict)
+                    or query_contract.get("fragment_count_is_query_count") is not True
+                    or query_contract.get("q8_fragment_indices") != list(range(8))
+                    or query_contract.get("q8_is_subset_of_q1024") is not True
+                    or query_contract.get("q8_is_ordered_prefix_of_q1024") is not True
+                    or not isinstance(query_contract.get("datasets"), list)
+                    or len(query_contract["datasets"]) != 8
+                    or any(dataset.get("q8_fragment_count") != 8
+                           or dataset.get("q1024_fragment_count") != 1024
+                           for dataset in query_contract["datasets"]
+                           if isinstance(dataset, dict))
+                    or any(not isinstance(dataset, dict)
+                           for dataset in query_contract["datasets"])
+                    or not isinstance(timeout_contract, dict)
+                    or timeout_contract.get("required_shards") != 256
+                    or timeout_contract.get("no_index_micro_shards") != 160
+                    or timeout_contract.get("isolated_minimap2_baseline_shards") != 16
+                    or timeout_contract.get("persisted_index_shards") != 80
+                    or not isinstance(ownership_contract, dict)
+                    or ownership_contract.get("stable_keys_sha256")
+                        != ownership.get("stable_keys_sha256")
+                    or ownership_contract.get("exact_nonoverlapping") is not True
+                    or ownership_contract.get(
+                        "q8_is_eligible_for_q1024_automatic_merge") is not False
+                    or not isinstance(rescue_authority, dict)
+                    or set(rescue_authority) != {
+                        "schema", "version", "ordinal", "manifest",
+                        "manifest_sha256", "canonical_parent_union_cells",
+                        "canonical_parent_union_records"}
+                    or rescue_authority.get("schema")
+                        != "bioseq.e2e.algorithm-matrix-q8-rescue"
+                    or rescue_authority.get("version") != 2
+                    or rescue_authority.get("ordinal") != 1
+                    or rescue_authority.get("canonical_parent_union_cells") != 4
+                    or rescue_authority.get("canonical_parent_union_records") != 20
+                    or rescue_manifest_raw is None
+                    or rescue_authority.get("manifest_sha256")
+                        != hashlib.sha256(rescue_manifest_raw).hexdigest()):
+                return None, "q8 query-prefix proof binding is invalid"
+            q8_config = _strict_json_object(
+                canonical_path, "q8 selected campaign config")[0]
+            test_cases = q8_config.get("test_cases")
+            if not isinstance(test_cases, dict) or not test_cases:
+                return None, "q8 config has no exact test-case query contract"
+            for test_case in test_cases.values():
+                data = test_case.get("data") if isinstance(test_case, dict) else None
+                if (not isinstance(data, dict)
+                        or data.get("fragment_count") != 8
+                        or data.get("keep_benchmark_artifacts") is True
+                        or data.get("skip_index_baseline_setup") is True
+                        or data.get("skip_minimap2_baseline_setup") is True):
+                    return None, (
+                        "q8 config query/artifact cleanup contract is invalid")
+            prefix_proof_sha256 = hashlib.sha256(proof_raw).hexdigest()
+
+        results_path = REPOSITORY_ROOT / profile["ledger"]
+        results, _ = _strict_json_object(results_path, profile["ledger"])
+        results_contract = results.get("contract")
+        results_campaign = results.get("campaign")
+        current_ledger_revision = (
+            results.get("schema_version") == profile["ledger_schema_version"]
+            and isinstance(results_contract, dict)
+            and results_contract.get("version")
+                == profile["ledger_contract_version"])
+        legacy_state = results.get("aggregation_state")
+        legacy_empty_revision = (
+            profile.get("legacy_empty_ledger_schema_version") is not None
+            and _legacy_q1024_ledger_is_exactly_empty(
+                results,
+                profile["campaign_id"],
+                profile["campaign_digest"],
+            ))
+        proof_binding_current = (
+            proof_relative is None
+            or (isinstance(results_contract, dict)
+                and results_contract.get("query_prefix_proof") == proof_relative
+                and results_contract.get("query_prefix_proof_sha256")
+                    == prefix_proof_sha256))
+        proof_binding_refreshable = (
+            profile.get("name") == "q8"
+            and isinstance(results_contract, dict)
+            and results_contract.get("query_prefix_proof") == proof_relative
+            and isinstance(
+                results_contract.get("query_prefix_proof_sha256"), str)
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                results_contract["query_prefix_proof_sha256"]) is not None)
+        if (not (current_ledger_revision or legacy_empty_revision)
+                or not isinstance(results_contract, dict)
+                or results_contract.get("schema")
+                    != profile["ledger_contract_schema"]
+                or results_contract.get("campaign_id")
+                    != profile["campaign_id"]
+                or results_contract.get("campaign_digest")
+                    != profile["campaign_digest"]
+                or results_contract.get("campaign_contract")
+                    != profile["manifest"]
+                or results_contract.get("campaign_contract_sha256")
+                    != hashlib.sha256(contract_raw).hexdigest()
+                or not (proof_binding_current or proof_binding_refreshable)
+                or not isinstance(results_campaign, dict)
+                or results_campaign.get("campaign_id")
+                    != profile["campaign_id"]
+                or results_campaign.get("campaign_digest")
+                    != profile["campaign_digest"]):
+            return None, (
+                f"{profile['ledger']} does not bind the audited campaign authority")
+        processed_reports = (
+            legacy_state.get("processed_reports")
+            if isinstance(legacy_state, dict) else None)
+        if ((singleton_authority is not None or packed_authority is not None)
+                and processed_reports == []
+                and config_path != (
+                    "bench/e2e_algorithm_matrix_deadline_v2_shards/"
+                    "bench_e2e_algorithm_matrix_deadline_v2_s056_q1024_"
+                    "q1024_anchor_m2_d4_k15_w10_no_index_minimap2.json")):
+            return None, (
+                "the empty q1024 ledger must start with deterministic baseline "
+                "adoption s056 before any new packed/singleton execution")
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return None, f"cannot validate canonical campaign contract: {exc}"
+    authority = dict(profile)
+    authority["manifest_sha256"] = hashlib.sha256(contract_raw).hexdigest()
+    authority["query_prefix_proof_sha256"] = prefix_proof_sha256
+    authority["execution_role"] = (
+        "q1024_singleton" if singleton_authority is not None
+        else "q1024_packed" if packed_authority is not None
+        else "canonical_topology")
+    if singleton_authority is not None:
+        authority.update(singleton_authority)
+    if packed_authority is not None:
+        authority.update(packed_authority)
+    authority["ledger_migration_required"] = (
+        legacy_empty_revision or not proof_binding_current)
+    return authority, None
+
+
+def _campaign_config_contract_status(
+        config_path: str | None) -> tuple[bool, str | None]:
+    """Compatibility wrapper for callers that need only campaign selection."""
+    authority, error = _algorithm_matrix_campaign_authority_status(config_path)
+    return authority is not None, error
+
+
+def _is_algorithm_matrix_campaign_config(config_path: str | None) -> bool:
+    """Select only path+digest-authorized campaign overrides."""
+    selected, error = _campaign_config_contract_status(config_path)
+    if error is not None:
+        raise RuntimeError(error)
+    return selected
+
+
+def _e2e_config_requests_nice_attestation(config_path: str | None) -> bool:
+    """Return whether an explicit E2E config opts into exact NI=0 evidence."""
+    if config_path is None:
+        return False
+    open_path = _validated_benchmark_e2e_config_open_path(config_path)
+    try:
+        payload = json.loads(Path(open_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "could not inspect explicit E2E priority-attestation config") from exc
+    test_cases = payload.get("test_cases")
+    if not isinstance(test_cases, dict) or not test_cases:
+        raise RuntimeError(
+            "explicit E2E priority-attestation config has no test cases")
+    requested = False
+    for test_case_name, test_case in test_cases.items():
+        if not isinstance(test_case, dict) or not isinstance(
+                test_case.get("data"), dict):
+            raise RuntimeError(
+                f"E2E test case {test_case_name!r} has no data object")
+        value = test_case["data"].get("require_nice_attestation", False)
+        if type(value) is not bool:
+            raise RuntimeError(
+                f"E2E test case {test_case_name!r} has a non-boolean "
+                "require_nice_attestation")
+        requested = requested or value
+    return requested
+
+
+def _ensure_algorithm_matrix_launch_nice(
+        mode: str,
+        config_path: str | None,
+        log_handle,
+) -> None:
+    """Establish ordinary-worker NI=0 before an attested E2E launch.
+
+    This is intentionally narrower than the build-worker scheduling guard. It
+    never requests negative niceness and never runs for an ordinary E2E/product
+    path unless its data explicitly requires E2E priority attestation.
+    """
+    if mode != "benchmark-e2e" or config_path is None:
+        return
+    authority, authority_error = _algorithm_matrix_campaign_authority_status(
+        config_path)
+    if authority_error is not None:
+        raise RuntimeError(authority_error)
+    canonical_priority_launch = authority is not None and authority.get(
+        "name") in {"deadline", "observed_rung", "q1", "q8", "q1024"}
+    explicit_attestation_launch = authority is None and (
+        _e2e_config_requests_nice_attestation(config_path))
+    if not canonical_priority_launch and not explicit_attestation_launch:
+        return
+    platform_name = host_platform.system()
+    if platform_name not in {"Darwin", "Linux"}:
+        raise RuntimeError(
+            "algorithm-matrix launch priority supports Darwin/Linux only")
+    try:
+        process_selector = os.PRIO_PROCESS
+        os.setpriority(process_selector, 0, 0)
+        nice_value = os.getpriority(process_selector, 0)
+    except (AttributeError, OSError) as exc:
+        raise RuntimeError(
+            "algorithm-matrix launch could not establish worker NI=0") from exc
+    if type(nice_value) is not int or nice_value != 0:
+        raise RuntimeError(
+            "algorithm-matrix launch requires verified worker NI=0; "
+            f"observed={nice_value!r}")
+    log_handle.write(
+        "# algorithm-matrix launch priority worker_NI=0 verified; "
+        f"platform={platform_name}; "
+        f"authority={'canonical' if canonical_priority_launch else 'explicit_e2e_attestation'}; "
+        "exec_children_inherit_worker_nice=true; "
+        "postgres_backend_priority_requires_exact_e2e_observation=true\n")
+    log_handle.flush()
+
+
+def _scrub_benchmark_e2e_config_environment(
+        environment: dict[str, str]) -> None:
+    """Remove ambient config identity/open paths before worker selection."""
+    for key in _BENCHMARK_E2E_CONFIG_ENVIRONMENT_KEYS:
+        environment.pop(key, None)
+
+
+def _validated_benchmark_e2e_config_open_path(
+        bench_e2e_config: str) -> str:
+    """Derive one absolute read path from the exact validated identity."""
+    validated_identity, validation_error = _validate_bench_e2e_config_override(
+        "benchmark-e2e", bench_e2e_config)
+    if validation_error is not None or validated_identity != bench_e2e_config:
+        raise RuntimeError(
+            "E2E config open path requires the exact validated identity: "
+            f"{validation_error or 'identity spelling changed'}")
+
+    campaign_selected, campaign_error = _campaign_config_contract_status(
+        validated_identity)
+    if campaign_error is not None:
+        raise RuntimeError(campaign_error)
+    if campaign_selected:
+        config_path = _campaign_regular_repository_file(
+            validated_identity, "E2E config open path")
+    else:
+        config_path = Path(validated_identity)
+        if not config_path.is_absolute():
+            raise RuntimeError(
+                "ordinary validated E2E config identity must be absolute")
+        try:
+            resolved = config_path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError(
+                f"E2E config open path cannot be resolved: {exc}") from exc
+        if resolved != config_path:
+            raise RuntimeError(
+                "ordinary E2E config open path may not retain a path alias")
+        if not resolved.is_file() or resolved.suffix.lower() != ".json":
+            raise RuntimeError(
+                "ordinary E2E config open path must be a regular .json file")
+    if not config_path.is_absolute():
+        raise RuntimeError("E2E config open path must be absolute")
+    return str(config_path)
+
+
+def _benchmark_e2e_runtime_config_identity(
+        bench_e2e_config: str, validated_open_path: str) -> str:
+    """Select the C++-recognized identity for an already-authorized config."""
+    if any(
+            re.fullmatch(str(profile["singleton_pattern"]), bench_e2e_config)
+            is not None
+            for profile in _ALGORITHM_MATRIX_OBSERVED_RUNG_PROFILES):
+        # The current C++ loader's generic absolute-file branch accepts this
+        # exact file, while its relative sealed-family branch predates the
+        # observed-rung singleton overlays.  The open-path validator above has
+        # already proved the manifest authority and canonical repository path.
+        return validated_open_path
+    return bench_e2e_config
+
+
+def _validate_benchmark_e2e_runtime_config_environment(
+        environment: Mapping[str, str],
+        bench_e2e_config: str | None) -> str | None:
+    """Prove the emitted identity/open pair came from the validated request."""
+    identity_present = _BENCHMARK_E2E_CONFIG_IDENTITY_ENV in environment
+    open_path_present = _BENCHMARK_E2E_CONFIG_OPEN_ENV in environment
+    if bench_e2e_config is None:
+        if identity_present or open_path_present:
+            raise RuntimeError(
+                "E2E config environment appeared without an explicit override")
+        return None
+    if not identity_present or not open_path_present:
+        raise RuntimeError(
+            "explicit E2E config requires both identity and absolute open path")
+
+    observed_identity = environment[_BENCHMARK_E2E_CONFIG_IDENTITY_ENV]
+    observed_open_path = environment[_BENCHMARK_E2E_CONFIG_OPEN_ENV]
+    expected_open_path = _validated_benchmark_e2e_config_open_path(
+        bench_e2e_config)
+    expected_identity = _benchmark_e2e_runtime_config_identity(
+        bench_e2e_config, expected_open_path)
+    if observed_identity != expected_identity:
+        raise RuntimeError(
+            "E2E config environment identity contradicts the validated request")
+    if (not isinstance(observed_open_path, str)
+            or not observed_open_path
+            or observed_open_path != observed_open_path.strip()
+            or any(ord(character) < 0x20 or ord(character) == 0x7F
+                   for character in observed_open_path)
+            or not Path(observed_open_path).is_absolute()):
+        raise RuntimeError("E2E config environment open path is malformed")
+    if observed_open_path != expected_open_path:
+        raise RuntimeError(
+            "E2E config environment open path contradicts the validated identity")
+    return expected_open_path
+
+
+def _benchmark_e2e_runtime_environment(
+        environment: dict[str, str],
+        active_build_dir: Path,
+        active_preset: str,
+        bench_e2e_config: str | None,
+        postgres_application_name: str | None = None,
+        q1024_run_token: str | None = None) -> dict[str, str]:
+    """Apply deterministic E2E identity/read authority without changing cwd."""
+    restart_command = _postgresql_e2e_restart_shell_command(
+        active_build_dir,
+        active_preset,
+        boundary_mode=(
+            "benchmark-e2e"
+            if postgres_application_name is not None else None),
+        boundary_run_token=q1024_run_token,
+        boundary_application_name=postgres_application_name,
+    )
+    run_environment = environment.copy()
+    _scrub_benchmark_e2e_config_environment(run_environment)
+    campaign_authority, authority_error = (
+        _algorithm_matrix_campaign_authority_status(bench_e2e_config))
+    if authority_error is not None:
+        raise RuntimeError(authority_error)
+    if postgres_application_name is not None:
+        if not _is_q1024_execution_authority(campaign_authority):
+            raise RuntimeError(
+                "PostgreSQL owner labels are reserved for q1024 execution")
+        run_environment["PGAPPNAME"] = (
+            _validated_q1024_postgres_application_name(
+                postgres_application_name))
+    if campaign_authority is not None:
+        if bench_e2e_config is None:
+            raise RuntimeError("canonical campaign lost its config authority")
+        run_environment.update(_ALGORITHM_MATRIX_RUNTIME_ENVIRONMENT)
+        selected_config = campaign_authority.get("selected_config")
+        canonical_cell = (
+            selected_config.get("canonical_cell")
+            if isinstance(selected_config, dict) else None)
+        cell_identity = (
+            canonical_cell.get("identity")
+            if isinstance(canonical_cell, dict) else None)
+        retain_observed_just_index_target = (
+            campaign_authority.get("name") == "observed_rung"
+            and campaign_authority.get("execution_role")
+                == "observed_rung_singleton"
+            and isinstance(cell_identity, dict)
+            and cell_identity.get("index_mode") == "just_index"
+            and cell_identity.get("engine") == "bioseq"
+            and canonical_cell.get("algorithm")
+                == "bioseq_algorithm_matrix_just_index"
+        )
+        if retain_observed_just_index_target:
+            query_count = campaign_authority.get("query_count")
+            if not isinstance(query_count, int) or query_count < 2:
+                raise RuntimeError(
+                    "observed just-index target retention lost its query rung")
+            run_environment[
+                "BIOSEQ_E2E_RETAIN_MATRIX_JUST_INDEX_TARGET"] = "1"
+            run_environment["BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP"] = "1"
+        run_environment["BIOSEQ_E2E_PG_RESTART_CMD"] = restart_command
+    else:
+        # Ordinary E2E behavior remains unchanged: ambient reuse/setup
+        # overrides are preserved, and an ambient restart command retains
+        # precedence.
+        run_environment.setdefault("BIOSEQ_E2E_PG_RESTART_CMD", restart_command)
+    if bench_e2e_config is None:
+        _validate_benchmark_e2e_runtime_config_environment(
+            run_environment, None)
+        return run_environment
+
+    config_open_path = _validated_benchmark_e2e_config_open_path(
+        bench_e2e_config)
+    run_environment[_BENCHMARK_E2E_CONFIG_IDENTITY_ENV] = (
+        _benchmark_e2e_runtime_config_identity(
+            bench_e2e_config, config_open_path))
+    run_environment[_BENCHMARK_E2E_CONFIG_OPEN_ENV] = config_open_path
+    _validate_benchmark_e2e_runtime_config_environment(
+        run_environment, bench_e2e_config)
+    return run_environment
+
+
+def _merge_algorithm_matrix_all_results(
+        *,
+        mode: str,
+        report_path: Path | None,
+        bench_e2e_config: str | None,
+        environment: dict[str, str],
+        log_handle,
+        deadline: float,
+        hard_kill_deadline: float | None = None,
+        run_receipt_id: str | None = None) -> None:
+    """Run the fail-closed raw-report consumer for explicit campaign runs."""
+    _require_control_deadline(deadline, "algorithm-matrix consumer setup")
+    authority, authority_error = _algorithm_matrix_campaign_authority_status(
+        bench_e2e_config)
+    _require_control_deadline(deadline, "algorithm-matrix authority validation")
+    if authority_error is not None:
+        raise RuntimeError(authority_error)
+    if mode != "benchmark-e2e" or authority is None:
+        return
+    if authority.get("name") == "q1":
+        log_handle.write(
+            "# algorithm-matrix q1 calibration is nonpublication evidence; "
+            "Q8_RESULTS.yaml and ALL_RESULTS.yaml merge skipped\n")
+        log_handle.flush()
+        return
+    if authority.get("name") == "deadline":
+        log_handle.write(
+            "# algorithm-matrix deadline report is an ALL_RESULTS.yaml candidate "
+            "only after terminal per-shard audit; automatic run_only merge skipped "
+            "and Q8_RESULTS.yaml remains unauthorized\n")
+        log_handle.flush()
+        return
+    if report_path is None or bench_e2e_config is None:
+        raise RuntimeError(
+            "algorithm-matrix campaign completed without an exact report/config")
+    merger = REPOSITORY_ROOT / "bench" / "aggregate_e2e_algorithm_matrix.py"
+    try:
+        _require_control_deadline(deadline, "algorithm-matrix evidence validation")
+        _campaign_internal_regular_file(merger, "algorithm-matrix merger")
+        verified_report = _campaign_internal_regular_file(
+            report_path, "algorithm-matrix framework report")
+        report_relative = verified_report.relative_to(REPOSITORY_ROOT).as_posix()
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"algorithm-matrix evidence path is not canonical: {exc}") from exc
+    if (verified_report.parent
+            != REPOSITORY_ROOT / "reporting/bioseq_benchmark_e2e"
+            or re.fullmatch(r"report_[0-9]+\.json", verified_report.name) is None):
+        raise RuntimeError(
+            "algorithm-matrix framework report must be the exact canonical "
+            "reporting/bioseq_benchmark_e2e/report_<N>.json path")
+
+    if authority.get("name") == "observed_rung":
+        if (not isinstance(run_receipt_id, str)
+                or re.fullmatch(r"rr_[0-9a-f]{32}", run_receipt_id) is None):
+            raise RuntimeError(
+                "observed-rung validation requires its persisted run receipt id")
+        command = [
+            sys.executable,
+            str(merger),
+            "validate-observed-rung-report",
+            "--manifest", str(authority["manifest"]),
+            "--expected-campaign-digest", str(authority["campaign_digest"]),
+            "--query-count", str(authority["query_count"]),
+            "--report", report_relative,
+            "--config", bench_e2e_config,
+            "--run-receipt-id", run_receipt_id,
+        ]
+        _update_entry(
+            mode,
+            step=(
+                f"validating observed algorithm-matrix q"
+                f"{authority['query_count']} rung"),
+        )
+        log_handle.write(
+            "# algorithm-matrix observed-rung validator="
+            f"{json.dumps(command, ensure_ascii=True)}\n")
+        log_handle.flush()
+        rc = _stream_subprocess(
+            command,
+            log_handle,
+            deadline,
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            hard_kill_deadline=hard_kill_deadline,
+            state_mode=mode,
+            phase="algorithm_matrix_observed_rung_validation",
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"algorithm-matrix observed q{authority['query_count']} "
+                f"validator rejected report {report_path} with exit code {rc}")
+        return
+
+    ledger_relative = authority["ledger"]
+    all_results = REPOSITORY_ROOT / ledger_relative
+    try:
+        _campaign_internal_regular_file(
+            all_results, f"{authority['name']} algorithm-matrix ledger")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"algorithm-matrix ledger path is not canonical: {exc}") from exc
+    command = [
+        sys.executable,
+        str(merger),
+        "--config", bench_e2e_config,
+        "--report", report_relative,
+        "--all-results", ledger_relative,
+    ]
+    if authority.get("execution_role") in {"q1024_singleton", "q1024_packed"}:
+        if (not isinstance(run_receipt_id, str)
+                or re.fullmatch(r"rr_[0-9a-f]{32}", run_receipt_id) is None):
+            raise RuntimeError(
+                "q1024 hybrid merge requires its persisted run receipt id")
+        command.extend(["--run-receipt-id", run_receipt_id])
+    elif run_receipt_id is not None:
+        raise RuntimeError(
+            "run receipt merge argument is reserved for q1024 execution members")
+    _update_entry(mode, step="merging validated algorithm-matrix results")
+    log_handle.write(
+        f"# algorithm-matrix {ledger_relative} consumer="
+        f"{json.dumps(command, ensure_ascii=True)}\n")
+    log_handle.flush()
+    rc = _stream_subprocess(
+        command,
+        log_handle,
+        deadline,
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        hard_kill_deadline=hard_kill_deadline,
+        state_mode=mode,
+        phase="algorithm_matrix_result_merge",
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"algorithm-matrix {ledger_relative} consumer rejected report "
+            f"{report_path} with exit code {rc}")
+
 def _require_allocated_command_report(
         mode: str, command: List[str], report_path: Path) -> None:
     """Fail closed unless one native command published its exact receipt."""
@@ -2514,6 +6533,12 @@ def _run_mode_commands(
         pre_reports: set[Path],
         bench_flags=None,
         test_flags=None,
+        *,
+        hard_kill_deadline: float | None = None,
+        state_mode: str | None = None,
+        phase: str | None = None,
+        service_boundary_provider=None,
+        initial_service_boundary_provider=None,
 ) -> tuple[
     Path | None,
     list[Path],
@@ -2527,8 +6552,10 @@ def _run_mode_commands(
     command_report_files: list[Path] = []
     command_report_invocations: list[list[str]] = []
     unit_command_records: list[dict[str, object]] = []
+    runtime_phase = phase or f"{mode}_runtime"
 
     for command in mode_details.commands:
+        _require_control_deadline(deadline, f"{mode} runtime command setup")
         # MODES.commands store binary BASENAMES; resolve against the active
         # build's bin directory. Args after the first slot are passed
         # through verbatim.
@@ -2562,6 +6589,14 @@ def _run_mode_commands(
                     cwd=active_build_dir,
                     env=run_env,
                     verified_executable=verified_executable,
+                    hard_kill_deadline=hard_kill_deadline,
+                    state_mode=state_mode,
+                    phase=runtime_phase,
+                    require_verified_termination=(
+                        hard_kill_deadline is not None),
+                    service_boundary_provider=service_boundary_provider,
+                    initial_service_boundary_provider=(
+                        initial_service_boundary_provider),
                 )
         else:
             try:
@@ -2571,6 +6606,14 @@ def _run_mode_commands(
                     command_deadline,
                     cwd=active_build_dir,
                     env=run_env,
+                    hard_kill_deadline=hard_kill_deadline,
+                    state_mode=state_mode,
+                    phase=runtime_phase,
+                    require_verified_termination=(
+                        hard_kill_deadline is not None),
+                    service_boundary_provider=service_boundary_provider,
+                    initial_service_boundary_provider=(
+                        initial_service_boundary_provider),
                 )
             except TimeoutError:
                 if (
@@ -2595,6 +6638,8 @@ def _run_mode_commands(
             unit_command_records.append(unit_command_before)
 
         if command_report_path is not None:
+            _require_control_deadline(
+                deadline, f"{mode} runtime report validation")
             _require_allocated_command_report(
                 mode, command, command_report_path)
             if mode in _CACHE_NATIVE_REPORT_MODES:
@@ -2635,6 +6680,10 @@ def _run_mode_commands(
             # (exit code 2) — the report is still a valid receipt, so this is
             # a "completed with violations" outcome rather than a worker
             # failure. The console log already explains the violations.
+            if service_boundary_provider is not None:
+                raise RuntimeError(
+                    "q1024 guarded client failed with exit code "
+                    f"{rc}: {' '.join(command)}")
             if (
                 mode_details.is_bench_mode
                 and rc == 2
@@ -2648,6 +6697,7 @@ def _run_mode_commands(
                 f"run failed with exit code {rc}: {' '.join(command)}")
 
     if expected_report_count:
+        _require_control_deadline(deadline, f"{mode} runtime receipt finalization")
         if len(command_report_files) != expected_report_count:
             raise RuntimeError(
                 f"{mode} published {len(command_report_files)} ordered "
@@ -2844,6 +6894,103 @@ def _build_receipt_required(mode: str, build_only: bool) -> bool:
         and mode not in LINT_MODES
     )
 
+
+def _cleanup_armed_q1024_postgresql_owner(
+        *,
+        mode: str,
+        active_build_dir: Path,
+        active_preset: str,
+        postgres_application_name: str,
+        log_handle,
+        cleanup_deadline: float,
+        run_token: str | None = None) -> bool:
+    """Disarm one exact owner only after PostgreSQL proves it absent."""
+    claim_token: str | None = None
+    if run_token is not None:
+        try:
+            claim = _claim_q1024_postgresql_cleanup(
+                mode, run_token, actor="worker")
+        except RuntimeError as exc:
+            claim = None
+            _update_entry(
+                mode,
+                postgres_cleanup_unverified=True,
+                cleanup_unverified=True,
+                postgres_cleanup_evidence={
+                    "cleanup_verified": False,
+                    "error": str(exc),
+                },
+            )
+        if claim is None:
+            return False
+        claim_token, current = claim
+    else:
+        # Compatibility seam for the existing focused helper tests. Production
+        # q1024 callers always provide the reserved run token and take a claim.
+        current = _load_state().get(mode)
+    identity = (
+        current.get("postgres_backend_identity")
+        if isinstance(current, dict) else None)
+    if (not isinstance(current, dict)
+            or current.get("postgres_backend_owner_started") is not True
+            or not isinstance(identity, dict)
+            or identity.get("application_name") != postgres_application_name
+            or not isinstance(identity.get("database"), str)
+            or not isinstance(identity.get("user"), str)):
+        evidence = {
+            "cleanup_verified": False,
+            "error": "armed q1024 PostgreSQL owner scope is missing or contradictory",
+        }
+    else:
+        try:
+            evidence = _cleanup_owned_postgresql_backends(
+                active_build_dir,
+                active_preset,
+                application_name=postgres_application_name,
+                database_name=identity["database"],
+                database_user=identity["user"],
+                log_handle=log_handle,
+                deadline=cleanup_deadline,
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            evidence = {"cleanup_verified": False, "error": str(exc)}
+    verified = bool(evidence.get("cleanup_verified"))
+    termination_evidence = (
+        current.get("termination_evidence")
+        if isinstance(current, dict) else None)
+    process_cleanup_unverified = bool(
+        isinstance(current, dict)
+        and (
+            current.get("cleanup_unverified_before_postgres_owner")
+            or current.get("process_cleanup_unverified")
+        ))
+    if termination_evidence is not None:
+        process_cleanup_unverified = (
+            process_cleanup_unverified
+            or not isinstance(termination_evidence, dict)
+            or termination_evidence.get("cleanup_verified") is not True
+            or any(
+                not isinstance(termination_evidence.get(field, []), list)
+                or bool(termination_evidence.get(field, []))
+                for field in (
+                    "survivor_pids",
+                    "marker_survivor_pids",
+                    "survivor_identities",
+                )
+            )
+        )
+    if claim_token is not None and run_token is not None:
+        return _finish_q1024_postgresql_cleanup(
+            mode, run_token, claim_token, evidence)
+    _update_entry(
+        mode,
+        postgres_backend_owner_started=not verified,
+        postgres_cleanup_evidence=evidence,
+        postgres_cleanup_unverified=not verified,
+        cleanup_unverified=(not verified or process_cleanup_unverified),
+    )
+    return verified
+
 def _run_only_from_build_receipt(
         *,
         mode: str,
@@ -2857,6 +7004,10 @@ def _run_only_from_build_receipt(
         bench_e2e_config: str | None,
         log_handle,
         deadline: float,
+        hard_kill_deadline: float | None = None,
+        cleanup_deadline: float | None = None,
+        postgres_application_name: str | None = None,
+        q1024_run_token: str | None = None,
 ) -> int:
     """Run install/tests/benchmarks from a validated tree without building."""
     mode_details = MODES[mode]
@@ -2867,10 +7018,15 @@ def _run_only_from_build_receipt(
         raise RuntimeError(
             "run_only cannot invoke a CMake post-build target because that "
             "could compile implicitly")
+    _require_control_deadline(deadline, "run-only setup")
+    _ensure_algorithm_matrix_launch_nice(
+        mode, bench_e2e_config, log_handle)
     env = _build_worker_descendant_environment()
-    env.pop("BIOSEQ_E2E_CONFIG_OVERRIDE", None)
+    _scrub_benchmark_e2e_config_environment(env)
     _ensure_local_toolchain_environment(env, active_build_dir)
-    if _is_aws_clang_preset(active_preset):
+    if _is_native_linux_clang22_preset(active_preset):
+        env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_LINUX_CLANG22"
+    elif _is_aws_clang_preset(active_preset):
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
     elif _is_aws_gcc_preset(active_preset):
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
@@ -2881,12 +7037,14 @@ def _run_only_from_build_receipt(
         and mode_details.reporting_dir.exists()
     ):
         pre_reports = _report_paths(mode_details.reporting_dir)
+    _require_control_deadline(deadline, "run-only report setup")
 
     if mode_details.install_extension:
         install_receipt, install_receipt_error = _validate_build_receipt(
             str(receipt["build_receipt_id"]),
             expected_mode=mode,
             expected_debug=bool(receipt["debug"]),
+            deadline=deadline,
         )
         if install_receipt_error is not None or install_receipt is None:
             raise RuntimeError(
@@ -2902,6 +7060,7 @@ def _run_only_from_build_receipt(
             deadline,
             cwd=REPOSITORY_ROOT,
             env=env,
+            hard_kill_deadline=hard_kill_deadline,
             state_mode=mode,
             phase="run_only_install",
         )
@@ -2910,48 +7069,213 @@ def _run_only_from_build_receipt(
                 "receipt-pinned extension install exited with code "
                 f"{rc}")
         _restart_postgresql(
-            active_build_dir, active_preset, log_handle, deadline)
+            active_build_dir,
+            active_preset,
+            log_handle,
+            deadline,
+            hard_kill_deadline=hard_kill_deadline,
+            state_mode=mode,
+            phase="run_only_postgresql_restart",
+        )
         _prepare_postgresql_test_database(
-            active_build_dir, active_preset, log_handle, deadline, env=env)
+            active_build_dir,
+            active_preset,
+            log_handle,
+            deadline,
+            env=env,
+            hard_kill_deadline=hard_kill_deadline,
+            state_mode=mode,
+            phase="run_only_postgresql_database_prepare",
+        )
 
     _update_entry(mode, step="running from build receipt")
     run_env = env
     if mode == "benchmark-e2e":
-        env.setdefault(
-            "BIOSEQ_E2E_PG_RESTART_CMD",
-            _postgresql_e2e_restart_shell_command(
-                active_build_dir, active_preset),
+        _require_control_deadline(deadline, "benchmark E2E environment setup")
+        run_env = _benchmark_e2e_runtime_environment(
+            env,
+            active_build_dir,
+            active_preset,
+            bench_e2e_config,
+            postgres_application_name=postgres_application_name,
+            q1024_run_token=q1024_run_token,
         )
-        if bench_e2e_config is not None:
-            run_env = env.copy()
-            run_env["BIOSEQ_E2E_CONFIG_OVERRIDE"] = bench_e2e_config
-    report_path, report_files, _, _ = _run_mode_commands(
-        mode,
-        active_bin_dir,
-        active_build_dir,
-        run_env,
-        log_handle,
-        deadline,
-        pre_reports,
-        bench_flags=bench_flags,
-        test_flags=test_flags,
-    )
-    revalidated_receipt, receipt_error = _validate_build_receipt(
-        str(receipt["build_receipt_id"]),
-        expected_mode=mode,
-        expected_debug=bool(receipt["debug"]),
-    )
-    if receipt_error is not None or revalidated_receipt is None:
+        _require_control_deadline(deadline, "benchmark E2E environment setup")
+        if postgres_application_name is not None:
+            if cleanup_deadline is None:
+                raise RuntimeError("q1024 execution has no cleanup deadline")
+            current_cleanup_state = _load_state().get(mode)
+            _update_entry(
+                mode,
+                postgres_backend_owner_started=True,
+                postgres_backend_identity={
+                    "application_name": postgres_application_name,
+                    "database": run_env.get("BIOSEQ_TEST_PGDATABASE", "bioseq"),
+                    "user": run_env.get("BIOSEQ_TEST_PGUSER", "postgres"),
+                },
+                postgres_cleanup_evidence={
+                    "cleanup_verified": False,
+                    "reason": "armed before E2E client launch",
+                },
+                postgres_cleanup_unverified=True,
+                cleanup_unverified_before_postgres_owner=bool(
+                    isinstance(current_cleanup_state, dict)
+                    and current_cleanup_state.get("cleanup_unverified")),
+                cleanup_unverified=True,
+            )
+    initial_service_boundary_provider = None
+    service_boundary_provider = None
+    if postgres_application_name is not None:
+        if not isinstance(q1024_run_token, str):
+            raise RuntimeError(
+                "q1024 service boundary has no reserved run token")
+        armed_entry = _load_state().get(mode)
+        if not isinstance(armed_entry, dict):
+            raise RuntimeError(
+                "q1024 service boundary lost its armed state")
+        if armed_entry.get("postgres_service_boundary") is not None:
+            raise RuntimeError(
+                "q1024 pre-arm state retained a stale service boundary")
+        initial_service_boundary_provider = (
+            _postgresql_recovery_service_boundary_provider(armed_entry))
+        if initial_service_boundary_provider is None:
+            raise RuntimeError(
+                "q1024 service boundary has no pre-arm classifier")
+        service_boundary_provider = (
+            _postgresql_guard_service_boundary_provider(
+                mode=mode,
+                run_token=q1024_run_token,
+                application_name=postgres_application_name,
+                active_build_dir=active_build_dir,
+                active_preset=active_preset,
+                log_handle=log_handle,
+            ))
+    cleanup_verified = True
+    postgres_cleanup_attempted = False
+    try:
+        report_path, report_files, _, _ = _run_mode_commands(
+            mode,
+            active_bin_dir,
+            active_build_dir,
+            run_env,
+            log_handle,
+            deadline,
+            pre_reports,
+            hard_kill_deadline=hard_kill_deadline,
+            state_mode=mode,
+            phase="run_only_runtime",
+            service_boundary_provider=service_boundary_provider,
+            initial_service_boundary_provider=(
+                initial_service_boundary_provider),
+            bench_flags=bench_flags,
+            test_flags=test_flags,
+        )
+        if postgres_application_name is not None:
+            postgres_cleanup_attempted = True
+            cleanup_verified = _cleanup_armed_q1024_postgresql_owner(
+                mode=mode,
+                active_build_dir=active_build_dir,
+                active_preset=active_preset,
+                postgres_application_name=postgres_application_name,
+                log_handle=log_handle,
+                cleanup_deadline=cleanup_deadline,
+                run_token=q1024_run_token,
+            )
+            if not cleanup_verified:
+                raise RuntimeError(
+                    "q1024 PostgreSQL owner cleanup did not prove zero matches")
+        revalidated_receipt, receipt_error = _validate_build_receipt(
+            str(receipt["build_receipt_id"]),
+            expected_mode=mode,
+            expected_debug=bool(receipt["debug"]),
+            deadline=deadline,
+        )
+        if receipt_error is not None or revalidated_receipt is None:
+            raise RuntimeError(
+                "build receipt changed during run_only execution: "
+                f"{receipt_error}")
+        _require_control_deadline(deadline, "campaign authority validation")
+        authority, authority_error = _algorithm_matrix_campaign_authority_status(
+            bench_e2e_config)
+        _require_control_deadline(deadline, "campaign authority validation")
+        if authority_error is not None:
+            raise RuntimeError(authority_error)
+        receipt_before_consumer_flow = (
+            authority is not None
+            and (authority.get("name") == "observed_rung"
+                 or authority.get("execution_role") in {
+                    "deadline_singleton", "q1024_singleton", "q1024_packed"}))
+        if receipt_before_consumer_flow:
+            # This immutable receipt attests completed client execution and
+            # exact raw-report bytes. The independent consumer loads it by id
+            # to decide result approval; consumer failure never invalidates
+            # those already-completed execution facts.
+            run_receipt = _seal_run_receipt(
+                mode=mode,
+                build_receipt=revalidated_receipt,
+                report_files=report_files,
+                bench_flags=bench_flags,
+                test_flags=test_flags,
+                bench_e2e_config=bench_e2e_config,
+                deadline=deadline,
+            )
+            run_receipt_id = str(run_receipt["build_receipt_id"])
+            _update_entry(
+                mode,
+                step=(
+                    "run receipt sealed; validating observed rung"
+                    if authority.get("name") == "observed_rung"
+                    else "run receipt sealed; ingesting sealed execution member"),
+                run_receipt_id=run_receipt_id,
+            )
+            _merge_algorithm_matrix_all_results(
+                mode=mode,
+                report_path=report_path,
+                bench_e2e_config=bench_e2e_config,
+                environment=run_env,
+                log_handle=log_handle,
+                deadline=deadline,
+                hard_kill_deadline=hard_kill_deadline,
+                run_receipt_id=run_receipt_id,
+            )
+        else:
+            _merge_algorithm_matrix_all_results(
+                mode=mode,
+                report_path=report_path,
+                bench_e2e_config=bench_e2e_config,
+                environment=run_env,
+                log_handle=log_handle,
+                deadline=deadline,
+                hard_kill_deadline=hard_kill_deadline,
+            )
+            run_receipt = _seal_run_receipt(
+                mode=mode,
+                build_receipt=revalidated_receipt,
+                report_files=report_files,
+                bench_flags=bench_flags,
+                test_flags=test_flags,
+                bench_e2e_config=bench_e2e_config,
+                deadline=deadline,
+            )
+    finally:
+        if (postgres_application_name is not None
+                and not postgres_cleanup_attempted):
+            postgres_cleanup_attempted = True
+            cleanup_verified = _cleanup_armed_q1024_postgresql_owner(
+                mode=mode,
+                active_build_dir=active_build_dir,
+                active_preset=active_preset,
+                postgres_application_name=postgres_application_name,
+                log_handle=log_handle,
+                cleanup_deadline=cleanup_deadline,
+                run_token=q1024_run_token,
+            )
+    if not cleanup_verified:
         raise RuntimeError(
-            "build receipt changed during run_only execution: "
-            f"{receipt_error}")
-    run_receipt = _seal_run_receipt(
-        mode=mode,
-        build_receipt=revalidated_receipt,
-        report_files=report_files,
-        bench_flags=bench_flags,
-        test_flags=test_flags,
-        bench_e2e_config=bench_e2e_config,
+            "q1024 PostgreSQL owner cleanup did not prove zero matches")
+    _require_control_deadline(
+        deadline,
+        "run-only terminal state publication",
     )
     completed_at = time.time()
     _update_entry(
@@ -2972,6 +7296,119 @@ def _run_only_from_build_receipt(
         f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(completed_at))}\n"
     )
     return 0
+
+
+def _algorithm_matrix_authority_query_count(
+        authority: Mapping[str, object] | None) -> int | None:
+    """Read the executed query count from any canonical authority shape."""
+    if not isinstance(authority, Mapping):
+        return None
+    direct = authority.get("query_count")
+    if type(direct) is int:
+        return direct
+    selected_shard = authority.get("selected_shard")
+    identity = (
+        selected_shard.get("identity")
+        if isinstance(selected_shard, Mapping) else None)
+    nested = identity.get("query_count") if isinstance(identity, Mapping) else None
+    if type(nested) is int:
+        return nested
+    name = authority.get("name")
+    match = re.fullmatch(r"q([1-9][0-9]*)", name) \
+        if isinstance(name, str) else None
+    return int(match.group(1)) if match is not None else None
+
+
+def _is_q1024_execution_authority(
+        authority: Mapping[str, object] | None) -> bool:
+    """Recognize executed q1024 work without config-path/ordinal coupling."""
+    return (
+        _algorithm_matrix_authority_query_count(authority) == 1024
+        and authority.get("execution_role") in {
+            "deadline_singleton",
+            "observed_rung_singleton",
+            "q1024_packed",
+            "q1024_singleton",
+        }
+    ) if isinstance(authority, Mapping) else False
+
+
+def _q1024_nonreceipt_execution_forbidden(
+        authority: Mapping[str, object] | None,
+        *, build_only: bool, run_only: bool) -> bool:
+    """Reject q1024 command execution unless it is receipt-pinned run-only."""
+    return (
+        _is_q1024_execution_authority(authority)
+        and not run_only
+        and not build_only
+    )
+
+
+def _q1024_postgres_application_name(run_token: str) -> str:
+    """Derive one opaque libpq backend owner from the reserved run token."""
+    if re.fullmatch(r"[0-9a-f]{32}", run_token) is None:
+        raise RuntimeError("q1024 PostgreSQL owner token is malformed")
+    return _Q1024_POSTGRES_APPLICATION_NAME_PREFIX + run_token
+
+
+def _validated_q1024_postgres_application_name(value: object) -> str:
+    if (not isinstance(value, str)
+            or re.fullmatch(
+                re.escape(_Q1024_POSTGRES_APPLICATION_NAME_PREFIX)
+                + r"[0-9a-f]{32}", value) is None
+            or len(value.encode("utf-8")) > 63):
+        raise RuntimeError("reserved q1024 PostgreSQL owner is malformed")
+    return value
+
+
+def _run_only_runtime_timeout_seconds(
+        mode: str,
+        bench_e2e_config: str | None,
+        default_seconds: float,
+        *,
+        started_at: float | None = None) -> float:
+    """Resolve the whole invocation allowance for one run-only selection."""
+    if mode != "benchmark-e2e" or bench_e2e_config is None:
+        return default_seconds
+    authority, error = _algorithm_matrix_campaign_authority_status(
+        bench_e2e_config)
+    if error is not None:
+        raise RuntimeError(error)
+    if authority is None:
+        return default_seconds
+    resolved_timeout = default_seconds
+    if authority.get("name") != "observed_rung":
+        timeout_authority = authority
+        if authority.get("name") != "deadline":
+            timeout_authority, error = (
+                _q1024_extended_timeout_authority(
+                    bench_e2e_config, authority))
+            if error is not None:
+                raise RuntimeError(error)
+        if timeout_authority is not None:
+            timeout = timeout_authority.get("runtime_timeout_seconds")
+            if timeout not in {
+                    _ALGORITHM_MATRIX_DEADLINE_NORMAL_TIMEOUT_SECONDS,
+                    _ALGORITHM_MATRIX_DEADLINE_EXTENDED_TIMEOUT_SECONDS}:
+                raise RuntimeError(
+                    "deadline campaign timeout escaped its closed allowlist")
+            resolved_timeout = max(default_seconds, float(timeout))
+            hard_stop_epoch = timeout_authority.get("hard_stop_epoch")
+            if hard_stop_epoch is not None:
+                if type(hard_stop_epoch) is not int:
+                    raise RuntimeError("q1024 hard-stop epoch is malformed")
+                timeout_origin = (
+                    time.time() if started_at is None else started_at)
+                remaining_seconds = (
+                    float(hard_stop_epoch) - timeout_origin - 1.0)
+                if remaining_seconds <= 0.0:
+                    raise RuntimeError(
+                        "q1024 extended-timeout authority has expired")
+                resolved_timeout = min(resolved_timeout, remaining_seconds)
+    if _is_q1024_execution_authority(authority):
+        resolved_timeout = min(
+            resolved_timeout, _Q1024_WHOLE_INVOCATION_TIMEOUT_SECONDS)
+    return resolved_timeout
 
 def _postgres_safety_services() -> dict[str, object]:
     return {
@@ -3019,8 +7456,11 @@ def _run_build_worker(mode: str, build_only: bool = False,
     `lint_paths` contains exact normalized compile units and is accepted only
     by the focused lint mode.
 
-    `bench_e2e_config` is an absolute, server-validated path inside this
-    repository and is exposed to the benchmark-e2e executable.
+    `bench_e2e_config` is server-validated inside this repository and is
+    exposed to the benchmark-e2e executable. Ordinary overrides retain their
+    historical canonical absolute form; sealed campaign members retain their
+    exact contract-listed repository-relative form. The worker derives a
+    separate absolute file-open path from that validated identity.
     """
     identity_error = _refuse_root_build_identity("detached build worker")
     if identity_error is not None:
@@ -3063,6 +7503,30 @@ def _run_build_worker(mode: str, build_only: bool = False,
     if not entry:
         _log(f"worker for {mode}: no state entry, exiting")
         return 1
+
+    # Revalidate and canonicalize both sides of the detached handoff.  A live
+    # MCP server may have reserved an exact absolute spelling for a sealed
+    # campaign member; the worker and every downstream receipt must use the
+    # manifest-owned repository-relative identity instead.
+    canonical_worker_config, worker_config_error = (
+        _validate_bench_e2e_config_override(mode, bench_e2e_config))
+    canonical_reserved_config, reserved_config_error = (
+        _validate_bench_e2e_config_override(
+            mode, entry.get("bench_e2e_config")))
+    if worker_config_error is not None or reserved_config_error is not None:
+        _log(
+            "detached worker rejected E2E config path: "
+            f"{worker_config_error or reserved_config_error}")
+        return 1
+    if canonical_worker_config != canonical_reserved_config:
+        _log(
+            "detached worker config differs from the reserved request after "
+            "canonicalization")
+        return 1
+    original_reserved_config = entry.get("bench_e2e_config")
+    bench_e2e_config = canonical_worker_config
+    entry = dict(entry)
+    entry["bench_e2e_config"] = canonical_reserved_config
     reserved_arguments = {
         "build_only": build_only,
         "debug": debug,
@@ -3071,6 +7535,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
         "build_timeout_sec": build_timeout_sec,
         "reuse_build_receipt": reuse_build_receipt,
         "lint_paths": lint_paths,
+        "bench_flags": bench_flags,
+        "focused_test_args": test_flags,
+        "bench_e2e_config": bench_e2e_config,
     }
     for field_name, observed_value in reserved_arguments.items():
         if field_name in entry and entry.get(field_name) != observed_value:
@@ -3079,7 +7546,76 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 f"{field_name} scheduled={entry.get(field_name)!r} "
                 f"worker={observed_value!r}")
             return 1
+    if original_reserved_config != canonical_reserved_config:
+        _update_entry(
+            mode, bench_e2e_config=canonical_reserved_config)
     mode_details = MODES[mode]
+    campaign_authority, campaign_error = _algorithm_matrix_campaign_authority_status(
+        bench_e2e_config)
+    if campaign_error is not None:
+        _log(f"detached worker rejected campaign authority: {campaign_error}")
+        return 1
+    campaign_selected = campaign_authority is not None
+    q1024_execution = (
+        run_only and _is_q1024_execution_authority(campaign_authority))
+    if _q1024_nonreceipt_execution_forbidden(
+            campaign_authority, build_only=build_only, run_only=run_only):
+        _log(
+            "q1024 execution requires run_only=true and a current "
+            "qualified debug=false Clang E2E build receipt")
+        return 1
+    try:
+        postgres_application_name = (
+            _validated_q1024_postgres_application_name(
+                entry.get("postgres_application_name"))
+            if q1024_execution else None)
+    except RuntimeError as exc:
+        _log(f"detached worker rejected PostgreSQL owner: {exc}")
+        return 1
+    if (not q1024_execution
+            and entry.get("postgres_application_name") is not None):
+        _log("detached worker rejected an out-of-scope PostgreSQL owner")
+        return 1
+    q1024_run_token = entry.get("q1024_run_token")
+    if q1024_execution:
+        if (not isinstance(q1024_run_token, str)
+                or re.fullmatch(r"[0-9a-f]{32}", q1024_run_token) is None
+                or _q1024_postgres_application_name(q1024_run_token)
+                    != postgres_application_name):
+            _log("detached worker rejected q1024 watchdog ownership")
+            return 1
+        try:
+            entry = _await_q1024_watchdog_arm(mode, q1024_run_token)
+        except RuntimeError as exc:
+            _log(f"detached worker q1024 watchdog arm failed: {exc}")
+            _update_entry(
+                mode,
+                status="failed",
+                step="q1024_watchdog_arm_failed",
+                completed_at=time.time(),
+                notes=str(exc),
+                cleanup_unverified=True,
+            )
+            return 1
+    elif q1024_run_token is not None:
+        _log("detached worker rejected an out-of-scope q1024 watchdog token")
+        return 1
+    if (campaign_authority is not None
+            and campaign_authority.get("name") == "observed_rung"
+            and not build_only and not run_only):
+        _log(
+            "observed-rung execution requires run_only=true and a current "
+            "qualified debug=false Clang E2E build receipt")
+        return 1
+    allowed_campaign_flags = (
+        _ALGORITHM_MATRIX_EXACT_BENCH_FLAGS,
+        [*_ALGORITHM_MATRIX_EXACT_BENCH_FLAGS, "--debug"],
+    )
+    if campaign_selected and bench_flags not in allowed_campaign_flags:
+        _log(
+            "detached worker requires the exact benchmark=bench_e2e selection "
+            "for canonical algorithm-matrix campaign execution")
+        return 1
     if mode == LINT_FOCUSED_MODE:
         normalized_lint_paths, lint_error = lint_filter_to_paths(
             {"paths": lint_paths}
@@ -3096,6 +7632,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
             return 1
     elif lint_paths:
         _log(f"{mode} worker does not accept lint paths")
+        return 1
+    if mode == ALL_ALPHABETS_UNIT_INTEGRATION_MODE and debug:
+        _log(f"{mode} uses a fixed optimized preset and rejects debug=true")
         return 1
     if mode_details.requires_build_only and (
         not build_only
@@ -3145,7 +7684,28 @@ def _run_build_worker(mode: str, build_only: bool = False,
             mode_details.hard_timeout_min * 60.0,
         )
     )
-    deadline = started_at + mode_timeout_sec
+    if run_only:
+        mode_timeout_sec = _run_only_runtime_timeout_seconds(
+            mode,
+            bench_e2e_config,
+            mode_timeout_sec,
+            started_at=started_at,
+        )
+    whole_deadline = started_at + mode_timeout_sec
+    q1024_whole_deadline = (
+        whole_deadline
+        if q1024_execution else None)
+    deadline = (
+        q1024_whole_deadline
+        - _Q1024_CLEANUP_RESERVE_SECONDS
+        - BUILD_TIMEOUT_TERM_GRACE_SEC
+        if q1024_whole_deadline is not None else whole_deadline)
+    if q1024_whole_deadline is not None and deadline <= started_at:
+        _log("q1024 authority leaves no bounded execution window")
+        return 1
+    subprocess_hard_kill_deadline = (
+        q1024_whole_deadline - _Q1024_CLEANUP_RESERVE_SECONDS
+        if q1024_whole_deadline is not None else None)
     if build_timeout_sec is not None:
         build_soft_deadline, build_hard_deadline = (
             _build_phase_deadlines(time.monotonic(), build_timeout_sec)
@@ -3192,6 +7752,13 @@ def _run_build_worker(mode: str, build_only: bool = False,
         f"# bench_e2e_config={bench_e2e_config or ''}\n"
         f"# clang_rt_priority={entry.get('rt_priority')}\n"
         f"# hard_timeout_min={mode_timeout_sec / 60.0}\n"
+        f"# q1024_whole_deadline={q1024_whole_deadline or ''}\n"
+        f"# q1024_work_deadline={deadline if q1024_execution else ''}\n"
+        "# q1024_process_kill_deadline="
+        f"{subprocess_hard_kill_deadline or ''}\n"
+        "# q1024_cleanup_reserve_seconds="
+        f"{_Q1024_CLEANUP_RESERVE_SECONDS if q1024_execution else ''}\n"
+        f"# postgres_application_name={postgres_application_name or ''}\n"
     )
     log_handle.flush()
     bootstrap_log_value = entry.get("bootstrap_log_file")
@@ -3220,6 +7787,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 reuse_build_receipt,
                 expected_mode=mode,
                 expected_debug=debug,
+                deadline=deadline,
             )
             if receipt_error is not None or receipt is None:
                 raise RuntimeError(
@@ -3239,6 +7807,12 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 bench_e2e_config=bench_e2e_config,
                 log_handle=log_handle,
                 deadline=deadline,
+                hard_kill_deadline=subprocess_hard_kill_deadline,
+                cleanup_deadline=q1024_whole_deadline,
+                postgres_application_name=postgres_application_name,
+                q1024_run_token=(
+                    q1024_run_token if isinstance(q1024_run_token, str)
+                    else None),
             )
 
         if reuse_build_receipt is not None:
@@ -3254,7 +7828,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
         env = _build_worker_descendant_environment()
         # Never let ambient MCP-server state select an E2E configuration. The
         # explicit start_build argument below is the sole supported override.
-        env.pop("BIOSEQ_E2E_CONFIG_OVERRIDE", None)
+        _scrub_benchmark_e2e_config_environment(env)
         env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
         # The local MCP may itself run on the provisioned Linux build host.
         # Keep the provisioned environment when present, but also recover
@@ -3277,7 +7851,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 log_handle=log_handle,
             )
         )
-        if _is_aws_clang_preset(active_preset):
+        if _is_native_linux_clang22_preset(active_preset):
+            env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_LINUX_CLANG22"
+        elif _is_aws_clang_preset(active_preset):
             env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
         elif _is_aws_gcc_preset(active_preset):
             env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
@@ -3931,15 +8507,6 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 step="running",
                 uses_private_cluster=mode_details.uses_private_cluster,
             )
-            if mode == "benchmark-e2e":
-                env.setdefault(
-                    "BIOSEQ_E2E_PG_RESTART_CMD",
-                    _postgresql_e2e_restart_shell_command(active_build_dir, active_preset),
-                )
-                log_handle.write(
-                    "# BIOSEQ_E2E_PG_RESTART_CMD="
-                    f"{env['BIOSEQ_E2E_PG_RESTART_CMD']}\n")
-                log_handle.flush()
             run_env = env
             if mode == "highway-gcc-canary":
                 run_env = HIGHWAY_GCC_CANARY_RUNTIME_ENVIRONMENT.copy()
@@ -3947,13 +8514,35 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     "# highway-gcc-canary runtime environment="
                     "PATH,LC_ALL,LANG\n")
                 log_handle.flush()
-            elif mode == "benchmark-e2e" and bench_e2e_config is not None:
-                run_env = env.copy()
-                run_env["BIOSEQ_E2E_CONFIG_OVERRIDE"] = bench_e2e_config
+            elif mode == "benchmark-e2e":
+                run_env = _benchmark_e2e_runtime_environment(
+                    env, active_build_dir, active_preset, bench_e2e_config)
                 log_handle.write(
-                    "# BIOSEQ_E2E_CONFIG_OVERRIDE="
-                    f"{bench_e2e_config}\n")
+                    "# BIOSEQ_E2E_PG_RESTART_CMD="
+                    f"{run_env['BIOSEQ_E2E_PG_RESTART_CMD']}\n")
+                if _is_algorithm_matrix_campaign_config(bench_e2e_config):
+                    log_handle.write(
+                        "# canonical algorithm-matrix E2E environment="
+                        + json.dumps({
+                            key: run_env[key]
+                            for key in (
+                                *_ALGORITHM_MATRIX_RUNTIME_ENVIRONMENT,
+                                _BENCHMARK_E2E_CONFIG_IDENTITY_ENV,
+                                _BENCHMARK_E2E_CONFIG_OPEN_ENV,
+                                "BIOSEQ_E2E_PG_RESTART_CMD",
+                            )
+                        }, ensure_ascii=True, sort_keys=True)
+                        + "\n")
+                elif bench_e2e_config is not None:
+                    log_handle.write(
+                        "# BIOSEQ_E2E_CONFIG_OVERRIDE="
+                        f"{bench_e2e_config}\n")
+                    log_handle.write(
+                        "# BIOSEQ_E2E_CONFIG_OPEN_PATH="
+                        f"{run_env[_BENCHMARK_E2E_CONFIG_OPEN_ENV]}\n")
                 log_handle.flush()
+            _ensure_algorithm_matrix_launch_nice(
+                mode, bench_e2e_config, log_handle)
             (
                 report_path,
                 report_files,
@@ -3967,8 +8556,18 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 log_handle,
                 deadline,
                 pre_reports,
+                state_mode=mode,
+                phase="runtime",
                 bench_flags=bench_flags,
                 test_flags=test_flags,
+            )
+            _merge_algorithm_matrix_all_results(
+                mode=mode,
+                report_path=report_path,
+                bench_e2e_config=bench_e2e_config,
+                environment=run_env,
+                log_handle=log_handle,
+                deadline=deadline,
             )
             completed_at = time.time()
             _update_entry(
@@ -3994,24 +8593,18 @@ def _run_build_worker(mode: str, build_only: bool = False,
             if build_timeout_sec is not None
             else mode_timeout_sec
         )
-        try:
-            partial_artifact_counts = _build_artifact_counts(
-                active_build_dir, mode)
-            artifact_count_error = None
-        except (OSError, RuntimeError) as artifact_error:
-            partial_artifact_counts = None
-            artifact_count_error = str(artifact_error)
+        timeout_update: dict[str, object] = {
+            "status": "killed_timeout",
+            "step": "killed_timeout",
+            "completed_at": completed_at,
+            "exit_code": None,
+            "notes": str(e),
+            "build_only": build_only,
+            "debug": debug,
+        }
         _update_entry(
             mode,
-            status="killed_timeout",
-            step="killed_timeout",
-            completed_at=completed_at,
-            exit_code=None,
-            notes=str(e),
-            build_only=build_only,
-            debug=debug,
-            artifact_counts=partial_artifact_counts,
-            artifact_count_error=artifact_count_error,
+            **timeout_update,
         )
         log_handle.write(
             f"\n# killed by {timeout_seconds}-second "
@@ -4049,12 +8642,153 @@ def _format_minutes(minutes: float, *, plural_int: bool = False) -> str:
         return f"{round(minutes)} minutes"
     return f"{minutes:.2f} min"
 
+def _revalidate_legacy_q1024_postgresql_cleanup_before_admission(
+        *, request_deadline: float | None = None) -> bool:
+    """Clear only terminal legacy PG uncertainty proven by a global zero.
+
+    This path is deliberately outside ordinary run receipt acceptance.  It
+    validates the historical build authority without requiring today's Python
+    source fingerprint, performs no SQL, restart, or signal operation, and
+    leaves the original terminal/result facts untouched.
+    """
+    started_at = time.time()
+    deadline = started_at + 15.0
+    if request_deadline is not None:
+        deadline = min(deadline, request_deadline)
+    state = _load_state()
+    entry = state.get("benchmark-e2e")
+    if not isinstance(entry, dict):
+        return False
+    run_token = entry.get("q1024_run_token")
+    application_name = entry.get("postgres_application_name")
+    backend_identity = entry.get("postgres_backend_identity")
+    if (
+        entry.get("mode") != "benchmark-e2e"
+        or entry.get("status") not in {
+            "completed", "failed", "aborted", "killed_timeout"}
+        or not isinstance(run_token, str)
+        or re.fullmatch(r"[0-9a-f]{32}", run_token) is None
+        or application_name != f"bioseq-q1024-{run_token}"
+        or entry.get("postgres_backend_owner_started") is not True
+        or entry.get("postgres_cleanup_unverified") is not True
+        or entry.get("postgres_service_boundary") is not None
+        or not isinstance(backend_identity, dict)
+        or backend_identity.get("application_name") != application_name
+        or not isinstance(backend_identity.get("database"), str)
+        or not isinstance(backend_identity.get("user"), str)
+    ):
+        return False
+    try:
+        authority, authority_error = (
+            _algorithm_matrix_campaign_authority_status(
+                entry.get("bench_e2e_config")))
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return False
+    if authority_error is not None or not _is_q1024_execution_authority(
+            authority):
+        return False
+    receipt_id = entry.get("reuse_build_receipt")
+    if not isinstance(receipt_id, str) or not receipt_id:
+        return False
+    try:
+        receipt, receipt_error = _validate_build_receipt(
+            receipt_id,
+            expected_mode="benchmark-e2e",
+            expected_debug=False,
+            verify_source=False,
+            deadline=deadline,
+        )
+    except (OSError, RuntimeError, TimeoutError):
+        return False
+    if receipt_error is not None or receipt is None:
+        return False
+    try:
+        active_build_dir = Path(str(receipt["build_dir"])).resolve(
+            strict=True)
+        recorded_build_dir = Path(str(entry.get("build_dir"))).resolve(
+            strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    active_preset = receipt.get("preset")
+    if (
+        receipt.get("build_receipt_id") != receipt_id
+        or receipt.get("mode") != "benchmark-e2e"
+        or receipt.get("debug") is not False
+        or _canonical_algorithm_matrix_clang_e2e_receipt_error(receipt)
+            is not None
+        or receipt.get("preset_family") != "e2e"
+        or receipt.get("binary_subdir") != "bioseq"
+        or active_build_dir != recorded_build_dir
+        or entry.get("preset") != active_preset
+        or entry.get("preset_family") != receipt.get("preset_family")
+    ):
+        return False
+    try:
+        claim = _claim_q1024_postgresql_revalidation(
+            "benchmark-e2e", run_token, deadline=deadline)
+    except (OSError, RuntimeError, TimeoutError):
+        return False
+    if claim is None:
+        return False
+    claim_token, claimed_entry = claim
+    evidence: dict[str, object]
+    try:
+        if any(
+            claimed_entry.get(field) != entry.get(field)
+            for field in (
+                "status", "exit_code", "q1024_run_token",
+                "postgres_application_name", "postgres_backend_identity",
+                "build_dir", "preset", "preset_family",
+                "reuse_build_receipt", "worker_process_identity",
+                "active_process_identity",
+                "q1024_watchdog_process_identity",
+            )
+        ):
+            evidence = {
+                "cleanup_verified": False,
+                "error": "terminal q1024 state changed before global proof",
+            }
+        else:
+            evidence = _legacy_q1024_global_postgresql_zero_evidence(
+                entry=claimed_entry,
+                active_build_dir=active_build_dir,
+                active_preset=str(active_preset),
+                deadline=deadline,
+            )
+    except (OSError, RuntimeError, TimeoutError) as exc:
+        evidence = {
+            "cleanup_verified": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    evidence.update({
+        "revalidation_started_at": started_at,
+        "revalidation_deadline": deadline,
+        "historical_build_receipt_id": receipt_id,
+        "historical_build_receipt_content_sha256": receipt.get(
+            "content_sha256"),
+        "source_fingerprint_policy": (
+            "terminal-cleanup-only; current source fingerprint intentionally "
+            "not accepted for new execution"),
+        "preserved_terminal_status": claimed_entry.get("status"),
+        "preserved_terminal_exit_code": claimed_entry.get("exit_code"),
+    })
+    return _finish_q1024_postgresql_revalidation(
+        "benchmark-e2e", run_token, claim_token, evidence)
+
+
 def _unverified_guard_cleanup(
-        state: Mapping[str, object]) -> str | None:
+        state: Mapping[str, object], *, persist: bool = False) -> str | None:
     """Re-sweep unique build roots before clearing an unverified cleanup."""
-    for entry in state.values():
-        if not isinstance(entry, dict) or not entry.get("cleanup_unverified"):
+    cleared: dict[str, dict[str, object]] = {}
+    for mode, entry in state.items():
+        if not isinstance(entry, dict):
             continue
+        if not entry.get("cleanup_unverified"):
+            continue
+        if entry.get("postgres_cleanup_unverified"):
+            return (
+                "a previous q1024 PostgreSQL backend cleanup did not prove "
+                "zero exact owner matches")
         build_dir_value = entry.get("build_dir")
         if not isinstance(build_dir_value, str) or not build_dir_value:
             return "a previous guarded cleanup has no ownership root"
@@ -4093,6 +8827,24 @@ def _unverified_guard_cleanup(
                 "previous guarded build descendants remain live: "
                 + ", ".join(str(pid) for pid in sorted(live))
             )
+        cleared_entry = dict(entry)
+        cleared_entry.update({
+            "process_cleanup_unverified": False,
+            "cleanup_unverified": False,
+            "guard_cleanup_revalidation_evidence": {
+                "cleanup_verified": True,
+                "method": "existing_exact_build_root_ownership_sweep",
+                "ownership_root": str(ownership_root),
+                "completed_at": time.time(),
+            },
+        })
+        cleared[str(mode)] = cleared_entry
+    if cleared:
+        if not isinstance(state, dict):
+            return "cannot persist guarded cleanup revalidation state"
+        state.update(cleared)
+        if persist:
+            _save_state(state)
     return None
 
 def _running_in_same_group(
@@ -4123,7 +8875,15 @@ def _running_in_same_group(
         # conflict rather than risk racing that worker's configure.
         resolved_requested_build_dirs = None
     for other_mode in VALID_MODES:
-        entry = _refresh(state, other_mode)
+        recorded_entry = state.get(other_mode)
+        entry = _refresh(
+            state,
+            other_mode,
+            service_boundary_provider=(
+                _postgresql_recovery_service_boundary_provider(
+                    recorded_entry)
+                if isinstance(recorded_entry, dict) else None),
+        )
         if not entry:
             continue
         if entry.get("status") != "running":
@@ -4214,11 +8974,11 @@ def _ordinary_bench_e2e_default_filter(
 def _validate_bench_e2e_config_override(mode: str, requested_path):
     """Resolve one explicit local benchmark-e2e config without path escape.
 
-    The public surface accepts either an absolute path or a repository-root
-    relative path. ``resolve(strict=True)`` follows symlinks before the
-    containment check, so a repository symlink cannot smuggle an outside file
-    into the worker. Returning the canonical absolute path also avoids making
-    interpretation depend on the detached worker's current directory.
+    Ordinary configs retain the existing absolute-or-relative behavior and
+    return a canonical absolute path. A sealed algorithm-matrix member returns
+    its exact contract-listed repository-relative identity. The caller may
+    supply either that identity or its one exact canonical absolute repository
+    path; traversal, out-of-repository, and symlink aliases remain rejected.
     """
     if requested_path is None:
         return None, None
@@ -4231,12 +8991,22 @@ def _validate_bench_e2e_config_override(mode: str, requested_path):
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in requested_path):
         return None, "bench_e2e_config may not contain control characters"
 
-    candidate = Path(requested_path).expanduser()
+    requested_candidate = Path(requested_path)
+    if not requested_candidate.is_absolute():
+        campaign_selected, campaign_error = _campaign_config_contract_status(
+            requested_path)
+        if campaign_error is not None:
+            return None, campaign_error
+        if campaign_selected:
+            return requested_path, None
+
+    candidate = requested_candidate.expanduser()
     if not candidate.is_absolute():
         candidate = REPOSITORY_ROOT / candidate
     try:
         resolved = candidate.resolve(strict=True)
-        resolved.relative_to(REPOSITORY_ROOT.resolve(strict=True))
+        canonical_root = REPOSITORY_ROOT.resolve(strict=True)
+        relative_identity = resolved.relative_to(canonical_root).as_posix()
     except (OSError, RuntimeError, ValueError) as exc:
         return None, (
             "bench_e2e_config must resolve to an existing file inside the "
@@ -4246,6 +9016,31 @@ def _validate_bench_e2e_config_override(mode: str, requested_path):
         return None, f"bench_e2e_config is not a regular file: {resolved}"
     if resolved.suffix.lower() != ".json":
         return None, f"bench_e2e_config must name a .json file: {resolved}"
+
+    if requested_candidate.is_absolute():
+        campaign_selected, campaign_error = _campaign_config_contract_status(
+            relative_identity)
+        if campaign_error is not None:
+            return None, campaign_error
+        if campaign_selected:
+            raw_components = requested_path.split("/")
+            if (not requested_path.startswith("/")
+                    or requested_path.endswith("/")
+                    or "\\" in requested_path
+                    or any(component in {"", ".", ".."}
+                           for component in raw_components[1:])):
+                return None, (
+                    "absolute campaign config path contains a lexical alias")
+            try:
+                canonical_file = _campaign_regular_repository_file(
+                    relative_identity, "absolute campaign config")
+            except (OSError, RuntimeError, ValueError) as exc:
+                return None, str(exc)
+            if candidate != resolved or canonical_file != resolved:
+                return None, (
+                    "absolute campaign config path may not traverse a symlink "
+                    "or retain another path alias")
+            return relative_identity, None
     return str(resolved), None
 
 def _configured_local_build_rt_priority() -> int | None:
@@ -4390,6 +9185,9 @@ def tool_start_build(mode: str, build_only: bool = False,
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
 
+    if mode == ALL_ALPHABETS_UNIT_INTEGRATION_MODE and debug:
+        return f"{mode} uses a fixed optimized preset and rejects debug=true"
+
     if build_timeout_sec is not None and (
         not isinstance(build_timeout_sec, int)
         or isinstance(build_timeout_sec, bool)
@@ -4462,13 +9260,85 @@ def tool_start_build(mode: str, build_only: bool = False,
         mode, bench_e2e_config)
     if config_error is not None:
         return f"Invalid bench_e2e_config: {config_error}"
-    bench_filter = _ordinary_bench_e2e_default_filter(
-        mode,
-        bench_filter,
-        build_only=build_only,
-        debug_report=debug_report,
-        filter_supplied=filter_supplied,
-    )
+    campaign_authority = None
+    try:
+        campaign_authority, campaign_error = (
+            _algorithm_matrix_campaign_authority_status(resolved_e2e_config))
+        if campaign_error is not None:
+            raise RuntimeError(campaign_error)
+        campaign_selected = campaign_authority is not None
+    except RuntimeError as exc:
+        return f"Invalid bench_e2e_config: {exc}"
+    if resolved_e2e_config in {
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0058_CONFIG,
+            _ALGORITHM_MATRIX_Q1024_SINGLETON0068_CONFIG}:
+        if campaign_authority is None:
+            return (
+                "Invalid bench_e2e_config: q1024 extended-timeout config has no "
+                "canonical campaign authority")
+        timeout_authority, timeout_error = (
+            _q1024_extended_timeout_authority(
+                resolved_e2e_config, campaign_authority))
+        if timeout_error is not None or timeout_authority is None:
+            return (
+                "Invalid bench_e2e_config: "
+                f"{timeout_error or 'q1024 timeout authority missing'}")
+    if _q1024_nonreceipt_execution_forbidden(
+            campaign_authority, build_only=build_only, run_only=run_only):
+        return (
+            "q1024 execution requires run_only=true and a current "
+            "qualified debug=false Clang E2E build receipt")
+    if (campaign_authority is not None
+            and campaign_authority.get("name") == "q1024"):
+        if campaign_authority.get("execution_role") not in {
+                "q1024_singleton", "q1024_packed"}:
+            return (
+                "Unselected canonical q1024 configs are topology authority only; "
+                "execute one exact sealed packed or singleton-fallback member.")
+        if not run_only and not build_only:
+            return (
+                "q1024 execution requires run_only=true and a current "
+                "qualified debug=false Clang E2E build receipt")
+        if debug_supplied and debug:
+            return "q1024 execution requires debug=false"
+    if (campaign_authority is not None
+            and campaign_authority.get("name") == "observed_rung"):
+        if campaign_authority.get(
+                "execution_role") != "observed_rung_singleton":
+            return (
+                "Observed-rung execution requires one exact sealed singleton")
+        if not run_only and not build_only:
+            return (
+                "Observed-rung execution requires run_only=true and a current "
+                "qualified debug=false Clang E2E build receipt")
+        if debug_supplied and debug:
+            return "Observed-rung execution requires debug=false"
+    if (campaign_authority is not None
+            and campaign_authority.get("name") == "deadline"):
+        if campaign_authority.get("execution_role") != "deadline_singleton":
+            return "deadline campaign execution requires one sealed singleton"
+        if not run_only:
+            return (
+                "deadline campaign execution requires run_only=true and a current "
+                "qualified debug=false Clang E2E build receipt")
+        if debug_supplied and debug:
+            return "deadline campaign execution requires debug=false"
+    if campaign_selected:
+        if ((filter_supplied or bench_filter is not None)
+                and bench_filter != _ALGORITHM_MATRIX_EXACT_BENCH_FILTER):
+            return (
+                "Canonical algorithm-matrix campaign configs accept only the "
+                "exact filter {'benchmarks': ['bench_e2e']}; case, tag, extra, "
+                "or multi-benchmark filters are incompatible with sealed ownership.")
+        bench_filter = copy.deepcopy(_ALGORITHM_MATRIX_EXACT_BENCH_FILTER)
+    else:
+        bench_filter = _ordinary_bench_e2e_default_filter(
+            mode,
+            bench_filter,
+            build_only=build_only,
+            debug_report=debug_report,
+            filter_supplied=filter_supplied,
+        )
     if mode == POSTGRES_ERROR_SAFETY_MODE:
         if (
             run_only or fresh or build_timeout_sec is not None
@@ -4507,6 +9377,20 @@ def tool_start_build(mode: str, build_only: bool = False,
                 return f"Build receipt validation error: {receipt_error}"
             debug = bool(selected_receipt["debug"])
             selected_preset = str(selected_receipt["preset"])
+            if (campaign_authority is not None
+                    and (campaign_authority.get("name") == "observed_rung"
+                         or campaign_authority.get("execution_role")
+                            in {"q1024_singleton", "q1024_packed"})
+                    and (debug is not False
+                         or _canonical_algorithm_matrix_clang_e2e_receipt_error(
+                             selected_receipt) is not None
+                         or selected_receipt.get("mode") != "benchmark-e2e"
+                         or selected_receipt.get("preset_family") != "e2e"
+                         or selected_receipt.get("binary_subdir") != "bioseq")):
+                return (
+                    "Canonical algorithm-matrix execution requires a current "
+                    "completed "
+                    "qualified debug=false Clang E2E receipt")
             source_repository_root = Path(
                 str(selected_receipt["source_repository_root"])
             ).resolve(strict=True)
@@ -4571,9 +9455,14 @@ def tool_start_build(mode: str, build_only: bool = False,
         if debug_report:
             bench_flags.append("--debug")
 
+    # Terminal legacy q1024 recovery runs before the scheduling admission
+    # lock because its own claim/finish operations are independently CAS-
+    # guarded.  It never grants execution authority to the historical receipt.
+    _revalidate_legacy_q1024_postgresql_cleanup_before_admission()
+
     with _global_lock():
         state = _load_state()
-        cleanup_blocker = _unverified_guard_cleanup(state)
+        cleanup_blocker = _unverified_guard_cleanup(state, persist=True)
         if cleanup_blocker is not None:
             return (
                 "Build guard cleanup error: " + cleanup_blocker
@@ -4585,7 +9474,7 @@ def tool_start_build(mode: str, build_only: bool = False,
         # dead guarded worker and records fail-closed cleanup evidence.  Do
         # not let this same scheduling request pass the cleanup gate using
         # the pre-refresh state.
-        cleanup_blocker = _unverified_guard_cleanup(state)
+        cleanup_blocker = _unverified_guard_cleanup(state, persist=True)
         if cleanup_blocker is not None:
             return (
                 "Build guard cleanup error: " + cleanup_blocker
@@ -4605,6 +9494,7 @@ def tool_start_build(mode: str, build_only: bool = False,
             worker_env = _build_worker_descendant_environment()
         except RuntimeError as exc:
             return f"Build worker environment error: {exc}"
+        _scrub_benchmark_e2e_config_environment(worker_env)
         worker_env["BIOSEQ_BUILD_REPOSITORY_ROOT"] = str(
             source_repository_root)
 
@@ -4641,6 +9531,38 @@ def tool_start_build(mode: str, build_only: bool = False,
             f"{log_path.name}.bootstrap")
 
         worker_e2e_config = resolved_e2e_config
+        postgres_application_name = (
+            _q1024_postgres_application_name(run_token)
+            if (run_only
+                and _is_q1024_execution_authority(campaign_authority))
+            else None
+        )
+        q1024_deadlines: dict[str, float] = {}
+        if postgres_application_name is not None:
+            default_timeout = (
+                HARD_TIMEOUT_SEC
+                if mode_details.hard_timeout_min is None
+                else min(
+                    HARD_TIMEOUT_SEC,
+                    mode_details.hard_timeout_min * 60.0,
+                )
+            )
+            whole_timeout = _run_only_runtime_timeout_seconds(
+                mode,
+                worker_e2e_config,
+                default_timeout,
+                started_at=started_at,
+            )
+            whole_deadline = started_at + whole_timeout
+            q1024_deadlines = {
+                "q1024_whole_deadline": whole_deadline,
+                "q1024_work_deadline": (
+                    whole_deadline
+                    - _Q1024_CLEANUP_RESERVE_SECONDS
+                    - BUILD_TIMEOUT_TERM_GRACE_SEC),
+                "q1024_client_kill_deadline": (
+                    whole_deadline - _Q1024_CLEANUP_RESERVE_SECONDS),
+            }
         receipt_required = _build_receipt_required(mode, build_only)
         state[mode] = {
             "mode": mode,
@@ -4680,6 +9602,8 @@ def tool_start_build(mode: str, build_only: bool = False,
             "bench_flags": bench_flags,
             "focused_test_args": test_flags,
             "bench_e2e_config": worker_e2e_config,
+            "postgres_application_name": postgres_application_name,
+            "postgres_backend_owner_started": False,
             "lint_paths": list(lint_paths),
             "rt_priority": configured_rt_priority,
             "effective_run_args":
@@ -4689,6 +9613,17 @@ def tool_start_build(mode: str, build_only: bool = False,
                     else (test_flags if mode in CATCH_FILTER_MODES else bench_flags)
                 ),
         }
+        if postgres_application_name is not None:
+            state[mode].update({
+                "q1024_run_token": run_token,
+                "q1024_watchdog_status": "reserved",
+                "q1024_watchdog_process_identity": None,
+                "q1024_watchdog_log_file": str(
+                    bootstrap_log_path.with_name(
+                        f"{bootstrap_log_path.name}.q1024-watchdog")),
+                "postgres_cleanup_claim": None,
+                **q1024_deadlines,
+            })
         _save_state(state)
 
         server_path = Path(__file__).with_name("server.py").resolve()
@@ -4730,8 +9665,11 @@ def tool_start_build(mode: str, build_only: bool = False,
         state = _load_state()
         state[mode]["pid"] = proc.pid
         worker_identity = _capture_process_identity(proc.pid)
-        guarded_identity_missing = (
+        detached_identity_required = (
             build_timeout_sec is not None
+            or postgres_application_name is not None)
+        guarded_identity_missing = (
+            detached_identity_required
             and not _valid_detached_worker_identity(
                 worker_identity,
                 child_pid=proc.pid,
@@ -4764,9 +9702,70 @@ def tool_start_build(mode: str, build_only: bool = False,
         state[mode]["worker_process_identity"] = (
             worker_identity.__dict__ if worker_identity is not None else None
         )
-        if build_timeout_sec is not None:
+        if detached_identity_required:
             state[mode]["step"] = "armed"
         _save_state(state)
+
+        if postgres_application_name is not None:
+            watchdog_path = Path(__file__).with_name(
+                "q1024_watchdog.py").resolve()
+            watchdog_log_path = Path(str(
+                state[mode]["q1024_watchdog_log_file"]))
+            watchdog_proc = None
+            try:
+                if not watchdog_path.is_file():
+                    raise RuntimeError(
+                        "q1024 watchdog module is not installed")
+                watchdog_env = dict(worker_env)
+                watchdog_env.pop("PGAPPNAME", None)
+                with watchdog_log_path.open(
+                        "w", buffering=1) as watchdog_log:
+                    watchdog_proc = subprocess.Popen(
+                        [sys.executable, str(watchdog_path),
+                         "--mode", mode,
+                         "--run-token", run_token],
+                        stdin=subprocess.DEVNULL,
+                        stdout=watchdog_log,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        close_fds=True,
+                        env=watchdog_env,
+                    )
+                watchdog_identity = _capture_process_identity(
+                    watchdog_proc.pid)
+                if not _valid_detached_worker_identity(
+                        watchdog_identity,
+                        child_pid=watchdog_proc.pid,
+                        parent_pid=os.getpid()):
+                    raise RuntimeError(
+                        "q1024 watchdog exact pid/start/session capture failed")
+                state = _load_state()
+                state[mode].update({
+                    "q1024_watchdog_status": "armed",
+                    "q1024_watchdog_process_identity": (
+                        watchdog_identity.__dict__),
+                })
+                _save_state(state)
+            except (OSError, RuntimeError) as exc:
+                state = _load_state()
+                if mode in state:
+                    state[mode].update({
+                        "status": "failed",
+                        "step": "q1024_watchdog_arm_failed",
+                        "completed_at": time.time(),
+                        "q1024_watchdog_status": "arm_failed",
+                        "q1024_watchdog_termination_evidence": {
+                            "cleanup_verified": False,
+                            "reason": (
+                                "watchdog/worker were not signaled while the "
+                                "scheduler state lock was held; both fail "
+                                "closed at their pre-setup arm gates"),
+                        },
+                        "cleanup_unverified": True,
+                        "notes": str(exc),
+                    })
+                    _save_state(state)
+                return f"q1024 watchdog arm error: {exc}"
         _log(f"started worker pid={proc.pid} mode={mode} debug={debug} "
              f"rt_priority={configured_rt_priority} "
              f"bench_flags={bench_flags} focused_test_args={test_flags} "
@@ -4822,6 +9821,9 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "--run-build-sync: lint-focused requires public MCP filter.paths "
             "and is not an inline remote mode")
         return 2
+    if mode == ALL_ALPHABETS_UNIT_INTEGRATION_MODE and debug:
+        _log(f"{mode} uses a fixed optimized preset and rejects debug=true")
+        return 2
     if mode_details.requires_build_only and (
         not build_only or debug or bench_flags or test_flags
         or bench_e2e_config
@@ -4839,6 +9841,18 @@ def _run_build_inline(mode: str, build_only: bool = False,
         mode, bench_e2e_config)
     if config_error is not None:
         _log(f"--run-build-sync: invalid bench_e2e_config: {config_error}")
+        return 2
+    campaign_selected, campaign_error = _campaign_config_contract_status(
+        resolved_e2e_config)
+    if campaign_error is not None:
+        _log(f"--run-build-sync: invalid campaign authority: {campaign_error}")
+        return 2
+    if campaign_selected and bench_flags not in (
+            _ALGORITHM_MATRIX_EXACT_BENCH_FLAGS,
+            [*_ALGORITHM_MATRIX_EXACT_BENCH_FLAGS, "--debug"]):
+        _log(
+            "--run-build-sync: canonical campaign requires exact "
+            "benchmark=bench_e2e selection")
         return 2
     if mode == POSTGRES_ERROR_SAFETY_MODE:
         try:
@@ -4995,6 +10009,10 @@ def tool_inspect(arguments: dict) -> str:
         source_basename = None
     try:
         llc_on_bc = _parse_worker_bool("llc_on_bc", arguments.get("llc_on_bc", True))
+        historical_artifact_only = _parse_worker_bool(
+            "historical_artifact_only",
+            arguments.get("historical_artifact_only", False),
+        )
     except RuntimeError as e:
         # parse_bool raises on a malformed string — convert to the JSON
         # error body shape the AI agent expects (per plan §6 error
@@ -5009,6 +10027,12 @@ def tool_inspect(arguments: dict) -> str:
             indent=2,
         )
 
+    # Artifact locations belong to the target, not necessarily to the mode
+    # whose receipt owns it.  In particular, a unit-integration receipt owns
+    # both extension targets while the cache DSO remains under
+    # bioseq_caching/artifacts/cache_production/<configuration>.
+    artifact_binary_subdir = MODES[target_definition.mode].binary_subdir
+
     # Resolve which preset family owns the requested binary. `debug` is an
     # explicit override; without it, prefer that family's debug tree if built.
     inspect_mode = target_definition.mode
@@ -5016,6 +10040,9 @@ def tool_inspect(arguments: dict) -> str:
     receipt_id = arguments.get("reuse_build_receipt")
     try:
         selected_receipt: dict[str, object] | None = None
+        if historical_artifact_only and receipt_id is None:
+            raise RuntimeError(
+                "historical_artifact_only requires reuse_build_receipt")
         if receipt_id is not None:
             if not isinstance(receipt_id, str) or not receipt_id:
                 raise RuntimeError(
@@ -5024,16 +10051,36 @@ def tool_inspect(arguments: dict) -> str:
                 _parse_worker_bool("debug", debug_raw)
                 if debug_raw is not None else None
             )
-            selected_receipt, receipt_error = _validate_build_receipt(
-                receipt_id,
-                expected_mode=inspect_mode,
-                expected_debug=explicit_debug,
-            )
+            if historical_artifact_only:
+                selected_receipt, receipt_error = _validate_build_receipt(
+                    receipt_id,
+                    expected_debug=explicit_debug,
+                    verify_source=False,
+                )
+            else:
+                selected_receipt, receipt_error = _validate_build_receipt(
+                    receipt_id,
+                    expected_debug=explicit_debug,
+                )
             if receipt_error is not None or selected_receipt is None:
                 raise RuntimeError(
                     f"inspect receipt validation failed: {receipt_error}")
+            receipt_mode = selected_receipt.get("mode")
+            receipt_targets = selected_receipt.get("targets")
+            if (
+                not isinstance(receipt_mode, str)
+                or receipt_mode not in MODES
+                or not isinstance(receipt_targets, list)
+            ):
+                raise RuntimeError(
+                    "inspect receipt validation returned malformed mode/targets")
+            if target not in receipt_targets:
+                raise RuntimeError(
+                    f"inspect receipt mode {receipt_mode!r} does not own "
+                    f"target {target!r}")
+            inspect_mode = receipt_mode
             debug_chosen = bool(selected_receipt["debug"])
-            if not debug_chosen:
+            if not debug_chosen and not historical_artifact_only:
                 raise RuntimeError(
                     "receipt-selected inspect requires a debug build receipt")
             inspect_build_dir = Path(
@@ -5062,6 +10109,34 @@ def tool_inspect(arguments: dict) -> str:
     except RuntimeError as e:
         return json.dumps({"error": str(e)}, indent=2)
 
+    if historical_artifact_only:
+        assert selected_receipt is not None
+        authorized_artifacts = selected_receipt.get("authorized_artifacts")
+        if not isinstance(authorized_artifacts, list):
+            return json.dumps(
+                {"error": "historical inspect receipt has malformed "
+                          "authorized_artifacts evidence"},
+                indent=2,
+            )
+        authorized_paths = {
+            item.get("relative_path")
+            for item in authorized_artifacts
+            if isinstance(item, dict)
+            and isinstance(item.get("relative_path"), str)
+        }
+        artifact_names = tuple(
+            name for name in artifact_names
+            if str(Path(artifact_binary_subdir) / name) in authorized_paths
+        )
+        if not artifact_names:
+            return json.dumps(
+                {"error": f"historical inspect receipt does not authorize "
+                          f"an artifact for target {target!r}"},
+                indent=2,
+            )
+        # Never synthesize a sibling .s file in a historical build tree.
+        llc_on_bc = False
+
     out = _run_inspect_impl(
         function_name=function_name,
         target=target,
@@ -5071,7 +10146,7 @@ def tool_inspect(arguments: dict) -> str:
         source_basename=source_basename,
         llc_on_bc=llc_on_bc,
         max_llc_bc_files=max_llc_bc_files,
-        binary_subdir=MODES[inspect_mode].binary_subdir,
+        binary_subdir=artifact_binary_subdir,
         artifact_names=artifact_names,
         shared_target_names=target_definition.shared_target_names,
     )
@@ -5084,9 +10159,17 @@ def tool_inspect(arguments: dict) -> str:
     out["build_metadata"]["preset_family"] = (
         MODES[inspect_mode].preset_family)
     if selected_receipt is not None:
+        out["build_metadata"]["mode"] = inspect_mode
         out["build_metadata"]["build_receipt_id"] = receipt_id
         out["build_metadata"]["source_graph_fingerprint"] = (
             selected_receipt["source_graph_fingerprint"])
+        if historical_artifact_only:
+            out["build_metadata"]["historical_artifact_only"] = True
+            out["build_metadata"]["current_worktree_source_verified"] = False
+            out["build_metadata"]["artifact_scope"] = (
+                "exact receipt-pinned historical artifact")
+            out["build_metadata"]["source_scope"] = (
+                "receipt-recorded source graph; current worktree not verified")
     return json.dumps(out, indent=2)
 
 def _unknown_document_activity() -> dict:
@@ -5225,7 +10308,15 @@ def tool_status(mode: str | None = None) -> str:
 
     with _global_lock():
         state = _load_state()
-        refreshed_entry = _refresh(state, mode)
+        recorded_entry = state.get(mode)
+        refreshed_entry = _refresh(
+            state,
+            mode,
+            service_boundary_provider=(
+                _postgresql_recovery_service_boundary_provider(
+                    recorded_entry)
+                if isinstance(recorded_entry, dict) else None),
+        )
         entry = (
             dict(refreshed_entry)
             if refreshed_entry is not None else None
@@ -5312,6 +10403,14 @@ def tool_status(mode: str | None = None) -> str:
         if entry.get("termination_evidence") is not None
         else ""
     )
+    postgres_cleanup_suffix = (
+        ". PostgreSQL owner cleanup: "
+        + json.dumps(entry.get("postgres_cleanup_evidence"), sort_keys=True)
+        + " cleanup_unverified="
+        + str(bool(entry.get("postgres_cleanup_unverified")))
+        if entry.get("postgres_cleanup_evidence") is not None
+        else ""
+    )
 
     if status == "running":
         elapsed_min = (time.time() - entry["started_at"]) / 60.0
@@ -5324,7 +10423,7 @@ def tool_status(mode: str | None = None) -> str:
                 f"{focus_suffix} "
                 f"Log: {log_path}{report_suffix}{qualification_suffix}"
                 f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}"
-                f"{clang_tidy_suffix}")
+                f"{clang_tidy_suffix}{postgres_cleanup_suffix}")
 
     completed_at = entry.get("completed_at") or time.time()
     duration_min = (completed_at - entry["started_at"]) / 60.0
@@ -5349,6 +10448,7 @@ def tool_status(mode: str | None = None) -> str:
         msg += guard_suffix
         msg += artifact_suffix
         msg += clang_tidy_suffix
+        msg += postgres_cleanup_suffix
         return msg
 
     if status == "killed_timeout":
@@ -5357,7 +10457,7 @@ def tool_status(mode: str | None = None) -> str:
                 f"Logs for inspection are available here: "
                 f"{log_path}{report_suffix}{qualification_suffix}"
                 f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}"
-                f"{clang_tidy_suffix}. "
+                f"{clang_tidy_suffix}{postgres_cleanup_suffix}. "
                 "Termination evidence: "
                 f"{json.dumps(entry.get('termination_evidence'), sort_keys=True)}")
 
@@ -5375,7 +10475,7 @@ def tool_status(mode: str | None = None) -> str:
                 f"{private_note}{bootstrap_suffix}{guard_suffix}"
                 f"{artifact_suffix}"
                 f"{clang_tidy_suffix}"
-                f"{termination_suffix}")
+                f"{termination_suffix}{postgres_cleanup_suffix}")
 
     if status == "aborted":
         return (f"{mode_details.label} run was aborted (worker process died "
@@ -5384,7 +10484,7 @@ def tool_status(mode: str | None = None) -> str:
                 f"Log: {log_path}{report_suffix}{qualification_suffix}"
                 f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}"
                 f"{clang_tidy_suffix}"
-                f"{termination_suffix}")
+                f"{termination_suffix}{postgres_cleanup_suffix}")
 
     return (f"{mode_details.label} status: {status}."
             f"{focus_suffix} Log: {log_path}{report_suffix}"

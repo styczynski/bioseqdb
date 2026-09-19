@@ -4,11 +4,13 @@
  */
 module;
 
+#include <array>
+#include <cstdint>
+
 struct SnapshotData;
 
 export module bioseq.postgres.storage.indexing.minimizer_persistence_policy;
 
-import std;
 import bioseq.indexing.type;
 
 export namespace bioseq::storage::indexing {

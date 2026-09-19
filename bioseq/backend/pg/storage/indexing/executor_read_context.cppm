@@ -4,16 +4,24 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
-
 extern "C" {
+#include "postgres.h"
+
 #include "access/relation.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
 }
 
-export module bioseq.postgres.storage.indexing.executor_read_context;
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
-import std;
+#include <optional>
+#include <type_traits>
+#include <utility>
+
+export module bioseq.postgres.storage.indexing.executor_read_context;
 
 export namespace bioseq::storage::indexing {
 

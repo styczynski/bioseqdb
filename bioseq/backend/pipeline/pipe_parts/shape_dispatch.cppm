@@ -16,6 +16,7 @@ import bioseq.common.memory_budget;
 import bioseq.highway.dispatch_contract;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.minimizer_layout_geometry;
 import bioseq.sequences.kmers.two_stack_minimizers;
 import bioseq.sequences.cigar;
 import bioseq.alignment;
@@ -98,8 +99,10 @@ export {
     /// specialisation handles the upper band), so a clamp on the upper end is sufficient.
     [[nodiscard]] constexpr std::size_t round_up_seq_len_log2(std::size_t max_bp,
                                                               std::size_t kmer_size) noexcept {
-        const std::size_t need = max_bp > 1u ? max_bp - 1u : 1u;
-        const std::size_t lg = static_cast<std::size_t>(std::bit_width(need));
+        // Preserve the legacy helper's saturating contract. New physical-layout
+        // selection checks the original extent before reaching this fallback.
+        const std::size_t lg = ::bioseq::minimizers::minimizer_position_requirement(
+            std::min<std::uint64_t>(max_bp, std::uint64_t{1u} << 63u));
         return std::clamp<std::size_t>(lg, kmer_size, 63u);
     }
 
@@ -138,12 +141,11 @@ export {
     /// p_kmer_size.  Every p_kmer_size in `kmer_size_buckets` must have a matching clause here.
     [[nodiscard]] consteval std::size_t storage_bits_for(std::size_t p_bucket_width,
                                                          std::size_t p_kmer_size) noexcept {
-        if (p_kmer_size == 15u)
-            return make_storage_bits_table<15u>()[p_bucket_width];
-        if (p_kmer_size == 7u)
-            return make_storage_bits_table<7u>()[p_bucket_width];
-        if (p_kmer_size == 27u)
-            return make_storage_bits_table<27u>()[p_bucket_width];
+        if (p_kmer_size == 15u || p_kmer_size == 20u ||
+            p_kmer_size == 7u || p_kmer_size == 27u) {
+            return ::bioseq::minimizers::minimizer_record_storage_bits(
+                p_bucket_width, p_kmer_size);
+        }
         return 0u;
     }
 

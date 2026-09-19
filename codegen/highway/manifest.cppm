@@ -5,6 +5,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -124,6 +125,25 @@ namespace detail {
     return value;
 }
 
+template <class p_integer>
+[[nodiscard]] inline p_integer parse_bounded_integer(
+    const std::string_view spelling,
+    const std::filesystem::path& path,
+    const std::string_view field) {
+    std::uint64_t value{};
+    const auto parsed = std::from_chars(
+        spelling.data(), spelling.data() + spelling.size(), value);
+    if (parsed.ec != std::errc{}
+        || parsed.ptr != spelling.data() + spelling.size()
+        || value > static_cast<std::uint64_t>(
+            (std::numeric_limits<p_integer>::max)())) {
+        throw std::runtime_error(
+            path.string() + ": invalid " + std::string{field} + " '"
+            + std::string{spelling} + "'");
+    }
+    return static_cast<p_integer>(value);
+}
+
 inline void require_field_count(
     const std::filesystem::path& path,
     std::string_view record,
@@ -236,6 +256,165 @@ inline void require_field_count(
 
 }  // namespace detail
 
+/** Render the source-derived record/owner/profile manifest consumed by Highway. */
+[[nodiscard]] inline std::string render_minimizer_registry_manifest(
+    const minimizer_registry_spec& registry) {
+    std::ostringstream output;
+    output << "bioseq-minimizer-physical-registry\n"
+           << "revision\t1\n"
+           << "profile\t" << minimizer_registry_profile_name(registry.profile)
+           << "\n"
+           << "payload-layout-abi\t1\n"
+           << "producer-identity-revision\t1\n";
+    for (const minimizer_physical_record_spec& record : registry.records) {
+        output << "record\t" << record.id << '\t' << record.key << '\t'
+               << record.representation_type << '\t'
+               << record.hash_output_width << '\t'
+               << static_cast<unsigned>(record.position_log2) << '\t'
+               << static_cast<unsigned>(record.physical_kmer_size) << '\t'
+               << static_cast<unsigned>(record.storage_bits) << '\t'
+               << static_cast<unsigned>(record.available_hash_bits) << '\n';
+    }
+    for (const minimizer_highway_owner_spec& owner : registry.highway_owners) {
+        output << "highway-owner\t" << owner.id << '\t' << owner.owner_key
+               << '\t' << owner.algorithm << '\t' << owner.source_key << '\t'
+               << owner.record_key << '\t';
+        for (std::size_t index = 0; index < owner.storage_types.size(); ++index) {
+            if (index != 0u) output << ',';
+            output << owner.storage_types[index];
+        }
+        output << '\t' << owner.alphabet_cpp_type << '\t' << owner.alphabet_id
+               << '\t' << owner.export_base << '\n';
+    }
+    for (const minimizer_runtime_profile_spec& profile :
+         registry.runtime_profiles) {
+        output << "profile-binding\t" << profile.requested_algorithm << '\t'
+               << profile.effective_algorithm << '\t'
+               << profile.alphabet_cpp_type << '\t' << profile.alphabet_id
+               << '\t' << profile.runtime_kmer_size << '\t'
+               << profile.runtime_window_size << '\t'
+               << static_cast<unsigned>(profile.minimum_position_log2) << '\t'
+               << static_cast<unsigned>(profile.maximum_position_log2) << '\t'
+               << profile.packed_storage << '\t' << profile.record_key << '\t'
+               << profile.hash_width << '\t' << profile.dispatch_kind << '\t'
+               << profile.highway_owner_key << '\t' << profile.export_symbol
+               << '\n';
+    }
+    return output.str();
+}
+
+/** Parse the early generated registry; it is the sole main-generator input. */
+[[nodiscard]] inline minimizer_registry_spec parse_minimizer_registry_manifest(
+    const std::filesystem::path& path) {
+    minimizer_registry_spec result;
+    bool saw_revision = false;
+    bool saw_profile = false;
+    bool saw_payload_abi = false;
+    bool saw_producer_revision = false;
+    for (const auto& fields : detail::manifest_lines(
+             path, "bioseq-minimizer-physical-registry")) {
+        if (!saw_revision && fields.front() != "revision") {
+            throw std::runtime_error(
+                path.string() + ": minimizer registry must begin with revision 1");
+        }
+        if (fields.front() == "revision") {
+            detail::require_field_count(path, fields.front(), fields.size(), 2u);
+            if (saw_revision || fields[1] != "1") {
+                throw std::runtime_error(
+                    path.string() + ": minimizer registry requires revision 1 exactly once");
+            }
+            saw_revision = true;
+        } else if (fields.front() == "profile") {
+            detail::require_field_count(path, fields.front(), fields.size(), 2u);
+            if (saw_profile) {
+                throw std::runtime_error(path.string() + ": duplicate profile record");
+            }
+            result.profile = parse_minimizer_registry_profile(fields[1]);
+            saw_profile = true;
+        } else if (fields.front() == "payload-layout-abi") {
+            detail::require_field_count(path, fields.front(), fields.size(), 2u);
+            if (saw_payload_abi || fields[1] != "1") {
+                throw std::runtime_error(
+                    path.string() + ": payload layout ABI must remain 1");
+            }
+            saw_payload_abi = true;
+        } else if (fields.front() == "producer-identity-revision") {
+            detail::require_field_count(path, fields.front(), fields.size(), 2u);
+            if (saw_producer_revision || fields[1] != "1") {
+                throw std::runtime_error(
+                    path.string() + ": producer identity revision must remain 1");
+            }
+            saw_producer_revision = true;
+        } else if (fields.front() == "record") {
+            detail::require_field_count(path, fields.front(), fields.size(), 9u);
+            result.records.push_back(minimizer_physical_record_spec{
+                .id = detail::parse_bounded_integer<std::uint16_t>(
+                    fields[1], path, "record id"),
+                .key = fields[2],
+                .representation_type = fields[3],
+                .hash_output_width = fields[4],
+                .position_log2 = detail::parse_bounded_integer<std::uint8_t>(
+                    fields[5], path, "record position bits"),
+                .physical_kmer_size = detail::parse_bounded_integer<std::uint8_t>(
+                    fields[6], path, "record physical k"),
+                .storage_bits = detail::parse_bounded_integer<std::uint8_t>(
+                    fields[7], path, "record storage bits"),
+                .available_hash_bits = detail::parse_bounded_integer<std::uint8_t>(
+                    fields[8], path, "record hash bits"),
+            });
+        } else if (fields.front() == "highway-owner") {
+            detail::require_field_count(path, fields.front(), fields.size(), 10u);
+            result.highway_owners.push_back(minimizer_highway_owner_spec{
+                .id = detail::parse_bounded_integer<std::uint16_t>(
+                    fields[1], path, "Highway owner id"),
+                .owner_key = fields[2],
+                .algorithm = fields[3],
+                .source_key = fields[4],
+                .record_key = fields[5],
+                .storage_types = detail::split_dependencies(fields[6]),
+                .alphabet_cpp_type = fields[7],
+                .alphabet_id = detail::parse_bounded_integer<std::uint16_t>(
+                    fields[8], path, "Highway owner alphabet id"),
+                .export_base = fields[9],
+            });
+        } else if (fields.front() == "profile-binding") {
+            detail::require_field_count(path, fields.front(), fields.size(), 15u);
+            result.runtime_profiles.push_back(minimizer_runtime_profile_spec{
+                .requested_algorithm = fields[1],
+                .effective_algorithm = fields[2],
+                .alphabet_cpp_type = fields[3],
+                .alphabet_id = detail::parse_bounded_integer<std::uint16_t>(
+                    fields[4], path, "profile alphabet id"),
+                .runtime_kmer_size = detail::parse_bounded_integer<std::uint16_t>(
+                    fields[5], path, "profile runtime k"),
+                .runtime_window_size = detail::parse_bounded_integer<std::uint16_t>(
+                    fields[6], path, "profile runtime w"),
+                .minimum_position_log2 = detail::parse_bounded_integer<std::uint8_t>(
+                    fields[7], path, "profile minimum position bits"),
+                .maximum_position_log2 = detail::parse_bounded_integer<std::uint8_t>(
+                    fields[8], path, "profile maximum position bits"),
+                .packed_storage = fields[9],
+                .record_key = fields[10],
+                .hash_width = fields[11],
+                .dispatch_kind = fields[12],
+                .highway_owner_key = fields[13],
+                .export_symbol = fields[14],
+            });
+        } else {
+            throw std::runtime_error(
+                path.string() + ": unknown minimizer-registry record '"
+                + fields.front() + "'");
+        }
+    }
+    if (!saw_revision || !saw_profile || !saw_payload_abi
+        || !saw_producer_revision || result.records.empty()
+        || result.highway_owners.empty() || result.runtime_profiles.empty()) {
+        throw std::runtime_error(
+            path.string() + ": incomplete minimizer physical registry");
+    }
+    return result;
+}
+
 [[nodiscard]] inline target_manifest parse_target_manifest(
     const std::filesystem::path& path) {
     target_manifest result;
@@ -325,6 +504,7 @@ inline void require_field_count(
     bool saw_contract = false;
     bool saw_dispatch = false;
     bool saw_completeness = false;
+    bool saw_minimizer_registry = false;
     for (const auto& fields : detail::manifest_lines(
              path, "bioseq-highway-sources")) {
         if (!saw_revision && fields.front() != "revision") {
@@ -393,16 +573,21 @@ inline void require_field_count(
                 .key = std::string{fields[1]},
                 .path = std::filesystem::path{fields[2]},
             });
-        } else if (fields.front() == "minimizer-repr-instance") {
-            detail::require_field_count(path, fields.front(), fields.size(), 6);
-            result.minimizer_representation_instances.push_back(
-                minimizer_representation_instance_spec{
-                    .owner_key = std::string{fields[1]},
-                    .algorithm = std::string{fields[2]},
-                    .source_key = std::string{fields[3]},
-                    .representation_type = std::string{fields[4]},
-                    .storage_types = detail::split_dependencies(fields[5]),
-                });
+        } else if (fields.front() == "minimizer-registry") {
+            detail::require_field_count(path, fields.front(), fields.size(), 3u);
+            if (saw_minimizer_registry) {
+                throw std::runtime_error(
+                    path.string() + ": duplicate minimizer-registry record");
+            }
+            result.minimizer_registry_manifest_path = fields[2];
+            result.minimizer_registry = parse_minimizer_registry_manifest(
+                result.minimizer_registry_manifest_path);
+            if (minimizer_registry_profile_name(
+                    result.minimizer_registry->profile) != fields[1]) {
+                throw std::runtime_error(
+                    path.string() + ": minimizer registry profile/path mismatch");
+            }
+            saw_minimizer_registry = true;
         } else if (fields.front() == "domain-topology") {
             result.domain_topologies.push_back(
                 detail::parse_domain_topology_record(
@@ -443,12 +628,6 @@ inline void require_field_count(
             probes, {}, [](const probe_spec& probe) { return probe.key; });
     };
     sort_probes(result.unit_probes);
-    std::ranges::sort(
-        result.minimizer_representation_instances,
-        {},
-        [](const minimizer_representation_instance_spec& instance) {
-            return instance.owner_key;
-        });
     return result;
 }
 
@@ -465,8 +644,9 @@ inline void require_field_count(
     const std::size_t expected_artifact_count =
         plan.target_inventory.targets.size()
             * (2U + plan.extracted_sources.size() + slot_owners.size()
-               + plan.source_inventory.minimizer_representation_instances
-                     .size())
+               + (plan.source_inventory.minimizer_registry.has_value()
+                      ? 1U
+                      : 0U))
         + 3U + plan.source_inventory.unit_probes.size();
     if (plan.target_inventory.targets.empty()
         || artifacts.size() != expected_artifact_count
@@ -586,7 +766,25 @@ inline void require_field_count(
                        ? "\n"
                        : ",\n");
     }
-    output << "  ],\n  \"artifacts\": [\n";
+    output << "  ],\n  \"minimizer_registry\": ";
+    if (plan.source_inventory.minimizer_registry) {
+        const std::string bytes = render_minimizer_registry_manifest(
+            *plan.source_inventory.minimizer_registry);
+        output << "{\"profile\":\""
+               << minimizer_registry_profile_name(
+                      plan.source_inventory.minimizer_registry->profile)
+               << "\",\"sha256\":\""
+               << bioseq::common::sha256_hex(bytes) << "\",\"records\":"
+               << plan.source_inventory.minimizer_registry->records.size()
+               << ",\"owners\":"
+               << plan.source_inventory.minimizer_registry->highway_owners.size()
+               << ",\"profiles\":"
+               << plan.source_inventory.minimizer_registry->runtime_profiles.size()
+               << "},\n";
+    } else {
+        output << "null,\n";
+    }
+    output << "  \"artifacts\": [\n";
     for (std::size_t index = 0; index < ordered.size(); ++index) {
         const generated_artifact& artifact = *ordered[index];
         output << "    {\"path\":\""

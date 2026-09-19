@@ -2,9 +2,12 @@
  * @file active_read_policy.cppm
  * @brief Declares the authority behind one active-read index selection.
  */
-export module bioseq.postgres.storage.indexing.active_read_policy;
+module;
 
-import std;
+#include <cstdint>
+#include <string_view>
+
+export module bioseq.postgres.storage.indexing.active_read_policy;
 
 export namespace bioseq::storage::indexing {
 

@@ -73,6 +73,10 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
         // permanently poisoned; the loop below then confirms fresh-txn recovery.
         failure_probe{"scalar_fail_sorted_compact_create_before_nth2", "XX000",
             "injected sorted-run PostgreSQL leaf failure\nDETAIL: failure point 15"},
+        failure_probe{"scalar_fail_sorted_reader_minimum", "XX000",
+            "bioseq sorted runs: could not admit one merge reader"},
+        failure_probe{"scalar_fail_sorted_reader_system_pressure", "XX000",
+            "bioseq sorted runs: could not admit one merge reader"},
         failure_probe{"scalar_fail_sorted_write_before", "XX000",
             "injected sorted-run PostgreSQL leaf failure\nDETAIL: failure point 3"},
         failure_probe{"scalar_fail_sorted_write_after", "XX000",
@@ -143,6 +147,18 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
             "ORDER BY generation_id, position_segment, sub_key, chunk_no;",
             sidecar, rowno));
     };
+    const auto capture_generation_payload = [&ctx, rowno](
+            const std::string& sidecar, long long generation) {
+        // Row CRCs authenticate generation_id and are generation-scoped. Compare
+        // stable coordinates, lengths, and exact bytes across generations.
+        return query_rows(ctx, fmt::format(
+            "SELECT position_segment::text, sub_key::text, chunk_no::text, "
+            "chunk_bytes::text, encode(blob, 'hex') "
+            "FROM bioseq_internal.{} WHERE query_key={} AND generation_id={} "
+            "AND position_segment >= 0 "
+            "ORDER BY position_segment, sub_key, chunk_no;",
+            sidecar, rowno, generation));
+    };
 
     row_t baseline_build = build("scalar");
     REQUIRE(baseline_build.size() == 72);
@@ -155,7 +171,31 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
     long long baseline_generation = std::stoll(
         baseline_build[10].value());
     REQUIRE(baseline_generation > 0);
+    const rowset_t baseline_payload =
+        capture_generation_payload(baseline_sidecar, baseline_generation);
+    REQUIRE(!baseline_payload.empty());
     rowset_t baseline_family = capture_generation_family(baseline_sidecar);
+    REQUIRE(!baseline_family.empty());
+
+    // The synthetic ceiling denies the preferred three-reader geometry and
+    // its 32-KiB minimum, then admits a two-reader minimum. Exact generation
+    // payload equality proves reduced fan-in preserves the complete ordered
+    // stream across both compaction passes.
+    row_t constrained_build = build("scalar_test_sorted_reader_backoff");
+    REQUIRE(constrained_build.size() == 72);
+    REQUIRE(constrained_build[0].value() == baseline_sidecar);
+    REQUIRE(constrained_build[6].value() == "scalar");
+    REQUIRE(constrained_build[8].value() == "t");
+    REQUIRE(constrained_build[9].value() == "t");
+    REQUIRE(constrained_build[41].value() == "t");
+    REQUIRE(constrained_build[71].value() == "t");
+    const long long constrained_generation = std::stoll(
+        constrained_build[10].value());
+    REQUIRE(constrained_generation > baseline_generation);
+    REQUIRE(capture_generation_payload(baseline_sidecar, constrained_generation)
+        == baseline_payload);
+    baseline_generation = constrained_generation;
+    baseline_family = capture_generation_family(baseline_sidecar);
     REQUIRE(!baseline_family.empty());
 
     for (const failure_probe& probe : probes) {

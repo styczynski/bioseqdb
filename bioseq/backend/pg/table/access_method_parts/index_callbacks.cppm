@@ -3,10 +3,34 @@
  * @brief Implements index build, validation, source promotion, and virtual-TID ordering.
  */
 module;
+
+extern "C" {
+#include "postgres.h"
+
+#include "access/genam.h"
+#include "access/skey.h"
+#include "access/tableam.h"
+#include "catalog/index.h"
+#include "commands/progress.h"
+#include "executor/executor.h"
+#include "executor/tuptable.h"
+#include "miscadmin.h"
+#include "nodes/pg_list.h"
+#include "port.h"
+#include "storage/itemptr.h"
+#include "utils/backend_progress.h"
+#include "utils/errcodes.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
+#include "utils/snapmgr.h"
+#include "utils/tuplesort.h"
+}
+
 #include <algorithm>
 #include <array>
-#include <bioseq/pg_compat.h>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <map>
@@ -16,6 +40,7 @@ module;
 #include <type_traits>
 #include <utility>
 #include <vector>
+
 export module bioseq.postgres.table:access_method_index_callbacks;
 
 import bioseq.postgres.storage.physical;

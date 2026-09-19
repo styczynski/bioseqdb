@@ -29,6 +29,8 @@ import bioseq.postgres.support;
 
 import :custom_scan_oid_expression_support_oid_catalog;
 import :custom_scan_slice_path_codec_contract;
+export import :custom_scan_slice_path_expression_detection_contracts;
+export import :custom_scan_slice_path_carrier_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -48,8 +50,8 @@ export {
 
     [[nodiscard]] std::uint32_t slice_project_add_producer(slice_project_ir_builder& builder,
                                                            Node* expression,
-                                                           bool distinct_consumer = false,
-                                                           bool force_value = false) {
+                                                           bool distinct_consumer,
+                                                           bool force_value) {
         check_stack_depth();
         if (expression == nullptr)
             return 0u;

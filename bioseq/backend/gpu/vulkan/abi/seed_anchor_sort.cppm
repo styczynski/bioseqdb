@@ -541,18 +541,5 @@ audit_seed_anchor_canonical_order(std::span<const std::byte> payload,
     return audit;
 }
 
-/** @brief Owns downloaded anchor bytes and telemetry from one seed lookup. */
-struct seed_lookup_result {
-    std::vector<std::byte> host_bytes;
-    std::uint64_t count = 0;
-    std::uint64_t actual_vulkan_allocation_bytes = 0u;
-    seed_anchor_canonical_order_audit anchor_order_audit{};
-    std::uint64_t canonical_tie_normalization_runs = 0u;
-    std::uint64_t canonical_tie_normalization_anchors = 0u;
-    std::uint64_t seed_lookup_dispatches = 0;
-    std::uint64_t open_addressed_lookup_dispatches = 0;
-    std::uint64_t sorted_dense_lookup_dispatches = 0;
-    seed_lookup_sort_execution_stats sort_stats{};
-};
 
 } // namespace bioseq::gpu::vulkan

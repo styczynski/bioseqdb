@@ -177,6 +177,40 @@ template <class p_sequence_range, class p_scanner>
     }
 }
 
+/** Copy an exact native packed-unit window without decoding logical ranks. */
+template <class p_sequence_range, class p_scanner>
+[[nodiscard]] bool owned_sequence_copy_packed_window(void const* state,
+                                                     void* destination,
+                                                     std::size_t first_unit,
+                                                     std::size_t unit_count,
+                                                     std::uint8_t requested_width) {
+    using range_traits = typename compact_sequence_range<p_sequence_range>::traits;
+    using storage_unit = typename range_traits::storage_unit;
+    using alphabet_type = typename range_traits::alphabet_type;
+    constexpr std::uint8_t k_physical_width = static_cast<std::uint8_t>(sizeof(storage_unit));
+    constexpr std::size_t k_logical_bits =
+        lazy_sequence_traits<alphabet_type>::k_logical_bits_per_symbol;
+    const auto& sequence = *static_cast<const lazy_sequence<p_sequence_range, p_scanner>*>(state);
+    if (requested_width != k_physical_width || range_traits::bits_per_char != k_logical_bits ||
+        first_unit > sequence.size() || unit_count > sequence.size() - first_unit ||
+        (unit_count != 0u && destination == nullptr) ||
+        (unit_count != 0u &&
+         reinterpret_cast<std::uintptr_t>(destination) % alignof(storage_unit) != 0u)) {
+        return false;
+    }
+    if (unit_count == 0u) {
+        return true;
+    }
+    auto begin = sequence.cbegin();
+    begin += static_cast<sequence_size_t>(first_unit);
+    std::span<storage_unit> output{static_cast<storage_unit*>(destination), unit_count};
+    const storage_unit* source = sequence.read_cptr(begin, output, unit_count);
+    if (source != output.data()) {
+        std::memcpy(output.data(), source, unit_count * sizeof(storage_unit));
+    }
+    return true;
+}
+
 template <class p_sequence_range, class p_scanner> struct owned_sequence_adapter {
     using alphabet_type = typename compact_sequence_range<p_sequence_range>::traits::alphabet_type;
     using view_type = lazy_sequence_view<alphabet_type>;
@@ -192,6 +226,7 @@ template <class p_sequence_range, class p_scanner> struct owned_sequence_adapter
             },
         .try_resident_packed = &owned_sequence_resident_probe<p_sequence_range, p_scanner>,
         .copy_packed_sequence = &owned_sequence_copy_packed<p_sequence_range, p_scanner>,
+        .copy_packed_window = &owned_sequence_copy_packed_window<p_sequence_range, p_scanner>,
         .worker_shareable = &owned_sequence_worker_shareable<p_sequence_range, p_scanner>,
     };
 };
@@ -244,6 +279,21 @@ template <class p_sequence_range>
         std::addressof(owner), from, to, requested_width);
 }
 
+/** Copy an exact packed-unit window from an inline compact range. */
+template <class p_sequence_range>
+[[nodiscard]] bool compact_range_copy_packed_window(void const* state,
+                                                    void* destination,
+                                                    std::size_t first_unit,
+                                                    std::size_t unit_count,
+                                                    std::uint8_t requested_width) {
+    using scanner_type = resident_sequence_scanner<
+        typename compact_sequence_range<p_sequence_range>::traits::storage_unit>;
+    const auto& range = *static_cast<const compact_sequence_range<p_sequence_range>*>(state);
+    const lazy_sequence<p_sequence_range, scanner_type> owner{range};
+    return owned_sequence_copy_packed_window<p_sequence_range, scanner_type>(
+        std::addressof(owner), destination, first_unit, unit_count, requested_width);
+}
+
 template <class p_sequence_range> struct compact_range_adapter {
     using alphabet_type = typename compact_sequence_range<p_sequence_range>::traits::alphabet_type;
     using view_type = lazy_sequence_view<alphabet_type>;
@@ -259,6 +309,7 @@ template <class p_sequence_range> struct compact_range_adapter {
             },
         .try_resident_packed = &compact_range_resident_probe<p_sequence_range>,
         .copy_packed_sequence = nullptr,
+        .copy_packed_window = &compact_range_copy_packed_window<p_sequence_range>,
         .worker_shareable = &compact_range_worker_shareable<p_sequence_range>,
     };
 };

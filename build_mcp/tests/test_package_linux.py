@@ -279,7 +279,8 @@ class PackageLinuxServerModeTests(unittest.TestCase):
             mock.patch.object(build_worker, "_run_package_linux_worker", return_value=0) as run,
         ):
             self.assertEqual(build_worker._run_build_worker(subject.MODE), 0)
-        run.assert_called_once_with(entry)
+        run.assert_called_once_with({**entry, "bench_e2e_config": None})
+        self.assertNotIn("bench_e2e_config", entry)
 
     def test_remote_run_rejects_before_provisioning(self) -> None:
         with mock.patch.object(

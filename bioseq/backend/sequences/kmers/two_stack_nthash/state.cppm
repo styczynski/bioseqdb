@@ -57,6 +57,8 @@ using ::bioseq::minimizers::bounded_nthash_execution_stats;
 using ::bioseq::minimizers::bounded_nthash_result;
 using ::bioseq::minimizers::exact_simd_runtime_error;
 using ::bioseq::minimizers::exact_simd_minimizer_representation;
+using ::bioseq::minimizers::wide_simd_minimizer_representation;
+using ::bioseq::minimizers::two_stack_simd_minimizer_representation;
 
 namespace resident_descriptor_detail {
 

@@ -2,6 +2,10 @@
  * @file typed_support_parts/resident_target_materialization.cppm
  * @brief Admits and materializes one immutable target for segment workers.
  */
+module;
+
+#include <new>
+
 export module bioseq.postgres.scheduler.dispatch_processor.typed_support.resident_target_materialization;
 
 import std;

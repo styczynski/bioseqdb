@@ -43,14 +43,14 @@ enum class vulkan_submission_test_fault : std::uint8_t {
 /// @brief Observable state of the test-only submission fault seam.
 struct vulkan_submission_test_snapshot {
     vulkan_submission_test_fault fault{vulkan_submission_test_fault::none}; ///< Armed fault kind.
-    std::uint64_t upload_latches = 0u;       ///< Upload paths that entered the seam.
-    std::uint64_t submissions = 0u;          ///< Submissions observed by the seam.
-    std::uint64_t fence_drains = 0u;         ///< Fence drains completed by the seam.
-    std::uint64_t delivered_faults = 0u;     ///< Faults released to callers.
-    bool waiting_after_submit = false;       ///< Whether a submission waits after submit.
-    bool waiting_after_drain = false;        ///< Whether a submission waits after drain.
-    bool cancellation_requested = false;     ///< Whether cancellation was requested.
-    bool upload_failure_latched = false;     ///< Whether an upload failure was latched.
+    std::uint64_t upload_latches = 0u;   ///< Upload paths that entered the seam.
+    std::uint64_t submissions = 0u;      ///< Submissions observed by the seam.
+    std::uint64_t fence_drains = 0u;     ///< Fence drains completed by the seam.
+    std::uint64_t delivered_faults = 0u; ///< Faults released to callers.
+    bool waiting_after_submit = false;   ///< Whether a submission waits after submit.
+    bool waiting_after_drain = false;    ///< Whether a submission waits after drain.
+    bool cancellation_requested = false; ///< Whether cancellation was requested.
+    bool upload_failure_latched = false; ///< Whether an upload failure was latched.
 };
 
 /// @brief Arms one test-only fault for the next Vulkan submission.
@@ -68,35 +68,107 @@ void reset_vulkan_submission_test_seam() noexcept;
 
 /// @brief Host-owned results from one batched alignment and CIGAR dispatch.
 struct alignment_cigar_batch_result {
+    alignment_cigar_batch_result() = default;
+    alignment_cigar_batch_result(const alignment_cigar_batch_result&) = delete;
+    alignment_cigar_batch_result& operator=(const alignment_cigar_batch_result&) = delete;
+    alignment_cigar_batch_result(alignment_cigar_batch_result&& other) noexcept
+        : capacity_permit(std::move(other.capacity_permit)), results(std::move(other.results)),
+          packed_cigar(std::move(other.packed_cigar)),
+          committed_submission_count(
+              std::exchange(other.committed_submission_count, std::uint64_t{0})) {}
+    alignment_cigar_batch_result& operator=(alignment_cigar_batch_result&& other) noexcept {
+        if (this != &other) {
+            // Release both owned capacities while their old permit is live.
+            std::vector<gpu_alignment_cigar_result_wire>{}.swap(results);
+            std::vector<std::uint32_t>{}.swap(packed_cigar);
+            capacity_permit = {};
+            capacity_permit = std::move(other.capacity_permit);
+            results = std::move(other.results);
+            packed_cigar = std::move(other.packed_cigar);
+            committed_submission_count =
+                std::exchange(other.committed_submission_count, std::uint64_t{0});
+        }
+        return *this;
+    }
+
+    // Declared first so both vectors release their admitted capacities before
+    // the permit is returned to the process-wide controller.
+    bioseq::parallelism::memory_permit capacity_permit{};
     std::vector<gpu_alignment_cigar_result_wire> results{}; ///< Per-job alignment wire records.
-    std::vector<std::uint32_t> packed_cigar{};              ///< Packed CIGAR words for all jobs.
+    std::vector<std::uint32_t> packed_cigar{};     ///< Compact actual CIGAR words for all jobs.
+    std::uint64_t committed_submission_count = 0u; ///< Physical GPU submissions in this result.
 };
+
+static_assert(!std::is_copy_constructible_v<alignment_cigar_batch_result>);
+static_assert(std::is_nothrow_move_constructible_v<alignment_cigar_batch_result>);
+
+/// @brief Host-owned physical post-alignment MAPQ readback and receipt count.
+struct gpu_mapq_batch_result {
+    gpu_mapq_batch_result() = default;
+    gpu_mapq_batch_result(const gpu_mapq_batch_result&) = delete;
+    gpu_mapq_batch_result& operator=(const gpu_mapq_batch_result&) = delete;
+    gpu_mapq_batch_result(gpu_mapq_batch_result&& other) noexcept
+        : capacity_permit(std::move(other.capacity_permit)), headers(std::move(other.headers)),
+          candidates(std::move(other.candidates)), results(std::move(other.results)),
+          committed_submission_count(
+              std::exchange(other.committed_submission_count, std::uint64_t{0})) {}
+    gpu_mapq_batch_result& operator=(gpu_mapq_batch_result&& other) noexcept {
+        if (this != &other) {
+            // Release all admitted capacities while their old permit is still live.
+            std::vector<gpu_chain_candidate_header_wire>{}.swap(headers);
+            std::vector<gpu_chain_candidate_wire>{}.swap(candidates);
+            std::vector<gpu_mapq_result_wire>{}.swap(results);
+            capacity_permit = {};
+            capacity_permit = std::move(other.capacity_permit);
+            headers = std::move(other.headers);
+            candidates = std::move(other.candidates);
+            results = std::move(other.results);
+            committed_submission_count =
+                std::exchange(other.committed_submission_count, std::uint64_t{0});
+        }
+        return *this;
+    }
+
+    // Declared first so vector capacity is released before the permit.
+    bioseq::parallelism::memory_permit capacity_permit{};
+    std::vector<gpu_chain_candidate_header_wire> headers{};
+    std::vector<gpu_chain_candidate_wire> candidates{};
+    std::vector<gpu_mapq_result_wire> results{};
+    std::uint64_t committed_submission_count = 0u;
+};
+
+static_assert(!std::is_copy_constructible_v<gpu_mapq_batch_result>);
+static_assert(std::is_nothrow_move_constructible_v<gpu_mapq_batch_result>);
+static_assert(std::is_nothrow_move_assignable_v<gpu_mapq_batch_result>);
 
 /// @brief Capabilities probed once at init. `available == false` means there is no
 /// usable Vulkan device and selected GPU algorithms must fail.
 struct vulkan_feature_set {
-    bool available = false;              ///< Whether a usable Vulkan device was found.
-    bool shader_int64 = false;           ///< Whether 64-bit integer shaders are supported.
-    bool scalar_block_layout = false;    ///< Whether scalar block layout is supported.
-    bool timeline_semaphore = false;     ///< Whether timeline semaphores are supported.
-    bool software_device = false;        ///< Whether the selected device is software rasterized.
-    std::uint32_t device_type = 0;       ///< Vulkan physical-device type enum value.
-    std::uint32_t api_version = 0;       ///< Packed Vulkan API version reported by the device.
-    std::uint32_t driver_version = 0;    ///< Driver version reported by the device.
-    std::uint32_t vendor_id = 0;         ///< PCI vendor identifier.
-    std::uint32_t device_id = 0;         ///< PCI device identifier.
+    bool available = false;           ///< Whether a usable Vulkan device was found.
+    bool shader_int64 = false;        ///< Whether 64-bit integer shaders are supported.
+    bool scalar_block_layout = false; ///< Whether scalar block layout is supported.
+    bool timeline_semaphore = false;  ///< Whether timeline semaphores are supported.
+    bool software_device = false;     ///< Whether the selected device is software rasterized.
+    std::uint32_t device_type = 0;    ///< Vulkan physical-device type enum value.
+    std::uint32_t api_version = 0;    ///< Packed Vulkan API version reported by the device.
+    std::uint32_t driver_version = 0; ///< Driver version reported by the device.
+    std::uint32_t vendor_id = 0;      ///< PCI vendor identifier.
+    std::uint32_t device_id = 0;      ///< PCI device identifier.
     std::uint32_t max_workgroup_invocations = 0; ///< Maximum invocations per workgroup.
     std::uint32_t max_workgroup_size_x = 0;      ///< Maximum local size along X.
     std::uint32_t max_workgroup_size_y = 0;      ///< Maximum local size along Y.
     std::uint32_t max_workgroup_size_z = 0;      ///< Maximum local size along Z.
     std::uint32_t max_workgroup_count_x = 0;     ///< Maximum dispatched workgroups along X.
-    std::uint32_t max_shared_memory_bytes = 0;    ///< Maximum shared memory per workgroup in bytes.
+    std::uint32_t max_shared_memory_bytes = 0;   ///< Maximum shared memory per workgroup in bytes.
     std::uint64_t max_storage_buffer_range = 0;  ///< Maximum storage-buffer span in bytes.
-    std::uint64_t min_storage_buffer_offset_alignment = 1; ///< Required storage-buffer offset alignment.
-    std::uint64_t device_local_bytes = 0;        ///< Device-local heap size in bytes.
+    std::uint64_t min_storage_buffer_offset_alignment =
+        1;                                ///< Required storage-buffer offset alignment.
+    std::uint64_t device_local_bytes = 0; ///< Device-local heap size in bytes.
     std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{}; ///< Stable Vulkan device UUID bytes.
-    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{}; ///< Pipeline-cache compatibility UUID.
-    std::array<char, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE> device_name{}; ///< NUL-terminated device name.
+    std::array<std::uint8_t, VK_UUID_SIZE>
+        pipeline_cache_uuid{}; ///< Pipeline-cache compatibility UUID.
+    std::array<char, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE>
+        device_name{}; ///< NUL-terminated device name.
 };
 
 /// @brief Count of fixed rank-prefilter replay slots exercised by recorded-command tests.
@@ -138,7 +210,7 @@ rank_prefilter_replay_index(shader_kind kind, std::uint32_t push_mode) noexcept 
 /// @brief Shader identity and replay slot selected for one GateKeeper batch.
 struct gatekeeper_rank_batch_route {
     shader_kind kind = shader_kind::gatekeeper_rank_batch; ///< Selected GateKeeper shader identity.
-    std::size_t replay_index = 2u;                       ///< Recorded-command replay slot for the route.
+    std::size_t replay_index = 2u; ///< Recorded-command replay slot for the route.
 
     constexpr bool operator==(const gatekeeper_rank_batch_route&) const noexcept = default;
 };
@@ -309,14 +381,15 @@ struct buffer {
         return (memory_properties & required) == required;
     }
 
-    runtime* owner = nullptr;                 ///< Runtime that releases this allocation.
-    VkBuffer buffer_handle = VK_NULL_HANDLE;  ///< Vulkan buffer handle.
-    VkDeviceMemory memory = VK_NULL_HANDLE;   ///< Device memory backing the buffer.
-    std::uint64_t bytes = 0;                  ///< Logical buffer extent in bytes.
-    std::uint64_t allocation_bytes = 0;       ///< Allocator-reported memory extent in bytes.
+    runtime* owner = nullptr;                    ///< Runtime that releases this allocation.
+    VkBuffer buffer_handle = VK_NULL_HANDLE;     ///< Vulkan buffer handle.
+    VkDeviceMemory memory = VK_NULL_HANDLE;      ///< Device memory backing the buffer.
+    std::uint64_t bytes = 0;                     ///< Logical buffer extent in bytes.
+    std::uint64_t allocation_bytes = 0;          ///< Allocator-reported memory extent in bytes.
     VkMemoryPropertyFlags memory_properties = 0; ///< Vulkan memory-type properties.
-    bool process_footprint_reflected = false; ///< Whether process accounting includes the allocation.
-    void* mapped = nullptr;                   ///< Persistent host mapping, or null for device-only memory.
+    bool process_footprint_reflected =
+        false;              ///< Whether process accounting includes the allocation.
+    void* mapped = nullptr; ///< Persistent host mapping, or null for device-only memory.
 
   private:
     /// @brief Moves every handle and accounting field, then clears the source.
@@ -357,11 +430,11 @@ template <class p_handle_type>
 /// insufficient because buffer is move-assignable. Operation receipt therefore
 /// binds its owner, Vulkan allocation handles, and physical/logical sizes too.
 struct runtime_buffer_identity {
-    const buffer* object = nullptr;       ///< Borrowed buffer object whose identity is captured.
-    const runtime* owner = nullptr;       ///< Runtime owner recorded for receipt binding.
-    std::uint64_t buffer_handle = 0u;   ///< Encoded Vulkan buffer handle bits.
-    std::uint64_t memory_handle = 0u;   ///< Encoded Vulkan device-memory handle bits.
-    std::uint64_t bytes = 0u;           ///< Logical buffer extent in bytes.
+    const buffer* object = nullptr;      ///< Borrowed buffer object whose identity is captured.
+    const runtime* owner = nullptr;      ///< Runtime owner recorded for receipt binding.
+    std::uint64_t buffer_handle = 0u;    ///< Encoded Vulkan buffer handle bits.
+    std::uint64_t memory_handle = 0u;    ///< Encoded Vulkan device-memory handle bits.
+    std::uint64_t bytes = 0u;            ///< Logical buffer extent in bytes.
     std::uint64_t allocation_bytes = 0u; ///< Allocator-reported memory extent in bytes.
 
     /// @brief Checks that every receipt identity field is populated and consistent.
@@ -414,8 +487,9 @@ struct runtime_shader_provider {
         VkDevice device,
         const shader_variant_key& key,
         PFN_vkCreateShaderModule create_shader_module);
-    prepare_function prepare_runtime = nullptr; ///< Optional prepare hook installed by the supervisor.
-    load_function load_module = nullptr;        ///< Optional module loader installed by the supervisor.
+    prepare_function prepare_runtime =
+        nullptr;                         ///< Optional prepare hook installed by the supervisor.
+    load_function load_module = nullptr; ///< Optional module loader installed by the supervisor.
 };
 
 /// @brief Returns the process-owned optional shader-provider slot.

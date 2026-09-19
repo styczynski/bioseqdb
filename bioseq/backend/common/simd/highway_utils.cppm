@@ -692,8 +692,26 @@ public:
                                         const p_value_type* source) -> std::size_t {
         const std::size_t lane_count = hn::Lanes(simd_tag);
         for (std::size_t row_index = 0; row_index < lane_count; ++row_index) {
-            matrix_storage_[row_index] =
-                hn::LoadU(simd_tag, &source[offsets[row_index]]);
+            if constexpr (std::same_as<std::remove_cv_t<p_value_type>,
+                                       hn::TFromD<p_simd_tag>>) {
+                matrix_storage_[row_index] =
+                    hn::LoadU(simd_tag, &source[offsets[row_index]]);
+            } else {
+                using lane_type = hn::TFromD<p_simd_tag>;
+                using source_type = std::remove_cv_t<p_value_type>;
+                using destination_simd_tag = std::remove_cvref_t<p_simd_tag>;
+                using source_simd_tag = hn::Rebind<source_type, destination_simd_tag>;
+                static_assert(std::unsigned_integral<source_type>
+                              && sizeof(lane_type) >= sizeof(p_value_type),
+                    "matrix lane conversion only supports unsigned widening");
+                static_assert(hn::MaxLanes(source_simd_tag{})
+                                  == hn::MaxLanes(p_simd_tag{}),
+                    "rebound source descriptor must preserve lane count");
+                const source_simd_tag source_tag;
+                matrix_storage_[row_index] = hn::PromoteTo(
+                    simd_tag,
+                    hn::LoadU(source_tag, &source[offsets[row_index]]));
+            }
         }
         return lane_count;
     }
@@ -725,6 +743,30 @@ public:
         std::size_t partial_lane_count = 0u;
         std::size_t full_row_count = 0u;
         std::size_t row_index = 0u;
+        using lane_type = hn::TFromD<p_simd_tag>;
+        const auto load_source_values = [&simd_tag](const p_value_type* values,
+                                                    std::size_t value_count) {
+            if constexpr (std::same_as<std::remove_cv_t<p_value_type>, lane_type>) {
+                return value_count == hn::Lanes(simd_tag)
+                    ? hn::LoadU(simd_tag, values)
+                    : hn::LoadN(simd_tag, values, value_count);
+            } else {
+                using source_type = std::remove_cv_t<p_value_type>;
+                using destination_simd_tag = std::remove_cvref_t<p_simd_tag>;
+                using source_simd_tag = hn::Rebind<source_type, destination_simd_tag>;
+                static_assert(std::unsigned_integral<source_type>
+                              && sizeof(lane_type) >= sizeof(p_value_type),
+                    "matrix lane conversion only supports unsigned widening");
+                static_assert(hn::MaxLanes(source_simd_tag{})
+                                  == hn::MaxLanes(p_simd_tag{}),
+                    "rebound source descriptor must preserve lane count");
+                const source_simd_tag source_tag;
+                const auto source_values = value_count == hn::Lanes(source_tag)
+                    ? hn::LoadU(source_tag, values)
+                    : hn::LoadN(source_tag, values, value_count);
+                return hn::PromoteTo(simd_tag, source_values);
+            }
+        };
         for (; row_index < p_offset_count; ++row_index) {
             const std::size_t source_offset = offsets[row_index];
             if (source_offset + lane_count > available_value_count) [[unlikely]] {
@@ -733,15 +775,13 @@ public:
                 } else {
                     const std::size_t available_lane_count =
                         available_value_count - source_offset;
-                    matrix_storage_[row_index] = hn::LoadN(
-                        simd_tag,
-                        &source[source_offset],
-                        available_lane_count);
+                    matrix_storage_[row_index] = load_source_values(
+                        &source[source_offset], available_lane_count);
                     partial_lane_count = available_lane_count;
                 }
             } else {
-                matrix_storage_[row_index] =
-                    hn::LoadU(simd_tag, &source[source_offset]);
+                matrix_storage_[row_index] = load_source_values(
+                    &source[source_offset], lane_count);
                 ++full_row_count;
             }
         }

@@ -781,7 +781,7 @@ inline void run_guc_generator_contract_self_tests() {
                         [](auto& values) {
                             const auto zstd = std::ranges::find(
                                 values,
-                                "zstd",
+                                std::string{"zstd"},
                                 &collected_guc_enum_value::name);
                             require(
                                 zstd != values.end(),
@@ -819,7 +819,7 @@ inline void run_guc_generator_contract_self_tests() {
                             [hidden](auto& values) {
                                 const auto pglz = std::ranges::find(
                                     values,
-                                    "pglz",
+                                    std::string{"pglz"},
                                     &collected_guc_enum_value::name);
                                 require(
                                     pglz != values.end(),

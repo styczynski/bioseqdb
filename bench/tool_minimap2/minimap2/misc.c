@@ -3,6 +3,10 @@
 #include <stdlib.h>
 #include "mmpriv.h"
 
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+#include "instr_shim.h"
+#endif
+
 int mm_verbose = 1;
 int mm_dbg_flag = 0;
 double mm_realtime0;
@@ -132,6 +136,55 @@ void mm_err_puts(const char *str)
 	}
 }
 
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+
+void mm_err_fwrite(const void *p, size_t size, size_t nitems, FILE *fp)
+{
+	size_t ret;
+	if (bioseq_minimap2_e2e_io_error_seen() || size == 0 || nitems == 0) return;
+	ret = fwrite(p, size, nitems, fp);
+	if (ret != nitems || ferror(fp))
+		bioseq_minimap2_e2e_io_error_mark();
+}
+
+void mm_err_fread(void *p, size_t size, size_t nitems, FILE *fp)
+{
+	size_t ret;
+	if (bioseq_minimap2_e2e_io_error_seen() || size == 0 || nitems == 0) return;
+	ret = fread(p, size, nitems, fp);
+	if (ret != nitems || ferror(fp))
+		bioseq_minimap2_e2e_io_error_mark();
+}
+
+int bioseq_minimap2_e2e_close_split_output(FILE *fp)
+{
+	int failed = 0;
+	if (fp == 0) {
+		bioseq_minimap2_e2e_io_error_mark();
+		return -1;
+	}
+	if (fflush(fp) != 0) failed = 1;
+	if (ferror(fp)) failed = 1;
+	if (fclose(fp) != 0) failed = 1;
+	if (failed) bioseq_minimap2_e2e_io_error_mark();
+	return failed? -1 : 0;
+}
+
+int bioseq_minimap2_e2e_close_split_input(FILE *fp)
+{
+	int failed = 0;
+	if (fp == 0) {
+		bioseq_minimap2_e2e_io_error_mark();
+		return -1;
+	}
+	if (ferror(fp)) failed = 1;
+	if (fclose(fp) != 0) failed = 1;
+	if (failed) bioseq_minimap2_e2e_io_error_mark();
+	return failed? -1 : 0;
+}
+
+#else
+
 void mm_err_fwrite(const void *p, size_t size, size_t nitems, FILE *fp)
 {
 	int ret;
@@ -151,6 +204,8 @@ void mm_err_fread(void *p, size_t size, size_t nitems, FILE *fp)
 		exit(EXIT_FAILURE);
 	}
 }
+
+#endif
 
 #include "ksort.h"
 

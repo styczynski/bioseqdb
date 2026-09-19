@@ -38,28 +38,17 @@ module bioseq.postgres.scheduler.dispatch_buffer:configuration;
 import bioseq.postgres.scheduler.dispatch_buffer;
 
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
-import bioseq.postgres.configuration.core;
 import bioseq.indexing.type;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.storage.lazy_sequence; // allocation observer for route-aware sequence payload tracing
-import bioseq.postgres.scheduler.dispatch_processor; // fixed-shape batch_processor, heavy pipeline in its own module
-import bioseq.sequences;
+import bioseq.sequences.compact_sequence_typmod;
 import bioseq.sequences.simd;
+import bioseq.pipeline.minimizer_execution_contract;
 import bioseq.pipeline.minimap_port;
-import bioseq.sequences.cigar;
-import bioseq.pipeline.pipe;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
-import bioseq.storage.scanner;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner; // statement-owned source provider for locator targets
-import bioseq.parallelism.memory_admission;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.column.table_access;
+import bioseq.postgres.storage.indexing.executor_read_context;
+import bioseq.postgres.storage.scanner.source_provider_contract;
 
 namespace bioseq::scheduler {
 
@@ -305,6 +294,18 @@ void tuple_dispatch_buffer::bind_persisted_gpu_operation_stats_sink(
     persisted_gpu_operation_stats_sink = &sink;
 }
 
+/** Bind the immutable statement owner used by all downstream intervals. */
+void tuple_dispatch_buffer::bind_downstream_active_wall_tracker(
+    bioseq::simd::downstream_active_wall_tracker& tracker) {
+    if (downstream_active_wall_tracker != nullptr &&
+        downstream_active_wall_tracker != &tracker) {
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq downstream active-wall tracker changed during execution")));
+    }
+    downstream_active_wall_tracker = &tracker;
+}
+
 /** @brief Implements the bind slice async owner contract declared by the stable buffer facade. */
 void tuple_dispatch_buffer::bind_slice_async_owner(slice_async_owner_guard* owner) {
     if (owner == nullptr || !make_slice_async_pool_observer_noexcept(owner)) {
@@ -385,7 +386,7 @@ void tuple_dispatch_buffer::release_join_slice_async_owner_after_drain() {
 
 /** @brief Implements the configure params contract declared by the stable buffer facade. */
 void tuple_dispatch_buffer::configure_params(
-    const ::bioseq::simd::minimap2_parameters& params,
+    ::bioseq::simd::pipe::statement_execution_plan_owner plan,
     bioseq::indexing::index_read_requirement read_requirement,
     bool read_sequence_index,
     Oid scan_user_relid,
@@ -409,10 +410,17 @@ void tuple_dispatch_buffer::configure_params(
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("bioseq dispatch executor relation identity is invalid")));
     }
-    base_params = params;
+    // A non-alignment provider scan has no biological request. Any alignment
+    // consumer checks this owner before dispatch; configuration never copies it.
+    execution_plan = std::move(plan);
     index_read_requirement = read_requirement;
+    const bool generic_raw_optional_scalar =
+        execution_plan &&
+        ::bioseq::simd::pipe::use_generic_raw_optional_scalar_minimizer_route(
+            execution_plan->frozen_parameters, read_requirement);
     read_sequence_index_active =
-        read_requirement == bioseq::indexing::index_read_requirement::require_absent ? false
+        generic_raw_optional_scalar ? false
+        : read_requirement == bioseq::indexing::index_read_requirement::require_absent ? false
         : read_requirement == bioseq::indexing::index_read_requirement::require_compatible_persisted
             ? true
             : read_sequence_index;

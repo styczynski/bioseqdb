@@ -25,6 +25,7 @@ export module bioseq.postgres.table:custom_scan_slice_rewrite_path_tree;
 
 import std;
 import bioseq.postgres.support;
+export import :custom_scan_slice_rewrite_path_contracts;
 
 using namespace bioseq::postgres::support;
 

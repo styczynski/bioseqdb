@@ -234,17 +234,58 @@ void require_admitted_oracle(std::span<const std::uint8_t> ranks,
     compact_sequence_range<instance> guarded_range{guarded_letters};
     const auto source = bioseq::storage::make_lazy_sequence_view(guarded_range);
 
-    const auto admission_bytes =
-        bioseq::storage::packed_sequence_admission_bytes<p_alphabet>(ranks.size(), sizeof(p_unit));
+    const auto physical_plan =
+        bioseq::storage::plan_packed_sequence_allocation<p_alphabet>(
+            ranks.size(), sizeof(p_unit));
+    const auto admission_bytes = physical_plan.total_allocation_requirement_bytes;
+    REQUIRE(admission_bytes ==
+            bioseq::storage::packed_sequence_admission_bytes<p_alphabet>(
+                ranks.size(), sizeof(p_unit)));
+    REQUIRE(physical_plan.logical_payload_bytes == expected.size_bytes());
+    REQUIRE(physical_plan.payload_highway_request_bound_bytes >=
+            physical_plan.logical_payload_bytes);
+    REQUIRE(physical_plan.payload_allocator_request_bytes >=
+            physical_plan.payload_highway_request_bound_bytes);
+    REQUIRE(physical_plan.payload_allocation_requirement_bytes >=
+            physical_plan.payload_allocator_request_bytes);
+    REQUIRE(physical_plan.control_object_bytes > 0u);
+    REQUIRE(physical_plan.control_allocator_request_bytes >=
+            physical_plan.control_object_bytes);
+    REQUIRE(physical_plan.control_allocation_requirement_bytes >=
+            physical_plan.control_allocator_request_bytes);
+    REQUIRE(admission_bytes == physical_plan.payload_allocation_requirement_bytes +
+                                   physical_plan.control_allocation_requirement_bytes);
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t baseline = admission.reserved_bytes();
     auto permit = admission.try_reserve(admission_bytes);
     REQUIRE(permit.has_value());
     {
         auto owner = bioseq::storage::materialize_packed_sequence(
-            source, 1u, 1u + ranks.size(), sizeof(p_unit), std::move(*permit));
+            source,
+            1u,
+            1u + ranks.size(),
+            sizeof(p_unit),
+            std::move(*permit),
+            bioseq::storage::packed_materialization_policy::allow_rank_repack,
+            /*no footprint reflection=*/nullptr);
         const auto& descriptor = owner.descriptor();
-        REQUIRE(admission.reserved_bytes() == baseline + admission_bytes);
+        const auto payload_allocation = owner.test_payload_allocation_bytes();
+        const auto control_allocation = owner.test_control_allocation_bytes();
+        REQUIRE(payload_allocation >= physical_plan.payload_allocator_request_bytes);
+        REQUIRE(payload_allocation <= physical_plan.payload_allocation_requirement_bytes);
+        REQUIRE(control_allocation >= physical_plan.control_allocator_request_bytes);
+        REQUIRE(control_allocation <= physical_plan.control_allocation_requirement_bytes);
+        REQUIRE(owner.test_admission_bytes() == payload_allocation + control_allocation);
+        REQUIRE(owner.test_admission_bytes() <= admission_bytes);
+#if defined(__APPLE__)
+        REQUIRE(physical_plan.payload_allocation_requirement_bytes ==
+                (physical_plan.payload_allocator_request_bytes == 0u
+                     ? 0u
+                     : 2u * physical_plan.payload_allocator_request_bytes - 1u));
+        REQUIRE(physical_plan.control_allocation_requirement_bytes ==
+                2u * physical_plan.control_allocator_request_bytes - 1u);
+#endif
+        REQUIRE(admission.reserved_bytes() == baseline + owner.test_admission_bytes());
         REQUIRE(descriptor.logical_length == ranks.size());
         REQUIRE(descriptor.unit_count == expected.size());
         REQUIRE(descriptor.storage_unit_width == sizeof(p_unit));

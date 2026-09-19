@@ -27,12 +27,15 @@ import std;
 import bioseq.postgres.configuration.aligner;
 import bioseq.pipeline.minimap_port;
 import bioseq.postgres.support;
+import bioseq.sequences.compact_sequence_typmod;
 
-import :custom_scan_runtime_support;
+import :custom_scan_scan_feature_contracts;
 
 import :custom_scan_oid_expression_support_oid_catalog;
 import :custom_scan_oid_expression_support_expression_analysis;
 import :custom_scan_oid_expression_support_restriction_ownership;
+export import :custom_scan_planner_aligner_contracts;
+export import :custom_scan_oid_expression_support_semantic_analysis_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -91,43 +94,6 @@ export {
             function, target_relid, target_sequence_attno, oids);
     }
 
-    /** @brief Accumulates executor feature requirements discovered in expression trees. */
-    struct bioseq_feature_detector {
-        const bioseq_stub_oids* oids = nullptr;
-        scan_feature_flags flags;
-    };
-
-    /** @brief Maps mmsearch and projection calls to executor feature flags. */
-    struct feature_flag_visitor {
-        /** @brief Updates feature flags for the current node and continues traversal. */
-        [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
-                                              pg_node_view node,
-                                              bioseq_feature_detector& detector) const {
-            if (FuncExpr* fe = node.try_cast<FuncExpr>()) {
-                const bioseq_stub_oids* o = detector.oids;
-                if (is_mmsearch_funcid(fe->funcid, *o)) {
-                    detector.flags.has_mmsearch = true;
-                }
-                if (fe->funcid == o->cigar_oid || fe->funcid == o->has_cigar_oid) {
-                    detector.flags.uses_cigar = true;
-                }
-                if (fe->funcid == o->edit_oid) {
-                    detector.flags.uses_edit = true;
-                }
-                if (fe->funcid == o->divergence_oid) {
-                    detector.flags.uses_divergence = true;
-                }
-                if (fe->funcid == o->mapq_oid) {
-                    detector.flags.uses_mapq = true;
-                }
-                if (is_bioseq_projection_funcid(fe->funcid, *o)) {
-                    detector.flags.any_match_projection = true;
-                }
-            }
-            return pg_walk_step::descend;
-        }
-    };
-
     /** @brief Detects executor features referenced by target-list and qual expressions. */
     [[nodiscard]] scan_feature_flags
     detect_feature_flags(List* targetlist, List* qual, const bioseq_stub_oids& oids) {
@@ -147,16 +113,6 @@ export {
         }
         return detector.flags;
     }
-
-    /** @brief Serialization constants for an extracted strict edit predicate. */
-    inline constexpr int k_bioseq_edit_predicate_magic = 0x42534531; /* BSE1 */
-    inline constexpr int k_bioseq_edit_predicate_version = 1;
-
-    /** @brief Describes an executor-owned strict upper bound on edit distance. */
-    struct strict_edit_predicate {
-        std::int64_t exclusive_upper_bound = 0;
-        AttrNumber sequence_attno = InvalidAttrNumber;
-    };
 
     /** @brief Tracks whether an expression contains a bioseq.edit call. */
     struct edit_function_probe {
@@ -286,12 +242,6 @@ export {
         return detector.flags;
     }
 
-    /** @brief Describes a plan-time sequence storage-width coalescing decision. */
-    struct explain_typmod_coalesce {
-        bool active = false;
-        uint8_t col_alpha = 0;
-        uint8_t col_byte_width = 0;
-    };
     /** @brief Carries OIDs and the first detected typmod mismatch through an explain walk. */
     struct explain_coalesce_walk_context {
         const bioseq_stub_oids* oids;

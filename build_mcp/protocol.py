@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from build_presets import (
+    ALL_ALPHABETS_UNIT_INTEGRATION_MODE,
     BENCH_CLI_MODES,
     CATCH_FILTER_MODES,
     FIXED_BUILD_ONLY_MODES,
@@ -277,6 +278,17 @@ TOOL_DEFINITIONS = [
                 }
             },
             "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "mode": {"const": ALL_ALPHABETS_UNIT_INTEGRATION_MODE},
+                        },
+                        "required": ["mode"],
+                    },
+                    "then": {
+                        "properties": {"debug": {"const": False}},
+                    },
+                },
                 {
                     "if": {
                         "properties": {
@@ -644,9 +656,25 @@ TOOL_DEFINITIONS = [
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Select and validate the exact successful debug build "
-                        "tree instead of auto-discovering a recent tree. The "
-                        "receipt mode must own the requested target."
+                        "Select and validate an exact successful build tree "
+                        "instead of auto-discovering a recent tree. A debug "
+                        "receipt is required unless historical_artifact_only "
+                        "is true. The receipt mode must own the requested "
+                        "target."
+                    ),
+                },
+                "historical_artifact_only": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Inspect only the exact artifact pinned by "
+                        "reuse_build_receipt, without requiring its recorded "
+                        "source graph to match the current worktree. This "
+                        "read-only historical mode is required for a "
+                        "non-debug receipt, disables .bc-to-.s synthesis, "
+                        "and never proves the current worktree. Receipt seal, "
+                        "commit, configuration, target ownership, and exact "
+                        "artifact hashes remain validated."
                     ),
                 },
             },
@@ -794,7 +822,10 @@ TOOL_DEFINITIONS = [
             "Tiers and fixed live-budget costs: specialist = gpt-5.6-sol/max (100) for the hardest "
             "architecture/research/implementation; senior = gpt-5.6-sol/high (70) for difficult "
             "design, review, and implementation; mid = gpt-5.6-terra/high (50) for ordinary "
-            "nontrivial work; intern = gpt-5.6-terra/medium (22) for bounded simple work; and "
+            "nontrivial work; contractor = Cursor gpt-5.5 with Cursor-selected dynamic reasoning "
+            "effort (45) for substantial bounded work and consumes a separate Cursor account "
+            "quota rather than Codex account quota; intern = gpt-5.6-terra/medium (22) for bounded "
+            "simple work; and "
             "contractor-intern = fast, cheap, weaker Cursor Composer 2.5 (canonical Cursor CLI "
             "model ID composer-2.5; cost 1) for simplistic or "
             "mechanical tasks only. Use contractor-intern first only when the work is truly "
@@ -839,8 +870,8 @@ TOOL_DEFINITIONS = [
                         "command": {"type": "string", "const": "create"},
                         "reasoning_effort": {
                             "type": "string",
-                            "enum": ["contractor-intern", "intern", "mid", "senior", "specialist"],
-                            "description": "Portable workforce tier; mapped to the documented model and vendor effort.",
+                            "enum": ["contractor-intern", "intern", "contractor", "mid", "senior", "specialist"],
+                            "description": "Portable workforce tier; mapped to the documented model and vendor effort. The contractor tier uses Cursor gpt-5.5 with dynamic effort and consumes a separate Cursor account quota.",
                         },
                         "instructions": {
                             "type": "string", "minLength": 1, "maxLength": 100000,
@@ -852,7 +883,7 @@ TOOL_DEFINITIONS = [
                         },
                         "highest_spawn_tier": {
                             "type": ["string", "null"],
-                            "enum": [None, "contractor-intern", "intern", "mid", "senior", "specialist"],
+                            "enum": [None, "contractor-intern", "intern", "contractor", "mid", "senior", "specialist"],
                             "description": "Omitted/null defaults to the new agent's tier; explicit values cannot exceed caller authority.",
                         },
                         "label": {
@@ -922,7 +953,7 @@ TOOL_DEFINITIONS = [
                         },
                         "highest_spawn_tier": {
                             "type": ["string", "null"],
-                            "enum": [None, "contractor-intern", "intern", "mid", "senior", "specialist"],
+                            "enum": [None, "contractor-intern", "intern", "contractor", "mid", "senior", "specialist"],
                             "description": "Omission preserves the ceiling; null resets it to the target's own tier.",
                         },
                         "label": {

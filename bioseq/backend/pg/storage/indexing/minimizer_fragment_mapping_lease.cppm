@@ -4,20 +4,28 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
-
 extern "C" {
+#include "postgres.h"
+
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <cstddef>
+#include <memory>
+#include <type_traits>
+#include <utility>
 
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 export module bioseq.postgres.storage.indexing.minimizer_fragment_mapping_lease;
-
-import std;
 
 export namespace bioseq::storage::indexing {
 

@@ -14,6 +14,7 @@ module;
 #include <vector>
 #include <algorithm>
 #include <limits>
+#include <stdexcept>
 
 export module bioseq.chaining.scalar;
 
@@ -61,7 +62,12 @@ void chain_anchors_scalar(
     static const auto* dp_instrumentation_descriptor =
         bioseq::instrumentation::register_static_region("mg_lchain_dp");
     auto dp_instrumentation_scope = bioseq::instrumentation::region(dp_instrumentation_descriptor);
-    const int64_t anchor_count = static_cast<int64_t>(anchors.size());
+    const auto storage_plan = derive_scalar_chaining_storage_plan(anchors.size(), params);
+    if (!storage_plan) {
+        throw std::length_error{"scalar chaining storage exceeds its addressable domain"};
+    }
+    const auto scratch_count = storage_plan->forward_anchor_count;
+    const int64_t anchor_count = static_cast<int64_t>(scratch_count);
     if (anchor_count == 0) {
         return;
     }
@@ -79,10 +85,10 @@ void chain_anchors_scalar(
     // predecessors and visited require the exact -1 and zero sentinels below.
     auto dp_scope = context::current().push<context::arena::chain>();
     auto& dp_ctx = context::current();
-    auto best_scores  = dp_ctx.alloc_chain_array<int32_t>(anchor_count);
-    auto predecessors = dp_ctx.alloc_chain_array<int64_t>(anchor_count);
-    auto peak_scores  = dp_ctx.alloc_chain_array<int32_t>(anchor_count);
-    auto visited      = dp_ctx.alloc_chain_array<int32_t>(anchor_count);
+    auto best_scores  = dp_ctx.alloc_chain_array<int32_t>(scratch_count);
+    auto predecessors = dp_ctx.alloc_chain_array<int64_t>(scratch_count);
+    auto peak_scores  = dp_ctx.alloc_chain_array<int32_t>(scratch_count);
+    auto visited      = dp_ctx.alloc_chain_array<int32_t>(scratch_count);
     // predecessors[] = -1 (the "no predecessor" sentinel checked at line
     // 143 below) — int64_t -1 is all-ones, so memset(0xff) does the job.
     std::memset(predecessors.data(), 0xff,

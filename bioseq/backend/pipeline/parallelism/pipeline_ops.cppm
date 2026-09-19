@@ -7,6 +7,7 @@ module;
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 export module bioseq.parallelism.pipeline_ops;
 import bioseq.parallelism.mode;
@@ -104,6 +105,41 @@ inline void parallel_for_pipeline(
         range_body{[&body](std::size_t lo, std::size_t hi) {
             body(lo, hi);
         }});
+}
+
+/**
+ * Execute a coarse range with independently admitted worker contexts.
+ * The borrowed factory and range body stay live until the pool has joined.
+ * Serial/nested execution retains the caller's already admitted context.
+ */
+template <class p_body>
+inline void parallel_for_pipeline(
+        std::size_t begin,
+        std::size_t end,
+        std::size_t grain,
+        std::size_t min_items,
+        task_parallel_region region,
+        p_body&& body,
+        worker_context_factory factory) {
+    if (factory.state == nullptr || factory.acquire == nullptr ||
+        factory.maximum_concurrency == 0u) {
+        throw std::invalid_argument{"admitted pipeline range requires a worker factory"};
+    }
+    auto& pool = global_pool::instance();
+    if (!has_parallel_tasks(pool.get_mode()) || pool.maximum_concurrency() <= 1 ||
+        factory.maximum_concurrency <= 1u || end <= begin || end - begin < min_items) {
+        if (end > begin) {
+            body(begin, end);
+        }
+        return;
+    }
+    task_parallel_scope scope(region);
+    if (!scope.is_acquired()) {
+        body(begin, end);
+        return;
+    }
+    pool.parallel_for_with_context(begin, end, grain,
+        range_body{[&body](std::size_t lo, std::size_t hi) { body(lo, hi); }}, factory);
 }
 
 /**

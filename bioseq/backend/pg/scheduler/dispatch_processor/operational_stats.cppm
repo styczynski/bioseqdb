@@ -2,9 +2,12 @@
  * @file operational_stats.cppm
  * @brief Updates saturating counters shared by typed dispatch stages.
  */
+module;
+
+#include <cstdint>
+
 export module bioseq.postgres.scheduler.dispatch_processor.operational_stats;
 
-import std;
 export import bioseq.pipeline.stats;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {

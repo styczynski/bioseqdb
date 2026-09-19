@@ -89,6 +89,7 @@ import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.storage.manager.sql_rows;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_manager_sequence_storage_manager.entity_handles;
+export import bioseq.postgres.storage.manager.locator_stub;
 // The PG-free bucket math and sequence_locator value live in their own
 // module so the unit-test TU can link them without the Postgres backend.
 // Re-exported here so existing `import bioseq_storage` consumers are unchanged.
@@ -105,12 +106,6 @@ export namespace bioseq::storage {
 // `sequence_locator_payload_version` and the 40-byte `sequence_locator` value
 // live in the PG-free `bioseq.storage.layout` module so the unit-test TU can
 // link them. They are re-exported above, so every use below resolves unchanged.
-
-/// Physical size in bytes of the canonical locator-stub varlena.
-constexpr std::size_t k_locator_stub_varlena_bytes =
-    bioseq::pg_types::seq::header_bytes() + sizeof(sequence_locator);
-static_assert(k_locator_stub_varlena_bytes == 56,
-              "sequence locator stub must be exactly 56 bytes");
 
 /// Check whether a sequence varlena carries the canonical locator width marker.
 /// @param hdr Borrowed varlena pointer, which may be null.
@@ -300,69 +295,6 @@ inline void validate_sequence_fragment_metadata(
                      static_cast<unsigned long long>(expected_padding))));
     }
     pg_unreachable();
-}
-
-/// Encode one canonical locator stub without changing its wire geometry.
-/// @param dst Writable storage for exactly `k_locator_stub_varlena_bytes` bytes.
-/// @param logical_alphabet_code Sequence alphabet stored in the varlena header.
-/// @param logical_byte_width Packed storage-unit width in bytes.
-/// @param padding_letters Unused letters in the final packed unit.
-/// @param total_bp_size Logical sequence length in letters.
-/// @param loc Canonical locator encoded into the payload.
-/// @throws PostgreSQL ERROR when an input is outside the locator wire domain.
-[[gnu::always_inline]]
-inline void encode_locator_into_stub(
-    bioseq::pg_types::seq* dst,
-    std::uint8_t logical_alphabet_code,
-    std::uint8_t logical_byte_width,
-    std::uint16_t padding_letters,
-    sequence_size_t total_bp_size,
-    const sequence_locator& loc)
-{
-    if (logical_byte_width == 0 || logical_byte_width > 0x0Fu
-        || loc.payload_version != sequence_locator_payload_version || loc.source_epoch == 0
-        || loc.reserved_16 != 0 || loc.reserved_32 != 0) {
-        bioseq_log<logging_level::error, logging_target::postgres>(
-            "bioseq storage: locator stub input is outside the revision-3 wire domain");
-    }
-    std::memset(dst, 0, k_locator_stub_varlena_bytes);
-    SET_VARSIZE(dst, k_locator_stub_varlena_bytes);
-    dst->alphabet_code = static_cast<bioseq::pg_types::seq::alphabet_code_t>(logical_alphabet_code);
-    dst->storage_unit_byte_width = static_cast<std::uint8_t>(
-        sequence_locator_stub_width_marker | logical_byte_width);
-    dst->padding_letters = padding_letters;
-    constexpr sequence_size_t k_base_pair_size_field_maximum =
-        static_cast<sequence_size_t>(std::numeric_limits<bioseq::pg_types::seq::bp_size_t>::max());
-    dst->bp_size = static_cast<bioseq::pg_types::seq::bp_size_t>(
-        std::min<sequence_size_t>(
-            total_bp_size, k_base_pair_size_field_maximum));
-    const auto payload = std::span<std::byte>{
-        reinterpret_cast<std::byte*>(dst->data), sizeof(sequence_locator)};
-    if (!encode_sequence_locator_payload(payload, loc)) {
-        bioseq_log<logging_level::error, logging_target::postgres>(
-            "bioseq storage: failed to encode canonical revision-3 locator payload");
-    }
-}
-
-/// Allocate and encode one canonical locator stub in a memory context.
-/// @param mctx Memory context that owns the returned varlena.
-/// @return Encoded locator stub owned by `mctx`.
-/// @throws PostgreSQL ERROR when allocation or encoding fails.
-[[nodiscard]] [[gnu::always_inline]]
-inline bioseq::pg_types::seq* alloc_locator_stub_in(
-    MemoryContext mctx,
-    std::uint8_t logical_alphabet_code,
-    std::uint8_t logical_byte_width,
-    std::uint16_t padding_letters,
-    sequence_size_t total_bp_size,
-    const sequence_locator& loc)
-{
-    bioseq::postgres::support::memory_context_scope ctx_guard{mctx};
-    bioseq::pg_types::seq* dst = static_cast<bioseq::pg_types::seq*>(
-        palloc0(k_locator_stub_varlena_bytes));
-    encode_locator_into_stub(dst, logical_alphabet_code, logical_byte_width,
-                             padding_letters, total_bp_size, loc);
-    return dst;
 }
 
 // ---------------------------------------------------------------------------

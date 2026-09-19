@@ -435,6 +435,42 @@ concept exact_simd_minimizer_representation =
     };
 
 /**
+ * @brief Requires the existing split 128-bit minimizer surface used by typed sinks.
+ * @tparam p_minimizer_type Candidate minimizer record.
+ */
+template<class p_minimizer_type>
+concept wide_simd_minimizer_representation =
+    std::is_standard_layout_v<p_minimizer_type>
+    && std::is_trivially_copyable_v<p_minimizer_type>
+    && sizeof(p_minimizer_type) == 2u * sizeof(std::uint64_t)
+    && requires (
+        p_minimizer_type value,
+        std::uint64_t hash,
+        std::uint64_t position,
+        std::uint64_t strand,
+        std::uint64_t span) {
+        typename p_minimizer_type::layout_type;
+        requires p_minimizer_type::layout_type::k_storage_bits == 128u;
+        { p_minimizer_type{hash, position, strand, span} }
+            -> std::same_as<p_minimizer_type>;
+        { p_minimizer_type::maximum() } -> std::same_as<p_minimizer_type>;
+        { value.kmer() } -> std::convertible_to<std::uint64_t>;
+        { value.pos_strand_encoded() } -> std::convertible_to<std::uint64_t>;
+        { value.data_low_64() } -> std::convertible_to<std::uint64_t>;
+        { value.data_high_64() } -> std::convertible_to<std::uint64_t>;
+        { p_minimizer_type::k_hash_field_mask }
+            -> std::convertible_to<std::uint64_t>;
+        { p_minimizer_type::k_position_field_mask }
+            -> std::convertible_to<std::uint64_t>;
+    };
+
+/** Native raw-word or split typed record accepted by the two-stack SIMD recurrence. */
+template<class p_minimizer_type>
+concept two_stack_simd_minimizer_representation =
+    exact_simd_minimizer_representation<p_minimizer_type>
+    || wide_simd_minimizer_representation<p_minimizer_type>;
+
+/**
  * @brief Identifies exact record layouts reachable by generated minimizers.
  *
  * This is invocation metadata for one coarse typed switch, never a generated
@@ -452,6 +488,9 @@ enum class minimizer_output_layout : std::uint8_t {
     sequence_log2_63_kmer_7_uint128 = 8u,
     sequence_log2_27_kmer_27_uint128 = 9u,
     sequence_log2_63_kmer_27_uint128 = 10u,
+    sequence_log2_20_kmer_20_uint64 = 11u,
+    sequence_log2_23_kmer_20_uint64 = 12u,
+    sequence_log2_63_kmer_20_uint128 = 13u,
 };
 
 /**
@@ -490,6 +529,15 @@ inline constexpr minimizer_output_layout k_minimizer_output_layout = [] {
     } else if constexpr (
         std::same_as<output_type, minimizer_representation<63u, 27u>>) {
         return minimizer_output_layout::sequence_log2_63_kmer_27_uint128;
+    } else if constexpr (
+        std::same_as<output_type, minimizer_representation<20u, 20u>>) {
+        return minimizer_output_layout::sequence_log2_20_kmer_20_uint64;
+    } else if constexpr (
+        std::same_as<output_type, minimizer_representation<23u, 20u>>) {
+        return minimizer_output_layout::sequence_log2_23_kmer_20_uint64;
+    } else if constexpr (
+        std::same_as<output_type, minimizer_representation<63u, 20u>>) {
+        return minimizer_output_layout::sequence_log2_63_kmer_20_uint128;
     } else {
         return minimizer_output_layout::unsupported;
     }
@@ -505,6 +553,12 @@ static_assert(sizeof(minimizer_representation<49u, 7u>) == 8u);
 static_assert(sizeof(minimizer_representation<63u, 7u>) == 16u);
 static_assert(sizeof(minimizer_representation<27u, 27u>) == 16u);
 static_assert(sizeof(minimizer_representation<63u, 27u>) == 16u);
+static_assert(sizeof(minimizer_representation<20u, 20u>) == 8u);
+static_assert(sizeof(minimizer_representation<23u, 20u>) == 8u);
+static_assert(sizeof(minimizer_representation<63u, 20u>) == 16u);
+static_assert(minimizer_representation<20u, 20u>::layout_type::k_hash_bits >= 40u);
+static_assert(minimizer_representation<23u, 20u>::layout_type::k_hash_bits >= 40u);
+static_assert(minimizer_representation<63u, 20u>::layout_type::k_hash_bits >= 40u);
 static_assert(k_minimizer_output_layout<minimizer_representation<15u, 15u>>
     == minimizer_output_layout::sequence_log2_15_kmer_15_uint64);
 static_assert(k_minimizer_output_layout<minimizer_representation<28u, 15u>>
@@ -525,6 +579,12 @@ static_assert(k_minimizer_output_layout<minimizer_representation<27u, 27u>>
     == minimizer_output_layout::sequence_log2_27_kmer_27_uint128);
 static_assert(k_minimizer_output_layout<minimizer_representation<63u, 27u>>
     == minimizer_output_layout::sequence_log2_63_kmer_27_uint128);
+static_assert(k_minimizer_output_layout<minimizer_representation<20u, 20u>>
+    == minimizer_output_layout::sequence_log2_20_kmer_20_uint64);
+static_assert(k_minimizer_output_layout<minimizer_representation<23u, 20u>>
+    == minimizer_output_layout::sequence_log2_23_kmer_20_uint64);
+static_assert(k_minimizer_output_layout<minimizer_representation<63u, 20u>>
+    == minimizer_output_layout::sequence_log2_63_kmer_20_uint128);
 
 /**
  * @brief Returns the position mask encoded by an output layout.
@@ -555,6 +615,12 @@ static_assert(k_minimizer_output_layout<minimizer_representation<63u, 27u>>
             return minimizer_representation<27u, 27u>::k_position_field_mask;
         case minimizer_output_layout::sequence_log2_63_kmer_27_uint128:
             return minimizer_representation<63u, 27u>::k_position_field_mask;
+        case minimizer_output_layout::sequence_log2_20_kmer_20_uint64:
+            return minimizer_representation<20u, 20u>::k_position_field_mask;
+        case minimizer_output_layout::sequence_log2_23_kmer_20_uint64:
+            return minimizer_representation<23u, 20u>::k_position_field_mask;
+        case minimizer_output_layout::sequence_log2_63_kmer_20_uint128:
+            return minimizer_representation<63u, 20u>::k_position_field_mask;
         case minimizer_output_layout::unsupported:
             break;
     }

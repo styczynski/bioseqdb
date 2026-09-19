@@ -331,14 +331,14 @@ inline void clear_with_prefix_(const std::string& prefix) {
     drop_index_relations(drop_index_relation_selector::with_prefix(prefix));
 }
 
-inline void fragment_index_storage::clear(std::string_view name) {
+void fragment_index_storage::clear(std::string_view name) {
     clear_with_prefix_(fmt::format(
         "seqidx_{}_{:016x}_",
         short_index_for(name),
         identity_hash64(db_oid_, tablespace_oid_, main_relfilenode_, column_attno_, name)));
     index_relid_ = InvalidOid;
 }
-inline void sequence_index_storage::clear(std::string_view name) {
+void sequence_index_storage::clear(std::string_view name) {
     clear_with_prefix_(fmt::format(
         "seqidx_{}_{:016x}_",
         short_index_for(name),
@@ -346,7 +346,7 @@ inline void sequence_index_storage::clear(std::string_view name) {
     index_relid_ = InvalidOid;
     decoded_valid_ = false;
 }
-inline void table_index_storage::clear(std::string_view name) {
+void table_index_storage::clear(std::string_view name) {
     clear_with_prefix_(fmt::format(
         "seqidxtab_{}_{:016x}_",
         short_index_for(name),

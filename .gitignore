@@ -22,4 +22,8 @@ __pycache__/
 .codex/config.toml
 .claude/settings.local.json
 
-main/build_mcp/node_modules
+
+
+bench/*observed*/**
+reporting/**
+reporting/*

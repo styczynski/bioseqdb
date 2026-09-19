@@ -2,9 +2,11 @@
  * @file external_file_producer_contract.cppm
  * @brief Exposes the compile-disabled external-file producer counters.
  */
-export module bioseq.postgres.storage.indexing.external_file_producer_contract;
+module;
 
-import std;
+#include <cstdint>
+
+export module bioseq.postgres.storage.indexing.external_file_producer_contract;
 
 export namespace bioseq::storage::indexing {
 

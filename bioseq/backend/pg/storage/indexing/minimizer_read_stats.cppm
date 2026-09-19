@@ -2,9 +2,16 @@
  * @file minimizer_read_stats.cppm
  * @brief Declares transport and validation counters for persisted minimizer reads.
  */
+module;
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+
 export module bioseq.postgres.storage.indexing.minimizer_read_stats;
 
-import std;
 import bioseq.indexing.storage;
 
 export namespace bioseq::storage::indexing {

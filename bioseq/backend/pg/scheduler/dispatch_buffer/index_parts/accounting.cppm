@@ -10,20 +10,8 @@ extern "C" {
 #include "utils/snapmgr.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <cstring>
-#include <exception>
-#include <limits>
-#include <map>
-#include <memory>
-#include <numeric>
-#include <optional>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <utility>
-#include <vector>
+#include <cstddef>
+#include <cstdint>
 
 // The chunked-scanner dispatch path is always compiled as a permanent part of
 // the fragmented pipeline tree.
@@ -35,29 +23,9 @@ extern "C" {
 // canonical lazy facade.
 export module bioseq.postgres.scheduler.dispatch_buffer:accounting;
 
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.postgres.configuration.core;
 import bioseq.indexing.type;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.storage.lazy_sequence; // allocation observer for route-aware sequence payload tracing
-import bioseq.postgres.scheduler.dispatch_processor; // fixed-shape batch_processor, heavy pipeline in its own module
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.minimap_port;
-import bioseq.sequences.cigar;
-import bioseq.pipeline.pipe;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.scanner;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner; // statement-owned source provider for locator targets
-import bioseq.parallelism.memory_admission;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.column.table_access;
+import bioseq.pipeline.stats;
+import bioseq.postgres.storage.indexing.minimizer_read_stats;
 
 export namespace bioseq::scheduler {
 
@@ -228,50 +196,6 @@ inline void merge_generation_read_stats(
     merge_cold_index_preparation_stats(destination, source.cold);
 }
 
-inline void apply_active_read_policy_resolution(
-    ::bioseq::simd::batch_processor::scanner_pg_context& context,
-    bioseq::storage::indexing::active_read_policy_resolution resolution,
-    const Oid user_relid,
-    const Oid relfilenode,
-    const std::int16_t attno) {
-    std::uint64_t* counter = nullptr;
-    switch (resolution.source) {
-    case bioseq::storage::indexing::active_read_policy_source::configured_row:
-        counter =
-            &bioseq::storage::indexing::g_active_read_policy_dispatch_stats.configured_batches;
-        break;
-    case bioseq::storage::indexing::active_read_policy_source::authoritative_no_row_default:
-        counter = &bioseq::storage::indexing::g_active_read_policy_dispatch_stats
-                       .authoritative_default_batches;
-        break;
-    case bioseq::storage::indexing::active_read_policy_source::non_relation:
-        counter =
-            &bioseq::storage::indexing::g_active_read_policy_dispatch_stats.non_relation_batches;
-        break;
-    case bioseq::storage::indexing::active_read_policy_source::unresolved:
-        break;
-    }
-    if (counter == nullptr) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("active-read policy resolver returned no dispatch source")));
-        pg_unreachable();
-    }
-    ++*counter;
-    context.active_index = std::move(resolution.index_name);
-    context.active_index_policy_source = resolution.source;
-    bioseq::storage::indexing::g_last_active_read_policy_dispatch_source = resolution.source;
-    bioseq_log<logging_level::debug>(
-        "[bioseq] dispatch active-read policy resolution source={} relation={} relfilenode={} "
-        "attno={} index={} source_dispatch_count={}",
-        bioseq::storage::indexing::active_read_policy_resolution_source_name(resolution.source),
-        static_cast<unsigned>(user_relid),
-        static_cast<unsigned>(relfilenode),
-        static_cast<int>(attno),
-        context.active_index,
-        static_cast<unsigned long long>(*counter));
-}
-
 [[nodiscard]] constexpr std::uint64_t
 extra_broadcast_query_ordinal(const bool per_row_query_mode,
                               const std::size_t batch_size,
@@ -345,8 +269,8 @@ enum class shared_join_target_outcome_topology : std::uint8_t {
 
 /* Requested-backend identity is an attestation result, not a dispatch-shape
  * discriminator. A deliberately unattested mixed CPU tuple still emits one
- * raw target outcome per target-query pair, whereas the complete Vulkan tuple
- * emits one already-shared target outcome. Derive that topology from the
+ * raw target outcome per target-query pair. The Vulkan dispatcher also records
+ * one outcome per completed query, even when its target is shared. Derive topology from the
  * immutable selected params and keep the backend identity only as a coherence
  * check. */
 [[nodiscard]] constexpr shared_join_target_outcome_topology
@@ -392,10 +316,16 @@ shared_join_raw_target_shape_valid(const shared_join_target_outcome_topology top
         expected = query_count;
         break;
     case shared_join_target_outcome_topology::gpu_shared_target:
-        if (backend != ::bioseq::pipeline_stats::executed_backend::vulkan_gpu) {
+        if (backend != ::bioseq::pipeline_stats::executed_backend::vulkan_gpu
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            && backend != ::bioseq::pipeline_stats::executed_backend::hybrid_cpu_vulkan
+#elif defined(BIOSEQ_TEST_INDEXES)
+            && backend != ::bioseq::pipeline_stats::executed_backend::mixed_invalid
+#endif
+        ) {
             return false;
         }
-        expected = 1;
+        expected = query_count;
         break;
     case shared_join_target_outcome_topology::invalid:
         return false;
@@ -419,7 +349,7 @@ static_assert(
                                        ::bioseq::pipeline_stats::executed_backend::vulkan_gpu,
                                        16,
                                        16,
-                                       1));
+                                       16));
 /* Later waves must still carry native raw target/source stats.  Only the
  * batch join owner suppresses their normalized publication. */
 static_assert(
@@ -434,12 +364,42 @@ static_assert(
                                         1,
                                         1,
                                         0));
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+static_assert(
+    shared_join_raw_target_shape_valid(
+        shared_join_target_outcome_topology::gpu_shared_target,
+        ::bioseq::pipeline_stats::executed_backend::hybrid_cpu_vulkan,
+        16,
+        16,
+        16));
 static_assert(
     !shared_join_raw_target_shape_valid(shared_join_target_outcome_topology::gpu_shared_target,
                                         ::bioseq::pipeline_stats::executed_backend::mixed_invalid,
                                         16,
                                         16,
                                         1));
+#elif defined(BIOSEQ_TEST_INDEXES)
+static_assert(
+    shared_join_raw_target_shape_valid(shared_join_target_outcome_topology::gpu_shared_target,
+                                       ::bioseq::pipeline_stats::executed_backend::mixed_invalid,
+                                       16,
+                                       16,
+                                       16));
+static_assert(
+    !shared_join_raw_target_shape_valid(
+        shared_join_target_outcome_topology::gpu_shared_target,
+        ::bioseq::pipeline_stats::executed_backend::hybrid_cpu_vulkan,
+        16,
+        16,
+        1));
+#else
+static_assert(
+    !shared_join_raw_target_shape_valid(shared_join_target_outcome_topology::gpu_shared_target,
+                                        ::bioseq::pipeline_stats::executed_backend::mixed_invalid,
+                                        16,
+                                        16,
+                                        1));
+#endif
 static_assert(
     !shared_join_raw_target_shape_valid(shared_join_target_outcome_topology::cpu_per_pair,
                                         ::bioseq::pipeline_stats::executed_backend::vulkan_gpu,
@@ -565,7 +525,7 @@ normalize_shared_join_target_outcomes(::bioseq::pipeline_stats::pipeline_executi
         expected_raw_target_rows = query_count_u64;
         break;
     case shared_join_target_outcome_topology::gpu_shared_target:
-        expected_raw_target_rows = 1;
+        expected_raw_target_rows = query_count_u64;
         break;
     case shared_join_target_outcome_topology::invalid:
         ereport(

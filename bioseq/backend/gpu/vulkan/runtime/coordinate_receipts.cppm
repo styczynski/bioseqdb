@@ -50,6 +50,31 @@ runtime::prepare_persisted_grouped_soa_coordinate_finalization(
     }
     const runtime_pipeline_operation_audit& query = receipt.query_pipeline_token_.audit();
     const runtime_pipeline_operation_audit& shape = receipt.grouped_soa_pipeline_token_.audit();
+    const bool alignment_present = receipt.has_alignment_cigar_receipt();
+    const runtime_pipeline_operation_audit* alignment =
+        alignment_present ? std::addressof(receipt.alignment_pipeline_token_.audit()) : nullptr;
+    const std::uint64_t alignment_pipeline_receipt_count =
+        alignment_present ? static_cast<std::uint64_t>(alignment->prepared_count) : 0u;
+    const std::uint64_t alignment_submission_count =
+        alignment_present ? alignment->committed_submissions : 0u;
+    const bool mapq_present = receipt.has_mapq_receipt();
+    const runtime_pipeline_operation_audit* mapq =
+        mapq_present ? std::addressof(receipt.mapq_pipeline_token_.audit()) : nullptr;
+    const std::uint64_t mapq_pipeline_receipt_count =
+        mapq_present ? static_cast<std::uint64_t>(mapq->prepared_count) : 0u;
+    const std::uint64_t mapq_submission_count = mapq_present ? mapq->committed_submissions : 0u;
+    if (alignment_present &&
+        (!receipt.alignment_pipeline_token_.is_valid_for_persisted_alignment_cigar() ||
+         alignment->operation_identity != receipt.operation_identity_ ||
+         alignment_pipeline_receipt_count != 1u || alignment_submission_count == 0u)) {
+        return result;
+    }
+    if (mapq_present != receipt.requires_mapq_receipt() ||
+        (mapq_present && (!receipt.mapq_pipeline_token_.is_valid_for_persisted_mapq() ||
+                          mapq->operation_identity != receipt.operation_identity_ ||
+                          mapq_pipeline_receipt_count != 1u || mapq_submission_count != 1u))) {
+        return result;
+    }
     const bool environment_equal =
         query.device_uuid == shape.device_uuid && query.api_version == shape.api_version &&
         query.driver_version == shape.driver_version && query.vendor_id == shape.vendor_id &&
@@ -62,7 +87,28 @@ runtime::prepare_persisted_grouped_soa_coordinate_finalization(
         query.api_version == live_features.api_version &&
         query.driver_version == live_features.driver_version &&
         query.vendor_id == live_features.vendor_id && query.device_id == live_features.device_id &&
-        query.pipeline_cache_uuid == live_features.pipeline_cache_uuid;
+        query.pipeline_cache_uuid == live_features.pipeline_cache_uuid &&
+        (!alignment_present ||
+         (query.device_uuid == alignment->device_uuid &&
+          query.api_version == alignment->api_version &&
+          query.driver_version == alignment->driver_version &&
+          query.vendor_id == alignment->vendor_id && query.device_id == alignment->device_id &&
+          query.pipeline_cache_uuid == alignment->pipeline_cache_uuid &&
+          query.seed_sha256 == alignment->seed_sha256 && query.seed_size == alignment->seed_size &&
+          query.manifest_checksum == alignment->manifest_checksum &&
+          query.seed_receipt_identity == alignment->seed_receipt_identity &&
+          query.archive_set == alignment->archive_set &&
+          query.cache_qualification == alignment->cache_qualification)) &&
+        (!mapq_present ||
+         (query.device_uuid == mapq->device_uuid && query.api_version == mapq->api_version &&
+          query.driver_version == mapq->driver_version && query.vendor_id == mapq->vendor_id &&
+          query.device_id == mapq->device_id &&
+          query.pipeline_cache_uuid == mapq->pipeline_cache_uuid &&
+          query.seed_sha256 == mapq->seed_sha256 && query.seed_size == mapq->seed_size &&
+          query.manifest_checksum == mapq->manifest_checksum &&
+          query.seed_receipt_identity == mapq->seed_receipt_identity &&
+          query.archive_set == mapq->archive_set &&
+          query.cache_qualification == mapq->cache_qualification));
     if (!environment_equal)
         return result;
 
@@ -94,8 +140,19 @@ runtime::prepare_persisted_grouped_soa_coordinate_finalization(
         .manifest_checksum = query.manifest_checksum,
         .pipeline_cache_all_hit = true,
     };
-    if (shape.committed_submissions >
-        (std::numeric_limits<std::uint64_t>::max)() - query.committed_submissions) {
+    const auto coordinate_submission_count =
+        bioseq::common::checked_add(query.committed_submissions, shape.committed_submissions);
+    if (!coordinate_submission_count.has_value()) {
+        return {};
+    }
+    const auto coordinate_alignment_submission_count =
+        bioseq::common::checked_add(*coordinate_submission_count, alignment_submission_count);
+    if (!coordinate_alignment_submission_count.has_value()) {
+        return {};
+    }
+    const auto committed_submission_count =
+        bioseq::common::checked_add(*coordinate_alignment_submission_count, mapq_submission_count);
+    if (!committed_submission_count.has_value()) {
         return {};
     }
     result.acceptance = persisted_grouped_soa_coordinate_operation_acceptance_audit{
@@ -106,7 +163,14 @@ runtime::prepare_persisted_grouped_soa_coordinate_finalization(
         .burned_count = static_cast<std::uint64_t>(receipt.burned_count()),
         .query_pipeline_receipt_count = static_cast<std::uint64_t>(query.prepared_count),
         .shape_pipeline_receipt_count = static_cast<std::uint64_t>(shape.prepared_count),
-        .committed_submission_count = query.committed_submissions + shape.committed_submissions,
+        .alignment_pipeline_receipt_count = alignment_pipeline_receipt_count,
+        .alignment_submission_count = alignment_submission_count,
+        .mapq_pipeline_receipt_count = mapq_pipeline_receipt_count,
+        .mapq_submission_count = mapq_submission_count,
+        .mapq_result_count = mapq_present ? receipt.mapq_result_count_ : 0u,
+        .mapq_published_count = mapq_present ? receipt.mapq_published_count_ : 0u,
+        .mapq_result_digest = mapq_present ? receipt.mapq_result_digest_ : 0u,
+        .committed_submission_count = *committed_submission_count,
         .seed_receipt_identity = query.seed_receipt_identity,
     };
     if (!result.environment.is_internally_consistent() ||
@@ -127,25 +191,29 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     if (!base_audit.is_internally_consistent() || base_audit.pipeline_create_ns == 0u) {
         return false;
     }
-    const std::array<shader_variant_key, 11> keys{
+    const std::array<shader_variant_key, 12> keys{
         make_shader_key(shader_kind::ordered_sketch_tile, 384u, 64u, 10u),
         make_shader_key(shader_kind::prefix_scan_block, 384u, 1u, 1u),
         make_shader_key(shader_kind::prefix_scan_add, 384u, 128u, 1u),
-        make_shader_key(shader_kind::grouped_soa_seed_count, 384u, 128u, 3u),
-        make_shader_key(shader_kind::grouped_soa_seed_emit, 384u, 128u, 3u),
+        make_shader_key(
+            shader_kind::grouped_soa_seed_count, 384u, 128u, k_grouped_soa_seed_cache_abi_revision),
+        make_shader_key(
+            shader_kind::grouped_soa_seed_emit, 384u, 128u, k_grouped_soa_seed_cache_abi_revision),
         make_shader_key(shader_kind::chain_range_build, 384u, 1u, 1u),
         make_shader_key(shader_kind::coordinate_reduce, 384u, 128u, 1u),
         make_shader_key(shader_kind::chain_tiled_dp_u64, 32u, 32u, 0u),
         make_shader_key(shader_kind::radix_sort_histogram, 384u, 1u, 1u),
         make_shader_key(shader_kind::radix_sort_scan, 384u, 1u, 1u),
         make_shader_key(shader_kind::radix_sort_scatter, 384u, 1u, 1u),
+        make_shader_key(
+            shader_kind::align_extend_simple_cigar, 384u, 64u, k_gpu_alignment_extension_max_len),
     };
     if (!std::all_of(keys.begin(), keys.end(), [](const shader_variant_key& key) {
             return is_shader_variant_key_valid(key);
         })) {
         return false;
     }
-    std::array<runtime_metal_archive_pipeline_receipt, 11> receipts{};
+    std::array<runtime_metal_archive_pipeline_receipt, 12> receipts{};
     for (std::size_t i = 0u; i < receipts.size(); ++i) {
         runtime_metal_archive_pipeline_audit audit = base_audit;
         audit.receipt_identity = 8000u + i;
@@ -162,6 +230,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
 
     runtime_pipeline_operation_token query{};
     runtime_pipeline_operation_token shape{};
+    runtime_pipeline_operation_token alignment{};
     try {
         auto query_collector = runtime_pipeline_use_collector::create(
             runtime_pipeline_operation_kind::query_sketch, 1u, 101u);
@@ -215,10 +284,27 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
         shape_collector->use(command(14u), 0u, keys[6], &receipts[6], 1u);
         shape_collector->commit(command(14u));
         shape = shape_collector->seal();
+
+        auto alignment_collector = runtime_pipeline_use_collector::create(
+            runtime_pipeline_operation_kind::persisted_alignment_cigar, 1u, 202u);
+        alignment_collector->set_shape_input(0u, 20'000u, 20'000u, 9'000u);
+        alignment_collector->set_shape_outcome(0u, 1u, 1u);
+        alignment_collector->prepare(keys[11], &receipts[11]);
+        alignment_collector->begin(command(21u));
+        alignment_collector->use(command(21u), 0u, keys[11], &receipts[11], 1u);
+        alignment_collector->commit(command(21u));
+        alignment_collector->prepare(keys[11], &receipts[11]);
+        alignment_collector->begin(command(22u));
+        alignment_collector->use(command(22u), 0u, keys[11], &receipts[11], 1u);
+        alignment_collector->commit(command(22u));
+        alignment = alignment_collector->seal();
     } catch (...) {
         return false;
     }
-    if (!query.is_valid_for_query_sketch() || !shape.is_valid_for_grouped_soa_coordinate()) {
+    if (!query.is_valid_for_query_sketch() || !shape.is_valid_for_grouped_soa_coordinate() ||
+        !alignment.is_valid_for_persisted_alignment_cigar() ||
+        alignment.audit().operation_identity != 202u || alignment.audit().prepared_count != 1u ||
+        alignment.audit().committed_submissions != 2u) {
         return false;
     }
 
@@ -231,14 +317,29 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     }
     receipt.records_[0].state =
         persisted_grouped_soa_coordinate_operation_receipt::record_state::accepted;
+    receipt.records_[0].audit.result.is_valid = 1u;
     receipt.accepted_count_ = 1u;
     receipt.query_pipeline_token_ = std::move(query);
     receipt.grouped_soa_pipeline_token_ = std::move(shape);
+    receipt.alignment_pipeline_token_ = std::move(alignment);
     receipt.sealed_ = true;
     const persisted_grouped_soa_coordinate_operation_receipt_preview expected =
         receipt.operation_receipt_preview();
+    const auto coordinate_submission_count = bioseq::common::checked_add(
+        receipt.query_pipeline_token_.audit().committed_submissions,
+        receipt.grouped_soa_pipeline_token_.audit().committed_submissions);
+    if (!coordinate_submission_count.has_value()) {
+        return false;
+    }
+    const auto committed_submission_count = bioseq::common::checked_add(
+        *coordinate_submission_count,
+        receipt.alignment_pipeline_token_.audit().committed_submissions);
     if (!receipt.are_all_jobs_accepted() || !expected.is_internally_consistent() ||
-        expected.acceptance.shape_pipeline_receipt_count != 10u) {
+        expected.acceptance.shape_pipeline_receipt_count != 10u ||
+        expected.acceptance.alignment_pipeline_receipt_count != 1u ||
+        expected.acceptance.alignment_submission_count != 2u ||
+        !committed_submission_count.has_value() ||
+        expected.acceptance.committed_submission_count != *committed_submission_count) {
         return false;
     }
     vulkan_feature_set live_features{};
@@ -304,6 +405,16 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
         !rejected_preview([](auto& value) { value.acceptance.burned_count = 1u; }) ||
         !rejected_preview([](auto& value) { ++value.acceptance.query_pipeline_receipt_count; }) ||
         !rejected_preview([](auto& value) { --value.acceptance.shape_pipeline_receipt_count; }) ||
+        !rejected_preview([](auto& value) {
+            value.acceptance.committed_submission_count -=
+                value.acceptance.alignment_submission_count;
+            value.acceptance.alignment_pipeline_receipt_count = 0u;
+            value.acceptance.alignment_submission_count = 0u;
+        }) ||
+        !rejected_preview([](auto& value) {
+            ++value.acceptance.alignment_submission_count;
+            ++value.acceptance.committed_submission_count;
+        }) ||
         !rejected_preview([](auto& value) { ++value.acceptance.committed_submission_count; }) ||
         !rejected_preview([](auto& value) { ++value.acceptance.seed_receipt_identity; }) ||
         !rejected_preview([](auto& value) { ++value.query_pipeline_operation_identity; }) ||

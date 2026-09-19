@@ -23,6 +23,7 @@ extern "C" {
 
 export module bioseq.postgres.table:custom_scan_slice_rewrite_owner_admission;
 
+export import :custom_scan_slice_rewrite_owner_admission_contracts;
 import std;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;

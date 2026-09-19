@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import io
 import json
 import multiprocessing
@@ -187,6 +188,8 @@ class CacheModeResolutionTest(unittest.TestCase):
             DEBUG_BUILD_PRESET=debug,
             TEST_BUILD_PRESET=build_presets._default_test_preset(fast),
             TEST_DEBUG_BUILD_PRESET=build_presets._default_test_preset(debug),
+            E2E_BUILD_PRESET_OVERRIDE=None,
+            E2E_DEBUG_BUILD_PRESET_OVERRIDE=None,
             CACHE_BUILD_PRESET_OVERRIDE=None,
             CACHE_DEBUG_BUILD_PRESET_OVERRIDE=None,
             CACHE_BIOSEQ_BUILD_PRESET_OVERRIDE=None,
@@ -208,6 +211,11 @@ class CacheModeResolutionTest(unittest.TestCase):
                             elif details.preset_family == "test":
                                 expected = (
                                     build_presets._default_test_preset(
+                                        core_preset)
+                                )
+                            elif details.preset_family == "e2e":
+                                expected = (
+                                    build_presets._default_e2e_preset(
                                         core_preset)
                                 )
                             elif details.preset_family == "cache":
@@ -1269,13 +1277,16 @@ class CacheModeRoutingTest(unittest.TestCase):
             build_presets.MODES["cache-integration"].targets,
         )
 
-    def test_existing_install_modes_remain_unchanged(self) -> None:
+    def test_install_modes_retain_required_extension_targets(self) -> None:
         install_modes = {
             name for name, details in build_presets.MODES.items()
             if details.install_extension
         }
         self.assertEqual(
-            install_modes, {"unit-integration", "benchmark-e2e"})
+            install_modes, {
+                "unit-integration", "benchmark-e2e",
+                build_presets.ALL_ALPHABETS_UNIT_INTEGRATION_MODE,
+            })
         for name in install_modes:
             with self.subTest(mode=name):
                 self.assertIn(
@@ -2752,7 +2763,8 @@ class CacheModeRoutingTest(unittest.TestCase):
         )
         self.assertEqual(
             definition.shared_target_names,
-            ("bioseq_modules_nopg",),
+            ("bioseq_modules_nopg", "bioseq_highway_fixed_target",
+             "bioseq_runtime_core", "bioseq_pipeline_dispatch_owners"),
         )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -3438,7 +3450,25 @@ class CacheRuntimeIntegrityTest(unittest.TestCase):
             displaced = root / "displaced"
             marker = root / "executed"
             observer = root / "observe_argv0.py"
-            shutil.copyfile(sys.executable, logical)
+            executable_image = Path(sys.executable)
+            if sys.platform == "darwin":
+                libc = ctypes.CDLL(None)
+                executable_path = libc._NSGetExecutablePath
+                executable_path.argtypes = [
+                    ctypes.POINTER(ctypes.c_char),
+                    ctypes.POINTER(ctypes.c_uint32),
+                ]
+                executable_path.restype = ctypes.c_int
+                required = ctypes.c_uint32(0)
+                if executable_path(None, ctypes.byref(required)) != -1 or required.value == 0:
+                    self.fail("cannot determine Darwin executable-image path length")
+                buffer = ctypes.create_string_buffer(required.value)
+                capacity = ctypes.c_uint32(required.value)
+                if (executable_path(buffer, ctypes.byref(capacity)) != 0 or
+                        capacity.value > required.value or not buffer.value):
+                    self.fail("cannot determine Darwin executable-image path")
+                executable_image = Path(os.fsdecode(buffer.value)).resolve(strict=True)
+            shutil.copyfile(executable_image, logical)
             observer.write_text(
                 "import ctypes\n"
                 "import sys\n"

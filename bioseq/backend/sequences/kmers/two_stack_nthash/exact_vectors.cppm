@@ -48,15 +48,25 @@ inline constexpr bool exact_compiled_target_is_scalar = false;
  */
 template <class p_minimizer_type>
 inline constexpr bool exact_k15_w10_b8_representation_v =
-    exact_simd_minimizer_representation<p_minimizer_type> &&
-    std::same_as<typename p_minimizer_type::storage_type, std::uint64_t> &&
-    p_minimizer_type::k_position_shift == 1u &&
-    ((static_cast<std::uint64_t>(p_minimizer_type::k_hash_field_mask) == 0x3fffffffull &&
-      static_cast<std::uint64_t>(p_minimizer_type::k_position_field_mask) == 0x1ffffffffull &&
-      p_minimizer_type::k_hash_shift == 34u) ||
-     (static_cast<std::uint64_t>(p_minimizer_type::k_hash_field_mask) == 0x7ffffffffull &&
-      static_cast<std::uint64_t>(p_minimizer_type::k_position_field_mask) == 0x0fffffffull &&
-      p_minimizer_type::k_hash_shift == 29u));
+    []() constexpr {
+        if constexpr (!exact_simd_minimizer_representation<p_minimizer_type>) {
+            return false;
+        } else {
+            return std::same_as<
+                       typename p_minimizer_type::storage_type, std::uint64_t>
+                && p_minimizer_type::k_position_shift == 1u
+                && ((static_cast<std::uint64_t>(
+                         p_minimizer_type::k_hash_field_mask) == 0x3fffffffull
+                     && static_cast<std::uint64_t>(
+                         p_minimizer_type::k_position_field_mask) == 0x1ffffffffull
+                     && p_minimizer_type::k_hash_shift == 34u)
+                    || (static_cast<std::uint64_t>(
+                            p_minimizer_type::k_hash_field_mask) == 0x7ffffffffull
+                        && static_cast<std::uint64_t>(
+                            p_minimizer_type::k_position_field_mask) == 0x0fffffffull
+                        && p_minimizer_type::k_hash_shift == 29u));
+        }
+    }();
 
 /// @brief Selects the exact SIMD kernel admitted by type and input length.
 /// @tparam p_minimizer_type Candidate output representation.

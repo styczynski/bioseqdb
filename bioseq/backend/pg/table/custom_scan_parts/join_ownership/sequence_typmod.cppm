@@ -29,23 +29,12 @@ import bioseq.postgres.support;
 import bioseq.postgres.types.compact_sequence;
 import :custom_scan_oid_expression_support_oid_catalog;
 import :custom_scan_slice_path_codec_contract;
+export import :custom_scan_join_ownership_sequence_typmod_validation_contracts;
+export import :custom_scan_join_ownership_expression_signature_contract;
 
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Validates a canonical sequence typmod supported by runtime dispatch. */
-    [[nodiscard]] bool batch_join_typmod_is_supported(const int32 typmod) noexcept {
-        if (typmod < 0) {
-            return false;
-        }
-        const auto decoded = compact_sequence_stdc_type_params::decode(typmod);
-        const bool alphabet_supported =
-            decoded.alphabet_code < pgseq_supported_alphabets::alphabet_count;
-        const bool width_supported = pgseq_supported_storage_unit_byte_widths::contains_runtime(
-            decoded.storage_unit_byte_width);
-        return alphabet_supported && width_supported && decoded.encode() == typmod;
-    }
-
     /** @brief Raises a PostgreSQL datatype error for operands with different alphabets. */
     [[noreturn]] void
     raise_mmsearch_alphabet_mismatch(const compact_sequence_stdc_type_params target,
@@ -69,63 +58,6 @@ export {
                  errhint("Explicitly convert the data before binding it to one alphabet; mmsearch "
                          "never performs cross-alphabet recoding.")));
         pg_unreachable();
-    }
-
-    /** @brief Checks that two supported sequence typmods bind the same alphabet. */
-    [[nodiscard]] bool mmsearch_typmods_share_alphabet(const int32 target_typmod,
-                                                       const int32 query_typmod) noexcept {
-        return batch_join_typmod_is_supported(target_typmod) &&
-               batch_join_typmod_is_supported(query_typmod) &&
-               compact_sequence_stdc_type_params::decode(target_typmod).alphabet_code ==
-                   compact_sequence_stdc_type_params::decode(query_typmod).alphabet_code;
-    }
-
-    /** @brief Carries a validated sequence typmod and whether its outer descriptor was erased. */
-    struct per_row_sequence_typmod_validation {
-        int32 typmod = -1;
-        bool descriptor_erased = false;
-    };
-
-    /** @brief Checks a function node against its exact catalog argument and result types. */
-    [[nodiscard]] bool per_row_function_signature_is_exact(FuncExpr* function) {
-        if (function == nullptr || function->funcretset || OidIsValid(function->funcvariadic))
-            return false;
-        Oid* catalog_argument_types = nullptr;
-        int catalog_argument_count = 0;
-        const Oid catalog_result_type =
-            get_func_signature(function->funcid, &catalog_argument_types, &catalog_argument_count);
-        if (catalog_result_type != function->funcresulttype ||
-            catalog_argument_count != list_length(function->args))
-            return false;
-        int argument_index = 0;
-        for (Node* argument : postgres_list<Node>(function->args)) {
-            if (argument == nullptr ||
-                exprType(argument) != catalog_argument_types[argument_index++])
-                return false;
-        }
-        return true;
-    }
-
-    /** @brief Checks an operator node against its exact catalog implementation signature. */
-    [[nodiscard]] bool per_row_operator_signature_is_exact(OpExpr* operation) {
-        if (operation == nullptr || !OidIsValid(operation->opno) ||
-            !OidIsValid(operation->opfuncid) || operation->opretset ||
-            get_opcode(operation->opno) != operation->opfuncid)
-            return false;
-        Oid* catalog_argument_types = nullptr;
-        int catalog_argument_count = 0;
-        const Oid catalog_result_type = get_func_signature(
-            operation->opfuncid, &catalog_argument_types, &catalog_argument_count);
-        if (catalog_result_type != operation->opresulttype ||
-            catalog_argument_count != list_length(operation->args))
-            return false;
-        int argument_index = 0;
-        for (Node* argument : postgres_list<Node>(operation->args)) {
-            if (argument == nullptr ||
-                exprType(argument) != catalog_argument_types[argument_index++])
-                return false;
-        }
-        return true;
     }
 
     /**

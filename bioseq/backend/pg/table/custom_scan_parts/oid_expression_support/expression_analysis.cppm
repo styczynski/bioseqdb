@@ -27,15 +27,11 @@ import std;
 import bioseq.postgres.support;
 
 import :custom_scan_oid_expression_support_oid_catalog;
+export import :custom_scan_oid_expression_support_expression_analysis_contracts;
 
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Tests whether an OID names either supported mmsearch overload. */
-    [[nodiscard]] inline bool is_mmsearch_funcid(Oid funcid, const bioseq_stub_oids& o) {
-        return funcid == o.mmsearch_oid || funcid == o.mmsearch_with_opts_oid;
-    }
-
     /** @brief Carries cached stub OIDs through the raw-query validation walk. */
     struct raw_mmsearch_options_validation {
         const bioseq_stub_oids* oids = nullptr;
@@ -203,14 +199,6 @@ export {
         walk_pg_expression_including_root(node, data, visitor);
         return data.count;
     }
-
-    /** @brief Holds an owned mmsearch restriction and additional clauses extracted with it. */
-    struct owned_mmsearch_restriction {
-        RestrictInfo* restriction = nullptr;
-        FuncExpr* normalized_expr = nullptr;
-        List* extra_restrictions = NIL;
-        List* extra_normalized_exprs = NIL;
-    };
 
     /**
      * @brief Applies the inexpensive base-local shape filter used before full operand validation.

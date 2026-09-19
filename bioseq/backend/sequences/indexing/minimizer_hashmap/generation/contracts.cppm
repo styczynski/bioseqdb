@@ -35,6 +35,22 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
+/// Optional allocation-free cooperative checkpoint for long synchronous
+/// generation work. The callback runs only on the invoking coordinator thread
+/// and may throw to stop the operation. An empty binding is a no-op.
+struct cooperative_cancellation_checkpoint {
+    void* context = nullptr;
+    void (*invoke_fn)(void*) = nullptr;
+
+    void operator()() const {
+        if (invoke_fn != nullptr) {
+            invoke_fn(context);
+        }
+    }
+};
+
+static_assert(std::is_trivially_copyable_v<cooperative_cancellation_checkpoint>);
+
 /// Grouped-SoA generation controls.
 /// Fixed-width limits of persisted controls and PostgreSQL key axes.
 struct grouped_soa_generation_limits {
@@ -62,6 +78,8 @@ struct grouped_soa_generation_options {
     // Deliberately invalid: every writer must name the producer's scheme.
     std::uint16_t minimizer_scheme_id = k_invalid_minimizer_scheme_id;
     std::uint16_t minimizer_scheme_revision = k_invalid_minimizer_scheme_revision;
+    /// Registry-selected requested/effective algorithm and physical record identity.
+    minimizer_generation_algorithm_identity algorithm_identity{};
     /// Grouped-SoA count saturation threshold.
     std::uint64_t max_occ_cap = k_grouped_soa_default_max_occurrence_cap;
 };
@@ -283,6 +301,35 @@ struct grouped_soa_generation_plan {
     std::uint64_t canonical_event_count = 0;
     std::uint64_t canonical_event_checksum = 0;
     std::vector<grouped_soa_bucket_directory_entry> entries;
+};
+
+/// Callback-scoped shape available before grouped-SoA payload emission.
+///
+/// Extent checksums and the aggregate payload checksum do not exist yet. The
+/// encoder owns every referenced object for the complete callback. A direct
+/// sink may allocate its final destination and copy each payload row
+/// immediately, but must not publish that destination before the matching
+/// finalized generation is delivered to its seal callback.
+struct direct_grouped_soa_generation_plan_view {
+    const grouped_soa_storage_plan_view& storage_plan;
+    const grouped_soa_generation_options& options;
+    const grouped_soa_generation_plan& generation_plan;
+};
+
+/// Optional sink handshake for direct payload-to-final-owner generation.
+/// Implementations still receive ordinary row callbacks for directory and
+/// manifest rows; the terminal callback is the only publication boundary.
+template <class p_sink>
+concept direct_grouped_soa_generation_sink = requires(
+    p_sink& sink,
+    const direct_grouped_soa_generation_plan_view& plan,
+    const encoded_grouped_soa_generation& generation) {
+    {
+        sink.begin_direct_grouped_soa_generation(plan)
+    } -> std::same_as<std::expected<void, minimizer_generation_encoding_error>>;
+    {
+        sink.seal_direct_grouped_soa_generation(generation)
+    } -> std::same_as<std::expected<void, minimizer_generation_encoding_error>>;
 };
 
 } // namespace bioseq::indexing

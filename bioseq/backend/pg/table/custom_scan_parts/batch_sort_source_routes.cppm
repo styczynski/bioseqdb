@@ -5,16 +5,18 @@
 module;
 #include <bioseq/pg_compat.h>
 
+#include <cstdint>
+
 export module bioseq.postgres.table:custom_scan_batch_sort_source_routes;
 
-import std;
+export import :custom_scan_batch_sort_source_route_contracts;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.storage.scanner;
 import bioseq.postgres.support;
 import bioseq.postgres.table.scan_state;
 
 import :custom_scan_execution_method_contracts;
-import :custom_scan_runtime_support;
+import :custom_scan_scan_runtime_state_contracts;
 
 using namespace bioseq::postgres::support;
 

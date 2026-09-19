@@ -16,8 +16,6 @@ extern "C" {
 
 module bioseq.postgres.extension:alignment_hook_core_stack;
 
-import bioseq.postgres.table.alignment_execution;
-
 namespace bioseq::pg::detail {
 
 /** Executor frame stored by the backend-local lifecycle stacks. */

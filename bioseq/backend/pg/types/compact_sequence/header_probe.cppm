@@ -4,10 +4,9 @@
  */
 module;
 #include <bioseq/pg_compat.h>
+#include <cstdint>
 
 export module bioseq.postgres.types.compact_sequence.header_probe;
-
-import std;
 
 export namespace bioseq::postgres {
 

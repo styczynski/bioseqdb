@@ -1639,6 +1639,19 @@ class PoetryEnvironmentTests(unittest.TestCase):
         self.assertIn("systemd-run", command)
         self.assertIn("--property=Type=exec", command)
         self.assertIn("--property=User=ubuntu", command)
+        self.assertIn(
+            f"--property=RuntimeMaxSec={package_builder.REMOTE_BUILD_RUNTIME_MAX}",
+            command,
+        )
+        self.assertIn(
+            f"--property=TimeoutStopSec={package_builder.REMOTE_BUILD_STOP_TIMEOUT}",
+            command,
+        )
+        self.assertIn("--property=KillMode=control-group", command)
+        self.assertEqual(
+            package_builder.REMOTE_BUILD_WAIT_TIMEOUT_SECONDS,
+            package_builder.REMOTE_BUILD_RUNTIME_MAX_SECONDS + 5 * 60,
+        )
         self.assertIn(f"{environment.venv_path}/bin/python", command)
         self.assertIn(f"--source-revision {self.revision}", command)
         self.assertIn(f"--poetry-lock-sha256 {self.lock_sha256}", command)
@@ -2637,7 +2650,7 @@ class ControllerReceiptTests(unittest.TestCase):
             "ActiveState": "failed",
             "SubState": "failed",
             "Result": "exit-code",
-            "ExecMainStatus": "17",
+            "ExecMainStatus": "124",
         }
         persisted: list[dict[str, object]] = []
         with mock.patch.object(
@@ -2816,6 +2829,238 @@ class ControllerReceiptTests(unittest.TestCase):
                 controller_source_revision=self.revision,
                 controller_owner_token_sha256=self.owner_sha256,
             )
+        ssm.assert_not_called()
+
+    @staticmethod
+    def cleanup_remote_result(
+        receipt: dict[str, object], architecture: str, *, active: bool
+    ) -> dict[str, object]:
+        builder = receipt["builders"][architecture]
+        return {
+            "unit_name": builder["unit_name"],
+            "build_root": builder["build_root"],
+            "unit_before": {
+                "LoadState": "loaded",
+                "ActiveState": "active" if active else "inactive",
+                "SubState": "running" if active else "dead",
+                "Result": "success",
+                "ExecMainStatus": "0",
+            },
+            "unit_after": {
+                "LoadState": "loaded",
+                "ActiveState": "inactive",
+                "SubState": "dead",
+                "Result": "success",
+                "ExecMainStatus": "0",
+            },
+            "unit_cancelled": active,
+            "worker_roots": [4100] if active else [],
+            "worker_processes": [4100, 4101] if active else [],
+            "containers": ["a" * 64] if active else [],
+            "log": {"present": True, "size": 8123, "sha256": None},
+            "manifest": {
+                "present": not active,
+                "size": 491 if not active else 0,
+                "sha256": "c" * 64 if not active else None,
+            },
+            "build_root_preserved": True,
+        }
+
+    def test_workflow_cleanup_cancels_prepared_or_active_receipts_exactly(self) -> None:
+        for state in ("prepared", "active"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                receipt = self.receipt(active=state == "active")
+                current_records = {
+                    name: {"State": {"Name": "running"}}
+                    for name in self.matrix.architectures
+                }
+                args = argparse.Namespace(
+                    region="us-east-1",
+                    receipt=str(Path(tmp) / "controller.json"),
+                    evidence=str(Path(tmp) / "cleanup.json"),
+                    source_revision=self.revision,
+                    owner_token=self.owner_token,
+                    if_present=False,
+                )
+
+                def detailed(_region, instance_ids, **_kwargs):
+                    architecture = next(
+                        name
+                        for name, builder in self.builders.items()
+                        if builder.instance_id == instance_ids[0]
+                    )
+                    result = self.cleanup_remote_result(
+                        receipt, architecture, active=True
+                    )
+                    return (
+                        f"cleanup-{architecture}",
+                        [
+                            {
+                                "InstanceId": instance_ids[0],
+                                "Status": "Success",
+                                "CommandPlugins": [
+                                    {"Output": json.dumps(result) + "\n"}
+                                ],
+                            }
+                        ],
+                    )
+
+                with mock.patch.object(
+                    package_builder,
+                    "discover_existing_infrastructure",
+                    return_value=(self.outputs, self.builders, current_records),
+                ), mock.patch.object(
+                    package_builder,
+                    "fetch_controller_receipt",
+                    return_value=receipt,
+                ), mock.patch.object(
+                    package_builder, "wait_for_ssm_online"
+                ), mock.patch.object(
+                    package_builder,
+                    "run_ssm_shell_command_detailed",
+                    side_effect=detailed,
+                ) as cleanup_ssm, mock.patch.object(
+                    package_builder,
+                    "run_ssm_shell_command",
+                    return_value="poweroff-arm64",
+                ) as poweroff, mock.patch.object(
+                    package_builder, "wait_for_ec2_state"
+                ), mock.patch.object(
+                    package_builder,
+                    "persist_controller_receipt",
+                    side_effect=lambda _path, value, **_kwargs: value,
+                ) as persist:
+                    evidence = package_builder.cleanup_controller_run(args)
+
+                self.assertEqual(receipt["state"], "failed")
+                self.assertEqual(evidence["receipt_state_before"], state)
+                self.assertEqual(evidence["receipt_state_after"], "failed")
+                self.assertEqual(cleanup_ssm.call_count, 2)
+                persist.assert_called_once()
+                poweroff.assert_called_once()
+                self.assertEqual(
+                    poweroff.call_args.args[1],
+                    [self.builders["arm64"].instance_id],
+                )
+                self.assertEqual(
+                    evidence["builders"]["arm64"]["instance_state_after"],
+                    "stopped",
+                )
+                self.assertEqual(
+                    evidence["builders"]["x64"]["instance_state_after"],
+                    "running",
+                )
+                for call in cleanup_ssm.call_args_list:
+                    script = call.kwargs["script"]
+                    instance_id = call.args[1][0]
+                    architecture = next(
+                        name
+                        for name, builder in self.builders.items()
+                        if builder.instance_id == instance_id
+                    )
+                    self.assertIn(
+                        receipt["builders"][architecture]["build_root"], script
+                    )
+                    self.assertNotIn("docker rm", script)
+                persisted_evidence = json.loads(
+                    Path(args.evidence).read_text(encoding="utf-8")
+                )
+                self.assertTrue(all(
+                    value["remote"]["build_root_preserved"]
+                    for value in persisted_evidence["builders"].values()
+                ))
+
+    def test_workflow_cleanup_retains_finalized_result_and_is_idempotent(self) -> None:
+        receipt = self.receipt(active=True)
+        receipt["state"] = "finalized"
+        receipt["result"] = {"preserved": True}
+        current_records = {
+            name: {"State": {"Name": "running"}}
+            for name in self.matrix.architectures
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                region="us-east-1",
+                receipt=str(Path(tmp) / "controller.json"),
+                evidence=str(Path(tmp) / "cleanup.json"),
+                source_revision=self.revision,
+                owner_token=self.owner_token,
+                if_present=False,
+            )
+
+            def detailed(_region, instance_ids, **_kwargs):
+                architecture = next(
+                    name
+                    for name, builder in self.builders.items()
+                    if builder.instance_id == instance_ids[0]
+                )
+                result = self.cleanup_remote_result(
+                    receipt, architecture, active=False
+                )
+                return (
+                    f"cleanup-{architecture}",
+                    [
+                        {
+                            "InstanceId": instance_ids[0],
+                            "Status": "Success",
+                            "CommandPlugins": [
+                                {"Output": json.dumps(result) + "\n"}
+                            ],
+                        }
+                    ],
+                )
+
+            with mock.patch.object(
+                package_builder,
+                "discover_existing_infrastructure",
+                return_value=(self.outputs, self.builders, current_records),
+            ), mock.patch.object(
+                package_builder, "fetch_controller_receipt", return_value=receipt
+            ), mock.patch.object(
+                package_builder, "require_controller_receipt", return_value=receipt
+            ), mock.patch.object(
+                package_builder, "wait_for_ssm_online"
+            ), mock.patch.object(
+                package_builder,
+                "run_ssm_shell_command_detailed",
+                side_effect=detailed,
+            ), mock.patch.object(
+                package_builder,
+                "run_ssm_shell_command",
+                return_value="poweroff-arm64",
+            ), mock.patch.object(
+                package_builder, "wait_for_ec2_state"
+            ), mock.patch.object(
+                package_builder, "persist_controller_receipt"
+            ) as persist:
+                evidence = package_builder.cleanup_controller_run(args)
+
+        self.assertEqual(evidence["receipt_state_before"], "finalized")
+        self.assertEqual(evidence["receipt_state_after"], "finalized")
+        self.assertEqual(receipt["result"], {"preserved": True})
+        persist.assert_not_called()
+
+    def test_workflow_cleanup_if_present_is_a_receipt_absence_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                region="us-east-1",
+                receipt=str(Path(tmp) / "controller.json"),
+                evidence=str(Path(tmp) / "cleanup.json"),
+                source_revision=self.revision,
+                owner_token=self.owner_token,
+                if_present=True,
+            )
+            with mock.patch.object(
+                package_builder,
+                "discover_existing_infrastructure",
+                return_value=(self.outputs, self.builders, self.records),
+            ), mock.patch.object(
+                package_builder, "fetch_controller_receipt", return_value=None
+            ), mock.patch.object(
+                package_builder, "run_ssm_shell_command_detailed"
+            ) as ssm:
+                evidence = package_builder.cleanup_controller_run(args)
+        self.assertFalse(evidence["receipt_present"])
         ssm.assert_not_called()
 
 
@@ -5074,6 +5319,78 @@ class ReleaseAutomationTests(unittest.TestCase):
             "authorize-security-group-ingress", authorize.call_args.args
         )
 
+    def test_owner_cleanup_revokes_only_exact_description_and_is_idempotent(self) -> None:
+        records = {
+            name: self.builder_record(name) for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in records.items()
+        }
+        rules = [
+            {
+                "SecurityGroupRuleId": "sgr-0aaabbbcccdddeee1",
+                "GroupId": "sg-0aaabbbcccdddeee1",
+                "IsEgress": False,
+                "IpProtocol": "tcp",
+                "FromPort": 22,
+                "ToPort": 22,
+                "CidrIpv4": "203.0.113.10/32",
+                "Description": self.owner_description,
+            },
+            {
+                "SecurityGroupRuleId": "sgr-0123456789abcdef0",
+                "GroupId": "sg-0aaabbbcccdddeee1",
+                "IsEgress": False,
+                "IpProtocol": "tcp",
+                "FromPort": 22,
+                "ToPort": 22,
+                "CidrIpv4": "203.0.113.11/32",
+                "Description": "operator-managed SSH",
+            },
+        ]
+        with mock.patch.object(
+            package_builder,
+            "aws_preflight",
+            return_value={"Account": "123456789012", "Arn": "arn:ci"},
+        ), mock.patch.object(
+            package_builder,
+            "discover_existing_builders",
+            return_value=(builders, records),
+        ), mock.patch.object(
+            package_builder,
+            "validated_builder_security_group",
+            return_value=("sg-0aaabbbcccdddeee1", {}),
+        ), mock.patch.object(
+            package_builder,
+            "aws_json",
+            side_effect=(
+                {"SecurityGroupRules": rules},
+                {"SecurityGroupRules": [rules[1]]},
+            ),
+        ), mock.patch.object(package_builder, "aws_no_output") as revoke:
+            first = package_builder.close_ci_access_owner(
+                region="us-east-1", owner_token=self.owner_token
+            )
+            second = package_builder.close_ci_access_owner(
+                region="us-east-1", owner_token=self.owner_token
+            )
+        self.assertEqual(
+            first["revoked_rule_ids"], ["sgr-0aaabbbcccdddeee1"]
+        )
+        self.assertEqual(second["revoked_rule_ids"], [])
+        revoke.assert_called_once()
+        self.assertIn("--security-group-rule-ids", revoke.call_args.args)
+        self.assertNotIn("203.0.113.11/32", revoke.call_args.args)
+
     def test_collection_enumerates_ten_exact_packages_and_four_json_receipts(self) -> None:
         revision = "a" * 40
         lock_sha256 = "b" * 64
@@ -5281,6 +5598,29 @@ class ReleaseAutomationTests(unittest.TestCase):
                 "adopt-run",
             ),
             (["finalize-run", *controller_options], "finalize-run"),
+            (
+                [
+                    "cleanup-run",
+                    "--if-present",
+                    "--receipt",
+                    "controller.json",
+                    "--source-revision",
+                    "a" * 40,
+                    "--owner-token",
+                    "bioseq/repository:package-release:" + "a" * 40,
+                    "--evidence",
+                    "cleanup.json",
+                ],
+                "cleanup-run",
+            ),
+            (
+                [
+                    "close-ci-access-owner",
+                    "--owner-token",
+                    "bioseq/repository:1:poll_1:1",
+                ],
+                "close-ci-access-owner",
+            ),
             (
                 [
                     "collect",
@@ -5684,26 +6024,41 @@ save()
             )
             return int(value.split(":", 1)[1].strip())
 
-        worst_case_seconds = (
-            package_builder.EC2_CLEANUP_STATE_TIMEOUT_SECONDS
-            + package_builder.SSM_CLEANUP_TIMEOUT_SECONDS
-            + package_builder.SSM_CLEANUP_TIMEOUT_SECONDS
-            + package_builder.SSM_CLEANUP_TIMEOUT_SECONDS
-            + package_builder.EC2_CLEANUP_STATE_TIMEOUT_SECONDS
-        )
+        # Readiness, exact remote cancellation, quiescent poweroff, and the
+        # terminal EC2-state proof are bounded phases. Architectures run in
+        # parallel inside each phase.
+        worst_case_seconds = 4 * package_builder.CONTROLLER_CLEANUP_TIMEOUT_SECONDS
         minimum_with_margin = (worst_case_seconds + 59) // 60 + 2
         self.assertGreaterEqual(
-            timeout_minutes(
-                "Revoke access and conditionally stop controller-owned builders"
-            ),
+            timeout_minutes("Cancel only receipt-owned package work"),
             minimum_with_margin,
+        )
+
+        finalizer = self.workflow.split("  lifecycle_finalizer:", 1)[1].split(
+            "\n  poll_1:", 1
+        )[0]
+        finalizer_timeout_match = re.search(
+            r"^    timeout-minutes: (\d+)$", finalizer, re.MULTILINE
+        )
+        self.assertIsNotNone(finalizer_timeout_match)
+        assert finalizer_timeout_match is not None
+        finalizer_timeout = int(finalizer_timeout_match.group(1))
+        finalizer_step_timeouts = [
+            int(value)
+            for value in re.findall(
+                r"^        timeout-minutes: (\d+)$", finalizer, re.MULTILINE
+            )
+        ]
+        self.assertGreaterEqual(
+            finalizer_timeout,
+            sum(finalizer_step_timeouts) + 5,
         )
 
     def test_workflow_uses_only_secret_backed_standard_credential_env(self) -> None:
         access_mapping = "AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}"
         secret_mapping = "AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}"
-        self.assertEqual(self.workflow.count(access_mapping), 8)
-        self.assertEqual(self.workflow.count(secret_mapping), 8)
+        self.assertEqual(self.workflow.count(access_mapping), 9)
+        self.assertEqual(self.workflow.count(secret_mapping), 9)
         global_environment = self.workflow.split("jobs:", 1)[0]
         self.assertNotIn(access_mapping, global_environment)
         self.assertNotIn(secret_mapping, global_environment)
@@ -5726,9 +6081,15 @@ save()
         self.assertNotIn("--architectures", self.workflow)
         self.assertNotIn("--distros", self.workflow)
         self.assertNotIn("--postgres", self.workflow)
-        self.assertEqual(self.workflow.count("package_builder.py stop"), 1)
+        self.assertNotIn("package_builder.py stop", self.workflow)
+        self.assertEqual(self.workflow.count("package_builder.py cleanup-run"), 1)
         self.assertEqual(
-            self.workflow.count("package_builder.py close-ci-access"), 7
+            self.workflow.count("package_builder.py close-ci-access-owner"), 1
+        )
+        self.assertEqual(
+            self.workflow.count("package_builder.py close-ci-access")
+            - self.workflow.count("package_builder.py close-ci-access-owner"),
+            6,
         )
         self.assertNotIn("--lifecycle-receipt", self.workflow)
         self.assertGreaterEqual(
@@ -5743,16 +6104,24 @@ save()
             'if [[ -f "$RUNNER_TEMP/package-builder-access.json" ]]',
             self.workflow,
         )
-        self.assertLess(
-            self.workflow.index(
-                "- name: Revoke access and conditionally stop controller-owned builders"
-            ),
-            self.workflow.index("- name: Create deterministic GitHub release"),
-        )
-        cleanup = self.step_script(
-            "Revoke access and conditionally stop controller-owned builders"
-        )
-        self.assertLess(cleanup.index("close-ci-access"), cleanup.index(" stop "))
+        self.assertIn("lifecycle_finalizer:", self.workflow)
+        finalizer = self.workflow.split("  lifecycle_finalizer:", 1)[1].split(
+            "\n  poll_1:", 1
+        )[0]
+        for dependency in (
+            "metadata",
+            "launch",
+            "poll_1",
+            "poll_2",
+            "poll_3",
+            "poll_4",
+            "wait_budget_exhausted",
+            "finalize_release",
+        ):
+            self.assertIn(f"      - {dependency}", finalizer)
+        self.assertIn("always()", finalizer)
+        self.assertIn("--if-present", finalizer)
+        self.assertIn("package-cleanup-evidence.json", finalizer)
         for step in (
             "Revoke only launch-job access",
             "Revoke only poll-1 access",
@@ -5763,49 +6132,53 @@ save()
         ):
             self.assertNotIn("package_builder.py stop", self.step_script(step))
 
-    def test_cleanup_attempts_revoke_and_stop_independently_on_either_failure(self) -> None:
-        step = "Revoke access and conditionally stop controller-owned builders"
-        for failing_command in ("close-ci-access", "stop"):
-            with self.subTest(failing_command=failing_command), \
-                    tempfile.TemporaryDirectory() as tmp:
-                    root = Path(tmp)
-                    binary = root / "bin"
-                    binary.mkdir()
-                    fake_python = binary / "python3"
-                    fake_python.write_text(
-                        "#!/bin/bash\n"
-                        "printf '%s\\n' \"$*\" >> \"$CALL_LOG\"\n"
-                        "if [[ \"${2:-}\" == \"$FAIL_COMMAND\" ]]; then exit 17; fi\n",
-                        encoding="utf-8",
-                    )
-                    fake_python.chmod(0o755)
-                    (root / "package-builder-access.json").write_text(
-                        "{}\n", encoding="utf-8"
-                    )
-                    environment = {
-                        **os.environ,
-                        "PATH": f"{binary}:{os.environ['PATH']}",
-                        "RUNNER_TEMP": str(root),
-                        "AWS_REGION": "us-east-1",
-                        "GITHUB_ENV": str(root / "github-env"),
-                        "CALL_LOG": str(root / "calls"),
-                        "FAIL_COMMAND": failing_command,
-                        "PACKAGE_COLLECTION_SUCCEEDED": "1",
-                        "GITHUB_SHA": "a" * 40,
-                        "GITHUB_REPOSITORY": "bioseq/repository",
-                    }
-                    completed = subprocess.run(
-                        ["bash", "-c", self.step_script(step)],
-                        cwd=WORKFLOW_PATH.parents[2],
-                        env=environment,
-                        capture_output=True,
-                        text=True,
-                    )
-                    self.assertEqual(completed.returncode, 17, completed.stderr)
-                    calls = (root / "calls").read_text(encoding="utf-8")
-                    self.assertLess(
-                        calls.index("close-ci-access"), calls.index(" stop ")
-                    )
+    def test_access_finalizer_attempts_every_owner_after_individual_failure(self) -> None:
+        step = "Revoke every workflow-owned access rule independently"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / "bin"
+            binary.mkdir()
+            fake_python = binary / "python3"
+            fake_python.write_text(
+                "#!/bin/bash\n"
+                "printf '%s\\n' \"$*\" >> \"$CALL_LOG\"\n"
+                "if [[ \"$*\" == *\":poll_2:\"* ]]; then exit 17; fi\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            completed = subprocess.run(
+                ["bash", "-c", self.step_script(step)],
+                cwd=WORKFLOW_PATH.parents[2],
+                env={
+                    **os.environ,
+                    "PATH": f"{binary}:{os.environ['PATH']}",
+                    "RUNNER_TEMP": str(root),
+                    "AWS_REGION": "us-east-1",
+                    "CALL_LOG": str(root / "calls"),
+                    "GITHUB_REPOSITORY": "bioseq/repository",
+                    "GITHUB_RUN_ID": "55",
+                    "GITHUB_RUN_ATTEMPT": "2",
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 17, completed.stderr)
+            calls = (root / "calls").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(calls), 12)
+            self.assertTrue(all("close-ci-access-owner" in call for call in calls))
+            self.assertIn("bioseq/repository:55:launch:1", calls[0])
+            self.assertIn("bioseq/repository:55:finalize_release:2", calls[-1])
+
+    def test_receipt_cleanup_is_not_gated_on_collection_or_prior_job_success(self) -> None:
+        script = self.step_script("Cancel only receipt-owned package work")
+        self.assertIn("package_builder.py cleanup-run", script)
+        self.assertIn("--if-present", script)
+        self.assertNotIn("PACKAGE_COLLECTION_SUCCEEDED", script)
+        finalizer = self.workflow.split("  lifecycle_finalizer:", 1)[1].split(
+            "\n  poll_1:", 1
+        )[0]
+        self.assertIn("if: always()", finalizer)
+        self.assertIn("needs.metadata.result != 'skipped'", finalizer)
 
     def test_cleanup_revokes_access_without_stopping_before_collection(self) -> None:
         step = "Revoke access and conditionally stop controller-owned builders"

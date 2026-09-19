@@ -12,16 +12,32 @@ extern "C" {
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_type_d.h"
+#include "commands/tablespace.h"
 #include "executor/spi.h"
 #include "utils/builtins.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+
 #include "miscadmin.h"
 }
+
+// Clang 22 must see these textual libc++ declarations before deserializing
+// header-backed dependency BMIs; importing std first makes aligned operator new
+// appear as two unrelated candidates during container allocation.
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <exception>
+#include <limits>
+#include <new>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:fragment_storage_catalog;
-import std;
-import bioseq.common.logging;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
 import :catalog;
 import :fragment_image;
@@ -119,7 +135,7 @@ inline void run_checked_generation_clear_ddl(const char* ddl, bool& spi_active) 
  *
  * @return OID of the validated unlogged generation relation.
  */
-[[nodiscard]] inline Oid fragment_index_storage::ensure_minimizer_generation_storage() {
+[[nodiscard]] Oid fragment_index_storage::ensure_minimizer_generation_storage() {
     if (index_name_ != k_minimizers_per_fragment_index_name &&
         index_name_ != k_minimizers_per_sequence_index_name) {
         minimizer_generation_storage_error(
@@ -254,7 +270,7 @@ inline void run_checked_generation_clear_ddl(const char* ddl, bool& spi_active) 
  *
  * @return Counts of dropped relations and deleted metadata rows.
  */
-[[nodiscard]] inline minimizer_generation_clear_result
+[[nodiscard]] minimizer_generation_clear_result
 fragment_index_storage::clear_minimizer_generation_storage() {
     // Identifies one discovered sidecar before it is admitted for deletion.
     struct physical_relation {
@@ -759,7 +775,7 @@ fragment_index_storage::clear_minimizer_generation_storage() {
  * @param[in] expected Expected immutable generation identity.
  * @return A read session that borrows this handle and the registered snapshot.
  */
-[[nodiscard]] inline fragment_index_storage::generation_read_session
+[[nodiscard]] fragment_index_storage::generation_read_session
 fragment_index_storage::begin_generation_read(
     std::uint64_t query_key,
     Snapshot executor_snapshot,
@@ -781,7 +797,7 @@ fragment_index_storage::begin_generation_read(
  * @param[in] generation_id Immutable identifier assigned to the generation.
  * @return A sink bound to the validated canonical generation relation.
  */
-[[nodiscard]] inline fragment_index_storage::generation_row_sink
+[[nodiscard]] fragment_index_storage::generation_row_sink
 fragment_index_storage::begin_generation_write(std::uint64_t query_key,
                                                std::uint64_t generation_id) {
     if (query_key != query_key_) {
@@ -807,7 +823,7 @@ fragment_index_storage::begin_generation_write(std::uint64_t query_key,
  * @param[in] generation_id Immutable identifier assigned to the generation.
  * @return A writer bound to the validated canonical generation relation.
  */
-[[nodiscard]] inline fragment_index_storage::hash_major_minimizer_generation_writer
+[[nodiscard]] fragment_index_storage::hash_major_minimizer_generation_writer
 fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_t query_key,
                                                                     std::uint64_t generation_id) {
     if (query_key != query_key_) {
@@ -837,7 +853,7 @@ fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_
  * @param[in] create_if_missing Whether an absent relation may be created.
  * @return Current relation OID, or `InvalidOid` when absent and creation is disabled.
  */
-[[nodiscard]] inline Oid fragment_index_storage::resolve_relid_(bool create_if_missing) const {
+[[nodiscard]] Oid fragment_index_storage::resolve_relid_(bool create_if_missing) const {
     const std::string nm = this_table_name();
     const Oid ns = bioseq_internal_ns();
     const char* relation_name = nm.c_str();
@@ -906,8 +922,8 @@ fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_
  * @param[in] lock PostgreSQL lock mode acquired for the returned relation.
  * @return Open relation, or null when it is absent and creation is disabled.
  */
-[[nodiscard]] inline Relation fragment_index_storage::open_index_relation_(bool create_if_missing,
-                                                                           LOCKMODE lock) const {
+[[nodiscard]] Relation fragment_index_storage::open_index_relation_(bool create_if_missing,
+                                                                    LOCKMODE lock) const {
     const Oid rid = resolve_relid_(create_if_missing);
     if (!OidIsValid(rid))
         return nullptr;

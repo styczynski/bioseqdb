@@ -24,82 +24,19 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_match_finalization;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
 
-import :custom_scan_support;
-import :custom_scan_join_paths;
-import :custom_scan_scan_paths;
-import :custom_scan_plan_builders;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_runtime_match_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_oid_expression_support_expression_analysis_contracts;
+import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_planner_method_contracts;
+export import :custom_scan_match_finalization_contracts;
 
 using namespace bioseq::postgres::support;
 
 export {
-
-    /** @brief Captures one match-producing plan node and its planner-side binding metadata. */
-    struct match_owner_finalization {
-        CustomScan* scan = nullptr;
-        List* descriptor = NIL;
-        List* sites = NIL;
-        Node* target_recipe = nullptr;
-        List* base_lineage = NIL;
-        Index base_relid = 0;
-        Oid target_relation_oid = InvalidOid;
-        int stable_match_id = 0;
-        /* custom_private is deliberately opaque to core setrefs, so Vars stored in
-         * recipes retain query-local varnos.  This finalization-only scope identity
-         * prevents equal local spellings in unrelated subqueries/initplans from
-         * becoming lineage candidates for one another.  It is never serialized: the
-         * final executor ABI remains the stable Plan.plan_node_id. */
-        std::uint64_t query_scope_id = 0u;
-        /* Non-NIL only for a base BioseqScan owner.  Its pre-setrefs descriptor and
-         * sites remain above for query-scope resolution; these tag cells receive a
-         * distinct post-setrefs executor image after resolution succeeds. */
-        List* base_owner_tag = NIL;
-    };
     static_assert(std::is_trivially_destructible_v<match_owner_finalization>);
     static_assert(std::is_trivially_destructible_v<std::array<match_owner_finalization, 4>>);
     static_assert(std::is_trivially_destructible_v<std::span<match_owner_finalization>>);

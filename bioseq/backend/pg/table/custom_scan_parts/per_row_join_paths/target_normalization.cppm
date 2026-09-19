@@ -26,10 +26,11 @@ export module bioseq.postgres.table:custom_scan_per_row_join_paths_target_normal
 import std;
 import bioseq.postgres.support;
 
-import :custom_scan_semantic_payload_callback_contracts;
+import :custom_scan_planner_method_contracts;
 import :custom_scan_join_ownership_target_contracts;
-import :custom_scan_slice_path_plan_construction;
-import :custom_scan_per_row_join_paths_carrier_analysis;
+import :custom_scan_per_row_join_paths_carrier_contracts;
+export import :custom_scan_per_row_join_paths_reconstruction_contracts;
+export import :custom_scan_per_row_join_paths_target_normalization_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -382,29 +383,5 @@ export {
         rel->reltarget = create_empty_pathtarget();
         return rel;
     }
-
-    /** @brief Accumulates per-stage rejection and reconstruction counts for path admission. */
-    struct per_row_reconstruction_rejections {
-        std::size_t incumbents = 0u;
-        std::size_t unsupported_path = 0u;
-        std::size_t invalid_join = 0u;
-        std::size_t missing_owned_identity = 0u;
-        std::size_t replacement_missing = 0u;
-        std::size_t projection_or_leak = 0u;
-        std::size_t new_external_parameter = 0u;
-        std::size_t unusable_algorithm_clause = 0u;
-        std::size_t reconstructed = 0u;
-        std::size_t cloned = 0u;
-        std::size_t tag_missing = 0u;
-        std::size_t source_projection_missing = 0u;
-        std::size_t nonfinite_cost = 0u;
-        std::size_t owners_created = 0u;
-        int last_incumbent_tag = -1;
-        int last_outer_tag = -1;
-        int last_inner_tag = -1;
-        const char* last_incumbent_custom_name = "none";
-        const char* last_outer_custom_name = "none";
-        const char* last_inner_custom_name = "none";
-    };
 
 } // export custom-scan partition declarations

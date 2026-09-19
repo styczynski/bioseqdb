@@ -21,6 +21,25 @@ namespace idx = ::bioseq::indexing;
 
 using namespace vulkan_minimizers_test_support;
 
+#if defined(BIOSEQ_TEST_INDEXES)
+TEST_CASE("MPS authorized readback admits and resizes the exact typed destination before transfer",
+          "[component:bioseq][layer:unit][feature:minimizer][feature:gpu_runtime]") {
+    const auto audit = vk::self_test_authorized_typed_readback_contract();
+    CHECK(audit.checked_multiplication_overflow_rejected);
+    CHECK(audit.maximum_u32_count_accepted);
+    CHECK(audit.wider_host_count_preserved);
+    CHECK(audit.admission_denied_before_destination_or_transfer);
+    CHECK(audit.pre_resize_span_rejected);
+    CHECK(audit.actual_capacity_reconciled);
+    CHECK(audit.exact_resized_destination_seen);
+    CHECK(audit.backing_padding_excluded);
+    CHECK(audit.successful_destination_extent_unchanged);
+    CHECK(audit.mutated_destination_extent_rejected);
+    CHECK(audit.negative_branch_storage_before_permit_cleanup);
+    CHECK(vk::runtime::self_test_authorized_readback_receipt_contract());
+}
+#endif
+
 TEST_CASE("Vulkan owned segment pairs transfer capacity with their permit",
           "[component:bioseq][layer:unit][feature:minimizer]") {
     auto& admission = bioseq::parallelism::memory_admission_controller::instance();

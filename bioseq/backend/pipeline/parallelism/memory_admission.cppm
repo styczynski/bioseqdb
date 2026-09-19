@@ -10,6 +10,7 @@ module;
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -201,6 +202,15 @@ class memory_permit {
     void release() noexcept;
     /// Return any reservation above the requested retained byte count.
     void shrink_to(std::uint64_t bytes) noexcept;
+    /// Transfer part of this reservation to an independent lifetime owner
+    /// without changing the controller's global reserved-byte counter.
+    [[nodiscard]] memory_permit split_off(std::uint64_t bytes) noexcept {
+        if (owner_ == nullptr || bytes > bytes_) {
+            return {};
+        }
+        bytes_ -= bytes;
+        return memory_permit{owner_, bytes};
+    }
     /// Extend this reservation through the same admission controller.
     [[nodiscard]] bool grow_to(std::uint64_t bytes,
                                memory_admission_failure* failure = nullptr) noexcept;
@@ -213,6 +223,11 @@ class memory_permit {
     /// Return the number of bytes owned by this permit.
     [[nodiscard]] std::uint64_t bytes() const noexcept {
         return bytes_;
+    }
+
+    /// Borrow the controller whose reservation this permit owns, or null if empty.
+    [[nodiscard]] memory_admission_controller* controller() const noexcept {
+        return owner_;
     }
 
     /// Return whether this permit owns a controller reservation.
@@ -230,6 +245,37 @@ class memory_permit {
 
     memory_admission_controller* owner_ = nullptr;
     std::uint64_t bytes_ = 0;
+};
+
+/**
+ * @brief Retains unreflected backing-block permits for one context lifetime.
+ *
+ * Only physical blocks destroyed with that context belong here. Replaceable
+ * vectors/device allocations keep their adjacent independent permits, and
+ * suballocations inside an admitted block add no reservation.
+ */
+class operation_memory_retention {
+  public:
+    /// Adopt or consolidate an already admitted context block without allocation.
+    [[nodiscard]] bool retain_context_block(memory_permit&& permit) noexcept {
+        if (!permit) {
+            return true;
+        }
+        if (!context_blocks_) {
+            context_blocks_ = std::move(permit);
+            return true;
+        }
+        // A failed absorb leaves the source permit live for ordinary unwind.
+        return context_blocks_.absorb(std::move(permit));
+    }
+
+    /// Bytes retained until the associated physical context is destroyed.
+    [[nodiscard]] std::uint64_t retained_bytes() const noexcept {
+        return context_blocks_.bytes();
+    }
+
+  private:
+    memory_permit context_blocks_;
 };
 
 /// Pre-allocation reservation multiplier for std::vector capacity ownership.
@@ -349,6 +395,9 @@ class memory_admission_controller {
     materialize(memory_permit& permit,
                 p_materialize_callable&& materialize_callable,
                 memory_footprint_probe probe = live_process_footprint_probe) {
+        if (permit.controller() != this) {
+            throw std::invalid_argument("materialization requires this controller's live permit");
+        }
         std::lock_guard<std::mutex> guard(materialization_mutex_);
         memory_materialization_result result{
             .footprint_before_bytes = probe != nullptr ? probe() : 0u,

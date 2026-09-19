@@ -2,6 +2,9 @@
  * @file compact_direct/reader/anchor_routes.cppm
  * @brief Explicit route selection for query-wave anchor preparation.
  */
+module;
+
+#include <new>
 
 export module bioseq.indexing.minimizer_hashmap:compact_direct.reader_anchor_routes;
 
@@ -48,6 +51,10 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch(
     bool baseline_query_plan_matcher_for_testing,
     bool verify_compositional_order_for_testing,
     minimizer_fragment_lookup_route lookup_route) const {
+    if (mode_ == prepared_minimizer_fragment_reader_mode::gpu_source_only) {
+        throw persisted_minimizer_lookup_error(
+            "GPU-source-only fragment reader cannot execute a host anchor query");
+    }
     if (lookup_route == minimizer_fragment_lookup_route::grouped_soa_control_scans &&
         backing_kind_ == backing_kind::compact_direct_only) {
         throw persisted_minimizer_lookup_error(

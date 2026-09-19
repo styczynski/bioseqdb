@@ -25,7 +25,7 @@ export module bioseq.postgres.table:custom_scan_join_ownership_target_contracts;
 
 import std;
 import bioseq.postgres.support;
-import :custom_scan_oid_expression_support_oid_catalog;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
 
 using namespace bioseq::postgres::support;
 

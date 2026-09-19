@@ -2,6 +2,10 @@
  * @file pipeline/minimap_port_parts/seeding_chaining.cppm
  * @brief Seed lookup, chaining-region construction, and region selection.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.minimap_port:seeding_chaining;
 
 import std;
@@ -23,6 +27,45 @@ export namespace bioseq::simd {
 // Internal data structures
 // ============================================================================
 // Anchor and chain ownership resides in bioseq.chaining.core.
+
+/** @brief One query's checked, non-overlapping slice of a canonical seed batch. */
+struct canonical_seed_job_span {
+    std::uint32_t ordinal;
+    std::size_t offset;
+    std::size_t count;
+};
+
+/**
+ * @brief Move-only canonical host anchor ownership shared by all selected seeders.
+ *
+ * Anchors retain the existing arena allocation contract. Their context and
+ * physical admission owner must outlive this batch and every borrowed job span.
+ */
+struct canonical_seed_batch {
+    bioseq::chaining::arena_slab<bioseq::chaining::anchor> anchors;
+    std::vector<canonical_seed_job_span> jobs;
+};
+
+/** @brief Authenticate the complete job partition before any chaining consumes it. */
+[[nodiscard]] inline bool canonical_seed_jobs_match_submission(
+    const canonical_seed_batch& batch,
+    std::span<const std::uint32_t> submitted_ordinals) noexcept {
+    if (batch.jobs.size() != submitted_ordinals.size()) {
+        return false;
+    }
+    std::size_t prefix = 0u;
+    for (std::size_t index = 0u; index < batch.jobs.size(); ++index) {
+        const auto& job = batch.jobs[index];
+        if (job.ordinal != submitted_ordinals[index] ||
+            (index != 0u && job.ordinal <= batch.jobs[index - 1u].ordinal) ||
+            job.offset != prefix || prefix > batch.anchors.size() ||
+            job.count > batch.anchors.size() - prefix) {
+            return false;
+        }
+        prefix += job.count;
+    }
+    return prefix == batch.anchors.size();
+}
 
 // Alignment-region and logarithm helpers are owned by their alignment and
 // chaining modules.
@@ -374,6 +417,12 @@ void generate_regions(std::span<chain> chains,
     if (chains.empty()) {
         return;
     }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    const auto tail_storage_plan = derive_alignment_tail_storage_plan(chains.size());
+    if (!tail_storage_plan) {
+        throw std::length_error{"region count exceeds the alignment tail domain"};
+    }
+#endif
 
     /// Order chains by descending score without capturing local state.
     struct chain_score_descending {
@@ -384,7 +433,11 @@ void generate_regions(std::span<chain> chains,
     };
     std::sort(chains.begin(), chains.end(), chain_score_descending{});
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    regions_out.reserve_for_placement_new(tail_storage_plan->region_count);
+#else
     regions_out.reserve_for_placement_new(chains.size());
+#endif
     for (std::size_t region_idx = 0; region_idx < chains.size(); ++region_idx) {
         alignment_region& region = regions_out.construct_at_back(alignment_region{
             .region_id = static_cast<std::int32_t>(region_idx),
@@ -432,6 +485,12 @@ void classify_primary_secondary(std::span<alignment_region> regions,
     if (region_count == 0) {
         return;
     }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    const auto tail_storage_plan = derive_alignment_tail_storage_plan(region_count);
+    if (!tail_storage_plan) {
+        throw std::length_error{"classification region count is not representable"};
+    }
+#endif
 
     for (std::size_t region_idx = 0; region_idx < region_count; ++region_idx) {
         regions[region_idx].region_id = static_cast<std::int32_t>(region_idx);
@@ -442,16 +501,30 @@ void classify_primary_secondary(std::span<alignment_region> regions,
     // chain through `region_count` worth of pushes when the chains
     // happen to be all primary. Sized at region_count (the upper bound
     // — every region is primary in the degenerate case).
-    std::vector<std::size_t> primary_indices;
+    alignment_result_vector<std::size_t> primary_indices;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    primary_indices.set_logical_bounds(
+        tail_storage_plan->primary_index_capacity,
+        tail_storage_plan->primary_index_capacity);
+    primary_indices.reserve(tail_storage_plan->primary_index_capacity);
+#else
     primary_indices.reserve(region_count);
+#endif
     primary_indices.push_back(0);
     regions[0].parent = 0;
 
     // coverage_intervals is cleared+refilled on every secondary check,
     // capped at primary_indices.size() entries. Pre-reserve at
     // region_count too so the inner loop never triggers realloc.
-    std::vector<std::uint64_t> coverage_intervals;
+    alignment_result_vector<std::uint64_t> coverage_intervals;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    coverage_intervals.set_logical_bounds(
+        tail_storage_plan->coverage_interval_capacity,
+        tail_storage_plan->coverage_interval_capacity);
+    coverage_intervals.reserve(tail_storage_plan->coverage_interval_capacity);
+#else
     coverage_intervals.reserve(region_count);
+#endif
 
     for (std::size_t region_idx = 1; region_idx < region_count; ++region_idx) {
         alignment_region& current_region = regions[region_idx];
@@ -579,7 +652,19 @@ void classify_primary_secondary(std::span<alignment_region> regions,
     // Mark each region as kept (true) or removed (false), then compact.
     const std::size_t region_count = regions.size();
     std::size_t secondary_kept_count = 0;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    const auto tail_storage_plan = derive_alignment_tail_storage_plan(region_count);
+    if (!tail_storage_plan) {
+        throw std::length_error{"filter region count is not representable"};
+    }
+    alignment_result_vector<std::uint8_t> keep;
+    keep.set_logical_bounds(
+        tail_storage_plan->filter_marker_count,
+        tail_storage_plan->filter_marker_count);
+    keep.resize(tail_storage_plan->filter_marker_count);
+#else
     std::vector<bool> keep(region_count, false);
+#endif
 
     for (std::size_t region_idx = 0; region_idx < region_count; ++region_idx) {
         const auto& region = regions[region_idx];

@@ -23,6 +23,7 @@ extern "C" {
 
 export module bioseq.postgres.table:custom_scan_slice_rewrite_upper_path_callbacks;
 
+export import :custom_scan_slice_rewrite_upper_path_callback_contracts;
 import std;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
@@ -39,11 +40,11 @@ using namespace bioseq::postgres::support;
 
 export {
     /* Install SliceProject ownership at the relevant upper-planner stages. */
-    inline void bioseq_slice_project_create_upper_paths(PlannerInfo* root,
-                                                        UpperRelationKind stage,
-                                                        RelOptInfo* input_rel,
-                                                        RelOptInfo* output_rel,
-                                                        void*) {
+    void bioseq_slice_project_create_upper_paths(PlannerInfo* root,
+                                                 UpperRelationKind stage,
+                                                 RelOptInfo* input_rel,
+                                                 RelOptInfo* output_rel,
+                                                 void*) {
         if (!bioseq::settings::planner::custom_scan::enabled || root == nullptr ||
             input_rel == nullptr || output_rel == nullptr || output_rel->reltarget == nullptr ||
             root->parse == nullptr || root->parse->hasRowSecurity ||

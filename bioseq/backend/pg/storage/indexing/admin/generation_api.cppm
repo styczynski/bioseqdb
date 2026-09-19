@@ -4,11 +4,22 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+extern "C" {
+#include "postgres.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
 
 export module bioseq.postgres.storage.indexing.admin:generation_api;
 
-import std;
 export import :audit_api;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.postgres.storage.indexing.minimizer_read_stats;
@@ -16,6 +27,29 @@ import bioseq.sequences.kmers;
 import bioseq.storage.layout;
 
 export namespace bioseq::storage::indexing {
+
+/// Raise the exact PostgreSQL error for an unsupported fixture backend name.
+[[noreturn]] void ready_minimizer_fixture_backend_error_as_cpp(std::string_view name);
+
+/**
+ * @brief Parse one exact fixture backend name without fallback.
+ * @param name Persisted fixture spelling.
+ * @return The matching minimizer producer backend.
+ */
+[[nodiscard]] inline bioseq::minimizers::minimizer_sketch_backend
+ready_minimizer_fixture_backend_from_name(std::string_view name) {
+    using backend_type = bioseq::minimizers::minimizer_sketch_backend;
+    if (name == "scalar")
+        return backend_type::scalar;
+    if (name == "exact_simd")
+        return backend_type::exact_simd;
+    if (name == "bounded_nthash_simd")
+        return backend_type::bounded_nthash_simd;
+    if (name == "vulkan_segment")
+        return backend_type::vulkan_segment;
+    ready_minimizer_fixture_backend_error_as_cpp(name);
+    pg_unreachable();
+}
 
 /** Result of publishing and reopening one grouped-SoA coordinator fixture. */
 struct ready_minimizer_generation_coordinator_fixture_result {

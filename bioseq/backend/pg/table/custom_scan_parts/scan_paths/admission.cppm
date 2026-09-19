@@ -23,6 +23,7 @@ extern "C" {
 
 export module bioseq.postgres.table:custom_scan_scan_paths_admission;
 
+export import :custom_scan_scan_paths_admission_contracts;
 import std;
 import bioseq.common.logging;
 import bioseq.postgres.configuration.core;

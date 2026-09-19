@@ -24,20 +24,21 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_join_ownership_semantic_admission;
 
 import std;
+import bioseq.sequences.compact_sequence_typmod;
 import bioseq.postgres.support;
-import bioseq.postgres.types.compact_sequence;
-import :custom_scan_support;
-import :custom_scan_slice_path_codec_contract;
-import :custom_scan_join_ownership_carrier_lineage;
-import :custom_scan_join_ownership_sequence_typmod;
+import :custom_scan_oid_expression_support_oid_catalog;
+import :custom_scan_oid_expression_support_expression_analysis;
+import :custom_scan_slice_path_expression_contract;
+import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_join_ownership_alphabet_mismatch_contracts;
+import :custom_scan_join_ownership_sequence_typmod_contract;
+import :custom_scan_join_ownership_expression_signature_contract;
 export import :custom_scan_join_ownership_target_contracts;
+export import :custom_scan_join_ownership_semantic_admission_contracts;
 
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Monotonic statement-local token used to pair BatchJoin plan components. */
-    int next_batch_join_plan_token = 1;
-
     /** @brief Encodes a finite planner Cost as a FLOAT8 plan node. */
     [[nodiscard]] Const* make_batch_join_cost_const(const Cost value) {
         if (!std::isfinite(value)) {
@@ -74,13 +75,6 @@ export {
         }
         return decoded;
     }
-
-    /** @brief Accumulates sequence Vars referenced by a movable per-row operand. */
-    struct per_row_operand_source_resolution {
-        RelOptInfo* joinrel = nullptr;
-        List* sequence_vars = NIL;
-        bool invalid = false;
-    };
 
     /** @brief Validates operand Vars against the candidate join relation. */
     struct per_row_operand_source_visitor {
@@ -199,22 +193,6 @@ export {
         }
         return true;
     }
-
-    /** @brief Collects passthrough Vars and helper identities needed by owner setrefs. */
-    struct per_row_owner_support_validation {
-        Index target_relid = 0;
-        Relids join_relids = nullptr;
-        const bioseq_stub_oids* oids = nullptr;
-        Node* target_recipe = nullptr;
-        List* passthrough_vars = NIL;
-        List* helper_identities = NIL;
-        /* Sequence-valued helpers which do not name this owner may still be exact
-         * outputs of one versioned descendant BatchJoin.  They remain candidates
-         * until each incumbent path validates that ownership structurally. */
-        List* foreign_exact_helper_identities = NIL;
-        List* helper_argument_vars = NIL;
-        bool invalid = false;
-    };
 
     /** @brief Appends a copied expression unless an equal expression is already present. */
     void per_row_append_unique_expression(List*& expressions, Node* node) {
@@ -459,25 +437,6 @@ export {
         return !resolution.invalid;
     }
 
-    /**
-     * @brief Describes an admitted base-local mmsearch operand and its source Vars.
-     *
-     * Exact baserel operand validation for BioseqScan-owned mmsearch. Unlike the
-     * join relocation validation above, this expression is not moved across a planner
-     * frontier: its original post-setrefs ExprState remains authoritative at the
-     * scan.  Volatile functions and opaque/erroring CASE/COALESCE arms are thus
-     * legal and execute once in PostgreSQL order.  The remaining validation
-     * requires that no aggregate/window/subplan/PHV/SRF frontier is crossed and that every
-     * Var belongs to this non-nullable scan relation.
-     */
-    struct base_local_mmsearch_operand_resolution {
-        Node* expression = nullptr;
-        List* sequence_vars = NIL;
-        Var* primary_sequence_var = nullptr;
-        int32 typmod = -1;
-        bool evaluated = false;
-    };
-
     /** @brief Tracks base-relation and type constraints during operand validation. */
     struct base_local_mmsearch_operand_walker {
         RelOptInfo* rel = nullptr;
@@ -540,12 +499,6 @@ export {
             }
             return pg_walk_step::skip_subtree;
         }
-    };
-
-    /** @brief Carries the exact sequence typmod derived for a base-local expression. */
-    struct base_local_sequence_typmod_resolution {
-        int32 typmod = -1;
-        bool invalid = false;
     };
 
     /** @brief Derives a compatible sequence typmod through supported expression shapes. */
@@ -756,17 +709,10 @@ export {
         };
     }
 
-    /** @brief Classifies the target and query bindings owned by one base-scan mmsearch. */
-    struct base_local_mmsearch_ownership {
-        base_local_mmsearch_operand_resolution target{};
-        std::optional<base_local_mmsearch_operand_resolution> local_query{};
-        bool query_is_const = false;
-        bool query_is_param = false;
-        bool query_is_outer_var = false;
-        bool any_evaluated_operand = false;
-    };
-
-    /** @brief Resolves an mmsearch call that a base relation can own without semantic movement. */
+    /**
+     * @brief Resolves an mmsearch call that a base relation can own without semantic movement.
+     * @throws PostgreSQL ERROR for a supported, non-NULL constant with a different bound alphabet.
+     */
     [[nodiscard]] std::optional<base_local_mmsearch_ownership>
     resolve_base_local_mmsearch_ownership(FuncExpr* function,
                                           RelOptInfo* rel,
@@ -790,10 +736,15 @@ export {
         Node* query = arguments.second_argument;
         if (Const* constant = try_cast_pg_node<Const>(query)) {
             if (constant->consttype != oids.bioseq_seq_type_oid || constant->consttypmod < 0 ||
-                !batch_join_typmod_is_supported(constant->consttypmod) ||
-                (!constant->constisnull &&
-                 !mmsearch_typmods_share_alphabet(target->typmod, constant->consttypmod))) {
+                !batch_join_typmod_is_supported(constant->consttypmod)) {
                 return std::nullopt;
+            }
+            if (!constant->constisnull &&
+                !mmsearch_typmods_share_alphabet(target->typmod, constant->consttypmod)) {
+                raise_mmsearch_alphabet_mismatch(
+                    compact_sequence_stdc_type_params::decode(target->typmod),
+                    compact_sequence_stdc_type_params::decode(constant->consttypmod),
+                    "column scan planning");
             }
             result.query_is_const = true;
             return result;

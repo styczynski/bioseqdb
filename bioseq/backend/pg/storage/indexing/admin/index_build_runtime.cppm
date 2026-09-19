@@ -2,9 +2,12 @@
  * @file admin/index_build_runtime.cppm
  * @brief Defines runtime checks shared by PostgreSQL minimizer index builders.
  */
+module;
+
+#include <string_view>
+
 export module bioseq.postgres.storage.indexing.admin.index_build_runtime;
 
-import std;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 
 export namespace bioseq::storage::indexing {

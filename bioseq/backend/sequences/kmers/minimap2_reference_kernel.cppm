@@ -37,6 +37,15 @@ using ::bioseq::minimizers::packed_sequence_kernel_view;
 using ::bioseq::minimizers::minimizer_sink_collector;
 using ::bioseq::minimizers::k_minimizer_output_layout;
 
+/** Trait-owned rolling-state width checked by generated alphabet registrations. */
+template<sequence_alphabet p_alphabet>
+inline constexpr std::size_t minimap2_reference_state_bits_per_rank =
+    []() constexpr {
+        using alphabet_traits = typename ::bioseq::simd::hasher_base<
+            p_alphabet, std::uint64_t>::traits;
+        return alphabet_traits::bits_per_char;
+    }();
+
 /// @brief Provides fixed-capacity circular storage for per-lane vectors.
 /// @tparam p_simd_tag Highway descriptor type.
 /// @tparam p_capacity Maximum number of vectors retained.
@@ -208,7 +217,8 @@ inline void collect_minimizers_simd(
 	const p_iterator& sequence_begin,
 	const p_iterator& sequence_end,
 	const std::size_t window_size,
-	const std::size_t kmer_size
+	const std::size_t kmer_size,
+    std::type_identity<p_hash_value> = {}
 ) {
     static const auto* region_description =
         bioseq::instrumentation::register_static_region("mm_sketch_simd");
@@ -216,6 +226,11 @@ inline void collect_minimizers_simd(
 
     using sequence_traits = compact_sequence_range<p_sequence_range>::traits;
     using storage_unit = typename sequence_traits::storage_unit;
+    using hash_value = p_hash_value;
+    static_assert(std::unsigned_integral<hash_value>,
+        "reference minimizer hash lanes must be unsigned integral words");
+    static_assert(sizeof(hash_value) >= sizeof(storage_unit),
+        "reference minimizer hash lanes may not narrow packed source units");
     [[maybe_unused]] constexpr std::size_t k_hash_value_bytes =
         sizeof(p_hash_value);
 
@@ -225,13 +240,13 @@ inline void collect_minimizers_simd(
         sizeof(storage_unit);
 #endif
 
-    using input_simd_tag_type = hn::ScalableTag<storage_unit>;
+    using input_simd_tag_type = hn::ScalableTag<hash_value>;
 	const input_simd_tag_type input_simd_tag;
 
-	using output_simd_tag_type = hn::ScalableTag<storage_unit>;
+	using output_simd_tag_type = hn::ScalableTag<hash_value>;
 	using hasher_type = typename p_simd_hasher_template<
         typename sequence_traits::alphabet_type>::template simd_hash<
-            storage_unit, input_simd_tag_type>;
+            hash_value, input_simd_tag_type>;
 
     hasher_type hasher(input_simd_tag, kmer_size);
 
@@ -245,24 +260,24 @@ inline void collect_minimizers_simd(
 	reference_minimizer_ring<output_simd_tag_type, 256> strand_buffer(
         input_simd_tag, window_size);
 
-	constexpr auto max_val = static_cast<storage_unit>(-1);
+	constexpr auto max_val = static_cast<hash_value>(-1);
 	const hash_vector_type max_vec = hn::Set(input_simd_tag, max_val);
 	const hash_vector_type one_vec = hn::Set(
-        input_simd_tag, static_cast<storage_unit>(1));
+        input_simd_tag, static_cast<hash_value>(1));
 	const hash_vector_type zero_vec = hn::Zero(input_simd_tag);
 	hash_vector_type current_min = hn::Set(input_simd_tag, max_val);
 	hash_vector_type current_min_pos = hn::Set(
         input_simd_tag,
-        static_cast<storage_unit>(buffer.get_begin_position()));
+        static_cast<hash_value>(buffer.get_begin_position()));
 	// Strand of the per-lane current_min. Mirrors the IfThenElse cascade applied to
 	// `current_min` so the two never go out of sync. Initial value doesn't matter
 	// (the emit guard `temp_buffer1[i] != max_val` skips the sentinel anyway).
 	hash_vector_type current_min_strand = zero_vec;
 
-	HWY_ALIGN storage_unit temp_buffer1[hn::MaxLanes(input_simd_tag)];
-	HWY_ALIGN storage_unit temp_buffer2[hn::MaxLanes(input_simd_tag)];
-    HWY_ALIGN storage_unit temp_buffer3[hn::MaxLanes(input_simd_tag)];
-    HWY_ALIGN storage_unit temp_buffer4[hn::MaxLanes(input_simd_tag)];
+	HWY_ALIGN hash_value temp_buffer1[hn::MaxLanes(input_simd_tag)];
+	HWY_ALIGN hash_value temp_buffer2[hn::MaxLanes(input_simd_tag)];
+    HWY_ALIGN hash_value temp_buffer3[hn::MaxLanes(input_simd_tag)];
+    HWY_ALIGN hash_value temp_buffer4[hn::MaxLanes(input_simd_tag)];
     std::size_t last_pushed_position = 0u;
 
     // submit_results emits one minimap_sketch_data per lane in `min_mask`, drawing the
@@ -317,7 +332,7 @@ inline void collect_minimizers_simd(
                     // so distance must be `capacity`, never 0. Using `>=` here conflates
                     // "just written" (distance 0) with "fully wrapped" (distance capacity) and
                     // produces the wrong real_pos for the elapsed min.
-                    const size_t current_pos = static_cast<storage_unit>(
+                    const size_t current_pos = static_cast<hash_value>(
                         buffer.get_last_write_position());
                     const size_t distance = (current_pos > temp_buffer3[i])
                         ? (current_pos - temp_buffer3[i])
@@ -368,7 +383,7 @@ inline void collect_minimizers_simd(
 	// know which case we are in, so we remember the flag for the iter that
 	// just finished.
 	hash_mask_type prev_new_min_mask = hn::MaskFalse(input_simd_tag);
-    iterate_sequence_bp_simd_offsets(
+    iterate_sequence_bp_simd_offsets<input_simd_tag_type>(
         sequence,
         sequence_begin,
         sequence_end,
@@ -450,7 +465,7 @@ inline void collect_minimizers_simd(
             // subsequent-iteration logic nor finish_fn re-emits the same pair.
             // Cache the physical write position once for every lane operation below.
             const auto last_write_pos_scalar =
-                static_cast<storage_unit>(buffer.get_last_write_position());
+                static_cast<hash_value>(buffer.get_last_write_position());
             const hash_vector_type last_write_pos_vec = hn::Set(d, last_write_pos_scalar);
 
             hash_mask_type just_masked = hn::And(prev_mask, hn::Not(mask));
@@ -478,11 +493,11 @@ inline void collect_minimizers_simd(
                 // lanes here produces extras — the analogous scalar emits come from
                 // later iterations via the regular paths, not a first-window.
                 // Restrict the emit to lanes whose offset is 0 to mirror scalar.
-                HWY_ALIGN storage_unit offset_zero_mask_bytes[hn::MaxLanes(d)];
+                HWY_ALIGN hash_value offset_zero_mask_bytes[hn::MaxLanes(d)];
                 for (size_t lane = 0; lane < hn::Lanes(d); ++lane) {
                     offset_zero_mask_bytes[lane] = (offsets[lane] == 0)
-                                                       ? static_cast<storage_unit>(-1)
-                                                       : static_cast<storage_unit>(0);
+                                                       ? static_cast<hash_value>(-1)
+                                                       : static_cast<hash_value>(0);
                 }
                 const hash_vector_type offset_zero_vec = hn::Load(d, offset_zero_mask_bytes);
                 const hash_mask_type offset_zero_mask = hn::Ne(offset_zero_vec, hn::Zero(d));
@@ -498,7 +513,7 @@ inline void collect_minimizers_simd(
                         hash_mask_type values_to_append_mask =
                             hn::And(offset_zero_mask,
                                     hn::And(hn::Eq(el, current_min),
-                                            hn::Ne(hn::Set(d, static_cast<storage_unit>(index)),
+                                            hn::Ne(hn::Set(d, static_cast<hash_value>(index)),
                                                    current_min_pos)));
                         if (!hn::AllFalse(d, values_to_append_mask)) {
                             // Emit the slot's own strand (mirrors scalar's `collector.collect(el)`
@@ -574,7 +589,7 @@ inline void collect_minimizers_simd(
                         hash_mask_type rescan_new_mask =
                             hn::And(has_elapsed_min, hn::Le(el, current_min));
                         hash_vector_type new_min_pos_val =
-                            hn::Set(d, static_cast<storage_unit>(index));
+                            hn::Set(d, static_cast<hash_value>(index));
                         current_min_pos =
                             hn::IfThenElse(rescan_new_mask, new_min_pos_val, current_min_pos);
                         current_min = hn::IfThenElse(rescan_new_mask, el, current_min);
@@ -599,7 +614,7 @@ inline void collect_minimizers_simd(
                             hash_mask_type values_to_append_mask =
                                 hn::And(has_elapsed_min,
                                         hn::And(hn::Eq(el, current_min),
-                                                hn::Ne(hn::Set(d, static_cast<storage_unit>(index)),
+                                                hn::Ne(hn::Set(d, static_cast<hash_value>(index)),
                                                        current_min_pos)));
                             if (!hn::AllFalse(d, values_to_append_mask)) {
                                 // Emit the slot's own strand (same rationale as the first-window
@@ -683,7 +698,8 @@ inline void collect_minimizers_simd_constexpr(
     p_collector_type& collector,
     compact_sequence_range<p_sequence_range>& sequence,
     const p_iterator& sequence_begin,
-    const p_iterator& sequence_end)
+    const p_iterator& sequence_end,
+    std::type_identity<p_hash_value> = {})
 {
     collect_minimizers_simd<
         p_simd_hasher_template,
@@ -697,7 +713,8 @@ inline void collect_minimizers_simd_constexpr(
         sequence_begin,
         sequence_end,
         p_window_size,
-        p_kmer_size);
+        p_kmer_size,
+        std::type_identity<p_hash_value>{});
 }
 
 namespace minimizer_kernel_detail {
@@ -709,8 +726,11 @@ namespace minimizer_kernel_detail {
 /// @param invocation Type-erased kernel request and sink.
 /// @param result Result populated with status and execution evidence.
 /// @return `true` when the borrowed descriptor is internally consistent.
-template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_unit>
-[[nodiscard]] bool run_reference(
+template<class p_minimizer_type,
+         sequence_alphabet p_alphabet,
+         class p_storage_unit,
+         class p_hash_value>
+[[nodiscard]] bool run_reference_with_hash_value(
     minimizer_kernel_invocation& invocation,
     minimizer_kernel_result& result)
 {
@@ -737,12 +757,14 @@ template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_u
             if (invocation.window == 10u && invocation.kmer == 15u) {
                 collect_minimizers_simd_constexpr<
                     10u, 15u, minimap_int_hasher, p_minimizer_type>(
-                        collector, range, range.begin(), range.end());
+                        collector, range, range.begin(), range.end(),
+                        std::type_identity<p_hash_value>{});
             } else {
                 collect_minimizers_simd<
                     minimap_int_hasher, p_minimizer_type>(
                         collector, range, range.begin(), range.end(),
-                    invocation.window, invocation.kmer);
+                    invocation.window, invocation.kmer,
+                    std::type_identity<p_hash_value>{});
             }
 
             const bool flushed = collector.flush();
@@ -769,7 +791,112 @@ template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_u
         });
 }
 
+/**
+ * @brief Selects rolling-state lanes independently from packed source units.
+ *
+ * DNA4 keeps the historical source-width specialization. Other registered
+ * alphabets select the narrowest unsigned lane that can hold the complete
+ * trait-ranked lexicographic state and the unchanged `2 * K` permutation
+ * mask. Packed source units may only widen at the iterator boundary.
+ */
+template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_unit>
+[[nodiscard]] bool run_reference(
+    minimizer_kernel_invocation& invocation,
+    minimizer_kernel_result& result)
+{
+    constexpr std::size_t output_hash_bits = std::bit_width(
+        static_cast<std::uint64_t>(p_minimizer_type::k_hash_field_mask));
+    if (invocation.kmer == 0u
+        || invocation.kmer > output_hash_bits / 2u) {
+        result.status = minimizer_kernel_status::invalid_configuration;
+        return false;
+    }
+    if constexpr (std::same_as<p_alphabet, seq::dna4>) {
+        return run_reference_with_hash_value<
+            p_minimizer_type, p_alphabet, p_storage_unit, p_storage_unit>(
+                invocation, result);
+    } else {
+        constexpr std::size_t alphabet_bits =
+            minimap2_reference_state_bits_per_rank<p_alphabet>;
+        static_assert(alphabet_bits != 0u);
+
+        const auto lane_fits = [&invocation]<std::unsigned_integral p_lane>() {
+            constexpr std::size_t lane_bits =
+                std::numeric_limits<p_lane>::digits;
+            return sizeof(p_lane) >= sizeof(p_storage_unit)
+                && invocation.kmer <= lane_bits / alphabet_bits
+                && invocation.kmer <= (lane_bits - 1u) / 2u;
+        };
+        if constexpr (sizeof(std::uint32_t) >= sizeof(p_storage_unit)) {
+            if (lane_fits.template operator()<std::uint32_t>()) {
+                return run_reference_with_hash_value<
+                    p_minimizer_type, p_alphabet, p_storage_unit,
+                    std::uint32_t>(invocation, result);
+            }
+        }
+        if (lane_fits.template operator()<std::uint64_t>()) {
+            return run_reference_with_hash_value<
+                p_minimizer_type, p_alphabet, p_storage_unit, std::uint64_t>(
+                    invocation, result);
+        }
+        result.status = minimizer_kernel_status::invalid_configuration;
+        return false;
+    }
+}
+
 } // namespace minimizer_kernel_detail
+
+/**
+ * @brief Validates one generated alphabet/source-width reference dispatch.
+ *
+ * Generated layout dispatchers call this before invoking their alphabet-owned
+ * representation leaf. DNA4 retains its historical source-lane limits;
+ * additional registered alphabets may widen their rolling state to uint64.
+ */
+template<sequence_alphabet p_alphabet, class p_storage_unit>
+[[nodiscard]] inline bool minimap2_reference_admit(
+    minimizer_kernel_invocation& invocation,
+    minimizer_kernel_result& result)
+{
+    result.stats.algorithm =
+        minimizer_kernel_algorithm::minimap2_reference;
+    result.stats.target = static_cast<std::int64_t>(HWY_TARGET);
+
+    if constexpr (!std::same_as<p_storage_unit, std::uint32_t>
+                  && !std::same_as<p_storage_unit, std::uint64_t>) {
+        result.status = minimizer_kernel_status::invalid_configuration;
+        return false;
+    } else {
+        constexpr std::size_t alphabet_bits =
+            minimap2_reference_state_bits_per_rank<p_alphabet>;
+        static_assert(alphabet_bits != 0u);
+        constexpr std::size_t widened_state_max_kmer =
+            std::numeric_limits<std::uint64_t>::digits / alphabet_bits;
+        constexpr std::size_t permutation_max_kmer =
+            (std::numeric_limits<std::uint64_t>::digits - 1u) / 2u;
+        constexpr std::size_t generic_max_kmer =
+            std::min(widened_state_max_kmer, permutation_max_kmer);
+        constexpr std::size_t admitted_max_kmer =
+            std::same_as<p_alphabet, seq::dna4>
+                ? (std::same_as<p_storage_unit, std::uint32_t> ? 15u : 31u)
+                : generic_max_kmer;
+
+        if (!invocation.sequence.final_segment
+            || invocation.fragments.is_present()
+            || invocation.emitted_position_base != 0u
+            || invocation.sequence.begin_symbol != 0u
+            || invocation.window == 0u || invocation.window > 256u
+            || invocation.kmer == 0u
+            || invocation.kmer > admitted_max_kmer
+            || invocation.window
+                > (std::numeric_limits<std::size_t>::max)()
+                    - invocation.kmer) {
+            result.status = minimizer_kernel_status::invalid_configuration;
+            return false;
+        }
+        return true;
+    }
+}
 
 /** Generated representation leaf for 15-bit positions and uint32 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l15_k15_u32(
@@ -794,6 +921,15 @@ template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_u
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 /** Generated representation leaf for 63-bit positions and uint64 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k15_u64(
+    minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** Generated k20 representation leaf for 20-bit positions and uint64 input. */
+[[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l20_k20_u64(
+    minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** Generated k20 representation leaf for 23-bit positions and uint64 input. */
+[[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l23_k20_u64(
+    minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** Generated k20 representation leaf for 63-bit positions and uint64 input. */
+[[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k20_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
 /** @brief Generated representation leaf for 7-bit positions and uint32 input. */
@@ -908,6 +1044,24 @@ requires (
                         invocation, result);
                 } else {
                     is_internally_consistent = minimap2_reference_repr_l63_k15_u64(
+                        invocation, result);
+                }
+                break;
+            case minimizer_output_layout::sequence_log2_20_kmer_20_uint64:
+                if constexpr (std::same_as<p_storage_unit, std::uint64_t>) {
+                    is_internally_consistent = minimap2_reference_repr_l20_k20_u64(
+                        invocation, result);
+                }
+                break;
+            case minimizer_output_layout::sequence_log2_23_kmer_20_uint64:
+                if constexpr (std::same_as<p_storage_unit, std::uint64_t>) {
+                    is_internally_consistent = minimap2_reference_repr_l23_k20_u64(
+                        invocation, result);
+                }
+                break;
+            case minimizer_output_layout::sequence_log2_63_kmer_20_uint128:
+                if constexpr (std::same_as<p_storage_unit, std::uint64_t>) {
+                    is_internally_consistent = minimap2_reference_repr_l63_k20_u64(
                         invocation, result);
                 }
                 break;

@@ -4,23 +4,16 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+#include <cstddef>
+#include <cstdint>
+#include <new>
 
 export module bioseq.postgres.scheduler.dispatch_processor.typed_support.cpu_batch_route;
 
 import std;
 import bioseq.postgres.scheduler.dispatch_processor;
-import bioseq.postgres.scheduler.dispatch_processor.typed_support.resident_target_materialization;
-import bioseq.postgres.scheduler.dispatch_processor.typed_support.row_adapters;
-import bioseq.postgres.scheduler.dispatch_processor.typed_support.source_provider_adapters;
 import bioseq.postgres.scheduler.dispatch_processor.typed_support.persisted_native_batch;
-import bioseq.postgres.scheduler.dispatch_processor.typed_support.generic_rows;
-import bioseq.highway.dispatch_contract;
-import bioseq.sequences.kmers;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.scanner;
 import bioseq.parallelism.pool;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
@@ -29,7 +22,16 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
  * Execute the non-Vulkan batch through persisted native preflight or the
  * generic CPU and SIMD row continuation.
  */
-template <class p_sequence, class p_scanner_row, class p_inmemory_row>
+template <class p_sequence,
+          class p_scanner_row,
+          class p_inmemory_row,
+          class p_materialize_target,
+          class p_same_target_locator,
+          class p_hash_major_identity_valid,
+          class p_fragment_identity_valid,
+          class p_with_pg_target,
+          class p_attach_query_stats,
+          class p_process_generic_rows>
 [[nodiscard]] auto process_cpu_batch_route(
     const size_t batch_size,
     const uint8_t alphabet_code,
@@ -38,7 +40,7 @@ template <class p_sequence, class p_scanner_row, class p_inmemory_row>
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>& target_hdrs,
     const std::array<int32_t, dispatch_batch_capacity>& query_ids,
-    const minimap2_parameters& dispatch_params,
+    pipe::statement_execution_plan_owner execution_plan,
     const std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     batch_processor::scanner_pg_context* scanner_pg_ctx,
@@ -50,10 +52,18 @@ template <class p_sequence, class p_scanner_row, class p_inmemory_row>
     const bool persisted_required,
     bool& cached_query_minimizer_stats_accounted,
     p_scanner_row& scanner_row,
-    p_inmemory_row& inmemory_row) -> std::map<int32_t, std::vector<match_result>> {
-    std::map<int32_t, std::vector<match_result>> results;
+    p_inmemory_row& inmemory_row,
+    const p_materialize_target& materialize_target,
+    const p_same_target_locator& same_target_locator,
+    const p_hash_major_identity_valid& hash_major_identity_valid,
+    const p_fragment_identity_valid& fragment_identity_valid,
+    const p_with_pg_target& with_pg_target,
+    const p_attach_query_stats& attach_query_stats,
+    const p_process_generic_rows& process_generic_rows_callback)
+    -> match_result_map {
+    match_result_map results;
     bool shared_target_outcome_recorded = false;
-    std::optional<std::vector<minimap_sketch_data>> cached_query_minimizers;
+    std::shared_ptr<const std::vector<minimap_sketch_data>> cached_query_minimizers;
     std::optional<pipe::minimizer_range_execution_stats> cached_query_minimizer_stats;
     auto& pool = bioseq::parallelism::global_pool::instance();
     /*
@@ -79,7 +89,7 @@ template <class p_sequence, class p_scanner_row, class p_inmemory_row>
                          &per_row_query_hdrs,
                          &target_hdrs,
                          &query_ids,
-                         &dispatch_params,
+                         execution_plan,
                          &broadcast_query_ordinal,
                          &stats,
                          &scanner_pg_ctx,
@@ -94,65 +104,31 @@ template <class p_sequence, class p_scanner_row, class p_inmemory_row>
                          &pool,
                          &scanner_row,
                          &inmemory_row,
+                         &process_generic_rows_callback,
                          &results] {
-        process_generic_rows<p_sequence>(batch_size,
-                                         alphabet_code,
-                                         storage_unit_byte_width,
-                                         query_hdr,
-                                         per_row_query_hdrs,
-                                         target_hdrs,
-                                         query_ids,
-                                         dispatch_params,
-                                         broadcast_query_ordinal,
-                                         stats,
-                                         scanner_pg_ctx,
-                                         per_row_query_mode,
-                                         record_target_operational_outcomes,
-                                         shared_target_outcome_recorded,
-                                         chunked_scanner_forced,
-                                         use_scanner_pg,
-                                         cached_query_minimizers,
-                                         cached_query_minimizer_stats,
-                                         cached_query_minimizer_stats_accounted,
-                                         pool,
-                                         scanner_row,
-                                         inmemory_row,
-                                         results);
-    };
-    const auto materialize_target = [](auto target_view,
-                                       const std::uint8_t requested_width,
-                                       const std::uint64_t sequence_rowno) {
-        return try_materialize_target_for_segment_workers(
-            target_view, requested_width, sequence_rowno);
-    };
-    const auto same_target_locator = [](const auto& left, const auto& right) noexcept {
-        return same_dispatch_target_locator(left, right);
-    };
-    const auto hash_major_identity_valid = [](const auto& group,
-                                               const std::uint64_t target_bp_size) noexcept {
-        return hash_major_parallel_reader_identity_valid(group, target_bp_size);
-    };
-    const auto fragment_identity_valid = [](const auto& group,
-                                             const std::uint64_t target_bp_size) noexcept {
-        return fragment_parallel_reader_identity_valid(group, target_bp_size);
-    };
-    const auto with_pg_target = [](auto& context,
-                                   const auto& locator,
-                                   const std::uint8_t target_alphabet_code,
-                                   const std::uint8_t target_storage_unit_byte_width,
-                                   const std::uint16_t last_padding_letters,
-                                   pg_sequence_read_session* active_read_session,
-                                   auto&& callback) {
-        with_source_provider_pg_target<p_sequence>(context,
-                                                   locator,
-                                                   target_alphabet_code,
-                                                   target_storage_unit_byte_width,
-                                                   last_padding_letters,
-                                                   active_read_session,
-                                                   std::forward<decltype(callback)>(callback));
-    };
-    const auto attach_query_stats = [](auto& collection, const auto& execution_stats) {
-        attach_retained_hash_major_query_stats(collection, execution_stats);
+        process_generic_rows_callback(batch_size,
+                                      alphabet_code,
+                                      storage_unit_byte_width,
+                                      query_hdr,
+                                      per_row_query_hdrs,
+                                      target_hdrs,
+                                      query_ids,
+                                      execution_plan,
+                                      broadcast_query_ordinal,
+                                      stats,
+                                      scanner_pg_ctx,
+                                      per_row_query_mode,
+                                      record_target_operational_outcomes,
+                                      shared_target_outcome_recorded,
+                                      chunked_scanner_forced,
+                                      use_scanner_pg,
+                                      cached_query_minimizers,
+                                      cached_query_minimizer_stats,
+                                      cached_query_minimizer_stats_accounted,
+                                      pool,
+                                      scanner_row,
+                                      inmemory_row,
+                                      results);
     };
     process_persisted_native_batch<p_sequence>(batch_size,
                                                alphabet_code,
@@ -160,7 +136,7 @@ template <class p_sequence, class p_scanner_row, class p_inmemory_row>
                                                per_row_query_hdrs,
                                                target_hdrs,
                                                query_ids,
-                                               dispatch_params,
+                                               execution_plan,
                                                broadcast_query_ordinal,
                                                stats,
                                                scanner_pg_ctx,

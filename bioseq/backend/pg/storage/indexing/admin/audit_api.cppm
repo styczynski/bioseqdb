@@ -4,11 +4,20 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+extern "C" {
+#include "postgres.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <cstdint>
+#include <string_view>
 
 export module bioseq.postgres.storage.indexing.admin:audit_api;
 
-import std;
 export import :hash_major;
 
 export namespace bioseq::storage::indexing {

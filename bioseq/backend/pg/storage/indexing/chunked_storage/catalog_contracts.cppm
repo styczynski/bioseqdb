@@ -3,8 +3,10 @@
  * @brief Defines chunked-storage catalog contracts, schema validation, and failure seams.
  */
 module;
-#include <bioseq/pg_compat.h>
+
 extern "C" {
+#include "postgres.h"
+
 #include "access/heapam.h"
 #include "access/nbtree.h"
 #include "access/relation.h"
@@ -17,14 +19,26 @@ extern "C" {
 #include "catalog/pg_opclass_d.h"
 #include "catalog/pg_type_d.h"
 #include "executor/instrument.h"
+#include "miscadmin.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:catalog_contracts;
+
 import std;
+export import bioseq.postgres.storage.indexing.cold_index_timing;
 export import bioseq.postgres.storage.indexing.executor_read_context;
 export import bioseq.postgres.storage.indexing.minimizer_build_stats;
 export import bioseq.postgres.storage.indexing.minimizer_read_stats;
@@ -38,7 +52,6 @@ import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
 import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
-import bioseq.instrumentation.clock;
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.physical;
 import bioseq.postgres.storage.indexing.sql_row_codecs;
@@ -288,34 +301,7 @@ authorize_minimizer_generation_catalog_source_pg(
 /** Allocates the next positive generation identifier from PostgreSQL. */
 [[nodiscard]] std::uint64_t allocate_minimizer_generation_id_pg();
 
-/// Monotonic project clock converted to the unsigned SQL-bound domain.
-[[nodiscard]] inline std::uint64_t cold_index_now_ns() noexcept {
-    return bioseq::instrumentation::clock::now_ns();
-}
-
-/// Add one elapsed interval while defending against a broken clock sample.
-inline void add_cold_index_elapsed(cold_index_preparation_stats& stats,
-                                   std::uint64_t& destination,
-                                   std::uint64_t begin_ns) noexcept {
-    const std::uint64_t end_ns = cold_index_now_ns();
-    stats.add(destination, end_ns >= begin_ns ? end_ns - begin_ns : 0);
-}
-
-/// Attribute PostgreSQL shared-buffer traffic since `begin` to this delta.
-inline void add_cold_index_buffer_usage(cold_index_preparation_stats& stats,
-                                        const BufferUsage& begin) noexcept {
-    BufferUsage delta{};
-    BufferUsageAccumDiff(&delta, &pgBufferUsage, &begin);
-    if (delta.shared_blks_hit < 0 || delta.shared_blks_read < 0) {
-        stats.are_stats_saturated = true;
-        return;
-    }
-    stats.add(stats.shared_blks_hit, static_cast<std::uint64_t>(delta.shared_blks_hit));
-    stats.add(stats.shared_blks_read, static_cast<std::uint64_t>(delta.shared_blks_read));
-}
-
 inline std::uint64_t g_last_index_merge_run_count = 0;
-inline last_minimizer_sequence_build_stats g_last_minimizer_sequence_build_stats{};
 
 /// Reset backend-local build counters before a new administrative build.
 inline void reset_last_minimizer_sequence_build_stats() noexcept {

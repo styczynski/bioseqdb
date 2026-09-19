@@ -9,23 +9,37 @@
  * `(bucket, shard)`. The table layout shards via `index_table_shard`.
  */
 module;
-#include <bioseq/pg_compat.h>
+
 extern "C" {
+#include "postgres.h"
+
+#include "miscadmin.h"
+#include "port.h"
 #include "storage/fd.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
-#include "miscadmin.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include <cerrno>
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:fragment_image;
+
 import std;
 export import bioseq.postgres.storage.indexing.minimizer_fragment_mapping_lease;
 import bioseq.common.logging;
+import bioseq.postgres.support;
 import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
@@ -36,6 +50,19 @@ import :file_actions;
 export namespace bioseq::storage::indexing {
 
 namespace minimizer_fragment_image_pg_detail {
+
+/// Avoid the allocating PostgreSQL error bridge on the ordinary no-interrupt path.
+/// A pending query-cancel ERROR crosses the bridge; backend-termination/FATAL
+/// retains PostgreSQL's native terminal semantics. The callback shape also binds
+/// directly to the portable compact-H32 adapter.
+inline void check_fragment_image_interrupts_as_cpp(void*) {
+    if (!INTERRUPTS_PENDING_CONDITION()) {
+        return;
+    }
+    bioseq::postgres::support::invoke_pg_as_cpp([] {
+        CHECK_FOR_INTERRUPTS();
+    });
+}
 
 [[nodiscard]] inline minimizer_generation_file_identity
 generation_file_identity(const minimizer_generation_administration_identity& identity,
@@ -75,13 +102,16 @@ pwrite_all(const int fd, const std::span<const std::byte> bytes, const std::uint
                                          bytes.data() + static_cast<std::ptrdiff_t>(written),
                                          bytes.size() - written,
                                          static_cast<off_t>(current));
-        if (result < 0 && errno == EINTR)
+        if (result < 0 && errno == EINTR) {
+            check_fragment_image_interrupts_as_cpp(nullptr);
             continue;
+        }
         if (result <= 0) {
             minimizer_generation_storage_error_as_cpp(
                 fmt::format("minimizer fragment image write failed: errno={}", errno));
         }
         written += static_cast<std::size_t>(result);
+        check_fragment_image_interrupts_as_cpp(nullptr);
     }
 }
 
@@ -105,11 +135,14 @@ inline void resize_temporary_image(const int fd, const std::uint64_t image_bytes
             "minimizer fragment image image length is not mmap/off_t representable");
     }
     while (::ftruncate(fd, static_cast<off_t>(image_bytes)) != 0) {
-        if (errno == EINTR)
+        if (errno == EINTR) {
+            check_fragment_image_interrupts_as_cpp(nullptr);
             continue;
+        }
         minimizer_generation_storage_error_as_cpp(
             fmt::format("minimizer fragment image image resize failed: errno={}", errno));
     }
+    check_fragment_image_interrupts_as_cpp(nullptr);
 }
 
 /// Scope-bound offset-zero shared mapping. Offset zero is page-aligned on
@@ -155,12 +188,16 @@ class scoped_mapped_region {
 
     /// Persist every dirty page before the outer header can authorize it.
     void sync() const {
+        check_fragment_image_interrupts_as_cpp(nullptr);
         while (msync(mapping_, bytes_, MS_SYNC) != 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) {
+                check_fragment_image_interrupts_as_cpp(nullptr);
                 continue;
+            }
             minimizer_generation_storage_error_as_cpp(
                 fmt::format("minimizer fragment image mapped image sync failed: errno={}", errno));
         }
+        check_fragment_image_interrupts_as_cpp(nullptr);
     }
 };
 
@@ -440,37 +477,97 @@ class minimizer_fragment_image_writer {
         const std::span<const std::byte> mapped_payload = payload_mapping.bytes().subspan(
             static_cast<std::size_t>(k_minimizer_fragment_image_header_bytes),
             static_cast<std::size_t>(payload_bytes_));
-        auto opened_adapter = minimizer_fragment_compact_hash32_adapter::open(
-            opened_minimizer_fragment_generation_view{
-                .head = &head,
-                .manifest = &manifest,
-                .directory = &authenticated_directory,
-                .mapped_payload = mapped_payload,
-            });
-        if (!opened_adapter) {
-            minimizer_generation_storage_error_as_cpp(
-                "minimizer fragment image compact-H32 source adapter rejected grouped-SoA");
-        }
-        minimizer_fragment_compact_hash32_adapter compact_adapter = std::move(*opened_adapter);
         const auto profile = derive_grouped_soa_minimizer_profile(manifest);
-        if (!profile || profile->max_occ_cap == 0u ||
+        if (!profile || head.layout != manifest.layout || head.generation_id == 0u ||
+            head.source_identity == 0u || head.storage_contract_checksum == 0u ||
+            authenticated_directory.profile() != *profile ||
+            mapped_payload.size() != manifest.payload_bytes) {
+            minimizer_generation_storage_error_as_cpp(
+                "minimizer fragment image persisted grouped-SoA source contract is invalid");
+        }
+        if (profile->max_occ_cap == 0u ||
             profile->max_occ_cap > (std::numeric_limits<std::uint32_t>::max)()) {
             minimizer_generation_storage_error_as_cpp(
                 "minimizer fragment image persisted grouped-SoA cap is invalid");
         }
-        const std::uint32_t persisted_max_occ_cap =
-            static_cast<std::uint32_t>(profile->max_occ_cap);
-        const auto compact_options = compact_adapter.compact_build_options(persisted_max_occ_cap);
-        if (!compact_options) {
+        if (profile->max_hash == 0u) {
             minimizer_generation_storage_error_as_cpp(
-                "minimizer fragment image compact-H32 build options are incompatible");
+                "minimizer fragment image persisted grouped-SoA hash geometry is invalid");
         }
-        const compact_hash32_sorted_run_source compact_source = compact_adapter.sorted_run_source();
-        const auto compact_plan =
-            plan_compact_hash32_direct_index(compact_source, *compact_options);
-        if (!compact_plan) {
+        const std::uint32_t profile_hash_bits = std::bit_width(profile->max_hash);
+        const std::uint64_t expected_max_hash =
+            profile_hash_bits == 64u
+                ? (std::numeric_limits<std::uint64_t>::max)()
+                : (std::uint64_t{1u} << profile_hash_bits) - 1u;
+        if (profile->max_hash != expected_max_hash) {
             minimizer_generation_storage_error_as_cpp(
-                "minimizer fragment image compact-H32 image planning failed");
+                "minimizer fragment image persisted grouped-SoA hash geometry is invalid");
+        }
+
+        bool compact_hash32_supported = false;
+        if (profile->max_hash <= (std::numeric_limits<std::uint32_t>::max)()) {
+            const compact_hash32_geometry geometry{
+                .hash_domain_bits = static_cast<std::uint8_t>(profile_hash_bits),
+                .max_hash = static_cast<std::uint32_t>(profile->max_hash),
+            };
+            compact_hash32_supported =
+                resolve_compact_hash32_address(0u, geometry).has_value();
+        }
+
+        std::optional<minimizer_fragment_compact_hash32_adapter> compact_adapter{};
+        std::optional<compact_hash32_build_options> compact_options{};
+        std::optional<compact_hash32_sorted_run_source> compact_source{};
+        std::optional<compact_hash32_image_plan> compact_plan{};
+        std::optional<minimizer_fragment_compact_hash32_section_spec> compact_section_spec{};
+        if (compact_hash32_supported) {
+            const minimizer_fragment_compact_hash32_options adapter_options{
+                .cancellation_checkpoint = cooperative_cancellation_checkpoint{
+                    .context = nullptr,
+                    .invoke_fn = &minimizer_fragment_image_pg_detail::
+                        check_fragment_image_interrupts_as_cpp,
+                },
+            };
+            auto opened_adapter = minimizer_fragment_compact_hash32_adapter::open(
+                opened_minimizer_fragment_generation_view{
+                    .head = &head,
+                    .manifest = &manifest,
+                    .directory = &authenticated_directory,
+                    .mapped_payload = mapped_payload,
+                },
+                adapter_options);
+            if (!opened_adapter) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer fragment image compact-H32 source adapter rejected grouped-SoA");
+            }
+            // Establish the move-only adapter's final address before issuing the
+            // replay source which borrows its move-stable source token.
+            compact_adapter.emplace(std::move(*opened_adapter));
+            const std::uint32_t persisted_max_occ_cap =
+                static_cast<std::uint32_t>(profile->max_occ_cap);
+            auto opened_options =
+                compact_adapter->compact_build_options(persisted_max_occ_cap);
+            if (!opened_options) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer fragment image compact-H32 build options are incompatible");
+            }
+            compact_options.emplace(std::move(*opened_options));
+            compact_source.emplace(compact_adapter->sorted_run_source());
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
+            auto planned_compact =
+                plan_compact_hash32_direct_index(*compact_source, *compact_options);
+            if (!planned_compact) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer fragment image compact-H32 image planning failed");
+            }
+            compact_plan.emplace(std::move(*planned_compact));
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
+            compact_section_spec.emplace(
+                minimizer_fragment_compact_hash32_section_spec{
+                    .bytes = compact_plan->image_bytes,
+                    .direct_header_crc64 = 0u,
+                });
         }
 
         const auto provisional_layout =
@@ -480,15 +577,24 @@ class minimizer_fragment_image_writer {
                                                  payload_crc64,
                                                  manifest.directory_checksum,
                                                  head.manifest_checksum,
-                                                 minimizer_fragment_compact_hash32_section_spec{
-                                                     .bytes = compact_plan->image_bytes,
-                                                     .direct_header_crc64 = 0u,
-                                                 });
-        if (!provisional_layout ||
-            provisional_layout->feature_bitmap != k_minimizer_fragment_compact_hash32_feature ||
-            provisional_layout->compact_hash32_direct.bytes != compact_plan->image_bytes) {
+                                                 compact_section_spec);
+        if (!provisional_layout) {
             minimizer_generation_storage_error_as_cpp(
                 "minimizer fragment image direct-section layout planning failed");
+        }
+        if (compact_section_spec) {
+            if (provisional_layout->feature_bitmap !=
+                    k_minimizer_fragment_compact_hash32_feature ||
+                provisional_layout->compact_hash32_direct.bytes != compact_plan->image_bytes) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer fragment image direct-section layout planning failed");
+            }
+        } else if (provisional_layout->feature_bitmap != 0u ||
+                   provisional_layout->compact_hash32_direct.offset != 0u ||
+                   provisional_layout->compact_hash32_direct.bytes != 0u ||
+                   provisional_layout->compact_hash32_direct.direct_header_crc64 != 0u) {
+            minimizer_generation_storage_error_as_cpp(
+                "minimizer fragment image native-section layout planning failed");
         }
         const std::uint64_t payload_end =
             provisional_layout->payload.offset + provisional_layout->payload.bytes;
@@ -504,13 +610,15 @@ class minimizer_fragment_image_writer {
             publication_.fd, encoded_manifest, provisional_layout->manifest.offset);
         const std::uint64_t manifest_end =
             provisional_layout->manifest.offset + provisional_layout->manifest.bytes;
-        minimizer_fragment_image_pg_detail::write_zero_padding(
-            publication_.fd, manifest_end, provisional_layout->compact_hash32_direct.offset);
+        if (compact_section_spec) {
+            minimizer_fragment_image_pg_detail::write_zero_padding(
+                publication_.fd, manifest_end, provisional_layout->compact_hash32_direct.offset);
+        }
         minimizer_fragment_image_pg_detail::resize_temporary_image(publication_.fd,
                                                                    provisional_layout->file_bytes);
 
         std::uint64_t direct_header_crc64 = 0u;
-        {
+        if (compact_section_spec) {
             minimizer_fragment_image_pg_detail::scoped_mapped_region destination_mapping{
                 publication_.fd, provisional_layout->file_bytes, PROT_READ | PROT_WRITE};
             const auto direct_offset =
@@ -519,12 +627,16 @@ class minimizer_fragment_image_writer {
                 static_cast<std::size_t>(provisional_layout->compact_hash32_direct.bytes);
             std::span<std::byte> direct_image =
                 destination_mapping.writable_bytes().subspan(direct_offset, direct_bytes);
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
             if (auto built = build_compact_hash32_direct_index_into(
-                    compact_source, *compact_options, *compact_plan, direct_image);
+                    *compact_source, *compact_options, *compact_plan, direct_image);
                 !built) {
                 minimizer_generation_storage_error_as_cpp(
                     "minimizer fragment image compact-H32 image replay/build failed");
             }
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
             const auto validated_direct =
                 validate_compact_hash32_direct_index(std::span<const std::byte>{direct_image},
                                                      compact_options->identity,
@@ -534,6 +646,8 @@ class minimizer_fragment_image_writer {
                 minimizer_generation_storage_error_as_cpp(
                     "minimizer fragment image compact-H32 nested image validation failed");
             }
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
             const compact_hash32_image_plan& validated_direct_plan = validated_direct->header;
             if (validated_direct_plan != *compact_plan) {
                 minimizer_generation_storage_error_as_cpp(
@@ -542,6 +656,7 @@ class minimizer_fragment_image_writer {
             direct_header_crc64 = crc64_ecma182(std::span<const std::byte>{direct_image}.first(
                 k_compact_hash32_direct_index_header_bytes));
             destination_mapping.sync();
+            compact_section_spec->direct_header_crc64 = direct_header_crc64;
         }
 
         const auto layout =
@@ -551,10 +666,7 @@ class minimizer_fragment_image_writer {
                                                  payload_crc64,
                                                  manifest.directory_checksum,
                                                  head.manifest_checksum,
-                                                 minimizer_fragment_compact_hash32_section_spec{
-                                                     .bytes = compact_plan->image_bytes,
-                                                     .direct_header_crc64 = direct_header_crc64,
-                                                 });
+                                                 compact_section_spec);
         if (!layout || layout->payload != provisional_layout->payload ||
             layout->directory != provisional_layout->directory ||
             layout->manifest != provisional_layout->manifest ||
@@ -606,6 +718,8 @@ class minimizer_fragment_image_writer {
             minimizer_generation_storage_error_as_cpp(
                 "minimizer fragment image header self-decode failed");
         }
+        minimizer_fragment_image_pg_detail::
+            check_fragment_image_interrupts_as_cpp(nullptr);
         minimizer_fragment_image_pg_detail::pwrite_all(publication_.fd, *encoded_header, 0u);
 
         struct stat observed{};
@@ -639,6 +753,8 @@ class minimizer_fragment_image_writer {
             .device = publication_.expected_device,
             .inode = publication_.expected_inode,
         };
+        minimizer_fragment_image_pg_detail::
+            check_fragment_image_interrupts_as_cpp(nullptr);
         publish_generation_file(publication_);
         sealed_ = true;
         return receipt;

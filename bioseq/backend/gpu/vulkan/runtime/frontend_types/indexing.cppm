@@ -363,6 +363,7 @@ struct gpu_seed_inputs {
     std::uint32_t slot_mask = 0;                       ///< Open-addressing mask when `bucket_count` is zero.
     std::uint32_t position_count = 0;                  ///< Number of encoded positions in `positions`.
     std::uint32_t minimizer_count = 0;                 ///< Number of query minimizer records.
+    std::uint32_t query_minimizer_record_offset = 0;   ///< First query record in the bound whole buffer.
     std::uint32_t minimizer_word_kind = 0;             ///< Minimizer word encoding kind for shaders.
     std::uint32_t minimizer_words32_per_record = 0;    ///< `uint32_t` words per minimizer record.
     std::uint32_t hash_shift = 0;                      ///< Right-shift applied before slot indexing.

@@ -2,9 +2,11 @@
  * @file minimizer_build_stats.cppm
  * @brief Backend-local statistics shape for one minimizer-sequence index build.
  */
-export module bioseq.postgres.storage.indexing.minimizer_build_stats;
+module;
 
-import std;
+#include <cstdint>
+
+export module bioseq.postgres.storage.indexing.minimizer_build_stats;
 
 export namespace bioseq::storage::indexing {
 
@@ -34,5 +36,9 @@ struct last_minimizer_sequence_build_stats {
     std::uint64_t position_spill_bytes = 0;
     std::uint64_t position_spill_count = 0;
 };
+
+/// Backend-local counters populated by the active minimizer-sequence build.
+inline last_minimizer_sequence_build_stats
+    g_last_minimizer_sequence_build_stats{};
 
 } // namespace bioseq::storage::indexing

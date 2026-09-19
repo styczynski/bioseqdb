@@ -9,25 +9,37 @@
  * `(bucket, shard)`. The table layout shards via `index_table_shard`.
  */
 module;
-#include <bioseq/pg_compat.h>
-extern "C" {
-#include "access/xact.h"
-#include "commands/tablespace.h"
-#include "storage/fd.h"
-#include "storage/ipc.h"
-#include "utils/memutils.h"
-#include "utils/xid8.h"
 
+extern "C" {
+#include "postgres.h"
+
+#include "access/xact.h"
 #include "common/relpath.h"
+#include "commands/tablespace.h"
 #include "miscadmin.h"
 #include "port.h"
+#include "storage/fd.h"
+#include "storage/ipc.h"
+#include "utils/errcodes.h"
+#include "utils/memutils.h"
+#include "utils/xid8.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include <cerrno>
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:file_actions;
+
 import std;
 import bioseq.common.logging;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid

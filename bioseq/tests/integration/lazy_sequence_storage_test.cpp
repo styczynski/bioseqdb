@@ -300,10 +300,11 @@ TEST_CASE("physical DNA4 letters support arrays grouping and indexes",
         " (id int, value bioseq.letter('dna5')); "
         "CREATE TEMP VIEW sequence_acceptance_letters_dna5_view AS "
         " SELECT id,value FROM sequence_acceptance_letters_dna5;");
+    // Native DNA5 rank order is A, C, G, N, T; insertion order remains ACGTN.
     REQUIRE(query_scalar(
         ctx,
         "SELECT string_agg(value::text,'' ORDER BY value) "
-        "FROM sequence_acceptance_letters_dna5;") == "ACGTN");
+        "FROM sequence_acceptance_letters_dna5;") == "ACGNT");
     REQUIRE(query_scalar_int(
         ctx,
         "SELECT count(DISTINCT value) FROM sequence_acceptance_letters_dna5;") == 5);

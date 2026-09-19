@@ -3,60 +3,33 @@
  * @brief Defines grouped-generation head, manifest, source, and descriptor authentication.
  */
 module;
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 
 extern "C" {
-#include "access/heapam.h"
-#include "access/nbtree.h"
-#include "access/parallel.h"
-#include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "access/transam.h"
-#include "access/xact.h"
-#include "catalog/indexing.h"
-#include "catalog/namespace.h" // RelnameGetRelid
-#include "catalog/pg_am_d.h"
-#include "catalog/pg_class.h"
-#include "catalog/pg_index.h"
-#include "catalog/pg_opclass_d.h"
-#include "catalog/pg_sequence.h"
-#include "catalog/pg_type_d.h"
-#include "commands/sequence.h"
-#include "commands/tablespace.h"
-#include "executor/instrument.h"
-#include "executor/spi.h"
-#include "executor/tuptable.h"
-#include "storage/buffile.h"
-#include "storage/dsm.h"
-#include "storage/fd.h"
-#include "storage/ipc.h"
-#include "storage/procarray.h"
-#include "storage/relfilelocator.h"
-#include "storage/shm_toc.h"
-#include "utils/builtins.h"
-#include "utils/inval.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/resowner.h"
-#include "utils/snapmgr.h"
-#include "utils/syscache.h"
-#include "utils/timestamp.h"
-#include "utils/xid8.h"
+#include "postgres.h"
 
-#include "common/relpath.h"
+#include "access/genam.h"
+#include "access/htup.h"
+#include "access/sdir.h"
+#include "access/skey.h"
+#include "access/stratnum.h"
+#include "catalog/namespace.h" // RelnameGetRelid
+#include "executor/instrument.h"
 #include "miscadmin.h"
-#include "port.h"
-#include "port/atomics.h"
+#include "storage/lockdefs.h"
+#include "utils/fmgroids.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
 }
 
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_session_metadata;
+
 import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
@@ -74,7 +47,6 @@ import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimi
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range

@@ -23,14 +23,17 @@ extern "C" {
 
 export module bioseq.postgres.table:custom_scan_scan_runtime_source_lifecycle;
 
+export import :custom_scan_scan_runtime_source_lifecycle_contracts;
+
 import std;
 import bioseq.postgres.support;
+import bioseq.postgres.storage.manager;
+import bioseq.postgres.storage.scanner;
 import bioseq.postgres.table.scan_state;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.storage.lazy_sequence;
 
 import :custom_scan_oid_expression_support;
-import :custom_scan_runtime_support;
 
 using namespace bioseq::postgres::support;
 
@@ -173,45 +176,6 @@ export {
                                                              producer_id);
         }
     }
-
-    /** @brief Selects the point at which a source datum must remain valid. */
-    enum class mmsearch_source_capture_role : std::uint8_t {
-        evaluated_operand,
-        output_projection,
-    };
-
-    /** @brief Records one physical source datum for restoration after promotion. */
-    struct mmsearch_source_restore_entry {
-        AttrNumber attno = InvalidAttrNumber;
-        Datum datum{};
-    };
-
-    /**
-     * @brief Holds source datums that must survive temporary locator promotion.
-     *
-     * Four physical sources cover the ordinary target/query/output case without
-     * a per-match_result allocation.  Wider projections spill into the executor
-     * per-tuple MemoryContext, which PostgreSQL releases even when ERROR skips C++
-     * destructors. The object is populated before PG_TRY and never mutated in
-     * its setjmp region, so either storage form is safe to read from PG_CATCH.
-     */
-    struct mmsearch_source_restore {
-        static constexpr std::size_t inline_capacity = 4u;
-        std::array<mmsearch_source_restore_entry, inline_capacity> inline_entries{};
-        mmsearch_source_restore_entry* overflow_entries = nullptr;
-        std::size_t count = 0u;
-
-        /** @brief Returns a mutable inline or overflow entry by index. */
-        [[nodiscard]] mmsearch_source_restore_entry& entry(const std::size_t index) noexcept {
-            return overflow_entries == nullptr ? inline_entries[index] : overflow_entries[index];
-        }
-
-        /** @brief Returns an inline or overflow entry by index. */
-        [[nodiscard]] const mmsearch_source_restore_entry&
-        entry(const std::size_t index) const noexcept {
-            return overflow_entries == nullptr ? inline_entries[index] : overflow_entries[index];
-        }
-    };
 
     /** @brief Marks one physical sequence attribute, or every sequence attribute for whole-row use. */
     void mark_mmsearch_physical_sequence_source(std::vector<std::uint8_t>& roles,
@@ -477,13 +441,19 @@ export {
         return true;
     }
 
-    /** @brief Carries the strict qual result and evaluated target/query operands for one row. */
-    struct mmsearch_row_evaluation {
-        bool qual_passed = false;
-        Datum target{};
-        bool target_is_null = true;
-        Datum query{};
-        bool query_is_null = true;
-    };
-
 } // export custom-scan partition declarations
+
+/** @brief Release lazy source resources after tuple-visible references are drained. */
+void release_scan_runtime_lazy_resources(bioseq_scan_runtime& runtime,
+                                         const bool is_commit) {
+    if (runtime.lazy_source_provider != nullptr) {
+        bioseq::storage::close_pg_sequence_source_provider(runtime.lazy_source_provider,
+                                                            is_commit);
+        runtime.lazy_source_provider = nullptr;
+    }
+    runtime.buffer.clear_sequence_source_provider_binding();
+    if (runtime.lazy_trace_attachment != nullptr) {
+        release_slice_trace_attachment(runtime.lazy_trace_attachment);
+        runtime.lazy_trace_attachment = nullptr;
+    }
+}

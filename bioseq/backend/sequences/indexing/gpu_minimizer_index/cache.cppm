@@ -347,6 +347,96 @@ public:
         return resident;
     }
 
+    /**
+     * Required lookup for a generated physical minimizer record.
+     *
+     * Unlike the legacy K15-only entry above, this overload authenticates the
+     * cache key against the caller's already-selected generated record. It
+     * still has no CPU-index or upload argument, so a miss cannot rebuild,
+     * transcode, or silently select a host seed path.
+     */
+    template <class p_minimizer>
+    [[nodiscard]] std::expected<
+        std::shared_ptr<const gpu_resident_minimizer_index>,
+        required_preinsert_lookup_error>
+    find_required_preinserted_typed(
+        const bioseq::gpu::vulkan::runtime& runtime,
+        const gpu_minimizer_index_cache_key& key)
+    {
+        using layout = typename p_minimizer::layout_type;
+        static_assert(std::is_standard_layout_v<p_minimizer>);
+        static_assert(std::is_trivially_copyable_v<p_minimizer>);
+        std::lock_guard<std::mutex> guard(mu_);
+        const bool device_uuid_bound = std::any_of(
+            key.device_uuid.begin(), key.device_uuid.end(),
+            [](std::uint8_t byte) noexcept { return byte != 0u; });
+        if (!gpu_source_direct_tuple_supported<p_minimizer>(
+                key.alphabet_size, key.kmer_size, key.window_size) ||
+            !key.source_direct_sorted_dense ||
+            key.operation_identity == 0u || key.source_id != 0u ||
+            key.caller_identity != key.operation_identity ||
+            key.minimizer_size != sizeof(p_minimizer) ||
+            key.minimizer_alignment != alignof(p_minimizer) ||
+            key.minimizer_hash_bits != layout::k_hash_bits ||
+            key.minimizer_position_bits != layout::k_position_bits ||
+            layout::k_storage_bits != sizeof(p_minimizer) * 8u ||
+            !device_uuid_bound || key.device_uuid != runtime.features().device_uuid ||
+            key.representation != gpu_index_representation::source_direct_sorted_dense ||
+            key.sorted_dense_abi_revision != k_minimizer_sorted_dense_gpu_abi_revision ||
+            key.target_len == 0u || key.table_size == 0u || key.position_count == 0u ||
+            key.table_size > key.position_count || key.gate_enabled ||
+            !key_gate_matches_binding_locked(key)) {
+            return std::unexpected{required_preinsert_lookup_error::invalid_key};
+        }
+        auto found = entries_.find(key);
+        if (found == entries_.end()) {
+            return std::unexpected{required_preinsert_lookup_error::miss};
+        }
+        const auto& resident = found->second;
+        const std::uint64_t required_control_bytes = bioseq::common::saturating_mul(
+            key.table_size, sizeof(gpu_minimizer_slot));
+        const std::uint64_t required_position_bytes = bioseq::common::saturating_mul(
+            key.position_count, sizeof(std::uint64_t));
+        const std::uint64_t actual_allocation_sum = bioseq::common::saturating_add(
+            resident ? resident->slots.allocation_bytes : 0u,
+            resident ? resident->positions.allocation_bytes : 0u);
+        const bool source_traversals_valid =
+            resident != nullptr &&
+            (resident->complete_source_traversals == 1u ||
+             resident->complete_source_traversals == 2u);
+        if (!resident || !(resident->key == key) ||
+            resident->representation != gpu_index_representation::source_direct_sorted_dense ||
+            resident->slot_mask != 0u || resident->bucket_count != key.table_size ||
+            resident->unique_key_count != key.table_size ||
+            resident->slot_capacity != key.table_size ||
+            resident->position_count != key.position_count ||
+            resident->target_len != key.target_len || resident->gate_identity.enabled ||
+            resident->accounting_authority == gpu_resident_accounting_authority::none ||
+            !resident->slots.is_valid() || !resident->positions.is_valid() ||
+            resident->slots.owner != &runtime || resident->positions.owner != &runtime ||
+            resident->slots.mapped == nullptr || resident->positions.mapped == nullptr ||
+            !resident->slots.is_host_visible_coherent() ||
+            !resident->positions.is_host_visible_coherent() ||
+            required_control_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
+            required_position_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
+            required_control_bytes > resident->slots.bytes ||
+            required_position_bytes > resident->positions.bytes ||
+            required_control_bytes > resident->slots.allocation_bytes ||
+            required_position_bytes > resident->positions.allocation_bytes ||
+            resident->source_stream_checksum == 0u ||
+            resident->source_stream_checksum != resident->mapped_stream_checksum ||
+            !source_traversals_valid || resident->complete_mapped_traversals != 1u ||
+            !gpu_exact_resident_authority_valid(resident->accounting_authority,
+                                                resident->materialization,
+                                                static_cast<bool>(resident->permit),
+                                                resident->permit.bytes(),
+                                                actual_allocation_sum)) {
+            return std::unexpected{required_preinsert_lookup_error::resident_mismatch};
+        }
+        touch_lru_locked(key);
+        return resident;
+    }
+
     /// Materialize a prepared host upload and optionally retain it in the cache.
     ///
     /// Returns null when memory admission fails or mapped device storage is unavailable.

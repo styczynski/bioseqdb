@@ -1,0 +1,540 @@
+{
+  "schema": "bioseq.e2e.algorithm-matrix-q1024-post-s059-seven-day-queue",
+  "version": 1,
+  "status": "sealed_not_started",
+  "created_at": "2026-08-28T21:23:34+02:00",
+  "authority_binding": {
+    "scheduling_overlay_only": true,
+    "does_not_reassign_execution_ownership": true,
+    "packed_partition_manifest": "bench/bench_e2e_algorithm_matrix_q1024_packed_partition_manifest.json",
+    "packed_partition_manifest_sha256": "adc97dcc133c2fb568745a91af023faa47ab3a636c915358d12f1395a35e984e",
+    "packed_partition_digest": "a332781b6fc8f08266cd67e7f40adad023992f9dc0aa379283b736b37885a7d7",
+    "canonical_manifest": "bench/bench_e2e_algorithm_matrix_campaign_contract.json",
+    "canonical_manifest_sha256": "e80407ca3a515ca04ac7ad616f0c7f5e0ef477f3e09884ec8ab93370e8c55933",
+    "singleton_manifest": "bench/bench_e2e_algorithm_matrix_q1024_singleton_partition_manifest.json",
+    "singleton_manifest_sha256": "6bfe0681b46087860b7d873cd868da8e70be5ecab85b817e6979a29fce6f2c3a",
+    "deadline_v2_manifest": "bench/bench_e2e_algorithm_matrix_deadline_v2_manifest.json",
+    "deadline_v2_manifest_sha256": "bf2abc14dbda84079d6384e330b1fdc752e1754360cc61d9fec42af1e2d1b31c"
+  },
+  "starting_adoptions": [
+    {
+      "source_ordinal": 56,
+      "source_config_sha256": "4e1d86c1aba8bbafb8c8a5d203cb7b19f6a402fc9d732c990d50d298ca4e5434",
+      "canonical_stable_key_sha256": "423ec685980909f514b861a6440901f927a978430cbf4458fef3d227f727ae5d",
+      "required_terminal_disposition": "accepted_or_missing_fail_closed"
+    },
+    {
+      "source_ordinal": 57,
+      "source_config_sha256": "038cf71ab49ddc7f52ad9594009e77aed8171e6fab3567838eaf362e5d8bfa78",
+      "canonical_stable_key_sha256": "e2662dcb9020741ce1ddef01f8142744cb8bfb109737e1437609552efbf635ba",
+      "required_terminal_disposition": "accepted_or_missing_fail_closed"
+    },
+    {
+      "source_ordinal": 58,
+      "source_config_sha256": "2680e9b8991517ee3374a12ea37e88976cbf415b479a747ca92dfaae7626075a",
+      "canonical_stable_key_sha256": "4c2d577f13d6eea8444b7ccfa1a2d5bf614c3a855766c0be3edac0b425675e99",
+      "required_terminal_disposition": "accepted_or_missing_fail_closed"
+    },
+    {
+      "source_ordinal": 59,
+      "source_config_sha256": "59d2204ce94d06590eda2ae351dbbb8133695d731d4d17dbd858eb1ab44b0f35",
+      "canonical_stable_key_sha256": "0ed6b7419bc8e21f149ee20e5caff1c43f3ae483e9b77939d5f57ea4070d40d0",
+      "required_terminal_disposition": "accepted_or_missing_fail_closed"
+    }
+  ],
+  "scope_contract": {
+    "query_count": 1024,
+    "repetitions_per_cell": 5,
+    "repeat_indices": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "cigar_projection": true,
+    "mapq_projection": true,
+    "prefilter_enabled": false,
+    "pipeline_mode": "task_parallel",
+    "worker_nice": 0,
+    "runner_nice": 0,
+    "concurrency": false,
+    "bench_lock": true,
+    "excluded_base_alignment_algorithms": [
+      "ksw2_batched"
+    ],
+    "exact_match_count_parity_required": true,
+    "same_repeat_adjusted_timing_required": true,
+    "route_and_fallback_proof_required": true
+  },
+  "duration_evidence": {
+    "s056_minimap2_no_index": {
+      "five_repeat_outer_sum_ns": 234292698791,
+      "p50_outer_ns": 45190754458,
+      "authority": "accepted"
+    },
+    "s057_minimap2_just_index": {
+      "five_repeat_outer_sum_ns": 62403713667,
+      "p50_outer_ns": 12620073042,
+      "authority": "accepted"
+    },
+    "s058_bioseq_persisted_mpf": {
+      "five_repeat_outer_sum_ns": 102386632459,
+      "completed_job_seconds": 725.16727,
+      "p50_outer_ns": 19892910458,
+      "authority": "accepted"
+    },
+    "mps_q1024_deadline_exclusion": {
+      "estimated_five_repeat_seconds": 1149314.421193,
+      "estimated_hours": 319.254006,
+      "authority": "accepted q8 scaling estimate sealed by deadline-v2",
+      "classification": "excluded_from_seven_day_queue"
+    }
+  },
+  "budget_contract": {
+    "hard_campaign_cap_seconds": 604800,
+    "hard_campaign_cap_hours": 168,
+    "cap_clock": "original user campaign elapsed time; post-s059 does not reset the clock",
+    "final_terminal_audit_reserve_seconds": 28800,
+    "maximum_execution_reservation_seconds": 576000,
+    "ordinary_entry_reservation_seconds": 14400,
+    "no_index_entry_reservation_seconds": 172800,
+    "launch_policy": "greedy prefix in queue order; before every launch require candidate reservation plus the untouched final audit reserve within actual remaining campaign time",
+    "same_host_parallelism_permitted": false,
+    "accepted_duration_reforecast_after_every_terminal_entry": true
+  },
+  "preconditions": {
+    "s059_terminal_required": true,
+    "s059_must_not_be_inspected_or_mutated_by_queue_sealing": true,
+    "safe_cleanup_authorized_only_after_terminal_s059": true,
+    "exact_config_hash_required": true,
+    "build_receipt_required": true,
+    "run_only_required": true,
+    "ni_zero_required": true,
+    "disk_preflight_filesystems": [
+      "/tmp",
+      "postgresql_data"
+    ]
+  },
+  "queue": [
+    {
+      "position": 1,
+      "id": "minimap2_m2_d4_k20_w15_both_modes",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_q1024_packed_shards/bench_e2e_algorithm_matrix_q1024_packed_m2_d4_k20_w15_minimap2_both_modes.json",
+      "config_sha256": "5c9d6f8586f73298f3b8e229e44d5079f8a5621a6267cbd234363aedb803eb00",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 2,
+      "supported_cells": 2,
+      "selector_rejection_cells": 0,
+      "expected_raw_records": 10,
+      "stable_keys_sha256": "6a7bfcde6e0dc4c87df8b7542012f9dfdc166577b84b5a52baf7fd000675a449",
+      "accepted_duration_estimate_seconds": 600,
+      "estimate_basis": "accepted s056+s057 five-repeat outer sums, rounded up for M2 axis variation",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": []
+    },
+    {
+      "position": 2,
+      "id": "minimap2_m2_d5_k15_w10_both_modes",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_q1024_packed_shards/bench_e2e_algorithm_matrix_q1024_packed_m2_d5_k15_w10_minimap2_both_modes.json",
+      "config_sha256": "089f6c629207950434842820ffdb25953264277b747b0f6731e5fcbdcf34bba9",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 2,
+      "supported_cells": 2,
+      "selector_rejection_cells": 0,
+      "expected_raw_records": 10,
+      "stable_keys_sha256": "1baf3e1526ffdf1c482f2fe9542c574bb7ce424c7047154979f3c1f824a1e821",
+      "accepted_duration_estimate_seconds": 600,
+      "estimate_basis": "accepted s056+s057 five-repeat outer sums, rounded up for M2 axis variation",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": []
+    },
+    {
+      "position": 3,
+      "id": "minimap2_m2_d5_k20_w15_both_modes",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_q1024_packed_shards/bench_e2e_algorithm_matrix_q1024_packed_m2_d5_k20_w15_minimap2_both_modes.json",
+      "config_sha256": "174192e25a5cd6d587afab373dcce0f73ad3262dbbb1fa5c763c8b8b2ae35f8d",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 2,
+      "supported_cells": 2,
+      "selector_rejection_cells": 0,
+      "expected_raw_records": 10,
+      "stable_keys_sha256": "488514776a02658a6514af08ef7845603544c58dba64340ffdb35a21503bc02d",
+      "accepted_duration_estimate_seconds": 600,
+      "estimate_basis": "accepted s056+s057 five-repeat outer sums, rounded up for M2 axis variation",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": []
+    },
+    {
+      "position": 4,
+      "id": "minimap2_m4_d4_k15_w10_both_modes",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_q1024_packed_shards/bench_e2e_algorithm_matrix_q1024_packed_m4_d4_k15_w10_minimap2_both_modes.json",
+      "config_sha256": "18fc890771a6c0fbd758cebd61cbda2213ff14fa51311e8fc6f3d547907c8211",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 2,
+      "supported_cells": 2,
+      "selector_rejection_cells": 0,
+      "expected_raw_records": 10,
+      "stable_keys_sha256": "920dd8fb4d2f9dcec9d7caab43869aea285ac01f0d588203664688891af9609b",
+      "accepted_duration_estimate_seconds": 1200,
+      "estimate_basis": "accepted s056+s057 five-repeat outer sums, doubled for 4 Gbp and rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": []
+    },
+    {
+      "position": 5,
+      "id": "minimap2_m4_d4_k20_w15_both_modes",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_q1024_packed_shards/bench_e2e_algorithm_matrix_q1024_packed_m4_d4_k20_w15_minimap2_both_modes.json",
+      "config_sha256": "d5eebe28de4dac44f73c51f96abaee48763fca53ed143921aa12a5035b76a4c4",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 2,
+      "supported_cells": 2,
+      "selector_rejection_cells": 0,
+      "expected_raw_records": 10,
+      "stable_keys_sha256": "845ec210d857f53582b05fabc49b852b5570ebaa4d9553fcb675d83d2207d369",
+      "accepted_duration_estimate_seconds": 1200,
+      "estimate_basis": "accepted s056+s057 five-repeat outer sums, doubled for 4 Gbp and rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": []
+    },
+    {
+      "position": 6,
+      "id": "minimap2_m4_d5_k15_w10_both_modes",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_q1024_packed_shards/bench_e2e_algorithm_matrix_q1024_packed_m4_d5_k15_w10_minimap2_both_modes.json",
+      "config_sha256": "89f7538571e0bfa6303eeb6f982165a0691bbee8b2db6a8f38282b65d090b875",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 2,
+      "supported_cells": 2,
+      "selector_rejection_cells": 0,
+      "expected_raw_records": 10,
+      "stable_keys_sha256": "7f093815686b1e4ffdbdc642bdbf3a85f2073edbc1d0559741f18d1d7b921281",
+      "accepted_duration_estimate_seconds": 1200,
+      "estimate_basis": "accepted s056+s057 five-repeat outer sums, doubled for 4 Gbp and rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": []
+    },
+    {
+      "position": 7,
+      "id": "minimap2_m4_d5_k20_w15_both_modes",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_q1024_packed_shards/bench_e2e_algorithm_matrix_q1024_packed_m4_d5_k20_w15_minimap2_both_modes.json",
+      "config_sha256": "2780eab9ea0707467115b523b0abf5477c34e81f8a7dc48eef43217d2a19f183",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 2,
+      "supported_cells": 2,
+      "selector_rejection_cells": 0,
+      "expected_raw_records": 10,
+      "stable_keys_sha256": "8a3b192295fc4766fbe8c7a29a40d817c7a310b0a096e00641cda290c90515ca",
+      "accepted_duration_estimate_seconds": 1200,
+      "estimate_basis": "accepted s056+s057 five-repeat outer sums, doubled for 4 Gbp and rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": []
+    },
+    {
+      "position": 8,
+      "id": "mpfragment_scalar_block_residual",
+      "action": "run_singleton",
+      "path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_singleton_0660_92411d3a09458e94.json",
+      "config_sha256": "9ca0ecbc5c83bef850cd7e2fdd2643f6387fb88edaaaf0aa49e772177f247218",
+      "execution_authority": "q1024_singleton_fallback",
+      "expected_result_cells": 1,
+      "supported_cells": 1,
+      "selector_rejection_cells": 0,
+      "expected_raw_records": 5,
+      "stable_keys_sha256": "92411d3a09458e94bc8d3130009655aa738dfe0bdeb4a3315772466a00edcb0f",
+      "accepted_duration_estimate_seconds": 900,
+      "estimate_basis": "accepted s058 completed job 725.167270 s, rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": [
+        "s057 accepted just-index parity baseline"
+      ]
+    },
+    {
+      "position": 9,
+      "id": "m2_d4_k15_w10_bounded_nthash_simd_mpfragment",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_m2_d4_k15_w10_just_index_bounded_nthash_simd_mpfragment.json",
+      "config_sha256": "71b1974fb676f64da910e6590c63229db0aa8369965622f11c61342837bf6069",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 8,
+      "supported_cells": 6,
+      "selector_rejection_cells": 2,
+      "expected_raw_records": 40,
+      "stable_keys_sha256": "1ed8a835a2014553491c84c3e30fc6e995b1c790ceb4d15ae0f1163d414b87c9",
+      "accepted_duration_estimate_seconds": 6000,
+      "estimate_basis": "8 cells x accepted s058 completed job, rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": [
+        "s057 accepted just-index parity baseline"
+      ]
+    },
+    {
+      "position": 10,
+      "id": "m2_d4_k15_w10_simd_minimap2_reference_mpfragment",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_m2_d4_k15_w10_just_index_simd_minimap2_reference_mpfragment.json",
+      "config_sha256": "bb637ae265c7f57ce1b9fb24c8b85cfba56c256c85505d808de16c2a1610010e",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 8,
+      "supported_cells": 6,
+      "selector_rejection_cells": 2,
+      "expected_raw_records": 40,
+      "stable_keys_sha256": "5ffb15bb13740895f4668efe84a31b2b60cb0891e943d4abb1b6dfb4106073c1",
+      "accepted_duration_estimate_seconds": 6000,
+      "estimate_basis": "8 cells x accepted s058 completed job, rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": [
+        "s057 accepted just-index parity baseline"
+      ]
+    },
+    {
+      "position": 11,
+      "id": "m2_d4_k15_w10_two_stack_nthash_mpfragment",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_m2_d4_k15_w10_just_index_two_stack_nthash_mpfragment.json",
+      "config_sha256": "a205e40e49a19448abf7539a2ed28251e7b0f225793f0b6dbe2ed1df49ef8484",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 8,
+      "supported_cells": 6,
+      "selector_rejection_cells": 2,
+      "expected_raw_records": 40,
+      "stable_keys_sha256": "36a8cab2f0a389ab0815b1a7a8c14f09f054b2af71ddb5065b6a1f05dd4d4ded",
+      "accepted_duration_estimate_seconds": 6000,
+      "estimate_basis": "8 cells x accepted s058 completed job, rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": [
+        "s057 accepted just-index parity baseline"
+      ]
+    },
+    {
+      "position": 12,
+      "id": "m2_d4_k15_w10_scalar_mpfragment_residual_after_s058",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_q1024_packed_shards/bench_e2e_algorithm_matrix_q1024_packed_m2_d4_k15_w10_just_index_scalar_mpfragment_residual_after_s058.json",
+      "config_sha256": "0a992c635e053530bf53257b7cf5e9d22cf61079ab71d71aa375fe954889b330",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 6,
+      "supported_cells": 4,
+      "selector_rejection_cells": 2,
+      "expected_raw_records": 30,
+      "stable_keys_sha256": "3dd0c97df3c1cb151d4ad5d8add03031b77647b30d9c046ada532e58ef8a4ef4",
+      "accepted_duration_estimate_seconds": 4800,
+      "estimate_basis": "6 cells x accepted s058 completed job, rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 16,
+      "dependency_gates": [
+        "s057 accepted just-index parity baseline"
+      ]
+    },
+    {
+      "position": 13,
+      "id": "m4_d4_k15_w10_scalar_mpfragment",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_m4_d4_k15_w10_just_index_scalar_mpfragment.json",
+      "config_sha256": "a39fda9baa701ba622e7ef4f4d60506f7ff4a59911f0ddb73ee21efa45fd6c64",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 8,
+      "supported_cells": 6,
+      "selector_rejection_cells": 2,
+      "expected_raw_records": 40,
+      "stable_keys_sha256": "0fdfcf3f0f7e4fb3fba4fbd7c02a7fbd64083362e514b67edd53c44d89b2f3e9",
+      "accepted_duration_estimate_seconds": 12000,
+      "estimate_basis": "8 cells x accepted s058 completed job x 2 target-size factor, rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 50,
+      "dependency_gates": [
+        "minimap2_m4_d4_k15_w10_both_modes accepted exact-mode parity baseline"
+      ]
+    },
+    {
+      "position": 14,
+      "id": "m4_d4_k15_w10_bounded_nthash_simd_mpfragment",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_m4_d4_k15_w10_just_index_bounded_nthash_simd_mpfragment.json",
+      "config_sha256": "18fc0f1f8b85bbdc774d848f6b72b7ca2145a55177eaa371340f30bb8d06ccc4",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 8,
+      "supported_cells": 6,
+      "selector_rejection_cells": 2,
+      "expected_raw_records": 40,
+      "stable_keys_sha256": "c5447af05483d26c90d477dea71e236bb916c7d422bd57f574a44159e98f323e",
+      "accepted_duration_estimate_seconds": 12000,
+      "estimate_basis": "8 cells x accepted s058 completed job x 2 target-size factor, rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 50,
+      "dependency_gates": [
+        "minimap2_m4_d4_k15_w10_both_modes accepted exact-mode parity baseline"
+      ]
+    },
+    {
+      "position": 15,
+      "id": "m4_d4_k15_w10_simd_minimap2_reference_mpfragment",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_m4_d4_k15_w10_just_index_simd_minimap2_reference_mpfragment.json",
+      "config_sha256": "ff9dfd6a359767c8268f0af6329b8df55ca26715622330bb0588eb467c582372",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 8,
+      "supported_cells": 6,
+      "selector_rejection_cells": 2,
+      "expected_raw_records": 40,
+      "stable_keys_sha256": "d9c931804af818aa6c96c51853114d41e9472ae7af882b92725b9df6cc7ca8c3",
+      "accepted_duration_estimate_seconds": 12000,
+      "estimate_basis": "8 cells x accepted s058 completed job x 2 target-size factor, rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 50,
+      "dependency_gates": [
+        "minimap2_m4_d4_k15_w10_both_modes accepted exact-mode parity baseline"
+      ]
+    },
+    {
+      "position": 16,
+      "id": "m4_d4_k15_w10_two_stack_nthash_mpfragment",
+      "action": "run_packed",
+      "path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_m4_d4_k15_w10_just_index_two_stack_nthash_mpfragment.json",
+      "config_sha256": "69ae99a86696bdcdf177e97d36a745bd658f6a05641999f634b29f08b7a0f810",
+      "execution_authority": "q1024_packed",
+      "expected_result_cells": 8,
+      "supported_cells": 6,
+      "selector_rejection_cells": 2,
+      "expected_raw_records": 40,
+      "stable_keys_sha256": "5273511ebcdd8a93eee08840644de6d678c7aa29713c8ec7d970699b59d38d5d",
+      "accepted_duration_estimate_seconds": 12000,
+      "estimate_basis": "8 cells x accepted s058 completed job x 2 target-size factor, rounded up",
+      "hard_reservation_seconds": 14400,
+      "minimum_free_gib": 50,
+      "dependency_gates": [
+        "minimap2_m4_d4_k15_w10_both_modes accepted exact-mode parity baseline"
+      ]
+    },
+    {
+      "position": 17,
+      "id": "seven_day_no_index_k20",
+      "action": "run_singleton",
+      "path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_singleton_0150_c9d4c0fd1968374d.json",
+      "config_sha256": "3f1ea122dbf2aed74674fbf1ef28b2461e21a87e98036fdb7053dba8c5be8f32",
+      "execution_authority": "q1024_singleton_fallback",
+      "expected_result_cells": 1,
+      "supported_cells": 1,
+      "selector_rejection_cells": 0,
+      "expected_raw_records": 5,
+      "stable_keys_sha256": "c9d4c0fd1968374df85c13868daebe1d9101806932edbd5ed6877c0aada3f39d",
+      "accepted_duration_estimate_seconds": 172800,
+      "estimate_basis": "terminal s059 accepted duration must replace this 48 h fail-closed ceiling before launch",
+      "hard_reservation_seconds": 172800,
+      "minimum_free_gib": 32,
+      "dependency_gates": [
+        "minimap2_m2_d4_k20_w15_both_modes accepted no-index parity baseline",
+        "terminal s059 accepted duration reforecast"
+      ]
+    },
+    {
+      "position": 18,
+      "id": "stretch_no_index_k15",
+      "action": "run_singleton",
+      "path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_singleton_0068_2496323c88e8add2.json",
+      "config_sha256": "7cbedf6a5ccc42f304e37b6a1faffbc4c3e19d6fb592c237ecdc3a141ad14b44",
+      "execution_authority": "q1024_singleton_fallback",
+      "expected_result_cells": 1,
+      "supported_cells": 1,
+      "selector_rejection_cells": 0,
+      "expected_raw_records": 5,
+      "stable_keys_sha256": "2496323c88e8add288fbd281ec0df05618b57a4b7425473db3092894d37cfa61",
+      "accepted_duration_estimate_seconds": 172800,
+      "estimate_basis": "terminal s059 accepted duration must replace this 48 h fail-closed ceiling before launch",
+      "hard_reservation_seconds": 172800,
+      "minimum_free_gib": 32,
+      "dependency_gates": [
+        "s056 accepted no-index parity baseline",
+        "terminal s059 accepted duration reforecast"
+      ]
+    }
+  ],
+  "excluded_within_cap": [
+    {
+      "class": "all q1024 minimizers_per_sequence work, including probe 0664 and M4 persisted-MPS packs",
+      "reason": "sealed five-repeat estimate 1149314.421193 s exceeds the entire 604800 s cap before margin",
+      "reconsideration_gate": "explicit deadline extension plus accepted q1024 MPS probe and, for M4, >=50 GiB free on /tmp and PostgreSQL data"
+    }
+  ],
+  "coverage": {
+    "supported_scope_cells": 304,
+    "minimap2_supported_scope_cells": 16,
+    "bioseq_supported_scope_cells": 288,
+    "queue_config_count": 18,
+    "queue_execution_cells": 79,
+    "queue_supported_cells": 63,
+    "queue_selector_rejection_cells": 16,
+    "queue_raw_record_owners": 395,
+    "starting_accepted_cells_if_s059_passes": 4,
+    "starting_accepted_cells_if_s059_fails": 3,
+    "core_positions": [
+      1,
+      16
+    ],
+    "core_supported_cells": 61,
+    "core_hard_execution_reservation_seconds": 230400,
+    "core_hard_eta_with_final_audit_seconds": 259200,
+    "core_accepted_duration_estimate_seconds": 78300,
+    "core_accepted_eta_with_final_audit_seconds": 107100,
+    "after_core_supported_coverage_if_s059_passes": 65,
+    "after_first_no_index_supported_coverage_if_s059_passes": 66,
+    "maximum_supported_coverage_if_s059_passes": 67,
+    "maximum_supported_coverage_if_s059_fails": 66,
+    "maximum_remaining_supported_cells_if_s059_passes": 237,
+    "full_queue_hard_execution_reservation_seconds": 576000,
+    "full_queue_hard_eta_with_final_audit_seconds": 604800,
+    "full_queue_accepted_and_ceiling_eta_seconds": 452700
+  },
+  "ownership": {
+    "queue_stable_keys_sha256": "2e86b2be260b79800483d47e93b559585cdfa3b63abd7d7b42d8c0b4b81ac637",
+    "queue_supported_stable_keys_sha256": "815927a03824e59bb4e0e1db5526a309f3e3e7102c5576d601285fb952bbc2df",
+    "starting_adoption_stable_keys_sha256": "162bf6922f0d85df64a7716916e481ff119c63cb1ffa0eef31cd115602c81ff0",
+    "combined_stable_keys_count": 83,
+    "combined_stable_keys_sha256": "19f2bdc29d2bd0b206ae2584c5a45e5f726fed7d650cccc13bc93ec13e4875c3",
+    "combined_unique_repeat_owners": 415,
+    "combined_repeat_owners_sha256": "2c7a3dd1642b8198fb01d0395a76b851fa6b7f8c0c2d4ab3cf88dd8c3cb192e5",
+    "overlap_count": 0,
+    "canonical_union_unchanged": true
+  },
+  "terminal_acceptance_gate": {
+    "required_record_count_per_cell": 5,
+    "required_repeat_indices": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "required_query_count": 1024,
+    "match_count_must_equal_minimap2_baseline": true,
+    "cigar_correct_and_replay_count": 1024,
+    "mapq_result_count": 1024,
+    "prefilter_activity_count": 0,
+    "unaccounted_backend_declines": 0,
+    "unaccounted_backend_fallbacks": 0,
+    "requested_observed_route_must_match": true,
+    "positive_selected_stage_work_required": true,
+    "same_repeat_b_equals_a_minus_cigar_or_mapq_union": true,
+    "mismatch_disposition": "invalid with prominent COMMENTS; never count as supported timing coverage",
+    "selector_rejection_disposition": "proof-only, never timing coverage"
+  },
+  "queue_digest_algorithm": "sha256-canonical-json-without-queue_digest",
+  "queue_digest": "06d7c1f8af21e0f5c71943d5b79f0885965972e38298b9c7285e4b1587680eca"
+}

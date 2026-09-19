@@ -33,6 +33,8 @@ enum class sequence_iteration_part : std::uint8_t {
  * The iterator keeps a bounded circular buffer for delayed streams, invokes
  * the handler once per decoded logical symbol, and masks the padded tail.
  *
+ * @tparam p_descriptor_tag Optional decoded-symbol descriptor. `void` keeps
+ * the packed storage unit descriptor used by existing callers.
  * @tparam p_delay_types Integral delay argument types.
  * @tparam p_sequence_range Packed sequence range type.
  * @tparam p_handler_type Callable receiving the live mask and current symbols.
@@ -48,6 +50,7 @@ enum class sequence_iteration_part : std::uint8_t {
  * @param delays Logical-symbol delays for additional lock-step streams.
  */
 template<
+	typename p_descriptor_tag = void,
 	typename... p_delay_types,
 	supports_compact_sequence_range p_sequence_range,
 	typename p_handler_type,
@@ -85,7 +88,16 @@ inline void iterate_sequence_bp_simd_offsets(
 	DEBUG_ASSERT(largest_delay <= p_maximum_delay,
 		"sequence iteration delay exceeds the configured bound");
 
-	const hn::ScalableTag<typename sequence_traits::storage_unit> d;
+	using default_descriptor =
+		hn::ScalableTag<typename sequence_traits::storage_unit>;
+	using resolved_descriptor = std::conditional_t<
+		std::same_as<p_descriptor_tag, void>,
+		default_descriptor,
+		std::remove_cvref_t<p_descriptor_tag>>;
+	using decoded_lane_type = hn::TFromD<resolved_descriptor>;
+	static_assert(std::unsigned_integral<decoded_lane_type>,
+		"sequence decoded-symbol lanes must be unsigned integral words");
+	const resolved_descriptor d;
 	using vector_type = hn::Vec<decltype(d)>;
     using vector_mask = hn::Mask<decltype(d)>;
     using matrix = square_lane_matrix<decltype(d)>;

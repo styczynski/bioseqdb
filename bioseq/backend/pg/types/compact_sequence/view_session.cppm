@@ -31,6 +31,7 @@ import :flat_abi;
 import :source_abi;
 import :tree_types;
 import :tree_ops;
+import bioseq.common.checked_arithmetic;
 import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;
@@ -749,6 +750,328 @@ template <class p_alphabet>
   };
 }
 
+template <class p_unit, class p_read_units>
+/** Rebase one complete identity packed slice through a bounded native-unit reader. */
+[[nodiscard]] bool rebase_identity_packed_slice(
+    pg_sequence_facade_state const& state,
+    std::uint64_t source_from,
+    std::uint64_t available_unit_count,
+    void* destination,
+    std::size_t unit_count,
+    std::uint64_t bits_per_symbol,
+    std::uint64_t letters_per_unit,
+    p_read_units const& read_units) {
+  static_assert(std::is_unsigned_v<p_unit>);
+  constexpr std::uint64_t unit_bits = std::numeric_limits<p_unit>::digits;
+  const auto packed_bits = bioseq::common::checked_mul(
+      letters_per_unit, bits_per_symbol);
+  const auto shift_bits = bioseq::common::checked_mul(
+      source_from % letters_per_unit, bits_per_symbol);
+  const auto source_occupied = bioseq::common::checked_add(
+      source_from % letters_per_unit, state.descriptor.bp_length);
+  if (!packed_bits || *packed_bits == 0u || *packed_bits > unit_bits ||
+      !shift_bits || *shift_bits >= *packed_bits || !source_occupied ||
+      unit_count > (std::numeric_limits<std::size_t>::max)() / sizeof(p_unit)) {
+    return false;
+  }
+
+  const std::uint64_t source_unit_count =
+      *source_occupied / letters_per_unit +
+      (*source_occupied % letters_per_unit != 0u ? 1u : 0u);
+  const std::uint64_t first_source_unit = source_from / letters_per_unit;
+  if (source_unit_count < unit_count || source_unit_count - unit_count > 1u ||
+      first_source_unit > available_unit_count ||
+      source_unit_count > available_unit_count - first_source_unit) {
+    return false;
+  }
+
+  auto output = std::span<std::uint8_t>{
+      static_cast<std::uint8_t*>(destination), unit_count * sizeof(p_unit)};
+  if (!read_units(first_source_unit, output)) {
+    return false;
+  }
+
+  std::array<std::uint8_t, sizeof(p_unit)> final_source_bytes{};
+  const bool needs_final_source = source_unit_count > unit_count;
+  if (needs_final_source) {
+    const auto final_source_unit = bioseq::common::checked_add(
+        first_source_unit, static_cast<std::uint64_t>(unit_count));
+    if (!final_source_unit ||
+        !read_units(*final_source_unit, final_source_bytes)) {
+      return false;
+    }
+  }
+
+  const auto low_mask = [](std::uint64_t bit_count) noexcept {
+    return bit_count == std::numeric_limits<std::uint64_t>::digits
+               ? (std::numeric_limits<std::uint64_t>::max)()
+               : (std::uint64_t{1u} << bit_count) - 1u;
+  };
+  const auto load_unit = [](const std::uint8_t* bytes) noexcept {
+    p_unit value{};
+    std::memcpy(std::addressof(value), bytes, sizeof(value));
+    return static_cast<std::uint64_t>(value);
+  };
+  const auto store_unit = [](std::uint8_t* bytes, std::uint64_t value) noexcept {
+    const p_unit narrowed = static_cast<p_unit>(value);
+    std::memcpy(bytes, std::addressof(narrowed), sizeof(narrowed));
+  };
+
+  const std::uint64_t packed_mask = low_mask(*packed_bits);
+  const std::uint64_t shift = *shift_bits;
+  const std::uint64_t shifted_prefix_mask = low_mask(shift);
+  const std::uint64_t high_shift = *packed_bits - shift;
+  for (std::size_t index = 0u; index < unit_count; ++index) {
+    const std::uint64_t low = load_unit(output.data() + index * sizeof(p_unit));
+    std::uint64_t rebased = low & packed_mask;
+    if (shift != 0u) {
+      std::uint64_t high = 0u;
+      if (index + 1u < unit_count) {
+        high = load_unit(output.data() + (index + 1u) * sizeof(p_unit));
+      } else if (needs_final_source) {
+        high = load_unit(final_source_bytes.data());
+      }
+      rebased = ((low & packed_mask) >> shift) |
+                ((high & shifted_prefix_mask) << high_shift);
+      rebased &= packed_mask;
+    }
+    if (index + 1u == unit_count) {
+      const std::uint64_t final_symbols =
+          state.descriptor.bp_length % letters_per_unit;
+      if (final_symbols != 0u) {
+        const auto final_bits = bioseq::common::checked_mul(
+            final_symbols, bits_per_symbol);
+        if (!final_bits || *final_bits == 0u || *final_bits >= unit_bits) {
+          return false;
+        }
+        rebased &= low_mask(*final_bits);
+      }
+    }
+    store_unit(output.data() + index * sizeof(p_unit), rebased);
+  }
+  return true;
+}
+
+template <class p_unit>
+/** Rebase one complete identity source slice without decoding its packed symbols. */
+[[nodiscard]] bool rebase_identity_source_slice(
+    pg_sequence_facade_state const& state,
+    source_piece const& source,
+    void* destination,
+    std::size_t unit_count,
+    std::uint64_t bits_per_symbol,
+    std::uint64_t letters_per_unit) {
+  const std::uint64_t locator_unit_count =
+      source.locator.logical_length / letters_per_unit +
+      (source.locator.logical_length % letters_per_unit != 0u ? 1u : 0u);
+  const auto read_units = [&state, &source](
+                              std::uint64_t first,
+                              std::span<std::uint8_t> bytes) {
+    return source.source.ops->read_packed_units(
+               source.source.state,
+               *state.session,
+               source.locator,
+               source.stored_type_params,
+               first,
+               bytes) == pg_sequence_source_read_status::ok;
+  };
+  return rebase_identity_packed_slice<p_unit>(
+      state,
+      source.from,
+      locator_unit_count,
+      destination,
+      unit_count,
+      bits_per_symbol,
+      letters_per_unit,
+      read_units);
+}
+
+template <class p_unit>
+/** Rebase one complete identity packed-literal slice without rank decoding. */
+[[nodiscard]] bool rebase_identity_literal_slice(
+    pg_sequence_facade_state const& state,
+    literal_piece const& literal,
+    void* destination,
+    std::size_t unit_count,
+    std::uint64_t bits_per_symbol,
+    std::uint64_t letters_per_unit) {
+  const std::uint64_t available_unit_count =
+      literal.symbol_to / letters_per_unit +
+      (literal.symbol_to % letters_per_unit != 0u ? 1u : 0u);
+  const auto available_bytes = bioseq::common::checked_mul(
+      available_unit_count, static_cast<std::uint64_t>(sizeof(p_unit)));
+  if (!available_bytes ||
+      *available_bytes > (std::numeric_limits<std::size_t>::max)()) {
+    return false;
+  }
+  const std::uint64_t available_byte_count = *available_bytes;
+  const auto read_units = [&literal, available_unit_count, available_byte_count](
+                              std::uint64_t first,
+                              std::span<std::uint8_t> bytes) {
+    if (bytes.size() % sizeof(p_unit) != 0u) {
+      return false;
+    }
+    const std::uint64_t requested_units = bytes.size() / sizeof(p_unit);
+    if (first > available_unit_count ||
+        requested_units > available_unit_count - first) {
+      return false;
+    }
+    const auto byte_offset = bioseq::common::checked_mul(
+        first, static_cast<std::uint64_t>(sizeof(p_unit)));
+    const auto byte_end = byte_offset
+        ? bioseq::common::checked_add(
+              *byte_offset, static_cast<std::uint64_t>(bytes.size()))
+        : std::nullopt;
+    if (!byte_offset || !byte_end || *byte_end > available_byte_count ||
+        *byte_offset > (std::numeric_limits<std::size_t>::max)()) {
+      return false;
+    }
+    std::memcpy(bytes.data(),
+                literal.bytes + static_cast<std::size_t>(*byte_offset),
+                bytes.size());
+    return true;
+  };
+  return rebase_identity_packed_slice<p_unit>(
+      state,
+      literal.symbol_from,
+      available_unit_count,
+      destination,
+      unit_count,
+      bits_per_symbol,
+      letters_per_unit,
+      read_units);
+}
+
+template <class p_alphabet>
+/** Copies one identity-oriented native packed-unit window from facade backing. */
+[[nodiscard]] bool facade_copy_packed_window(void const* opaque,
+                                             void* destination,
+                                             std::size_t first_unit,
+                                             std::size_t unit_count,
+                                             std::uint8_t requested_width) {
+  auto const& state = *static_cast<pg_sequence_facade_state const*>(opaque);
+  constexpr std::uint64_t bits_per_symbol =
+      bioseq::storage::lazy_sequence_traits<p_alphabet>::k_logical_bits_per_symbol;
+  const std::uint64_t letters_per_unit =
+      bioseq::storage::packed_letters_per_unit(requested_width, bits_per_symbol);
+  if (requested_width == 0u ||
+      state.descriptor.storage_unit_byte_width != requested_width ||
+      letters_per_unit == 0u ||
+      unit_count > (std::numeric_limits<std::size_t>::max)() / requested_width ||
+      (unit_count != 0u && destination == nullptr)) {
+    return false;
+  }
+  const std::uint64_t total_units =
+      state.descriptor.bp_length / letters_per_unit +
+      (state.descriptor.bp_length % letters_per_unit != 0u ? 1u : 0u);
+  if (first_unit > total_units || unit_count > total_units - first_unit) {
+    return false;
+  }
+  const std::size_t byte_count = unit_count * requested_width;
+  if (byte_count == 0u) {
+    return true;
+  }
+  if (state.flat != nullptr) {
+#ifdef BIOSEQ_TEST_INDEXES
+    note_pg_sequence_facade_contiguous_access();
+#endif
+    std::memcpy(destination,
+                state.flat->data + first_unit * requested_width,
+                byte_count);
+    return true;
+  }
+
+  /* Native packed rebasing is limited to one immutable identity leaf. Branches
+   * and biological transforms remain outside this capability. */
+  if (!state.tree || state.tree.transform != bioseq::storage::sequence_transform::identity ||
+      state.tree.node->bp_length != state.descriptor.bp_length) {
+    return false;
+  }
+  if (state.tree.node->node_kind == piece_node::kind::source) {
+    const source_piece& source = state.tree.node->payload.source;
+    if (!pg_sequence_source_handle_valid(source.source) ||
+        source.source.ops->read_packed_units == nullptr ||
+        source.stored_type_params.alphabet_code != state.descriptor.alphabet_code ||
+        source.stored_type_params.storage_unit_byte_width != requested_width ||
+        source.from > source.to || source.to > source.locator.logical_length ||
+        source.to - source.from != state.descriptor.bp_length) {
+      return false;
+    }
+    if (source.from == 0u && source.to == source.locator.logical_length &&
+        source.to == state.descriptor.bp_length) {
+#ifdef BIOSEQ_TEST_INDEXES
+      note_pg_sequence_facade_source_stream_callback();
+#endif
+      const auto status = source.source.ops->read_packed_units(
+          source.source.state,
+          *state.session,
+          source.locator,
+          source.stored_type_params,
+          first_unit,
+          std::span<std::uint8_t>{static_cast<std::uint8_t*>(destination), byte_count});
+      return status == pg_sequence_source_read_status::ok;
+    }
+
+    /* The admitted owner and Vulkan upload require a zero-leading descriptor.
+     * Normalize only a complete direct source slice; arbitrary nested windows
+     * keep returning unsupported instead of acquiring broader transform semantics. */
+    if (first_unit != 0u || unit_count != total_units) {
+      return false;
+    }
+#ifdef BIOSEQ_TEST_INDEXES
+    note_pg_sequence_facade_source_stream_callback();
+#endif
+    switch (requested_width) {
+    case sizeof(std::uint8_t):
+      return rebase_identity_source_slice<std::uint8_t>(
+          state, source, destination, unit_count, bits_per_symbol, letters_per_unit);
+    case sizeof(std::uint16_t):
+      return rebase_identity_source_slice<std::uint16_t>(
+          state, source, destination, unit_count, bits_per_symbol, letters_per_unit);
+    case sizeof(std::uint32_t):
+      return rebase_identity_source_slice<std::uint32_t>(
+          state, source, destination, unit_count, bits_per_symbol, letters_per_unit);
+    case sizeof(std::uint64_t):
+      return rebase_identity_source_slice<std::uint64_t>(
+          state, source, destination, unit_count, bits_per_symbol, letters_per_unit);
+    default:
+      return false;
+    }
+  }
+
+  if (state.tree.node->node_kind != piece_node::kind::literal) {
+    return false;
+  }
+  const literal_piece& literal = state.tree.node->payload.literal;
+  if (literal.storage_arena == nullptr || literal.bytes == nullptr ||
+      literal.encoding != literal_encoding::packed ||
+      literal.validation != literal_validation::alphabet_validated ||
+      literal.stored_type_params.alphabet_code != state.descriptor.alphabet_code ||
+      literal.stored_type_params.storage_unit_byte_width != requested_width ||
+      literal.symbol_from > literal.symbol_to ||
+      literal.symbol_to - literal.symbol_from != state.descriptor.bp_length ||
+      first_unit != 0u || unit_count != total_units) {
+    return false;
+  }
+
+  switch (requested_width) {
+  case sizeof(std::uint8_t):
+    return rebase_identity_literal_slice<std::uint8_t>(
+        state, literal, destination, unit_count, bits_per_symbol, letters_per_unit);
+  case sizeof(std::uint16_t):
+    return rebase_identity_literal_slice<std::uint16_t>(
+        state, literal, destination, unit_count, bits_per_symbol, letters_per_unit);
+  case sizeof(std::uint32_t):
+    return rebase_identity_literal_slice<std::uint32_t>(
+        state, literal, destination, unit_count, bits_per_symbol, letters_per_unit);
+  case sizeof(std::uint64_t):
+    return rebase_identity_literal_slice<std::uint64_t>(
+        state, literal, destination, unit_count, bits_per_symbol, letters_per_unit);
+  default:
+    return false;
+  }
+}
+
 template<class p_alphabet>
 /** Lazy-sequence backend ops wired to PostgreSQL flat or expanded sequence storage. */
 struct facade_adapter {
@@ -763,6 +1086,7 @@ struct facade_adapter {
         },
         .try_resident_packed = &facade_resident_probe<p_alphabet>,
         .copy_packed_sequence = nullptr,
+        .copy_packed_window = &facade_copy_packed_window<p_alphabet>,
         .worker_shareable = &facade_worker_shareable,
     };
 };

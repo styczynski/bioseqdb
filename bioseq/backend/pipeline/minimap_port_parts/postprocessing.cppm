@@ -2,6 +2,10 @@
  * @file pipeline/minimap_port_parts/postprocessing.cppm
  * @brief Divergence, mapping-quality, and result projection stages.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.minimap_port:postprocessing;
 
 import std;
@@ -84,8 +88,19 @@ void estimate_divergence_from_seeds(std::span<alignment_region> regions,
     // though collector emission clamps to query_len - 1). Using
     // uint32_t supports up to 4 G minimizers — vastly above realistic
     // cell-genome scale.
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (query_len >
+        static_cast<sequence_size_t>((std::numeric_limits<std::size_t>::max)() - 2u)) {
+        throw std::length_error{"divergence prefix count is not representable"};
+    }
+    const std::size_t prefix_size = static_cast<std::size_t>(query_len) + 2u;
+    alignment_result_vector<std::uint32_t> mini_pos_count;
+    mini_pos_count.set_logical_bounds(prefix_size, prefix_size);
+    mini_pos_count.resize(prefix_size);
+#else
     const std::size_t prefix_size = static_cast<std::size_t>(query_len) + 2;
     std::vector<std::uint32_t> mini_pos_count(prefix_size, 0);
+#endif
     for (const auto& query_min : query_minimizers) {
         const std::int64_t pos = static_cast<std::int64_t>(query_min.last_pos());
         if (pos >= 0 && pos <= static_cast<std::int64_t>(query_len)) {
@@ -247,6 +262,12 @@ void compute_mapping_quality(std::span<alignment_region> regions,
     static const auto* _desc = bioseq::instrumentation::register_static_region("mm_set_mapq");
     auto _scope = bioseq::instrumentation::region(_desc);
     constexpr float quality_coefficient = 40.0f;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    const auto tail_storage_plan = derive_alignment_tail_storage_plan(regions.size());
+    if (!tail_storage_plan || tail_storage_plan->mapq_region_count != regions.size()) {
+        throw std::length_error{"MAPQ region count is not representable"};
+    }
+#endif
     const std::int32_t match_sc = params.match_score;
     const std::int32_t min_chain_sc = params.min_chain_score;
 

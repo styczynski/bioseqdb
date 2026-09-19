@@ -94,22 +94,29 @@ void release_entry_storage(column_cache_entry& entry) noexcept {
     return nullptr;
 }
 
-/** Evict least-frequently-read entries until `bytes_to_release` is satisfied. */
+/**
+ * Evict least-frequently-read entries while eligible storage remains.
+ * Active chunk groups can temporarily exceed capacity: their borrowed Datums
+ * must stay live until the reader advances or the cache is reset.
+ */
 void evict_column_cache_bytes(std::uint64_t bytes_to_release) {
     std::uint64_t current_read_count = 0;
-    std::uint64_t next_read_count = PG_UINT64_MAX;
 
     while (bytes_to_release > 0) {
+        std::uint64_t next_read_count = 0;
+        bool next_frequency_found = false;
         dlist_mutable_iter iterator;
         dlist_foreach_modify(iterator, cache_entries) {
             auto* entry = dlist_container(
                 column_cache_entry, list_node, iterator.cur);
-            if (entry->read_count != current_read_count
-                && entry->read_count < next_read_count) {
-                next_read_count = entry->read_count;
+            if (entry_is_in_use(*entry)) {
+                continue;
             }
-            if (entry->read_count != current_read_count
-                || entry_is_in_use(*entry)) {
+            if (entry->read_count != current_read_count) {
+                if (!next_frequency_found || entry->read_count < next_read_count) {
+                    next_read_count = entry->read_count;
+                    next_frequency_found = true;
+                }
                 continue;
             }
 
@@ -126,8 +133,10 @@ void evict_column_cache_bytes(std::uint64_t bytes_to_release) {
             pfree(entry);
         }
 
+        if (!next_frequency_found) {
+            return;
+        }
         current_read_count = next_read_count;
-        next_read_count = PG_UINT64_MAX;
     }
 }
 

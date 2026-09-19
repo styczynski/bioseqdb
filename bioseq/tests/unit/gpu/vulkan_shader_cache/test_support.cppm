@@ -275,6 +275,93 @@ void write_fake_archive_qualification(
         *qualification_bytes));
 }
 
+/** @brief Builds one internally consistent exact command-library fixture. */
+[[nodiscard]] gv::moltenvk_command_library_bundle
+fake_moltenvk_command_library_bundle()
+{
+#if defined(__APPLE__)
+    const auto helper =
+        gv::qualified_metal_archive_helper_process_store_instance().load_once();
+    REQUIRE(helper);
+    const std::string helper_source = (**helper).source;
+    const std::uint64_t helper_size = (**helper).executable_size;
+    const std::array<std::uint8_t, 32> helper_sha256 =
+        (**helper).executable_sha256;
+#else
+    const auto portable_helper = bytes_of("portable-helper-fixture");
+    const std::string helper_source = "installed-sibling";
+    const std::uint64_t helper_size =
+        static_cast<std::uint64_t>(portable_helper.size());
+    const std::array<std::uint8_t, 32> helper_sha256 =
+        gv::sealed_shader_cache_detail::sha256(portable_helper);
+#endif
+    std::string source =
+        "kernel void cmdCopyBufferBytes() {}\n"
+        "kernel void vtxCmdBlitImage() {}\n";
+    source.append(256u, ' ');
+    gv::moltenvk_command_library_bundle bundle{};
+    bundle.source = bytes_of(source);
+    bundle.metallib = bytes_of("qualified-command-metallib-byte-image");
+    gv::moltenvk_command_compile_options options{
+        .language_version = (3u << 16u) | 2u,
+        .fast_math_enabled = 1u,
+        .math_mode_available = 1u,
+        .math_mode = 2u,
+        .math_fp_functions_available = 1u,
+        .math_fp_functions = 0u,
+        .optimization_level_available = 1u,
+        .optimization_level = 0u,
+        .preserve_invariance = 0u,
+        .library_type_available = 1u,
+        .library_type = 0u,
+        .compile_symbol_visibility_available = 1u,
+        .compile_symbol_visibility = 0u,
+        .allow_undefined_available = 1u,
+        .allow_undefined = 0u,
+        .max_total_threads_available = 1u,
+        .max_total_threads = 0u,
+        .enable_logging_available = 1u,
+        .enable_logging = 0u,
+        .preprocessor_macro_count = 0u,
+        .linked_library_count = 0u,
+        .install_name_bytes = 0u,
+    };
+    const auto loader = bytes_of("qualified-vulkan-loader-image");
+    const auto moltenvk = bytes_of("qualified-moltenvk-image");
+    bundle.qualification = gv::moltenvk_command_library_qualification_receipt{
+        .wire_revision = gv::sealed_shader_cache_detail::k_command_library_wire_revision,
+        .capture_count = 1u,
+        .source_size = static_cast<std::uint64_t>(bundle.source.size()),
+        .source_sha256 = gv::sealed_shader_cache_detail::sha256(bundle.source),
+        .compile_options = options,
+        .source_options_sha256 =
+            gv::moltenvk_command_source_options_fingerprint(bundle.source, options),
+        .metallib_size = static_cast<std::uint64_t>(bundle.metallib.size()),
+        .metallib_sha256 = gv::sealed_shader_cache_detail::sha256(bundle.metallib),
+        .helper_wire_revision = 2u,
+        .helper_build_identity = "bioseq_gpu_archive_builder",
+        .helper_source = helper_source,
+        .helper_executable_size = helper_size,
+        .helper_executable_sha256 = helper_sha256,
+        .helper_metal_registry_id = 0x1234u,
+        .vulkan_device = gv::moltenvk_command_vulkan_identity{
+            .device_uuid = {0x42u},
+            .api_version = 0x00403000u,
+            .driver_version = 0x01020304u,
+            .vendor_id = 0x0000106bu,
+            .device_id = 0x00000001u,
+            .pipeline_cache_uuid = {0x42u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+                                    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0x24u},
+        },
+        .loader_image_size = static_cast<std::uint64_t>(loader.size()),
+        .loader_image_sha256 = gv::sealed_shader_cache_detail::sha256(loader),
+        .moltenvk_image_size = static_cast<std::uint64_t>(moltenvk.size()),
+        .moltenvk_image_sha256 = gv::sealed_shader_cache_detail::sha256(moltenvk),
+    };
+    REQUIRE(bundle.is_accepted());
+    return bundle;
+}
+
 /**
  * @brief Writes a complete synthetic sealed-cache artifact set.
  * @param[in] cache_dir Destination cache directory.
@@ -285,6 +372,12 @@ void write_fake_sealed_shader_artifacts(
     std::span<const gv::shader_variant_key> keys)
 {
     constexpr std::string_view entry = "main0";
+    const auto command_bundle = fake_moltenvk_command_library_bundle();
+    const auto command_wire = gv::sealed_shader_cache_detail::
+        serialize_moltenvk_command_library_bundle(command_bundle);
+    REQUIRE(command_wire);
+    REQUIRE(gv::durable_write_file(
+        gv::cache_moltenvk_command_library_path(cache_dir), *command_wire));
     for (const gv::shader_variant_key& key : keys) {
         const gv::shader_workgroup_size workgroup =
             gv::expected_shader_workgroup_size(key);

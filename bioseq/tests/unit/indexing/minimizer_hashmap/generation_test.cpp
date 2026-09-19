@@ -367,6 +367,8 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
         auto value = golden_generation_manifest();
         assign_grouped_soa_profile(value, k_test_bounded_grouped_soa_profile);
         value.producer_backend_id = minimizer_producer_backend::bounded_nthash_simd;
+        value.algorithm_identity = test_generation_algorithm_identity(
+            minimizer_algorithm::bounded_nthash_simd);
         return value;
     }();
     constexpr auto bounded_bytes = encode_minimizer_generation_manifest(bounded);
@@ -396,6 +398,8 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
         auto value = golden_generation_manifest();
         assign_grouped_soa_profile(value, k_test_bounded_grouped_soa_profile);
         value.producer_backend_id = minimizer_producer_backend::bounded_nthash_simd;
+        value.algorithm_identity = test_generation_algorithm_identity(
+            minimizer_algorithm::bounded_nthash_simd);
         return value;
     }();
 
@@ -410,6 +414,7 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
         .minimizer_scheme_revision = k_minimap_scheme_revision,
         .producer_backend_id = minimizer_producer_backend::scalar,
         .producer_identity_revision = k_minimizer_producer_identity_revision,
+        .algorithm_identity = test_generation_algorithm_identity(),
         .max_occ_cap = k_test_grouped_soa_profile.max_occ_cap,
     };
     constexpr expected_minimizer_generation_identity bounded_reader{
@@ -423,6 +428,8 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
         .minimizer_scheme_revision = k_bounded_nthash_u32_r7_sum_scheme_revision,
         .producer_backend_id = minimizer_producer_backend::bounded_nthash_simd,
         .producer_identity_revision = k_minimizer_producer_identity_revision,
+        .algorithm_identity = test_generation_algorithm_identity(
+            minimizer_algorithm::bounded_nthash_simd),
         .max_occ_cap = k_test_bounded_grouped_soa_profile.max_occ_cap,
     };
     STATIC_REQUIRE(validate_minimizer_generation_storage_contract(canonical_minimap, minimap_reader)
@@ -445,21 +452,29 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
     constexpr auto canonical_exact = [canonical_minimap] {
         auto value = canonical_minimap;
         value.producer_backend_id = minimizer_producer_backend::exact_simd;
+        value.algorithm_identity = test_generation_algorithm_identity(
+            minimizer_algorithm::two_stack_nthash);
         return value;
     }();
     constexpr auto canonical_vulkan = [canonical_minimap] {
         auto value = canonical_minimap;
         value.producer_backend_id = minimizer_producer_backend::vulkan_segment;
+        value.algorithm_identity = test_generation_algorithm_identity(
+            minimizer_algorithm::vulkan_minimap_integer);
         return value;
     }();
     constexpr auto exact_reader = [minimap_reader] {
         auto value = minimap_reader;
         value.producer_backend_id = minimizer_producer_backend::exact_simd;
+        value.algorithm_identity = test_generation_algorithm_identity(
+            minimizer_algorithm::two_stack_nthash);
         return value;
     }();
     constexpr auto vulkan_reader = [minimap_reader] {
         auto value = minimap_reader;
         value.producer_backend_id = minimizer_producer_backend::vulkan_segment;
+        value.algorithm_identity = test_generation_algorithm_identity(
+            minimizer_algorithm::vulkan_minimap_integer);
         return value;
     }();
     STATIC_REQUIRE(
@@ -491,9 +506,8 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
     vector_replay_minimizer_producer producer{minimizers,
                                               k_bounded_nthash_u32_r7_sum_scheme_identity};
     collecting_minimizer_row_sink sink;
-    auto options = test_generation_options(100);
-    options.minimizer_scheme_id = k_bounded_nthash_u32_r7_sum_scheme_id;
-    options.minimizer_scheme_revision = k_bounded_nthash_u32_r7_sum_scheme_revision;
+    auto options =
+        test_generation_options(100, minimizer_algorithm::bounded_nthash_simd);
     const auto generated = encode_minimizer_generation(producer, sink, options);
     REQUIRE(generated.has_value());
     REQUIRE(generated->manifest.minimizer_scheme_id == k_bounded_nthash_u32_r7_sum_scheme_id);
@@ -510,14 +524,18 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
         vector_replay_minimizer_producer physical_producer{
             minimizers, k_minimap_scheme_identity, backend_identity};
         collecting_minimizer_row_sink physical_sink;
+        const auto requested_algorithm = minimizer_algorithm_for_explicit_sketch_backend(backend);
+        REQUIRE(requested_algorithm.has_value());
+        const auto physical_options = test_generation_options(100, *requested_algorithm);
         const auto physical = encode_minimizer_generation(
-            physical_producer, physical_sink, test_generation_options(100));
+            physical_producer, physical_sink, physical_options);
         REQUIRE(physical.has_value());
         REQUIRE(physical->manifest.producer_backend_id == backend_identity.id);
         REQUIRE(physical->manifest.producer_identity_revision == backend_identity.revision);
         const auto matching = expected_grouped_soa_generation_identity_for_backend(
             minimizer_generation_layout::grouped_soa_segment_local,
             backend,
+            physical_options.algorithm_identity,
             k_minimizer_persisted_dna4_alphabet_code,
             8,
             15,

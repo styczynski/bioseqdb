@@ -411,6 +411,8 @@ export void extract_tuple_from_vector_slot(TupleTableSlot* output_slot,
     }
 
     ExecStoreVirtualTuple(output_slot);
+    /* Preserve the scan wrapper's physical relation; callers set the row-specific TID. */
+    output_slot->tts_tableOid = vector_slot->virtual_slot.base.tts_tableOid;
 }
 
 /** Store one PostgreSQL datum in a vector column, copying owned varlena bytes. */

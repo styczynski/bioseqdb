@@ -22,6 +22,36 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+/// @brief Authenticates a borrowed batch allocation and its exact submitted query slice.
+std::uint64_t runtime::validate_seed_query_authorization_locked(
+    const device_query_sketch_authorization& authorization,
+    const buffer* device_words,
+    const gpu_seed_query_record_wire& submitted_record,
+    std::uint32_t query_index,
+    std::uint32_t kmer_size,
+    std::uint32_t word_kind,
+    std::uint32_t words32_per_record,
+    std::uint32_t hash_shift,
+    std::uint32_t pos_bits) const {
+    if (device_words == nullptr || query_index >= authorization.query_records_.size() ||
+        kmer_size != authorization.kmer_size_) {
+        throw vulkan_runtime_error("MPF query slice has no matching device-sketch authority");
+    }
+    (void)validate_query_sketch_authorization_locked(
+        authorization, *device_words, authorization.minimizer_count_, word_kind,
+        words32_per_record, hash_shift, pos_bits, authorization.query_records_);
+    const gpu_seed_query_record_wire& sealed = authorization.query_records_[query_index];
+    if (submitted_record.minimizer_offset != sealed.minimizer_offset ||
+        submitted_record.minimizer_count != sealed.minimizer_count ||
+        submitted_record.query_len != sealed.query_len ||
+        submitted_record.flags != sealed.flags) {
+        throw vulkan_runtime_error("MPF submitted device slice differs from its sealed query");
+    }
+    return authorization.identity_;
+}
+#endif
+
 /// @brief Counts and emits seed hits against an already resident target index.
 /// @param[in] inputs Borrowed resident index buffers and query minimizer storage.
 /// @param[in] prefix_counts Exclusive per-minimizer anchor offsets plus the final total.
@@ -39,7 +69,12 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
                                    std::uint32_t kmer_size,
                                    std::uint64_t exact_anchor_count,
                                    const seed_anchor_sort_plan& sort_plan,
-                                   std::uint64_t expected_vulkan_allocation_bytes) {
+                                   std::uint64_t expected_vulkan_allocation_bytes
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                   , const device_query_sketch_authorization* query_authorization,
+                                   std::uint32_t query_index
+#endif
+                                   ) {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
         throw vulkan_runtime_error("run_seed_lookup_roundtrip on unavailable device");
@@ -54,6 +89,21 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
     }
     if (inputs.slots == nullptr || inputs.positions == nullptr) {
         throw vulkan_runtime_error("seed lookup missing resident index buffers");
+    }
+    const std::uint64_t minimizer_count = prefix_counts.size() - 1u;
+    if (inputs.device_minimizer_words == nullptr) {
+        if (inputs.query_minimizer_record_offset != 0u) {
+            throw vulkan_runtime_error("host-uploaded seed lookup carried a device record base");
+        }
+    } else {
+        const std::uint64_t record_end =
+            static_cast<std::uint64_t>(inputs.query_minimizer_record_offset) + minimizer_count;
+        if (record_end > (std::numeric_limits<std::uint32_t>::max)() ||
+            minimizer_device_bytes(inputs.minimizer_word_kind,
+                                   inputs.minimizer_words32_per_record,
+                                   record_end) > inputs.device_minimizer_words->bytes) {
+            throw vulkan_runtime_error("seed lookup device minimizer subrange is malformed");
+        }
     }
     if (static_cast<std::uint64_t>(inputs.position_count) * 8u > inputs.positions->bytes) {
         throw vulkan_runtime_error("seed lookup resident position range is malformed");
@@ -89,15 +139,41 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
     if (prefix_counts.back() != exact_anchor_count) {
         throw vulkan_runtime_error("seed lookup prefix total disagrees with anchor count");
     }
-    const std::uint64_t minimizer_count = prefix_counts.size() - 1u;
     constexpr std::uint32_t seed_local = 128u;
     const std::uint64_t seed_groups = (minimizer_count + seed_local - 1u) / seed_local;
     if (seed_groups > features_.max_workgroup_count_x) {
         throw vulkan_runtime_error("seed lookup dispatch exceeds maxComputeWorkGroupCount[0]");
     }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    std::unique_ptr<runtime_pipeline_use_collector> collector;
+    std::uint64_t query_authority_identity = 0u;
+    if (query_authorization != nullptr) {
+        if (minimizer_count > (std::numeric_limits<std::uint32_t>::max)() ||
+            query_len > (std::numeric_limits<std::uint32_t>::max)()) {
+            throw vulkan_runtime_error("MPF seed receipt query shape exceeds its wire domain");
+        }
+        const gpu_seed_query_record_wire submitted_record{
+            inputs.query_minimizer_record_offset, static_cast<std::uint32_t>(minimizer_count),
+            static_cast<std::uint32_t>(query_len), 0u};
+        query_authority_identity = validate_seed_query_authorization_locked(
+            *query_authorization, inputs.device_minimizer_words, submitted_record, query_index,
+            kmer_size, inputs.minimizer_word_kind, inputs.minimizer_words32_per_record,
+            inputs.hash_shift, inputs.pos_bits);
+        collector = runtime_pipeline_use_collector::create(
+            runtime_pipeline_operation_kind::mpf_seed_anchor_roundtrip, 1u,
+            next_operation_identity_locked());
+        collector->set_shape_input(0u, minimizer_count, inputs.target_len,
+                                   inputs.target_position_offset);
+    }
+#endif
 
     const compute_pipeline seed_pipe =
         get_compute_pipeline_locked(shader_kind::seed_lookup_anchors, seed_local, 256u);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (collector != nullptr)
+        collector->prepare(make_shader_key(seed_pipe.kind, 384u, seed_pipe.local_size,
+                                           seed_pipe.max_span), seed_pipe.metal_archive_receipt);
+#endif
 
     buffer scratch = create_host_buffer(4u, k_compute_buffer_usage);
 
@@ -145,6 +221,11 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
             VK_ACCESS_SHADER_READ_BIT);
         sort_pipe = get_compute_pipeline_locked(
             shader_kind::sort_anchors_bitonic, gpu_anchor_sort_capacity_, 256u);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (collector != nullptr)
+            collector->prepare(make_shader_key(sort_pipe->kind, 384u, sort_pipe->local_size,
+                                               sort_pipe->max_span), sort_pipe->metal_archive_receipt);
+#endif
     } else {
         anchors_scratch_buf = create_device_buffer(sort_plan.anchor_bytes, k_compute_buffer_usage);
         anchor_keys_scratch_buf = create_device_buffer(sort_plan.key_bytes, k_compute_buffer_usage);
@@ -197,6 +278,10 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "vkBeginCommandBuffer(seed)");
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (collector != nullptr)
+        collector->begin(command_buffer_);
+#endif
 
     VkMemoryBarrier host_to_shader{};
     host_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -223,7 +308,8 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
                                                inputs.slot_mask,
                                                inputs.bucket_count,
                                                static_cast<std::uint32_t>(exact_anchor_count),
-                                               sort_plan.target_ref_bits};
+                                               sort_plan.target_ref_bits,
+                                               inputs.query_minimizer_record_offset};
     vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, seed_pipe.pipeline);
     vkCmdBindDescriptorSets(command_buffer_,
                             VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -240,6 +326,13 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
                        sizeof(seed_push),
                        &seed_push);
     vkCmdDispatch(command_buffer_, static_cast<std::uint32_t>(seed_groups), 1, 1);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (collector != nullptr)
+        collector->use(command_buffer_, 0u,
+                       make_shader_key(seed_pipe.kind, 384u, seed_pipe.local_size,
+                                       seed_pipe.max_span),
+                       seed_pipe.metal_archive_receipt, seed_groups);
+#endif
 
     VkMemoryBarrier shader_to_shader{};
     shader_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -268,6 +361,13 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
                                 0,
                                 nullptr);
         vkCmdDispatch(command_buffer_, 1, 1, 1);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (collector != nullptr)
+            collector->use(command_buffer_, 0u,
+                           make_shader_key(sort_pipe->kind, 384u, sort_pipe->local_size,
+                                           sort_pipe->max_span),
+                           sort_pipe->metal_archive_receipt, 1u);
+#endif
     } else {
         const gpu_arena_slice anchors{&anchors_buf, 0u, sort_plan.anchor_bytes};
         const gpu_arena_slice keys{&anchor_keys_buf, 0u, sort_plan.key_bytes};
@@ -285,7 +385,11 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
                                  sort_plan.num_workgroups,
                                  sort_plan.elements_per_workgroup,
                                  3u,
-                                 radix_result_in_scratch);
+                                 radix_result_in_scratch
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                 , collector.get(), 0u
+#endif
+                                 );
         if (radix_result_in_scratch !=
             is_seed_radix_result_in_scratch(sort_plan.radix_pass_count)) {
             throw vulkan_runtime_error("seed radix sort result parity mismatch");
@@ -321,6 +425,10 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
              "vkWaitForFences(seed)");
     require_immutable_metal_policy_live("seed operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(seed)");
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (collector != nullptr)
+        collector->commit(command_buffer_);
+#endif
 
     seed_lookup_result result;
     result.count = exact_anchor_count;
@@ -362,6 +470,19 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
 
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(seed-post)");
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (collector != nullptr) {
+        collector->set_shape_outcome(0u, result.count, 0u);
+        collector->set_seed_anchor_authentication(0u, query_authority_identity,
+                                                  result.anchor_order_audit);
+        require_immutable_metal_policy_live("MPF native seed receipt sealing");
+        auto token = collector->seal();
+        if (!token.is_valid_for_mpf_seed_anchor_roundtrip(features_.max_workgroup_count_x)) {
+            throw vulkan_runtime_error("MPF native seed causal completion receipt is invalid");
+        }
+        result.seed_operation_receipt = std::move(token);
+    }
+#endif
     return result;
 }
 
@@ -379,7 +500,12 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
 seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inputs,
                                                       std::uint64_t query_len,
                                                       std::uint32_t kmer_size,
-                                                      std::int32_t max_occ) {
+                                                      std::int32_t max_occ
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                                      , const device_query_sketch_authorization* query_authorization,
+                                                      std::uint32_t query_index
+#endif
+                                                      ) {
     std::lock_guard<std::mutex> guard(mu_);
     seed_lookup_result result;
     result.anchor_order_audit = audit_seed_anchor_canonical_order({}, 0u);
@@ -389,6 +515,41 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
         throw vulkan_runtime_error("gpu seed missing resident index buffers");
     }
     const std::uint32_t mc = inputs.minimizer_count;
+    if (inputs.device_minimizer_words == nullptr) {
+        if (inputs.query_minimizer_record_offset != 0u) {
+            throw vulkan_runtime_error("host-uploaded fused seed carried a device record base");
+        }
+    } else {
+        const std::uint64_t record_end =
+            static_cast<std::uint64_t>(inputs.query_minimizer_record_offset) + mc;
+        if (record_end > (std::numeric_limits<std::uint32_t>::max)() ||
+            minimizer_device_bytes(inputs.minimizer_word_kind,
+                                   inputs.minimizer_words32_per_record,
+                                   record_end) > inputs.device_minimizer_words->bytes) {
+            throw vulkan_runtime_error("fused seed device minimizer subrange is malformed");
+        }
+    }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    std::unique_ptr<runtime_pipeline_use_collector> collector;
+    std::uint64_t query_authority_identity = 0u;
+    if (query_authorization != nullptr) {
+        if (query_len > (std::numeric_limits<std::uint32_t>::max)()) {
+            throw vulkan_runtime_error("MPF fused seed receipt query length exceeds its wire domain");
+        }
+        const gpu_seed_query_record_wire submitted_record{
+            inputs.query_minimizer_record_offset, mc, static_cast<std::uint32_t>(query_len), 0u};
+        query_authority_identity = validate_seed_query_authorization_locked(
+            *query_authorization, inputs.device_minimizer_words, submitted_record, query_index,
+            kmer_size, inputs.minimizer_word_kind, inputs.minimizer_words32_per_record,
+            inputs.hash_shift, inputs.pos_bits);
+        if (mc != 0u && max_occ >= 0) {
+            collector = runtime_pipeline_use_collector::create(
+                runtime_pipeline_operation_kind::mpf_seed_anchor_roundtrip, 1u,
+                next_operation_identity_locked());
+            collector->set_shape_input(0u, mc, inputs.target_len, inputs.target_position_offset);
+        }
+    }
+#endif
     gpu_arena& arena = reusable_gpu_arena();
     if (mc == 0u || max_occ < 0) {
         if (!arena.release_idle_capacity()) {
@@ -477,7 +638,10 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
                         inputs.host_minimizer_bytes.size());
         }
     }
-    const host_query_record qrec{0u, mc, static_cast<std::uint32_t>(query_len), 0u};
+    const host_query_record qrec{inputs.query_minimizer_record_offset,
+                                 mc,
+                                 static_cast<std::uint32_t>(query_len),
+                                 0u};
     std::memcpy(base + qrec_s.offset, &qrec, sizeof(qrec));
 
     const compute_pipeline count_pipe =
@@ -488,6 +652,19 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
         get_compute_pipeline_locked(shader_kind::prefix_scan_block, 1u, 1u);
     const compute_pipeline scana =
         get_compute_pipeline_locked(shader_kind::prefix_scan_add, 128u, 1u);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (collector != nullptr) {
+        const auto prepare = [collector_ptr = collector.get()](const compute_pipeline& pipeline) {
+            collector_ptr->prepare(make_shader_key(pipeline.kind, 384u, pipeline.local_size,
+                                                   pipeline.max_span),
+                                   pipeline.metal_archive_receipt);
+        };
+        prepare(count_pipe);
+        prepare(emit_pipe);
+        prepare(scanb);
+        prepare(scana);
+    }
+#endif
 
     const std::uint32_t target_offset_lo =
         static_cast<std::uint32_t>(inputs.target_position_offset & 0xffffffffull);
@@ -542,23 +719,47 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed1)");
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (collector != nullptr)
+            collector->begin(command_buffer_);
+#endif
         record_host_to_shader(command_buffer_);
         record_compute_dispatch_locked(
-            command_buffer_, count_pipe, seed_infos, &cpush, sizeof(cpush), seed_groups);
+            command_buffer_, count_pipe, seed_infos, &cpush, sizeof(cpush), seed_groups
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            , collector.get(), 0u
+#endif
+            );
         record_compute_barrier(command_buffer_);
         record_compute_dispatch_locked(
-            command_buffer_, scanb, scan_infos, &s0, sizeof(s0), num_blocks);
+            command_buffer_, scanb, scan_infos, &s0, sizeof(s0), num_blocks
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            , collector.get(), 0u
+#endif
+            );
         record_compute_barrier(command_buffer_);
-        record_compute_dispatch_locked(command_buffer_, scana, scan_infos, &s0, sizeof(s0), 1u);
+        record_compute_dispatch_locked(command_buffer_, scana, scan_infos, &s0, sizeof(s0), 1u
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                       , collector.get(), 0u
+#endif
+                                       );
         record_compute_barrier(command_buffer_);
         record_compute_dispatch_locked(command_buffer_,
                                        scana,
                                        scan_infos,
                                        &s1,
                                        sizeof(s1),
-                                       bioseq::common::ceil_div(mc, 128u));
+                                       bioseq::common::ceil_div(mc, 128u)
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                       , collector.get(), 0u
+#endif
+                                       );
         record_shader_to_host(command_buffer_);
-        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_seed1)");
+        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_seed1)"
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                        , collector.get()
+#endif
+                        );
     }
     result.seed_lookup_dispatches = 1u;
     result.open_addressed_lookup_dispatches = inputs.bucket_count == 0u ? 1u : 0u;
@@ -569,6 +770,19 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
     const std::uint64_t total = static_cast<std::uint64_t>(plast) + clast;
     if (total == 0u) {
         seed_arena_lifetime.release_or_throw();
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (collector != nullptr) {
+            collector->set_shape_outcome(0u, 0u, 0u);
+            collector->set_seed_anchor_authentication(0u, query_authority_identity,
+                                                      result.anchor_order_audit);
+            require_immutable_metal_policy_live("MPF zero-hit seed receipt sealing");
+            auto token = collector->seal();
+            if (!token.is_valid_for_mpf_seed_anchor_roundtrip(features_.max_workgroup_count_x)) {
+                throw vulkan_runtime_error("MPF zero-hit seed causal completion receipt is invalid");
+            }
+            result.seed_operation_receipt = std::move(token);
+        }
+#endif
         return result;
     }
     if (total > std::numeric_limits<std::uint32_t>::max()) {
@@ -637,9 +851,17 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_seed2)");
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (collector != nullptr)
+            collector->begin(command_buffer_);
+#endif
         record_host_to_shader(command_buffer_);
         record_compute_dispatch_locked(
-            command_buffer_, emit_pipe, seed_infos, &epush, sizeof(epush), seed_groups);
+            command_buffer_, emit_pipe, seed_infos, &epush, sizeof(epush), seed_groups
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            , collector.get(), 0u
+#endif
+            );
         record_compute_barrier(command_buffer_);
         gpu_sort_plan sort_plan{total, 8u, 24u, 8u, anchor_sort_plan.pass_count};
         record_radix_sort_locked(command_buffer_,
@@ -652,9 +874,17 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
                                  awg.num_workgroups,
                                  awg.elems_per_wg,
                                  3u,
-                                 sorted_in_scratch);
+                                 sorted_in_scratch
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                 , collector.get(), 0u
+#endif
+                                 );
         record_shader_to_host(command_buffer_);
-        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_seed2)");
+        submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(pc_seed2)"
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                        , collector.get()
+#endif
+                        );
     }
     const gpu_arena_slice& sorted_anchors = sorted_in_scratch ? anchors_scr_s : anchors_s;
     result.count = total;
@@ -690,6 +920,19 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
     seed_arena_lifetime.release_or_throw();
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_seed-post)");
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (collector != nullptr) {
+        collector->set_shape_outcome(0u, result.count, 0u);
+        collector->set_seed_anchor_authentication(0u, query_authority_identity,
+                                                  result.anchor_order_audit);
+        require_immutable_metal_policy_live("MPF fused seed receipt sealing");
+        auto token = collector->seal();
+        if (!token.is_valid_for_mpf_seed_anchor_roundtrip(features_.max_workgroup_count_x)) {
+            throw vulkan_runtime_error("MPF fused seed causal completion receipt is invalid");
+        }
+        result.seed_operation_receipt = std::move(token);
+    }
+#endif
     return result;
 }
 

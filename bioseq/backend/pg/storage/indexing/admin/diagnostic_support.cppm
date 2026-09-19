@@ -3,17 +3,25 @@
  * @brief Shared PostgreSQL error and sequence-column helpers for index diagnostics.
  */
 module;
-#include <bioseq/pg_compat.h>
 
 extern "C" {
+#include "postgres.h"
 #include "executor/spi.h"
 #include "utils/errcodes.h"
 }
 
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <fmt/format.h>
+
 export module bioseq.postgres.storage.indexing.admin.diagnostic_support;
 
-import std;
-import bioseq.common.logging;
 import bioseq.postgres.support;
 
 export namespace bioseq::storage::indexing {

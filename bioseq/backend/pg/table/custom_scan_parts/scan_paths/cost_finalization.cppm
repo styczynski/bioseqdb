@@ -26,6 +26,7 @@ export module bioseq.postgres.table:custom_scan_scan_paths_cost_finalization;
 import std;
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.support;
+export import :custom_scan_scan_paths_cost_finalization_contracts;
 
 using namespace bioseq::postgres::support;
 

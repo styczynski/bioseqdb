@@ -26,11 +26,14 @@ export module bioseq.postgres.table:custom_scan_match_analysis_carrier_validatio
 import std;
 import bioseq.postgres.support;
 
-import :custom_scan_runtime_support;
-import :custom_scan_oid_expression_support_semantic_analysis;
-import :custom_scan_match_finalization;
-import :custom_scan_join_ownership_carrier_lineage;
-import :custom_scan_join_ownership_semantic_admission;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_runtime_match_contracts;
+import :custom_scan_scan_runtime_state_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_match_finalization_contracts;
+import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_join_ownership_semantic_admission_contracts;
+export import :custom_scan_match_analysis_carrier_validation_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -397,37 +400,12 @@ export {
                    scan, supplied_argument, canonical_argument);
     }
 
-    /** @brief Captures the first finalized-carrier comparison for planner diagnostics. */
-    struct finalized_match_helper_carrier_audit {
-        bool inspected = false;
-        int early_reject = 0;
-        int version = -1;
-        int private_fields = -1;
-        int expected_fields = -1;
-        int descriptor_tag = -1;
-        int sites_tag = -1;
-        int site_count = -1;
-        int supplied_tag = -1;
-        int carrier_tag = -1;
-        int supplied_argument_tag = -1;
-        int carrier_argument_tag = -1;
-        int canonical_argument_tag = -1;
-        int site_resno = -1;
-        int site_phid = -1;
-        int supplied_phid = 0;
-        int carrier_phid = 0;
-        bool identity_equal = false;
-        bool supplied_argument_canonical = false;
-        bool carrier_argument_canonical = false;
-        bool equivalent = false;
-    };
-
     /** @brief Counts finalized sites in one BatchJoin that own a helper carrier identity. */
     [[nodiscard]] std::size_t finalized_batch_owner_matching_site_count(
         CustomScan* scan,
         Node* identity,
         const bioseq_stub_oids& oids,
-        finalized_match_helper_carrier_audit* audit = nullptr) {
+        finalized_match_helper_carrier_audit* audit) {
         if (audit != nullptr) {
             audit->private_fields = scan == nullptr ? -1 : list_length(scan->custom_private);
             audit->carrier_tag = identity == nullptr ? -1 : static_cast<int>(nodeTag(identity));

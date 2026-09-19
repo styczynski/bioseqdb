@@ -4,6 +4,5 @@
  */
 export module bioseq.postgres.table:custom_scan_slice_projection;
 
-export import :custom_scan_slice_path;
-export import :custom_scan_slice_execution;
-export import :custom_scan_slice_rewrite;
+export import :custom_scan_planner_method_contracts;
+export import :custom_scan_slice_execution_method_contracts;

@@ -25,22 +25,23 @@ export module bioseq.postgres.table:custom_scan_semantic_payload_cache_validatio
 
 import std;
 import bioseq.postgres.configuration.core;
+import bioseq.highway.dispatch_contract;
 import bioseq.indexing.type;
-import bioseq.pipeline.minimap_port;
 import bioseq.postgres.support;
 
-import :custom_scan_runtime_support;
-import :custom_scan_oid_expression_support;
-
-import :custom_scan_semantic_payload_payload_codec;
-import :custom_scan_semantic_payload_aligner_semantics;
-import :custom_scan_semantic_payload_callback_contracts;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_runtime_match_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_oid_expression_support_expression_analysis_contracts;
+import :custom_scan_planner_aligner_contracts;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_semantic_payload_payload_contracts;
 
 using namespace bioseq::postgres::support;
 
 export {
     /** @brief Return the stable base-scan callback table registered with PostgreSQL. */
-    inline const CustomScanMethods* bioseq_customscan_methods(void) {
+    const CustomScanMethods* bioseq_customscan_methods(void) {
         return bioseq_column_scan_scan_methods();
     }
 
@@ -86,7 +87,7 @@ export {
     }
 
     /** @brief Return the stable BatchJoin callback table registered with PostgreSQL. */
-    inline const CustomScanMethods* bioseq_batch_join_customscan_methods(void) {
+    const CustomScanMethods* bioseq_batch_join_customscan_methods(void) {
         return bioseq_batch_join_scan_methods();
     }
 

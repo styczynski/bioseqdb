@@ -194,6 +194,12 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
                                                          std::uint8_t) noexcept;
     /** @brief Copies one full packed sequence into an aligned destination buffer. */
     using copy_packed_sequence_fn = bool (*)(void const*, void*, std::size_t, std::uint8_t);
+    /** @brief Copies one bounded interval of native packed storage units. */
+    using copy_packed_window_fn = bool (*)(void const*,
+                                           void*,
+                                           std::size_t,
+                                           std::size_t,
+                                           std::uint8_t);
 
     /** @brief Complete callback table implementing one erased sequence backend. */
     struct backend_ops {
@@ -205,6 +211,8 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         resident_probe_fn try_resident_packed;
         /** @brief Copies one packed sequence when the backend exposes a fast path. */
         copy_packed_sequence_fn copy_packed_sequence;
+        /** @brief Copies native packed units covering one logical window. */
+        copy_packed_window_fn copy_packed_window;
         /** @brief Reports whether the backend state may be shared across worker tasks. */
         bool (*worker_shareable)(void const*) noexcept;
     };
@@ -332,6 +340,88 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
             return false;
         }
         return ops_->copy_packed_sequence(state_, destination.data(), unit_count, requested_width);
+    }
+
+    /**
+     * Copies only the native packed storage units intersecting `[from, to)`.
+     * The callback never decodes, complements, or reorders biological symbols;
+     * consumers receive the same LSB-first units described by
+     * `resident_packed_sequence`, including the leading and trailing symbols in
+     * the two boundary units.
+     *
+     * @return A validated descriptor over @p destination, or no value when the
+     *         backend cannot provide native packed-window I/O.
+     */
+    [[nodiscard]] resident_packed_result
+    try_copy_packed_window(std::span<std::uint8_t> destination,
+                           sequence_size_t from,
+                           sequence_size_t to,
+                           std::uint8_t requested_width) const {
+        if (from > to || to > bp_size() || ops_->copy_packed_window == nullptr ||
+            !(requested_width == 1u || requested_width == 2u || requested_width == 4u ||
+              requested_width == 8u) ||
+            (!destination.empty() &&
+             reinterpret_cast<std::uintptr_t>(destination.data()) % requested_width != 0u)) {
+            return std::nullopt;
+        }
+        constexpr std::uint8_t k_bits_per_symbol =
+            static_cast<std::uint8_t>(traits::k_logical_bits_per_symbol);
+        const sequence_size_t letters_per_unit = static_cast<sequence_size_t>(
+            packed_letters_per_unit(requested_width, k_bits_per_symbol));
+        const sequence_size_t length = to - from;
+        if (letters_per_unit == 0u) {
+            return std::nullopt;
+        }
+        if (length == 0u) {
+            return destination.empty()
+                       ? resident_packed_result{resident_packed_sequence{
+                             .units = nullptr,
+                             .unit_count = 0u,
+                             .logical_length = 0u,
+                             .storage_unit_width = requested_width,
+                             .bits_per_symbol = k_bits_per_symbol,
+                             .leading_symbol_offset = 0u,
+                             .trailing_padding = 0u,
+                             .bit_order = packed_symbol_order::least_significant_symbol_first,
+                         }}
+                       : std::nullopt;
+        }
+        const sequence_size_t first_unit = from / letters_per_unit;
+        const sequence_size_t leading = from % letters_per_unit;
+        const auto occupied = bioseq::common::checked_add(leading, length);
+        if (!occupied.has_value()) {
+            return std::nullopt;
+        }
+        const sequence_size_t unit_count_u64 =
+            bioseq::common::ceil_div(*occupied, letters_per_unit);
+        const auto represented = bioseq::common::checked_mul(unit_count_u64, letters_per_unit);
+        if (!represented.has_value() ||
+            unit_count_u64 > static_cast<sequence_size_t>((std::numeric_limits<std::size_t>::max)())) {
+            return std::nullopt;
+        }
+        const std::size_t unit_count = static_cast<std::size_t>(unit_count_u64);
+        if (unit_count > (std::numeric_limits<std::size_t>::max)() / requested_width ||
+            destination.size() != unit_count * requested_width ||
+            first_unit > static_cast<sequence_size_t>((std::numeric_limits<std::size_t>::max)())) {
+            return std::nullopt;
+        }
+        if (!ops_->copy_packed_window(state_,
+                                      destination.data(),
+                                      static_cast<std::size_t>(first_unit),
+                                      unit_count,
+                                      requested_width)) {
+            return std::nullopt;
+        }
+        return resident_packed_sequence{
+            .units = destination.data(),
+            .unit_count = unit_count,
+            .logical_length = length,
+            .storage_unit_width = requested_width,
+            .bits_per_symbol = k_bits_per_symbol,
+            .leading_symbol_offset = static_cast<std::uint16_t>(leading),
+            .trailing_padding = static_cast<std::uint16_t>(*represented - *occupied),
+            .bit_order = packed_symbol_order::least_significant_symbol_first,
+        };
     }
 
     /** @brief Copies logical ranks for one subrange into caller storage. */

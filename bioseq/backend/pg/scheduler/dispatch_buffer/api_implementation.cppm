@@ -20,25 +20,44 @@ module;
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
-module bioseq.postgres.scheduler.dispatch_buffer.api;
+module bioseq.postgres.scheduler.dispatch_buffer.runtime_contract;
 
 import bioseq.highway.dispatch_contract;
 import bioseq.postgres.scheduler.dispatch_buffer;
-import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.pipeline.pipe;
+import bioseq.pipeline.stats;
 import bioseq.indexing.type;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.scanner;
+import bioseq.postgres.storage.scanner.source_provider_contract;
 
 namespace bioseq::scheduler {
 
 /** @return The immutable Highway plan registered for scheduler dispatch. */
 bioseq::simd_dispatch::highway_dispatch_plan highway_dispatch_plan_for_plan() noexcept {
     return bioseq::simd_dispatch::registered_highway_dispatch_plan();
+}
+
+bioseq::simd::pipe::statement_execution_plan_owner
+make_postgres_statement_execution_plan(bioseq::simd::minimap2_parameters parameters) {
+    if (parameters.highway_kernels == nullptr) {
+        const auto plan = highway_dispatch_plan_for_plan();
+        const auto& binding =
+            bioseq::simd_dispatch::registered_highway_target_binding(plan.planned_target);
+        if (binding.target == 0 || binding.kernels == nullptr ||
+            !binding.kernels->is_complete() || binding.target != plan.planned_target) {
+            throw std::logic_error{"PostgreSQL statement has no valid Highway runtime binding"};
+        }
+        parameters.highway_kernels = binding.kernels;
+        parameters.highway_dispatch = plan;
+        parameters.highway_executed_target = binding.target;
+    }
+    return bioseq::simd::pipe::make_statement_execution_plan(std::move(parameters));
 }
 
 namespace {
@@ -81,7 +100,7 @@ dispatch_buffer_runtime::operator=(dispatch_buffer_runtime&& other) noexcept {
 }
 
 void dispatch_buffer_runtime::configure_params(
-    const bioseq::simd::minimap2_parameters& params,
+    bioseq::simd::pipe::statement_execution_plan_owner execution_plan,
     const bioseq::indexing::index_read_requirement index_read_requirement,
     const bool read_sequence_index,
     const Oid scan_user_relid,
@@ -92,7 +111,7 @@ void dispatch_buffer_runtime::configure_params(
     Snapshot executor_snapshot,
     MemoryContext executor_query_context) {
     as_buffer(implementation)
-        ->configure_params(params,
+        ->configure_params(std::move(execution_plan),
                            index_read_requirement,
                            read_sequence_index,
                            scan_user_relid,
@@ -122,6 +141,11 @@ void dispatch_buffer_runtime::clear_sequence_source_provider_binding() noexcept 
 void dispatch_buffer_runtime::bind_persisted_gpu_operation_stats_sink(
     bioseq::pipeline_stats::persisted_gpu_operation_accumulator& sink) {
     as_buffer(implementation)->bind_persisted_gpu_operation_stats_sink(sink);
+}
+
+void dispatch_buffer_runtime::bind_downstream_active_wall_tracker(
+    bioseq::simd::downstream_active_wall_tracker& tracker) {
+    as_buffer(implementation)->bind_downstream_active_wall_tracker(tracker);
 }
 
 void dispatch_buffer_runtime::bind_slice_async_owner(slice_async_owner_guard* owner) {
@@ -281,6 +305,17 @@ void dispatch_buffer_runtime::submit_scan(TupleTableSlot* scan_slot) {
     as_buffer(implementation)->submit_scan(scan_slot);
 }
 
+void dispatch_buffer_runtime::submit_scan_with_source_tid(TupleTableSlot* scan_slot,
+                                                          const Oid source_relation_oid,
+                                                          const ItemPointerData source_tid) {
+    as_buffer(implementation)
+        ->submit_scan_with_source_tid(scan_slot, source_relation_oid, source_tid);
+}
+
+void dispatch_buffer_runtime::submit_scan_recipe_without_source_tid(TupleTableSlot* scan_slot) {
+    as_buffer(implementation)->submit_scan_recipe_without_source_tid(scan_slot);
+}
+
 void dispatch_buffer_runtime::submit_scan_evaluated(TupleTableSlot* scan_slot,
                                                     const Datum target,
                                                     const bool target_is_null,
@@ -319,6 +354,10 @@ std::optional<dispatch_next_output> dispatch_buffer_runtime::read_next_output() 
 
 bioseq::pipeline_stats::pipeline_execution_stats dispatch_buffer_runtime::execution_stats() const {
     return as_buffer(implementation)->execution_stats();
+}
+
+bool dispatch_buffer_runtime::reads_sequence_index() const {
+    return as_buffer(implementation)->reads_sequence_index();
 }
 
 std::size_t dispatch_buffer_runtime::extra_query_count() const {

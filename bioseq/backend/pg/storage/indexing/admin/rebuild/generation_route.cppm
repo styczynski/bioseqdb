@@ -12,6 +12,7 @@ module;
 export module bioseq.postgres.storage.indexing.admin.rebuild.generation_route;
 
 import bioseq.postgres.storage.manager;
+import bioseq.indexing.minimizer_hashmap;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 
 export namespace bioseq::storage::indexing::rebuild_detail {
@@ -43,6 +44,7 @@ struct locator_generation_rebuild_request {
     std::uint8_t alphabet_code = 0;
     bioseq::minimizers::minimizer_sketch_backend backend =
         bioseq::minimizers::minimizer_sketch_backend::scalar;
+    bioseq::indexing::minimizer_generation_algorithm_identity algorithm_identity{};
     const bioseq::minimizers::minimizer_kernels* kernels = nullptr;
 };
 

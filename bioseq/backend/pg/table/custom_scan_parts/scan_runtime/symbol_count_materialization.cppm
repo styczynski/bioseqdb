@@ -23,17 +23,25 @@ extern "C" {
 
 export module bioseq.postgres.table:custom_scan_scan_runtime_symbol_count_materialization;
 
+export import :custom_scan_scan_runtime_symbol_count_materialization_contracts;
+
 import std;
 import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
+import bioseq.postgres.storage.indexing.handles;
+import bioseq.postgres.storage.manager;
 import bioseq.postgres.storage.metadata;
+import bioseq.postgres.storage.scanner;
+import bioseq.postgres.storage.scanner.lazy_binding_contract;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
 import bioseq.postgres.table.io;
 import bioseq.postgres.types.compact_sequence;
+import bioseq.sequences;
 import bioseq.storage.lazy_sequence;
+import bioseq.storage.layout;
 
-import :custom_scan_runtime_support;
+import :custom_scan_runtime_placeholder_contracts;
 
 using namespace bioseq::postgres::support;
 

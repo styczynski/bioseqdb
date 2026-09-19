@@ -1359,6 +1359,87 @@ function(_bioseq_highway_probe_targets)
   set(${ARG_OUTPUT_HIGHWAY_DIGEST} "${_highway_digest}" PARENT_SCOPE)
 endfunction()
 
+# Generate the target-neutral minimizer registry before any production module
+# names a concrete minimizer_representation specialization. The fixed output
+# set keeps CMake independent of the selected registry's owner cardinality.
+function(bioseq_add_minimizer_registry_codegen)
+  set(_one_value_arguments
+    TARGET
+    OUTPUT_ROOT
+    PROFILE
+    OUTPUT_RECORDS_MODULE
+    OUTPUT_VISITOR_MODULE
+    OUTPUT_MANIFEST
+    OUTPUT_STAMP)
+  cmake_parse_arguments(PARSE_ARGV 0 ARG ""
+    "${_one_value_arguments}" "")
+  foreach(_required IN ITEMS TARGET OUTPUT_ROOT PROFILE)
+    if(NOT ARG_${_required})
+      _bioseq_highway_fail(
+        "bioseq_add_minimizer_registry_codegen requires ${_required}")
+    endif()
+  endforeach()
+  if(ARG_UNPARSED_ARGUMENTS)
+    _bioseq_highway_fail(
+      "unknown minimizer registry codegen arguments: ${ARG_UNPARSED_ARGUMENTS}")
+  endif()
+  if(NOT ARG_PROFILE STREQUAL "baseline"
+      AND NOT ARG_PROFILE STREQUAL "extended")
+    _bioseq_highway_fail(
+      "minimizer registry PROFILE must be baseline or extended")
+  endif()
+  if(TARGET "${ARG_TARGET}")
+    _bioseq_highway_fail("target ${ARG_TARGET} already exists")
+  endif()
+  if(NOT TARGET bioseq_codegen OR NOT TARGET bioseq_codegen_project)
+    _bioseq_highway_fail(
+      "the shared bioseq_codegen project must exist before minimizer registry generation")
+  endif()
+  get_filename_component(_output_root "${ARG_OUTPUT_ROOT}" ABSOLUTE)
+  set(_records_module "${_output_root}/minimizer_physical_records.cppm")
+  set(_visitor_module "${_output_root}/minimizer_physical_registry.cppm")
+  set(_manifest "${_output_root}/minimizer_registry.tsv")
+  set(_stamp "${_output_root}/minimizer_registry.stamp")
+  set_source_files_properties(
+    "${_records_module}" "${_visitor_module}" PROPERTIES GENERATED TRUE)
+  add_custom_command(
+    OUTPUT
+      "${_records_module}"
+      "${_visitor_module}"
+      "${_manifest}"
+      "${_stamp}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${_output_root}"
+    COMMAND "$<TARGET_FILE:bioseq_codegen>" highway minimizer-registry
+      --profile "${ARG_PROFILE}"
+      --records-output "${_records_module}"
+      --visitor-output "${_visitor_module}"
+      --manifest-output "${_manifest}"
+      --stamp "${_stamp}"
+    DEPENDS
+      bioseq_codegen_project
+      "${BIOSEQ_CODEGEN_EXECUTABLE}"
+    COMMENT
+      "Generating ${ARG_PROFILE} minimizer physical-record/profile registry"
+    VERBATIM)
+  add_custom_target("${ARG_TARGET}"
+    DEPENDS
+      "${_records_module}"
+      "${_visitor_module}"
+      "${_manifest}"
+      "${_stamp}")
+  add_dependencies("${ARG_TARGET}" bioseq_codegen_project)
+  foreach(_output_pair IN ITEMS
+      "${ARG_OUTPUT_RECORDS_MODULE}|${_records_module}"
+      "${ARG_OUTPUT_VISITOR_MODULE}|${_visitor_module}"
+      "${ARG_OUTPUT_MANIFEST}|${_manifest}"
+      "${ARG_OUTPUT_STAMP}|${_stamp}")
+    if(_output_pair MATCHES "^([^|]*)\\|(.*)$"
+        AND NOT CMAKE_MATCH_1 STREQUAL "")
+      set("${CMAKE_MATCH_1}" "${CMAKE_MATCH_2}" PARENT_SCOPE)
+    endif()
+  endforeach()
+endfunction()
+
 # bioseq_add_highway_codegen(
 #   TARGET bioseq_highway_codegen
 #   POLICY_TARGET bioseq_highway_policy
@@ -1377,8 +1458,8 @@ endfunction()
 #     "family_field|slot_field"
 #   UNIT_PROBE_RECORDS
 #     "key|/absolute/test_probe.cppm.in"
-#   MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
-#     "owner|minimap2_reference_or_bounded_nthash|source_key|representation_type|u32,u64"
+#   MINIMIZER_PROFILE baseline|extended
+#   MINIMIZER_REGISTRY_MANIFEST <generated>/minimizer_registry.tsv
 #   OUTPUT_MODULES generated_modules
 #   OUTPUT_PRIMARY_MODULES generated_target_primaries
 #   OUTPUT_TARGET_IMPLEMENTATIONS generated_target_implementations
@@ -1411,6 +1492,8 @@ function(bioseq_add_highway_codegen)
     COMPILE_DATABASE
     SIGNATURE_SOURCE
     PCM_ROOT
+    MINIMIZER_PROFILE
+    MINIMIZER_REGISTRY_MANIFEST
     OUTPUT_MODULES
     OUTPUT_PRIMARY_MODULES
     OUTPUT_TARGET_IMPLEMENTATIONS
@@ -1437,7 +1520,6 @@ function(bioseq_add_highway_codegen)
     SLOT_RECORDS
     REQUIRED_SLOT_RECORDS
     UNIT_PROBE_RECORDS
-    MINIMIZER_REPRESENTATION_INSTANCE_RECORDS
     DOMAIN_TOPOLOGY_MANIFESTS
     POLICY_DEFINITIONS
     POLICY_COMPILE_OPTIONS)
@@ -1446,7 +1528,8 @@ function(bioseq_add_highway_codegen)
     "${_multi_value_arguments}")
   foreach(_required IN ITEMS
       TARGET OUTPUT_ROOT CONTRACT_MODULE DISPATCH_MODULE HIGHWAY_VERSION
-      COMPILE_DATABASE SIGNATURE_SOURCE PCM_ROOT SOURCE_RECORDS)
+      COMPILE_DATABASE SIGNATURE_SOURCE PCM_ROOT SOURCE_RECORDS
+      MINIMIZER_PROFILE MINIMIZER_REGISTRY_MANIFEST)
     if(NOT ARG_${_required})
       _bioseq_highway_fail("bioseq_add_highway_codegen requires ${_required}")
     endif()
@@ -1455,6 +1538,16 @@ function(bioseq_add_highway_codegen)
     _bioseq_highway_fail(
       "unknown bioseq_add_highway_codegen arguments: "
       "${ARG_UNPARSED_ARGUMENTS}")
+  endif()
+  if(NOT ARG_MINIMIZER_PROFILE STREQUAL "baseline"
+      AND NOT ARG_MINIMIZER_PROFILE STREQUAL "extended")
+    _bioseq_highway_fail("MINIMIZER_PROFILE must be baseline or extended")
+  endif()
+  get_filename_component(_minimizer_registry_manifest
+    "${ARG_MINIMIZER_REGISTRY_MANIFEST}" ABSOLUTE)
+  if(NOT _minimizer_registry_manifest MATCHES "\\.tsv$")
+    _bioseq_highway_fail(
+      "MINIMIZER_REGISTRY_MANIFEST must be an absolute generated .tsv path")
   endif()
   if(TARGET "${ARG_TARGET}")
     _bioseq_highway_fail("target ${ARG_TARGET} already exists")
@@ -2022,79 +2115,13 @@ function(bioseq_add_highway_codegen)
   unset(_probe_key)
   unset(_probe_path)
 
-  set(_normalized_minimizer_representation_instance_records)
-  set(_minimizer_representation_owner_keys)
-  set(_minimizer_representation_typed_count 0)
-  set(_minimizer_representation_minimap2_reference_count 0)
-  set(_minimizer_representation_bounded_nthash_count 0)
-  foreach(_record IN LISTS ARG_MINIMIZER_REPRESENTATION_INSTANCE_RECORDS)
-    _bioseq_highway_reject_control_characters(
-      "minimizer representation instance record" "${_record}")
-    if(NOT _record MATCHES
-        "^([^|]+)\\|(minimap2_reference|bounded_nthash)\\|([^|]+)\\|([^|]+)\\|([^|]+)$")
-      _bioseq_highway_fail(
-        "malformed minimizer representation instance '${_record}'; "
-        "expected owner|minimap2_reference_or_bounded_nthash|source_key|representation_type|"
-        "u32[,u64]")
-    endif()
-    set(_representation_owner "${CMAKE_MATCH_1}")
-    set(_representation_algorithm "${CMAKE_MATCH_2}")
-    set(_representation_source "${CMAKE_MATCH_3}")
-    set(_representation_type "${CMAKE_MATCH_4}")
-    set(_representation_storage_csv "${CMAKE_MATCH_5}")
-    if(NOT _representation_owner MATCHES "^[a-z][a-z0-9_]*$")
-      _bioseq_highway_fail(
-        "invalid minimizer representation owner '${_representation_owner}'")
-    endif()
-    list(FIND _source_keys "${_representation_source}" _representation_source_index)
-    list(FIND _minimizer_representation_owner_keys "${_representation_owner}"
-      _representation_owner_index)
-    if(_representation_source_index EQUAL -1 OR NOT _representation_owner_index EQUAL -1)
-      _bioseq_highway_fail(
-        "duplicate or unowned minimizer representation '${_representation_owner}'")
-    endif()
-    if(NOT _representation_storage_csv STREQUAL "u32"
-        AND NOT _representation_storage_csv STREQUAL "u64"
-        AND NOT _representation_storage_csv STREQUAL "u32,u64")
-      _bioseq_highway_fail(
-        "invalid minimizer representation storage set for '${_representation_owner}'")
-    endif()
-    string(REPLACE "," ";" _representation_storages "${_representation_storage_csv}")
-    list(LENGTH _representation_storages _representation_storage_count)
-    math(EXPR _minimizer_representation_typed_count
-      "${_minimizer_representation_typed_count} + ${_representation_storage_count}")
-    if(_representation_algorithm STREQUAL "minimap2_reference")
-      math(EXPR _minimizer_representation_minimap2_reference_count
-        "${_minimizer_representation_minimap2_reference_count} + ${_representation_storage_count}")
-    else()
-      math(EXPR _minimizer_representation_bounded_nthash_count
-        "${_minimizer_representation_bounded_nthash_count} + ${_representation_storage_count}")
-    endif()
-    list(APPEND _minimizer_representation_owner_keys "${_representation_owner}")
-    list(APPEND _normalized_minimizer_representation_instance_records
-      "${_representation_owner}|${_representation_algorithm}|${_representation_source}|${_representation_type}|${_representation_storage_csv}")
-  endforeach()
-  list(SORT _normalized_minimizer_representation_instance_records)
-  list(SORT _minimizer_representation_owner_keys)
-  list(LENGTH _minimizer_representation_owner_keys _minimizer_representation_owner_count)
-  if(_minimizer_representation_owner_count GREATER 13
-      OR _minimizer_representation_typed_count GREATER 24
-      OR _minimizer_representation_minimap2_reference_count GREATER 18
-      OR _minimizer_representation_bounded_nthash_count GREATER 6)
-    _bioseq_highway_fail(
-      "minimizer representation owner/instantiation cap exceeded: "
-      "owners=${_minimizer_representation_owner_count}, "
-      "typed=${_minimizer_representation_typed_count}, "
-      "minimap2_reference=${_minimizer_representation_minimap2_reference_count}, "
-      "bounded_nthash=${_minimizer_representation_bounded_nthash_count}")
-  endif()
-
   set(_source_manifest_contents
     "bioseq-highway-sources\nrevision\t1\n")
   string(APPEND _source_manifest_contents
     "contract\t${ARG_CONTRACT_MODULE}\n"
     "dispatch\t${ARG_DISPATCH_MODULE}\n"
-    "require-complete-table\t${_require_complete_table}\n")
+    "require-complete-table\t${_require_complete_table}\n"
+    "minimizer-registry\t${ARG_MINIMIZER_PROFILE}\t${_minimizer_registry_manifest}\n")
   foreach(_domain_topology_record IN LISTS _domain_topology_records)
     string(APPEND _source_manifest_contents
       "${_domain_topology_record}\n")
@@ -2116,11 +2143,6 @@ function(bioseq_add_highway_codegen)
     string(REPLACE "|" "\t" _tsv_record "${_record}")
     string(APPEND _source_manifest_contents "unit-probe\t${_tsv_record}\n")
   endforeach()
-  foreach(_record IN LISTS _normalized_minimizer_representation_instance_records)
-    string(REPLACE "|" "\t" _tsv_record "${_record}")
-    string(APPEND _source_manifest_contents
-      "minimizer-repr-instance\t${_tsv_record}\n")
-  endforeach()
   _bioseq_highway_write_if_different(
     "${_source_manifest}" "${_source_manifest_contents}")
 
@@ -2135,8 +2157,11 @@ function(bioseq_add_highway_codegen)
     set_source_files_properties("${_source}" PROPERTIES
       BIOSEQ_HIGHWAY_GENERATOR_INPUT TRUE)
   endforeach()
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    ${_source_paths} ${_probe_template_paths})
+  # These are content inputs to PREPARE/GENERATE below, not configure-time
+  # inputs. Their paths and ownership come from the registered CMake records;
+  # changing a function body must not regenerate the whole CMake build graph.
+  # Keep the explicit custom-command dependencies so edits still regenerate
+  # the affected Highway publication, whose writer preserves identical files.
 
   set(_generated_modules)
   set(_generated_primary_modules)
@@ -2168,16 +2193,14 @@ function(bioseq_add_highway_codegen)
           "${_target_dir}/instances/${_slot_owner}.cppm")
       endif()
     endforeach()
-    foreach(_representation_owner IN LISTS _minimizer_representation_owner_keys)
-      set(_representation_output
-        "${_target_dir}/instances/minimizer_representation_${_representation_owner}.cppm")
-      list(APPEND _generated_target_implementations "${_representation_output}")
-      list(APPEND _generated_minimizer_representation_instance_implementations
-        "${_representation_output}")
-      if(_target_record STREQUAL _static_target_record)
-        list(APPEND _generated_test_implementations "${_representation_output}")
-      endif()
-    endforeach()
+    set(_representation_output
+      "${_target_dir}/instances/minimizer_physical_owners.cppm")
+    list(APPEND _generated_target_implementations "${_representation_output}")
+    list(APPEND _generated_minimizer_representation_instance_implementations
+      "${_representation_output}")
+    if(_target_record STREQUAL _static_target_record)
+      list(APPEND _generated_test_implementations "${_representation_output}")
+    endif()
     foreach(_partition IN LISTS _partitions)
       list(APPEND _generated_target_implementations
         "${_target_dir}/${_partition}.cppm")
@@ -2258,6 +2281,7 @@ function(bioseq_add_highway_codegen)
       bioseq_codegen_project
       "${BIOSEQ_CODEGEN_EXECUTABLE}"
       "${_source_manifest}"
+      "${_minimizer_registry_manifest}"
       "${_compile_database}"
       "${BIOSEQ_CODEGEN_CLANG_BINARY}"
       "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
@@ -2310,6 +2334,7 @@ function(bioseq_add_highway_codegen)
       "${BIOSEQ_CODEGEN_EXECUTABLE}"
       "${_target_manifest}"
       "${_source_manifest}"
+      "${_minimizer_registry_manifest}"
       "${_prepare_stamp}"
       "${_owned_compile_database}"
       "${_pcm_manifest}"

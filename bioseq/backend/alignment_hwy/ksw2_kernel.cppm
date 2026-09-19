@@ -14,6 +14,7 @@ module;
 #include <array>
 #include <span>
 #include <algorithm>
+#include <concepts>
 #include <type_traits>
 
 export module bioseq.highway.sources.ksw2;
@@ -23,6 +24,7 @@ import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.cigar;
 import bioseq.alignment.contracts;
+import bioseq.common.checked_arithmetic;
 import bioseq.highway.sources.alignment_utils;
 import bioseq.highway.sources.ksw2_primitives;
 import bioseq.common.context;
@@ -68,8 +70,8 @@ template<
     bool p_is_reversed,
     sequence_alphabet p_alphabet,
     size_t p_alphabet_dimension = seqan3::alphabet_size<p_alphabet> + 1u,
-    class p_partial_score_type = int8_t,
-    class p_full_score_type = int32_t>
+    class p_partial_score_type = ksw2_partial_score_type,
+    class p_full_score_type = ksw2_full_score_type>
 [[nodiscard]] ksw_alignment_result align_ksw2_core(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
     bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
@@ -113,6 +115,13 @@ template<
     const size_t query_length  = query_end - query_start;
     const size_t target_length = target_end - target_start;
     if (query_length == 0 || target_length == 0) return result;
+    constexpr auto coordinate_limit =
+        static_cast<size_t>((std::numeric_limits<int>::max)());
+    const auto sequence_steps = bioseq::common::checked_add(query_length, target_length);
+    if (!sequence_steps || query_length > coordinate_limit || target_length > coordinate_limit ||
+        *sequence_steps - 1u > coordinate_limit) {
+        throw std::length_error{"KSW2 storage exceeds the signed anti-diagonal domain"};
+    }
 
     const int query_length_i32 = static_cast<int>(query_length);
     const int target_length_i32 = static_cast<int>(target_length);
@@ -194,15 +203,16 @@ template<
                         - (gap_open_long - gap_open) - gap_extend_long;
     }
 
-    // --- Block dimensions --------------------------------------------------
-    int band_vector_capacity = query_length_i32 < target_length_i32 ? query_length_i32 : target_length_i32;
-    band_vector_capacity = ((band_vector_capacity < band_width + 1
-                            ? band_vector_capacity : band_width + 1)
-                         + static_cast<int>(byte_lane_count) - 1)
-                        / static_cast<int>(byte_lane_count) + 1;
-
+    // --- Checked storage geometry ------------------------------------------
+    const auto storage_plan = derive_ksw2_storage_plan(
+        query_length, target_length, byte_lane_count, k_is_dual_affine,
+        configured_band_width, !should_use_approximate_maximum,
+        sizeof(p_full_score_type), should_compute_cigar);
+    if (!storage_plan) {
+        throw std::length_error{"KSW2 storage geometry is not representable"};
+    }
     // --- State arena -------------------------------------------------------
-    ksw_state_for<p_mode> state(target_length, query_length, byte_lane_count);
+    ksw_state_for<p_mode> state(*storage_plan);
 
     if constexpr (k_is_dual_affine) {
         state.fill_leading_arrays(4,
@@ -218,7 +228,7 @@ template<
     // diagonal but never survives the call.
     p_full_score_type* exact_score_row = nullptr;
     if (!should_use_approximate_maximum) {
-        const size_t exact_score_row_length = static_cast<size_t>(state.target_vector_count()) * byte_lane_count;
+        const size_t exact_score_row_length = storage_plan->exact_score_elements;
         auto exact_row_span =
             context::current().alloc_align_array<p_full_score_type>(exact_score_row_length);
         std::fill(exact_row_span.begin(), exact_row_span.end(),
@@ -231,7 +241,7 @@ template<
     std::span<int32_t> anti_diagonal_band_starts{};
     std::span<int32_t> anti_diagonal_band_ends{};
     if (should_compute_cigar) {
-        backtrack.allocate(query_length_i32 + target_length_i32 - 1, band_vector_capacity, byte_lane_count);
+        backtrack.allocate(*storage_plan);
         anti_diagonal_band_starts = backtrack.band_starts();
         anti_diagonal_band_ends   = backtrack.band_ends();
     }
@@ -873,6 +883,11 @@ template<
     // Backtrack
     // ====================================================================
     if (should_compute_cigar) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        result.cigar.set_logical_bounds(
+            storage_plan->packed_cigar_step_bound,
+            storage_plan->packed_cigar_capacity_bound);
+#endif
         const bool output_reversed = flags.reverse_cigar;
         if (!result.is_z_dropped && !flags.extz_only) {
             ksw_backtrack_cigar(backtrack, true, output_reversed, 0,

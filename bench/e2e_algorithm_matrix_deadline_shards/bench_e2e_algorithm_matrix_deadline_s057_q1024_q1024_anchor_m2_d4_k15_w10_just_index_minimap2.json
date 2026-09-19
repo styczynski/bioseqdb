@@ -1,0 +1,217 @@
+{
+  "params": {
+    "minimap2_just_index": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "match-count baseline"
+      },
+      "threads": {
+        "type": "integer",
+        "default": 0,
+        "description": "scheduler-parity thread count"
+      }
+    }
+  },
+  "test_cases": {
+    "M2_D4_K15_W10_Q1024_DEADLINE": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna4",
+        "size_label": "matrix_2gbp_dna4_k15_w10",
+        "reference_length": 2000000000,
+        "fragment_count": 1024,
+        "fragment_length_mean": 20000,
+        "fragment_length_stddev": 500,
+        "substitution_rate": 0.001,
+        "insertion_rate": 0.0005,
+        "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0,
+        "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5,
+        "kmer_size": 15,
+        "window_size": 10,
+        "cigar_projection": true,
+        "mapq_projection": true,
+        "minimap2_split_bp": 2000000352,
+        "seed": 33320010
+      },
+      "description": "DEADLINE_PRODUCTION: 2000000000 bp dna4 k15/w10, exact fixed-seed q1024 prefix"
+    }
+  },
+  "bench_e2e": {
+    "tags": [
+      "e2e",
+      "algorithm-matrix",
+      "deadline-campaign",
+      "q1024_anchor",
+      "q1024"
+    ],
+    "description": "Deadline campaign singleton q1024_anchor, q1024, M2_D4_K15_W10, minimap2_just_index.",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 333
+    },
+    "matrix": {
+      "for": {
+        "M2_D4_K15_W10_Q1024_DEADLINE": 5
+      },
+      "over": {
+        "minimap2_just_index": {
+          "threads": [
+            0
+          ]
+        }
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": []
+        },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "tuple_accepted": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "match_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "expected_match_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "correct_match_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "exact_primary_count_accepted": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "correct_cigar_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "cigar_replay_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "mapq_result_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "pipeline_validation_accepted": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "stage_engine_matrix_valid": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "backend_declines": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "backend_fallbacks": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "prefilter_activity_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "measured_region_ns_manual": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "cigar_or_mapq_interval_union_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "outer_e2e_minus_cigar_or_mapq_union_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "minimap2_receipt_available": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "minimap2_cigar_interval_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        },
+        "minimap2_mapq_interval_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "minimap2_just_index"
+          ],
+          "rules": []
+        }
+      }
+    }
+  },
+  "regression_rules": []
+}

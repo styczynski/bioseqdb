@@ -169,6 +169,14 @@ TEST_CASE(
     highway_target_force_reset restore{ctx.raw()};
     (void)query_scalar(ctx, "SELECT bioseq_internal.set_highway_target_for_test(0);");
     seed_small_bioseq_column(ctx, k_table);
+    constexpr std::string_view highway_probe =
+        "TTTTAAAAGGGGCCCCTTTTAAAAGGGGCCCC";
+    static_assert(highway_probe.size() == 32u);
+    exec_sql(ctx, fmt::format(
+        "INSERT INTO {} (pk, seq0) VALUES (4, {});",
+        k_table,
+        format_literal(highway_probe,
+                       seq_typmod{.alphabet = "dna4", .width = 32})));
     configure_highway_simd_pipeline(ctx);
 
     const auto baseline_mask = static_cast<std::int64_t>(
@@ -196,8 +204,10 @@ TEST_CASE(
     const std::string public_sql =
         fmt::format("SELECT pk, seq0, bioseq.cigar(pk) AS cigar, "
                     "bioseq.edit(pk) AS edit_distance FROM {} WHERE mmsearch(seq0, "
-                    "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32)) ORDER BY pk;",
-                    k_table);
+                    "{}) ORDER BY pk;",
+                    k_table,
+                    format_literal(highway_probe,
+                                   seq_typmod{.alphabet = "dna4", .width = 32}));
     const rowset_t baseline_rows = query_rows(ctx, public_sql);
     REQUIRE_FALSE(baseline_rows.empty());
     for (const auto& row : baseline_rows) {
@@ -220,7 +230,7 @@ TEST_CASE(
         CAPTURE(target, target_name);
 
         REQUIRE(query_rows(ctx, public_sql) == baseline_rows);
-        const auto plan = explain_text<true>(ctx, explain_highway_target_sql());
+        const auto plan = explain_text<true>(ctx, public_sql);
         const auto planned = find_explain_property(plan, "Planned Architecture");
         const auto executed = find_explain_property(plan, "* Executed Architecture");
         REQUIRE(planned.has_value());

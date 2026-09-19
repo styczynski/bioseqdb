@@ -9,6 +9,8 @@ module;
 
 export module bioseq.postgres.table:api;
 
+export import :table_access_method_contracts;
+
 /*
  * Public table-module surface used outside bioseq.postgres.table.
  *
@@ -17,8 +19,6 @@ export module bioseq.postgres.table:api;
  * re-exported by the primary interface. The heavy implementation partitions stay
  * out of the primary module's re-export graph for GCC 16.1.
  */
-/** @brief Return the Bioseq PostgreSQL table-access callback table. */
-export const TableAmRoutine* column_table_access_method(void);
 /** @brief Register Bioseq's table access method with PostgreSQL. */
 export void bioseq_tableam_init(void);
 

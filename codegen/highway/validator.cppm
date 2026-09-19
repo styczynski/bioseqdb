@@ -12,6 +12,7 @@ module;
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -21,6 +22,7 @@ import :model;
 import bioseq.codegen.structural_analysis;
 import bioseq.codegen.namespace_materialization;
 import bioseq.codegen.support;
+import bioseq.sequences.kmers.minimizer_layout_geometry;
 
 export namespace bioseq::codegen::highway {
 
@@ -867,6 +869,299 @@ inline void validate_target_compile_policy(
     }
 }
 
+inline void validate_minimizer_registry(
+    const minimizer_registry_spec& registry) {
+    const minimizer_registry_spec expected =
+        make_minimizer_registry(registry.profile);
+    if (registry != expected) {
+        throw std::runtime_error(
+            "minimizer registry diverges from the source-derived profile model");
+    }
+
+    const bool extended =
+        registry.profile == minimizer_registry_profile::extended;
+    const std::size_t expected_records = extended ? 13u : 7u;
+    const std::size_t expected_owners = expected.highway_owners.size();
+    std::size_t expected_exports = 0u;
+    std::size_t expected_reference_exports = 0u;
+    std::uint16_t maximum_owner_id = 0u;
+    for (const minimizer_highway_owner_spec& owner :
+         expected.highway_owners) {
+        expected_exports += owner.storage_types.size();
+        if (owner.algorithm == "minimap2_reference") {
+            expected_reference_exports += owner.storage_types.size();
+        }
+        maximum_owner_id = std::max(maximum_owner_id, owner.id);
+    }
+    if (registry.records.size() != expected_records
+        || registry.highway_owners.size() != expected_owners) {
+        throw std::runtime_error(
+            "minimizer registry record/owner profile counts diverged");
+    }
+
+    std::map<std::string, const minimizer_physical_record_spec*, std::less<>>
+        records;
+    std::set<std::uint16_t> record_ids;
+    for (const minimizer_physical_record_spec& record : registry.records) {
+        const std::uint8_t expected_storage = static_cast<std::uint8_t>(
+            ::bioseq::minimizers::minimizer_record_storage_bits(
+                record.position_log2, record.physical_kmer_size));
+        const std::uint8_t expected_hash = static_cast<std::uint8_t>(
+            expected_storage == 128u
+                ? 128u - 1u - record.position_log2 - 8u
+                : expected_storage - 1u - record.position_log2);
+        if (record.id == 0u || record.id > 13u
+            || !detail::identifier(record.key)
+            || !record.key.starts_with("minimizer_record_")
+            || record.representation_type
+                != "::bioseq::minimizers::minimizer_representation<"
+                    + std::to_string(record.position_log2) + "u,"
+                    + std::to_string(record.physical_kmer_size) + "u>"
+            || (record.hash_output_width != "u16"
+                && record.hash_output_width != "u32"
+                && record.hash_output_width != "u64")
+            || record.storage_bits != expected_storage
+            || record.available_hash_bits != expected_hash
+            || !record_ids.insert(record.id).second
+            || !records.emplace(record.key, &record).second) {
+            throw std::runtime_error(
+                "invalid or duplicate minimizer physical record '"
+                + record.key + "'");
+        }
+    }
+
+    // Alphabet identity is registry data.  Keep both directions consistent so
+    // validation and generated trait dispatch cannot drift into a second list.
+    std::map<std::uint16_t, std::string> alphabet_types_by_id;
+    std::map<std::string, std::uint16_t, std::less<>> alphabet_ids_by_type;
+    for (const auto& profile : registry.runtime_profiles) {
+        const auto [id_it, inserted_id] = alphabet_types_by_id.emplace(
+            profile.alphabet_id, profile.alphabet_cpp_type);
+        const auto [type_it, inserted_type] = alphabet_ids_by_type.emplace(
+            profile.alphabet_cpp_type, profile.alphabet_id);
+        if ((!inserted_id && id_it->second != profile.alphabet_cpp_type)
+            || (!inserted_type && type_it->second != profile.alphabet_id)) {
+            throw std::runtime_error(
+                "minimizer registry alphabet id/type mapping is not bijective");
+        }
+    }
+
+    std::map<std::string, const minimizer_highway_owner_spec*, std::less<>>
+        owners;
+    std::set<std::uint16_t> owner_ids;
+    std::set<std::string, std::less<>> declared_exports;
+    std::size_t export_count = 0u;
+    std::size_t bounded_exports = 0u;
+    std::size_t reference_exports = 0u;
+    for (const minimizer_highway_owner_spec& owner :
+         registry.highway_owners) {
+        const auto record = records.find(owner.record_key);
+        const bool valid_algorithm = owner.algorithm == "minimap2_reference"
+            || owner.algorithm == "bounded_nthash";
+        const auto alphabet = alphabet_types_by_id.find(owner.alphabet_id);
+        const bool valid_alphabet = alphabet != alphabet_types_by_id.end()
+            && alphabet->second == owner.alphabet_cpp_type;
+        if (owner.id == 0u || owner.id > maximum_owner_id
+            || !detail::identifier(owner.owner_key)
+            || !detail::identifier(owner.source_key)
+            || !detail::identifier(owner.export_base)
+            || !valid_algorithm || !valid_alphabet
+            || record == records.end() || owner.storage_types.empty()
+            || !owner_ids.insert(owner.id).second
+            || !owners.emplace(owner.owner_key, &owner).second) {
+            throw std::runtime_error(
+                "invalid or duplicate minimizer Highway owner '"
+                + owner.owner_key + "'");
+        }
+        for (const std::string& storage : owner.storage_types) {
+            const std::string symbol = owner.export_base + "_" + storage;
+            if ((storage != "u32" && storage != "u64")
+                || !declared_exports.insert(symbol).second) {
+                throw std::runtime_error(
+                    "invalid or duplicate minimizer typed export '"
+                    + symbol + "'");
+            }
+            if (owner.algorithm == "minimap2_reference"
+                && owner.alphabet_id == 0u
+                && record->second->physical_kmer_size == 20u
+                && storage != "u64") {
+                throw std::runtime_error(
+                    "DNA4 reference-k20 generated a forbidden u32 export");
+            }
+            ++export_count;
+            if (owner.algorithm == "bounded_nthash") {
+                ++bounded_exports;
+            } else {
+                ++reference_exports;
+            }
+        }
+    }
+    if (export_count != expected_exports || bounded_exports != 12u
+        || reference_exports != expected_reference_exports) {
+        throw std::runtime_error(
+            "minimizer typed-export caps diverged from 12 bounded and "
+            "the registered reference export closure");
+    }
+
+    std::set<std::tuple<std::string, std::uint16_t, std::uint16_t,
+                        std::uint16_t, std::uint8_t, std::uint8_t,
+                        std::string>> profile_keys;
+    std::set<std::string, std::less<>> referenced_exports;
+    for (const minimizer_runtime_profile_spec& profile :
+         registry.runtime_profiles) {
+        const auto record = records.find(profile.record_key);
+        const auto owner = owners.find(profile.highway_owner_key);
+        const auto alphabet = alphabet_types_by_id.find(profile.alphabet_id);
+        const bool valid_alphabet = alphabet != alphabet_types_by_id.end()
+            && alphabet->second == profile.alphabet_cpp_type;
+        const bool valid_storage = profile.packed_storage == "u32"
+            || profile.packed_storage == "u64";
+        const bool valid_hash_width = profile.hash_width == "u16"
+            || profile.hash_width == "u32"
+            || profile.hash_width == "u64";
+        const bool valid_dispatch = profile.dispatch_kind == "highway_export"
+            || profile.dispatch_kind == "highway_slot"
+            || profile.dispatch_kind == "scalar_collect_minimizers"
+            || profile.dispatch_kind == "vulkan_minimap_integer";
+        const auto capabilities =
+            minimizer_runtime_profile_capabilities_for(registry, profile);
+        const bool valid_capabilities =
+            capabilities.minimum_runtime_kmer_size != 0u
+            && capabilities.minimum_runtime_kmer_size
+                <= capabilities.maximum_runtime_kmer_size
+            && capabilities.minimum_runtime_window_size != 0u
+            && capabilities.minimum_runtime_window_size
+                <= capabilities.maximum_runtime_window_size;
+        if (!valid_alphabet || !valid_storage || !valid_hash_width
+            || !valid_dispatch || record == records.end()
+            || !valid_capabilities
+            || profile.minimum_position_log2
+                > profile.maximum_position_log2
+            || profile.maximum_position_log2
+                != record->second->position_log2
+            || !profile_keys.emplace(
+                    profile.requested_algorithm, profile.alphabet_id,
+                    profile.runtime_kmer_size, profile.runtime_window_size,
+                    profile.minimum_position_log2,
+                    profile.maximum_position_log2,
+                    profile.packed_storage).second) {
+            throw std::runtime_error(
+                "invalid or duplicate minimizer runtime profile binding");
+        }
+        if (profile.dispatch_kind == "highway_export") {
+            if (owner == owners.end()
+                || owner->second->record_key != profile.record_key
+                || owner->second->alphabet_id != profile.alphabet_id
+                || !std::ranges::contains(
+                    owner->second->storage_types, profile.packed_storage)
+                || profile.export_symbol
+                    != owner->second->export_base + "_"
+                        + profile.packed_storage
+                || !declared_exports.contains(profile.export_symbol)) {
+                throw std::runtime_error(
+                    "Highway minimizer profile has incompatible export ownership");
+            }
+            referenced_exports.insert(profile.export_symbol);
+        } else if (!profile.highway_owner_key.empty()
+                   || !profile.export_symbol.empty()) {
+            throw std::runtime_error(
+                "non-exporting minimizer profile names a Highway owner/symbol");
+        }
+        if ((profile.requested_algorithm == "vulkan_minimap_integer")
+            != (profile.dispatch_kind == "vulkan_minimap_integer")) {
+            throw std::runtime_error(
+                "Vulkan minimizer profile has an incompatible dispatch kind");
+        }
+        const bool scalar_reference_fallback =
+            profile.requested_algorithm == "simd_minimap2_reference"
+            && profile.effective_algorithm == "scalar"
+            && profile.dispatch_kind == "scalar_collect_minimizers";
+        if (profile.requested_algorithm != profile.effective_algorithm) {
+            if (!scalar_reference_fallback) {
+                throw std::runtime_error(
+                    "unregistered requested/effective minimizer algorithm pair");
+            }
+        }
+        const bool bounded =
+            profile.requested_algorithm == "bounded_nthash_simd";
+        const bool two_stack =
+            profile.requested_algorithm == "two_stack_nthash";
+        if (bounded
+            && (profile.runtime_kmer_size != 0u
+                || profile.runtime_window_size != 0u
+                || capabilities.minimum_runtime_kmer_size != 1u
+                || capabilities.maximum_runtime_kmer_size != 31u
+                || capabilities.minimum_runtime_window_size != 1u
+                || capabilities.maximum_runtime_window_size != 64u)) {
+            throw std::runtime_error(
+                "bounded minimizer runtime domain diverged from K1..31/W1..64");
+        }
+        const std::uint16_t expected_two_stack_minimum_k =
+            profile.hash_width == "u16" ? 1u
+            : profile.hash_width == "u32" ? 9u
+            : 17u;
+        const std::uint16_t canonical_two_stack_maximum_k =
+            profile.hash_width == "u16" ? 8u
+            : profile.hash_width == "u32" ? 16u
+            : 31u;
+        if (two_stack
+            && (profile.runtime_window_size != 0u
+                || (record->second->storage_bits != 64u
+                    && record->second->storage_bits != 128u)
+                || capabilities.minimum_runtime_kmer_size
+                    != expected_two_stack_minimum_k
+                || capabilities.maximum_runtime_kmer_size
+                    != profile.runtime_kmer_size
+                || capabilities.maximum_runtime_kmer_size
+                    > canonical_two_stack_maximum_k
+                || capabilities.minimum_runtime_window_size != 1u
+                || capabilities.maximum_runtime_window_size != 256u)) {
+            throw std::runtime_error(
+                "two-stack minimizer runtime slice diverged from canonical "
+                "K1..31/W1..256 widths");
+        }
+        if (!bounded && !two_stack
+            && (profile.runtime_kmer_size == 0u
+                || profile.runtime_window_size != 0u
+                || capabilities.minimum_runtime_window_size != 1u
+                || capabilities.maximum_runtime_window_size != 256u
+                || static_cast<std::uint32_t>(
+                       capabilities.maximum_runtime_kmer_size) * 2u
+                    > record->second->available_hash_bits)) {
+            throw std::runtime_error(
+                "minimizer runtime capacity exceeds its kernel/record bounds");
+        }
+    }
+    if (referenced_exports != declared_exports) {
+        throw std::runtime_error(
+            "minimizer profile/export closure must account for every export");
+    }
+
+    static constexpr std::array legacy_exports{
+        std::string_view{"bounded_nthash_repr_l15_k15_u32"},
+        std::string_view{"bounded_nthash_repr_l15_k15_u64"},
+        std::string_view{"bounded_nthash_repr_l28_k15_u32"},
+        std::string_view{"bounded_nthash_repr_l28_k15_u64"},
+        std::string_view{"bounded_nthash_repr_l63_k15_u32"},
+        std::string_view{"bounded_nthash_repr_l63_k15_u64"},
+        std::string_view{"minimap2_reference_repr_l15_k15_u32"},
+        std::string_view{"minimap2_reference_repr_l15_k15_u64"},
+        std::string_view{"minimap2_reference_repr_l28_k15_u32"},
+        std::string_view{"minimap2_reference_repr_l28_k15_u64"},
+        std::string_view{"minimap2_reference_repr_l33_k15_u32"},
+        std::string_view{"minimap2_reference_repr_l33_k15_u64"},
+        std::string_view{"minimap2_reference_repr_l63_k15_u32"},
+        std::string_view{"minimap2_reference_repr_l63_k15_u64"},
+    };
+    for (const std::string_view symbol : legacy_exports) {
+        if (!declared_exports.contains(std::string{symbol})) {
+            throw std::runtime_error(
+                "legacy minimizer export name changed: "
+                + std::string{symbol});
+        }
+    }
+}
+
 inline void validate_inventories(
     const target_manifest& targets,
     const source_manifest& sources) {
@@ -1085,90 +1380,15 @@ inline void validate_inventories(
     };
     validate_probes(sources.unit_probes, 4U, "unit");
 
-    struct expected_representation_owner final {
-        std::string_view algorithm;
-        std::string_view source_key;
-        std::string_view representation_type;
-        bool u64_only{};
-        bool high_profile{};
-    };
-    static const std::map<std::string_view, expected_representation_owner, std::less<>>
-        expected_representation_owners{
-            {"minimap2_reference_l15_k15", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<15u,15u>", false, false}},
-            {"minimap2_reference_l28_k15", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<28u,15u>", false, false}},
-            {"minimap2_reference_l33_k15", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<33u,15u>", false, false}},
-            {"minimap2_reference_l63_k15", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<63u,15u>", false, false}},
-            {"bounded_nthash_l15_k15", {"bounded_nthash", "minimizer_bounded_nthash", "::bioseq::minimizers::minimizer_representation<15u,15u>", false, false}},
-            {"bounded_nthash_l28_k15", {"bounded_nthash", "minimizer_bounded_nthash", "::bioseq::minimizers::minimizer_representation<28u,15u>", false, false}},
-            {"bounded_nthash_l63_k15", {"bounded_nthash", "minimizer_bounded_nthash", "::bioseq::minimizers::minimizer_representation<63u,15u>", false, false}},
-            {"minimap2_reference_l7_k7", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<7u,7u>", false, true}},
-            {"minimap2_reference_l17_k7", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<17u,7u>", false, true}},
-            {"minimap2_reference_l49_k7", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<49u,7u>", false, true}},
-            {"minimap2_reference_l63_k7", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<63u,7u>", false, true}},
-            {"minimap2_reference_l27_k27", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<27u,27u>", true, true}},
-            {"minimap2_reference_l63_k27", {"minimap2_reference", "minimizer_minimap2_reference", "::bioseq::minimizers::minimizer_representation<63u,27u>", true, true}},
-        };
-    if (sources.require_complete_table
-        || !sources.minimizer_representation_instances.empty()) {
-        const bool high_profile =
-            sources.minimizer_representation_instances.size() == 13U;
-        if (!high_profile
-            && sources.minimizer_representation_instances.size() != 7U) {
-            throw std::runtime_error(
-                "Highway minimizer representation owners must contain "
-                "exactly 7 K15-only or 13 high-profile identities");
-        }
-        std::set<std::string, std::less<>> observed_owners;
-        std::size_t typed_instantiations = 0U;
-        std::size_t minimap2_reference_instantiations = 0U;
-        std::size_t bounded_nthash_instantiations = 0U;
-        for (const minimizer_representation_instance_spec& instance :
-             sources.minimizer_representation_instances) {
-            const auto expected = expected_representation_owners.find(instance.owner_key);
-            if (expected == expected_representation_owners.end()
-                || expected->second.algorithm != instance.algorithm
-                || expected->second.source_key != instance.source_key
-                || expected->second.representation_type
-                    != instance.representation_type
-                || (expected->second.high_profile && !high_profile)
-                || !by_key.contains(instance.source_key)
-                || !observed_owners.insert(instance.owner_key).second) {
+    if (sources.minimizer_registry) {
+        validate_minimizer_registry(*sources.minimizer_registry);
+        for (const minimizer_highway_owner_spec& owner :
+             sources.minimizer_registry->highway_owners) {
+            if (!by_key.contains(owner.source_key)) {
                 throw std::runtime_error(
-                    "invalid or duplicate Highway minimizer representation "
-                    "owner '" + instance.owner_key + "'");
+                    "minimizer Highway owner references unknown source '"
+                    + owner.source_key + "'");
             }
-            const std::vector<std::string> expected_storages =
-                expected->second.u64_only
-                ? std::vector<std::string>{"u64"}
-                : std::vector<std::string>{"u32", "u64"};
-            if (instance.storage_types != expected_storages) {
-                throw std::runtime_error(
-                    "Highway minimizer representation owner '"
-                    + instance.owner_key
-                    + "' has an invalid input-storage instantiation set");
-            }
-            typed_instantiations += instance.storage_types.size();
-            (instance.algorithm == "minimap2_reference"
-                 ? minimap2_reference_instantiations
-                 : bounded_nthash_instantiations) +=
-                instance.storage_types.size();
-        }
-        for (const auto& [owner, expected] : expected_representation_owners) {
-            if ((!expected.high_profile || high_profile)
-                && !observed_owners.contains(std::string{owner})) {
-                throw std::runtime_error(
-                    "Highway minimizer representation owner set omits '"
-                    + std::string{owner} + "'");
-            }
-        }
-        const std::size_t expected_total = high_profile ? 24U : 14U;
-        const std::size_t expected_minimap2_reference =
-            high_profile ? 18U : 8U;
-        if (typed_instantiations != expected_total
-            || minimap2_reference_instantiations != expected_minimap2_reference
-            || bounded_nthash_instantiations != 6U) {
-            throw std::runtime_error(
-                "Highway minimizer representation instantiation caps diverged");
         }
     }
 

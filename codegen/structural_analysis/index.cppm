@@ -75,6 +75,15 @@ export namespace bioseq::codegen::structural_analysis {
     std::string_view compiler_profile = {},
     const std::filesystem::path& pcm_root = {});
 
+/// Runs structural collection and active module-edge recovery over the same
+/// authoritative Clang AST for each selected compile-database unit.
+[[nodiscard]] structural_module_graph_scan
+scan_translation_units_and_module_graph_from_database(
+    const std::vector<std::filesystem::path>& source_paths,
+    const std::filesystem::path& compile_database,
+    std::string_view compiler_profile = {},
+    const std::filesystem::path& pcm_root = {});
+
 /// Recovers provided-module and import edges with the same compile commands.
 [[nodiscard]] module_graph scan_module_graph_from_database(
     const std::vector<std::filesystem::path>& source_paths,

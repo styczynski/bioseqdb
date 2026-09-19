@@ -3,21 +3,20 @@
  * @brief PostgreSQL generation storage residency and transaction fixtures.
  */
 module;
-#include <new>
 #include <bioseq/pg_compat.h>
+#include <new>
 
+extern "C" {
 #include "access/heapam.h"
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "commands/tablespace.h"
 #include "executor/tuptable.h"
+#include "storage/buffile.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
-
-extern "C" {
-#include "storage/buffile.h"
 }
 export module bioseq.postgres.storage.indexing.admin:generation_storage;
 import std;

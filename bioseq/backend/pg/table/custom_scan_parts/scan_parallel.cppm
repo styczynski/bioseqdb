@@ -3,84 +3,58 @@
  * @brief Manages parallel scan DSM state and publishes the stable executor callbacks.
  */
 module;
-#include <bioseq/pg_compat.h>
-
 extern "C" {
+#include "postgres.h"
+#include "access/tupdesc.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_attribute.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_language_d.h"
 #include "catalog/pg_proc.h"
 #include "commands/extension.h"
+#include "nodes/extensible.h"
+#include "nodes/makefuncs.h"
+#include "nodes/pg_list.h"
 #include "optimizer/appendinfo.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/planmain.h"
+#include "port/atomics.h"
 #include "storage/dsm.h"
 #include "storage/shmem.h"
+#include "utils/errcodes.h"
 #include "utils/inval.h"
+#include "utils/rel.h"
+#include "utils/ruleutils.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 
 #include "rewrite/rewriteManip.h"
 }
 
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <new>
+
 export module bioseq.postgres.table:custom_scan_scan_parallel;
 
-import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
 import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
+import bioseq.postgres.scheduler.dispatch_buffer.runtime_contract;
+import bioseq.postgres.storage.parallel_scan_contract;
+import bioseq.postgres.storage.scanner.snapshot_rebind;
 import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
 
-import :custom_scan_support;
-import :custom_scan_slice_path_runtime_contract;
+import :custom_scan_execution_method_contracts;
+import :custom_scan_scan_runtime_state_contracts;
+import :custom_scan_semantic_payload_explain_callback_contracts;
 import :custom_scan_slice_execution_dsm_protocol;
-import :custom_scan_join_paths;
-import :custom_scan_scan_paths;
-import :custom_scan_plan_builders;
-import :custom_scan_match_ownership;
-import :custom_scan_join_execution;
-
-import :custom_scan_scan_runtime;
-import :custom_scan_scan_explain;
 
 using namespace bioseq::postgres::support;
 

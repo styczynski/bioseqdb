@@ -927,6 +927,12 @@ export inline seq_typmod seed_hoe_fixture(
     constexpr seq_typmod typmod{.alphabet = "dna4", .width = 32};
     exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
     exec_sqlf(ctx, "SET bioseq.vectorization.enabled = on;");
+    // The short probe needs explicit admission thresholds now that statement
+    // parameters stay frozen: one exact k=15 anchor scores 15. Keep k/w and
+    // algorithm selection unchanged instead of relying on hidden size scaling.
+    exec_sqlf(ctx,
+        "SET bioseq.aligner.chaining.minimum_score = 10;"
+        "SET bioseq.aligner.chaining.minimum_seed_count = 1;");
     create_seq_table(
         ctx,
         seq_table_spec{

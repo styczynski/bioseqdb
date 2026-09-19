@@ -3,16 +3,33 @@
  * @brief Defines generation-row validation and snapshot-bound source authorization.
  */
 module;
-#include <bioseq/pg_compat.h>
+
 extern "C" {
+#include "postgres.h"
+
+#include "access/relation.h"
 #include "access/table.h"
+#include "access/tupdesc.h"
 #include "access/xact.h"
 #include "executor/instrument.h"
-#include "utils/memutils.h"
-#include "utils/snapmgr.h"
+#include "fmgr.h"
 #include "miscadmin.h"
+#include "nodes/pg_list.h"
+#include "storage/lockdefs.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
+#include "utils/snapmgr.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:catalog_source_authorization;
+
 import std;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid

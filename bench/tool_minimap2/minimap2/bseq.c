@@ -4,11 +4,54 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+#include <errno.h>
+#include <unistd.h>
+#endif
 #define __STDC_LIMIT_MACROS
 #include "bseq.h"
 #include "kvec.h"
 #include "kseq.h"
 KSEQ_INIT2(, gzFile, gzread)
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+/* Checked kseq construction for the private descriptor reader only. The
+ * bundled kseq_init() dereferences both allocation results before returning,
+ * so its ordinary behavior is deliberately left untouched. */
+static kseq_t *bioseq_kseq_init_checked(gzFile file)
+{
+	kseq_t *sequence;
+	kstream_t *stream;
+	int failure_errno;
+	errno = 0;
+	sequence = (kseq_t*)calloc(1, sizeof(kseq_t));
+	if (sequence == 0) {
+		failure_errno = errno != 0? errno : ENOMEM;
+		errno = failure_errno;
+		return 0;
+	}
+	errno = 0;
+	stream = (kstream_t*)calloc(1, sizeof(kstream_t));
+	if (stream == 0) {
+		failure_errno = errno != 0? errno : ENOMEM;
+		free(sequence);
+		errno = failure_errno;
+		return 0;
+	}
+	stream->f = file;
+	stream->bufsize = 16384;
+	errno = 0;
+	stream->buf = (unsigned char*)malloc(16384);
+	if (stream->buf == 0) {
+		failure_errno = errno != 0? errno : ENOMEM;
+		free(stream);
+		free(sequence);
+		errno = failure_errno;
+		return 0;
+	}
+	sequence->f = stream;
+	return sequence;
+}
+#endif
 
 unsigned char seq_comp_table[256] = {
 	  0,   1,	2,	 3,	  4,   5,	6,	 7,	  8,   9,  10,	11,	 12,  13,  14,	15,
@@ -49,6 +92,45 @@ mm_bseq_file_t *mm_bseq_open(const char *fn)
 	return fp;
 }
 
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+mm_bseq_file_t *mm_bseq_open_fd(int fd)
+{
+	mm_bseq_file_t *fp;
+	gzFile f;
+	int failure_errno;
+	if (fd < 0) {
+		errno = EBADF;
+		return 0;
+	}
+	errno = 0;
+	fp = (mm_bseq_file_t*)calloc(1, sizeof(mm_bseq_file_t));
+	if (fp == 0) {
+		failure_errno = errno != 0? errno : ENOMEM;
+		close(fd);
+		errno = failure_errno;
+		return 0;
+	}
+	errno = 0;
+	f = gzdopen(fd, "r");
+	if (f == 0) {
+		failure_errno = errno != 0? errno : EIO;
+		free(fp);
+		close(fd);
+		errno = failure_errno;
+		return 0;
+	}
+	fp->fp = f;
+	fp->ks = bioseq_kseq_init_checked(fp->fp);
+	if (fp->ks == 0) {
+		failure_errno = errno != 0? errno : ENOMEM;
+		gzclose(fp->fp);
+		free(fp);
+		errno = failure_errno;
+		return 0;
+	}
+	return fp;
+}
+#endif
 void mm_bseq_close(mm_bseq_file_t *fp)
 {
 	kseq_destroy(fp->ks);

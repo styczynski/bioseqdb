@@ -92,7 +92,13 @@ export {
         std::int32_t runtime_k;
         // Runtime parameters let the Vulkan kernel inspect `vulkan_enabled`;
         // CPU kernels ignore them.
-        ::bioseq::simd::minimap2_parameters params;
+        statement_execution_plan_owner execution_plan;
+
+        /// Borrow the sole immutable statement snapshot.
+        [[nodiscard, gnu::always_inline]] const minimap2_parameters&
+        parameters() const noexcept {
+            return execution_plan->frozen_parameters;
+        }
         match_result_collection* stats_dst = nullptr;
         match_result_collection* host_timing_dst = nullptr;
 
@@ -120,13 +126,13 @@ export {
             require_representable_minimizer_query_length<p_minimizer>(query_seq_.bp_size());
 
             // Only the Vulkan kernel exposes the device-minimizer
-            // `call_result`. When it returns a result, copy the host minimizers into
-            // the arena slab and forward the resident device span as stage-local
-            // metadata so seed_hit_stage can skip a second query-minimizer upload.
+            // `call_result`. Retain its admitted host vector and device span in
+            // one real owner so the handoff needs neither a host copy nor a
+            // second query-minimizer upload.
             if constexpr (requires { p_kernel::may_emit_device_minimizers; }) {
                 if constexpr (p_kernel::may_emit_device_minimizers) {
                     if (auto gpu_result = p_kernel::template call_result<p_minimizer>(
-                            params, query_seq_, window_size, kmer_size)) {
+                            parameters(), query_seq_, window_size, kmer_size)) {
                         if (stats_dst == nullptr ||
                             !gpu_result->dispatch_token.is_internally_consistent()) {
                             bioseq_log<logging_level::error>(
@@ -137,27 +143,18 @@ export {
                         stats.query_sketch_dispatches =
                             gpu_result->dispatch_token.completed_roundtrips;
                         stats_dst->record_partial_vulkan_execution_stats(stats);
-                        auto device_slab = make_arena_slab<p_minimizer>();
-                        device_slab.reserve(gpu_result->host_minimizers.size());
-                        if (!gpu_result->host_minimizers.empty()) {
-                            std::memcpy(device_slab.data(),
-                                        gpu_result->host_minimizers.data(),
-                                        gpu_result->host_minimizers.size() * sizeof(p_minimizer));
-                        }
-                        device_slab.resize(gpu_result->host_minimizers.size());
-                        minimizer_batch_view<p_minimizer> batch{
-                            .host = device_slab.as_const_span(),
-                            .device =
-                                std::optional<
-                                    bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>>{
-                                    gpu_result->device_span()},
-                        };
-                        // The reservation owns the vector capacity, so destroy
-                        // that capacity before releasing its permit. `batch.device`
-                        // independently retains the resident device permit.
-                        std::vector<p_minimizer>{}.swap(gpu_result->host_minimizers);
-                        gpu_result->host_permit.reset();
-                        return std::move(token).emit_minimizer_batch(batch);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                        stats_dst->record_completed_minimizer_algorithm_identity(
+                            minimizer_algorithm::vulkan_minimap_integer);
+#endif
+                        using result_type = std::remove_cvref_t<decltype(*gpu_result)>;
+                        const auto result_owner =
+                            std::make_shared<result_type>(std::move(*gpu_result));
+                        const std::shared_ptr<const std::vector<p_minimizer>> host_owner{
+                            result_owner, &result_owner->host_minimizers};
+                        auto batch = minimizer_batch_view<p_minimizer>::from_shared_host(
+                            host_owner, 0u, host_owner->size(), result_owner->device_span());
+                        return std::move(token).emit_minimizer_batch(std::move(batch));
                     }
                 }
             }
@@ -174,10 +171,10 @@ export {
                         return p_kernel::template call_constexpr<p_aligner_parameters::window_len,
                                                                  p_aligner_parameters::kmer_len,
                                                                  p_minimizer>(
-                            params, collector, query_seq_);
+                            parameters(), collector, query_seq_);
                     } else {
                         return p_kernel::template call<p_minimizer>(
-                            params, collector, query_seq_, window_size, kmer_size);
+                            parameters(), collector, query_seq_, window_size, kmer_size);
                     }
                 }();
                 if (stats_dst == nullptr || !dispatch_token.is_internally_consistent()) {
@@ -188,16 +185,20 @@ export {
                 partial_vulkan_execution_stats stats{};
                 stats.query_sketch_dispatches = dispatch_token.completed_roundtrips;
                 stats_dst->record_partial_vulkan_execution_stats(stats);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                stats_dst->record_completed_minimizer_algorithm_identity(
+                    minimizer_algorithm::vulkan_minimap_integer);
+#endif
             } else if constexpr (p_kernel::emits_scalar_minimizer_execution_stats) {
                 scalar_minimizer_execution_stats stats{};
                 if constexpr (!p_aligner_parameters::generic_fallback) {
                     stats = p_kernel::template call_constexpr<p_aligner_parameters::window_len,
                                                               p_aligner_parameters::kmer_len,
                                                               p_minimizer>(
-                        params, collector, query_seq_);
+                        parameters(), collector, query_seq_);
                 } else {
                     stats = p_kernel::template call<p_minimizer>(
-                        params, collector, query_seq_, window_size, kmer_size);
+                        parameters(), collector, query_seq_, window_size, kmer_size);
                 }
                 if (stats_dst == nullptr || !stats.is_coherent()) {
                     bioseq_log<logging_level::error>(
@@ -205,16 +206,20 @@ export {
                     std::abort();
                 }
                 stats_dst->record_scalar_query_minimizer_execution_stats(stats);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                stats_dst->record_completed_minimizer_algorithm_identity(
+                    minimizer_algorithm::scalar);
+#endif
             } else if constexpr (p_kernel::emits_exact_simd_execution_stats) {
                 const auto stats = [this, &collector, window_size, kmer_size] {
                     if constexpr (!p_aligner_parameters::generic_fallback) {
                         return p_kernel::template call_constexpr<p_aligner_parameters::window_len,
                                                                  p_aligner_parameters::kmer_len,
                                                                  p_minimizer>(
-                            params, collector, query_seq_);
+                            parameters(), collector, query_seq_);
                     } else {
                         return p_kernel::template call<p_minimizer>(
-                            params, collector, query_seq_, window_size, kmer_size);
+                            parameters(), collector, query_seq_, window_size, kmer_size);
                     }
                 }();
                 if (stats_dst == nullptr || !stats.is_internally_consistent(
@@ -224,16 +229,20 @@ export {
                     std::abort();
                 }
                 stats_dst->record_exact_simd_query_execution_stats(stats);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                stats_dst->record_completed_minimizer_algorithm_identity(
+                    minimizer_algorithm::two_stack_nthash);
+#endif
             } else if constexpr (p_kernel::emits_bounded_nthash_execution_stats) {
                 const auto stats = [this, &collector, window_size, kmer_size] {
                     if constexpr (!p_aligner_parameters::generic_fallback) {
                         return p_kernel::template call_constexpr<p_aligner_parameters::window_len,
                                                                  p_aligner_parameters::kmer_len,
                                                                  p_minimizer>(
-                            params, collector, query_seq_);
+                            parameters(), collector, query_seq_);
                     } else {
                         return p_kernel::template call<p_minimizer>(
-                            params, collector, query_seq_, window_size, kmer_size);
+                            parameters(), collector, query_seq_, window_size, kmer_size);
                     }
                 }();
                 if (stats_dst == nullptr || !stats.is_internally_consistent(
@@ -243,13 +252,37 @@ export {
                     std::abort();
                 }
                 stats_dst->record_bounded_nthash_query_execution_stats(stats);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                stats_dst->record_completed_minimizer_algorithm_identity(
+                    minimizer_algorithm::bounded_nthash_simd);
+#endif
             } else if constexpr (!p_aligner_parameters::generic_fallback) {
                 p_kernel::template call_constexpr<p_aligner_parameters::window_len,
                                                   p_aligner_parameters::kmer_len,
-                                                  p_minimizer>(params, collector, query_seq_);
+                                                  p_minimizer>(parameters(), collector, query_seq_);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                if (stats_dst != nullptr) {
+                    constexpr minimizer_algorithm observed =
+                        bioseq::storage::lazy_sequence_view<
+                            p_alphabet>::traits::k_logical_bits_per_symbol == 2u
+                            ? minimizer_algorithm::simd_minimap2_reference
+                            : minimizer_algorithm::scalar;
+                    stats_dst->record_completed_minimizer_algorithm_identity(observed);
+                }
+#endif
             } else {
                 p_kernel::template call<p_minimizer>(
-                    params, collector, query_seq_, window_size, kmer_size);
+                    parameters(), collector, query_seq_, window_size, kmer_size);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                if (stats_dst != nullptr) {
+                    constexpr minimizer_algorithm observed =
+                        bioseq::storage::lazy_sequence_view<
+                            p_alphabet>::traits::k_logical_bits_per_symbol == 2u
+                            ? minimizer_algorithm::simd_minimap2_reference
+                            : minimizer_algorithm::scalar;
+                    stats_dst->record_completed_minimizer_algorithm_identity(observed);
+                }
+#endif
             }
 
             if (host_timing_dst != nullptr) {
@@ -349,6 +382,10 @@ export {
         match_result_collection* stats_dst = nullptr;
         match_result_collection* host_timing_dst = nullptr;
         const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels = nullptr;
+        route_attempt_memory* attempt_memory = nullptr;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        ::bioseq::gpu::vulkan::runtime_pipeline_operation_token* completed_chaining = nullptr;
+#endif
 
         /// Collect seed hits and execute the selected chaining kernel.
         template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_sink>
@@ -357,6 +394,10 @@ export {
             const std::uint64_t host_stage_started =
                 host_timing_dst == nullptr ? 0u : host_stage_now_ns();
             chaining_parameters active_cp = cp;
+            if (attempt_memory != nullptr &&
+                &context::current() != &attempt_memory->fresh_context) {
+                throw std::logic_error{"chaining stage is not installed in its admitted attempt"};
+            }
             active_cp.query_len = query_len;
             const std::span<const anchor> anchors_span{anchors_in.data(), anchors_in.size()};
 
@@ -370,9 +411,19 @@ export {
                 // allocations are reclaimed before the stage emits downstream.
                 reordered_slab.reserve(anchors_in.size());
             } else {
-                chains_slab.reserve(
-                    detail::estimated_chain_count(anchors_in.size(), active_cp.min_seed_count));
-                reordered_slab.reserve(anchors_in.size());
+                if constexpr (requires { p_kernel::storage_requirements(anchors_in.size(), active_cp); }) {
+                    const auto storage_plan = p_kernel::storage_requirements(anchors_in.size(), active_cp);
+                    if (!storage_plan) {
+                        throw std::length_error{"selected chaining storage plan is not addressable"};
+                    }
+                    chains_slab.reserve(storage_plan->output.initial_chain_capacity);
+                    reordered_slab.reserve(storage_plan->output.reordered_anchor_capacity);
+                } else {
+                    // Vulkan retains its existing shape/driver allocation plan.
+                    chains_slab.reserve(
+                        detail::estimated_chain_count(anchors_in.size(), active_cp.min_seed_count));
+                    reordered_slab.reserve(anchors_in.size());
+                }
             }
 
             if constexpr (p_kernel::emits_scalar_chaining_execution_stats) {
@@ -389,6 +440,10 @@ export {
                 stats.record_scalar_chain_stage_completion(
                     static_cast<std::uint64_t>(anchors_span.size()));
                 stats_dst->record_scalar_pipeline_execution_stats(stats);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                stats_dst->record_completed_chaining_algorithm_identity(
+                    chaining_algorithm::scalar_minimap2);
+#endif
             } else if constexpr (p_kernel::emits_simd_chaining_execution_stats) {
                 if (stats_dst == nullptr) {
                     bioseq_log<logging_level::error>(
@@ -409,19 +464,52 @@ export {
                         "simd chaining stats");
                 }
                 stats_dst->record_simd_chaining_execution_stats(stats);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                stats_dst->record_completed_chaining_algorithm_identity(
+                    chaining_algorithm::simd_minimap2);
+#endif
             } else if constexpr (p_kernel::emits_partial_vulkan_execution_stats) {
                 if (stats_dst == nullptr) {
                     bioseq_log<logging_level::error>(
                         "Vulkan chaining stage has no execution-stats sink");
                     std::abort();
                 }
-                if (p_kernel::call(anchors_span, active_cp, chains_slab, reordered_slab)) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                ::bioseq::gpu::vulkan::runtime_pipeline_operation_token local_chaining;
+                auto* completion = completed_chaining == nullptr
+                    ? &local_chaining : completed_chaining;
+#endif
+                if (p_kernel::call(anchors_span, active_cp, chains_slab, reordered_slab,
+                                   attempt_memory == nullptr ? nullptr : &attempt_memory->retention
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                   , completion
+#endif
+                                   )) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    if (!completion->is_valid_for_chaining_tiled_dp()) {
+                        throw ::bioseq::gpu::vulkan::vulkan_runtime_error{
+                            "selected chaining completed without a causal GPU dispatch receipt"};
+                    }
+#endif
                     partial_vulkan_execution_stats stats{};
                     stats.chain_score_dispatches = 1;
                     stats_dst->record_partial_vulkan_execution_stats(stats);
                 }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                // The existing kernel returns false for a successful no-work
+                // input. Attribute the completed selection without inventing a
+                // device dispatch; nonempty admitted work retains its real count.
+                stats_dst->record_completed_chaining_algorithm_identity(
+                    chaining_algorithm::vulkan_tiled_dynamic_programming);
+#endif
             } else {
                 p_kernel::call(anchors_span, active_cp, chains_slab, reordered_slab);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                if (stats_dst != nullptr) {
+                    stats_dst->record_completed_chaining_algorithm_identity(
+                        chaining_algorithm::range_minimum_query);
+                }
+#endif
             }
 
             if (host_timing_dst != nullptr) {
@@ -622,12 +710,14 @@ export {
     /**
      * @brief Conditional divergence-estimation stage.
      */
-    template <class p_minimizer, class p_query_minimizers = std::vector<p_minimizer>>
+    template <class p_minimizer,
+              class p_query_minimizers = minimizer_batch_view<p_minimizer>>
     struct divergence_stage
         : stage_base<divergence_stage<p_minimizer, p_query_minimizers>, alignment_region> {
         static constexpr std::string_view stage_name = "divergence_stage";
 
-        const p_query_minimizers* query_minimizers_;
+        static_assert(std::same_as<p_query_minimizers, minimizer_batch_view<p_minimizer>>);
+        p_query_minimizers query_minimizers_;
         sequence_size_t query_len;
         sequence_size_t target_len;
         std::int32_t runtime_kmer_size;
@@ -649,8 +739,7 @@ export {
                         : static_cast<std::int32_t>(p_aligner_parameters::kmer_len);
                 estimate_divergence_from_seeds<p_minimizer>(
                     std::span<alignment_region>{regions.data(), regions.size()},
-                    std::span<const p_minimizer>{query_minimizers_->data(),
-                                                 query_minimizers_->size()},
+                    query_minimizers_.as_span(),
                     std::span<const anchor>{anchors.data(), anchors.size()},
                     query_len,
                     kmer_size,
@@ -687,7 +776,13 @@ export {
     struct exact_edit_filter_stage : stage_base<exact_edit_filter_stage, alignment_region> {
         static constexpr std::string_view stage_name = "exact_edit_filter_stage";
 
-        ::bioseq::simd::minimap2_parameters params;
+        statement_execution_plan_owner execution_plan;
+
+        /// Borrow the sole immutable statement snapshot.
+        [[nodiscard, gnu::always_inline]] const minimap2_parameters&
+        parameters() const noexcept {
+            return execution_plan->frozen_parameters;
+        }
 
         /// Retain only exact-edit survivors and reset their classification fields.
         template <is_constexpr_aligner_params p_aligner_parameters,
@@ -697,17 +792,17 @@ export {
         emitted_token<p_sink> process_pair(p_region_batch&& regions,
                                            p_anchor_batch&& anchors,
                                            emit_token<p_sink>&& token) {
-            if (!params.exact_edit_filter_enabled) {
+            if (!parameters().exact_edit_filter_enabled) {
                 return std::move(token).emit_batch_pair(
                     std::span<alignment_region>{regions.data(), regions.size()},
                     std::span<const anchor>{anchors.data(), anchors.size()});
             }
-            if (!params.compute_edit_distance) {
+            if (!parameters().compute_edit_distance) {
                 throw std::logic_error("exact edit filter requires exact edit-distance accounting");
             }
 
             const std::int64_t exclusive_upper_bound =
-                params.exact_edit_filter_exclusive_upper_bound;
+                parameters().exact_edit_filter_exclusive_upper_bound;
             std::size_t output_size = 0;
             for (std::size_t index = 0; index < regions.size(); ++index) {
                 alignment_region& region = regions.data()[index];
@@ -744,12 +839,12 @@ export {
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
             desc.stage_name = std::string{stage_name};
-            if (params.exact_edit_filter_enabled) {
+            if (parameters().exact_edit_filter_enabled) {
                 stage_algorithm_description algorithm;
                 algorithm.name = "Exact edit-distance predicate";
                 algorithm.parameters.push_back(
                     {"exclusive_upper_bound",
-                     std::to_string(params.exact_edit_filter_exclusive_upper_bound)});
+                     std::to_string(parameters().exact_edit_filter_exclusive_upper_bound)});
                 algorithm.computed_properties.push_back(
                     {"classification_domain", "exact predicate survivors"});
                 desc.algorithm = std::move(algorithm);
@@ -768,7 +863,13 @@ export {
     struct align_stage : stage_base<align_stage<p_kernel, p_alphabet>, alignment_region> {
         static constexpr std::string_view stage_name = "align_stage";
 
-        ::bioseq::simd::minimap2_parameters params;
+        statement_execution_plan_owner execution_plan;
+
+        /// Borrow the sole immutable statement snapshot.
+        [[nodiscard, gnu::always_inline]] const minimap2_parameters&
+        parameters() const noexcept {
+            return execution_plan->frozen_parameters;
+        }
         const scoring_matrix<p_alphabet>* sm;
         const ::bioseq::simd::alignment_kernels<p_alphabet>* alignment_kernels_;
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_;
@@ -776,6 +877,11 @@ export {
         bool enabled;
         match_result_collection* stats_dst_;
         match_result_collection* host_timing_dst_;
+        route_attempt_memory* attempt_memory = nullptr;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        benchmark_e2e_operation_binding benchmark_e2e_operation =
+            current_benchmark_e2e_operation_binding();
+#endif
 
         /// Execute the selected base-alignment kernel and record its statistics.
         template <is_constexpr_aligner_params p_aligner_parameters,
@@ -786,11 +892,89 @@ export {
         emitted_token<p_sink> process_pair(p_region_batch&& regions,
                                            p_anchor_batch&& anchors,
                                            emit_token<p_sink>&& token) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            const benchmark_e2e_operation_scope benchmark_e2e_scope{benchmark_e2e_operation};
+#endif
             if (host_timing_dst_ != nullptr) {
                 host_timing_dst_->transition_region_to_alignment_result_host_stage(
-                    host_stage_now_ns(), enabled);
+                    host_stage_now_ns(), enabled || parameters().compute_mapq);
             }
             if (enabled) {
+                std::optional<route_worker_context_factory> admitted_workers;
+                bioseq::parallelism::worker_context_factory worker_factory{};
+                if (attempt_memory != nullptr) {
+                    if (&context::current() != &attempt_memory->fresh_context) {
+                        throw std::logic_error{
+                            "alignment stage is not installed in its admitted attempt"};
+                    }
+                    const auto& pool = bioseq::parallelism::global_pool::instance();
+                    std::size_t worker_count = alignment_worker_concurrency(
+                        std::span<const alignment_region>{regions.data(), regions.size()},
+                        bioseq::parallelism::has_parallel_tasks(pool.get_mode()) &&
+                            !p_kernel::emits_ksw2_batched_execution_stats,
+                        bioseq::storage::is_worker_shareable(query_seq_) &&
+                            bioseq::storage::is_worker_shareable(target_seq_),
+                        static_cast<std::size_t>(pool.maximum_concurrency()));
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    if (worker_count > 1u) {
+                        auto planning_scope = context::current().push<context::arena::scratch>();
+                        auto workspace_scratch =
+                            context::current().alloc_scratch_array<std::uint64_t>(regions.size());
+                        const block_global_gap_certificate_plan target_geometry =
+                            alignment_kernels_->prepare_block_global_gap_certificate(
+                                *sm,
+                                project_block_aligner_params(
+                                    parameters(), block_alignment_stage::gap_extension));
+                        const auto align_bandwidth = static_cast<std::int32_t>(
+                            parameters().bandwidth * 1.5 + 1.0);
+                        if constexpr (p_kernel::emits_scalar_ksw2_execution_stats) {
+                            worker_count = admitted_alignment_worker_concurrency<
+                                base_alignment_algorithm::ksw2>(
+                                    std::span<const alignment_region>{
+                                        regions.data(), regions.size()},
+                                    std::span<const ::bioseq::chaining::anchor>{
+                                        anchors.data(), anchors.size()},
+                                    query_seq_.bp_size(),
+                                    target_seq_.bp_size(),
+                                    parameters(),
+                                    align_bandwidth,
+                                    target_geometry,
+                                    /*task_parallelism_enabled=*/true,
+                                    /*sequences_worker_shareable=*/true,
+                                    static_cast<std::size_t>(pool.maximum_concurrency()),
+                                    attempt_memory->alignment_workspace_headroom_bytes(),
+                                    workspace_scratch);
+                        } else if constexpr (p_kernel::emits_block_execution_stats) {
+                            worker_count = admitted_alignment_worker_concurrency<
+                                base_alignment_algorithm::block_aligner>(
+                                    std::span<const alignment_region>{
+                                        regions.data(), regions.size()},
+                                    std::span<const ::bioseq::chaining::anchor>{
+                                        anchors.data(), anchors.size()},
+                                    query_seq_.bp_size(),
+                                    target_seq_.bp_size(),
+                                    parameters(),
+                                    align_bandwidth,
+                                    target_geometry,
+                                    /*task_parallelism_enabled=*/true,
+                                    /*sequences_worker_shareable=*/true,
+                                    static_cast<std::size_t>(pool.maximum_concurrency()),
+                                    attempt_memory->alignment_workspace_headroom_bytes(),
+                                    workspace_scratch);
+                        }
+                        if (worker_count == 0u) {
+                            throw std::bad_alloc{};
+                        }
+                    }
+#endif
+                    // A nonzero count with no factory is an explicit serial cap;
+                    // zero remains the ordinary non-campaign "unspecified" value.
+                    worker_factory.maximum_concurrency = worker_count;
+                    if (worker_count > 1u) {
+                        admitted_workers.emplace(worker_count, *attempt_memory);
+                        worker_factory = admitted_workers->borrowed_factory();
+                    }
+                }
                 if constexpr (p_kernel::emits_scalar_ksw2_execution_stats) {
                     if (stats_dst_ == nullptr) {
                         bioseq_log<logging_level::error>(
@@ -805,10 +989,15 @@ export {
                         target_seq_,
                         *sm,
                         *alignment_kernels_,
-                        params,
+                        parameters(),
                         /*forbidden_block_stats=*/nullptr,
-                        &call_stats);
+                        &call_stats,
+                        worker_factory);
                     stats_dst_->record_scalar_pipeline_execution_stats(call_stats);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    stats_dst_->record_completed_base_alignment_algorithm_identity(
+                        base_alignment_algorithm::ksw2);
+#endif
                 } else if constexpr (p_kernel::emits_ksw2_batched_execution_stats) {
                     if (stats_dst_ == nullptr) {
                         bioseq_log<logging_level::error>(
@@ -823,7 +1012,7 @@ export {
                         target_seq_,
                         *sm,
                         *alignment_kernels_,
-                        params,
+                        parameters(),
                         /*forbidden_block_stats=*/nullptr,
                         /*scalar_execution_stats=*/nullptr,
                         &call_stats);
@@ -848,15 +1037,20 @@ export {
                         target_seq_,
                         *sm,
                         *alignment_kernels_,
-                        params,
+                        parameters(),
                         &call_stats,
-                        /*scalar_execution_stats=*/nullptr);
+                        /*scalar_execution_stats=*/nullptr,
+                        worker_factory);
                     if (!call_stats.is_internally_consistent()) {
                         bioseq_log<logging_level::error>(
                             "Block Aligner stage produced a rejected execution stats");
                         std::abort();
                     }
                     stats_dst_->record_block_aligner_execution_stats(call_stats);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                    stats_dst_->record_completed_base_alignment_algorithm_identity(
+                        base_alignment_algorithm::block_aligner);
+#endif
                 } else {
                     p_kernel::template call<p_alphabet>(
                         std::span<alignment_region>{regions.data(), regions.size()},
@@ -865,7 +1059,7 @@ export {
                         target_seq_,
                         *sm,
                         *alignment_kernels_,
-                        params,
+                        parameters(),
                         /*forbidden_block_stats=*/nullptr,
                         /*scalar_execution_stats=*/nullptr);
                 }
@@ -883,7 +1077,7 @@ export {
             if (enabled) {
                 stage_algorithm_description algo;
                 algo.name = std::string{p_kernel::algorithm_label()};
-                p_kernel::populate_runtime_params(params, algo.parameters);
+                p_kernel::populate_runtime_params(parameters(), algo.parameters);
                 algo.computed_properties =
                     p_kernel::template static_properties<p_aligner_parameters>();
                 algo.highway_kernels = detail::stage_highway_kernels<p_kernel>();
@@ -902,8 +1096,19 @@ export {
     struct mapq_stage : stage_base<mapq_stage, alignment_region> {
         static constexpr std::string_view stage_name = "mapq_stage";
 
-        ::bioseq::simd::minimap2_parameters params;
+        statement_execution_plan_owner execution_plan;
+
+        /// Borrow the sole immutable statement snapshot.
+        [[nodiscard, gnu::always_inline]] const minimap2_parameters&
+        parameters() const noexcept {
+            return execution_plan->frozen_parameters;
+        }
         bool enabled;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        match_result_collection* execution_stats_dst_ = nullptr;
+        benchmark_e2e_operation_binding benchmark_e2e_operation =
+            current_benchmark_e2e_operation_binding();
+#endif
 
         /// Compute mapping quality when enabled and emit the region batch.
         template <is_constexpr_aligner_params p_aligner_parameters,
@@ -912,9 +1117,30 @@ export {
         [[gnu::always_inline]]
         emitted_token<p_sink> process(p_region_batch&& regions, emit_token<p_sink>&& token) {
             if (enabled) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                {
+                    // Classification and downstream emission are outside this
+                    // compute_mapping_quality-only interval.
+                    benchmark_e2e_interval_scope benchmark_e2e_mapq_scope{
+                        parameters().downstream_active_wall,
+                        true,
+                        benchmark_e2e_interval_kind::mapq,
+                        benchmark_e2e_interval_algorithm::cpu_mapping_quality,
+                        benchmark_e2e_operation.origin,
+                        benchmark_e2e_operation.is_available};
+                    compute_mapping_quality(
+                        std::span<alignment_region>{regions.data(), regions.size()}, parameters(), 0);
+                }
+#else
                 compute_mapping_quality(
-                    std::span<alignment_region>{regions.data(), regions.size()}, params, 0);
+                    std::span<alignment_region>{regions.data(), regions.size()}, parameters(), 0);
+#endif
             }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            if (execution_stats_dst_ != nullptr) {
+                execution_stats_dst_->record_mapq_execution(enabled);
+            }
+#endif
             return std::move(token).emit_batch(
                 std::span<alignment_region>{regions.data(), regions.size()});
         }
@@ -959,10 +1185,19 @@ export {
         sequence_size_t query_len = 0;
         sequence_size_t target_len = 0;
         match_result_collection* host_timing_dst_ = nullptr;
+        statement_execution_plan_owner execution_plan;
 
         /// Convert regions into final match results and close host timing.
         [[gnu::always_inline]] inline void on_batch(std::span<alignment_region> regions) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            const auto tail_storage_plan = derive_alignment_tail_storage_plan(regions.size());
+            if (!tail_storage_plan) {
+                throw std::length_error{"result region count is not representable"};
+            }
+            dst_->prepare_result_append(tail_storage_plan->result_count);
+#else
             dst_->results.reserve(dst_->results.size() + regions.size());
+#endif
             // `region_slot` is move-consumed into the converted match_result; the
             // slot is left in a valid-but-moved-from state and reclaimed by
             // whichever owner (arena slab or std::vector) holds the span.

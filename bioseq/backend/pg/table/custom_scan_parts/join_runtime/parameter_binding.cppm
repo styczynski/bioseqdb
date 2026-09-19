@@ -30,11 +30,10 @@ import bioseq.postgres.table.scan_state;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences.simd;
 
-import :access_method;
 import :custom_scan_execution_method_contracts;
-import :custom_scan_runtime_support;
-import :custom_scan_join_ownership_carrier_lineage;
-import :custom_scan_join_ownership_sequence_typmod;
+import :custom_scan_scan_runtime_state_contracts;
+import :custom_scan_join_ownership_sequence_typmod_validation_contracts;
+export import :custom_scan_join_runtime_parameter_binding_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -108,12 +107,6 @@ export {
         eval_params_mutator mutator;
         return mutate_pg_expression(node, *econtext, mutator);
     }
-
-    /** @brief Distinguishes a configured query from SQL NULL during parameter rebinding. */
-    enum class mmsearch_parameter_resolution : std::uint8_t {
-        configured,
-        null_value,
-    };
 
     /**
      * @brief Resolves and validates the Param registered as the primary mmsearch query.

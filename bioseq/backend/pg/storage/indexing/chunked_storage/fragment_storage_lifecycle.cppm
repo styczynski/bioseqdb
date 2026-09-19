@@ -29,7 +29,7 @@ export namespace bioseq::storage::indexing {
  * @param[in] required Minimum number of segment entries required.
  * @return `true` when vector capacity and its memory permit cover the request.
  */
-[[nodiscard]] inline bool
+[[nodiscard]] bool
 fragment_index_storage::ensure_segment_run_metadata_capacity_(std::size_t required) {
     const std::uint64_t retained =
         bioseq::common::saturating_mul(static_cast<std::uint64_t>(segment_sorted_runs_.capacity()),
@@ -83,7 +83,7 @@ fragment_index_storage::ensure_segment_run_metadata_capacity_(std::size_t requir
  *
  * @param[in,out] o Handle whose complete state is consumed.
  */
-inline void fragment_index_storage::steal_(fragment_index_storage&& o) noexcept {
+void fragment_index_storage::steal_(fragment_index_storage&& o) noexcept {
     db_oid_ = o.db_oid_;
     tablespace_oid_ = o.tablespace_oid_;
     main_relfilenode_ = o.main_relfilenode_;
@@ -111,6 +111,7 @@ inline void fragment_index_storage::steal_(fragment_index_storage&& o) noexcept 
     sorted_runs_.swap(o.sorted_runs_);
     segment_sorted_runs_.swap(o.segment_sorted_runs_);
     segment_sorted_runs_metadata_permit_ = std::move(o.segment_sorted_runs_metadata_permit_);
+    active_segment_write_buffer_owner_ = o.active_segment_write_buffer_owner_;
     segment_spill_binding_ = o.segment_spill_binding_;
     segment_spill_pg_poisoned_ = o.segment_spill_pg_poisoned_;
 
@@ -143,6 +144,7 @@ inline void fragment_index_storage::steal_(fragment_index_storage&& o) noexcept 
     o.scratch_units_ = 0;
     o.run_buffer_override_bytes_ = 0;
     o.chunk_payload_bytes_.clear();
+    o.active_segment_write_buffer_owner_.reset();
     o.segment_spill_binding_ = {};
     o.segment_spill_pg_poisoned_ = true;
     o.sorted_runs_.reset();
@@ -156,7 +158,7 @@ inline void fragment_index_storage::steal_(fragment_index_storage&& o) noexcept 
  * This invalidates segment replay because logical memory-only runs are not
  * preserved by the release.
  */
-inline void fragment_index_storage::release_resident_runs_noexcept() noexcept {
+void fragment_index_storage::release_resident_runs_noexcept() noexcept {
     if (sorted_runs_.has_value()) {
         sorted_runs_->release_resident_runs_noexcept();
     }
@@ -176,7 +178,7 @@ inline void fragment_index_storage::release_resident_runs_noexcept() noexcept {
  * Destruction requires the owning memory context and run stores to have been
  * discharged by an explicit lifecycle operation.
  */
-inline void fragment_index_storage::release_() noexcept {
+void fragment_index_storage::release_() noexcept {
     DEBUG_ASSERT(own_mctx_ == nullptr,
                  "fragment_index_storage must be close_checked or abandoned before destruction");
     DEBUG_ASSERT(
@@ -198,7 +200,7 @@ inline void fragment_index_storage::release_() noexcept {
  * @brief Raises a PostgreSQL data-corruption error for invalid index state.
  * @param[in] message Bounded diagnostic text copied into the PostgreSQL error.
  */
-[[noreturn]] inline void fragment_index_storage::index_error(std::string_view message) const {
+[[noreturn]] void fragment_index_storage::index_error(std::string_view message) const {
     const char* message_data = message.empty() ? "" : message.data();
     const int message_size = static_cast<int>(
         std::min(message.size(), static_cast<std::size_t>((std::numeric_limits<int>::max)())));
@@ -215,8 +217,8 @@ inline void fragment_index_storage::release_() noexcept {
  * @param[in] p Start of the serialized directory bytes.
  * @param[in] bytes Available byte count.
  */
-inline void fragment_index_storage::validate_minimizer_directory_or_error(const char* p,
-                                                                          std::size_t bytes) const {
+void fragment_index_storage::validate_minimizer_directory_or_error(const char* p,
+                                                                   std::size_t bytes) const {
     if (bytes < 40)
         index_error("directory truncated");
     std::uint32_t magic{};
@@ -234,7 +236,7 @@ inline void fragment_index_storage::validate_minimizer_directory_or_error(const 
  * @param[in] chunk_no Zero-based chunk number.
  * @param[in] min_bytes Required minimum payload size in bytes.
  */
-inline void fragment_index_storage::validate_minimizer_chunk_metadata_or_error(
+void fragment_index_storage::validate_minimizer_chunk_metadata_or_error(
     index_sub_key_t sk,
     std::size_t chunk_no,
     std::size_t min_bytes,
@@ -247,7 +249,7 @@ inline void fragment_index_storage::validate_minimizer_chunk_metadata_or_error(
  * @brief Formats the canonical direct-fragment relation name for this handle.
  * @return Extension-internal relation name derived from the physical identity.
  */
-[[nodiscard]] inline std::string fragment_index_storage::this_table_name() const {
+[[nodiscard]] std::string fragment_index_storage::this_table_name() const {
     return format_seqidx_name(index_name_,
                               db_oid_,
                               tablespace_oid_,
@@ -263,7 +265,7 @@ inline void fragment_index_storage::validate_minimizer_chunk_metadata_or_error(
  * The operation invalidates decoded-buffer identity and broadcasts the full
  * physical index key to the shared residency owner.
  */
-inline void fragment_index_storage::evict_generation_storage_residency_() {
+void fragment_index_storage::evict_generation_storage_residency_() {
     chunk_cache_.clear();
     chunk_cache_bytes_ = 0;
     chunk_cache_clock_ = 0;
@@ -280,7 +282,7 @@ inline void fragment_index_storage::evict_generation_storage_residency_() {
 }
 
 /// @brief Returns the immutable spill-storage binding selected for this handle.
-[[nodiscard]] inline direct_minimizer_spill_storage_binding
+[[nodiscard]] direct_minimizer_spill_storage_binding
 fragment_index_storage::segment_spill_storage_binding() const noexcept {
     return segment_spill_binding_;
 }

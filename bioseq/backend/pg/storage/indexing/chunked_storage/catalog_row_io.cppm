@@ -3,17 +3,34 @@
  * @brief Defines immutable generation-row formation, deformation, projection, and authentication.
  */
 module;
-#include <bioseq/pg_compat.h>
+
 extern "C" {
+#include "postgres.h"
+
+#include "access/genam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "access/transam.h"
 #include "executor/tuptable.h"
+#include "storage/bufpage.h"
 #include "storage/procarray.h"
 #include "utils/builtins.h"
+#include "utils/errcodes.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
+#include "varatt.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:catalog_row_io;
+
 import std;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
 import bioseq.postgres.support.datums;

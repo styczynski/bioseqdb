@@ -4,11 +4,22 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+extern "C" {
+#include "postgres.h"
+#include "utils/snapshot.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 
 export module bioseq.postgres.storage.scanner.lazy_binding_contract;
 
-import std;
 import bioseq.postgres.storage.manager;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;

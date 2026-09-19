@@ -5,27 +5,10 @@
 module;
 
 #include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <iterator>
-#include <libassert/assert.hpp>
-#include <limits>
-#include <memory>
 #include <new>
-#include <optional>
 #include <span>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
 export module bioseq.indexing.minimizer_sequence:read_assembly_query_assembly;
 

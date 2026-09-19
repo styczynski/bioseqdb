@@ -26,14 +26,20 @@ export module bioseq.postgres.table:custom_scan_join_plan_plan_construction;
 import std;
 import bioseq.postgres.support;
 import bioseq.indexing.type;
-import :custom_scan_support;
-import :custom_scan_join_ownership_carrier_lineage;
-import :custom_scan_join_ownership_sequence_typmod;
-import :custom_scan_join_ownership_semantic_admission;
-import :custom_scan_join_ownership_descendant_neutralization;
-import :custom_scan_join_plan_placeholder_lineage;
-import :custom_scan_join_plan_setrefs_rewrite;
-import :custom_scan_scan_plan;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
+import :custom_scan_oid_expression_support_expression_analysis_contracts;
+import :custom_scan_oid_expression_support_edit_sequence_recipe_contracts;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_join_ownership_descendant_path_contracts;
+import :custom_scan_join_ownership_descendant_neutralization_contracts;
+import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_join_ownership_sequence_typmod_contract;
+import :custom_scan_join_ownership_semantic_admission_contracts;
+import :custom_scan_join_plan_placeholder_registration_contracts;
+import :custom_scan_join_plan_setrefs_contracts;
+import :custom_scan_match_finalization_contracts;
+export import :custom_scan_join_plan_plan_construction_contracts;
 
 using namespace bioseq::postgres::support;
 

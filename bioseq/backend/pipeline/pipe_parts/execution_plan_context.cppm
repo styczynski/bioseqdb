@@ -59,6 +59,508 @@ export {
 
     namespace bioseq::simd::pipe {
 
+    /// Independent selected seed and chain locations for one executor request.
+    enum class seed_chain_route : std::uint8_t {
+        host_seed_host_chain,
+        host_seed_vulkan_chain,
+        vulkan_seed_host_chain,
+        vulkan_seed_vulkan_chain,
+    };
+
+    /// Classify the two selectors without requiring an all-GPU biological tail.
+    [[nodiscard]] inline seed_chain_route classify_seed_chain_route(
+        const minimap2_parameters& params) {
+        bool device_seed = false;
+        switch (params.minimizer_algorithm) {
+        case minimizer_algorithm::scalar:
+        case minimizer_algorithm::simd_minimap2_reference:
+        case minimizer_algorithm::two_stack_nthash:
+        case minimizer_algorithm::bounded_nthash_simd:
+            break;
+        case minimizer_algorithm::vulkan_minimap_integer:
+            device_seed = true;
+            break;
+        default:
+            throw std::invalid_argument("statement plan has an unknown minimizer algorithm");
+        }
+        bool device_chain = false;
+        switch (params.chaining_algorithm) {
+        case chaining_algorithm::scalar_minimap2:
+        case chaining_algorithm::simd_minimap2:
+        case chaining_algorithm::range_minimum_query:
+            break;
+        case chaining_algorithm::vulkan_tiled_dynamic_programming:
+            device_chain = true;
+            break;
+        default:
+            throw std::invalid_argument("statement plan has an unknown chaining algorithm");
+        }
+        return device_seed
+            ? (device_chain ? seed_chain_route::vulkan_seed_vulkan_chain
+                            : seed_chain_route::vulkan_seed_host_chain)
+            : (device_chain ? seed_chain_route::host_seed_vulkan_chain
+                            : seed_chain_route::host_seed_host_chain);
+    }
+
+    /// The sole immutable executor snapshot, shared across retaining boundaries.
+    struct statement_execution_plan final {
+        const minimap2_parameters frozen_parameters;
+        const seed_chain_route route;
+
+        /// Project the already-classified route without consulting selectors again.
+        [[nodiscard]] bool uses_vulkan_seed() const {
+            switch (route) {
+            case seed_chain_route::host_seed_host_chain:
+            case seed_chain_route::host_seed_vulkan_chain:
+                return false;
+            case seed_chain_route::vulkan_seed_host_chain:
+            case seed_chain_route::vulkan_seed_vulkan_chain:
+                return true;
+            }
+            throw std::logic_error{"statement plan contains an invalid seed/chain route"};
+        }
+    };
+
+    using statement_execution_plan_owner = std::shared_ptr<const statement_execution_plan>;
+
+    /// Validate and classify before allocating the one shared statement owner.
+    [[nodiscard]] inline statement_execution_plan_owner make_statement_execution_plan(
+        minimap2_parameters frozen_parameters) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (frozen_parameters.prefilter_enabled ||
+            frozen_parameters.base_alignment_algorithm == base_alignment_algorithm::ksw2_batched) {
+            throw std::invalid_argument(
+                "E2E execution excludes prefilter and legacy batched alignment");
+        }
+#endif
+        if (frozen_parameters.kmer_size <= 0 || frozen_parameters.window_size <= 0) {
+            throw std::invalid_argument("statement plan requires positive minimizer k and w");
+        }
+        switch (frozen_parameters.base_alignment_algorithm) {
+        case base_alignment_algorithm::ksw2:
+        case base_alignment_algorithm::block_aligner:
+        case base_alignment_algorithm::ksw2_batched:
+            // The campaign excludes the legacy batched choice in its config;
+            // the statement owner does not narrow the ordinary public API.
+            break;
+        default:
+            throw std::invalid_argument("statement plan has an unknown alignment algorithm");
+        }
+        const auto route = classify_seed_chain_route(frozen_parameters);
+        switch (route) {
+        case seed_chain_route::host_seed_host_chain:
+            break;
+        case seed_chain_route::host_seed_vulkan_chain:
+            if (!frozen_parameters.vulkan_enabled) {
+                throw std::invalid_argument{"selected Vulkan chaining is disabled"};
+            }
+            break;
+        case seed_chain_route::vulkan_seed_host_chain:
+        case seed_chain_route::vulkan_seed_vulkan_chain:
+            if (!frozen_parameters.vulkan_enabled ||
+                !frozen_parameters.vulkan_seed_hits_enabled) {
+                throw std::invalid_argument{"selected Vulkan seeding is disabled"};
+            }
+            break;
+        }
+        if (frozen_parameters.highway_kernels == nullptr) {
+            // Runtime-core modules are shared by PostgreSQL and standalone
+            // consumers. Bind the exact target at their respective boundary;
+            // a core compile definition cannot identify the eventual caller.
+            throw std::invalid_argument{
+                "statement plan requires an explicit Highway binding"};
+        }
+        const auto owner = std::make_shared<const statement_execution_plan>(
+            std::move(frozen_parameters), route);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (owner->frozen_parameters.downstream_active_wall != nullptr &&
+            !owner->frozen_parameters.downstream_active_wall
+                 ->bind_benchmark_e2e_statement_owner(owner)) {
+            throw std::logic_error{"E2E observation tracker belongs to a different statement owner"};
+        }
+#endif
+        return owner;
+    }
+
+    /**
+     * @brief Owns physical context admission for one fresh route attempt.
+     *
+     * Declaration order is the lifetime contract: the context and all of its
+     * backing storage are destroyed before the aggregate permit is released.
+     * This owner deliberately contains no route or statement-plan state.
+     */
+    struct route_attempt_memory final {
+        bioseq::parallelism::operation_memory_retention retention{};
+
+    private:
+        friend class route_worker_context_factory;
+        bioseq::parallelism::memory_admission_controller* admission_ = nullptr;
+        bioseq::parallelism::memory_footprint_probe footprint_probe_ = nullptr;
+
+    public:
+        ::context::context fresh_context;
+
+    private:
+        /** @brief Reconciles one still-local permit inside materialization. */
+        [[nodiscard]] static bool reconcile_permit(
+            void* opaque_permit,
+            std::uint64_t actual_bytes) noexcept {
+            auto& permit = *static_cast<bioseq::parallelism::memory_permit*>(
+                opaque_permit);
+            if (!permit.grow_to(actual_bytes)) {
+                return false;
+            }
+            permit.shrink_to(actual_bytes);
+            return permit.bytes() == actual_bytes;
+        }
+
+        /** @brief Executes the concrete transaction behind the context hook. */
+        [[nodiscard]] static ::context::backing_allocation_authority
+        materialize_context_allocation(
+            void* opaque_attempt,
+            std::uint64_t requested_bytes,
+            ::context::backing_allocation_lifetime lifetime,
+            void* operation_state,
+            ::context::backing_allocation_materializer materializer,
+            ::context::backing_allocation_cleanup cleanup) {
+            auto& attempt = *static_cast<route_attempt_memory*>(opaque_attempt);
+            if (requested_bytes == 0u || materializer == nullptr || cleanup == nullptr
+                || attempt.admission_ == nullptr) {
+                throw std::invalid_argument{
+                    "context allocation hook received an invalid transaction"};
+            }
+
+            auto permit = attempt.admission_->try_reserve(requested_bytes);
+            if (!permit.has_value()) {
+                throw std::bad_alloc{};
+            }
+
+            try {
+                ::context::backing_allocation_materialization allocation{};
+                ::context::backing_allocation_authority authority{};
+                (void)attempt.admission_->materialize(
+                    *permit,
+                    [&allocation,
+                     &permit,
+                     operation_state,
+                     materializer]()
+                        -> bioseq::parallelism::memory_materialization_snapshot {
+                        const ::context::backing_allocation_reconciliation reconciliation{
+                            .state = std::addressof(*permit),
+                            .reconcile = &route_attempt_memory::reconcile_permit,
+                        };
+                        allocation = materializer(operation_state, reconciliation);
+                        if (allocation.actual_allocation_bytes != permit->bytes()) {
+                            bioseq_log<logging_level::debug>(
+                                "context allocation failed exact permit reconciliation");
+                            std::abort();
+                        }
+                        return {
+                            .actual_allocation_bytes = allocation.actual_allocation_bytes,
+                            .fully_touched_bytes = allocation.fully_touched_bytes,
+                            .is_host_visible = allocation.is_host_visible,
+                            .is_host_coherent = allocation.is_host_coherent,
+                            .is_process_footprint_reflected =
+                                allocation.is_process_footprint_reflected,
+                        };
+                    },
+                    attempt.footprint_probe_);
+
+                if (lifetime == ::context::backing_allocation_lifetime::context) {
+                    if (allocation.primary_owner_bytes != 0u
+                        || allocation.replacement_owner_bytes != 0u) {
+                        bioseq_log<logging_level::debug>(
+                            "context-lifetime allocation exposed adjacent ownership");
+                        std::abort();
+                    }
+                    if (*permit
+                        && !attempt.retention.retain_context_block(std::move(*permit))) {
+                        throw std::logic_error{
+                            "context backing permit could not enter attempt retention"};
+                    }
+                    return authority;
+                }
+
+                if (allocation.primary_owner_bytes == 0u
+                    || allocation.replacement_owner_bytes
+                        > (std::numeric_limits<std::uint64_t>::max)()
+                            - allocation.primary_owner_bytes
+                    || allocation.primary_owner_bytes
+                            + allocation.replacement_owner_bytes
+                        != allocation.actual_allocation_bytes) {
+                    bioseq_log<logging_level::debug>(
+                        "adjacent context allocation exposed invalid ownership geometry");
+                    std::abort();
+                }
+                if (!*permit) {
+                    return authority;
+                }
+
+                if (allocation.replacement_owner_bytes == 0u) {
+                    authority.primary.emplace(std::move(*permit));
+                    return authority;
+                }
+                auto primary_permit = permit->split_off(
+                    allocation.primary_owner_bytes);
+                if (!primary_permit) {
+                    bioseq_log<logging_level::debug>(
+                        "adjacent context allocation permit split failed");
+                    std::abort();
+                }
+                authority.primary.emplace(std::move(primary_permit));
+                authority.replacement.emplace(std::move(*permit));
+                return authority;
+            } catch (...) {
+                cleanup(operation_state);
+                throw;
+            }
+        }
+
+    public:
+
+        /**
+         * @brief Installs admission before the context's five initial blocks.
+         * @param admission Controller serializing physical materialization.
+         * @param configuration Initial arena geometry.
+         * @param footprint_probe Process-footprint observation function.
+         */
+        explicit route_attempt_memory(
+            bioseq::parallelism::memory_admission_controller& admission =
+                bioseq::parallelism::memory_admission_controller::instance(),
+            const ::context::context::arena_configuration& configuration = {},
+            bioseq::parallelism::memory_footprint_probe footprint_probe =
+                bioseq::parallelism::live_process_footprint_probe)
+            : admission_(std::addressof(admission))
+            , footprint_probe_(footprint_probe)
+            , fresh_context(
+                  configuration,
+                  ::context::backing_allocation_hook{
+                      .state = this,
+                      .transaction =
+                          &route_attempt_memory::materialize_context_allocation,
+                  })
+        {}
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        /**
+         * @brief Return current controller headroom for a logical concurrency bound.
+         *
+         * This is deliberately read-only: selected alignment workspace remains
+         * context-backed and is charged only when the allocator materializes an
+         * actual block through this attempt's installed hook.
+         */
+        [[nodiscard]] std::uint64_t alignment_workspace_headroom_bytes() const noexcept {
+            return admission_->allocatable_after_reservations();
+        }
+#endif
+
+        /**
+         * Admit the physical job-vector allocation beside its canonical batch.
+         * The caller declares the permit before that batch so storage dies first.
+         * Logical anchor-slab growth is deliberately not part of this transaction.
+         */
+        void prepare_seed_job_storage(
+            std::vector<canonical_seed_job_span>& destination,
+            bioseq::parallelism::memory_permit& adjacent_permit,
+            std::size_t count) {
+            if (destination.capacity() != 0u || adjacent_permit || count == 0u ||
+                count > (std::numeric_limits<std::size_t>::max)() /
+                            sizeof(canonical_seed_job_span) ||
+                count > (std::numeric_limits<std::uint64_t>::max)() /
+                            sizeof(canonical_seed_job_span)) {
+                throw std::invalid_argument{"canonical seed job storage is not fresh or addressable"};
+            }
+            const auto requested_bytes = static_cast<std::uint64_t>(count) *
+                                         sizeof(canonical_seed_job_span);
+            const auto preallocation_bound = bioseq::common::checked_mul(
+                requested_bytes, bioseq::parallelism::k_vector_preallocation_headroom_factor);
+            if (!preallocation_bound) {
+                throw std::length_error{"canonical seed job preallocation bound overflowed"};
+            }
+            auto pending_permit = admission_->try_reserve(*preallocation_bound);
+            if (!pending_permit) {
+                throw std::bad_alloc{};
+            }
+            // This declaration order also covers allocation/reconciliation exceptions.
+            std::vector<canonical_seed_job_span> pending_storage;
+            const auto materialization = admission_->materialize(
+                *pending_permit,
+                [&pending_permit, &pending_storage, count]()
+                    -> bioseq::parallelism::memory_materialization_snapshot {
+                    pending_storage.reserve(count);
+                    if (pending_storage.capacity() >
+                        (std::numeric_limits<std::uint64_t>::max)() /
+                            sizeof(canonical_seed_job_span)) {
+                        throw std::length_error{"canonical seed job capacity overflowed"};
+                    }
+                    const auto actual_bytes =
+                        static_cast<std::uint64_t>(pending_storage.capacity()) *
+                        sizeof(canonical_seed_job_span);
+                    if (actual_bytes > pending_permit->bytes()) {
+                        throw std::length_error{"canonical seed job capacity exceeded admission"};
+                    }
+                    pending_permit->shrink_to(actual_bytes);
+                    if (pending_permit->bytes() != actual_bytes) {
+                        throw std::logic_error{"canonical seed job capacity did not reconcile"};
+                    }
+                    pending_storage.resize(pending_storage.capacity());
+                    std::memset(pending_storage.data(), 0,
+                                static_cast<std::size_t>(actual_bytes));
+                    pending_storage.clear();
+                    return {
+                        .actual_allocation_bytes = actual_bytes,
+                        .fully_touched_bytes = actual_bytes,
+                        .is_host_visible = true,
+                        .is_host_coherent = true,
+                        .is_process_footprint_reflected = true,
+                    };
+                },
+                footprint_probe_);
+            const auto exact_bytes = static_cast<std::uint64_t>(pending_storage.capacity()) *
+                                     sizeof(canonical_seed_job_span);
+            if (materialization.allocation_snapshot.actual_allocation_bytes != exact_bytes ||
+                materialization.allocation_snapshot.fully_touched_bytes != exact_bytes ||
+                materialization.admitted_bytes != exact_bytes ||
+                materialization.is_permit_released == static_cast<bool>(*pending_permit) ||
+                (*pending_permit && pending_permit->bytes() != exact_bytes)) {
+                throw std::logic_error{"canonical seed job materialization proof is inconsistent"};
+            }
+            destination = std::move(pending_storage);
+            adjacent_permit = std::move(*pending_permit);
+        }
+
+        route_attempt_memory(const route_attempt_memory&) = delete;
+        route_attempt_memory& operator=(const route_attempt_memory&) = delete;
+        route_attempt_memory(route_attempt_memory&&) = delete;
+        route_attempt_memory& operator=(route_attempt_memory&&) = delete;
+    };
+
+    /**
+     * @brief Address-stable, independently admitted worker contexts for one joined call.
+     *
+     * Each live slot contains its own route_attempt_memory, whose aggregate
+     * retention precedes its context. No worker mutates another worker's permits.
+     * Slots are claimed by the pool's ETS once per participating worker and are
+     * destroyed only after that synchronous pool call has joined or thrown.
+     */
+    class route_worker_context_factory final {
+        struct slot_storage {
+            alignas(route_attempt_memory) std::array<std::byte,
+                sizeof(route_attempt_memory)> bytes{};
+            bool constructed = false;
+
+            [[nodiscard]] route_attempt_memory* live_owner() noexcept {
+                return std::launder(reinterpret_cast<route_attempt_memory*>(bytes.data()));
+            }
+        };
+        static_assert(std::is_trivially_copyable_v<slot_storage>);
+
+        bioseq::parallelism::memory_permit slots_permit_;
+        std::vector<slot_storage> slots_;
+        std::atomic<std::size_t> next_slot_{0u};
+        bioseq::parallelism::memory_admission_controller* admission_;
+        ::context::context::arena_configuration configuration_;
+        bioseq::parallelism::memory_footprint_probe footprint_probe_;
+
+        static ::context::context& acquire_worker(void* opaque) {
+            auto& factory = *static_cast<route_worker_context_factory*>(opaque);
+            const auto index = factory.next_slot_.fetch_add(1u, std::memory_order_relaxed);
+            if (index >= factory.slots_.size()) {
+                throw std::length_error{"admitted worker-context slots exhausted"};
+            }
+            auto& slot = factory.slots_[index];
+            auto* owner = std::construct_at(
+                reinterpret_cast<route_attempt_memory*>(slot.bytes.data()),
+                *factory.admission_, factory.configuration_, factory.footprint_probe_);
+            slot.constructed = true;
+            return owner->fresh_context;
+        }
+
+    public:
+        explicit route_worker_context_factory(
+            std::size_t maximum_concurrency,
+            bioseq::parallelism::memory_admission_controller& admission =
+                bioseq::parallelism::memory_admission_controller::instance(),
+            const ::context::context::arena_configuration& configuration = {},
+            bioseq::parallelism::memory_footprint_probe footprint_probe =
+                bioseq::parallelism::live_process_footprint_probe)
+            : admission_(std::addressof(admission)), configuration_(configuration),
+              footprint_probe_(footprint_probe) {
+            if (maximum_concurrency == 0u || maximum_concurrency > slots_.max_size() ||
+                maximum_concurrency > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
+                throw std::invalid_argument{"worker-context capacity is not bounded"};
+            }
+            const auto logical_bytes = bioseq::common::checked_mul(
+                static_cast<std::uint64_t>(maximum_concurrency), sizeof(slot_storage));
+            const auto bound = logical_bytes ? bioseq::common::checked_mul(*logical_bytes,
+                bioseq::parallelism::k_vector_preallocation_headroom_factor)
+                : std::optional<std::uint64_t>{};
+            if (!bound) {
+                throw std::length_error{"worker-context storage bound overflowed"};
+            }
+            auto pending_permit = admission.try_reserve(*bound);
+            if (!pending_permit) {
+                throw std::bad_alloc{};
+            }
+            std::vector<slot_storage> pending_slots;
+            const auto materialization = admission.materialize(*pending_permit,
+                [&pending_slots, &pending_permit, maximum_concurrency]() {
+                    pending_slots.reserve(maximum_concurrency);
+                    const auto bytes = bioseq::common::checked_mul(
+                        static_cast<std::uint64_t>(pending_slots.capacity()), sizeof(slot_storage));
+                    if (!bytes || *bytes > pending_permit->bytes()) {
+                        throw std::length_error{"worker-context capacity exceeded admission"};
+                    }
+                    pending_permit->shrink_to(*bytes);
+                    pending_slots.resize(pending_slots.capacity());
+                    std::memset(pending_slots.data(), 0, static_cast<std::size_t>(*bytes));
+                    pending_slots.resize(maximum_concurrency);
+                    return bioseq::parallelism::memory_materialization_snapshot{
+                        .actual_allocation_bytes = *bytes, .fully_touched_bytes = *bytes,
+                        .is_host_visible = true, .is_host_coherent = true,
+                        .is_process_footprint_reflected = true,
+                    };
+                }, footprint_probe_);
+            const auto actual = static_cast<std::uint64_t>(pending_slots.capacity()) *
+                                sizeof(slot_storage);
+            if (materialization.allocation_snapshot.actual_allocation_bytes != actual ||
+                materialization.allocation_snapshot.fully_touched_bytes != actual ||
+                materialization.admitted_bytes != actual ||
+                materialization.is_permit_released == static_cast<bool>(*pending_permit) ||
+                (*pending_permit && pending_permit->bytes() != actual)) {
+                throw std::logic_error{"worker-context materialization proof is inconsistent"};
+            }
+            slots_.swap(pending_slots);
+            slots_permit_ = std::move(*pending_permit);
+        }
+
+        /// Inherit the parent's controller and footprint probe, not its mutable context.
+        route_worker_context_factory(
+            std::size_t maximum_concurrency,
+            route_attempt_memory& parent,
+            const ::context::context::arena_configuration& configuration = {})
+            : route_worker_context_factory(maximum_concurrency, *parent.admission_,
+                                           configuration, parent.footprint_probe_) {}
+
+        ~route_worker_context_factory() {
+            for (auto& slot : slots_) {
+                if (slot.constructed) {
+                    std::destroy_at(slot.live_owner());
+                    slot.constructed = false;
+                }
+            }
+        }
+        route_worker_context_factory(const route_worker_context_factory&) = delete;
+        route_worker_context_factory& operator=(const route_worker_context_factory&) = delete;
+        route_worker_context_factory(route_worker_context_factory&&) = delete;
+        route_worker_context_factory& operator=(route_worker_context_factory&&) = delete;
+
+        [[nodiscard]] bioseq::parallelism::worker_context_factory borrowed_factory() noexcept {
+            return {.state = this, .maximum_concurrency = slots_.size(),
+                    .acquire = &route_worker_context_factory::acquire_worker};
+        }
+    };
+
     enum class source_direct_host_authorization : std::uint8_t {
         none,
         canonical_empty,
