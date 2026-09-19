@@ -84,6 +84,7 @@ enum class sealed_shader_cache_artifact_kind : std::uint32_t {
     shader_metallib = 2,                  ///< Compiled Metal library.
     metal_binary_archive = 3,             ///< Metal binary archive.
     metal_binary_archive_qualification = 4, ///< Archive qualification receipt.
+    moltenvk_command_library = 5,         ///< Exact source/options/metallib/provenance bundle.
 };
 
 /// @brief Manifest descriptor for one sealed shader-cache artifact.
@@ -383,6 +384,14 @@ cache_binary_archive_paths(const std::filesystem::path& cache_dir, const shader_
                                      std::to_string(k_conservative_moltenvk_cap) + ".metalar"));
     }
     return paths;
+}
+
+/// @brief Resolves the immutable MoltenVK command-library bundle path.
+/// @param[in] cache_dir Shader-cache directory.
+/// @return Global command-library artifact path for the seed.
+[[nodiscard]] inline std::filesystem::path
+cache_moltenvk_command_library_path(const std::filesystem::path& cache_dir) {
+    return cache_dir / "moltenvk_command.sealed";
 }
 
 /// @brief Resolves the metadata path for one shader variant.
@@ -742,9 +751,9 @@ cache_metallib_entry_status(const std::filesystem::path& cache_dir, const shader
 namespace sealed_shader_cache_detail {
 
 /// @brief Sealed seed manifest magic.
-inline constexpr std::string_view k_manifest_magic = "BSCSEED3";
+inline constexpr std::string_view k_manifest_magic = "BSCSEED4";
 /// @brief Current sealed seed manifest wire revision.
-inline constexpr std::uint32_t k_manifest_wire_revision = 3u;
+inline constexpr std::uint32_t k_manifest_wire_revision = 4u;
 /// @brief Maximum accepted serialized manifest size.
 inline constexpr std::size_t k_maximum_manifest_bytes = 16u << 20u;
 /// @brief Maximum accepted size of one seed artifact.
@@ -834,7 +843,7 @@ canonical_keys(std::span<const shader_variant_key> requested) {
 expected_artifacts(const std::filesystem::path& cache_dir,
                    std::span<const shader_variant_key> canonical) {
     std::vector<expected_artifact> artifacts;
-    artifacts.reserve(canonical.size() * 6u);
+    artifacts.reserve(3u + canonical.size() * 6u);
     // Adds one artifact using its filename as the manifest path component.
     const auto append = [&artifacts](sealed_shader_cache_artifact_kind kind,
                                      std::uint32_t key_index,
@@ -846,6 +855,9 @@ expected_artifacts(const std::filesystem::path& cache_dir,
             .path = path,
         });
     };
+    append(sealed_shader_cache_artifact_kind::moltenvk_command_library,
+           (std::numeric_limits<std::uint32_t>::max)(),
+           cache_moltenvk_command_library_path(cache_dir));
     for (std::size_t index = 0; index < canonical.size(); ++index) {
         if (index > (std::numeric_limits<std::uint32_t>::max)()) {
             return std::unexpected("sealed shader cache key index overflow");
@@ -1184,7 +1196,7 @@ seed_identity(std::string_view cache_digest,
               std::span<const shader_variant_key> keys,
               std::span<const sealed_shader_cache_artifact> artifacts) {
     sha256_hasher hasher;
-    hasher.update("bioseq-sealed-shader-seed-contract");
+    hasher.update("bioseq-sealed-shader-seed-contract-v4-command-library");
     hasher.update_little_endian(cache_digest.size());
     hasher.update(cache_digest);
     hasher.update_little_endian(keys.size());

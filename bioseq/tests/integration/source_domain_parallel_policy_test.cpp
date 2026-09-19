@@ -407,6 +407,15 @@ TEST_CASE("production source routes never invoke PostgreSQL off backend",
         "       backend_declines::text, backend_fallbacks::text "
         "FROM bioseq.last_alignment_execution_stats() "
         "WHERE stage='query_sketch';");
+    const auto readable_task_evidence = [&task_evidence] {
+        std::vector<std::string> values;
+        values.reserve(task_evidence.size());
+        for (const auto& value : task_evidence) {
+            values.push_back(value.value_or("<null>"));
+        }
+        return values;
+    }();
+    CAPTURE(readable_task_evidence);
     REQUIRE(task_evidence.size() == 16u);
     for (const auto& value : task_evidence) REQUIRE(value.has_value());
     REQUIRE(std::stoll(*task_evidence[0]) >= 2);

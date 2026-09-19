@@ -41,6 +41,7 @@ import bioseq.common.hashing; //  shared SHA-256
 import bioseq.tests.support.indexing_storage_fakes;
 
 import bioseq.tests.unit.indexing.minimizer_hashmap_support;
+import bioseq.tests.unit.indexing.minimizer_hashmap.compact_direct_support;
 
 using namespace seq::literals;
 
@@ -88,7 +89,8 @@ TEST_CASE("packed and wide query occurrences recycle exact capacities",
     };
     std::vector<fragment_seed_query> queries(query_count,
                                              fragment_seed_query{
-                                                 .minimizers = {},
+                                                 .minimizers =
+                                                     std::span<const minimap_sketch_data>{},
                                                  .query_length = query_length,
                                                  .kmer_size = kmer_size,
                                              });
@@ -195,6 +197,9 @@ TEST_CASE("packed and wide query occurrences recycle exact capacities",
             REQUIRE(snapshot.packed_size == minimizers.size());
             REQUIRE(snapshot.wide_size == 0u);
             REQUIRE(snapshot.query_plan_size == exact_unique_hashes.size());
+            REQUIRE(snapshot.query_plan_reserve_request == exact_unique_hashes.size());
+            REQUIRE(batch.stats().peak_query_plan_capacity_bytes ==
+                    static_cast<std::uint64_t>(snapshot.query_plan_capacity) * 16u);
             REQUIRE(snapshot.occurrence_radix_invoked);
             // This receipt records the exact split-route threshold and output
             // parity; it deliberately makes no claim about observed pool workers.

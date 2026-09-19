@@ -4,18 +4,34 @@
  */
 module;
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <expected>
 #include <libassert/assert.hpp>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 export module bioseq.indexing.minimizer_hashmap:fragment_producer;
 
-import std;
 import :exact_simd;
+import bioseq.pipeline.runtime_contract;
 import :grouped_soa;
 import :prepared_reader;
 import :compact_direct;
 import :generation;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
+import bioseq.gpu.vulkan.abi;
+import bioseq.gpu.vulkan.runtime;
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;
@@ -26,6 +42,7 @@ import bioseq.common.checked_arithmetic;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.highway_minimizer_contract;
+import bioseq.sequences.kmers.minimizer_physical_registry;
 import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy_sequence;
@@ -49,9 +66,13 @@ inline void index_corruption_panic(std::string_view msg) {
 /// Caller-owned per-row/per-query assembly scratch. Reused across
 /// segments within one query, destroyed with its IndexReadContext.
 struct minimizer_assembly_scratch {
+    /// Globalized `(hash, encoded_position)` pairs for one assembly result.
     std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
+    /// Deduplicated query kmer hashes used to filter persisted buckets.
     std::vector<std::uint64_t> query_kmers;
+    /// Reusable position buffer passed to `wire_for_each_bucket`.
     std::vector<std::uint64_t> bucket_positions;
+    /// Storage sub keys selected for query-touched bucket loads.
     std::vector<bioseq::indexing::index_sub_key_t> wanted_sub_keys;
     /// Clear state retained only for the current target segment.
     void clear_segment() noexcept {
@@ -69,6 +90,7 @@ struct minimizer_assembly_scratch {
 // ---- shared serialized-index walkers -------------------------------------
 
 /// Walk one persisted wire blob and emit each key/position pair.
+/// Aborts via `index_corruption_panic` when the header, layout, or bucket ranges are invalid.
 /// @tparam p_function Callable accepting `(hash, encoded_position)`.
 template <class p_function>
 void wire_for_each_entry(const char* blob, std::size_t blob_bytes, p_function&& emit) {
@@ -106,7 +128,9 @@ void wire_for_each_entry(const char* blob, std::size_t blob_bytes, p_function&& 
 }
 
 /// Walk one persisted wire blob and emit each complete hash bucket.
-/// The callback receives a pointer into `pos_scratch` that remains valid until the next bucket.
+/// Aborts via `index_corruption_panic` when the header, layout, or bucket ranges are invalid.
+/// The callback receives a pointer into `pos_scratch`, which is resized per bucket and remains
+/// valid only until the next bucket.
 /// @tparam p_function Callable accepting `(hash, position_count, positions)`.
 template <class p_function>
 void wire_for_each_bucket(const char* blob,
@@ -146,7 +170,13 @@ void wire_for_each_bucket(const char* blob,
 }
 
 /// Return the number of whole fragments fitting one GPU window.
-/// The bound covers the run buffer, dispatch geometry, and position field.
+/// The bound is the minimum of fragment count, run-buffer memory, encoded position field,
+/// and dispatch geometry limits.
+///
+/// @param nfrag Total physical fragment count for the target.
+/// @param frag_bp Bytes in one fragment core.
+/// @param halo_bp Aggregate collection halo added around a batch core.
+/// @param run_buffer_bytes GPU run-buffer capacity for one submission.
 [[nodiscard]] inline std::size_t
 gpu_minimizer_fragments_per_batch(std::size_t nfrag,
                                   std::size_t frag_bp,
@@ -174,6 +204,9 @@ gpu_minimizer_fragments_per_batch(std::size_t nfrag,
 
 /// Serialize sorted `(hash, encoded_position)` pairs into one fragment blob.
 /// This function performs no minimizer collection or sorting.
+///
+/// @param target_len Fragment core length stored in the blob header.
+/// @param out_blob Resized to hold the complete wire encoding.
 inline void serialize_sorted_pairs_to_fragment_blob(
     std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted_pairs,
     sequence_size_t target_len,
@@ -235,10 +268,13 @@ class minimizer_fragment_generation_execution_receipt {
   public:
     minimizer_sketch_backend selected_backend = minimizer_sketch_backend::scalar;
     minimizer_scheme_identity minimizer_scheme{};
+    minimizer_generation_algorithm_identity algorithm_identity{};
     std::uint64_t target_length = 0;
     std::uint16_t window_size = 0;
     std::uint16_t kmer_size = 0;
+    /// Total producer scan attempts, including geometry retries.
     std::uint64_t producer_scan_count = 0;
+    /// Extra scans recorded when `persisted_span` changes between replays.
     std::uint64_t geometry_retry_count = 0;
     minimizer_generation_layout generation_layout = minimizer_generation_layout::invalid;
     std::uint64_t short_core_runs = 0;
@@ -248,12 +284,16 @@ class minimizer_fragment_generation_execution_receipt {
     std::uint64_t vulkan_core_runs = 0;
     exact_simd_index_execution_stats exact_simd_stats{};
     bool exact_simd_stats_present = false;
+    reference_simd_index_execution_stats reference_simd_stats{};
+    bool reference_simd_stats_present = false;
     packed_bounded_nthash_index_status packed_bounded_status =
         packed_bounded_nthash_index_status::invalid_state;
     packed_bounded_nthash_index_execution_stats packed_bounded_stats{};
     bool packed_bounded_stats_present = false;
     bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats vulkan_stats{};
+    /// Set when route identity fields were populated from a bound producer.
     bool backend_bound = false;
+    /// Set when a route counter overflowed and the receipt must be rejected.
     bool saturated = false;
 
     /// Return the successful replay count required by the selected layout.
@@ -287,10 +327,22 @@ class minimizer_fragment_generation_execution_receipt {
     /// biological construction operation rather than an encoder replay and
     /// therefore deliberately has no storage-layout/publication binding.
     [[nodiscard]] bool direct_build_accepted() const noexcept {
+        const bool legacy_unbound_build =
+            kmer_size == 15u && window_size == 10u &&
+            !route_snapshot_present_ &&
+            algorithm_identity == minimizer_generation_algorithm_identity{};
+        const bool registered_identity_build =
+            route_snapshot_present_ && route_snapshot_matches_() &&
+            algorithm_identity.runtime_kmer_size == kmer_size &&
+            algorithm_identity.runtime_window_size == window_size &&
+            is_valid_minimizer_generation_algorithm_identity(
+                algorithm_identity,
+                minimizer_producer_backend_identity_for_backend(selected_backend));
         return common_identity_accepted_() && producer_scan_count == 1u &&
                geometry_retry_count == 0u &&
-               generation_layout == minimizer_generation_layout::invalid && window_size == 10u &&
-               kmer_size == 15u && !route_snapshot_present_ && !publication_binding_present_ &&
+               generation_layout == minimizer_generation_layout::invalid &&
+               (legacy_unbound_build || registered_identity_build) &&
+               !publication_binding_present_ &&
                selected_route_accepted_(requires_backend_work_());
     }
 
@@ -306,8 +358,15 @@ class minimizer_fragment_generation_execution_receipt {
   private:
     /// Check stable backend, scheme, target, and parameter identity fields.
     [[nodiscard]] bool common_identity_accepted_() const noexcept {
+        const minimizer_producer_identity producer =
+            minimizer_producer_backend_identity_for_backend(selected_backend);
+        const bool algorithm_identity_accepted =
+            generation_layout == minimizer_generation_layout::invalid ||
+            (is_valid_minimizer_generation_algorithm_identity(algorithm_identity, producer) &&
+             algorithm_identity.runtime_kmer_size == kmer_size &&
+             algorithm_identity.runtime_window_size == window_size);
         return backend_bound && !saturated && target_length != 0u && window_size != 0u &&
-               kmer_size != 0u &&
+               kmer_size != 0u && algorithm_identity_accepted &&
                minimizer_scheme == minimizer_scheme_identity_for_backend(selected_backend);
     }
 
@@ -320,7 +379,8 @@ class minimizer_fragment_generation_execution_receipt {
 
     /// Validate that only the selected backend ran and that its native receipt is consistent.
     [[nodiscard]] bool selected_route_accepted_(bool require_backend_work) const noexcept {
-        const bool no_exact = exact_simd_core_runs == 0 && !exact_simd_stats_present;
+        const bool no_exact = exact_simd_core_runs == 0 && !exact_simd_stats_present &&
+                              !reference_simd_stats_present;
         const bool no_bounded = bounded_nthash_core_runs == 0 && !packed_bounded_stats_present;
         const bool no_vulkan = vulkan_core_runs == 0 && vulkan_stats.completed_roundtrips == 0 &&
                                vulkan_stats.downloaded_minimizers == 0 &&
@@ -332,12 +392,25 @@ class minimizer_fragment_generation_execution_receipt {
                    vulkan_core_runs == 0 && no_exact && no_bounded && no_vulkan &&
                    (!require_backend_work || scalar_core_runs != 0);
         case minimizer_sketch_backend::exact_simd:
-            return scalar_core_runs == 0 && bounded_nthash_core_runs == 0 &&
-                   vulkan_core_runs == 0 && no_bounded && no_vulkan &&
-                   (exact_simd_core_runs == 0
-                        ? (!require_backend_work && !exact_simd_stats_present)
-                        : (exact_simd_stats_present &&
-                           exact_simd_stats.is_internally_consistent(require_backend_work)));
+            if (scalar_core_runs != 0 || bounded_nthash_core_runs != 0 || vulkan_core_runs != 0 ||
+                !no_bounded || !no_vulkan) {
+                return false;
+            }
+            if (exact_simd_core_runs == 0) {
+                return !require_backend_work && !exact_simd_stats_present &&
+                       !reference_simd_stats_present;
+            }
+            if (algorithm_identity.effective_algorithm ==
+                bioseq::simd::minimizer_algorithm::simd_minimap2_reference) {
+                return !exact_simd_stats_present && reference_simd_stats_present &&
+                       reference_simd_stats.is_internally_consistent(
+                           require_backend_work, algorithm_identity.packed_storage_bits / 8u);
+            }
+            return (generation_layout == minimizer_generation_layout::invalid ||
+                    algorithm_identity.effective_algorithm ==
+                        bioseq::simd::minimizer_algorithm::two_stack_nthash) &&
+                   exact_simd_stats_present && !reference_simd_stats_present &&
+                   exact_simd_stats.is_internally_consistent(require_backend_work);
         case minimizer_sketch_backend::bounded_nthash_simd:
             return scalar_core_runs == 0 && exact_simd_core_runs == 0 && vulkan_core_runs == 0 &&
                    no_exact && no_vulkan &&
@@ -363,6 +436,7 @@ class minimizer_fragment_generation_execution_receipt {
     struct route_snapshot {
         minimizer_sketch_backend selected_backend = minimizer_sketch_backend::scalar;
         minimizer_scheme_identity minimizer_scheme{};
+        minimizer_generation_algorithm_identity algorithm_identity{};
         std::uint64_t target_length = 0;
         std::uint16_t window_size = 0;
         std::uint16_t kmer_size = 0;
@@ -376,6 +450,8 @@ class minimizer_fragment_generation_execution_receipt {
         std::uint64_t vulkan_core_runs = 0;
         exact_simd_index_execution_stats exact_simd_stats{};
         bool exact_simd_stats_present = false;
+        reference_simd_index_execution_stats reference_simd_stats{};
+        bool reference_simd_stats_present = false;
         packed_bounded_nthash_index_status packed_bounded_status =
             packed_bounded_nthash_index_status::invalid_state;
         packed_bounded_nthash_index_execution_stats packed_bounded_stats{};
@@ -404,6 +480,7 @@ class minimizer_fragment_generation_execution_receipt {
         route_snapshot_ = route_snapshot{
             .selected_backend = selected_backend,
             .minimizer_scheme = minimizer_scheme,
+            .algorithm_identity = algorithm_identity,
             .target_length = target_length,
             .window_size = window_size,
             .kmer_size = kmer_size,
@@ -417,6 +494,8 @@ class minimizer_fragment_generation_execution_receipt {
             .vulkan_core_runs = vulkan_core_runs,
             .exact_simd_stats = exact_simd_stats,
             .exact_simd_stats_present = exact_simd_stats_present,
+            .reference_simd_stats = reference_simd_stats,
+            .reference_simd_stats_present = reference_simd_stats_present,
             .packed_bounded_status = packed_bounded_status,
             .packed_bounded_stats = packed_bounded_stats,
             .packed_bounded_stats_present = packed_bounded_stats_present,
@@ -431,7 +510,9 @@ class minimizer_fragment_generation_execution_receipt {
     [[nodiscard]] bool route_snapshot_matches_() const noexcept {
         const route_snapshot& value = route_snapshot_;
         return route_snapshot_present_ && selected_backend == value.selected_backend &&
-               minimizer_scheme == value.minimizer_scheme && target_length == value.target_length &&
+               minimizer_scheme == value.minimizer_scheme &&
+               algorithm_identity == value.algorithm_identity &&
+               target_length == value.target_length &&
                window_size == value.window_size && kmer_size == value.kmer_size &&
                producer_scan_count == value.producer_scan_count &&
                geometry_retry_count == value.geometry_retry_count &&
@@ -443,6 +524,8 @@ class minimizer_fragment_generation_execution_receipt {
                vulkan_core_runs == value.vulkan_core_runs &&
                exact_simd_stats == value.exact_simd_stats &&
                exact_simd_stats_present == value.exact_simd_stats_present &&
+               reference_simd_stats == value.reference_simd_stats &&
+               reference_simd_stats_present == value.reference_simd_stats_present &&
                packed_bounded_status == value.packed_bounded_status &&
                packed_bounded_stats == value.packed_bounded_stats &&
                packed_bounded_stats_present == value.packed_bounded_stats_present &&
@@ -464,15 +547,18 @@ class minimizer_fragment_generation_execution_receipt {
             minimizer_scheme.id == generation.manifest.minimizer_scheme_id &&
             minimizer_scheme.revision == generation.manifest.minimizer_scheme_revision &&
             backend.id == generation.manifest.producer_backend_id &&
-            backend.revision == generation.manifest.producer_identity_revision;
+            backend.revision == generation.manifest.producer_identity_revision &&
+            algorithm_identity == generation.manifest.algorithm_identity;
     }
 };
 
 /// Concrete minimizer-fragment producer. Each replay rescans source fragments with
 /// the canonical `w+k-2` halo and emits each physical fragment's independently
 /// ordered index. A multi-run merge route is used only when a caller explicitly
-/// requests a persisted span wider than one
-/// physical fragment. The production minimizer-fragment publisher never does so.
+/// requests a persisted span wider than one physical fragment. The production
+/// Vulkan publisher may collect adjacent persisted segments in one admitted
+/// batch, but retains every segment/physical-fragment intersection and emits
+/// each persisted segment's independently ordered stream.
 ///
 /// @tparam p_alphabet Alphabet carried by the borrowed lazy sequence.
 template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_replay_producer {
@@ -480,12 +566,21 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     using sequence_type = bioseq::storage::lazy_sequence_view<p_alphabet>;
     using traits = typename sequence_type::traits;
 
+    /// Current event ordinal within one independently sorted fragment run.
+    struct cursor {
+        std::size_t run = 0;
+        std::size_t index = 0;
+    };
+
     sequence_type sequence_;
     minimizer_sketch_backend backend_ = minimizer_sketch_backend::scalar;
     const bioseq::minimizers::minimizer_kernels* kernels_ = nullptr;
+    minimizer_generation_algorithm_identity algorithm_identity_{};
     std::uint8_t alphabet_code_ = bioseq::minimizers::k_unbound_packed_alphabet_code;
-    std::uint16_t window_size_ = 10;
-    std::uint16_t kmer_size_ = 15;
+    std::uint16_t window_size_ = 0;
+    std::uint16_t kmer_size_ = 0;
+    std::size_t gpu_run_buffer_bytes_ = 0;
+    cooperative_cancellation_checkpoint cancellation_checkpoint_{};
     std::uint64_t scan_count_ = 0;
     std::uint64_t geometry_retry_count_ = 0;
     minimizer_generation_layout generation_layout_ = minimizer_generation_layout::invalid;
@@ -497,6 +592,8 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     std::uint64_t peak_bounded_materialized_window_bp_ = 0;
     exact_simd_index_execution_stats exact_simd_stats_{};
     bool exact_simd_stats_present_ = false;
+    reference_simd_index_execution_stats reference_simd_stats_{};
+    bool reference_simd_stats_present_ = false;
     packed_bounded_nthash_index_status packed_bounded_status_ =
         packed_bounded_nthash_index_status::invalid_state;
     packed_bounded_nthash_index_execution_stats packed_bounded_stats_{};
@@ -508,6 +605,12 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     std::uint64_t vulkan_core_runs_ = 0;
     bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats vulkan_stats_{};
     bool route_stats_saturated_ = false;
+
+    /// Poll a caller-owned cooperative cancellation source on this synchronous
+    /// producer's coordinator thread.
+    void cancellation_checkpoint() const {
+        cancellation_checkpoint_();
+    }
 
     /// Increment a route counter and latch saturation instead of wrapping.
     void increment_route_counter_(std::uint64_t& counter) noexcept {
@@ -526,7 +629,424 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         packed_bounded_stats_present_ = true;
     }
 
-    /// Collect, globalize, sort, and deduplicate one disjoint fragment core with its halo.
+    /// Sort and deduplicate one independently owned canonical core run.
+    static void canonicalize_core_run_(
+        std::vector<canonical_minimizer_event>& run) {
+        std::ranges::sort(run, {}, [](const canonical_minimizer_event& event) {
+            return std::pair{event.hash, event.encoded_position};
+        });
+        // Minimizer collectors may report one selected occurrence from more
+        // than one adjacent tied window. Persisted occurrence semantics are
+        // canonical `(hash, position, strand)` events for every backend, so
+        // collapse identical reports inside this backend-owned core run after
+        // the mandatory sort. Core ownership is disjoint, therefore a
+        // duplicate cannot legitimately need to survive in another run. The
+        // lower wire encoder remains fail-closed for arbitrary producers that
+        // violate this canonical-stream contract.
+        run.erase(std::ranges::unique(run).begin(), run.end());
+    }
+
+    /// Exact source and emission geometry retained for one independently
+    /// uploaded Vulkan core.
+    struct vulkan_core_geometry {
+        std::uint64_t collect_lo = 0u;
+        std::uint64_t collect_hi = 0u;
+        std::uint64_t emit_base = 0u;
+        std::uint64_t core_lo = 0u;
+        std::uint64_t core_hi = 0u;
+        std::uint64_t output_segment_lo = 0u;
+        std::uint64_t next_core_lo = 0u;
+    };
+
+    /// One non-empty physical-core run and the persisted segment that owns it.
+    struct vulkan_segment_core_run {
+        std::uint64_t output_segment_lo = 0u;
+        std::vector<canonical_minimizer_event> events;
+    };
+
+    /// Emit one persisted segment from its independently canonicalized core runs.
+    /// Empty runs are omitted by every caller before this merge.
+    [[nodiscard]] static std::expected<void, minimizer_generation_encoding_error>
+    emit_sorted_core_runs_(
+        const std::vector<std::vector<canonical_minimizer_event>>& runs,
+        canonical_minimizer_event_receiver& receiver) {
+        if (runs.empty()) {
+            return {};
+        }
+        if (runs.size() == 1u) {
+            for (const canonical_minimizer_event& event : runs.front()) {
+                if (auto accepted = receiver(event); !accepted) {
+                    return accepted;
+                }
+            }
+            return {};
+        }
+
+        // Order the merge heap by hash and encoded position. Keep cursor
+        // storage fixed-size: Clang 22 can miscompile libc++'s append path
+        // for this module-instantiated cursor type by losing the local end
+        // pointer. Standard heap operations over an active prefix preserve
+        // the priority_queue ordering without growing this vector.
+        const auto after = [&runs](const cursor& lhs, const cursor& rhs) {
+            const auto& left = runs[lhs.run][lhs.index];
+            const auto& right = runs[rhs.run][rhs.index];
+            return std::pair{left.hash, left.encoded_position} >
+                   std::pair{right.hash, right.encoded_position};
+        };
+        std::vector<cursor> heap(runs.size());
+        std::size_t active_cursor_count = 0u;
+        for (std::size_t run = 0; run < runs.size(); ++run) {
+            heap[active_cursor_count] = cursor{.run = run, .index = 0};
+            ++active_cursor_count;
+            std::push_heap(heap.begin(), heap.begin() + active_cursor_count, after);
+        }
+        while (active_cursor_count != 0u) {
+            std::pop_heap(heap.begin(), heap.begin() + active_cursor_count, after);
+            cursor& current_cursor = heap[active_cursor_count - 1u];
+            if (auto accepted = receiver(runs[current_cursor.run][current_cursor.index]);
+                !accepted) {
+                return accepted;
+            }
+            ++current_cursor.index;
+            if (current_cursor.index < runs[current_cursor.run].size()) {
+                std::push_heap(heap.begin(), heap.begin() + active_cursor_count, after);
+            } else {
+                --active_cursor_count;
+            }
+        }
+        return {};
+    }
+
+    /**
+     * Collect every physical core in one bounded range through admitted
+     * prepared-upload batches. `output_segment_span` retains every original
+     * persisted-segment boundary even when the range spans adjacent segments;
+     * physical-fragment boundaries remain independent core boundaries too.
+     * Source owners and descriptors remain live until each batch completes;
+     * non-empty runs retain core order and return only after every record slice
+     * is validated, clipped, sorted, and deduplicated.
+     *
+     * @tparam p_minimizer_type Generated physical record selected for the
+     * largest local upload window before any batch allocation or dispatch.
+     * @param segment_lo Inclusive aggregate collection bound.
+     * @param segment_hi Exclusive aggregate collection bound.
+     * @param fragment_bp Physical fragment width used by source ownership.
+     * @param output_segment_span Persisted segment width used for output grouping.
+     * @return Non-empty core runs tagged with their original persisted segment.
+     */
+    template <class p_minimizer_type>
+    [[nodiscard]] std::expected<
+        std::vector<vulkan_segment_core_run>,
+        minimizer_generation_encoding_error>
+    collect_vulkan_segment_runs_(
+        std::uint64_t segment_lo,
+        std::uint64_t segment_hi,
+        std::uint64_t fragment_bp,
+        std::uint64_t output_segment_span) {
+        using minimizer_type = p_minimizer_type;
+        using canonical_window =
+            bioseq::gpu::vulkan::admitted_sequence_detail::canonical_u32_window<
+                p_alphabet>;
+        using canonical_window_batch = bioseq::gpu::vulkan::
+            admitted_sequence_detail::canonical_u32_window_batch<p_alphabet>;
+        using upload_instance =
+            bioseq::gpu::vulkan::admitted_sequence_detail::borrowed_u32_instance<
+                p_alphabet>;
+        using upload_range = compact_sequence_range<upload_instance>;
+
+        const std::uint64_t target_length = sequence_.bp_size();
+        const std::uint64_t halo =
+            static_cast<std::uint64_t>(window_size_) + kmer_size_ - 2u;
+        const std::uint64_t minimum_bases =
+            static_cast<std::uint64_t>(window_size_) + kmer_size_ - 1u;
+        const bioseq::gpu::vulkan::vulkan_rank_lut rank_lut =
+            bioseq::gpu::vulkan::make_vulkan_rank_lut<upload_range>();
+        if (fragment_bp == 0u || output_segment_span == 0u
+            || segment_lo > segment_hi || segment_hi > target_length) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::arithmetic_overflow);
+        }
+        std::vector<vulkan_segment_core_run> completed_runs;
+        std::optional<canonical_window> pending_owner;
+        std::optional<vulkan_core_geometry> pending_geometry;
+        std::uint64_t core_cursor = segment_lo;
+
+        const auto geometry_for_core = [=](std::uint64_t core_lo)
+            -> std::expected<vulkan_core_geometry,
+                             minimizer_generation_encoding_error> {
+            if (core_lo >= segment_hi || core_lo >= target_length) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::arithmetic_overflow);
+            }
+            const std::uint64_t fragment_lo =
+                (core_lo / fragment_bp) * fragment_bp;
+            const std::uint64_t fragment_hi = std::min(
+                target_length,
+                bioseq::common::saturating_add(fragment_lo, fragment_bp));
+            const std::uint64_t output_segment_lo =
+                (core_lo / output_segment_span) * output_segment_span;
+            const std::uint64_t output_segment_hi = std::min(
+                target_length,
+                bioseq::common::saturating_add(output_segment_lo,
+                                                output_segment_span));
+            const std::uint64_t core_hi =
+                std::min({segment_hi, fragment_hi, output_segment_hi});
+            if (core_hi <= core_lo) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::arithmetic_overflow);
+            }
+            const std::uint64_t collect_lo =
+                core_lo >= halo ? core_lo - halo : 0u;
+            const std::uint64_t collect_hi =
+                core_hi > target_length - std::min(target_length, halo)
+                    ? target_length
+                    : core_hi + halo;
+            return vulkan_core_geometry{
+                .collect_lo = collect_lo,
+                .collect_hi = collect_hi,
+                .emit_base = collect_lo,
+                .core_lo = core_lo,
+                .core_hi = core_hi,
+                .output_segment_lo = output_segment_lo,
+                .next_core_lo = core_hi,
+            };
+        };
+
+        while (core_cursor < segment_hi) {
+            auto plan = bioseq::gpu::vulkan::
+                make_minimap_sketch_data_vulkan_upload_batch_admission_plan<
+                    minimizer_type>(
+                        rank_lut,
+                        window_size_,
+                        kmer_size_,
+                        bioseq::gpu::vulkan::vulkan_sketch_host_materialization::
+                            host_and_device);
+            if (!plan) {
+                pending_owner.reset();
+                pending_geometry.reset();
+                auto geometry = geometry_for_core(core_cursor);
+                if (!geometry) {
+                    return std::unexpected(geometry.error());
+                }
+                auto run = collect_core_run(geometry->core_lo, geometry->core_hi);
+                if (!run) {
+                    return std::unexpected(run.error());
+                }
+                if (!run->empty()) {
+                    completed_runs.push_back(vulkan_segment_core_run{
+                        .output_segment_lo = geometry->output_segment_lo,
+                        .events = std::move(*run),
+                    });
+                }
+                core_cursor = geometry->next_core_lo;
+                continue;
+            }
+
+            canonical_window_batch source_owners;
+            bioseq::gpu::vulkan::sequence_upload_batch upload_batch;
+            std::vector<vulkan_core_geometry> geometries;
+            std::uint64_t candidate_core_lo = core_cursor;
+
+            while (candidate_core_lo < segment_hi) {
+                vulkan_core_geometry geometry{};
+                std::optional<canonical_window> candidate_owner;
+                if (pending_owner) {
+                    if (!pending_geometry) {
+                        throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                            "Vulkan fragment batch retained an owner without geometry"};
+                    }
+                    geometry = *pending_geometry;
+                    if (geometry.core_lo != candidate_core_lo) {
+                        throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                            "Vulkan fragment batch retained non-contiguous geometry"};
+                    }
+                    candidate_owner.emplace(std::move(*pending_owner));
+                    pending_owner.reset();
+                    pending_geometry.reset();
+                } else {
+                    auto next_geometry = geometry_for_core(candidate_core_lo);
+                    if (!next_geometry) {
+                        return std::unexpected(next_geometry.error());
+                    }
+                    geometry = *next_geometry;
+                    if (geometry.collect_hi <= geometry.collect_lo
+                        || geometry.collect_hi - geometry.collect_lo
+                            < minimum_bases) {
+                        break;
+                    }
+                    bioseq::gpu::vulkan::vulkan_sketch_decline decline{
+                        .bp_size = geometry.collect_hi - geometry.collect_lo,
+                        .window_size = window_size_,
+                        .kmer_size = kmer_size_,
+                    };
+                    auto window = bioseq::gpu::vulkan::admitted_sequence_detail::
+                        prepare_canonical_u32_window(
+                            sequence_,
+                            static_cast<sequence_size_t>(geometry.collect_lo),
+                            static_cast<sequence_size_t>(geometry.collect_hi),
+                            &decline);
+                    if (!window) {
+                        break;
+                    }
+                    candidate_owner.emplace(std::move(*window));
+                }
+
+                auto upload = bioseq::gpu::vulkan::admitted_sequence_detail::
+                    with_canonical_u32_upload_source<p_alphabet>(
+                        *candidate_owner,
+                        []<class p_range>(p_range& resident) {
+                            return bioseq::gpu::vulkan::make_sequence_upload_view(
+                                resident);
+                        });
+                if (!bioseq::gpu::vulkan::
+                        try_append_minimap_sketch_data_vulkan_upload(
+                            *plan, upload)) {
+                    pending_owner.emplace(std::move(*candidate_owner));
+                    pending_geometry = geometry;
+                    break;
+                }
+                source_owners.push_back(std::move(*candidate_owner));
+                upload_batch.push_back(std::move(upload));
+                geometries.push_back(geometry);
+                if (geometry.next_core_lo <= candidate_core_lo) {
+                    return std::unexpected(
+                        minimizer_generation_encoding_error::arithmetic_overflow);
+                }
+                candidate_core_lo = geometry.next_core_lo;
+            }
+
+            if (geometries.empty()) {
+                pending_owner.reset();
+                pending_geometry.reset();
+                auto geometry = geometry_for_core(core_cursor);
+                if (!geometry) {
+                    return std::unexpected(geometry.error());
+                }
+                auto run = collect_core_run(geometry->core_lo, geometry->core_hi);
+                if (!run) {
+                    return std::unexpected(run.error());
+                }
+                if (!run->empty()) {
+                    completed_runs.push_back(vulkan_segment_core_run{
+                        .output_segment_lo = geometry->output_segment_lo,
+                        .events = std::move(*run),
+                    });
+                }
+                core_cursor = geometry->next_core_lo;
+                continue;
+            }
+
+            const std::size_t accepted_count = plan->accepted_upload_count();
+            if (accepted_count != geometries.size()
+                || !plan->bind_accepted_uploads(upload_batch.view())) {
+                throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                    "Vulkan fragment batch admission did not bind its exact prefix"};
+            }
+            auto batch_result = bioseq::gpu::vulkan::
+                execute_admitted_minimap_sketch_data_vulkan_upload_batch<
+                    minimizer_type>(std::move(*plan));
+            if (!batch_result
+                || batch_result->materialization
+                    != bioseq::gpu::vulkan::vulkan_sketch_host_materialization::
+                        host_and_device
+                || !batch_result->dispatch_stats.is_internally_consistent()
+                || batch_result->dispatch_stats.completed_roundtrips() != 1u
+                || batch_result->query_records.size() != accepted_count
+                || batch_result->device_minimizer_count
+                    != batch_result->host_minimizers.size()) {
+                throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                    "Vulkan fragment batch returned an invalid completed result"};
+            }
+            // The synchronous Vulkan roundtrip is complete and authenticated;
+            // a throwing checkpoint can now unwind its result/source owners.
+            cancellation_checkpoint();
+
+            std::vector<std::vector<canonical_minimizer_event>> pending_runs(
+                accepted_count);
+            std::uint64_t record_cursor = 0u;
+            for (std::size_t core_index = 0u;
+                 core_index < accepted_count;
+                 ++core_index) {
+                const auto& record = batch_result->query_records[core_index];
+                const vulkan_core_geometry& geometry = geometries[core_index];
+                const std::uint64_t expected_query_length =
+                    geometry.collect_hi - geometry.collect_lo;
+                const std::uint64_t record_end = bioseq::common::saturating_add(
+                    static_cast<std::uint64_t>(record.minimizer_offset),
+                    static_cast<std::uint64_t>(record.minimizer_count));
+                if (record.flags != 0u
+                    || record.minimizer_offset != record_cursor
+                    || record.query_len != expected_query_length
+                    || record_end > batch_result->host_minimizers.size()) {
+                    throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                        "Vulkan fragment batch query partition is invalid"};
+                }
+                auto& run = pending_runs[core_index];
+                run.reserve(record.minimizer_count);
+                for (std::uint64_t minimizer_index = record.minimizer_offset;
+                     minimizer_index < record_end;
+                     ++minimizer_index) {
+                    const minimizer_type& minimizer =
+                        batch_result->host_minimizers[
+                            static_cast<std::size_t>(minimizer_index)];
+                    if (minimizer.last_pos() >= record.query_len
+                        || minimizer.last_pos()
+                            > (std::numeric_limits<std::uint64_t>::max)()
+                                - geometry.emit_base) {
+                        throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                            "Vulkan fragment batch minimizer position is invalid"};
+                    }
+                    const std::uint64_t position =
+                        geometry.emit_base
+                        + static_cast<std::uint64_t>(minimizer.last_pos());
+                    if (position < geometry.core_lo || position >= geometry.core_hi) {
+                        continue;
+                    }
+                    run.push_back(canonical_minimizer_event{
+                        .hash = minimizer.kmer(),
+                        .encoded_position =
+                            (position << 1u)
+                            | static_cast<std::uint64_t>(minimizer.strand()),
+                    });
+                }
+                canonicalize_core_run_(run);
+                record_cursor = record_end;
+            }
+            if (record_cursor != batch_result->host_minimizers.size()) {
+                throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                    "Vulkan fragment batch partitions do not cover host output"};
+            }
+
+            bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats batch_stats{};
+            batch_stats.record_completed_roundtrip(
+                batch_result->host_minimizers.size());
+            vulkan_stats_.merge(batch_stats);
+            route_stats_saturated_ =
+                route_stats_saturated_ || vulkan_stats_.saturated;
+            for (std::size_t core_index = 0u;
+                 core_index < pending_runs.size();
+                 ++core_index) {
+                auto& run = pending_runs[core_index];
+                increment_route_counter_(vulkan_core_runs_);
+                if (!run.empty()) {
+                    completed_runs.push_back(vulkan_segment_core_run{
+                        .output_segment_lo =
+                            geometries[core_index].output_segment_lo,
+                        .events = std::move(run),
+                    });
+                }
+            }
+            core_cursor = geometries.back().next_core_lo;
+            // The upload/dispatch/download roundtrip and all result validation
+            // are complete. Poll only now, on the synchronous caller thread.
+            cancellation_checkpoint();
+        }
+        return completed_runs;
+    }
+
+    /// Collect minimizers for one half-open core `[core_lo, core_hi)` with the standard halo.
+    /// Events are sorted and deduplicated before return.
+    /// Returns `storage_contract_mismatch` when the selected backend or SIMD collection fails.
     [[nodiscard]] std::expected<std::vector<canonical_minimizer_event>,
                                 minimizer_generation_encoding_error>
     collect_core_run(std::uint64_t core_lo, std::uint64_t core_hi) {
@@ -542,6 +1062,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         std::vector<canonical_minimizer_event> run;
         if (collect_hi <= emit_base || collect_hi - emit_base < minimum_bases) {
             increment_route_counter_(short_core_runs_);
+            cancellation_checkpoint();
             return run;
         }
 
@@ -568,6 +1089,88 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                     .encoded_position = pair.second,
                 });
             }
+        } else if (backend_ == minimizer_sketch_backend::scalar) {
+            increment_route_counter_(scalar_core_runs_);
+            const auto identity_layout =
+                select_minimizer_generation_physical_layout<p_alphabet>(
+                    algorithm_identity_.requested_algorithm,
+                    k_minimizer_fragment_algorithm_position_extent_bp,
+                    algorithm_identity_.packed_storage_bits,
+                    kmer_size_,
+                    window_size_);
+            if (!identity_layout) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::storage_contract_mismatch);
+            }
+            const auto selected_identity =
+                make_minimizer_generation_algorithm_identity(*identity_layout);
+            if (!selected_identity || *selected_identity != algorithm_identity_) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::storage_contract_mismatch);
+            }
+            // Published fragment positions use the 32-Kbp identity class. The
+            // transient scalar ring addresses the fragment plus its halo, so
+            // select a possibly wider registered record before collecting.
+            const auto transient_layout =
+                select_minimizer_generation_physical_layout<p_alphabet>(
+                    algorithm_identity_.requested_algorithm,
+                    collect_hi - emit_base,
+                    algorithm_identity_.packed_storage_bits,
+                    kmer_size_,
+                    window_size_);
+            if (!transient_layout) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::storage_contract_mismatch);
+            }
+            try {
+                (void)bioseq::minimizers::visit_minimizer_physical_layout(
+                    *transient_layout,
+                    [this,
+                     collect_lo,
+                     collect_hi,
+                     emit_base,
+                     core_lo,
+                     core_hi,
+                     &run]<class p_minimizer>() {
+                        struct canonical_event_collector {
+                            std::vector<canonical_minimizer_event>* output = nullptr;
+                            std::uint64_t emit_base = 0u;
+                            std::uint64_t core_lo = 0u;
+                            std::uint64_t core_hi = 0u;
+
+                            /** Append one scalar record directly to the canonical run. */
+                            void collect(const p_minimizer& minimizer) {
+                                const std::uint64_t position =
+                                    emit_base +
+                                    static_cast<std::uint64_t>(minimizer.last_pos());
+                                if (position < core_lo || position >= core_hi) {
+                                    return;
+                                }
+                                output->push_back(canonical_minimizer_event{
+                                    .hash = minimizer.kmer(),
+                                    .encoded_position =
+                                        (position << 1u) |
+                                        static_cast<std::uint64_t>(minimizer.strand()),
+                                });
+                            }
+                        } collector{
+                            .output = &run,
+                            .emit_base = emit_base,
+                            .core_lo = core_lo,
+                            .core_hi = core_hi,
+                        };
+                        bioseq::simd::collect_minimizers_segment_scalar<p_minimizer>(
+                            collector,
+                            sequence_,
+                            static_cast<sequence_size_t>(collect_lo),
+                            static_cast<sequence_size_t>(collect_hi),
+                            window_size_,
+                            kmer_size_);
+                    });
+            } catch (const std::invalid_argument&) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::storage_contract_mismatch);
+            }
         } else {
             sketch_collector collector;
             if (backend_ == minimizer_sketch_backend::bounded_nthash_simd) {
@@ -583,7 +1186,8 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                     kmer_size_,
                     kernels_,
                     collector,
-                    &materialized_window_bp);
+                    &materialized_window_bp,
+                    algorithm_identity_.packed_storage_bits);
                 peak_bounded_materialized_window_bp_ =
                     std::max(peak_bounded_materialized_window_bp_, materialized_window_bp);
                 record_packed_bounded_result(bounded_result);
@@ -594,28 +1198,137 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             } else if (backend_ == minimizer_sketch_backend::exact_simd) {
                 increment_route_counter_(exact_simd_core_runs_);
                 try {
-                    const auto stats = collect_exact_simd_index_range_or_throw(
-                        collector,
-                        sequence_,
-                        alphabet_code_,
-                        static_cast<sequence_size_t>(collect_lo),
-                        static_cast<sequence_size_t>(collect_hi),
-                        window_size_,
-                        kmer_size_,
-                        0u,
-                        kernels_,
-                        "minimizer fragment generation replay");
-                    exact_simd_stats_.merge(stats);
-                    exact_simd_stats_present_ = true;
-                    route_stats_saturated_ = route_stats_saturated_ || exact_simd_stats_.saturated;
+                    if (algorithm_identity_.effective_algorithm ==
+                        bioseq::simd::minimizer_algorithm::simd_minimap2_reference) {
+                        const auto selected_layout =
+                            select_minimizer_generation_physical_layout<p_alphabet>(
+                                algorithm_identity_.requested_algorithm,
+                                k_minimizer_fragment_algorithm_position_extent_bp,
+                                algorithm_identity_.packed_storage_bits,
+                                kmer_size_,
+                                window_size_);
+                        if (!selected_layout) {
+                            return std::unexpected(
+                                minimizer_generation_encoding_error::storage_contract_mismatch);
+                        }
+                        const auto selected_identity =
+                            make_minimizer_generation_algorithm_identity(*selected_layout);
+                        if (!selected_identity || *selected_identity != algorithm_identity_) {
+                            return std::unexpected(
+                                minimizer_generation_encoding_error::storage_contract_mismatch);
+                        }
+                        const auto stats = bioseq::minimizers::visit_minimizer_physical_layout(
+                            *selected_layout,
+                            [this,
+                             core_lo,
+                             core_hi,
+                             target_length,
+                             halo,
+                             &run]<class p_minimizer>() {
+                                const std::uint64_t local_position_capacity =
+                                    static_cast<std::uint64_t>(
+                                        bioseq::minimizers::
+                                            k_max_minimizer_sequence_length<p_minimizer>);
+                                if (halo > (std::numeric_limits<std::uint64_t>::max)() / 2u ||
+                                    local_position_capacity <= 2u * halo) {
+                                    throw std::invalid_argument(
+                                        "reference fragment owner cannot represent its halo");
+                                }
+                                const std::uint64_t maximum_core_bp =
+                                    local_position_capacity - 2u * halo;
+                                reference_simd_index_execution_stats combined{};
+                                std::uint64_t subcore_lo = core_lo;
+                                while (subcore_lo < core_hi) {
+                                    const std::uint64_t subcore_hi =
+                                        subcore_lo + std::min(maximum_core_bp,
+                                                              core_hi - subcore_lo);
+                                    const std::uint64_t subcollect_lo =
+                                        subcore_lo >= halo ? subcore_lo - halo : 0u;
+                                    const std::uint64_t right_halo =
+                                        std::min(halo, target_length - subcore_hi);
+                                    const std::uint64_t subcollect_hi =
+                                        subcore_hi + right_halo;
+                                    if (subcollect_hi < subcollect_lo ||
+                                        subcollect_hi - subcollect_lo > local_position_capacity) {
+                                        throw std::invalid_argument(
+                                            "reference fragment owner range exceeds its record");
+                                    }
+                                    struct canonical_event_collector {
+                                        std::vector<canonical_minimizer_event>* output = nullptr;
+                                        std::uint64_t emit_base = 0u;
+                                        std::uint64_t core_lo = 0u;
+                                        std::uint64_t core_hi = 0u;
+
+                                        /// Project one authenticated physical record to the wire
+                                        /// event.
+                                        void collect(const p_minimizer& minimizer) {
+                                            const std::uint64_t position =
+                                                emit_base +
+                                                static_cast<std::uint64_t>(minimizer.last_pos());
+                                            if (position < core_lo || position >= core_hi) {
+                                                return;
+                                            }
+                                            output->push_back(canonical_minimizer_event{
+                                                .hash = minimizer.kmer(),
+                                                .encoded_position =
+                                                    (position << 1u) |
+                                                    static_cast<std::uint64_t>(minimizer.strand()),
+                                            });
+                                        }
+                                    } direct_collector{
+                                        .output = &run,
+                                        .emit_base = subcollect_lo,
+                                        .core_lo = subcore_lo,
+                                        .core_hi = subcore_hi,
+                                    };
+                                    combined.merge(
+                                        collect_reference_simd_index_range_or_throw<p_minimizer>(
+                                            direct_collector,
+                                            sequence_,
+                                            alphabet_code_,
+                                            static_cast<sequence_size_t>(subcollect_lo),
+                                            static_cast<sequence_size_t>(subcollect_hi),
+                                            window_size_,
+                                            kmer_size_,
+                                            algorithm_identity_.packed_storage_bits,
+                                            kernels_,
+                                            "minimizer fragment generation replay"));
+                                    subcore_lo = subcore_hi;
+                                }
+                                return combined;
+                            });
+                        reference_simd_stats_.merge(stats);
+                        reference_simd_stats_present_ = true;
+                        route_stats_saturated_ =
+                            route_stats_saturated_ || reference_simd_stats_.saturated;
+                    } else if (algorithm_identity_.effective_algorithm ==
+                               bioseq::simd::minimizer_algorithm::two_stack_nthash) {
+                        const auto stats = collect_exact_simd_index_range_or_throw(
+                            collector,
+                            sequence_,
+                            alphabet_code_,
+                            static_cast<sequence_size_t>(collect_lo),
+                            static_cast<sequence_size_t>(collect_hi),
+                            window_size_,
+                            kmer_size_,
+                            0u,
+                            kernels_,
+                            "minimizer fragment generation replay");
+                        exact_simd_stats_.merge(stats);
+                        exact_simd_stats_present_ = true;
+                        route_stats_saturated_ =
+                            route_stats_saturated_ || exact_simd_stats_.saturated;
+                    } else {
+                        return std::unexpected(
+                            minimizer_generation_encoding_error::storage_contract_mismatch);
+                    }
                 } catch (const exact_simd_index_runtime_error&) {
                     return std::unexpected(
                         minimizer_generation_encoding_error::storage_contract_mismatch);
+                } catch (const std::invalid_argument&) {
+                    return std::unexpected(
+                        minimizer_generation_encoding_error::storage_contract_mismatch);
                 }
-            } else if (backend_ == minimizer_sketch_backend::scalar) {
-                increment_route_counter_(scalar_core_runs_);
-                bioseq::simd::collect_minimizers_segment_scalar<minimap_sketch_data>(
-                    collector, sequence_, collect_lo, collect_hi, window_size_, kmer_size_);
             } else {
                 return std::unexpected(
                     minimizer_generation_encoding_error::storage_contract_mismatch);
@@ -635,18 +1348,9 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                 });
             }
         }
-        std::ranges::sort(run, {}, [](const canonical_minimizer_event& event) {
-            return std::pair{event.hash, event.encoded_position};
-        });
-        // Minimizer collectors may report one selected occurrence from more
-        // than one adjacent tied window. Persisted occurrence semantics are
-        // canonical `(hash, position, strand)` events for every backend, so
-        // collapse identical reports inside this backend-owned core run after
-        // the mandatory sort. Core ownership is disjoint, therefore a
-        // duplicate cannot legitimately need to survive in another run. The
-        // lower wire encoder remains fail-closed for arbitrary producers that
-        // violate this canonical-stream contract.
-        run.erase(std::ranges::unique(run).begin(), run.end());
+        canonicalize_core_run_(run);
+        // One physical core and all of its backend-owned scratch are complete.
+        cancellation_checkpoint();
         return run;
     }
 
@@ -657,13 +1361,21 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         sequence_type sequence,
         minimizer_sketch_backend backend,
         const bioseq::minimizers::minimizer_kernels* kernels,
+        minimizer_generation_algorithm_identity algorithm_identity,
+        std::uint16_t window_size,
+        std::uint16_t kmer_size,
         std::uint8_t alphabet_code,
-        std::uint16_t window_size = 10,
-        std::uint16_t kmer_size = 15) noexcept
-        : sequence_(sequence), backend_(backend), kernels_(kernels), alphabet_code_(alphabet_code),
-          window_size_(window_size), kmer_size_(kmer_size) {}
+        std::size_t gpu_run_buffer_bytes = 0u,
+        cooperative_cancellation_checkpoint cancellation_checkpoint = {}) noexcept
+        : sequence_(sequence), backend_(backend), kernels_(kernels),
+          algorithm_identity_(algorithm_identity), alphabet_code_(alphabet_code),
+          window_size_(window_size), kmer_size_(kmer_size),
+          gpu_run_buffer_bytes_(gpu_run_buffer_bytes),
+          cancellation_checkpoint_(cancellation_checkpoint) {}
 
     /// Bind the required replay count from the persisted generation layout before scanning.
+    /// Sets `saturated` when the layout is unsupported, a scan already ran, or the layout changes
+    /// after binding.
     void bind_generation_layout(minimizer_generation_layout layout) noexcept {
         const std::uint64_t required =
             layout == minimizer_generation_layout::grouped_soa_segment_local ? 3u
@@ -688,10 +1400,16 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         return minimizer_producer_backend_identity_for_backend(backend_);
     }
 
+    /// Return the generated algorithm/record identity bound before replay.
+    [[nodiscard]] minimizer_generation_algorithm_identity algorithm_identity() const noexcept {
+        return algorithm_identity_;
+    }
+
     /// Replay canonical events in hash-major order for one persisted segment geometry.
     ///
     /// Each call rescans the borrowed source. A changed `persisted_span` is recorded as a
-    /// geometry retry, and receiver rejection stops the scan immediately.
+    /// geometry retry. The receiver is invoked once per event in sorted order. Returning an
+    /// error stops the scan and propagates that error.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     scan_sorted_events(std::uint64_t persisted_span, canonical_minimizer_event_receiver receiver) {
         constexpr std::uint64_t fragment_bp = 32'768u;
@@ -712,13 +1430,285 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             backend_ != minimizer_sketch_backend::vulkan_segment) {
             return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
         }
-        if ((backend_ == minimizer_sketch_backend::exact_simd &&
-             (kernels_ == nullptr || kernels_->two_stack_nthash == nullptr)) ||
-            (backend_ == minimizer_sketch_backend::bounded_nthash_simd &&
-             (kernels_ == nullptr || kernels_->bounded_nthash == nullptr))) {
+        if (!minimizer_generation_kernel_binding_is_valid(
+                backend_, algorithm_identity_, kernels_)) {
             return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
         }
         const std::uint64_t target_length = sequence_.bp_size();
+        cancellation_checkpoint();
+
+        // Grouped-SoA MPF publication persists exactly one physical fragment
+        // per segment. For that geometry only, widen Vulkan collection across
+        // adjacent fragments while retaining one independently canonicalized
+        // run per physical fragment. The physical record remains selected for
+        // one fragment and its own halo, never for the aggregate batch width.
+        if (backend_ == minimizer_sketch_backend::vulkan_segment
+            && persisted_span == fragment_bp && target_length != 0u) {
+            const std::uint64_t halo =
+                static_cast<std::uint64_t>(window_size_) + kmer_size_ - 2u;
+            const std::uint64_t aggregate_halo =
+                bioseq::common::saturating_mul(halo, 2u);
+            const std::uint64_t fragment_count_u64 =
+                target_length / fragment_bp
+                + static_cast<std::uint64_t>(target_length % fragment_bp != 0u);
+            if (!std::in_range<std::size_t>(fragment_count_u64)
+                || !std::in_range<std::size_t>(fragment_bp)
+                || !std::in_range<std::size_t>(aggregate_halo)) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::arithmetic_overflow);
+            }
+            const std::size_t fragments_per_batch =
+                gpu_minimizer_fragments_per_batch(
+                    static_cast<std::size_t>(fragment_count_u64),
+                    static_cast<std::size_t>(fragment_bp),
+                    static_cast<std::size_t>(aggregate_halo),
+                    gpu_run_buffer_bytes_);
+            if (!std::in_range<std::uint64_t>(fragments_per_batch)
+                || fragments_per_batch == 0u
+                || static_cast<std::uint64_t>(fragments_per_batch)
+                    > (std::numeric_limits<std::uint64_t>::max)() / fragment_bp) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::arithmetic_overflow);
+            }
+            const std::uint64_t batch_core_capacity =
+                static_cast<std::uint64_t>(fragments_per_batch) * fragment_bp;
+            const std::uint64_t maximum_window_bp = std::min(
+                target_length,
+                bioseq::common::saturating_add(fragment_bp, aggregate_halo));
+            return bioseq::gpu::vulkan::
+                with_vulkan_segment_pair_record<p_alphabet>(
+                    window_size_,
+                    kmer_size_,
+                    maximum_window_bp,
+                    [this,
+                     target_length,
+                     fragment_bp,
+                     batch_core_capacity,
+                     &receiver]<class p_minimizer_type>()
+                        -> std::expected<void,
+                                         minimizer_generation_encoding_error> {
+                        std::uint64_t batch_lo = 0u;
+                        while (batch_lo < target_length) {
+                            const std::uint64_t batch_width =
+                                std::min(batch_core_capacity,
+                                         target_length - batch_lo);
+                            if (batch_width == 0u) {
+                                return std::unexpected(
+                                    minimizer_generation_encoding_error::
+                                        arithmetic_overflow);
+                            }
+                            const std::uint64_t batch_hi = batch_lo + batch_width;
+                            auto runs = this->template collect_vulkan_segment_runs_<
+                                p_minimizer_type>(batch_lo,
+                                                  batch_hi,
+                                                  fragment_bp,
+                                                  fragment_bp);
+                            if (!runs) {
+                                return std::unexpected(runs.error());
+                            }
+                            std::uint64_t buffered_events = 0u;
+                            for (const auto& run : *runs) {
+                                if (buffered_events
+                                    > (std::numeric_limits<std::uint64_t>::max)()
+                                        - run.events.size()) {
+                                    return std::unexpected(
+                                        minimizer_generation_encoding_error::
+                                            arithmetic_overflow);
+                                }
+                                buffered_events += run.events.size();
+                            }
+                            peak_buffered_events_ =
+                                std::max(peak_buffered_events_, buffered_events);
+                            peak_buffered_core_bp_ =
+                                std::max(peak_buffered_core_bp_, batch_width);
+                            peak_active_fragment_runs_ =
+                                std::max<std::uint64_t>(
+                                    peak_active_fragment_runs_, runs->size());
+
+                            // Runs are already independently hash-major and
+                            // retain physical-fragment order. Emitting them
+                            // directly prevents a cross-segment hash merge.
+                            for (const auto& run : *runs) {
+                                for (const canonical_minimizer_event& event :
+                                     run.events) {
+                                    if (auto accepted = receiver(event); !accepted) {
+                                        return accepted;
+                                    }
+                                }
+                                this->cancellation_checkpoint();
+                            }
+                            batch_lo = batch_hi;
+                        }
+                        return {};
+                    });
+        }
+
+        // A persisted segment whose width differs from the physical geometry
+        // may straddle one or more physical boundaries. Batch complete adjacent
+        // segments, but retain every original segment/fragment intersection as
+        // an independent descriptor with its own halo and clipping interval.
+        if (backend_ == minimizer_sketch_backend::vulkan_segment
+            && persisted_span != fragment_bp && target_length != 0u) {
+            const std::uint64_t halo =
+                static_cast<std::uint64_t>(window_size_) + kmer_size_ - 2u;
+            const std::uint64_t aggregate_halo =
+                bioseq::common::saturating_mul(halo, 2u);
+            const std::uint64_t segment_count_u64 =
+                target_length / persisted_span
+                + static_cast<std::uint64_t>(target_length % persisted_span != 0u);
+            // A half-open interval of this width can intersect at most this
+            // many physical fragments for any starting offset. The bound is
+            // deliberately conservative when both widths are aligned.
+            const std::uint64_t cores_per_segment_bound_u64 =
+                persisted_span / fragment_bp
+                + (persisted_span % fragment_bp == 0u ? 1u : 2u);
+            if (std::in_range<std::size_t>(segment_count_u64)
+                && std::in_range<std::size_t>(cores_per_segment_bound_u64)
+                && cores_per_segment_bound_u64 != 0u
+                && segment_count_u64
+                    <= (std::numeric_limits<std::size_t>::max)()
+                        / static_cast<std::size_t>(
+                            cores_per_segment_bound_u64)
+                && std::in_range<std::size_t>(fragment_bp)
+                && std::in_range<std::size_t>(aggregate_halo)) {
+                const std::size_t maximum_core_count =
+                    static_cast<std::size_t>(segment_count_u64)
+                    * static_cast<std::size_t>(
+                        cores_per_segment_bound_u64);
+                const std::size_t core_capacity =
+                    gpu_minimizer_fragments_per_batch(
+                        maximum_core_count,
+                        static_cast<std::size_t>(fragment_bp),
+                        static_cast<std::size_t>(aggregate_halo),
+                        gpu_run_buffer_bytes_);
+                const std::size_t segment_capacity =
+                    core_capacity
+                    / static_cast<std::size_t>(
+                        cores_per_segment_bound_u64);
+                if (segment_capacity != 0u) {
+                    if (!std::in_range<std::uint64_t>(segment_capacity)
+                        || static_cast<std::uint64_t>(segment_capacity)
+                            > (std::numeric_limits<std::uint64_t>::max)()
+                                / persisted_span) {
+                        return std::unexpected(
+                            minimizer_generation_encoding_error::
+                                arithmetic_overflow);
+                    }
+                    const std::uint64_t batch_segment_capacity =
+                        static_cast<std::uint64_t>(segment_capacity)
+                        * persisted_span;
+                    const std::uint64_t maximum_window_bp = std::min(
+                        target_length,
+                        bioseq::common::saturating_add(fragment_bp,
+                            aggregate_halo));
+                    return bioseq::gpu::vulkan::
+                        with_vulkan_segment_pair_record<p_alphabet>(
+                            window_size_,
+                            kmer_size_,
+                            maximum_window_bp,
+                            [this,
+                             target_length,
+                             persisted_span,
+                             fragment_bp,
+                             batch_segment_capacity,
+                             &receiver]<class p_minimizer_type>()
+                                -> std::expected<
+                                    void,
+                                    minimizer_generation_encoding_error> {
+                                std::uint64_t batch_lo = 0u;
+                                while (batch_lo < target_length) {
+                                    const std::uint64_t batch_width = std::min(
+                                        batch_segment_capacity,
+                                        target_length - batch_lo);
+                                    if (batch_width == 0u) {
+                                        return std::unexpected(
+                                            minimizer_generation_encoding_error::
+                                                arithmetic_overflow);
+                                    }
+                                    const std::uint64_t batch_hi =
+                                        batch_lo + batch_width;
+                                    auto core_runs = this->template
+                                        collect_vulkan_segment_runs_<
+                                            p_minimizer_type>(
+                                                batch_lo,
+                                                batch_hi,
+                                                fragment_bp,
+                                                persisted_span);
+                                    if (!core_runs) {
+                                        return std::unexpected(core_runs.error());
+                                    }
+                                    const std::uint64_t batch_segment_count_u64 =
+                                        batch_width / persisted_span
+                                        + static_cast<std::uint64_t>(
+                                            batch_width % persisted_span != 0u);
+                                    if (!std::in_range<std::size_t>(
+                                            batch_segment_count_u64)) {
+                                        return std::unexpected(
+                                            minimizer_generation_encoding_error::
+                                                arithmetic_overflow);
+                                    }
+                                    std::vector<std::vector<std::vector<
+                                        canonical_minimizer_event>>> segment_runs(
+                                            static_cast<std::size_t>(
+                                                batch_segment_count_u64));
+                                    std::uint64_t buffered_events = 0u;
+                                    for (auto& core_run : *core_runs) {
+                                        if (core_run.output_segment_lo < batch_lo) {
+                                            return std::unexpected(
+                                                minimizer_generation_encoding_error::
+                                                    arithmetic_overflow);
+                                        }
+                                        const std::uint64_t relative_segment_lo =
+                                            core_run.output_segment_lo - batch_lo;
+                                        if (relative_segment_lo % persisted_span
+                                            != 0u) {
+                                            return std::unexpected(
+                                                minimizer_generation_encoding_error::
+                                                    arithmetic_overflow);
+                                        }
+                                        const std::uint64_t segment_slot_u64 =
+                                            relative_segment_lo / persisted_span;
+                                        if (!std::in_range<std::size_t>(
+                                                segment_slot_u64)
+                                            || segment_slot_u64
+                                                >= batch_segment_count_u64
+                                            || buffered_events
+                                                > (std::numeric_limits<
+                                                       std::uint64_t>::max)()
+                                                    - core_run.events.size()) {
+                                            return std::unexpected(
+                                                minimizer_generation_encoding_error::
+                                                    arithmetic_overflow);
+                                        }
+                                        buffered_events += core_run.events.size();
+                                        segment_runs[static_cast<std::size_t>(
+                                            segment_slot_u64)]
+                                            .push_back(
+                                                std::move(core_run.events));
+                                    }
+                                    peak_buffered_events_ = std::max(
+                                        peak_buffered_events_, buffered_events);
+                                    peak_buffered_core_bp_ = std::max(
+                                        peak_buffered_core_bp_, batch_width);
+                                    peak_active_fragment_runs_ =
+                                        std::max<std::uint64_t>(
+                                            peak_active_fragment_runs_,
+                                            core_runs->size());
+                                    for (const auto& runs : segment_runs) {
+                                        auto emitted = emit_sorted_core_runs_(
+                                            runs, receiver);
+                                        if (!emitted) {
+                                            return emitted;
+                                        }
+                                        this->cancellation_checkpoint();
+                                    }
+                                    batch_lo = batch_hi;
+                                }
+                                return {};
+                            });
+                }
+            }
+        }
 
         std::uint64_t segment_lo = 0;
         while (segment_lo < target_length) {
@@ -727,78 +1717,89 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
             const std::uint64_t segment_hi = segment_lo + segment_width;
             std::vector<std::vector<canonical_minimizer_event>> runs;
             std::uint64_t buffered_events = 0;
-            std::uint64_t fragment_lo = (segment_lo / fragment_bp) * fragment_bp;
-            while (fragment_lo < segment_hi) {
-                const std::uint64_t fragment_hi =
-                    std::min(target_length, fragment_lo + fragment_bp);
-                const std::uint64_t core_lo = std::max(segment_lo, fragment_lo);
-                const std::uint64_t core_hi = std::min(segment_hi, fragment_hi);
-                if (core_lo < core_hi) {
-                    auto run = collect_core_run(core_lo, core_hi);
-                    if (!run) {
-                        return std::unexpected(run.error());
-                    }
-                    if (buffered_events >
-                        (std::numeric_limits<std::uint64_t>::max)() - run->size()) {
+            if (backend_ == minimizer_sketch_backend::vulkan_segment) {
+                const std::uint64_t halo =
+                    static_cast<std::uint64_t>(window_size_) + kmer_size_ - 2u;
+                const std::uint64_t maximum_window_bp = std::min(
+                    target_length,
+                    bioseq::common::saturating_add(
+                        fragment_bp,
+                        bioseq::common::saturating_mul(halo, 2u)));
+                auto batched_runs = bioseq::gpu::vulkan::
+                    with_vulkan_segment_pair_record<p_alphabet>(
+                        window_size_,
+                        kmer_size_,
+                        maximum_window_bp,
+                        [this,
+                         segment_lo,
+                         segment_hi,
+                         fragment_bp,
+                         persisted_span]
+                        <class p_minimizer_type>() {
+                            return this->template collect_vulkan_segment_runs_<
+                                p_minimizer_type>(
+                                    segment_lo,
+                                    segment_hi,
+                                    fragment_bp,
+                                    persisted_span);
+                        });
+                if (!batched_runs) {
+                    return std::unexpected(batched_runs.error());
+                }
+                for (auto& run : *batched_runs) {
+                    if (buffered_events
+                        > (std::numeric_limits<std::uint64_t>::max)()
+                            - run.events.size()) {
                         return std::unexpected(
                             minimizer_generation_encoding_error::arithmetic_overflow);
                     }
-                    buffered_events += run->size();
-                    if (!run->empty()) {
-                        runs.push_back(std::move(*run));
+                    buffered_events += run.events.size();
+                    runs.push_back(std::move(run.events));
+                }
+            } else {
+                std::uint64_t fragment_lo =
+                    (segment_lo / fragment_bp) * fragment_bp;
+                while (fragment_lo < segment_hi) {
+                    const std::uint64_t fragment_hi =
+                        std::min(target_length, fragment_lo + fragment_bp);
+                    const std::uint64_t core_lo = std::max(segment_lo, fragment_lo);
+                    const std::uint64_t core_hi = std::min(segment_hi, fragment_hi);
+                    if (core_lo < core_hi) {
+                        auto run = collect_core_run(core_lo, core_hi);
+                        if (!run) {
+                            return std::unexpected(run.error());
+                        }
+                        if (buffered_events
+                            > (std::numeric_limits<std::uint64_t>::max)()
+                                - run->size()) {
+                            return std::unexpected(
+                                minimizer_generation_encoding_error::arithmetic_overflow);
+                        }
+                        buffered_events += run->size();
+                        if (!run->empty()) {
+                            runs.push_back(std::move(*run));
+                        }
                     }
+                    if (fragment_hi <= fragment_lo) {
+                        return std::unexpected(
+                            minimizer_generation_encoding_error::arithmetic_overflow);
+                    }
+                    fragment_lo = fragment_hi;
                 }
-                if (fragment_hi <= fragment_lo) {
-                    return std::unexpected(
-                        minimizer_generation_encoding_error::arithmetic_overflow);
-                }
-                fragment_lo = fragment_hi;
             }
             peak_buffered_events_ = std::max(peak_buffered_events_, buffered_events);
             peak_buffered_core_bp_ = std::max(peak_buffered_core_bp_, segment_width);
             peak_active_fragment_runs_ =
                 std::max<std::uint64_t>(peak_active_fragment_runs_, runs.size());
 
-            if (runs.size() == 1u) {
-                for (const canonical_minimizer_event& event : runs.front()) {
-                    if (auto accepted = receiver(event); !accepted) {
-                        return accepted;
-                    }
-                }
-                segment_lo = segment_hi;
-                continue;
-            }
-
-            /// Current event ordinal within one independently sorted fragment run.
-            struct cursor {
-                std::size_t run = 0;
-                std::size_t index = 0;
-            };
-            // Order the merge heap by hash and encoded position.
-            const auto after = [&runs](const cursor& lhs, const cursor& rhs) {
-                const auto& left = runs[lhs.run][lhs.index];
-                const auto& right = runs[rhs.run][rhs.index];
-                return std::pair{left.hash, left.encoded_position} >
-                       std::pair{right.hash, right.encoded_position};
-            };
-            std::priority_queue<cursor, std::vector<cursor>, decltype(after)> heap{after};
-            for (std::size_t run = 0; run < runs.size(); ++run) {
-                heap.push(cursor{.run = run, .index = 0});
-            }
-            while (!heap.empty()) {
-                cursor current_cursor = heap.top();
-                heap.pop();
-                if (auto accepted = receiver(runs[current_cursor.run][current_cursor.index]);
-                    !accepted) {
-                    return accepted;
-                }
-                ++current_cursor.index;
-                if (current_cursor.index < runs[current_cursor.run].size()) {
-                    heap.push(current_cursor);
-                }
+            auto emitted = emit_sorted_core_runs_(runs, receiver);
+            if (!emitted) {
+                return emitted;
             }
             segment_lo = segment_hi;
+            cancellation_checkpoint();
         }
+        cancellation_checkpoint();
         return {};
     }
 
@@ -806,15 +1807,15 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     [[nodiscard]] std::uint64_t scan_count() const noexcept {
         return scan_count_;
     }
-    /// Return the maximum canonical events buffered for one persisted segment.
+    /// Return the maximum canonical events buffered for one collection batch.
     [[nodiscard]] std::uint64_t peak_buffered_events() const noexcept {
         return peak_buffered_events_;
     }
-    /// Return the largest persisted segment width buffered in base pairs.
+    /// Return the largest aggregate core width buffered in base pairs.
     [[nodiscard]] std::uint64_t peak_buffered_core_bp() const noexcept {
         return peak_buffered_core_bp_;
     }
-    /// Return the largest number of fragment runs merged concurrently.
+    /// Return the largest number of fragment runs buffered concurrently.
     [[nodiscard]] std::uint64_t peak_active_fragment_runs() const noexcept {
         return peak_active_fragment_runs_;
     }
@@ -848,6 +1849,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         minimizer_fragment_generation_execution_receipt stats;
         stats.selected_backend = backend_;
         stats.minimizer_scheme = scheme_identity();
+        stats.algorithm_identity = algorithm_identity_;
         stats.target_length = sequence_.bp_size();
         stats.window_size = window_size_;
         stats.kmer_size = kmer_size_;
@@ -861,6 +1863,8 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         stats.vulkan_core_runs = vulkan_core_runs_;
         stats.exact_simd_stats = exact_simd_stats_;
         stats.exact_simd_stats_present = exact_simd_stats_present_;
+        stats.reference_simd_stats = reference_simd_stats_;
+        stats.reference_simd_stats_present = reference_simd_stats_present_;
         stats.packed_bounded_status = packed_bounded_status_;
         stats.packed_bounded_stats = packed_bounded_stats_;
         stats.packed_bounded_stats_present = packed_bounded_stats_present_;
@@ -868,6 +1872,21 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         stats.backend_bound = true;
         stats.saturated = route_stats_saturated_ || vulkan_stats_.saturated;
         stats.capture_route_snapshot_();
+        return stats;
+    }
+
+    /// @brief Snapshot route counters and bind them to one completed encoded publication.
+    ///
+    /// The producer owns the private binding operation so external publishers cannot
+    /// manufacture publication authority by mutating an already-returned receipt.
+    /// @param[in] generation Completed encoded generation whose identity is validated.
+    /// @return A bound route snapshot, or an unbound receipt rejected by
+    ///         publication_accepted() when the generation identity does not match.
+    [[nodiscard]] minimizer_fragment_generation_execution_receipt
+    publication_execution_stats(
+        const encoded_grouped_soa_generation& generation) const noexcept {
+        auto stats = execution_stats();
+        stats.bind_publication_(generation);
         return stats;
     }
 };
@@ -890,9 +1909,22 @@ template <class p_storage> struct minimizers_per_fragment_index {
         bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
         minimizer_sketch_backend backend,
         const bioseq::minimizers::minimizer_kernels* kernels,
-        std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code) {
+        minimizer_generation_algorithm_identity algorithm_identity,
+        std::uint16_t window_size,
+        std::uint16_t kmer_size,
+        std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code,
+        std::size_t gpu_run_buffer_bytes = 0u,
+        cooperative_cancellation_checkpoint cancellation_checkpoint = {}) {
         return minimizer_fragment_generation_replay_producer<p_alphabet>{
-            sequence, backend, kernels, alphabet_code};
+            sequence,
+            backend,
+            kernels,
+            algorithm_identity,
+            window_size,
+            kmer_size,
+            alphabet_code,
+            gpu_run_buffer_bytes,
+            cancellation_checkpoint};
     }
 
     /// Encode a fragment image from the bounded producer selected by the caller.
@@ -913,27 +1945,46 @@ template <class p_storage> struct minimizers_per_fragment_index {
         const grouped_soa_generation_options& options,
         const grouped_soa_generation_limits& limits = {},
         minimizer_fragment_generation_execution_receipt* execution_stats_out = nullptr,
-        std::uint8_t runtime_alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code) {
+        std::uint8_t runtime_alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code,
+        std::size_t gpu_run_buffer_bytes = 0u,
+        cooperative_cancellation_checkpoint cancellation_checkpoint = {}) {
         if (execution_stats_out != nullptr) {
             *execution_stats_out = {};
         }
-        if (options.window_size != 10 || options.kmer_size != 15) {
+        const auto selected_identity =
+            select_minimizer_generation_algorithm_identity<p_alphabet>(
+                options.algorithm_identity.requested_algorithm,
+                k_minimizer_fragment_algorithm_position_extent_bp,
+                options.algorithm_identity.packed_storage_bits,
+                options.kmer_size,
+                options.window_size);
+        const minimizer_producer_identity producer_backend =
+            minimizer_producer_backend_identity_for_backend(backend);
+        if (!selected_identity || *selected_identity != options.algorithm_identity ||
+            !is_valid_minimizer_generation_algorithm_identity(options.algorithm_identity,
+                                                              producer_backend)) {
             return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
         }
-        if ((backend == minimizer_sketch_backend::exact_simd &&
-             (kernels == nullptr || kernels->two_stack_nthash == nullptr)) ||
-            (backend == minimizer_sketch_backend::bounded_nthash_simd &&
-             (kernels == nullptr || kernels->bounded_nthash == nullptr))) {
+        if (!minimizer_generation_kernel_binding_is_valid(
+                backend, options.algorithm_identity, kernels)) {
             return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
         }
-        auto producer =
-            make_generation_replay_producer(sequence, backend, kernels, runtime_alphabet_code);
+        auto producer = make_generation_replay_producer(sequence,
+                                                        backend,
+                                                        kernels,
+                                                        options.algorithm_identity,
+                                                        options.window_size,
+                                                        options.kmer_size,
+                                                        runtime_alphabet_code,
+                                                        gpu_run_buffer_bytes,
+                                                        cancellation_checkpoint);
         auto encoded = encode_minimizer_generation(producer, sink, options, limits);
         minimizer_fragment_generation_execution_receipt stats = producer.execution_stats();
         const minimizer_producer_identity stats_backend =
             minimizer_producer_backend_identity_for_backend(stats.selected_backend);
         if (encoded && (encoded->manifest.producer_backend_id != stats_backend.id ||
-                        encoded->manifest.producer_identity_revision != stats_backend.revision)) {
+                        encoded->manifest.producer_identity_revision != stats_backend.revision ||
+                        encoded->manifest.algorithm_identity != stats.algorithm_identity)) {
             encoded =
                 std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
         }
@@ -949,6 +2000,179 @@ template <class p_storage> struct minimizers_per_fragment_index {
             *execution_stats_out = stats;
         }
         return encoded;
+    }
+
+    /// Build one transient fragment-blob image through a generated algorithm identity.
+    ///
+    /// This is the non-persisted counterpart of the grouped-SoA replay producer: the generated
+    /// selector and backend receipt are checked before any storage mutation, every physical
+    /// fragment is emitted exactly once (including empty fragments), and the completeness
+    /// manifest is written last.
+    template <sequence_alphabet p_alphabet>
+    [[nodiscard]] static std::expected<minimizer_fragment_generation_execution_receipt,
+                                       minimizer_generation_encoding_error>
+    build_registered(
+        p_storage& storage,
+        bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
+        minimizer_sketch_backend backend,
+        const bioseq::minimizers::minimizer_kernels* kernels,
+        minimizer_generation_algorithm_identity algorithm_identity,
+        std::uint16_t window_size,
+        std::uint16_t kmer_size,
+        std::uint8_t alphabet_code) {
+        constexpr std::uint64_t fragment_bp = 32'768u;
+        const auto selected_identity =
+            select_minimizer_generation_algorithm_identity<p_alphabet>(
+                algorithm_identity.requested_algorithm,
+                k_minimizer_fragment_algorithm_position_extent_bp,
+                algorithm_identity.packed_storage_bits,
+                kmer_size,
+                window_size);
+        const minimizer_producer_identity producer_backend =
+            minimizer_producer_backend_identity_for_backend(backend);
+        if (!selected_identity ||
+            *selected_identity != algorithm_identity ||
+            algorithm_identity.alphabet_id != alphabet_code ||
+            !is_valid_minimizer_generation_algorithm_identity(algorithm_identity,
+                                                               producer_backend) ||
+            !minimizer_generation_kernel_binding_is_valid(backend,
+                                                           algorithm_identity,
+                                                           kernels)) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::storage_contract_mismatch);
+        }
+
+        const std::uint64_t target_length = sequence.bp_size();
+        if (target_length == 0u) {
+            return std::unexpected(minimizer_generation_encoding_error::position_range);
+        }
+        const std::uint64_t fragment_count =
+            target_length / fragment_bp + (target_length % fragment_bp != 0u ? 1u : 0u);
+        if (fragment_count >
+                static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)()) ||
+            fragment_count >
+                static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())) {
+            return std::unexpected(minimizer_generation_encoding_error::segment_count);
+        }
+
+        auto producer = make_generation_replay_producer(sequence,
+                                                        backend,
+                                                        kernels,
+                                                        algorithm_identity,
+                                                        window_size,
+                                                        kmer_size,
+                                                        alphabet_code);
+        struct fragment_writer_state {
+            p_storage* storage = nullptr;
+            std::uint64_t target_length = 0u;
+            std::uint64_t fragment_count = 0u;
+            std::uint64_t next_fragment = 0u;
+            std::uint64_t fragment_span = 0u;
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
+            std::vector<char> blob;
+
+            /** Serialize and write the next complete fragment, then clear its pair buffer. */
+            [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
+            flush_one() {
+                if (storage == nullptr || next_fragment >= fragment_count ||
+                    next_fragment >
+                        (std::numeric_limits<index_sub_key_t>::max)()) {
+                    return std::unexpected(minimizer_generation_encoding_error::segment_count);
+                }
+                const std::uint64_t fragment_lo = next_fragment * fragment_span;
+                if (fragment_lo > target_length) {
+                    return std::unexpected(minimizer_generation_encoding_error::position_range);
+                }
+                const std::uint64_t fragment_hi =
+                    fragment_lo + std::min(fragment_span, target_length - fragment_lo);
+                serialize_sorted_pairs_to_fragment_blob(
+                    std::span<const std::pair<std::uint64_t, std::uint64_t>>{pairs},
+                    static_cast<sequence_size_t>(fragment_hi - fragment_lo),
+                    blob);
+                const index_sub_key_t key = static_cast<index_sub_key_t>(next_fragment);
+                const std::size_t bytes = blob.size();
+                storage->resize(key, bytes);
+                storage->template write_to_each<char>(
+                    key,
+                    [this, bytes](std::size_t chunk_no,
+                                  char* output,
+                                  std::size_t capacity) {
+                        if (chunk_no != 0u || capacity < bytes) {
+                            storage->index_error(
+                                "registered transient fragment blob has invalid chunk geometry");
+                        }
+                        if (bytes != 0u) {
+                            std::memcpy(output, blob.data(), bytes);
+                        }
+                        return chunk_no;
+                    });
+                pairs.clear();
+                ++next_fragment;
+                return {};
+            }
+
+            /** Accept one globally positioned canonical event in fragment-major order. */
+            [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
+            accept(const canonical_minimizer_event& event) {
+                const std::uint64_t position = event.encoded_position >> 1u;
+                if (position >= target_length) {
+                    return std::unexpected(minimizer_generation_encoding_error::position_range);
+                }
+                const std::uint64_t fragment = position / fragment_span;
+                while (next_fragment < fragment) {
+                    if (auto flushed = flush_one(); !flushed) {
+                        return flushed;
+                    }
+                }
+                if (fragment != next_fragment) {
+                    return std::unexpected(minimizer_generation_encoding_error::row_order);
+                }
+                const std::uint64_t local_position = position - fragment * fragment_span;
+                pairs.emplace_back(event.hash,
+                                   (local_position << 1u) | (event.encoded_position & 1u));
+                return {};
+            }
+        } writer{
+            .storage = std::addressof(storage),
+            .target_length = target_length,
+            .fragment_count = fragment_count,
+            .fragment_span = fragment_bp,
+        };
+        const auto scanned = producer.scan_sorted_events(
+            fragment_bp,
+            canonical_minimizer_event_receiver{
+                .context = std::addressof(writer),
+                .emit_fn = +[](void* context, const canonical_minimizer_event& event) {
+                    return static_cast<fragment_writer_state*>(context)->accept(event);
+                },
+            });
+        if (!scanned) {
+            return std::unexpected(scanned.error());
+        }
+        while (writer.next_fragment < writer.fragment_count) {
+            if (auto flushed = writer.flush_one(); !flushed) {
+                return std::unexpected(flushed.error());
+            }
+        }
+        const std::int64_t manifest = static_cast<std::int64_t>(fragment_count);
+        storage.resize(k_directory_sub_key, sizeof(manifest));
+        storage.template write_to_each<std::int64_t>(
+            k_directory_sub_key,
+            [manifest](std::size_t chunk_no, std::int64_t* output, std::size_t capacity) {
+                if (chunk_no != 0u || capacity < 1u) {
+                    throw std::logic_error{
+                        "registered transient fragment manifest has invalid chunk geometry"};
+                }
+                output[0] = manifest;
+                return chunk_no;
+            });
+        minimizer_fragment_generation_execution_receipt receipt = producer.execution_stats();
+        if (!receipt.direct_build_accepted() || receipt.algorithm_identity != algorithm_identity ||
+            receipt.selected_backend != backend || receipt.target_length != target_length) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::storage_contract_mismatch);
+        }
+        return receipt;
     }
 
     /// Build and publish one native fragment blob per 32 KiBP target core.
@@ -1350,6 +2574,11 @@ template <class p_storage> struct minimizers_per_fragment_index {
     ///
     /// Fragment-local positions are globalized, clipped to `[clip_lo_bp, clip_hi_bp)`, and
     /// rebuilt into one target-wide hash map using caller-owned reusable scratch.
+    ///
+    /// @param frag_lo First fragment index in `[frag_lo, frag_hi)`.
+    /// @param frag_hi One-past-last fragment index to load.
+    /// @param clip_lo_bp Inclusive global clip start for retained positions.
+    /// @param clip_hi_bp Exclusive global clip end for retained positions.
     static minimizer_hashmap_fragment_index assemble_segment(p_storage& storage,
                                                              std::size_t frag_lo,
                                                              std::size_t frag_hi,
@@ -1402,29 +2631,18 @@ template <class p_storage> struct minimizers_per_fragment_index {
         return merged;
     }
 
-    /// Query-filtered segment assembly for GPU seed lookup. Only query kmers
-    /// can be probed by the seed stage, so persisted minimizer-fragment does not need to
-    /// materialise unrelated buckets before uploading the segment index.
-    static minimizer_hashmap_fragment_index
-    assemble_segment_for_query(p_storage& storage,
-                               std::span<const minimap_sketch_data> query_minimizers,
-                               std::size_t frag_lo,
-                               std::size_t frag_hi,
-                               sequence_size_t frag_bp,
-                               sequence_size_t total_bp,
-                               sequence_size_t clip_lo_bp,
-                               sequence_size_t clip_hi_bp,
-                               minimizer_assembly_scratch& scratch) {
-        scratch.clear_query();
+    /// Assemble one segment after the caller has populated sorted unique query hashes.
+    static minimizer_hashmap_fragment_index assemble_segment_for_sorted_query_(
+        p_storage& storage,
+        std::size_t frag_lo,
+        std::size_t frag_hi,
+        sequence_size_t frag_bp,
+        sequence_size_t total_bp,
+        sequence_size_t clip_lo_bp,
+        sequence_size_t clip_hi_bp,
+        minimizer_assembly_scratch& scratch) {
         auto& pairs = scratch.pairs;
         auto& qkmers = scratch.query_kmers;
-        qkmers.reserve(query_minimizers.size());
-        for (const minimap_sketch_data& qm : query_minimizers) {
-            qkmers.push_back(qm.kmer());
-        }
-        std::sort(qkmers.begin(), qkmers.end());
-        qkmers.erase(std::unique(qkmers.begin(), qkmers.end()), qkmers.end());
-
         clip_hi_bp = std::min(clip_hi_bp, total_bp);
         if (clip_lo_bp > clip_hi_bp) {
             clip_lo_bp = clip_hi_bp;
@@ -1472,6 +2690,82 @@ template <class p_storage> struct minimizers_per_fragment_index {
         minimizer_hashmap_fragment_index merged;
         merged.build_from_pairs(pairs, total_bp);
         return merged;
+    }
+
+    /// Query-filtered segment assembly for GPU seed lookup. Only query kmers
+    /// can be probed by the seed stage, so persisted minimizer-fragment does not need to
+    /// materialise unrelated buckets before uploading the segment index.
+    ///
+    /// @param query_minimizers Query sketches whose kmer hashes select persisted buckets.
+    /// @param frag_lo First fragment index in `[frag_lo, frag_hi)`.
+    /// @param frag_hi One-past-last fragment index to load.
+    /// @param clip_lo_bp Inclusive global clip start for retained positions.
+    /// @param clip_hi_bp Exclusive global clip end for retained positions.
+    static minimizer_hashmap_fragment_index
+    assemble_segment_for_query(p_storage& storage,
+                               std::span<const minimap_sketch_data> query_minimizers,
+                               std::size_t frag_lo,
+                               std::size_t frag_hi,
+                               sequence_size_t frag_bp,
+                               sequence_size_t total_bp,
+                               sequence_size_t clip_lo_bp,
+                               sequence_size_t clip_hi_bp,
+                               minimizer_assembly_scratch& scratch) {
+        scratch.clear_query();
+        auto& qkmers = scratch.query_kmers;
+        qkmers.reserve(query_minimizers.size());
+        for (const minimap_sketch_data& minimizer : query_minimizers) {
+            qkmers.push_back(minimizer.kmer());
+        }
+        std::sort(qkmers.begin(), qkmers.end());
+        qkmers.erase(std::unique(qkmers.begin(), qkmers.end()), qkmers.end());
+        return assemble_segment_for_sorted_query_(storage,
+                                                  frag_lo,
+                                                  frag_hi,
+                                                  frag_bp,
+                                                  total_bp,
+                                                  clip_lo_bp,
+                                                  clip_hi_bp,
+                                                  scratch);
+    }
+
+    /// Query-filtered segment assembly from one generated physical query owner.
+    /// The physical width is branched once by `for_each_decoded`; no per-record
+    /// registry or function-pointer dispatch is introduced.
+    static minimizer_hashmap_fragment_index
+    assemble_segment_for_query(
+        p_storage& storage,
+        const bioseq::minimizers::minimizer_physical_batch_view query_minimizers,
+        std::size_t frag_lo,
+        std::size_t frag_hi,
+        sequence_size_t frag_bp,
+        sequence_size_t total_bp,
+        sequence_size_t clip_lo_bp,
+        sequence_size_t clip_hi_bp,
+        minimizer_assembly_scratch& scratch) {
+        if (bioseq::minimizers::find_minimizer_physical_record(
+                query_minimizers.record_id()) == nullptr ||
+            (!query_minimizers.empty() && query_minimizers.data_owner_address() == nullptr)) {
+            storage.index_error("minimizers_per_fragment: invalid physical query owner");
+        }
+        scratch.clear_query();
+        auto& qkmers = scratch.query_kmers;
+        qkmers.reserve(query_minimizers.size());
+        query_minimizers.for_each_decoded(
+            [&qkmers](std::size_t,
+                      const bioseq::minimizers::minimizer_physical_record_value minimizer) {
+                qkmers.push_back(minimizer.kmer());
+            });
+        std::sort(qkmers.begin(), qkmers.end());
+        qkmers.erase(std::unique(qkmers.begin(), qkmers.end()), qkmers.end());
+        return assemble_segment_for_sorted_query_(storage,
+                                                  frag_lo,
+                                                  frag_hi,
+                                                  frag_bp,
+                                                  total_bp,
+                                                  clip_lo_bp,
+                                                  clip_hi_bp,
+                                                  scratch);
     }
 };
 

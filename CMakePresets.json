@@ -82,6 +82,18 @@
         }
       },
       {
+        "name": "bench-e2e-opt",
+        "inherits": "bench-opt",
+        "displayName": "Dedicated E2E interval-evidence config",
+        "description": "Isolated production-flavor tree for benchmark-e2e. Only this tree compiles statement-scoped CIGAR/MAPQ interval evidence into the Bioseq DSO and module owners.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64"
+        }
+      },
+      {
         "name": "test-opt",
         "inherits": "bench-opt",
         "displayName": "Optimised unit/integration test config",
@@ -249,6 +261,10 @@
           "CMAKE_C_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -save-temps=obj -g",
           "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -save-temps=obj -g",
           "BIOSEQ_TEST_INDEXES": "OFF",
+          "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+          "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/gettext",
+          "Intl_INCLUDE_DIR": "/opt/homebrew/opt/gettext/include",
+          "Intl_LIBRARY": "/opt/homebrew/opt/gettext/lib/libintl.dylib",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
           "CMAKE_OSX_ARCHITECTURES": "arm64",
           "VCPKG_TARGET_ARCHITECTURE": "arm64",
@@ -257,12 +273,28 @@
         }
       },
       {
+        "name": "bench-e2e-opt-debug",
+        "inherits": "bench-opt-debug",
+        "displayName": "Dedicated E2E interval-evidence debug config",
+        "description": "Debug/inspect analogue of bench-e2e-opt in its own build tree. Retains source-line and inlining DWARF plus per-TU assembly/IR, without full variable/type debug metadata that makes generated pipeline listings multi-gigabyte.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS_DEBUG": "-gline-tables-only",
+          "CMAKE_CXX_FLAGS_DEBUG": "-gline-tables-only",
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64"
+        }
+      },
+      {
         "name": "test-opt-debug",
         "inherits": "bench-opt-debug",
         "displayName": "Optimised unit/integration test config with debug artefacts",
-        "description": "Debug/inspect analogue of test-opt with BIOSEQ_TEST_INDEXES enabled in its own build tree.",
+        "description": "Debug/inspect analogue of test-opt with BIOSEQ_TEST_INDEXES enabled in its own build tree. Retains source-line and inlining DWARF plus per-TU assembly/IR, without full variable/type debug metadata that makes generated pipeline listings multi-gigabyte.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
+          "CMAKE_C_FLAGS_DEBUG": "-gline-tables-only",
+          "CMAKE_CXX_FLAGS_DEBUG": "-gline-tables-only",
           "BIOSEQ_TEST_INDEXES": "ON"
         }
       },
@@ -365,6 +397,28 @@
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -stdlib=libc++ -save-temps=obj -g",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "aws-x64-linux-e2e",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang E2E interval evidence build",
+        "description": "Isolated AWS Clang benchmark-e2e tree with benchmark-only CIGAR/MAPQ interval instrumentation; production and test-index trees remain unchanged.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "aws-x64-linux-e2e-debug",
+        "inherits": "aws-x64-linux-debug",
+        "displayName": "AWS Clang E2E interval debug/inspect build",
+        "description": "Isolated AWS Clang benchmark-e2e tree with interval instrumentation, DWARF, and per-TU compiler artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
           "BIOSEQ_TEST_INDEXES": "OFF"
         }
       },
@@ -514,6 +568,28 @@
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive -fabi-version=0 -Wno-expose-global-module-tu-local -Wno-external-tu-local -Wno-template-names-tu-local -Wno-global-module -Wno-template-body -save-temps=obj -g",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-e2e",
+        "inherits": "aws-x64-linux-gcc161",
+        "displayName": "AWS GCC 16 E2E interval evidence build",
+        "description": "Isolated AWS GCC 16 benchmark-e2e tree with benchmark-only CIGAR/MAPQ interval instrumentation; production and test-index trees remain unchanged.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-e2e-debug",
+        "inherits": "aws-x64-linux-gcc161-debug",
+        "displayName": "AWS GCC 16 E2E interval debug/inspect build",
+        "description": "Isolated AWS GCC 16 benchmark-e2e tree with interval instrumentation, DWARF, and per-TU compiler artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
           "BIOSEQ_TEST_INDEXES": "OFF"
         }
       },

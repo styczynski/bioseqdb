@@ -27,53 +27,11 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
 import bioseq.postgres.table.sql_row_codecs;
 import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
 import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
 
 export import :custom_scan_support;
 export import :custom_scan_slice_projection;
@@ -81,24 +39,14 @@ export import :custom_scan_join_paths;
 export import :custom_scan_scan_paths;
 export import :custom_scan_plan_builders;
 export import :custom_scan_match_ownership;
-export import :custom_scan_join_execution;
-export import :custom_scan_scan_execution;
+export import :custom_scan_execution_method_contracts;
+export import :custom_scan_planner_method_contracts;
+export import :custom_scan_sql_probe_contracts;
 
 using namespace bioseq::postgres::support;
 
 export namespace bioseq::table::sql_routines {
 
-[[bioseq_sql::function({
-    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
-    .create = bioseq::sql::create_mode::or_replace,
-    .volatility = bioseq::sql::volatility::volatile_,
-    .parallel = bioseq::sql::parallel_safety::unsafe,
-})]] [[bioseq_sql::revoke({
-    .privileges = bioseq::sql::privileges::all,
-    .from = bioseq::sql::public_role,
-})]]
-/** @brief Reports BatchJoin base ProjectionPath eligibility and wrapper-cost ownership decisions.
- */
 bioseq::postgres::support::named_output<bioseq::table::batch_join_projection_guard_probe_row>
     batch_join_projection_guard_probe() {
 
@@ -233,17 +181,6 @@ bioseq::postgres::support::named_output<bioseq::table::batch_join_projection_gua
 } // namespace bioseq::table::sql_routines
 export namespace bioseq::table::sql_routines {
 
-[[bioseq_sql::function({
-    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
-    .create = bioseq::sql::create_mode::or_replace,
-    .volatility = bioseq::sql::volatility::volatile_,
-    .parallel = bioseq::sql::parallel_safety::unsafe,
-})]] [[bioseq_sql::revoke({
-    .privileges = bioseq::sql::privileges::all,
-    .from = bioseq::sql::public_role,
-})]]
-/** @brief Reports match-helper ownership and copy-on-write propagation through Projection,
-   Material, Memoize, Unique, and Append paths. */
 bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_propagation_probe_row>
     match_helper_wrapper_propagation_probe() {
 
@@ -528,17 +465,6 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
 } // namespace bioseq::table::sql_routines
 export namespace bioseq::table::sql_routines {
 
-[[bioseq_sql::function({
-    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
-    .create = bioseq::sql::create_mode::or_replace,
-    .volatility = bioseq::sql::volatility::volatile_,
-    .parallel = bioseq::sql::parallel_safety::unsafe,
-})]] [[bioseq_sql::revoke({
-    .privileges = bioseq::sql::privileges::all,
-    .from = bioseq::sql::public_role,
-})]]
-/** @brief Reports whether carrier translation accepts exact setrefs offsets and slots and rejects
-   attribute, alias, slot, or range mismatches. */
 bioseq::postgres::support::named_output<bioseq::table::base_match_executor_translation_probe_row>
     base_match_executor_translation_probe() {
     const bioseq_stub_oids& oids = get_cached_stub_oids();
@@ -642,17 +568,6 @@ bioseq::postgres::support::named_output<bioseq::table::base_match_executor_trans
 } // namespace bioseq::table::sql_routines
 export namespace bioseq::table::sql_routines {
 
-[[bioseq_sql::function({
-    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
-    .create = bioseq::sql::create_mode::or_replace,
-    .volatility = bioseq::sql::volatility::volatile_,
-    .parallel = bioseq::sql::parallel_safety::unsafe,
-})]] [[bioseq_sql::revoke({
-    .privileges = bioseq::sql::privileges::all,
-    .from = bioseq::sql::public_role,
-})]]
-/** @brief Returns and optionally resets counters for match-owner finalization scopes across
-   PostgreSQL errors. */
 bioseq::postgres::support::named_output<
     bioseq::table::match_owner_finalization_scope_diagnostics_row>
     match_owner_finalization_scope_diagnostics(bool reset) {

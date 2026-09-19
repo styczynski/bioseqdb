@@ -13,6 +13,8 @@ import bioseq.highway.test_support;
 import bioseq.chaining.scalar;
 import bioseq.chaining.simd;
 import bioseq.chaining.core;
+import bioseq.chaining.rmq;
+import bioseq.parallelism.memory_admission;
 
 HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
@@ -37,6 +39,76 @@ using ch::simd_chaining_status;
         throw std::logic_error{"generated fixed-target test table lacks SIMD chaining"};
     }
     return kernel;
+}
+
+TEST_CASE("chaining storage plans preserve selected workspace geometry without admission",
+          "[component:bioseq][layer:unit][feature:chaining]") {
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const auto reserved_before = admission.reserved_bytes();
+    ch::chaining_parameters params{};
+    params.min_seed_count = 3;
+    params.max_gap = 100;
+    params.bandwidth = 50;
+
+    const auto scalar = ch::derive_scalar_chaining_storage_plan(100u, params);
+    REQUIRE(scalar.has_value());
+    REQUIRE(scalar->output.anchor_count == 100u);
+    REQUIRE(scalar->output.initial_chain_capacity == 34u);
+    REQUIRE(scalar->output.reordered_anchor_capacity == 100u);
+    REQUIRE(scalar->forward_anchor_count == 100u);
+    REQUIRE(scalar->backtracking.anchor_scratch_count == 100u);
+    REQUIRE(scalar->backtracking.logical_scratch_bytes == 2800u);
+    REQUIRE(scalar->logical_scratch_bytes == 4800u);
+
+    params.simd_policy = ch::simd_chaining_policy::exact_visited;
+    const auto simd = ch::derive_simd_chaining_storage_plan(100u, params);
+    REQUIRE(simd.has_value());
+    REQUIRE(simd->soa_u32_elements == 300u);
+    REQUIRE(simd->forward_visited_elements == 100u);
+    REQUIRE(simd->logical_bytes_before_lane_paths == 4000u);
+    REQUIRE(simd->path_elements(4u) == 400u);
+    REQUIRE(simd->logical_scratch_bytes(4u) == 5600u);
+    REQUIRE(simd->logical_scratch_bytes(8u) == 7200u);
+    REQUIRE_FALSE(simd->path_elements(1u));
+    REQUIRE_FALSE(simd->path_elements((std::numeric_limits<std::size_t>::max)()));
+    params.simd_policy = ch::simd_chaining_policy::bounded_batch_approximate;
+    const auto bounded = ch::derive_simd_chaining_storage_plan(100u, params);
+    REQUIRE(bounded.has_value());
+    REQUIRE(bounded->forward_visited_elements == 0u);
+    REQUIRE(bounded->logical_scratch_bytes(4u) == 5200u);
+
+    const auto rmq = ch::derive_rmq_chaining_storage_plan(100u, params);
+    REQUIRE(rmq.has_value());
+    REQUIRE(rmq->output.initial_chain_capacity == 34u);
+    REQUIRE(rmq->nodes_per_tree == 164u);
+    REQUIRE(rmq->initial_free_list_entries_per_tree == 41u);
+    REQUIRE(rmq->tree_count == 1u);
+    REQUIRE(rmq->logical_arena_scratch_bytes ==
+        100u * (2u * sizeof(std::int32_t) + sizeof(std::int64_t) + 2u * sizeof(ch::rmq_node*)) +
+        2800u);
+    REQUIRE(rmq->logical_initial_tree_bytes ==
+        164u * sizeof(ch::rmq_node) + 41u * sizeof(ch::rmq_node*));
+    const auto inner_rmq = ch::derive_rmq_chaining_storage_plan(100u, params, 50);
+    REQUIRE(inner_rmq.has_value());
+    REQUIRE(inner_rmq->tree_count == 2u);
+    REQUIRE(inner_rmq->logical_initial_tree_bytes == 2u * rmq->logical_initial_tree_bytes);
+    REQUIRE(ch::derive_rmq_chaining_storage_plan(100u, params, 100)->tree_count == 1u);
+
+    const auto empty = ch::derive_rmq_chaining_storage_plan(0u, params);
+    REQUIRE(empty.has_value());
+    REQUIRE(empty->tree_count == 0u);
+    REQUIRE(empty->nodes_per_tree == 0u);
+    REQUIRE(empty->logical_arena_scratch_bytes == 0u);
+    REQUIRE(empty->logical_initial_tree_bytes == 0u);
+    REQUIRE(empty->output.initial_chain_capacity == 1u); // unchanged initial reserve heuristic
+    const auto maximum = (std::numeric_limits<std::size_t>::max)();
+    REQUIRE_FALSE(ch::derive_scalar_chaining_storage_plan(maximum, params));
+    REQUIRE_FALSE(ch::derive_rmq_chaining_storage_plan(maximum, params));
+    REQUIRE_FALSE(ch::derive_simd_chaining_storage_plan(maximum, params));
+    REQUIRE_FALSE(ch::simd_chaining_soa_elements(maximum));
+    REQUIRE_FALSE(ch::simd_chaining_path_elements(
+        static_cast<std::size_t>((std::numeric_limits<std::int32_t>::max)()) / 4u + 1u, 4u));
+    REQUIRE(admission.reserved_bytes() == reserved_before);
 }
 
 TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap fallbacks",

@@ -274,7 +274,8 @@ inline void run_fmgr_renderer_contract_tests() {
             "bioseq.postgres.table:access_method", "method_probe"));
     table_graph.entities.push_back(
         fmgr_contract_test_detail::scalar_routine(
-            "bioseq.postgres.table:custom_scan", "scan_probe"));
+            "bioseq.postgres.table:custom_scan_sql_probe_contracts",
+            "scan_probe"));
     const auto table_modules = render_fmgr_entrypoint_modules(
         table_graph,
         {{"table_access_hooks", "bioseq.postgres.table"}});
@@ -289,7 +290,7 @@ inline void run_fmgr_renderer_contract_tests() {
             && table_modules.front().content.contains(
                 "import :access_method;")
             && table_modules.front().content.contains(
-                "import :custom_scan;"),
+                "import :custom_scan_sql_probe_contracts;"),
         "registered table root did not retain its three exact partition "
         "owners");
 

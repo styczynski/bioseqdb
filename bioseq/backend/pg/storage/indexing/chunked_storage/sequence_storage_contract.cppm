@@ -3,10 +3,10 @@
  * @brief Contracts for sequence, table, and relation-cleanup storage adapters.
  */
 module;
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 
 extern "C" {
+#include "postgres.h"
+
 #include "access/heapam.h"
 #include "access/nbtree.h"
 #include "access/parallel.h"
@@ -36,6 +36,7 @@ extern "C" {
 #include "storage/relfilelocator.h"
 #include "storage/shm_toc.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -51,37 +52,27 @@ extern "C" {
 #include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#ifdef NDEBUG
+#include <libassert/assert-macros.hpp>
+#else
+#include <libassert/assert.hpp>
+#endif
+
 #include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <tuple>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
+
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:sequence_storage_contract;
+import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
@@ -89,6 +80,7 @@ import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_
 import bioseq.postgres.support.datums;
 import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
+import bioseq.postgres.storage.scanner.lazy_binding; // PostgreSQL-backed lazy sequence access
 import bioseq.storage.layout;           // sequence_locator
 import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
@@ -98,7 +90,6 @@ import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimi
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
@@ -121,7 +112,6 @@ import :fragment_image;
 import :generation_writer;
 import :generation_session;
 import :hash_major_writer;
-import :hash_major_session;
 export namespace bioseq::storage::indexing {
 
 /// Bounded cursor exposing one k-mer's unique positions as a single batch.
@@ -779,5 +769,99 @@ struct drop_index_relation_selector {
         return {.selected_kind = kind::prefix_strict, .prefix = selected_prefix};
     }
 };
+
+/// Drop the selected internal index relations under checked SPI ownership.
+void drop_index_relations(drop_index_relation_selector selector);
+
+/**
+ * @brief Visits every non-null sequence in the handle's table column.
+ *
+ * The main relation remains under `AccessShareLock` and the function owns a
+ * registered transaction snapshot for the full traversal. The callback view
+ * borrows per-row storage and must not escape its invocation.
+ *
+ * @tparam p_callback Callable accepting `(sequence_view, row_number, total_rows)`.
+ * @param[in] loader Callback invoked for each inline or locator-backed sequence.
+ */
+template <class p_callback>
+inline void table_index_storage::for_each_sequence(p_callback&& loader) {
+    Relation main = table_open(user_relid_, AccessShareLock);
+    TupleDesc td = RelationGetDescr(main);
+    Snapshot snap = RegisterSnapshot(GetTransactionSnapshot());
+    const std::size_t total = static_cast<std::size_t>(column_table_row_count(main));
+    List* projected = list_make1_int(column_attno_);
+    column_read_state* rs = begin_column_read(
+        main, td, projected, NIL, own_mctx_, snap, /*randomAccess=*/false, nullptr);
+    MemoryContext inner =
+        AllocSetContextCreate(own_mctx_, "seqidx_table_inner_seq", ALLOCSET_DEFAULT_SIZES);
+    std::vector<Datum> vals(td->natts);
+    std::vector<bool> nullsv(td->natts);
+    Datum* valp = vals.data();
+    std::vector<char> nullbuf(td->natts);
+    bool* nulls = reinterpret_cast<bool*>(nullbuf.data());
+    std::uint64_t rowno = 0;
+    while (read_next_column_row(rs, valp, nulls, &rowno)) {
+        if (nulls[column_attno_ - 1])
+            continue;
+        MemoryContextReset(inner);
+        MemoryContext previous_context = MemoryContextSwitchTo(inner);
+        auto hdr_detoasted = bioseq::postgres::support::detoast_as<bioseq::pg_types::seq>(
+            bioseq::postgres::support::pg_datum::from_raw(valp[column_attno_ - 1]));
+        bioseq::pg_types::seq* hdr = hdr_detoasted.ptr;
+        MemoryContextSwitchTo(previous_context);
+        const std::uint8_t alpha = hdr->alphabet_code;
+        const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
+        if (!is_locator_stub(hdr)) {
+            bioseq::pg_types::seq::dispatch_instance(
+                alpha, bw, [hdr, &loader, rowno, total]<class p_sequence_type>() {
+                    compact_sequence_range<p_sequence_type> rng{*hdr};
+                    const auto view = bioseq::storage::make_lazy_sequence_view(rng);
+                    loader(view, static_cast<std::size_t>(rowno), total);
+                });
+        } else {
+            const sequence_locator loc = decode_locator_from_stub(hdr);
+            bioseq::pg_types::seq::dispatch_instance(
+                alpha, bw, [this, &loader, loc, rowno, total, rs, inner]<class p_sequence_type>() {
+                    // Binds the locator to the traversal snapshot and per-row context.
+                    using source_binding =
+                        bioseq::storage::postgres_lazy_sequence_binding<p_sequence_type>;
+                    const source_binding bound_source{
+                        db_oid_,
+                        tablespace_oid_,
+                        main_relfilenode_,
+                        column_attno_,
+                        loc,
+                        source_binding::expected_last_fragment_padding(loc),
+                        rs->snapshot,
+                        read_caches_,
+                        inner};
+                    bioseq::storage::with_postgres_lazy_sequence<p_sequence_type>(
+                        bound_source, [&loader, rowno, total](auto view) {
+                            loader(view, static_cast<std::size_t>(rowno), total);
+                        });
+                });
+        }
+        hdr_detoasted.free_if_copy();
+    }
+    // with_postgres_lazy_sequence keyed cached fragment readers by rs->snapshot.
+    // Release them before the outer reader unregisters a refreshed snapshot.
+    if (read_caches_ != nullptr) {
+        read_caches_->close_all(/*commit=*/false);
+    }
+    end_column_read(rs);
+    UnregisterSnapshot(snap);
+    MemoryContextDelete(inner);
+    table_close(main, AccessShareLock);
+}
+
+static_assert(!std::is_move_assignable_v<sequence_index_storage>);
+static_assert(!std::is_move_assignable_v<table_index_storage>);
+static_assert(
+    bioseq::indexing::is_index_chunked_storage_for<sequence_index_storage,
+                                                   sequence_index_layout::sequence_inline>,
+    "sequence_index_storage must satisfy INLINE_PER_SEQUENCE");
+static_assert(bioseq::indexing::is_index_chunked_storage_for<table_index_storage,
+                                                             sequence_index_layout::table_chunks>,
+              "table_index_storage must satisfy CHUNKED_PER_TABLE");
 
 } // namespace bioseq::storage::indexing

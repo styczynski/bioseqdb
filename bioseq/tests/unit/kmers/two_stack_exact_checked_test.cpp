@@ -817,7 +817,7 @@ TEST_CASE("two_stack_nthash checked table — scanner bounded materialization pr
     REQUIRE(result.kernel.stats.two_stack.masked_tail_lanes > 0u);
 }
 
-TEST_CASE("two_stack_nthash checked table — invalid shapes fail before core work",
+TEST_CASE("two_stack_nthash checked table — shape and wide-record admission are checked",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     const auto data = fixture(96u);
     using config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
@@ -866,12 +866,13 @@ TEST_CASE("two_stack_nthash checked table — invalid shapes fail before core wo
     const auto two_word = invoke<two_word_representation>(
         view, {}, 10u, 15u);
     REQUIRE(two_word.kernel.status
-        == minimizer_kernel_status::invalid_configuration);
+        == minimizer_kernel_status::ok);
     REQUIRE(two_word.kernel.family_status == static_cast<std::uint32_t>(
-        two_stack_continuation_status::unsupported_representation));
-    REQUIRE(two_word.kernel.emitted == 0u);
-    REQUIRE(two_word.records.empty());
-    REQUIRE(two_word.kernel.stats.two_stack.vector_batches == 0u);
+        two_stack_continuation_status::ok));
+    REQUIRE(two_word.sink_ok);
+    REQUIRE_FALSE(two_word.records.empty());
+    REQUIRE(two_word.raw_batches == 0u);
+    REQUIRE(two_word.kernel.stats.two_stack.vector_batches > 0u);
     REQUIRE(two_word.kernel.stats.two_stack.scalar_backend_branches == 0u);
 
     auto unknown_alphabet = view;

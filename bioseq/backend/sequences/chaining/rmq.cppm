@@ -21,6 +21,8 @@ module;
 #include <cstring>
 #include <libassert/assert.hpp>
 #include <limits>
+#include <optional>
+#include <stdexcept>
 #include <span>
 #include <vector>
 
@@ -30,6 +32,7 @@ import bioseq.common.logging;
 import bioseq.chaining.core;
 import bioseq.common.context;
 import bioseq.instrumentation;
+import bioseq.common.checked_arithmetic;
 
 export {
 namespace bioseq::chaining {
@@ -49,6 +52,50 @@ struct rmq_node {
     int8_t   balance       = 0;
     uint32_t subtree_size  = 0;
 };
+
+/// Existing RMQ initial geometry; the free list may grow beyond its initial reserve.
+struct rmq_chaining_storage_plan {
+    chaining_output_storage_plan output;
+    scalar_backtracking_storage_plan backtracking;
+    std::size_t forward_anchor_count;
+    std::size_t nodes_per_tree;
+    std::size_t initial_free_list_entries_per_tree;
+    std::size_t tree_count;
+    std::size_t logical_arena_scratch_bytes;
+    std::size_t logical_initial_tree_bytes;
+};
+
+[[nodiscard]] constexpr std::optional<rmq_chaining_storage_plan>
+derive_rmq_chaining_storage_plan(std::size_t count, const chaining_parameters& params,
+                                 std::int32_t max_dist_inner = 0) noexcept {
+    const auto output = derive_chaining_output_storage_plan(count, params.min_seed_count);
+    const auto backtracking = derive_scalar_backtracking_storage_plan(count);
+    const auto nodes = count == 0u ? std::optional<std::size_t>{0u}
+                                  : bioseq::common::checked_add(count, std::size_t{64u});
+    const auto arena_bytes = bioseq::common::checked_mul(count,
+        2u * sizeof(std::int32_t) + sizeof(std::int64_t) + 2u * sizeof(rmq_node*));
+    if (!output || !backtracking || !nodes || !arena_bytes) {
+        return std::nullopt;
+    }
+    const std::int32_t max_dist = std::max(params.max_gap, params.bandwidth);
+    const std::size_t trees = count == 0u ? 0u
+        : (max_dist_inner > 0 && max_dist_inner < max_dist ? 2u : 1u);
+    const auto pool_bytes = bioseq::common::checked_mul(*nodes, sizeof(rmq_node));
+    const auto free_bytes = bioseq::common::checked_mul(*nodes / 4u, sizeof(rmq_node*));
+    const auto total_arena = bioseq::common::checked_add(*arena_bytes,
+        backtracking->logical_scratch_bytes);
+    if (!pool_bytes || !free_bytes || !total_arena) {
+        return std::nullopt;
+    }
+    const auto tree_bytes = bioseq::common::checked_add(*pool_bytes, *free_bytes);
+    const auto total_tree = tree_bytes ? bioseq::common::checked_mul(*tree_bytes, trees)
+                                       : std::nullopt;
+    if (!total_tree) {
+        return std::nullopt;
+    }
+    return rmq_chaining_storage_plan{*output, *backtracking, count, *nodes,
+        *nodes / 4u, trees, *total_arena, *total_tree};
+}
 
 /// Compare two rmq nodes by (query_position, anchor_index) ascending.
 ///
@@ -632,7 +679,13 @@ void chain_anchors_rmq(
     static const auto* rmq_instrumentation_descriptor =
         bioseq::instrumentation::register_static_region("mg_lchain_rmq");
     auto rmq_instrumentation_scope = bioseq::instrumentation::region(rmq_instrumentation_descriptor);
-    const int64_t anchor_count = static_cast<int64_t>(anchors.size());
+    const auto storage_plan = derive_rmq_chaining_storage_plan(
+        anchors.size(), params, max_dist_inner);
+    if (!storage_plan) {
+        throw std::length_error{"RMQ chaining storage exceeds its addressable domain"};
+    }
+    const auto scratch_count = storage_plan->forward_anchor_count;
+    const int64_t anchor_count = static_cast<int64_t>(scratch_count);
     if (anchor_count == 0) return;
 
     int32_t max_dist = params.max_gap;
@@ -646,9 +699,9 @@ void chain_anchors_rmq(
     // scalar and SIMD backends without introducing heap-owned intermediates.
     auto dp_scope = context::current().push<context::arena::chain>();
     auto& dp_ctx = context::current();
-    auto best_scores  = dp_ctx.alloc_chain_array<int32_t>(static_cast<std::size_t>(anchor_count));
-    auto predecessors = dp_ctx.alloc_chain_array<int64_t>(static_cast<std::size_t>(anchor_count));
-    auto peak_scores  = dp_ctx.alloc_chain_array<int32_t>(static_cast<std::size_t>(anchor_count));
+    auto best_scores  = dp_ctx.alloc_chain_array<int32_t>(scratch_count);
+    auto predecessors = dp_ctx.alloc_chain_array<int64_t>(scratch_count);
+    auto peak_scores  = dp_ctx.alloc_chain_array<int32_t>(scratch_count);
     std::memset(best_scores.data(),  0,
                 static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
     std::memset(predecessors.data(), 0xff,
@@ -658,10 +711,10 @@ void chain_anchors_rmq(
 
     // Allocate trees
     rmq_tree primary_tree;
-    primary_tree.reserve(static_cast<size_t>(anchor_count) + 64);
+    primary_tree.reserve(storage_plan->nodes_per_tree);
     rmq_tree inner_tree;
     if (max_dist_inner > 0) {
-        inner_tree.reserve(static_cast<size_t>(anchor_count) + 64);
+        inner_tree.reserve(storage_plan->nodes_per_tree);
     }
 
     // Track which anchors are in the trees for pruning
@@ -672,9 +725,9 @@ void chain_anchors_rmq(
     // Per-anchor node pointers live in the chain arena. Supported targets use
     // the all-zero null-pointer representation required by this bulk reset.
     auto primary_nodes = dp_ctx.alloc_chain_array<rmq_node*>(
-        static_cast<std::size_t>(anchor_count));
+        scratch_count);
     auto inner_nodes   = dp_ctx.alloc_chain_array<rmq_node*>(
-        static_cast<std::size_t>(anchor_count));
+        scratch_count);
     std::memset(primary_nodes.data(), 0,
                 static_cast<std::size_t>(anchor_count) * sizeof(rmq_node*));
     std::memset(inner_nodes.data(),   0,

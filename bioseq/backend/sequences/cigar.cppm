@@ -60,8 +60,14 @@ struct cigar_operation {
  * @param opcode Minimap2-compatible opcode stored in the low four bits.
  * @param length Number of symbols represented by the operation.
  */
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+template <class p_cigar_storage>
+inline void push_packed_cigar(
+    p_cigar_storage& cigar,
+#else
 inline void push_packed_cigar(
     std::vector<std::uint32_t>& cigar,
+#endif
     std::uint32_t opcode,
     std::uint32_t length)
 {
@@ -76,9 +82,16 @@ inline void push_packed_cigar(
  * @param destination Run-length destination. Equal adjacent opcodes merge.
  * @param source KSW2 words encoded as `(length << 4) | opcode`.
  */
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+template <class p_destination_storage, class p_source_storage>
+inline void append_cigar(
+    p_destination_storage& destination,
+    const p_source_storage& source)
+#else
 inline void append_cigar(
     std::vector<cigar_operation>& destination,
     const std::vector<std::uint32_t>& source)
+#endif
 {
     for (std::uint32_t entry : source) {
         const std::uint32_t opcode = entry & 0xfU;
@@ -203,8 +216,14 @@ exact_edit_distance_from_packed_cigar(
  * @param query_length Number of query symbols in the seed span.
  * @param target_length Number of target symbols in the seed span.
  */
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+template <class p_cigar_storage>
+inline void append_implicit_seed_cigar(
+    p_cigar_storage& cigar,
+#else
 inline void append_implicit_seed_cigar(
     std::vector<cigar_operation>& cigar,
+#endif
     std::size_t query_length,
     std::size_t target_length)
 {
@@ -302,12 +321,12 @@ exact_edit_distance_for_implicit_seed(
  * @param cigar Run-length operations to render.
  * @return Text such as `58M1I33M`. Unknown opcodes render as `?`.
  */
-[[nodiscard]] inline std::string format_cigar(
-    const std::vector<cigar_operation>& cigar)
-{
+template <class p_cigar_storage>
+[[nodiscard]] inline std::string format_cigar(const p_cigar_storage& cigar) {
+    const std::span<const cigar_operation> operations{cigar.data(), cigar.size()};
     std::string cigar_string;
-    cigar_string.reserve(cigar.size() * 5);
-    for (const auto& cigar_op : cigar) {
+    cigar_string.reserve(operations.size() * 5);
+    for (const auto& cigar_op : operations) {
         cigar_string += std::to_string(cigar_op.length);
         if (cigar_op.opcode < cigar_opcode_characters.size()) {
             cigar_string += cigar_opcode_characters[cigar_op.opcode];

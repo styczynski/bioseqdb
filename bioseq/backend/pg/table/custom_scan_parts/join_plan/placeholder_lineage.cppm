@@ -3,10 +3,7 @@
  * @brief Registers join placeholders and inherited helper identities.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,80 +24,14 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_join_plan_placeholder_lineage;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
-
 import :custom_scan_support;
-import :custom_scan_slice_projection;
-import :custom_scan_join_paths;
-import :custom_scan_scan_paths;
-
-import :custom_scan_scan_plan;
+import :custom_scan_join_ownership_helper_contracts;
+export import :custom_scan_join_plan_placeholder_registration_contracts;
 
 using namespace bioseq::postgres::support;
 
 export {
-
-    /** @brief Accumulates match-result placeholder sites for one BatchJoin plan. */
-    struct batch_join_placeholder_registration {
-        const bioseq_stub_oids* oids = nullptr;
-        Index target_relid = 0;
-        AttrNumber target_sequence_attno = InvalidAttrNumber;
-        Node* target_recipe = nullptr;
-        List** combined_tlist = nullptr;
-        List** encoded_sites = nullptr;
-        bool invalid = false;
-        bool edit_sequence_mismatch = false;
-        /* Helper identities already supplied as match_result columns by a validated
-         * descendant BioseqBatchJoin.  An outer owner may pass these through, but
-         * must neither execute their SQL stubs nor relabel them as its own sites. */
-        List* inherited_helper_identities = NIL;
-    };
 
     /** @brief Reports whether an expression contains any match-result helper. */
     [[nodiscard]] bool batch_join_expression_has_match_helper(Node* expression,
@@ -456,98 +387,5 @@ export {
         }
         return result;
     }
-
-    /** @brief Registers current-owner helpers while preserving inherited identities. */
-    struct batch_join_placeholder_registration_visitor {
-        /** @brief Validates and registers one plain or PHV-wrapped helper node. */
-        [[nodiscard]] pg_walk_step
-        operator()(pg_expression_walk_cursor,
-                   pg_node_view node,
-                   batch_join_placeholder_registration& registration) const {
-            if (PlaceHolderVar* placeholder = node.try_cast<PlaceHolderVar>()) {
-                FuncExpr* helper =
-                    registration.oids == nullptr
-                        ? nullptr
-                        : batch_join_match_helper_phv_function(placeholder, *registration.oids);
-                if (helper != nullptr) {
-                    if (batch_join_identity_is_inherited(registration,
-                                                         reinterpret_cast<Node*>(placeholder))) {
-                        return pg_walk_step::skip_subtree;
-                    }
-                    if (!edit_sequence_argument_matches_recipe(helper,
-                                                               registration.target_recipe,
-                                                               registration.target_relid,
-                                                               registration.target_sequence_attno,
-                                                               *registration.oids)) {
-                        registration.invalid = true;
-                        registration.edit_sequence_mismatch = true;
-                        return pg_walk_step::stop;
-                    }
-                    const bool names_recipe =
-                        batch_join_match_helper_names_recipe(helper, registration.target_recipe);
-                    const bool base_lineage = batch_join_match_helper_names_base_lineage(
-                        helper, registration.target_recipe, *registration.oids);
-                    if (!names_recipe && !base_lineage) {
-                        registration.invalid = true;
-                        return pg_walk_step::stop;
-                    }
-                    batch_join_register_placeholder_site(reinterpret_cast<Node*>(placeholder),
-                                                         helper,
-                                                         placeholder->phid,
-                                                         registration);
-                    return registration.invalid ? pg_walk_step::stop : pg_walk_step::skip_subtree;
-                }
-                /* A generic PHV containing a helper has evaluation/nulling semantics
-                 * that this join cannot reproduce.  Do not descend and accidentally
-                 * register only the inner FuncExpr. */
-                if (registration.oids != nullptr &&
-                    batch_join_expression_has_match_helper(
-                        reinterpret_cast<Node*>(placeholder->phexpr), *registration.oids)) {
-                    registration.invalid = true;
-                    return pg_walk_step::stop;
-                }
-                return pg_walk_step::descend;
-            }
-            if (FuncExpr* function = node.try_cast<FuncExpr>()) {
-                if (registration.oids != nullptr &&
-                    is_bioseq_projection_funcid(function->funcid, *registration.oids)) {
-                    if (batch_join_identity_is_inherited(registration,
-                                                         reinterpret_cast<Node*>(function))) {
-                        return pg_walk_step::skip_subtree;
-                    }
-                    if (!edit_sequence_argument_matches_recipe(function,
-                                                               registration.target_recipe,
-                                                               registration.target_relid,
-                                                               registration.target_sequence_attno,
-                                                               *registration.oids)) {
-                        registration.invalid = true;
-                        registration.edit_sequence_mismatch = true;
-                        return pg_walk_step::stop;
-                    }
-                    const bool names_recipe =
-                        batch_join_match_helper_names_recipe(function, registration.target_recipe);
-                    const bool base_lineage = batch_join_match_helper_names_base_lineage(
-                        function, registration.target_recipe, *registration.oids);
-                    if (!names_recipe && !base_lineage) {
-                        registration.invalid = true;
-                        return pg_walk_step::stop;
-                    }
-                    batch_join_register_placeholder_site(
-                        reinterpret_cast<Node*>(function), function, 0, registration);
-                    return registration.invalid ? pg_walk_step::stop : pg_walk_step::skip_subtree;
-                }
-            }
-            return pg_walk_step::descend;
-        }
-    };
-
-    /** @brief Carries scan target and helper provenance through output setrefs rewriting. */
-    struct batch_join_output_setrefs_rewrite {
-        List* scan_tlist = NIL;
-        const bioseq_stub_oids* oids = nullptr;
-        AttrNumber current_site_first_resno = 1;
-        List* inherited_helper_identities = NIL;
-        bool invalid = false;
-    };
 
 } // export custom-scan partition declarations

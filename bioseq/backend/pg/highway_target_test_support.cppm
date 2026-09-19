@@ -18,7 +18,7 @@ export module bioseq.highway_target_test_support;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.highway.dispatch_contract;
 import bioseq.postgres.sql_boundary;
-import bioseq.postgres.scheduler.dispatch_processor;
+import bioseq.postgres.scheduler.dispatch_processor.reprepare_probe;
 
 namespace {
 
@@ -76,8 +76,7 @@ export namespace bioseq::pg::sql_routines {
     .from = bioseq::sql::public_role,
 })]]
 bool cpu_prepared_target_same_object_reprepare_probe() {
-	return bioseq::simd::batch_processor::
-		cpu_prepared_target_same_object_reprepare_probe();
+	return bioseq::simd::cpu_prepared_target_same_object_reprepare_probe();
 }
 
 [[bioseq_sql::function({

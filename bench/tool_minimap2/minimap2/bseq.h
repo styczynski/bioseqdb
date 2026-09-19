@@ -17,6 +17,10 @@ typedef struct {
 } mm_bseq1_t;
 
 mm_bseq_file_t *mm_bseq_open(const char *fn);
+#if defined(BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT)
+/** Consume an already-open input descriptor, including on failure. */
+mm_bseq_file_t *mm_bseq_open_fd(int fd);
+#endif
 void mm_bseq_close(mm_bseq_file_t *fp);
 mm_bseq1_t *mm_bseq_read3(mm_bseq_file_t *fp, int64_t chunk_size, int with_qual, int with_comment, int frag_mode, int *n_);
 mm_bseq1_t *mm_bseq_read2(mm_bseq_file_t *fp, int64_t chunk_size, int with_qual, int frag_mode, int *n_);

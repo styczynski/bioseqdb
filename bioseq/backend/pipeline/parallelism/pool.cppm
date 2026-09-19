@@ -12,7 +12,9 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <condition_variable>
+#include <exception>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -52,6 +54,16 @@ struct task_group_implementation {
 } // namespace bioseq::parallelism::detail
 
 export namespace bioseq::parallelism {
+
+/// Non-owning acquisition boundary for caller-admitted per-worker contexts.
+struct worker_context_factory {
+    /// Caller-owned, address-stable slot owner, retained until the joined call returns.
+    void* state = nullptr;
+    /// Bounded number of independently admitted worker slots.
+    std::size_t maximum_concurrency = 0u;
+    /// Claims and constructs one slot per participating worker. May throw on denial.
+    context::context& (*acquire)(void*) = nullptr;
+};
 
 /// Non-owning callback used while draining scheduler-controlled resources.
 struct tracked_noexcept_callback {
@@ -286,11 +298,21 @@ public:
   /// Execute a half-open range with one context per participating worker.
   void parallel_for_with_context(std::size_t begin, std::size_t end,
                                  std::size_t grain, const range_body &body);
+  /// Execute with caller-admitted contexts; never borrow an unrelated installed context.
+  void parallel_for_with_context(std::size_t begin, std::size_t end,
+                                 std::size_t grain, const range_body &body,
+                                 worker_context_factory factory);
   /// Execute range shards through the tracked scheduler lifecycle.
   void parallel_for_with_context_tracked(std::size_t begin, std::size_t end,
                                          std::size_t grain,
                                          const range_body &body,
                                          tracked_job_observer observer);
+  /// Track joined shards using caller-owned, physically admitted fresh contexts.
+  void parallel_for_with_context_tracked(std::size_t begin, std::size_t end,
+                                         std::size_t grain,
+                                         const range_body &body,
+                                         tracked_job_observer observer,
+                                         worker_context_factory factory);
   /// Enroll and enqueue one address-stable tracked task without throwing.
   [[nodiscard]] tracked_submit_status
   submit_tracked_task_noexcept(tracked_task_submission *submission,
@@ -526,6 +548,49 @@ void global_pool::parallel_for_with_context(
               body(range.begin(), range.end());
             }
           });
+    });
+}
+
+void global_pool::parallel_for_with_context(
+        std::size_t begin,
+        std::size_t end,
+        std::size_t grain,
+        const range_body& body,
+        worker_context_factory factory) {
+    ensure_configured();
+    if (end <= begin)
+        return;
+    if (factory.state == nullptr || factory.acquire == nullptr ||
+        factory.maximum_concurrency == 0u ||
+        factory.maximum_concurrency > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
+        throw std::invalid_argument{"parallel context factory is not a bounded live owner"};
+    }
+    const std::size_t effective_grain = std::max<std::size_t>(1u, grain);
+    const std::size_t concurrency = std::min<std::size_t>(
+        maximum_concurrency_, factory.maximum_concurrency);
+    if (concurrency <= 1u || end - begin <= effective_grain) {
+        context::installed_context_scope scope(factory.acquire(factory.state));
+        body(begin, end);
+        return;
+    }
+
+    // Only a participating worker claims a slot, exactly once in this ETS map.
+    // Exceptions from acquisition or work cancel and join the TBB operation
+    // before its caller may destroy any slot or associated physical permit.
+    otbb::enumerable_thread_specific<context::context*> worker_contexts(
+        [factory] { return std::addressof(factory.acquire(factory.state)); });
+    const auto implementation = implementation_;
+    implementation->arena->execute([begin, end, effective_grain, concurrency,
+                                    &body, &worker_contexts] {
+        otbb::task_arena bounded_workers{static_cast<int>(concurrency)};
+        bounded_workers.execute([begin, end, effective_grain, &body, &worker_contexts] {
+            otbb::parallel_for(
+                otbb::blocked_range<std::size_t>(begin, end, effective_grain),
+                [&body, &worker_contexts](const otbb::blocked_range<std::size_t>& range) {
+                    context::installed_context_scope scope(*worker_contexts.local());
+                    body(range.begin(), range.end());
+                });
+        });
     });
 }
 
@@ -765,6 +830,71 @@ void global_pool::parallel_for_with_context_tracked(
         outcomes[index].has_failure) {
       throw std::runtime_error(outcomes[index].message_length == 0u
                                    ? "tracked parallel range did not complete"
+                                   : outcomes[index].message.data());
+    }
+  }
+}
+
+void global_pool::parallel_for_with_context_tracked(
+    std::size_t begin, std::size_t end, std::size_t grain,
+    const range_body &body, tracked_job_observer observer,
+    worker_context_factory factory) {
+  ensure_configured();
+  if (end <= begin) {
+    return;
+  }
+  if (factory.state == nullptr || factory.acquire == nullptr ||
+      factory.maximum_concurrency == 0u ||
+      factory.maximum_concurrency > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
+    throw std::invalid_argument{"tracked range requires a bounded worker context factory"};
+  }
+  const std::size_t effective_grain = std::max<std::size_t>(1u, grain);
+  if (!observer || maximum_concurrency_ <= 1u || factory.maximum_concurrency <= 1u ||
+      end - begin <= effective_grain) {
+    parallel_for_with_context(begin, end, grain, body, factory);
+    return;
+  }
+
+  // Preserve the scheduler's existing two-shard lifecycle. The stack records
+  // and their borrowed factory remain live until BOTH tasks join and drain,
+  // including acquisition failure, cancellation and a throwing range body.
+  struct admitted_tracked_range_context {
+    range_body const *body;
+    std::size_t begin;
+    std::size_t end;
+    worker_context_factory factory;
+  };
+  const std::size_t midpoint = begin + (end - begin) / 2u;
+  std::array<admitted_tracked_range_context, 2> ranges{{
+      {std::addressof(body), begin, midpoint, factory},
+      {std::addressof(body), midpoint, end, factory},
+  }};
+  std::array<tracked_task_submission, 2> submissions{};
+  std::array<tracked_submit_status, 2> statuses{};
+  const auto invoke_range = +[](void *argument) {
+    auto& range = *static_cast<admitted_tracked_range_context*>(argument);
+    // A scheduler observer may have installed its own context. It is not the
+    // biological attempt's allocation authority and must never be borrowed.
+    context::installed_context_scope scope{
+        range.factory.acquire(range.factory.state)};
+    (*range.body)(range.begin, range.end);
+  };
+  for (std::size_t index = 0u; index < submissions.size(); ++index) {
+    statuses[index] = submit_tracked_task_noexcept(
+        std::addressof(submissions[index]),
+        {std::addressof(ranges[index]), invoke_range}, observer);
+  }
+  std::array<tracked_job_outcome, 2> outcomes{};
+  for (std::size_t index = 0u; index < submissions.size(); ++index) {
+    outcomes[index] = join_and_drain_tracked_task_noexcept(
+        std::addressof(submissions[index]));
+  }
+  for (std::size_t index = 0u; index < submissions.size(); ++index) {
+    if (statuses[index] != tracked_submit_status::submitted ||
+        !outcomes[index].is_drained || outcomes[index].is_incomplete ||
+        outcomes[index].has_failure) {
+      throw std::runtime_error(outcomes[index].message_length == 0u
+                                   ? "admitted tracked parallel range did not complete"
                                    : outcomes[index].message.data());
     }
   }

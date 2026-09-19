@@ -3,82 +3,41 @@
  * @brief Validates aligner overrides and final SIMD chaining policy.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
-#include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
-#include "catalog/namespace.h"
-#include "catalog/pg_aggregate.h"
-#include "catalog/pg_language_d.h"
-#include "catalog/pg_proc.h"
-#include "commands/extension.h"
-#include "optimizer/appendinfo.h"
-#include "optimizer/planmain.h"
-#include "storage/dsm.h"
-#include "storage/shmem.h"
-#include "utils/inval.h"
-#include "utils/syscache.h"
+#include "postgres.h"
 
-#include "rewrite/rewriteManip.h"
+#include "access/htup_details.h"
+#include "access/tupdesc.h"
+#include "fmgr.h"
+#include "nodes/pg_list.h"
+#include "nodes/primnodes.h"
+#include "storage/itemptr.h"
+#include "utils/errcodes.h"
+#include "utils/typcache.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
 
 export module bioseq.postgres.table:custom_scan_semantic_payload_aligner_semantics;
 
-import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
 import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
+import bioseq.pipeline.minimap_parameters_contract;
+import bioseq.postgres.support;
 
-import :custom_scan_runtime_support;
-import :custom_scan_oid_expression_support;
-
-import :custom_scan_semantic_payload_payload_codec;
+import :custom_scan_aligner_options_codec_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
+export import :custom_scan_planner_aligner_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -251,7 +210,7 @@ export {
                                    bioseq::simd::minimap2_parameters& params,
                                    bioseq::indexing::index_read_requirement& index_read_requirement,
                                    const bioseq_stub_oids& oids,
-                                   bool* vulkan_enabled_explicit = nullptr) {
+                                   bool* vulkan_enabled_explicit) {
         if (vulkan_enabled_explicit != nullptr) {
             *vulkan_enabled_explicit = false;
         }

@@ -9,6 +9,8 @@ module;
 
 export module bioseq.pipeline.pipe:stage_graph;
 
+export import bioseq.pipeline.runtime_contract;
+
 import std;
 import bioseq.common.logging;
 import bioseq.common.templating;
@@ -53,6 +55,7 @@ import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
+export import bioseq.pipeline.vulkan_decline;
 
 export {
 
@@ -107,23 +110,6 @@ export {
         return elapsed > 0 ? elapsed : 1u;
     }
 
-    /// Report that a mandatory Vulkan stage did not execute.
-    [[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
-        auto& runtime = bioseq::gpu::vulkan::runtime::instance();
-        const std::string detail =
-            !runtime.is_usable()
-                ? fmt::format("runtime unavailable: {}", runtime.initialization_error())
-            : runtime.features().software_device
-                ? fmt::format("active Vulkan device '{}' is a CPU/software device "
-                              "(VkPhysicalDeviceType={}); explicit GPU execution requires a "
-                              "hardware Vulkan device",
-                              runtime.features().device_name.data(),
-                              runtime.features().device_type)
-                : "GPU path declined";
-        throw bioseq::gpu::vulkan::vulkan_runtime_error(
-            fmt::format("{} selected but Vulkan execution did not run ({})", stage, detail));
-    }
-
     /// Report the structured decline emitted by a mandatory Vulkan sketch.
     [[noreturn]] inline void
     throw_vulkan_sketch_declined(std::string_view stage,
@@ -159,23 +145,27 @@ export {
      * @brief Type-level parameter pack for a fully specialised pipeline instance.
      *
      * @tparam p_window_size           Minimizer window size (must be > 0).
-     * @tparam p_kmer_size           p_kmer_size-mer length (must match the
-     * minimizer_representation's KmerLen).
+     * @tparam p_runtime_kmer_size   Biological k-mer length used by the kernel.
      * @tparam p_sequence_length_log2  ceil(log2(max(query_bp, target_bp))).  Selects the
-     *                     `minimizer_representation<p_sequence_length_log2, p_kmer_size>` storage
+     *                     `minimizer_representation<p_sequence_length_log2, p_physical_kmer_size>` storage
      * bucket — same dispatch already happens at runtime in `minimap_port`.
+     * @tparam p_physical_kmer_size  Record-format K; fixed-u32 sketches retain
+     *                              their legacy K15 format even at runtime k20.
      */
     template <std::size_t p_window_size,
-              std::size_t p_kmer_size,
-              std::size_t p_sequence_length_log2>
+              std::size_t p_runtime_kmer_size,
+              std::size_t p_sequence_length_log2,
+              std::size_t p_physical_kmer_size = p_runtime_kmer_size>
     struct static_aligner_parameters {
         static constexpr std::size_t window_len = p_window_size;
-        static constexpr std::size_t kmer_len = p_kmer_size;
+        static constexpr std::size_t kmer_len = p_runtime_kmer_size;
+        static constexpr std::size_t physical_kmer_len = p_physical_kmer_size;
         static constexpr std::size_t sequence_len_log2 = p_sequence_length_log2;
         static constexpr bool generic_fallback = false;
 
         using minimizer_repr_t =
-            ::bioseq::minimizers::minimizer_representation<p_sequence_length_log2, p_kmer_size>;
+            ::bioseq::minimizers::minimizer_representation<p_sequence_length_log2,
+                                                         p_physical_kmer_size>;
 
         [[nodiscard]] static constexpr std::string_view label() noexcept {
             return "specialised";
@@ -188,14 +178,18 @@ export {
      * Stages branch on `generic_fallback` to read window/kmer from runtime params
      * instead of the type-level constants.
      */
-    template <std::size_t p_sequence_length_log2> struct fallback_aligner_parameters {
+    template <std::size_t p_sequence_length_log2,
+              std::size_t p_physical_kmer_size = 15u>
+    struct fallback_aligner_parameters {
         static constexpr std::size_t window_len = 0;
         static constexpr std::size_t kmer_len = 0;
+        static constexpr std::size_t physical_kmer_len = p_physical_kmer_size;
         static constexpr std::size_t sequence_len_log2 = p_sequence_length_log2;
         static constexpr bool generic_fallback = true;
 
         using minimizer_repr_t =
-            ::bioseq::minimizers::minimizer_representation<p_sequence_length_log2, 15u>;
+            ::bioseq::minimizers::minimizer_representation<p_sequence_length_log2,
+                                                         p_physical_kmer_size>;
 
         [[nodiscard]] static constexpr std::string_view label() noexcept {
             return "fallback(generic w/k)";
@@ -207,6 +201,7 @@ export {
     concept is_constexpr_aligner_params = requires {
         { p_type::window_len } -> std::convertible_to<std::size_t>;
         { p_type::kmer_len } -> std::convertible_to<std::size_t>;
+        { p_type::physical_kmer_len } -> std::convertible_to<std::size_t>;
         { p_type::sequence_len_log2 } -> std::convertible_to<std::size_t>;
         { p_type::generic_fallback } -> std::convertible_to<bool>;
         typename p_type::minimizer_repr_t;
@@ -215,6 +210,13 @@ export {
 
     static_assert(is_constexpr_aligner_params<static_aligner_parameters<10u, 15u, 28u>>);
     static_assert(is_constexpr_aligner_params<fallback_aligner_parameters<28u>>);
+    static_assert(std::same_as<
+        static_aligner_parameters<15u, 20u, 28u, 15u>::minimizer_repr_t,
+        ::bioseq::minimizers::minimizer_representation<28u, 15u>>);
+    static_assert(static_aligner_parameters<15u, 20u, 28u, 15u>::kmer_len == 20u);
+    static_assert(std::same_as<
+        fallback_aligner_parameters<23u, 20u>::minimizer_repr_t,
+        ::bioseq::minimizers::minimizer_representation<23u, 20u>>);
 
     /**
      * @brief Pipeline-builder entry-point tag.
@@ -252,45 +254,70 @@ export {
     template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
     struct stage;
 
-    // Metadata types (defined fully in; forward-declared here so describe()
-    // has a return type).
-    struct stage_description;
-    struct pipeline_description;
-
     // =============================================================================
-    // — narrow minimizer-batch shape carrying an optional device span.
+    // — owner-carrying minimizer batch with an optional device span.
     // =============================================================================
     //
-    // One additional stage-shape on top of the  matrix. It borrows the host
-    // minimizers from the arena slab and owns the optional GPU device minimizer
-    // handle through `vulkan_device_minimizer_span::owner`, so the all-Vulkan
-    // sketch+seed path avoids a second query-minimizer upload. CPU minimizer
-    // kernels keep using the existing `std::span<const p_minimizer>` path.
-    template <class p_minimizer> struct minimizer_batch_view {
+    // The immutable host owner and checked scalar bounds survive every retaining
+    // handoff. No stored host span can outlive its backing vector. The optional
+    // device span independently retains its existing shared device owner.
+    template <class p_minimizer> class minimizer_batch_view {
+        std::shared_ptr<const std::vector<p_minimizer>> host_owner_;
+        std::size_t offset_;
+        std::size_t count_;
+
+        minimizer_batch_view(
+            std::shared_ptr<const std::vector<p_minimizer>> owner,
+            const std::size_t offset,
+            const std::size_t count,
+            std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>> device_span)
+            : host_owner_(std::move(owner)), offset_(offset), count_(count),
+              device(std::move(device_span)) {}
+
+      public:
         using value_type = p_minimizer;
 
-        std::span<const p_minimizer> host{};
         std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>> device{};
 
+        /// Retain a real vector owner without copying any minimizer elements.
+        [[nodiscard]] static minimizer_batch_view from_shared_host(
+            std::shared_ptr<const std::vector<p_minimizer>> owner,
+            const std::size_t offset,
+            const std::size_t count,
+            std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>>
+                device_span = std::nullopt) {
+            if (!owner || offset > owner->size() || count > owner->size() - offset) {
+                throw std::invalid_argument("minimizer batch requires an owned in-bounds host range");
+            }
+            return minimizer_batch_view{
+                std::move(owner), offset, count, std::move(device_span)};
+        }
+
+        /// Check that this value was not consumed by a move.
+        [[nodiscard]] bool has_host_owner() const noexcept {
+            return static_cast<bool>(host_owner_);
+        }
         /// Return the first host minimizer, or null for an empty batch.
         [[nodiscard]] const p_minimizer* data() const noexcept {
-            return host.data();
+            return as_span().data();
         }
         /// Return the number of host minimizers.
         [[nodiscard]] std::size_t size() const noexcept {
-            return host.size();
+            return as_span().size();
         }
         /// View the host minimizers without transferring device ownership.
         [[nodiscard]] std::span<const p_minimizer> as_span() const noexcept {
-            return host;
+            return host_owner_
+                ? std::span<const p_minimizer>{*host_owner_}.subspan(offset_, count_)
+                : std::span<const p_minimizer>{};
         }
         /// Return the host-range begin iterator.
         [[nodiscard]] auto begin() const noexcept {
-            return host.begin();
+            return as_span().begin();
         }
         /// Return the host-range end iterator.
         [[nodiscard]] auto end() const noexcept {
-            return host.end();
+            return as_span().end();
         }
     };
 
@@ -710,18 +737,6 @@ export {
     // `arena_slab<p_element>` is owned by `bioseq.chaining.core` so chaining,
     // seed, and region kernels share one caller-owned output contract. The using
     // declarations above expose the slab and its factory to stage bodies.
-
-    // =============================================================================
-    // Metadata surface — forward types for algorithm_traits
-    // =============================================================================
-    //
-    // `named_property` precedes algorithm traits because their computed-property
-    // signatures return this type. Full descriptions follow the trait definitions.
-
-    struct named_property {
-        std::string name;
-        std::string value;
-    };
 
     } // namespace bioseq::simd::pipe
 

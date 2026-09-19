@@ -14,7 +14,7 @@ export module bioseq.codegen.sql:tests.contract;
 
 import :policy;
 import bioseq.codegen.sql.graph;
-import :tests.contract.guc;
+export import :tests.contract.guc;
 import bioseq.codegen.sql.renderer;
 import bioseq.codegen.structural_analysis.tests.contract;
 
@@ -1384,7 +1384,7 @@ inline void run_generator_contract_self_tests() {
                 contract_test_detail::annotated_type_program();
             const auto prerequisite = std::ranges::find(
                 cyclic.entities,
-                "fixture_callback_prerequisite",
+                std::string{"fixture_callback_prerequisite"},
                 &collected_entity::name);
             if (prerequisite == cyclic.entities.end()) {
                 throw std::runtime_error{
@@ -1405,7 +1405,7 @@ inline void run_generator_contract_self_tests() {
                 contract_test_detail::annotated_type_program();
             const auto output = std::ranges::find(
                 invalid.entities,
-                "fixture_base_out",
+                std::string{"fixture_base_out"},
                 &collected_entity::name);
             if (output == invalid.entities.end()) {
                 throw std::runtime_error{"callback fixture is absent"};
@@ -1422,7 +1422,7 @@ inline void run_generator_contract_self_tests() {
                 contract_test_detail::annotated_type_program();
             const auto output = std::ranges::find(
                 invalid.entities,
-                "fixture_base_out",
+                std::string{"fixture_base_out"},
                 &collected_entity::name);
             if (output == invalid.entities.end()) {
                 throw std::runtime_error{"callback fixture is absent"};
@@ -1439,7 +1439,7 @@ inline void run_generator_contract_self_tests() {
                 contract_test_detail::annotated_type_program();
             const auto input = std::ranges::find(
                 invalid.entities,
-                "fixture_base_in",
+                std::string{"fixture_base_in"},
                 &collected_entity::name);
             if (input == invalid.entities.end()) {
                 throw std::runtime_error{"callback fixture is absent"};
@@ -1458,7 +1458,7 @@ inline void run_generator_contract_self_tests() {
                 contract_test_detail::annotated_type_program();
             const auto output = std::ranges::find(
                 invalid.entities,
-                "fixture_base_out",
+                std::string{"fixture_base_out"},
                 &collected_entity::name);
             if (output == invalid.entities.end()) {
                 throw std::runtime_error{"callback fixture is absent"};
@@ -1494,14 +1494,14 @@ inline void run_generator_contract_self_tests() {
             contract_test_detail::annotated_type_program();
         const auto base = std::ranges::find(
             variable.entities,
-            "fixture_base",
+            std::string{"fixture_base"},
             &collected_entity::name);
         if (base == variable.entities.end()) {
             throw std::runtime_error{"base-type fixture is absent"};
         }
         const auto length = std::ranges::find(
             base->options,
-            "internal_length",
+            std::string{"internal_length"},
             &option_value::name);
         if (length == base->options.end()) {
             throw std::runtime_error{"base-type length fixture is absent"};
@@ -1524,7 +1524,7 @@ inline void run_generator_contract_self_tests() {
                 contract_test_detail::annotated_type_program();
             const auto base = std::ranges::find(
                 conflicting.entities,
-                "fixture_base",
+                std::string{"fixture_base"},
                 &collected_entity::name);
             if (base == conflicting.entities.end()) {
                 throw std::runtime_error{"base-type fixture is absent"};
@@ -1612,14 +1612,14 @@ inline void run_generator_contract_self_tests() {
                 contract_test_detail::annotated_type_program();
             const auto base = std::ranges::find(
                 self.entities,
-                "fixture_base",
+                std::string{"fixture_base"},
                 &collected_entity::name);
             if (base == self.entities.end()) {
                 throw std::runtime_error{"base-type fixture is absent"};
             }
             const auto element = std::ranges::find(
                 base->options,
-                "element",
+                std::string{"element"},
                 &option_value::name);
             if (element == base->options.end()) {
                 throw std::runtime_error{"ELEMENT fixture is absent"};

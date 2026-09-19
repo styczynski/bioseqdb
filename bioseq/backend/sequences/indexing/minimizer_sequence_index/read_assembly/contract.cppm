@@ -4,34 +4,20 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <concepts>
-#include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <exception>
 #include <expected>
-#include <iterator>
-#include <libassert/assert.hpp>
-#include <limits>
 #include <memory>
 #include <new>
-#include <optional>
 #include <span>
-#include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
 export module bioseq.indexing.minimizer_sequence:read_assembly_contract;
 
-import :admitted_runs;
-import :bucket_codec;
-import :replay_build;
+export import bioseq.indexing.minimizer_sequence.generation;
+import bioseq.indexing.minimizer_sequence.admitted_runs;
+import bioseq.indexing.minimizer_sequence.bucket_codec;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
 import bioseq.common.seqan_adapter;
@@ -48,8 +34,9 @@ import bioseq.parallelism.pipeline_ops;
 import bioseq.parallelism.pool;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.storage.lazy_sequence;
+import bioseq.storage.lazy_sequence_view;
 import bioseq.storage.size;
 
 export namespace bioseq::indexing {
@@ -59,7 +46,6 @@ using bioseq::minimizers::minimizer_sketch_backend;
 using bioseq::minimizers::minimizer_sketch_backend_name;
 using bioseq::minimizers::sketch_collector;
 using bioseq::simd::collect_minimizers_view;
-using bioseq::storage::lazy_sequence;
 using bioseq::storage::sequence_size_t;
 
 template <class p_storage> struct direct_minimizer_bucket_index {
@@ -69,95 +55,9 @@ template <class p_storage> struct direct_minimizer_bucket_index {
     static constexpr std::string_view index_name = k_minimizers_per_sequence_index_name;
     using storage_type = p_storage;
 
-    class generation_spill_result {
-      private:
-        friend struct direct_minimizer_bucket_index<p_storage>;
-
-        std::uint64_t run_count_ = 0;
-        exact_simd_index_execution_stats exact_simd_stats_{};
-        bool exact_simd_stats_available_ = false;
-        minimizer_scheme_identity minimizer_scheme_{};
-        std::uint64_t target_length_ = 0;
-        std::uint64_t position_segment_span_bp_ = 0;
-        minimizer_sequence_generation_execution_receipt execution_receipt_{};
-        std::shared_ptr<const direct_minimizer_spill_authority<p_storage>> authority_{};
-
-        generation_spill_result(
-            std::uint64_t run_count,
-            const exact_simd_index_execution_stats& exact_simd_stats,
-            bool exact_simd_stats_available,
-            minimizer_scheme_identity minimizer_scheme,
-            std::uint64_t target_length,
-            std::uint64_t position_segment_span_bp,
-            const minimizer_sequence_generation_execution_receipt& execution_receipt,
-            std::shared_ptr<const direct_minimizer_spill_authority<p_storage>> authority) noexcept
-            : run_count_(run_count), exact_simd_stats_(exact_simd_stats),
-              exact_simd_stats_available_(exact_simd_stats_available),
-              minimizer_scheme_(minimizer_scheme), target_length_(target_length),
-              position_segment_span_bp_(position_segment_span_bp),
-              execution_receipt_(execution_receipt), authority_(std::move(authority)) {}
-
-        void poison_() noexcept {
-            run_count_ = 0;
-            exact_simd_stats_ = {};
-            exact_simd_stats_available_ = false;
-            minimizer_scheme_ = {};
-            target_length_ = 0;
-            position_segment_span_bp_ = 0;
-            execution_receipt_ = {};
-            authority_.reset();
-        }
-
-        void steal_from_(generation_spill_result&& other) noexcept {
-            run_count_ = other.run_count_;
-            exact_simd_stats_ = other.exact_simd_stats_;
-            exact_simd_stats_available_ = other.exact_simd_stats_available_;
-            minimizer_scheme_ = other.minimizer_scheme_;
-            target_length_ = other.target_length_;
-            position_segment_span_bp_ = other.position_segment_span_bp_;
-            execution_receipt_ = std::move(other.execution_receipt_);
-            authority_ = std::move(other.authority_);
-            other.poison_();
-        }
-
-      public:
-        generation_spill_result() = delete;
-        generation_spill_result(const generation_spill_result&) = delete;
-        generation_spill_result& operator=(const generation_spill_result&) = delete;
-        generation_spill_result(generation_spill_result&& other) noexcept {
-            steal_from_(std::move(other));
-        }
-        generation_spill_result& operator=(generation_spill_result&& other) noexcept {
-            if (this != &other) {
-                poison_();
-                steal_from_(std::move(other));
-            }
-            return *this;
-        }
-
-        [[nodiscard]] std::uint64_t run_count() const noexcept {
-            return run_count_;
-        }
-        [[nodiscard]] const exact_simd_index_execution_stats& exact_simd_stats() const noexcept {
-            return exact_simd_stats_;
-        }
-        [[nodiscard]] bool exact_simd_stats_available() const noexcept {
-            return exact_simd_stats_available_;
-        }
-        [[nodiscard]] minimizer_scheme_identity minimizer_scheme() const noexcept {
-            return minimizer_scheme_;
-        }
-        [[nodiscard]] std::uint64_t target_length() const noexcept {
-            return target_length_;
-        }
-        [[nodiscard]] std::uint64_t position_segment_span_bp() const noexcept {
-            return position_segment_span_bp_;
-        }
-        [[nodiscard]] const minimizer_sequence_generation_execution_receipt&
-        execution_receipt() const noexcept {
-            return execution_receipt_;
-        }
-    };
+    /// Share the sealed producer handle; the facade must not duplicate its receipt fields.
+    using generation_spill_result = generation_detail::generation_spill_result<
+        p_storage, direct_minimizer_bucket_index<p_storage>>;
 
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] static std::expected<segment_unit_range,
@@ -165,7 +65,13 @@ template <class p_storage> struct direct_minimizer_bucket_index {
     make_generation_collection_range(bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
                                      std::uint64_t core_lo,
                                      std::uint64_t core_hi,
-                                     std::uint64_t halo_bp = 10u + 15u - 2u) noexcept;
+                                     std::uint16_t window_size,
+                                     std::uint16_t kmer_size) noexcept {
+        return direct_minimizer_generation_replay<
+            p_storage,
+            direct_minimizer_bucket_index<p_storage>>::make_generation_collection_range(
+            sequence, core_lo, core_hi, window_size, kmer_size);
+    }
 
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] static std::expected<exact_simd_index_execution_stats,
@@ -176,11 +82,31 @@ template <class p_storage> struct direct_minimizer_bucket_index {
         minimizer_sketch_backend backend,
         const bioseq::minimizers::minimizer_kernels* kernels,
         segment_unit_range range,
+        std::uint16_t window_size,
+        std::uint16_t kmer_size,
+        const minimizer_generation_algorithm_identity* algorithm_identity,
         sketch_collector& collector,
         std::vector<detail::sorted_pair_t>& output,
         minimizer_sequence_generation_execution_receipt* execution_receipt = nullptr,
         bool allow_packed_bounded = false,
-        direct_minimizer_bucket_build_stats* scalar_build_stats = nullptr);
+        direct_minimizer_bucket_build_stats* scalar_build_stats = nullptr) {
+        return direct_minimizer_generation_replay<
+            p_storage,
+            direct_minimizer_bucket_index<p_storage>>::collect_generation_core_run(
+            sequence,
+            alphabet_code,
+            backend,
+            kernels,
+            range,
+            window_size,
+            kmer_size,
+            algorithm_identity,
+            collector,
+            output,
+            execution_receipt,
+            allow_packed_bounded,
+            scalar_build_stats);
+    }
 
     /// Prepare external runs serially within the bounded production budget. Each source core is
     /// collected and spilled before the next is allocated. The returned direct minimizer-bucket
@@ -193,16 +119,41 @@ template <class p_storage> struct direct_minimizer_bucket_index {
         bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
         minimizer_sketch_backend backend,
         const bioseq::minimizers::minimizer_kernels* kernels,
+        minimizer_generation_algorithm_identity algorithm_identity,
         std::uint64_t core_span_bp = 0,
         std::uint64_t position_segment_span_bp = k_minimizer_preferred_segment_span_bp,
         minimizer_sequence_generation_execution_receipt* execution_receipt_out = nullptr,
-        std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code);
+        std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code,
+        std::span<const std::uint32_t> selected_hashes_u32 = {},
+        std::span<const std::uint64_t> selected_hashes_u64 = {},
+        std::uint8_t selected_hash_width = 0u) {
+        return direct_minimizer_generation_replay<
+            p_storage,
+            direct_minimizer_bucket_index<p_storage>>::spill_generation_replay_runs_serial(
+            storage,
+            sequence,
+            backend,
+            kernels,
+            algorithm_identity,
+            core_span_bp,
+            position_segment_span_bp,
+            execution_receipt_out,
+            alphabet_code,
+            selected_hashes_u32,
+            selected_hashes_u64,
+            selected_hash_width);
+    }
 
     [[nodiscard]] static auto make_generation_replay_producer(
         p_storage& storage,
         std::uint64_t target_length,
         generation_spill_result&& spill,
-        std::uint64_t position_segment_span_bp = k_minimizer_preferred_segment_span_bp);
+        std::uint64_t position_segment_span_bp = k_minimizer_preferred_segment_span_bp) {
+        return direct_minimizer_generation_replay<
+            p_storage,
+            direct_minimizer_bucket_index<p_storage>>::make_generation_replay_producer(
+            storage, target_length, std::move(spill), position_segment_span_bp);
+    }
 
     /// Encode grouped-SoA rows from a sealed direct minimizer-bucket spill. The layout
     /// consumes the sealed direct minimizer-bucket spill without conversion.
@@ -215,7 +166,12 @@ template <class p_storage> struct direct_minimizer_bucket_index {
         generation_spill_result&& spill,
         const grouped_soa_generation_options& options,
         const grouped_soa_generation_limits& limits = {},
-        minimizer_sequence_generation_execution_receipt* execution_receipt_out = nullptr);
+        minimizer_sequence_generation_execution_receipt* execution_receipt_out = nullptr) {
+        return direct_minimizer_generation_replay<
+            p_storage,
+            direct_minimizer_bucket_index<p_storage>>::encode_persisted_generation(
+            storage, sink, std::move(spill), options, limits, execution_receipt_out);
+    }
 
     template <sequence_alphabet p_alphabet>
     static void

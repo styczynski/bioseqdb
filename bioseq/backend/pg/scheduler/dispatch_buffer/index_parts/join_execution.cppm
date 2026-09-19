@@ -36,30 +36,19 @@ extern "C" {
 module bioseq.postgres.scheduler.dispatch_buffer:join_execution;
 
 import bioseq.postgres.scheduler.dispatch_buffer;
+import :active_policy_accounting;
 
-import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
+import bioseq.common.logging;
 import bioseq.postgres.configuration.core;
-import bioseq.indexing.type;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.storage.lazy_sequence; // allocation observer for route-aware sequence payload tracing
+import bioseq.postgres.support;
 import bioseq.postgres.scheduler.dispatch_processor; // fixed-shape batch_processor, heavy pipeline in its own module
-import bioseq.sequences;
+import bioseq.sequences.compact_sequence_typmod;
 import bioseq.sequences.simd;
-import bioseq.pipeline.minimap_port;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.pipe;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
-import bioseq.storage.scanner;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner; // statement-owned source provider for locator targets
-import bioseq.parallelism.memory_admission;
 import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.column.table_access;
 
 namespace bioseq::scheduler {
 
@@ -105,7 +94,7 @@ namespace bioseq::scheduler {
      * all CPU preparation groups. */
     auto prepared_counter_totals = [this] {
         std::array<std::uint64_t, 5> totals{};
-        for (const auto& group : join_cpu_prepared_target.groups) {
+        for (const auto& group : join_cpu_prepared_target->groups) {
             totals[0] += group.target_index_builds;
             totals[1] += group.target_index_reuses;
             totals[2] += group.duplicate_build_attempts;
@@ -239,6 +228,7 @@ namespace bioseq::scheduler {
             scanner_pg_ctx.snapshot = scan_snapshot;
             scanner_pg_ctx.source_provider = source_provider;
             scanner_pg_ctx.persisted_gpu_operation_stats_sink = persisted_gpu_operation_stats_sink;
+            scanner_pg_ctx.downstream_active_wall = downstream_active_wall_tracker;
             scanner_pg_ctx.user_relid = user_relid;
             scanner_pg_ctx.index_read_requirement = index_read_requirement;
             scanner_pg_ctx.read_index_active = read_sequence_index_active;
@@ -260,15 +250,15 @@ namespace bioseq::scheduler {
             const bool record_physical_target = !join_target_outcomes_recorded;
             scanner_pg_ctx.explicit_query_ordinals = true;
             /* Ask the generic processor for its native raw stats on every
-             * wave. CPU reports one target/source observation per pair; GPU
-             * reports its already-deduplicated logical target identity. The
-             * batch join owner validates that backend-specific shape above and
-             * alone decides whether this wave publishes the physical target. */
+             * wave. CPU and GPU both report one target/source observation per
+             * completed pair, including when GPU execution shares the target.
+             * The batch join owner validates the exact raw shape and alone
+             * decides whether this wave publishes the physical target. */
             scanner_pg_ctx.shared_target_batch = false;
             scanner_pg_ctx.record_target_operational_outcomes = true;
             if (join_cpu_preparation_pending) {
                 if (join_pending_cpu_preparation_queries.empty() ||
-                    join_cpu_prepared_target.unions_ready) {
+                    join_cpu_prepared_target->unions_ready) {
                     ereport(
                         ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),
@@ -282,11 +272,15 @@ namespace bioseq::scheduler {
                 };
             } else {
                 scanner_pg_ctx.cpu_prepared_target =
-                    join_cpu_prepared_target.unions_ready ? &join_cpu_prepared_target : nullptr;
+                    join_cpu_prepared_target->unions_ready ? join_cpu_prepared_target : nullptr;
             }
+            scanner_pg_ctx.gpu_prepared_mpf_target =
+                join_gpu_prepared_mpf_target.source_ready() ? &join_gpu_prepared_mpf_target
+                                                            : nullptr;
             scanner_pg_ctx.gpu_prepared_grouped_soa_target =
-                join_gpu_prepared_grouped_soa_target.ready() ? &join_gpu_prepared_grouped_soa_target
-                                                             : nullptr;
+                join_gpu_prepared_grouped_soa_target.source_ready()
+                    ? &join_gpu_prepared_grouped_soa_target
+                    : nullptr;
             for (std::size_t query_index = 0; query_index < batch_size; ++query_index) {
                 scanner_pg_ctx.target_locators[query_index] = target.seq_loc;
                 scanner_pg_ctx.target_rownos[query_index] = target.sequence_rowno;
@@ -316,7 +310,7 @@ namespace bioseq::scheduler {
                                             &join_query_hdrs,
                                             join_target_hdrs,
                                             join_query_ids,
-                                            base_params,
+                                            execution_plan,
                                             ::bioseq::simd::batch_invocation_role::primary,
                                             0,
                                             last_stats,
@@ -326,8 +320,8 @@ namespace bioseq::scheduler {
                 active_wave_read_session = nullptr;
                 scanner_pg_ctx.read_session = nullptr;
             }
-            if (join_cpu_prepared_target.unions_ready &&
-                !join_cpu_prepared_target.query_set_validation_ready()) {
+            if (join_cpu_prepared_target->unions_ready &&
+                !join_cpu_prepared_target->query_set_validation_ready()) {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),
                          errmsg("bioseq batch join compact-direct query-set stats remained pending "
@@ -338,29 +332,29 @@ namespace bioseq::scheduler {
                 record_physical_target,
                 batch_size,
                 classify_shared_join_target_outcome_topology(
-                    ::bioseq::simd::pipe::vulkan_components_requested(base_params),
-                    ::bioseq::simd::pipe::complete_all_gpu_tuple_selected(base_params)));
+                    execution_plan->uses_vulkan_seed(),
+                    execution_plan->uses_vulkan_seed()));
             const auto prepared_after = prepared_counter_totals();
             if (prepared_after[0] < prepared_before[0] || prepared_after[1] < prepared_before[1] ||
                 prepared_after[2] < prepared_before[2] || prepared_after[3] < prepared_before[3] ||
                 prepared_after[4] < prepared_before[4] ||
-                join_cpu_prepared_target.physical_target_index_reads !=
+                join_cpu_prepared_target->physical_target_index_reads !=
                     prepared_after[0] + prepared_after[3]) {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),
                          errmsg("bioseq batch join prepared-target counters are inconsistent")));
             }
             auto& operational = last_stats.operational;
-            if (!join_cpu_prepared_target.query_union_prepare_host_wall_published &&
-                join_cpu_prepared_target.query_union_prepare_host_wall_ns != 0u) {
+            if (!join_cpu_prepared_target->query_union_prepare_host_wall_published &&
+                join_cpu_prepared_target->query_union_prepare_host_wall_ns != 0u) {
                 const std::size_t query_sketch_stage = ::bioseq::pipeline_stats::stage_index(
                     ::bioseq::pipeline_stats::pipeline_stage::query_sketch);
                 operational.are_stats_saturated =
                     ::bioseq::pipeline_stats::merge_counter(
                         operational.timing[query_sketch_stage].host_wall_ns,
-                        join_cpu_prepared_target.query_union_prepare_host_wall_ns) ||
+                        join_cpu_prepared_target->query_union_prepare_host_wall_ns) ||
                     operational.are_stats_saturated;
-                join_cpu_prepared_target.query_union_prepare_host_wall_published = true;
+                join_cpu_prepared_target->query_union_prepare_host_wall_published = true;
             }
             ::bioseq::pipeline_stats::pipeline_operational_stats prepared_delta{};
             prepared_delta.cpu_prepared_index_builds = prepared_after[0] - prepared_before[0];
@@ -368,10 +362,11 @@ namespace bioseq::scheduler {
             prepared_delta.cpu_prepared_duplicate_build_attempts =
                 prepared_after[2] - prepared_before[2];
             operational.merge(prepared_delta);
-            if (!join_cpu_prepared_target.persisted_read_stats_published &&
-                !join_gpu_prepared_grouped_soa_target.ready()) {
+            if (!join_cpu_prepared_target->persisted_read_stats_published &&
+                !join_gpu_prepared_mpf_target.persisted &&
+                !join_gpu_prepared_grouped_soa_target.persisted) {
                 merge_cold_index_preparation_stats(operational, join_cold_policy_stats);
-                for (const auto& group : join_cpu_prepared_target.groups) {
+                for (const auto& group : join_cpu_prepared_target->groups) {
                     if (!group.persisted_fragment_reader && !group.persisted_grouped_soa_reader &&
                         !group.persisted_hash_major_reader)
                         continue;
@@ -481,43 +476,90 @@ namespace bioseq::scheduler {
                     operational.merge(read_delta);
                     merge_cold_index_preparation_stats(operational, read.cold);
                 }
-                join_cpu_prepared_target.persisted_read_stats_published = true;
+                join_cpu_prepared_target->persisted_read_stats_published = true;
             }
-            if (join_gpu_prepared_grouped_soa_target.ready() &&
+            if (join_gpu_prepared_mpf_target.persisted &&
+                join_gpu_prepared_mpf_target.ready() &&
+                !join_gpu_prepared_mpf_target.persisted_read_stats_published) {
+                merge_cold_index_preparation_stats(operational, join_cold_policy_stats);
+                merge_generation_read_stats(
+                    operational, join_gpu_prepared_mpf_target.persisted_read_stats);
+                join_gpu_prepared_mpf_target.persisted_read_stats_published = true;
+            }
+            if (join_gpu_prepared_grouped_soa_target.persisted &&
+                join_gpu_prepared_grouped_soa_target.ready() &&
                 !join_gpu_prepared_grouped_soa_target.persisted_read_stats_published) {
                 merge_cold_index_preparation_stats(operational, join_cold_policy_stats);
                 merge_generation_read_stats(
                     operational, join_gpu_prepared_grouped_soa_target.persisted_read_stats);
-                ::bioseq::pipeline_stats::pipeline_operational_stats gpu_load{};
-                gpu_load.gpu_persisted_resident_uploads = 1;
-                gpu_load.gpu_buffer_creates = 3;
-                gpu_load.gpu_memory_allocations = 3;
-                operational.merge(gpu_load);
+                if (!join_gpu_prepared_grouped_soa_target
+                         .resident_materialization_stats_published) {
+                    std::uint64_t materialization_count = 0u;
+                    for (const auto& materialization :
+                         join_gpu_prepared_grouped_soa_target.resident->materializations()) {
+                        const auto& snapshot = materialization.allocation_snapshot;
+                        if (materialization.admitted_bytes == 0u ||
+                            snapshot.actual_allocation_bytes !=
+                                materialization.admitted_bytes ||
+                            snapshot.fully_touched_bytes < materialization.admitted_bytes) {
+                            throw std::logic_error{
+                                "bioseq grouped-SoA GPU resident has an unauthenticated "
+                                "physical allocation"};
+                        }
+                        ++materialization_count;
+                    }
+                    if (materialization_count == 0u) {
+                        throw std::logic_error{
+                            "bioseq grouped-SoA GPU resident has no physical allocation "
+                            "receipts"};
+                    }
+                    ::bioseq::pipeline_stats::pipeline_operational_stats gpu_load{};
+                    gpu_load.gpu_persisted_resident_uploads =
+                        join_gpu_prepared_grouped_soa_target.resident
+                            ->cold_load_stats().full_generations_ingested;
+                    if (gpu_load.gpu_persisted_resident_uploads == 0u) {
+                        throw std::logic_error{
+                            "bioseq grouped-SoA GPU resident has no completed ingestion "
+                            "receipt"};
+                    }
+                    gpu_load.gpu_buffer_creates = materialization_count;
+                    gpu_load.gpu_memory_allocations = materialization_count;
+                    operational.merge(gpu_load);
+                    join_gpu_prepared_grouped_soa_target
+                        .resident_materialization_stats_published = true;
+                }
                 join_gpu_prepared_grouped_soa_target.persisted_read_stats_published = true;
             }
-            if (join_cpu_prepared_target.unions_ready && !join_cpu_prepared_target.groups.empty() &&
+            if (join_cpu_prepared_target->unions_ready && !join_cpu_prepared_target->groups.empty() &&
                 !join_prepared_union_outcomes_recorded) {
-                operational.cpu_prepared_unique_keys = join_cpu_prepared_target.total_unique_keys;
+                operational.cpu_prepared_unique_keys = join_cpu_prepared_target->total_unique_keys;
                 operational.cpu_prepared_key_set_checksum =
-                    join_cpu_prepared_target.key_set_checksum;
+                    join_cpu_prepared_target->key_set_checksum;
                 operational.cpu_prepared_key_set_checksum_available = true;
                 join_prepared_union_outcomes_recorded = true;
             }
             const bool every_group_built =
-                !join_cpu_prepared_target.groups.empty() &&
-                std::all_of(join_cpu_prepared_target.groups.begin(),
-                            join_cpu_prepared_target.groups.end(),
+                !join_cpu_prepared_target->groups.empty() &&
+                std::all_of(join_cpu_prepared_target->groups.begin(),
+                            join_cpu_prepared_target->groups.end(),
                             [](const auto& group) noexcept {
-                                return (group.target_index != nullptr ||
-                                        group.persisted_fragment_reader.has_value() ||
-                                        group.persisted_grouped_soa_reader.has_value() ||
-                                        group.persisted_hash_major_reader.has_value()) &&
+                                const unsigned target_owner_count =
+                                    static_cast<unsigned>(group.target_index != nullptr) +
+                                    static_cast<unsigned>(
+                                        group.transient_grouped_soa_reader.has_value()) +
+                                    static_cast<unsigned>(
+                                        group.persisted_fragment_reader.has_value()) +
+                                    static_cast<unsigned>(
+                                        group.persisted_grouped_soa_reader.has_value()) +
+                                    static_cast<unsigned>(
+                                        group.persisted_hash_major_reader.has_value());
+                                return target_owner_count == 1u &&
                                        group.build_set_checksum_present &&
                                        group.build_set_checksum == group.key_set_checksum;
                             });
             if (every_group_built && !join_prepared_build_checksum_recorded) {
                 operational.cpu_prepared_build_set_checksum =
-                    join_cpu_prepared_target.key_set_checksum;
+                    join_cpu_prepared_target->key_set_checksum;
                 operational.cpu_prepared_build_set_checksum_available = true;
                 join_prepared_build_checksum_recorded = true;
             }
@@ -564,7 +606,7 @@ namespace bioseq::scheduler {
                 for (std::size_t match_index = 0; match_index < inserted->second.size();
                      ++match_index) {
                     const auto& match = inserted->second[match_index];
-                    if (base_params.do_cigar && (!match.has_cigar || match.cigar.empty())) {
+                    if (base_aligner_params().do_cigar && (!match.has_cigar || match.cigar.empty())) {
                         continue;
                     }
                     join_output_cursors.push_back(join_output_cursor{query_index, match_index});
@@ -627,30 +669,55 @@ void tuple_dispatch_buffer::finish_join_target() {
                                join_gpu_prepared_grouped_soa_target.ready() ? "true" : "false")));
         }
     }
+    if (join_gpu_prepared_mpf_target.resident != nullptr ||
+        join_gpu_prepared_mpf_target.canonical_empty) {
+        const bool gpu_equation_valid =
+            join_gpu_prepared_mpf_target.ready() &&
+            join_gpu_prepared_mpf_target.dispatched_query_count <=
+                join_gpu_prepared_mpf_target.query_count &&
+            (join_gpu_prepared_mpf_target.dispatched_query_count == 0u
+                 ? join_gpu_prepared_mpf_target.dispatch_waves == 0u
+                 : join_gpu_prepared_mpf_target.dispatch_waves != 0u);
+        if (!gpu_equation_valid) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq batch join GPU MPF target lifecycle equation failed"),
+                     errdetail("prepared_queries=%llu dispatched_queries=%llu waves=%llu ready=%s",
+                               static_cast<unsigned long long>(
+                                   join_gpu_prepared_mpf_target.query_count),
+                               static_cast<unsigned long long>(
+                                   join_gpu_prepared_mpf_target.dispatched_query_count),
+                               static_cast<unsigned long long>(
+                                   join_gpu_prepared_mpf_target.dispatch_waves),
+                               join_gpu_prepared_mpf_target.ready() ? "true" : "false")));
+        }
+    }
     std::uint64_t builds = 0;
     std::uint64_t reuses = 0;
     std::uint64_t duplicate_build_attempts = 0;
     std::uint64_t built_groups = 0;
     std::uint64_t reader_loads = 0;
     std::uint64_t reader_queries = 0;
-    for (const auto& group : join_cpu_prepared_target.groups) {
+    for (const auto& group : join_cpu_prepared_target->groups) {
         builds += group.target_index_builds;
         reuses += group.target_index_reuses;
         duplicate_build_attempts += group.duplicate_build_attempts;
-        built_groups += group.target_index != nullptr ? 1u : 0u;
+        built_groups += static_cast<std::uint64_t>(group.target_index != nullptr) +
+                        static_cast<std::uint64_t>(
+                            group.transient_grouped_soa_reader.has_value());
         reader_loads += group.persisted_reader_loads;
         reader_queries += group.persisted_reader_queries;
     }
     const bool reader_mode = reader_loads != 0;
     const std::uint64_t processed_queries = reader_mode ? reader_queries : builds + reuses;
-    const bool fully_processed = processed_queries == join_cpu_prepared_target.query_count;
+    const bool fully_processed = processed_queries == join_cpu_prepared_target->query_count;
     if ((built_groups != 0 || reader_loads != 0) &&
         (builds != built_groups ||
-         builds + reader_loads != join_cpu_prepared_target.physical_target_index_reads ||
-         processed_queries > join_cpu_prepared_target.query_count ||
+         builds + reader_loads != join_cpu_prepared_target->physical_target_index_reads ||
+         processed_queries > join_cpu_prepared_target->query_count ||
          (reader_mode && (reader_loads != 1 || builds != 0 || reuses != 0)) ||
          duplicate_build_attempts != 0 ||
-         (fully_processed && join_cpu_prepared_target.query_count != 0 &&
+         (fully_processed && join_cpu_prepared_target->query_count != 0 &&
           !join_prepared_build_checksum_recorded))) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
@@ -660,9 +727,9 @@ void tuple_dispatch_buffer::finish_join_target() {
                            static_cast<unsigned long long>(builds),
                            static_cast<unsigned long long>(built_groups),
                            static_cast<unsigned long long>(
-                               join_cpu_prepared_target.physical_target_index_reads),
+                               join_cpu_prepared_target->physical_target_index_reads),
                            static_cast<unsigned long long>(reuses),
-                           static_cast<unsigned long long>(join_cpu_prepared_target.query_count),
+                           static_cast<unsigned long long>(join_cpu_prepared_target->query_count),
                            static_cast<unsigned long long>(duplicate_build_attempts),
                            join_prepared_build_checksum_recorded ? "true" : "false")));
     }
@@ -671,7 +738,7 @@ void tuple_dispatch_buffer::finish_join_target() {
             "[bioseq] batch join prepared target finalized partial: "
             "processed_queries={} prepared_queries={} reader_mode={}",
             static_cast<unsigned long long>(processed_queries),
-            static_cast<unsigned long long>(join_cpu_prepared_target.query_count),
+            static_cast<unsigned long long>(join_cpu_prepared_target->query_count),
             reader_mode);
     }
     join_queries.clear();
@@ -688,7 +755,10 @@ void tuple_dispatch_buffer::finish_join_target() {
     join_prepared_build_checksum_recorded = false;
     join_active_read_policy.reset();
     join_cold_policy_stats = {};
-    join_cpu_prepared_target = ::bioseq::simd::batch_processor::cpu_prepared_target{};
+    join_cpu_prepared_target =
+        std::make_shared<::bioseq::simd::batch_processor::cpu_prepared_target>();
+    join_gpu_prepared_mpf_target =
+        ::bioseq::simd::batch_processor::gpu_prepared_mpf_target{};
     join_gpu_prepared_grouped_soa_target =
         ::bioseq::simd::batch_processor::gpu_prepared_grouped_soa_target{};
     clear_slots();
@@ -732,7 +802,10 @@ void tuple_dispatch_buffer::abandon_join_runtime_after_pg_error_noexcept() noexc
     join_prepared_build_checksum_recorded = false;
     join_active_read_policy.reset();
     join_cold_policy_stats = {};
-    join_cpu_prepared_target = ::bioseq::simd::batch_processor::cpu_prepared_target{};
+    join_cpu_prepared_target =
+        std::make_shared<::bioseq::simd::batch_processor::cpu_prepared_target>();
+    join_gpu_prepared_mpf_target =
+        ::bioseq::simd::batch_processor::gpu_prepared_mpf_target{};
     join_gpu_prepared_grouped_soa_target =
         ::bioseq::simd::batch_processor::gpu_prepared_grouped_soa_target{};
     for (auto& entry : buffered_entries) {
@@ -775,7 +848,10 @@ void tuple_dispatch_buffer::reset_join_runtime_for_rescan() {
     join_prepared_build_checksum_recorded = false;
     join_active_read_policy.reset();
     join_cold_policy_stats = {};
-    join_cpu_prepared_target = ::bioseq::simd::batch_processor::cpu_prepared_target{};
+    join_cpu_prepared_target =
+        std::make_shared<::bioseq::simd::batch_processor::cpu_prepared_target>();
+    join_gpu_prepared_mpf_target =
+        ::bioseq::simd::batch_processor::gpu_prepared_mpf_target{};
     join_gpu_prepared_grouped_soa_target =
         ::bioseq::simd::batch_processor::gpu_prepared_grouped_soa_target{};
     clear_slots();

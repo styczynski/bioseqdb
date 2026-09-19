@@ -3,114 +3,55 @@
  * @brief Defines chunked-storage catalog contracts, schema validation, and failure seams.
  */
 module;
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 
 extern "C" {
+#include "postgres.h"
+
 #include "access/heapam.h"
 #include "access/nbtree.h"
-#include "access/parallel.h"
 #include "access/relation.h"
 #include "access/table.h"
-#include "access/tableam.h"
-#include "access/transam.h"
-#include "access/xact.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h" // RelnameGetRelid
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_opclass_d.h"
-#include "catalog/pg_sequence.h"
 #include "catalog/pg_type_d.h"
-#include "commands/sequence.h"
-#include "commands/tablespace.h"
 #include "executor/instrument.h"
-#include "executor/spi.h"
-#include "executor/tuptable.h"
-#include "storage/buffile.h"
-#include "storage/dsm.h"
-#include "storage/fd.h"
-#include "storage/ipc.h"
-#include "storage/procarray.h"
-#include "storage/relfilelocator.h"
-#include "storage/shm_toc.h"
+#include "miscadmin.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils/resowner.h"
-#include "utils/snapmgr.h"
 #include "utils/syscache.h"
-#include "utils/timestamp.h"
-#include "utils/xid8.h"
-
-#include "common/relpath.h"
-#include "miscadmin.h"
-#include "port.h"
-#include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <tuple>
-#include <type_traits>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:catalog_contracts;
-import bioseq.common.logging;
+
+import std;
+export import bioseq.postgres.storage.indexing.cold_index_timing;
+export import bioseq.postgres.storage.indexing.executor_read_context;
+export import bioseq.postgres.storage.indexing.minimizer_build_stats;
+export import bioseq.postgres.storage.indexing.minimizer_read_stats;
 import bioseq.common.checked_arithmetic;
-import bioseq.common.memory_budget;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
-import bioseq.postgres.support.datums;
-import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
 import bioseq.storage.layout;           // sequence_locator
-import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
 import bioseq.indexing.storage;           // the concepts
 import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
 import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
-import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
-import bioseq.storage.lazy_sequence;           // lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.instrumentation.clock;
-import bioseq.postgres.column.table_access;
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.physical;
 import bioseq.postgres.storage.indexing.sql_row_codecs;
@@ -196,328 +137,171 @@ static_assert(bioseq::indexing::k_varlena_header_bytes == VARHDRSZ, "VARHDRSZ mi
 static_assert(bioseq::indexing::k_postgres_max_allocation_bytes == MaxAllocSize,
               "MaxAllocSize mirror drift");
 
-/// Backend-local counters for the most recent per-sequence index build.
-/// Storage updates the counters, administration resets them, and SQL reads
-/// them from the same backend process.
-struct last_minimizer_sequence_build_stats {
-    std::uint64_t backend_pid = 0;
-    std::uint64_t db_oid = 0;
-    std::uint64_t relfilenode = 0;
+/// Result of one current-generation logical-index clear.
+struct minimizer_generation_clear_result {
+    std::uint64_t dropped_relation_count = 0;
+    std::uint64_t deleted_metadata_age_rows = 0;
+};
+
+/// Catalog identity shared by generation writers, readers, and administrators.
+struct minimizer_generation_administration_identity {
+    Oid database_oid = InvalidOid;
+    Oid tablespace_oid = InvalidOid;
+    Oid main_relfilenode = InvalidOid;
+    Oid user_relid = InvalidOid;
+    std::int16_t column_attno = 0;
+    std::string index_name;
+    std::string table_name;
+
+    /** Releases the owned catalog names before a PostgreSQL error boundary. */
+    void release_owned_strings() noexcept {
+        std::string{}.swap(index_name);
+        std::string{}.swap(table_name);
+    }
+};
+
+/** Describes the exact visible source row bound to one generation. */
+struct minimizer_generation_source_locator {
     std::uint64_t sequence_rowno = 0;
-    std::uint64_t total_run_count = 0;
-    std::uint64_t resident_runs = 0;
-    std::uint64_t file_runs = 0;
-    std::uint64_t resident_run_bytes = 0;
-    std::uint64_t resident_peak_bytes = 0;
-    std::uint64_t spilled_run_bytes = 0;
-    std::uint64_t postgres_temp_file_bytes = 0;
-    std::uint64_t postgres_temp_file_count = 0;
-    std::uint64_t merge_reader_buffer_bytes = 0;
-    std::uint64_t merge_pass_count = 0;
-    std::uint64_t spill_count_from_pressure = 0;
-    std::uint64_t resident_demotions = 0;
-    std::uint64_t position_spill_bytes = 0;
-    std::uint64_t position_spill_count = 0;
+    sequence_locator locator{};
+    std::uint8_t alphabet_code = 0;
+    std::uint8_t storage_unit_byte_width = 0;
+    std::uint16_t padding_letters = 0;
+    std::uint64_t storage_contract_checksum = 0;
+
+    /** Compares every persisted source identity field. */
+    [[nodiscard]] bool operator==(const minimizer_generation_source_locator& other) const noexcept {
+        return sequence_rowno == other.sequence_rowno &&
+               locator.payload_version == other.locator.payload_version &&
+               locator.bucket_index == other.locator.bucket_index &&
+               locator.reserved_16 == other.locator.reserved_16 &&
+               locator.shard_index == other.locator.shard_index &&
+               locator.fragment_count == other.locator.fragment_count &&
+               locator.reserved_32 == other.locator.reserved_32 &&
+               locator.logical_length == other.locator.logical_length &&
+               locator.first_fragment_row == other.locator.first_fragment_row &&
+               locator.source_epoch == other.locator.source_epoch &&
+               alphabet_code == other.alphabet_code &&
+               storage_unit_byte_width == other.storage_unit_byte_width &&
+               padding_letters == other.padding_letters &&
+               storage_contract_checksum == other.storage_contract_checksum;
+    }
 };
 
-/// PostgreSQL-local stats for one cold persisted-index preparation. This
-/// is a transport delta, not a second execution/fallback authority: the
-/// dispatch owner merges it into pipeline_operational_stats exactly once.
-/// Every SQL-bound value clamps at INT64_MAX so the PostgreSQL bigint row
-/// shape can never wrap a large counter into a plausible small value.
-struct cold_index_preparation_stats {
-    std::uint64_t target_relation_reuses = 0;
-    std::uint64_t target_relation_extra_opens = 0;
-    std::uint64_t parent_random_reads = 0;
-    std::uint64_t policy_heap_opens = 0;
-    std::uint64_t policy_index_opens = 0;
-    std::uint64_t source_heap_opens = 0;
-    std::uint64_t source_index_opens = 0;
-    std::uint64_t fragment_heap_opens = 0;
-    std::uint64_t sidecar_heap_opens = 0;
-    std::uint64_t sidecar_index_opens = 0;
-    std::uint64_t policy_schema_validations = 0;
-    std::uint64_t source_schema_validations = 0;
-    std::uint64_t sidecar_schema_validations = 0;
-    std::uint64_t head_scans = 0;
-    std::uint64_t directory_scans = 0;
-    std::uint64_t payload_range_scans = 0;
-    std::uint64_t lock_acquires = 0;
-    std::uint64_t lock_releases = 0;
-    std::uint64_t snapshot_registers = 0;
-    std::uint64_t route_empty = 0;
-    std::uint64_t route_selective = 0;
-    std::uint64_t route_full = 0;
-    std::uint64_t route_candidate_rows = 0;
-    std::uint64_t route_full_rows = 0;
-    std::uint64_t route_candidate_bytes = 0;
-    std::uint64_t route_full_bytes = 0;
-    std::uint64_t route_selective_cost = 0;
-    std::uint64_t route_full_cost = 0;
-    std::uint64_t memory_reroutes = 0;
-    std::uint64_t payload_bytes_requested = 0;
-    std::uint64_t payload_bytes_delivered = 0;
-    std::uint64_t payload_rows_requested = 0;
-    std::uint64_t payload_rows_delivered = 0;
-    std::uint64_t payload_rows_scanned = 0;
-    std::uint64_t payload_bytes_scanned = 0;
-    std::uint64_t payload_rows_skipped = 0;
-    std::uint64_t heap_tid_adjacent = 0;
-    std::uint64_t heap_tid_forward_gap = 0;
-    std::uint64_t heap_tid_backward_jump = 0;
-    // extent_crc_bytes is the frozen logical byte-coverage counter. The three
-    // additive counters distinguish raw payload traversal from authenticated
-    // algebraic combination without changing that public meaning.
-    std::uint64_t extent_crc_bytes = 0;
-    std::uint64_t extent_crc_raw_bytes_hashed = 0;
-    std::uint64_t extent_crc_combined_bytes = 0;
-    std::uint64_t extent_crc_combine_rows = 0;
-    std::uint64_t row_crc_bytes = 0;
-    std::uint64_t tuple_form_bytes = 0;
-    std::uint64_t toast_values = 0;
-    std::uint64_t detoast_bytes = 0;
-    std::uint64_t policy_ns = 0;
-    std::uint64_t source_ns = 0;
-    std::uint64_t bind_ns = 0;
-    std::uint64_t head_ns = 0;
-    std::uint64_t directory_ns = 0;
-    std::uint64_t payload_ns = 0;
-    std::uint64_t decode_ns = 0;
-    std::uint64_t transfer_ns = 0;
-    std::uint64_t close_ns = 0;
-    std::uint64_t shared_blks_hit = 0;
-    std::uint64_t shared_blks_read = 0;
-    bool are_stats_saturated = false;
+class index_storage_fragment_generation_row_sink;
+class index_storage_fragment_generation_read_session;
+class index_storage_hash_major_minimizer_writer;
 
-    static constexpr std::uint64_t k_sql_bigint_max =
-        static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)());
-
-    /// Add one SQL-bound value and fail closed on overflow.
-    void add(std::uint64_t& destination, std::uint64_t increment) noexcept {
-        if (destination > k_sql_bigint_max ||
-            increment > k_sql_bigint_max - std::min(destination, k_sql_bigint_max)) {
-            destination = k_sql_bigint_max;
-            are_stats_saturated = true;
-            return;
-        }
-        destination += increment;
-    }
-
-    /// Saturating merge used for policy, source and sidecar stage deltas.
-    void merge(const cold_index_preparation_stats& rhs) noexcept {
-        are_stats_saturated = are_stats_saturated || rhs.are_stats_saturated;
-        add(target_relation_reuses, rhs.target_relation_reuses);
-        add(target_relation_extra_opens, rhs.target_relation_extra_opens);
-        add(parent_random_reads, rhs.parent_random_reads);
-        add(policy_heap_opens, rhs.policy_heap_opens);
-        add(policy_index_opens, rhs.policy_index_opens);
-        add(source_heap_opens, rhs.source_heap_opens);
-        add(source_index_opens, rhs.source_index_opens);
-        add(fragment_heap_opens, rhs.fragment_heap_opens);
-        add(sidecar_heap_opens, rhs.sidecar_heap_opens);
-        add(sidecar_index_opens, rhs.sidecar_index_opens);
-        add(policy_schema_validations, rhs.policy_schema_validations);
-        add(source_schema_validations, rhs.source_schema_validations);
-        add(sidecar_schema_validations, rhs.sidecar_schema_validations);
-        add(head_scans, rhs.head_scans);
-        add(directory_scans, rhs.directory_scans);
-        add(payload_range_scans, rhs.payload_range_scans);
-        add(lock_acquires, rhs.lock_acquires);
-        add(lock_releases, rhs.lock_releases);
-        add(snapshot_registers, rhs.snapshot_registers);
-        add(route_empty, rhs.route_empty);
-        add(route_selective, rhs.route_selective);
-        add(route_full, rhs.route_full);
-        add(route_candidate_rows, rhs.route_candidate_rows);
-        add(route_full_rows, rhs.route_full_rows);
-        add(route_candidate_bytes, rhs.route_candidate_bytes);
-        add(route_full_bytes, rhs.route_full_bytes);
-        add(route_selective_cost, rhs.route_selective_cost);
-        add(route_full_cost, rhs.route_full_cost);
-        add(memory_reroutes, rhs.memory_reroutes);
-        add(payload_bytes_requested, rhs.payload_bytes_requested);
-        add(payload_bytes_delivered, rhs.payload_bytes_delivered);
-        add(payload_rows_requested, rhs.payload_rows_requested);
-        add(payload_rows_delivered, rhs.payload_rows_delivered);
-        add(payload_rows_scanned, rhs.payload_rows_scanned);
-        add(payload_bytes_scanned, rhs.payload_bytes_scanned);
-        add(payload_rows_skipped, rhs.payload_rows_skipped);
-        add(heap_tid_adjacent, rhs.heap_tid_adjacent);
-        add(heap_tid_forward_gap, rhs.heap_tid_forward_gap);
-        add(heap_tid_backward_jump, rhs.heap_tid_backward_jump);
-        add(extent_crc_bytes, rhs.extent_crc_bytes);
-        add(extent_crc_raw_bytes_hashed, rhs.extent_crc_raw_bytes_hashed);
-        add(extent_crc_combined_bytes, rhs.extent_crc_combined_bytes);
-        add(extent_crc_combine_rows, rhs.extent_crc_combine_rows);
-        add(row_crc_bytes, rhs.row_crc_bytes);
-        add(tuple_form_bytes, rhs.tuple_form_bytes);
-        add(toast_values, rhs.toast_values);
-        add(detoast_bytes, rhs.detoast_bytes);
-        add(policy_ns, rhs.policy_ns);
-        add(source_ns, rhs.source_ns);
-        add(bind_ns, rhs.bind_ns);
-        add(head_ns, rhs.head_ns);
-        add(directory_ns, rhs.directory_ns);
-        add(payload_ns, rhs.payload_ns);
-        add(decode_ns, rhs.decode_ns);
-        add(transfer_ns, rhs.transfer_ns);
-        add(close_ns, rhs.close_ns);
-        add(shared_blks_hit, rhs.shared_blks_hit);
-        add(shared_blks_read, rhs.shared_blks_read);
-    }
-
-    [[nodiscard]] constexpr bool
-    operator==(const cold_index_preparation_stats&) const noexcept = default;
-};
-
-/// Forward declarations required by the mutual friend-based authorization
-/// cycle between executor context and catalog source authority.
-struct minimizer_generation_administration_identity;
-class minimizer_generation_catalog_source_authorization;
-/// Authorize one catalog source against an already registered snapshot.
-[[nodiscard]] inline minimizer_generation_catalog_source_authorization
-authorize_minimizer_generation_catalog_source_pg(
-    const minimizer_generation_administration_identity&, std::uint64_t, Snapshot);
-
-/// Move-only, non-owning executor read capability.  The CustomScan owns the
-/// Relation lock and the registered MVCC snapshot. Cold-index preparation may
-/// borrow both only while this token remains valid.  Moving the token transfers
-/// the right to borrow, but neither move nor destruction performs PostgreSQL
-/// work (in particular, it never closes the Relation or unregisters the
-/// snapshot).
-class borrowed_executor_read_context {
+/**
+ * Move-only authorization for the exact visible sequence source used by a
+ * generation writer or full validating reader.
+ */
+class minimizer_generation_source_authorization {
   private:
-    friend minimizer_generation_catalog_source_authorization
-    authorize_minimizer_generation_catalog_source_pg(
-        const minimizer_generation_administration_identity&, std::uint64_t, Snapshot);
-
-    Relation relation_ = nullptr;
-    Snapshot snapshot_ = nullptr;
-    Oid relation_oid_ = InvalidOid;
+    minimizer_generation_source_locator source_{};
+    std::uint64_t source_content_checksum_ = 0;
     Oid database_oid_ = InvalidOid;
     Oid tablespace_oid_ = InvalidOid;
-    Oid relfilenode_ = InvalidOid;
+    Oid main_relfilenode_ = InvalidOid;
+    Oid user_relid_ = InvalidOid;
+    std::int16_t column_attno_ = 0;
+    std::string index_name_{};
+    std::string table_name_{};
+    Snapshot snapshot_ = nullptr;
+    TransactionId transaction_id_ = InvalidTransactionId;
+    bool valid_ = false;
 
+    minimizer_generation_source_authorization() = default;
+
+    /** Clears a moved-from authorization without releasing external resources. */
     void invalidate_() noexcept {
-        relation_ = nullptr;
-        snapshot_ = nullptr;
-        relation_oid_ = InvalidOid;
+        source_ = {};
+        source_content_checksum_ = 0;
         database_oid_ = InvalidOid;
         tablespace_oid_ = InvalidOid;
-        relfilenode_ = InvalidOid;
+        main_relfilenode_ = InvalidOid;
+        user_relid_ = InvalidOid;
+        column_attno_ = 0;
+        std::string{}.swap(index_name_);
+        std::string{}.swap(table_name_);
+        snapshot_ = nullptr;
+        transaction_id_ = InvalidTransactionId;
+        valid_ = false;
     }
 
-    borrowed_executor_read_context(Relation relation, Snapshot registered_snapshot) noexcept
-        : relation_(relation), snapshot_(registered_snapshot),
-          relation_oid_(relation == nullptr ? InvalidOid : RelationGetRelid(relation)),
-          database_oid_(relation == nullptr ? InvalidOid : relation->rd_locator.dbOid),
-          tablespace_oid_(relation == nullptr ? InvalidOid : relation->rd_locator.spcOid),
-          relfilenode_(relation == nullptr ? InvalidOid
-                                           : static_cast<Oid>(relation->rd_locator.relNumber)) {}
+    friend minimizer_generation_source_authorization authorize_minimizer_generation_source_pg(
+        const minimizer_generation_administration_identity&, std::uint64_t, Snapshot);
+    friend class index_storage_fragment_generation_row_sink;
+    friend class index_storage_fragment_generation_read_session;
+    friend class index_storage_hash_major_minimizer_writer;
 
   public:
-    borrowed_executor_read_context() = delete;
-
-    [[nodiscard]] static std::optional<borrowed_executor_read_context>
-    bind_checked(Relation relation, Snapshot registered_snapshot) noexcept {
-        borrowed_executor_read_context context{relation, registered_snapshot};
-        if (!context.valid())
-            return std::nullopt;
-        return std::optional<borrowed_executor_read_context>{std::move(context)};
+    minimizer_generation_source_authorization(const minimizer_generation_source_authorization&) =
+        delete;
+    minimizer_generation_source_authorization&
+    operator=(const minimizer_generation_source_authorization&) = delete;
+    minimizer_generation_source_authorization(
+        minimizer_generation_source_authorization&& other) noexcept
+        : source_(other.source_), source_content_checksum_(other.source_content_checksum_),
+          database_oid_(other.database_oid_), tablespace_oid_(other.tablespace_oid_),
+          main_relfilenode_(other.main_relfilenode_), user_relid_(other.user_relid_),
+          column_attno_(other.column_attno_), index_name_(std::move(other.index_name_)),
+          table_name_(std::move(other.table_name_)), snapshot_(other.snapshot_),
+          transaction_id_(other.transaction_id_), valid_(other.valid_) {
+        other.invalidate_();
     }
-
-    borrowed_executor_read_context(const borrowed_executor_read_context&) = delete;
-    borrowed_executor_read_context& operator=(const borrowed_executor_read_context&) = delete;
-    borrowed_executor_read_context(borrowed_executor_read_context&& other) noexcept
-        : relation_(std::exchange(other.relation_, nullptr)),
-          snapshot_(std::exchange(other.snapshot_, nullptr)),
-          relation_oid_(std::exchange(other.relation_oid_, InvalidOid)),
-          database_oid_(std::exchange(other.database_oid_, InvalidOid)),
-          tablespace_oid_(std::exchange(other.tablespace_oid_, InvalidOid)),
-          relfilenode_(std::exchange(other.relfilenode_, InvalidOid)) {}
-    borrowed_executor_read_context& operator=(borrowed_executor_read_context&& other) noexcept {
+    minimizer_generation_source_authorization&
+    operator=(minimizer_generation_source_authorization&& other) noexcept {
         if (this != &other) {
             invalidate_();
-            relation_ = std::exchange(other.relation_, nullptr);
-            snapshot_ = std::exchange(other.snapshot_, nullptr);
-            relation_oid_ = std::exchange(other.relation_oid_, InvalidOid);
-            database_oid_ = std::exchange(other.database_oid_, InvalidOid);
-            tablespace_oid_ = std::exchange(other.tablespace_oid_, InvalidOid);
-            relfilenode_ = std::exchange(other.relfilenode_, InvalidOid);
+            source_ = other.source_;
+            source_content_checksum_ = other.source_content_checksum_;
+            database_oid_ = other.database_oid_;
+            tablespace_oid_ = other.tablespace_oid_;
+            main_relfilenode_ = other.main_relfilenode_;
+            user_relid_ = other.user_relid_;
+            column_attno_ = other.column_attno_;
+            index_name_ = std::move(other.index_name_);
+            table_name_ = std::move(other.table_name_);
+            snapshot_ = other.snapshot_;
+            transaction_id_ = other.transaction_id_;
+            valid_ = other.valid_;
+            other.invalidate_();
         }
         return *this;
     }
-    ~borrowed_executor_read_context() = default;
+    ~minimizer_generation_source_authorization() = default;
 
-    [[nodiscard]] bool valid() const noexcept {
-        return relation_ != nullptr && snapshot_ != nullptr && IsMVCCSnapshot(snapshot_) &&
-               snapshot_->regd_count > 0 && OidIsValid(relation_oid_) &&
-               OidIsValid(database_oid_) && OidIsValid(tablespace_oid_) &&
-               OidIsValid(relfilenode_) && RelationGetRelid(relation_) == relation_oid_ &&
-               relation_->rd_locator.dbOid == database_oid_ &&
-               relation_->rd_locator.spcOid == tablespace_oid_ &&
-               static_cast<Oid>(relation_->rd_locator.relNumber) == relfilenode_;
+    /** Returns the locator authenticated by this authorization. */
+    [[nodiscard]] const minimizer_generation_source_locator&
+    source_for_diagnostics() const noexcept {
+        return source_;
     }
 
-    [[nodiscard]] bool matches(Oid database_oid,
-                               Oid tablespace_oid,
-                               Oid relfilenode,
-                               Oid relation_oid) const noexcept {
-        return valid() && database_oid_ == database_oid && tablespace_oid_ == tablespace_oid &&
-               relfilenode_ == relfilenode && relation_oid_ == relation_oid;
-    }
-
-    [[nodiscard]] Relation relation() const noexcept {
-        return relation_;
-    }
-    [[nodiscard]] Snapshot snapshot() const noexcept {
-        return snapshot_;
-    }
-    [[nodiscard]] Oid relation_oid() const noexcept {
-        return relation_oid_;
-    }
-    [[nodiscard]] Oid database_oid() const noexcept {
-        return database_oid_;
-    }
-    [[nodiscard]] Oid tablespace_oid() const noexcept {
-        return tablespace_oid_;
-    }
-    [[nodiscard]] Oid relfilenode() const noexcept {
-        return relfilenode_;
+    /** Returns the independently streamed source checksum. */
+    [[nodiscard]] std::uint64_t source_content_checksum_for_diagnostics() const noexcept {
+        return source_content_checksum_;
     }
 };
 
-static_assert(!std::is_copy_constructible_v<borrowed_executor_read_context>);
-static_assert(std::is_nothrow_move_constructible_v<borrowed_executor_read_context>);
+static_assert(!std::is_default_constructible_v<minimizer_generation_source_authorization>);
+static_assert(!std::is_copy_constructible_v<minimizer_generation_source_authorization>);
+static_assert(std::is_nothrow_move_constructible_v<minimizer_generation_source_authorization>);
 
-/// Monotonic project clock converted to the unsigned SQL-bound domain.
-[[nodiscard]] inline std::uint64_t cold_index_now_ns() noexcept {
-    return bioseq::instrumentation::clock::now_ns();
-}
+/** Authenticates one visible sequence source for generation I/O. */
+[[nodiscard]] minimizer_generation_source_authorization authorize_minimizer_generation_source_pg(
+    const minimizer_generation_administration_identity&, std::uint64_t, Snapshot);
 
-/// Add one elapsed interval while defending against a broken clock sample.
-inline void add_cold_index_elapsed(cold_index_preparation_stats& stats,
-                                   std::uint64_t& destination,
-                                   std::uint64_t begin_ns) noexcept {
-    const std::uint64_t end_ns = cold_index_now_ns();
-    stats.add(destination, end_ns >= begin_ns ? end_ns - begin_ns : 0);
-}
+class minimizer_generation_catalog_source_authorization;
+/// Authorize one catalog source against an already registered snapshot.
+[[nodiscard]] minimizer_generation_catalog_source_authorization
+authorize_minimizer_generation_catalog_source_pg(
+    const minimizer_generation_administration_identity&, std::uint64_t, Snapshot);
 
-/// Attribute PostgreSQL shared-buffer traffic since `begin` to this delta.
-inline void add_cold_index_buffer_usage(cold_index_preparation_stats& stats,
-                                        const BufferUsage& begin) noexcept {
-    BufferUsage delta{};
-    BufferUsageAccumDiff(&delta, &pgBufferUsage, &begin);
-    if (delta.shared_blks_hit < 0 || delta.shared_blks_read < 0) {
-        stats.are_stats_saturated = true;
-        return;
-    }
-    stats.add(stats.shared_blks_hit, static_cast<std::uint64_t>(delta.shared_blks_hit));
-    stats.add(stats.shared_blks_read, static_cast<std::uint64_t>(delta.shared_blks_read));
-}
+/** Allocates the next positive generation identifier from PostgreSQL. */
+[[nodiscard]] std::uint64_t allocate_minimizer_generation_id_pg();
 
 inline std::uint64_t g_last_index_merge_run_count = 0;
-inline last_minimizer_sequence_build_stats g_last_minimizer_sequence_build_stats{};
 
 /// Reset backend-local build counters before a new administrative build.
 inline void reset_last_minimizer_sequence_build_stats() noexcept {
@@ -799,7 +583,9 @@ struct minimizer_generation_schema_inspection {
 };
 
 /// Raise a generation-storage PostgreSQL error through the C++ boundary.
-[[noreturn]] inline void minimizer_generation_storage_error(std::string_view message);
+[[noreturn]] void minimizer_generation_storage_error(std::string_view message);
+/// Translate a generation-storage failure into the preserved PostgreSQL error.
+[[noreturn]] void minimizer_generation_storage_error_as_cpp(std::string_view message);
 
 [[nodiscard]] constexpr std::string_view
 minimizer_generation_schema_error_name(minimizer_generation_schema_error error) noexcept {

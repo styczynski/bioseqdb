@@ -27,59 +27,31 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_batch_join_paths;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
 import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
+import bioseq.postgres.column.table_access;
+import bioseq.postgres.support;
+import bioseq.sequences.compact_sequence_typmod;
 
-import :custom_scan_support;
-import :custom_scan_slice_projection;
-
-import :custom_scan_join_ownership;
-import :custom_scan_per_row_join_paths;
+import :api;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_runtime_buffer_contracts;
+export import :custom_scan_batch_join_path_hook_contracts;
+import :custom_scan_planner_hook_state_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_oid_expression_support_expression_analysis_contracts;
+import :custom_scan_oid_expression_support_semantic_analysis_contracts;
+import :custom_scan_planner_aligner_contracts;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_join_ownership_carrier_lineage_contracts;
+import :custom_scan_join_ownership_sequence_typmod_validation_contracts;
+import :custom_scan_join_ownership_semantic_admission_contracts;
+import :custom_scan_join_ownership_transformed_verification_contracts;
+import :custom_scan_slice_path_cost_contracts;
+import :custom_scan_slice_path_expression_detection_contracts;
+import :custom_scan_slice_rewrite_path_contracts;
+import :custom_scan_per_row_join_paths_transformed_admission_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -648,6 +620,7 @@ export {
         Const* hidden_rowno = makeConst(INT8OID, -1, InvalidOid, 8, Int64GetDatum(0), false, true);
         add_column_to_pathtarget(
             locator_path->path.pathtarget, reinterpret_cast<Expr*>(hidden_rowno), 0);
+        const int locator_rowno_resno = list_length(locator_path->path.pathtarget->exprs);
         set_pathtarget_cost_width(root, locator_path->path.pathtarget);
         /* A lower BatchJoin may publish an otherwise-unused target sequence as the
          * PARAM_EXEC query of an upper BatchJoin.  The locator child must therefore
@@ -707,7 +680,7 @@ export {
         List* locator_tag = list_make4(makeInteger(k_bioseq_locator_passthrough_magic),
                                        makeInteger(k_bioseq_batch_join_plan_version),
                                        makeInteger(token),
-                                       makeInteger(0));
+                                       makeInteger(locator_rowno_resno));
         locator_path->custom_private = lappend(locator_path->custom_private, locator_tag);
         locator_path->path.parallel_safe = false;
         locator_path->path.parallel_aware = false;

@@ -19,6 +19,18 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
+// MoltenVK's pinned discrete-binding pipeline layout reserves the implicit
+// OpArrayLength size table at maxPerStageBufferCount - 2. The direct cached-MSL
+// path does not bind that table, so the AOT ABI below rejects every shader that
+// actually needs it. Keep the reserved index explicit for SPIRV-Cross resource
+// mapping/collision validation without treating it as an available input.
+inline constexpr std::uint32_t k_moltenvk_discrete_max_per_stage_buffer_count = 31u;
+inline constexpr std::uint32_t k_moltenvk_discrete_buffer_size_buffer_index =
+    k_moltenvk_discrete_max_per_stage_buffer_count - 2u;
+static_assert(k_moltenvk_discrete_buffer_size_buffer_index == 29u);
+inline constexpr std::string_view k_direct_metallib_array_length_policy =
+    "bioseq-direct-metallib-no-op-array-length-v1";
+
 /// @brief Computes the cache identity for toolchain, device, ABI, and shader inputs.
 /// @param[in] inputs Static cache-build inputs.
 /// @return Sixteen-character lowercase hexadecimal digest.
@@ -38,6 +50,8 @@ export namespace bioseq::gpu::vulkan {
     // concrete layout so cached artifacts must satisfy the current pipeline
     // contract.
     hash = bioseq::common::hash_combine_64(hash, "bioseq-spirv-to-msl-resource-abi");
+    hash = bioseq::common::hash_combine_64(hash, k_moltenvk_discrete_buffer_size_buffer_index);
+    hash = bioseq::common::hash_combine_64(hash, k_direct_metallib_array_length_policy);
 
     for_each_static_shader_variant(inputs.variants, [&hash](const shader_variant_key& key) {
         const shader_kind kind = checked_shader_kind(key.kind);
@@ -51,6 +65,32 @@ export namespace bioseq::gpu::vulkan {
         hash = bioseq::common::hash_combine_64(hash, push_constant_size(kind));
         hash = bioseq::common::hash_combine_64(hash, shader_body_for_digest(kind));
     });
+    std::ostringstream out;
+    out << std::hex << std::setfill('0') << std::setw(16) << hash;
+    return out.str();
+}
+
+/// @brief Computes the Apple cache identity bound to the once-qualified helper image.
+/// @param[in] inputs Static shader, toolchain, device, and ABI inputs.
+/// @param[in] helper Accepted process-owned helper identity already hashed from the filesystem.
+/// @return Helper-bound cache digest, or a qualification diagnostic.
+[[nodiscard]] inline std::expected<std::string, std::string>
+shader_cache_digest_hex_with_qualified_helper(
+    const shader_cache_build_inputs& inputs,
+    const qualified_metal_archive_helper& helper) {
+    if (!helper.is_accepted()) {
+        return std::unexpected(
+            "shader cache identity requires an accepted once-qualified helper executable");
+    }
+    std::uint64_t hash =
+        bioseq::common::fnv1a_64("bioseq-shader-cache-qualified-helper-contract-v1");
+    hash = bioseq::common::hash_combine_64(hash, shader_cache_digest_hex(inputs));
+    hash = bioseq::common::hash_combine_64(hash, helper.source);
+    hash = bioseq::common::hash_combine_64(hash, helper.executable_size);
+    hash = bioseq::common::hash_combine_64(
+        hash,
+        bioseq::common::fnv1a_64(std::as_bytes(
+            std::span<const std::uint8_t, 32>{helper.executable_sha256})));
     std::ostringstream out;
     out << std::hex << std::setfill('0') << std::setw(16) << hash;
     return out.str();
@@ -95,6 +135,98 @@ validate_spirv_layout(const shader_variant_key& key, std::span<const std::uint32
                scan.has_binding_struct_offsets(
                    0u, binding, std::span<const std::uint32_t>{offsets.begin(), offsets.size()});
     };
+    if ((kind == shader_kind::grouped_soa_seed_count ||
+         kind == shader_kind::grouped_soa_seed_emit) &&
+        (!binding_scalar(0u, 4u) ||
+         !binding_struct(1u,
+                         104u,
+                         {0u,
+                          4u,
+                          8u,
+                          12u,
+                          16u,
+                          24u,
+                          32u,
+                          40u,
+                          48u,
+                          52u,
+                          56u,
+                          60u,
+                          64u,
+                          68u,
+                          72u,
+                          80u,
+                          88u,
+                          96u}) ||
+         !binding_scalar(2u, 4u) || !binding_scalar(3u, 4u) ||
+         !binding_struct(4u, 16u, {0u, 4u, 8u, 12u}) || !binding_scalar(5u, 4u) ||
+         !binding_scalar(6u, 4u) || !binding_struct(7u, 24u, {0u, 8u, 16u, 20u}) ||
+         !binding_scalar(8u, 8u) || !binding_scalar(9u, 4u) ||
+         !scan.has_push_constant_offsets(std::array<std::uint32_t, 27>{
+             0u,  4u,  8u,  12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u,  48u, 52u,
+             56u, 60u, 64u, 68u, 72u, 76u, 80u, 84u, 88u, 92u, 96u, 100u, 104u}))) {
+        return std::unexpected("SPIR-V grouped-SoA seed ABI mismatch");
+    }
+    if (kind == shader_kind::chain_candidate_reduce &&
+        (!binding_struct(0u, 24u, {0u, 8u, 16u, 20u}) || !binding_scalar(1u, 4u) ||
+         !binding_scalar(2u, 8u) || !binding_scalar(3u, 4u) || !binding_scalar(4u, 4u) ||
+         !binding_struct(5u, 64u, {0u, 8u, 16u, 24u, 32u, 40u, 48u, 52u, 56u, 60u}) ||
+         !binding_struct(6u, 40u, {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u}) ||
+         !binding_struct(7u,
+                         96u,
+                         {0u,
+                          8u,
+                          16u,
+                          24u,
+                          32u,
+                          40u,
+                          48u,
+                          52u,
+                          56u,
+                          60u,
+                          64u,
+                          68u,
+                          72u,
+                          76u,
+                          80u,
+                          84u,
+                          88u,
+                          92u}) ||
+         !binding_scalar(8u, 4u) || !binding_scalar(9u, 4u) ||
+         !scan.has_push_constant_offsets(
+             std::array<std::uint32_t, 20>{0u,  4u,  8u,  12u, 16u, 20u, 24u, 28u, 32u, 36u,
+                                           40u, 44u, 48u, 52u, 56u, 60u, 64u, 68u, 72u, 76u}))) {
+        return std::unexpected("SPIR-V chain-candidate reducer ABI mismatch");
+    }
+    if (kind == shader_kind::mapping_quality_reduce &&
+        (!binding_struct(0u, 40u, {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u}) ||
+         !binding_struct(1u,
+                         96u,
+                         {0u,
+                          8u,
+                          16u,
+                          24u,
+                          32u,
+                          40u,
+                          48u,
+                          52u,
+                          56u,
+                          60u,
+                          64u,
+                          68u,
+                          72u,
+                          76u,
+                          80u,
+                          84u,
+                          88u,
+                          92u}) ||
+         !binding_struct(2u, 8u, {0u, 4u}) ||
+         !binding_struct(3u, 48u, {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u}) ||
+         !binding_struct(4u, 32u, {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u}) ||
+         !scan.has_push_constant_offsets(std::array<std::uint32_t, 15>{
+             0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 48u, 52u, 56u}))) {
+        return std::unexpected("SPIR-V mapping-quality reducer ABI mismatch");
+    }
     if (kind == shader_kind::align_extend_banded_affine &&
         (!scan.has_binding(0) || !scan.has_binding(1) || !scan.has_binding(2) ||
          !scan.has_binding(3) || !scan.has_array_stride(4) || !scan.has_array_stride(16) ||
@@ -102,9 +234,13 @@ validate_spirv_layout(const shader_variant_key& key, std::span<const std::uint32
         return std::unexpected("SPIR-V alignment extension layout mismatch");
     }
     if (kind == shader_kind::align_extend_simple_cigar &&
-        (!scan.has_binding(0) || !scan.has_binding(1) || !scan.has_binding(2) ||
-         !scan.has_binding(3) || !scan.has_binding(4) || !scan.has_binding(5) ||
-         !scan.has_array_stride(4) || !scan.has_array_stride(40) || !scan.has_array_stride(48))) {
+        (!binding_scalar(0u, 4u) || !binding_scalar(1u, 4u) ||
+         !binding_struct(2u, 80u, {0u,  4u,  8u,  12u, 16u, 20u, 24u, 28u, 32u, 36u,
+                                   40u, 44u, 48u, 52u, 56u, 60u, 64u, 68u, 72u, 76u}) ||
+         !binding_struct(3u, 48u, {0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u}) ||
+         !binding_scalar(4u, 4u) || !binding_scalar(5u, 4u) ||
+         !scan.has_push_constant_offsets(std::array<std::uint32_t, 16>{
+             0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 48u, 52u, 56u, 60u}))) {
         return std::unexpected("SPIR-V alignment CIGAR extension layout mismatch");
     }
     if ((kind == shader_kind::sneaky_snake_rank_batch || is_gatekeeper_rank_batch_kind(kind)) &&
@@ -119,13 +255,14 @@ validate_spirv_layout(const shader_variant_key& key, std::span<const std::uint32
 
 /// @brief MSL source and reflected execution metadata produced by SPIRV-Cross.
 struct msl_compile_result {
-    std::string msl; ///< Translated Metal shading language source.
+    std::string msl;        ///< Translated Metal shading language source.
     std::string entry_name; ///< Cleansed compute entry point name for pipeline creation.
     std::uint32_t wg_x = 1; ///< Reflected local-size X dimension in threads.
     std::uint32_t wg_y = 1; ///< Reflected local-size Y dimension in threads.
     std::uint32_t wg_z = 1; ///< Reflected local-size Z dimension in threads.
     bool needs_buffer_size_buffer = false; ///< Whether SPIRV-Cross emitted OpArrayLength support.
-    std::uint32_t buffer_size_buffer_index = 25u; ///< Metal buffer index reserved for array lengths.
+    std::uint32_t buffer_size_buffer_index =
+        k_moltenvk_discrete_buffer_size_buffer_index; ///< Metal array-length table index.
 };
 
 /// @brief Translates SPIR-V to MSL with the runtime descriptor mapping.
@@ -140,10 +277,9 @@ spirv_to_msl(std::vector<std::uint32_t> spirv, const shader_variant_key& key, ms
         spirv_cross::CompilerMSL::Options options{};
         options.set_msl_version(version.major, version.minor, version.patch);
         options.argument_buffers = false;
-        // MoltenVK and SPIRV-Cross reserve Metal buffer 25 for the runtime
-        // array-length table used by OpArrayLength. Keep it explicit and reject
-        // any descriptor mapping that would collide with that implicit input.
-        options.buffer_size_buffer_index = 25u;
+        // Match MoltenVK's discrete pipeline-layout convention for the implicit
+        // OpArrayLength table, and reject descriptors that would collide with it.
+        options.buffer_size_buffer_index = k_moltenvk_discrete_buffer_size_buffer_index;
         compiler.set_msl_options(options);
 
         const shader_kind kind = checked_shader_kind(key.kind);
@@ -227,6 +363,10 @@ spirv_to_msl(std::vector<std::uint32_t> spirv, const shader_variant_key& key, ms
         result.wg_z = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, 2);
         result.needs_buffer_size_buffer = compiler.needs_buffer_size_buffer();
         result.buffer_size_buffer_index = options.buffer_size_buffer_index;
+        if (result.needs_buffer_size_buffer) {
+            return std::unexpected(
+                "direct cached metallib ABI forbids OpArrayLength/buffer-size inputs");
+        }
         const shader_workgroup_size expected = expected_shader_workgroup_size(key);
         if (result.wg_x != expected.x || result.wg_y != expected.y || result.wg_z != expected.z) {
             return std::unexpected(shader_cache_message("SPIR-V/MSL workgroup mismatch: reflected=",
@@ -244,8 +384,7 @@ spirv_to_msl(std::vector<std::uint32_t> spirv, const shader_variant_key& key, ms
         }
         return result;
     } catch (const std::exception& exception) {
-        return std::unexpected(
-            shader_cache_message("SPIR-V to MSL failed: ", exception.what()));
+        return std::unexpected(shader_cache_message("SPIR-V to MSL failed: ", exception.what()));
     }
 }
 

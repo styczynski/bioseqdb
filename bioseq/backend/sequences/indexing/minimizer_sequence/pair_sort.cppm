@@ -4,11 +4,10 @@
  */
 module;
 
+#include <cstddef>
 #include <hwy/highway.h>
 
-#include <cstddef>
-
-module bioseq.indexing.minimizer_sequence;
+module bioseq.indexing.minimizer_sequence.admitted_runs;
 
 import bioseq.simd.sorting;
 
@@ -25,20 +24,16 @@ void sort_minimizer_pair_run_keys(hwy::uint128_t* keys,
                                   int sort_implementation) noexcept {
     switch (sort_implementation) {
     case 1:
-        bioseq::simd::sorting::sort_unsigned_128_ascending_vqsort(
-            keys, key_count);
+        bioseq::simd::sorting::sort_unsigned_128_ascending_vqsort(keys, key_count);
         return;
     case 2:
-        bioseq::simd::sorting::sort_unsigned_128_ascending_vector_stream<1>(
-            keys, key_count);
+        bioseq::simd::sorting::sort_unsigned_128_ascending_vector_stream<1>(keys, key_count);
         return;
     case 3:
-        bioseq::simd::sorting::sort_unsigned_128_ascending_vector_stream<2>(
-            keys, key_count);
+        bioseq::simd::sorting::sort_unsigned_128_ascending_vector_stream<2>(keys, key_count);
         return;
     case 4:
-        bioseq::simd::sorting::sort_unsigned_128_ascending_vector_stream<4>(
-            keys, key_count);
+        bioseq::simd::sorting::sort_unsigned_128_ascending_vector_stream<4>(keys, key_count);
         return;
     default:
         bioseq::simd::sorting::sort_unsigned_128_ascending(keys, key_count);

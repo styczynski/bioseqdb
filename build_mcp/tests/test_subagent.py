@@ -237,6 +237,7 @@ class PersistentSubagentContractTest(unittest.TestCase):
             "provider": config["provider"],
             "tier": tier,
             "model": config["model"],
+            "model_display": config["model_display"],
             "reasoning": config["reasoning"],
             "cost": config["cost"] if cost is None else cost,
             "label": "general-purpose",
@@ -270,6 +271,13 @@ class PersistentSubagentContractTest(unittest.TestCase):
     def test_tier_mapping_costs_and_runtime_arguments_are_exact(self) -> None:
         self.assertEqual(subject.SUBAGENT_BUDGET, 4000)
         self.assertEqual(
+            subject.TIER_ORDER,
+            (
+                "contractor-intern", "intern", "contractor", "mid",
+                "senior", "specialist",
+            ),
+        )
+        self.assertEqual(
             {
                 tier: (
                     config["provider"], config["model"],
@@ -280,6 +288,7 @@ class PersistentSubagentContractTest(unittest.TestCase):
             {
                 "contractor-intern": ("cursor", "composer-2.5", None, 1),
                 "intern": ("codex", "gpt-5.6-terra", "medium", 22),
+                "contractor": ("cursor", "gpt-5.5", None, 45),
                 "mid": ("codex", "gpt-5.6-terra", "high", 50),
                 "senior": ("codex", "gpt-5.6-sol", "high", 70),
                 "specialist": ("codex", "gpt-5.6-sol", "max", 100),
@@ -310,6 +319,15 @@ class PersistentSubagentContractTest(unittest.TestCase):
         self.assertIn("disabled", cursor_args)
         self.assertIn("composer-2.5", cursor_args)
         self.assertEqual(cursor_args[-2:], ["--resume", "chat-456"])
+
+        contractor = {
+            "provider": "cursor", "model": "gpt-5.5", "reasoning": None,
+            "vendor_session_id": "chat-789",
+        }
+        contractor_args = subject._runtime_arguments(contractor, resume=True)
+        self.assertIn("gpt-5.5", contractor_args)
+        self.assertEqual(contractor_args[-2:], ["--resume", "chat-789"])
+        self.assertFalse(any("reasoning" in argument for argument in contractor_args))
 
     def test_terminal_runtime_cleanup_flushes_logs_and_destroys_session(self) -> None:
         agent = self._agent_record(1, status="KILLED")
@@ -658,7 +676,7 @@ class PersistentSubagentContractTest(unittest.TestCase):
         self.assertIn("subagent 7", senior)
         self.assertIn("tier senior", senior)
         self.assertIn("13 messages", senior)
-        self.assertIn("mid, intern, contractor-intern", senior)
+        self.assertIn("mid, contractor, intern, contractor-intern", senior)
         self.assertNotIn("senior,", senior)
         self.assertIn("never wait passively", senior)
         self.assertLess(len(senior), 600)
@@ -666,6 +684,57 @@ class PersistentSubagentContractTest(unittest.TestCase):
         intern = subject._prompt_prefix(8, "intern", "intern", 0)
         self.assertIn("critical situations", intern)
         self.assertIn("do the work yourself", intern)
+
+    def test_contractor_create_status_authority_and_exact_context_resume(self) -> None:
+        agent_id, created = self._create("contractor")
+        self.assertTrue(created["ok"], created)
+        self.assertEqual(created["data"]["account"], "cursor")
+        self.assertEqual(created["data"]["provider"], "cursor")
+        self.assertEqual(created["data"]["model"], "gpt-5.5")
+        self.assertEqual(created["data"]["model_display"], "gpt-5.5")
+        self.assertIsNone(created["data"]["vendor_reasoning"])
+        self.assertEqual(created["data"]["cost"], 45)
+        self.assertTrue(any(
+            "separate Cursor account quota" in warning
+            and "dynamically selected reasoning effort" in warning
+            for warning in created["warnings"]
+        ))
+
+        status = self._call(command="status")
+        projected = next(
+            agent for agent in status["data"]["agents"]
+            if agent["id"] == agent_id
+        )
+        self.assertEqual(projected["reasoning_effort"], "contractor")
+        self.assertEqual(projected["model"], "gpt-5.5")
+        self.assertEqual(projected["model_display"], "gpt-5.5")
+        self.assertIsNone(projected["vendor_reasoning"])
+        self.assertEqual(
+            projected["allowed_tiers"],
+            ["contractor", "intern", "contractor-intern"],
+        )
+
+        os.environ[subject.AGENT_ID_ENV] = str(agent_id)
+        os.environ[subject.AGENT_CAPABILITY_ENV] = self.capabilities[agent_id]
+        _, forbidden = self._create("mid")
+        self.assertFalse(forbidden["ok"])
+        self.assertEqual(forbidden["error_code"], "UNAUTHORIZED_TIER")
+        os.environ.pop(subject.AGENT_ID_ENV)
+        os.environ.pop(subject.AGENT_CAPABILITY_ENV)
+
+        killed = self._call(command="kill", agent_id=agent_id)
+        self.assertTrue(killed["ok"], killed)
+        repurposed = self._call(
+            command="repurpose",
+            agent_id=agent_id,
+            instructions="Resume the exact contractor chat for another bounded task.",
+            description="C" * 200,
+        )
+        self.assertTrue(repurposed["ok"], repurposed)
+        self.assertTrue(repurposed["data"]["resumed_process"])
+        self.assertTrue(self.launches[-1]["resume"])
+        self.assertEqual(self.launches[-1]["agent"]["model"], "gpt-5.5")
+        self.assertIsNone(self.launches[-1]["agent"]["reasoning"])
 
     def test_public_dispatch_strictly_rejects_cross_command_arguments_and_bools(self) -> None:
         cases = (

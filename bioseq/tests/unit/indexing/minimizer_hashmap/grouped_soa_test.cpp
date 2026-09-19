@@ -19,10 +19,12 @@ import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.chaining.core;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.minimizer_physical_registry;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.minimap2_sketch_baseline;
 import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.runtime_contract;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy_sequence;
@@ -64,11 +66,20 @@ TEST_CASE("grouped-SoA derives exact H P C O boundaries and SoA offsets",
     STATIC_REQUIRE(shape(15u, 32'768u, 65'534u)->hash_width == minimizer_scalar_width::u32);
     STATIC_REQUIRE(shape(16u, 32'768u, 65'534u)->hash_width == minimizer_scalar_width::u32);
     STATIC_REQUIRE(shape(17u, 32'768u, 65'534u)->hash_width == minimizer_scalar_width::u64);
-    STATIC_REQUIRE(shape(28u, 32'768u, 65'534u).has_value());
-    STATIC_REQUIRE_FALSE(shape(29u, 32'768u, 65'534u).has_value());
-    STATIC_REQUIRE_FALSE(
-        derive_grouped_soa_minimizer_profile(k_minimap_scheme_identity, 1u, 15u, 32'768u, 65'534u)
+    STATIC_REQUIRE(shape(31u, 32'768u, 65'534u).has_value());
+    STATIC_REQUIRE_FALSE(shape(32u, 32'768u, 65'534u).has_value());
+    STATIC_REQUIRE(
+        derive_grouped_soa_minimizer_profile(k_minimap_scheme_identity,
+                                             k_minimizer_persisted_dna5_alphabet_code,
+                                             15u, 32'768u, 65'534u)
             .has_value());
+    STATIC_REQUIRE(derive_grouped_soa_minimizer_profile(
+                       k_minimap_scheme_identity, k_minimizer_persisted_dna5_alphabet_code,
+                       20u, 32'768u, 65'534u)->hash_width == minimizer_scalar_width::u64);
+    STATIC_REQUIRE(derive_grouped_soa_minimizer_profile(
+                       k_bounded_nthash_u32_r7_sum_scheme_identity,
+                       k_minimizer_persisted_dna5_alphabet_code,
+                       20u, 32'768u, 65'534u)->hash_width == minimizer_scalar_width::u32);
     STATIC_REQUIRE_FALSE(
         derive_grouped_soa_minimizer_profile(k_minimap_scheme_identity, 4u, 15u, 32'768u, 65'534u)
             .has_value());
@@ -81,30 +92,43 @@ TEST_CASE("grouped-SoA derives exact H P C O boundaries and SoA offsets",
     STATIC_REQUIRE_FALSE(
         derive_grouped_soa_minimizer_profile(k_bounded_nthash_u32_r7_sum_scheme_identity,
                                              k_minimizer_persisted_dna4_alphabet_code,
-                                             14u,
+                                             0u,
                                              32'768u,
                                              65'534u)
             .has_value());
     STATIC_REQUIRE_FALSE(
         derive_grouped_soa_minimizer_profile(k_bounded_nthash_u32_r7_sum_scheme_identity,
                                              k_minimizer_persisted_dna4_alphabet_code,
-                                             16u,
+                                             32u,
                                              32'768u,
                                              65'534u)
             .has_value());
 
+    constexpr auto scalar_layout =
+        bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+            minimizer_algorithm::scalar, 32'768u, 15u, 10u);
+    constexpr auto scalar_identity =
+        make_minimizer_generation_algorithm_identity(scalar_layout);
+    STATIC_REQUIRE(scalar_identity.has_value());
     constexpr auto scalar_expected = expected_grouped_soa_generation_identity_for_backend(
         minimizer_generation_layout::grouped_soa_segment_local,
         minimizer_sketch_backend::scalar,
+        *scalar_identity,
         k_minimizer_persisted_dna4_alphabet_code,
         8u,
         15u,
         10u,
         65'534u);
     STATIC_REQUIRE(scalar_expected.has_value());
+    constexpr auto exact_layout =
+        bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+            minimizer_algorithm::two_stack_nthash, 32'768u, 15u, 10u);
+    constexpr auto exact_identity = make_minimizer_generation_algorithm_identity(exact_layout);
+    STATIC_REQUIRE(exact_identity.has_value());
     constexpr auto exact_simd_expected = expected_grouped_soa_generation_identity_for_backend(
         minimizer_generation_layout::grouped_soa_segment_local,
         minimizer_sketch_backend::exact_simd,
+        *exact_identity,
         k_minimizer_persisted_dna4_alphabet_code,
         8u,
         15u,
@@ -250,7 +274,210 @@ TEST_CASE("grouped-SoA derives exact H P C O boundaries and SoA offsets",
     REQUIRE(decoded_o64_controls->front().saturated_count == 65'535u);
 }
 
-TEST_CASE("grouped-SoA fixed records use exact 160-byte and 128-byte layouts",
+TEST_CASE("READY identity uses generated fragment and sequence position classes",
+          "[component:bioseq][layer:unit][feature:storage]") {
+    using namespace bioseq::indexing;
+    constexpr auto fragment_layout =
+        bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+            minimizer_algorithm::scalar, 32'768u, 15u, 10u);
+    constexpr auto sequence_layout =
+        bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+            minimizer_algorithm::scalar, 32'769u, 15u, 10u);
+    constexpr auto fragment_identity =
+        make_minimizer_generation_algorithm_identity(fragment_layout);
+    constexpr auto sequence_identity =
+        make_minimizer_generation_algorithm_identity(sequence_layout);
+    STATIC_REQUIRE(fragment_identity.has_value());
+    STATIC_REQUIRE(sequence_identity.has_value());
+    STATIC_REQUIRE(fragment_identity->physical_record_id ==
+                   bioseq::minimizers::minimizer_physical_record_id::minimizer_record_l15_k15);
+    STATIC_REQUIRE(fragment_identity->record_position_log2 == 15u);
+    STATIC_REQUIRE(sequence_identity->physical_record_id ==
+                   bioseq::minimizers::minimizer_physical_record_id::minimizer_record_l28_k15);
+    STATIC_REQUIRE(sequence_identity->record_position_log2 == 28u);
+    STATIC_REQUIRE(fragment_identity->payload_layout_abi_revision == 1u);
+
+    constexpr auto dna5_reference_layout =
+        bioseq::minimizers::select_minimizer_physical_layout<seq::dna5, std::uint64_t>(
+            minimizer_algorithm::simd_minimap2_reference, 32'768u, 15u, 10u);
+    constexpr auto dna5_reference_identity =
+        make_minimizer_generation_algorithm_identity(dna5_reference_layout);
+    STATIC_REQUIRE(dna5_reference_identity.has_value());
+    STATIC_REQUIRE(dna5_reference_identity->requested_algorithm ==
+                   minimizer_algorithm::simd_minimap2_reference);
+    STATIC_REQUIRE(dna5_reference_identity->effective_algorithm ==
+                   minimizer_algorithm::simd_minimap2_reference);
+    STATIC_REQUIRE(dna5_reference_identity->highway_owner_id !=
+                   bioseq::minimizers::minimizer_highway_owner_id::none);
+    STATIC_REQUIRE(minimizer_sketch_backend_for_effective_algorithm(
+                       dna5_reference_identity->effective_algorithm) ==
+                   minimizer_sketch_backend::exact_simd);
+    constexpr auto dna5_reference_expected = expected_grouped_soa_generation_identity_for_backend(
+        minimizer_generation_layout::grouped_soa_segment_local,
+        minimizer_sketch_backend::exact_simd,
+        *dna5_reference_identity,
+        k_minimizer_persisted_dna5_alphabet_code,
+        sizeof(std::uint64_t),
+        15u,
+        10u,
+        65'534u);
+    STATIC_REQUIRE(dna5_reference_expected.has_value());
+    STATIC_REQUIRE(dna5_reference_expected->algorithm_identity == *dna5_reference_identity);
+
+    const auto narrow_reference_k20 = select_minimizer_generation_algorithm_identity_runtime(
+        minimizer_algorithm::simd_minimap2_reference,
+        32'768u,
+        k_minimizer_persisted_dna4_alphabet_code,
+        32u,
+        20u,
+        15u);
+    REQUIRE_FALSE(narrow_reference_k20.has_value());
+    const auto wide_reference_k20 = select_minimizer_generation_algorithm_identity_runtime(
+        minimizer_algorithm::simd_minimap2_reference,
+        32'768u,
+        k_minimizer_persisted_dna4_alphabet_code,
+        64u,
+        20u,
+        15u);
+    REQUIRE(wide_reference_k20.has_value());
+    REQUIRE(wide_reference_k20->packed_storage_bits == 64u);
+    REQUIRE(wide_reference_k20->runtime_kmer_size == 20u);
+    REQUIRE(wide_reference_k20->runtime_window_size == 15u);
+    REQUIRE(minimizer_sketch_backend_for_effective_algorithm(
+                wide_reference_k20->effective_algorithm) ==
+            minimizer_sketch_backend::exact_simd);
+    const auto wide_reference_expected = expected_grouped_soa_generation_identity_for_backend(
+        minimizer_generation_layout::grouped_soa_segment_local,
+        minimizer_sketch_backend::exact_simd,
+        *wide_reference_k20,
+        k_minimizer_persisted_dna4_alphabet_code,
+        sizeof(std::uint64_t),
+        20u,
+        15u,
+        65'534u);
+    REQUIRE(wide_reference_expected.has_value());
+    REQUIRE_FALSE(expected_grouped_soa_generation_identity_for_backend(
+                      minimizer_generation_layout::grouped_soa_segment_local,
+                      minimizer_sketch_backend::scalar,
+                      *wide_reference_k20,
+                      k_minimizer_persisted_dna4_alphabet_code,
+                      sizeof(std::uint64_t),
+                      20u,
+                      15u,
+                      65'534u)
+                      .has_value());
+
+    constexpr auto expected = expected_grouped_soa_generation_identity_for_backend(
+        minimizer_generation_layout::grouped_soa_segment_local,
+        minimizer_sketch_backend::scalar,
+        *fragment_identity,
+        k_minimizer_persisted_dna4_alphabet_code,
+        sizeof(std::uint64_t),
+        15u,
+        10u,
+        65'534u);
+    STATIC_REQUIRE(expected.has_value());
+    STATIC_REQUIRE(expected->algorithm_identity == *fragment_identity);
+    STATIC_REQUIRE_FALSE(expected_grouped_soa_generation_identity_for_backend(
+                             minimizer_generation_layout::grouped_soa_segment_local,
+                             minimizer_sketch_backend::exact_simd,
+                             *fragment_identity,
+                             k_minimizer_persisted_dna4_alphabet_code,
+                             sizeof(std::uint64_t),
+                             15u,
+                             10u,
+                             65'534u)
+                             .has_value());
+}
+
+TEST_CASE("K20 query owner preserves its generated record width and position identity",
+          "[component:bioseq][layer:unit][feature:storage]") {
+    using namespace bioseq::minimizers;
+    const auto layout = select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+        minimizer_algorithm::simd_minimap2_reference, 100'000u, 20u, 15u);
+    REQUIRE(layout.hash_width == minimizer_scalar_width::u64);
+    REQUIRE(layout.physical_kmer_size == 20u);
+    REQUIRE(layout.record_position_log2 == 20u);
+
+    const bool checked = visit_minimizer_physical_layout(
+        layout,
+        [&layout]<class p_record>() {
+            constexpr std::uint64_t hash = (std::uint64_t{1u} << 39u) | 0x12345u;
+            constexpr std::uint64_t last_position = 70'000u;
+            std::vector<p_record> records;
+            records.reserve(2u);
+            records.emplace_back(hash, last_position, 1u);
+            records.emplace_back(hash + 7u, last_position + 11u, 0u);
+            const p_record* const original_data = records.data();
+            const std::size_t original_capacity = records.capacity();
+            const std::uint64_t payload_capacity_bytes =
+                original_capacity * sizeof(p_record);
+            bioseq::parallelism::memory_admission_controller admission;
+            auto adjacent_permit = admission.try_reserve(payload_capacity_bytes);
+            REQUIRE(adjacent_permit.has_value());
+            auto owner = minimizer_physical_batch_owner::from_owned_host(
+                layout, std::move(records), *adjacent_permit);
+            REQUIRE(owner.valid());
+            REQUIRE(owner.size() == 2u);
+            REQUIRE(owner.capacity() == original_capacity);
+            REQUIRE(owner.payload_capacity_bytes() == payload_capacity_bytes);
+            REQUIRE(owner.owner_allocation_bytes() > 0u);
+            REQUIRE(owner.capacity_bytes() ==
+                    owner.payload_capacity_bytes() + owner.owner_allocation_bytes());
+            REQUIRE(owner.capacity_bytes() == adjacent_permit->bytes());
+            REQUIRE(admission.reserved_bytes() == adjacent_permit->bytes());
+            REQUIRE(owner.layout() == layout);
+
+            const auto view = owner.view();
+            REQUIRE(view.record_id() == layout.record_id);
+            REQUIRE(view.data_owner_address() == original_data);
+            REQUIRE(view.at(0u).kmer() == hash);
+            REQUIRE(view.at(0u).pos_strand_encoded() == (last_position << 1u) + 1u);
+            REQUIRE(view.at(1u).kmer() == hash + 7u);
+            REQUIRE(view.at(1u).pos_strand_encoded() == ((last_position + 11u) << 1u));
+
+            auto shared = owner.template shared_host<p_record>();
+            REQUIRE(shared->data() == original_data);
+            REQUIRE(shared->size() == 2u);
+            minimizer_physical_batch_owner moved{std::move(owner)};
+            REQUIRE_FALSE(owner.valid());
+            REQUIRE(owner.size() == 0u);
+            REQUIRE(owner.capacity() == 0u);
+            REQUIRE(owner.payload_capacity_bytes() == 0u);
+            REQUIRE(owner.owner_allocation_bytes() == 0u);
+            REQUIRE(owner.capacity_bytes() == 0u);
+            REQUIRE(owner.layout().record_id == minimizer_physical_record_id::invalid);
+            minimizer_physical_batch_owner assigned;
+            assigned = std::move(moved);
+            REQUIRE_FALSE(moved.valid());
+            REQUIRE(moved.capacity_bytes() == 0u);
+            REQUIRE(assigned.valid());
+            assigned.reset();
+            REQUIRE_FALSE(assigned.valid());
+            REQUIRE(shared->at(0u).kmer() == hash);
+            return true;
+        });
+    REQUIRE(checked);
+}
+
+TEST_CASE("grouped-SoA rejects a missing READY identity before output mutation",
+          "[component:bioseq][layer:unit][feature:storage]") {
+    using namespace bioseq::indexing;
+    const std::array<std::pair<std::uint64_t, std::uint64_t>, 1> minimizers{{
+        {1u, (3u << 1u) | 1u},
+    }};
+    vector_replay_minimizer_producer producer{minimizers};
+    collecting_minimizer_row_sink sink;
+    auto options = test_grouped_soa_generation_options(100u, 10u);
+    options.algorithm_identity = {};
+
+    require_wire_error(encode_minimizer_generation(producer, sink, options),
+                       minimizer_generation_encoding_error::storage_contract_mismatch);
+    REQUIRE(producer.scan_count == 0u);
+    REQUIRE(sink.rows.empty());
+}
+
+TEST_CASE("grouped-SoA fixed records use exact 176-byte and 128-byte layouts",
           "[component:bioseq][layer:unit][feature:storage]") {
     using namespace bioseq::indexing;
     constexpr auto b = [](unsigned value) { return static_cast<std::byte>(value); };
@@ -271,9 +498,9 @@ TEST_CASE("grouped-SoA fixed records use exact 160-byte and 128-byte layouts",
     }();
     constexpr auto encoded_manifest = encode_minimizer_generation_manifest(manifest);
     STATIC_REQUIRE(encoded_manifest.has_value());
-    STATIC_REQUIRE(encoded_manifest->size() == 160u);
-    constexpr std::array<std::byte, 160> expected_manifest{
-        b(0x47), b(0x4f), b(0x49), b(0x42), b(0x05), b(0x00), b(0xa0), b(0x00), b(0x08), b(0x07),
+    STATIC_REQUIRE(encoded_manifest->size() == 176u);
+    constexpr std::array<std::byte, 176> expected_manifest{
+        b(0x47), b(0x4f), b(0x49), b(0x42), b(0x05), b(0x00), b(0xb0), b(0x00), b(0x08), b(0x07),
         b(0x06), b(0x05), b(0x04), b(0x03), b(0x02), b(0x01), b(0x18), b(0x17), b(0x16), b(0x15),
         b(0x14), b(0x13), b(0x12), b(0x11), b(0x28), b(0x27), b(0x26), b(0x25), b(0x24), b(0x23),
         b(0x22), b(0x21), b(0x14), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00),
@@ -283,21 +510,23 @@ TEST_CASE("grouped-SoA fixed records use exact 160-byte and 128-byte layouts",
         b(0x62), b(0x61), b(0x78), b(0x77), b(0x76), b(0x75), b(0x74), b(0x73), b(0x72), b(0x71),
         b(0x10), b(0x0f), b(0x0e), b(0x0d), b(0x0c), b(0x0b), b(0x0a), b(0x09), b(0x03), b(0x00),
         b(0x00), b(0x00), b(0x44), b(0x33), b(0x22), b(0x11), b(0x88), b(0x77), b(0x66), b(0x55),
-        b(0x00), b(0x00), b(0x44), b(0x33), b(0x0f), b(0x00), b(0x88), b(0x77), b(0x03), b(0x00),
+        b(0x00), b(0x00), b(0x08), b(0x00), b(0x0f), b(0x00), b(0x0a), b(0x00), b(0x03), b(0x00),
         b(0x00), b(0x00), b(0x08), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00),
         b(0x02), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x01), b(0x01), b(0x53), b(0x4f),
-        b(0x49), b(0x42), b(0x01), b(0x00), b(0x20), b(0x00), b(0x04), b(0x02), b(0x02), b(0x01),
+        b(0x49), b(0x42), b(0x02), b(0x00), b(0x30), b(0x00), b(0x04), b(0x02), b(0x02), b(0x01),
         b(0x01), b(0x01), b(0x02), b(0x00), b(0xff), b(0xff), b(0xff), b(0x3f), b(0x00), b(0x00),
         b(0x00), b(0x00), b(0x0a), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00),
+        b(0x00), b(0x00), b(0x0f), b(0x00), b(0x01), b(0x00), b(0x00), b(0x00), b(0x01), b(0x00),
+        b(0x00), b(0x00), b(0x00), b(0x00), b(0x00), b(0x00),
     };
     STATIC_REQUIRE(*encoded_manifest == expected_manifest);
     STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 4) == 5u);
-    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 6) == 160u);
+    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 6) == 176u);
     STATIC_REQUIRE(test_read_le<std::uint32_t>(*encoded_manifest, 108) == 3u);
     STATIC_REQUIRE(test_read_le<std::uint32_t>(*encoded_manifest, 128) ==
                    k_grouped_soa_extension_magic);
-    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 132) == 1u);
-    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 134) == 32u);
+    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 132) == 2u);
+    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 134) == 48u);
     STATIC_REQUIRE(test_read_le<std::uint8_t>(*encoded_manifest, 136) == 4u);
     STATIC_REQUIRE(test_read_le<std::uint8_t>(*encoded_manifest, 137) == 2u);
     STATIC_REQUIRE(test_read_le<std::uint8_t>(*encoded_manifest, 138) == 2u);
@@ -308,6 +537,13 @@ TEST_CASE("grouped-SoA fixed records use exact 160-byte and 128-byte layouts",
     STATIC_REQUIRE((*encoded_manifest)[143] == std::byte{0});
     STATIC_REQUIRE(test_read_le<std::uint64_t>(*encoded_manifest, 144) == shape->max_hash);
     STATIC_REQUIRE(test_read_le<std::uint64_t>(*encoded_manifest, 152) == 10u);
+    STATIC_REQUIRE(test_read_le<std::uint8_t>(*encoded_manifest, 160) == 0u);
+    STATIC_REQUIRE(test_read_le<std::uint8_t>(*encoded_manifest, 161) == 0u);
+    STATIC_REQUIRE(test_read_le<std::uint8_t>(*encoded_manifest, 162) == 15u);
+    STATIC_REQUIRE((*encoded_manifest)[163] == std::byte{0});
+    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 164) == 1u);
+    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 166) == 0u);
+    STATIC_REQUIRE(test_read_le<std::uint16_t>(*encoded_manifest, 168) == 1u);
     constexpr auto decoded_manifest =
         decode_minimizer_generation_manifest(std::span<const std::byte>{*encoded_manifest});
     STATIC_REQUIRE(decoded_manifest.has_value());
@@ -380,6 +616,17 @@ TEST_CASE("grouped-SoA fixed records reject every extension corruption class",
     const auto encoded_manifest = encode_minimizer_generation_manifest(manifest);
     REQUIRE(encoded_manifest.has_value());
     const auto good_manifest = *encoded_manifest;
+    require_wire_error(
+        decode_minimizer_generation_manifest(
+            std::span<const std::byte>{good_manifest}.first(160u)),
+        minimizer_generation_encoding_error::encoded_size);
+    {
+        auto missing_identity = good_manifest;
+        std::ranges::fill(std::span<std::byte>{missing_identity}.subspan(160u, 10u),
+                          std::byte{0});
+        require_wire_error(decode_minimizer_generation_manifest(missing_identity),
+                           minimizer_generation_encoding_error::storage_contract_mismatch);
+    }
 
     for (const std::size_t offset : {128u, 132u, 134u}) {
         INFO("grouped-SoA extension header offset " << offset);
@@ -400,6 +647,19 @@ TEST_CASE("grouped-SoA fixed records reject every extension corruption class",
         require_wire_error(decode_minimizer_generation_manifest(corrupt),
                            minimizer_generation_encoding_error::reserved_nonzero);
     }
+    for (const std::size_t offset : {160u, 161u, 162u, 164u, 166u, 168u}) {
+        INFO("grouped-SoA READY identity offset " << offset);
+        auto corrupt = good_manifest;
+        corrupt[offset] ^= std::byte{0x7f};
+        REQUIRE_FALSE(decode_minimizer_generation_manifest(corrupt));
+    }
+    for (const std::size_t offset : {163u, 170u, 175u}) {
+        INFO("grouped-SoA READY reserved offset " << offset);
+        auto corrupt = good_manifest;
+        corrupt[offset] = std::byte{1};
+        require_wire_error(decode_minimizer_generation_manifest(corrupt),
+                           minimizer_generation_encoding_error::reserved_nonzero);
+    }
     {
         INFO("grouped-SoA derived hash bound offset 144");
         auto corrupt = good_manifest;
@@ -413,6 +673,7 @@ TEST_CASE("grouped-SoA fixed records reject every extension corruption class",
         const auto expected = expected_grouped_soa_generation_identity_for_backend(
             minimizer_generation_layout::grouped_soa_segment_local,
             minimizer_sketch_backend::scalar,
+            test_generation_algorithm_identity(),
             manifest.alphabet_code,
             manifest.storage_unit_byte_width,
             manifest.kmer_size,
@@ -493,7 +754,7 @@ TEST_CASE("grouped-SoA emits exact SoA and prepared reader rejects corruption",
     const auto generation = encode_minimizer_generation(producer, sink, options);
     REQUIRE(generation.has_value());
     REQUIRE(producer.scan_count == 3u);
-    REQUIRE(generation->manifest_row.byte_count == 160u);
+    REQUIRE(generation->manifest_row.byte_count == 176u);
     REQUIRE(generation->directory.encoded_bytes().size() ==
             generation->directory.entries().size() * 128u);
     REQUIRE(generation->directory.entries().size() == 1u);
@@ -528,6 +789,7 @@ TEST_CASE("grouped-SoA emits exact SoA and prepared reader rejects corruption",
                                                  queries,
                                                  10u);
     REQUIRE(reader.has_value());
+    REQUIRE(reader->generation_manifest().algorithm_identity == options.algorithm_identity);
     for (const auto& row : sink.rows) {
         if (row.address.position_segment >= 0) {
             REQUIRE(reader->accept(row_view(row)).has_value());

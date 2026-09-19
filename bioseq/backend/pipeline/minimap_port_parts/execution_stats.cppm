@@ -2,19 +2,33 @@
  * @file pipeline/minimap_port_parts/execution_stats.cppm
  * @brief Route receipts and owned mapping-result collections.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.minimap_port:execution_stats;
 
 import std;
 import :results;
 import :alignment;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+import bioseq.alignment.contracts;
+#endif
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.highway.dispatch_contract;
 import bioseq.prefilter.execution_contract;
+import bioseq.pipeline.minimap_parameters_contract;
 import bioseq.sequences.kmers.two_stack_minimizers;
 import bioseq.sequences.cigar;
 import bioseq.alignment.block_aligner;
 import bioseq.chaining.simd;
 import bioseq.indexing.minimizer_hashmap;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+import bioseq.indexing.minimizer_sequence.generation;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.pipeline.stats;
+#endif
 
 export namespace bioseq::simd {
 
@@ -691,15 +705,330 @@ static_assert([] {
            lhs.gpu_index_max_probe == 7;
 }());
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+/** Runtime-authenticated completion shape for one job in a shared GPU-seed wave. */
+enum class vulkan_seed_frontend_completion_kind : std::uint8_t {
+    invalid = 0,
+    mpf_runtime,
+    mpf_zero_query,
+    mpf_empty_target,
+    mps_runtime,
+    mps_zero_query,
+};
+
+/** Exact statement-owned target representation consumed by a GPU-seed wave. */
+enum class vulkan_seed_target_completion_kind : std::uint8_t {
+    invalid = 0,
+    mpf_persisted,
+    mpf_runtime_generated,
+    mps_persisted,
+    mps_runtime_generated,
+};
+
+/**
+ * Fixed proof of the one physical target operation borrowed by logical seed jobs.
+ *
+ * It carries only existing receipt outcomes. No selector-derived counter may be
+ * placed here, and the whole-wave publisher merges its physical counts once.
+ */
+struct vulkan_seed_target_execution {
+    vulkan_seed_target_completion_kind completion =
+        vulkan_seed_target_completion_kind::invalid;
+    bioseq::gpu::vulkan::gpu_device_uuid device_uuid{};
+    std::uint64_t target_operation_identity = 0u;
+    std::uint64_t target_len = 0u;
+    std::uint64_t persisted_generation_id = 0u;
+    std::uint64_t persisted_source_identity = 0u;
+    std::uint64_t persisted_cold_load_identity = 0u;
+    std::uint64_t producer_roundtrips = 0u;
+    std::uint64_t resident_materializations = 0u;
+    std::uint64_t resident_ingestions = 0u;
+    bool canonical_empty = false;
+    bool query_empty_bypass = false;
+    bool producer_receipt_present = false;
+
+    /** Return the target-index source authenticated by this operation. */
+    [[nodiscard]] constexpr ::bioseq::pipeline_stats::target_index_source
+    target_source() const noexcept {
+        using source = ::bioseq::pipeline_stats::target_index_source;
+        switch (completion) {
+        case vulkan_seed_target_completion_kind::mpf_persisted:
+        case vulkan_seed_target_completion_kind::mps_persisted:
+            return source::persisted;
+        case vulkan_seed_target_completion_kind::mpf_runtime_generated:
+        case vulkan_seed_target_completion_kind::mps_runtime_generated:
+            return source::recomputed;
+        case vulkan_seed_target_completion_kind::invalid:
+            return source::none;
+        }
+        return source::none;
+    }
+
+    /** Whether an authenticated target-minimizer producer completed. */
+    [[nodiscard]] constexpr bool target_sketch_completed() const noexcept {
+        // A valid short/canonical-empty producer may complete without a queue
+        // roundtrip. The receipt proves the logical stage; producer_roundtrips
+        // remains the independent physical-submit count.
+        return producer_receipt_present;
+    }
+
+    /** Whether host construction processed a recomputed target representation. */
+    [[nodiscard]] constexpr bool target_index_build_executed() const noexcept {
+        return target_source() ==
+                   ::bioseq::pipeline_stats::target_index_source::recomputed &&
+               !query_empty_bypass && producer_receipt_present;
+    }
+
+    /** Whether exact retained device storage was physically materialized. */
+    [[nodiscard]] constexpr bool device_index_upload_executed() const noexcept {
+        return resident_materializations != 0u;
+    }
+
+    /** Validate route-specific identity and physical outcome geometry. */
+    [[nodiscard]] bool is_internally_consistent() const noexcept {
+        const auto source = target_source();
+        const bool persisted =
+            source == ::bioseq::pipeline_stats::target_index_source::persisted;
+        const bool device_bound = std::ranges::any_of(
+            device_uuid, [](const std::uint8_t byte) noexcept { return byte != 0u; });
+        if (source == ::bioseq::pipeline_stats::target_index_source::none ||
+            !device_bound || target_operation_identity == 0u || target_len == 0u ||
+            (persisted ? persisted_generation_id == 0u ||
+                             persisted_source_identity == 0u
+                       : persisted_generation_id != 0u ||
+                             persisted_source_identity != 0u ||
+                             persisted_cold_load_identity != 0u)) {
+            return false;
+        }
+        const bool mpf =
+            completion == vulkan_seed_target_completion_kind::mpf_persisted ||
+            completion == vulkan_seed_target_completion_kind::mpf_runtime_generated;
+        if (mpf) {
+            const std::uint64_t expected_ingestions =
+                persisted && !canonical_empty ? 1u : 0u;
+            if (persisted_cold_load_identity != 0u ||
+                resident_ingestions != expected_ingestions ||
+                resident_materializations > 2u ||
+                (canonical_empty && resident_materializations != 0u) ||
+                (!canonical_empty && resident_materializations != 2u) ||
+                (persisted &&
+                 (producer_roundtrips != 0u || producer_receipt_present)) ||
+                (query_empty_bypass &&
+                 (!canonical_empty || producer_roundtrips != 0u ||
+                  resident_materializations != 0u || producer_receipt_present)) ||
+                (!persisted && !query_empty_bypass && !producer_receipt_present)) {
+                return false;
+            }
+            return true;
+        }
+        const bool mps =
+            completion == vulkan_seed_target_completion_kind::mps_persisted ||
+            completion == vulkan_seed_target_completion_kind::mps_runtime_generated;
+        return mps && !query_empty_bypass && resident_materializations != 0u &&
+               resident_ingestions != 0u &&
+               (persisted ? persisted_cold_load_identity != 0u &&
+                                producer_roundtrips == 0u &&
+                                !producer_receipt_present
+                          : producer_receipt_present);
+    }
+};
+
+/**
+ * Fixed, non-owning projection of one completed GPU seed job.
+ *
+ * The runtime token remains the causal authority.  This value only binds the
+ * already-authenticated job shape to its canonical host suffix without copying
+ * a move-only token into every logical result collection.
+ */
+struct vulkan_seed_frontend_job_execution {
+    vulkan_seed_frontend_completion_kind completion =
+        vulkan_seed_frontend_completion_kind::invalid;
+    partial_vulkan_execution_stats seed_stats{};
+    std::uint64_t operation_identity = 0u;
+    std::uint64_t query_authority_identity = 0u;
+    std::uint64_t query_ordinal = 0u;
+    std::uint64_t minimizer_count = 0u;
+    std::uint64_t target_len = 0u;
+    std::uint64_t target_position_offset = 0u;
+    std::uint64_t anchor_count = 0u;
+    vulkan_seed_target_completion_kind target_completion =
+        vulkan_seed_target_completion_kind::invalid;
+    std::uint64_t target_operation_identity = 0u;
+    std::uint64_t persisted_generation_id = 0u;
+    std::uint64_t persisted_source_identity = 0u;
+    std::size_t operation_job_index = 0u;
+
+    /** Return the target-index source proved by the retained target owner. */
+    [[nodiscard]] constexpr ::bioseq::pipeline_stats::target_index_source
+    target_source() const noexcept {
+        using source = ::bioseq::pipeline_stats::target_index_source;
+        switch (target_completion) {
+        case vulkan_seed_target_completion_kind::mpf_persisted:
+        case vulkan_seed_target_completion_kind::mps_persisted:
+            return source::persisted;
+        case vulkan_seed_target_completion_kind::mpf_runtime_generated:
+        case vulkan_seed_target_completion_kind::mps_runtime_generated:
+            return source::recomputed;
+        case vulkan_seed_target_completion_kind::invalid:
+            return source::none;
+        }
+        return source::none;
+    }
+
+    /** Return whether only seed fields carry the exact completed job shape. */
+    [[nodiscard]] bool is_internally_consistent() const noexcept {
+        partial_vulkan_execution_stats expected{};
+        expected.seed_lookup_dispatches = seed_stats.seed_lookup_dispatches;
+        expected.seed_open_addressed_lookup_dispatches =
+            seed_stats.seed_open_addressed_lookup_dispatches;
+        expected.seed_sorted_dense_lookup_dispatches =
+            seed_stats.seed_sorted_dense_lookup_dispatches;
+        expected.seed_bitonic_sort_dispatches = seed_stats.seed_bitonic_sort_dispatches;
+        expected.seed_radix_sort_operations = seed_stats.seed_radix_sort_operations;
+        expected.seed_radix_anchor_count = seed_stats.seed_radix_anchor_count;
+        expected.seed_radix_passes = seed_stats.seed_radix_passes;
+        expected.seed_radix_histogram_dispatches =
+            seed_stats.seed_radix_histogram_dispatches;
+        expected.seed_radix_scan_dispatches = seed_stats.seed_radix_scan_dispatches;
+        expected.seed_radix_scatter_dispatches = seed_stats.seed_radix_scatter_dispatches;
+        expected.seed_host_sort_fallbacks = seed_stats.seed_host_sort_fallbacks;
+        expected.seed_anchor_stats_operations = seed_stats.seed_anchor_stats_operations;
+        expected.seed_canonical_anchor_count = seed_stats.seed_canonical_anchor_count;
+        expected.seed_canonical_anchor_order_checks =
+            seed_stats.seed_canonical_anchor_order_checks;
+        expected.seed_canonical_anchor_order_accepts =
+            seed_stats.seed_canonical_anchor_order_accepts;
+        expected.seed_canonical_tie_normalization_runs =
+            seed_stats.seed_canonical_tie_normalization_runs;
+        expected.seed_canonical_tie_normalization_anchors =
+            seed_stats.seed_canonical_tie_normalization_anchors;
+        expected.seed_anchor_digest_lane0 = seed_stats.seed_anchor_digest_lane0;
+        expected.seed_anchor_digest_lane1 = seed_stats.seed_anchor_digest_lane1;
+        const bool seed_fields_only = seed_stats == expected && !seed_stats.is_saturated;
+        const bool canonical = seed_stats.seed_anchor_stats_operations == 1u &&
+                               seed_stats.seed_canonical_anchor_count == anchor_count &&
+                               seed_stats.seed_canonical_anchor_order_checks == 1u &&
+                               seed_stats.seed_canonical_anchor_order_accepts == 1u &&
+                               seed_stats.seed_host_sort_fallbacks == 0u;
+        const bool sort_shape =
+            seed_stats.seed_bitonic_sort_dispatches <= 1u &&
+            seed_stats.seed_radix_sort_operations <= 1u &&
+            !(seed_stats.seed_bitonic_sort_dispatches != 0u &&
+              seed_stats.seed_radix_sort_operations != 0u) &&
+            (seed_stats.seed_bitonic_sort_dispatches == 0u || anchor_count != 0u) &&
+            (seed_stats.seed_radix_sort_operations == 0u
+                 ? seed_stats.seed_radix_anchor_count == 0u &&
+                       seed_stats.seed_radix_passes == 0u &&
+                       seed_stats.seed_radix_histogram_dispatches == 0u &&
+                       seed_stats.seed_radix_scan_dispatches == 0u &&
+                       seed_stats.seed_radix_scatter_dispatches == 0u
+                 : anchor_count != 0u &&
+                       seed_stats.seed_radix_anchor_count == anchor_count &&
+                       seed_stats.seed_radix_passes != 0u &&
+                       seed_stats.seed_radix_histogram_dispatches ==
+                           seed_stats.seed_radix_passes &&
+                       seed_stats.seed_radix_scan_dispatches ==
+                           seed_stats.seed_radix_passes &&
+                       seed_stats.seed_radix_scatter_dispatches ==
+                           seed_stats.seed_radix_passes);
+        const auto source = target_source();
+        const bool persisted_target =
+            source == ::bioseq::pipeline_stats::target_index_source::persisted;
+        const bool target_identity =
+            source != ::bioseq::pipeline_stats::target_index_source::none &&
+            target_operation_identity != 0u &&
+            (persisted_target ? persisted_generation_id != 0u &&
+                                    persisted_source_identity != 0u
+                              : persisted_generation_id == 0u &&
+                                    persisted_source_identity == 0u);
+        if (!seed_fields_only || !canonical || !sort_shape || !target_identity ||
+            query_authority_identity == 0u ||
+            query_ordinal > (std::numeric_limits<std::uint32_t>::max)() || target_len == 0u ||
+            target_position_offset >
+                (std::numeric_limits<std::uint64_t>::max)() - (target_len - 1u)) {
+            return false;
+        }
+        const bool runtime_seed =
+            completion == vulkan_seed_frontend_completion_kind::mpf_runtime ||
+            completion == vulkan_seed_frontend_completion_kind::mps_runtime;
+        if (runtime_seed) {
+            return operation_identity != 0u && minimizer_count != 0u &&
+                   seed_stats.seed_lookup_dispatches == 1u &&
+                   ((seed_stats.seed_open_addressed_lookup_dispatches == 1u &&
+                     seed_stats.seed_sorted_dense_lookup_dispatches == 0u) ||
+                    (seed_stats.seed_open_addressed_lookup_dispatches == 0u &&
+                     seed_stats.seed_sorted_dense_lookup_dispatches == 1u));
+        }
+        const bool empty = completion == vulkan_seed_frontend_completion_kind::mpf_zero_query ||
+                           completion == vulkan_seed_frontend_completion_kind::mpf_empty_target ||
+                           completion == vulkan_seed_frontend_completion_kind::mps_zero_query;
+        const bool mps_zero =
+            completion == vulkan_seed_frontend_completion_kind::mps_zero_query;
+        return empty && (mps_zero ? operation_identity != 0u : operation_identity == 0u) &&
+               (completion == vulkan_seed_frontend_completion_kind::mpf_empty_target ||
+                minimizer_count == 0u) &&
+               anchor_count == 0u && seed_stats.seed_lookup_dispatches == 0u &&
+               seed_stats.seed_open_addressed_lookup_dispatches == 0u &&
+               seed_stats.seed_sorted_dense_lookup_dispatches == 0u &&
+               seed_stats.seed_bitonic_sort_dispatches == 0u &&
+               seed_stats.seed_radix_sort_operations == 0u;
+    }
+
+    /** Bind this projection to the still-private runtime operation token. */
+    [[nodiscard]] bool matches_runtime_operation(
+        const bioseq::gpu::vulkan::runtime_pipeline_operation_token& operation,
+        const std::uint32_t max_workgroup_count_x) const noexcept {
+        if (!is_internally_consistent()) {
+            return false;
+        }
+        using operation_kind = bioseq::gpu::vulkan::runtime_pipeline_operation_kind;
+        if (completion == vulkan_seed_frontend_completion_kind::mpf_zero_query ||
+            completion == vulkan_seed_frontend_completion_kind::mpf_empty_target) {
+            return operation.audit().kind == operation_kind::invalid;
+        }
+        const auto& audit = operation.audit();
+        const bool mpf = completion == vulkan_seed_frontend_completion_kind::mpf_runtime;
+        const bool valid_operation =
+            mpf ? operation.is_valid_for_mpf_seed_anchor_roundtrip(max_workgroup_count_x)
+                : operation.is_valid_for_grouped_soa_seed_anchor_roundtrip();
+        if (!valid_operation || audit.operation_identity != operation_identity ||
+            operation_job_index >= audit.jobs.size() ||
+            (mpf && (audit.kind != operation_kind::mpf_seed_anchor_roundtrip ||
+                     operation_job_index != 0u)) ||
+            (!mpf && audit.kind != operation_kind::grouped_soa_seed_anchor_roundtrip)) {
+            return false;
+        }
+        const auto& job = audit.jobs[operation_job_index];
+        return job.minimizer_count == minimizer_count && job.target_len == target_len &&
+               job.target_position_offset == target_position_offset &&
+               job.anchor_count == anchor_count && job.range_count == 0u &&
+               job.query_authority_identity == query_authority_identity &&
+               job.anchor_digest_lo == seed_stats.seed_anchor_digest_lane0 &&
+               job.anchor_digest_hi == seed_stats.seed_anchor_digest_lane1 &&
+               job.anchor_order_checked && job.anchor_order_accepted;
+    }
+};
+#endif
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+/// Physical representation whose completed transient target receipt is retained
+/// until the PostgreSQL job-attestation boundary.
+enum class transient_cpu_target_generation_representation : std::uint8_t {
+    none,
+    minimizer_fragment_spill,
+    minimizer_sequence_publication,
+};
+#endif
+
 /**
  * @brief Owning container of alignment results with PAF output formatting.
  *
- * Wraps a std::vector<match_result> and provides a print() method that outputs
+ * Wraps the ordered match-result owner and provides a print() method that outputs
  * results in exact minimap2 PAF format, reproducing mm_write_paf4()
  * (format.c:427-460) with auxiliary tags from write_tags() (format.c:399-425).
  */
 struct match_result_collection {
-    std::vector<match_result> results;
+    match_result_vector results;
     two_stack_execution_stats exact_simd_query_execution_stats{};
     two_stack_execution_stats exact_simd_target_execution_stats{};
     bounded_nthash_execution_stats bounded_nthash_query_execution_stats{};
@@ -721,6 +1050,114 @@ struct match_result_collection {
     bool ksw2_batched_execution_stats_available = false;
     bool prefilter_execution_stats_available = false;
     bool fragment_native_query_stats_available = false;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    // This is an existing immutable generation receipt, not a derived counter.
+    // Ordinary production collections do not carry it. The representation is
+    // required because an MPF spill and an encoded MPS have different terminal
+    // receipt predicates.
+    std::optional<bioseq::indexing::minimizer_sequence_generation_execution_receipt>
+        transient_cpu_target_generation_receipt{};
+    transient_cpu_target_generation_representation
+        transient_cpu_target_generation_representation_kind =
+            transient_cpu_target_generation_representation::none;
+    bool transient_cpu_target_generation_receipt_conflict = false;
+    bool transient_cpu_target_generation_stats_published = false;
+#endif
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    // Existing causal authority retained until the PG job publication boundary.
+    // It is not a serialized metric and is absent from ordinary result owners.
+    ::bioseq::gpu::vulkan::runtime_pipeline_operation_token completed_vulkan_chaining{};
+    // The common single-dispatch path stays inline. Only segmented merges
+    // allocate this existing admitted owner for further completed operations.
+    admitted_alignment_result_vector<
+        ::bioseq::gpu::vulkan::runtime_pipeline_operation_token, false>
+        additional_completed_vulkan_chaining{};
+
+    [[nodiscard]] bool has_valid_completed_vulkan_chaining(
+        const std::uint64_t expected_dispatches) const noexcept {
+        if (expected_dispatches == 0u ||
+            additional_completed_vulkan_chaining.size() != expected_dispatches - 1u ||
+            !completed_vulkan_chaining.is_valid_for_chaining_tiled_dp()) {
+            return false;
+        }
+        for (const auto& operation : additional_completed_vulkan_chaining) {
+            if (!operation.is_valid_for_chaining_tiled_dp())
+                return false;
+        }
+        return true;
+    }
+
+    /// Preserve every causal token before merging its descriptive counters.
+    /// Allocation failure leaves both collections' tokens unmoved.
+    void retain_completed_vulkan_chaining(match_result_collection& source) {
+        using kind = ::bioseq::gpu::vulkan::runtime_pipeline_operation_kind;
+        if (this == &source) {
+            throw std::logic_error{"chaining receipt collection cannot merge itself"};
+        }
+        const bool have_source = source.completed_vulkan_chaining.audit().kind != kind::invalid;
+        if (!have_source) {
+            if (!source.additional_completed_vulkan_chaining.empty()) {
+                throw std::logic_error{"segmented chaining receipts lack their first operation"};
+            }
+            return;
+        }
+        const bool have_first = completed_vulkan_chaining.audit().kind != kind::invalid;
+        if (!have_first && !additional_completed_vulkan_chaining.empty()) {
+            throw std::logic_error{"destination chaining receipts lack their first operation"};
+        }
+        const auto incoming = bioseq::common::checked_add(
+            source.additional_completed_vulkan_chaining.size(), std::size_t{have_first ? 1u : 0u});
+        const auto required = incoming
+            ? bioseq::common::checked_add(additional_completed_vulkan_chaining.size(), *incoming)
+            : std::optional<std::size_t>{};
+        if (!required) {
+            throw std::overflow_error{"segmented chaining receipt count overflow"};
+        }
+        const std::size_t old_capacity = additional_completed_vulkan_chaining.capacity();
+        std::size_t capacity = old_capacity;
+        if (*required > old_capacity) {
+            const std::size_t maximum = std::vector<
+                ::bioseq::gpu::vulkan::runtime_pipeline_operation_token>{}.max_size();
+            const std::size_t grown = old_capacity <= maximum / 2u
+                ? old_capacity * 2u : maximum;
+            capacity = std::max(*required, grown);
+        }
+        additional_completed_vulkan_chaining.set_logical_bounds(*required, capacity);
+        additional_completed_vulkan_chaining.reserve(capacity);
+        if (have_first) {
+            additional_completed_vulkan_chaining.push_back(
+                std::move(source.completed_vulkan_chaining));
+        } else {
+            completed_vulkan_chaining = std::move(source.completed_vulkan_chaining);
+        }
+        for (auto& operation : source.additional_completed_vulkan_chaining) {
+            additional_completed_vulkan_chaining.push_back(std::move(operation));
+        }
+        source.additional_completed_vulkan_chaining.clear();
+    }
+    // Exact algorithm identities are published only after the selected
+    // templated pipeline's terminal callback returns normally.
+    minimizer_algorithm observed_minimizer_algorithm = minimizer_algorithm::scalar;
+    chaining_algorithm observed_chaining_algorithm = chaining_algorithm::scalar_minimap2;
+    base_alignment_algorithm observed_base_alignment_algorithm = base_alignment_algorithm::ksw2;
+    bool observed_minimizer_algorithm_available = false;
+    bool observed_chaining_algorithm_available = false;
+    bool observed_base_alignment_algorithm_available = false;
+    bool observed_minimizer_algorithm_conflict = false;
+    bool observed_chaining_algorithm_conflict = false;
+    bool observed_base_alignment_algorithm_conflict = false;
+#endif
+    // One invocation receipt is retained once, independently of the number of
+    // query workers whose active intervals contributed to its union.
+    std::uint64_t downstream_active_wall_ns = 0;
+    std::uint64_t downstream_active_wall_invocations = 0;
+    std::uint64_t downstream_active_wall_unavailable_invocations = 0;
+    bool downstream_active_wall_saturated = false;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    bool mapq_execution_available = false;
+    bool mapq_executed = false;
+    bool mapq_execution_conflict = false;
+#endif
     // Operation-local CPU/SIMD wall clocks. These travel with the result so
     // parallel rows never update shared statement statistics. The PostgreSQL
     // dispatch boundary consumes them exactly once into the existing stable
@@ -739,13 +1176,207 @@ struct match_result_collection {
     std::uint64_t alignment_result_host_stage_started_ns = 0;
     bool is_region_host_stage_active = false;
     bool is_alignment_result_host_stage_active = false;
+    downstream_active_wall_tracker* downstream_active_wall_tracker_ = nullptr;
+    bool downstream_active_wall_tracker_entered_ = false;
 
     /// Create an empty result collection and execution-stat aggregate.
     match_result_collection() = default;
 
     /// Adopt a completed ordered result vector.
-    explicit match_result_collection(std::vector<match_result>&& results_vec)
+    explicit match_result_collection(match_result_vector&& results_vec)
         : results(std::move(results_vec)) {}
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    /// Retain exactly one already-completed transient CPU target receipt.
+    [[nodiscard]] bool record_transient_cpu_target_generation_receipt(
+        const transient_cpu_target_generation_representation representation,
+        bioseq::indexing::minimizer_sequence_generation_execution_receipt receipt) noexcept {
+        const bool terminal_receipt_valid =
+            representation ==
+                    transient_cpu_target_generation_representation::minimizer_fragment_spill
+                ? receipt.is_spill_valid()
+            : representation ==
+                    transient_cpu_target_generation_representation::minimizer_sequence_publication
+                ? receipt.is_internally_consistent()
+                : false;
+        if (!terminal_receipt_valid || transient_cpu_target_generation_receipt.has_value() ||
+            transient_cpu_target_generation_representation_kind !=
+                transient_cpu_target_generation_representation::none ||
+            transient_cpu_target_generation_receipt_conflict ||
+            transient_cpu_target_generation_stats_published) {
+            transient_cpu_target_generation_receipt_conflict = true;
+            return false;
+        }
+        transient_cpu_target_generation_receipt.emplace(std::move(receipt));
+        transient_cpu_target_generation_representation_kind = representation;
+        return true;
+    }
+
+  private:
+    /// Move one-shot target authority with an instrumented collection merge.
+    void retain_transient_cpu_target_generation_receipt(
+        match_result_collection& source) noexcept {
+        static_assert(std::is_nothrow_move_constructible_v<
+                      bioseq::indexing::minimizer_sequence_generation_execution_receipt>);
+        if (this == &source) {
+            transient_cpu_target_generation_receipt_conflict = true;
+            return;
+        }
+        if (source.transient_cpu_target_generation_receipt_conflict ||
+            source.transient_cpu_target_generation_stats_published) {
+            transient_cpu_target_generation_receipt_conflict = true;
+        }
+        if (!source.transient_cpu_target_generation_receipt.has_value()) {
+            if (source.transient_cpu_target_generation_representation_kind !=
+                transient_cpu_target_generation_representation::none) {
+                transient_cpu_target_generation_receipt_conflict = true;
+            }
+            return;
+        }
+        if (transient_cpu_target_generation_receipt.has_value() ||
+            transient_cpu_target_generation_representation_kind !=
+                transient_cpu_target_generation_representation::none ||
+            transient_cpu_target_generation_stats_published) {
+            transient_cpu_target_generation_receipt_conflict = true;
+            return;
+        }
+        transient_cpu_target_generation_receipt.emplace(
+            std::move(*source.transient_cpu_target_generation_receipt));
+        transient_cpu_target_generation_representation_kind =
+            source.transient_cpu_target_generation_representation_kind;
+        source.transient_cpu_target_generation_receipt.reset();
+        source.transient_cpu_target_generation_representation_kind =
+            transient_cpu_target_generation_representation::none;
+    }
+
+  public:
+#endif
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    /**
+     * @brief Admit capacity for one source-bounded append before publication.
+     * @param additional_upper_bound Maximum elements appended by the next batch.
+     * @return Final logical element bound for the append.
+     */
+    [[gnu::always_inline]] std::size_t
+    prepare_result_append(const std::size_t additional_upper_bound) {
+        if (additional_upper_bound >
+            (std::numeric_limits<std::size_t>::max)() - results.size()) {
+            throw std::length_error{"match result append bound overflowed"};
+        }
+        const std::size_t required = results.size() + additional_upper_bound;
+        // Repeated segment/wave appends must retain vector-like amortized growth.
+        // Logical output is bounded by this source batch; physical spare capacity
+        // has its separate checked bound and adjacent admission.
+        std::size_t capacity_bound = results.capacity();
+        if (required > capacity_bound) {
+            const std::size_t maximum_capacity = std::vector<match_result>{}.max_size();
+            const std::size_t grown_capacity = capacity_bound <= maximum_capacity / 2u
+                ? capacity_bound * 2u
+                : maximum_capacity;
+            capacity_bound = std::max(required, grown_capacity);
+        }
+        results.set_logical_bounds(required, capacity_bound);
+        results.reserve(capacity_bound);
+        return required;
+    }
+#endif
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    /// Record an operation-observed minimizer after its consuming pipeline completes.
+    void
+    record_completed_minimizer_algorithm_identity(const minimizer_algorithm minimizer) noexcept {
+        if (!observed_minimizer_algorithm_available) {
+            observed_minimizer_algorithm = minimizer;
+            observed_minimizer_algorithm_available = true;
+        } else if (observed_minimizer_algorithm != minimizer) {
+            observed_minimizer_algorithm_conflict = true;
+        }
+    }
+
+    /// Record an operation-observed chaining algorithm after the pipeline completes.
+    void record_completed_chaining_algorithm_identity(const chaining_algorithm chaining) noexcept {
+        if (!observed_chaining_algorithm_available) {
+            observed_chaining_algorithm = chaining;
+            observed_chaining_algorithm_available = true;
+        } else if (observed_chaining_algorithm != chaining) {
+            observed_chaining_algorithm_conflict = true;
+        }
+    }
+
+    /// Record an operation-observed CPU base aligner after its kernel returns.
+    void record_completed_base_alignment_algorithm_identity(
+        const base_alignment_algorithm alignment) noexcept {
+        if (!observed_base_alignment_algorithm_available) {
+            observed_base_alignment_algorithm = alignment;
+            observed_base_alignment_algorithm_available = true;
+        } else if (observed_base_alignment_algorithm != alignment) {
+            observed_base_alignment_algorithm_conflict = true;
+        }
+    }
+
+    /// Record both effective algorithms after one selected pipeline completes.
+    void record_completed_algorithm_identity(const minimizer_algorithm minimizer,
+                                             const chaining_algorithm chaining) noexcept {
+        record_completed_minimizer_algorithm_identity(minimizer);
+        record_completed_chaining_algorithm_identity(chaining);
+    }
+
+    /// Record whether the completed pipeline actually selected MAPQ execution.
+    void record_mapq_execution(const bool executed) noexcept {
+        if (!mapq_execution_available) {
+            mapq_execution_available = true;
+            mapq_executed = executed;
+        } else if (mapq_executed != executed) {
+            mapq_execution_conflict = true;
+        }
+    }
+#endif
+
+    /// Attach this query's downstream enter/leave events to its invocation union.
+    void attach_downstream_active_wall_tracker(downstream_active_wall_tracker& tracker) noexcept {
+        if (downstream_active_wall_tracker_ != nullptr || downstream_active_wall_tracker_entered_) {
+            tracker.invalidate();
+            return;
+        }
+        downstream_active_wall_tracker_ = &tracker;
+    }
+
+    /// Detach after the selected pipeline terminal callback has completed.
+    void detach_downstream_active_wall_tracker() noexcept {
+        if (downstream_active_wall_tracker_entered_ && downstream_active_wall_tracker_ != nullptr) {
+            downstream_active_wall_tracker_->invalidate();
+            downstream_active_wall_tracker_->leave();
+        }
+        downstream_active_wall_tracker_entered_ = false;
+        downstream_active_wall_tracker_ = nullptr;
+    }
+
+    /// Retain one completed invocation timing receipt.
+    void
+    record_downstream_active_wall_receipt(const downstream_active_wall_receipt& receipt) noexcept {
+        if (downstream_active_wall_invocations == (std::numeric_limits<std::uint64_t>::max)()) {
+            downstream_active_wall_saturated = true;
+        } else {
+            ++downstream_active_wall_invocations;
+        }
+        if (!receipt.available) {
+            if (downstream_active_wall_unavailable_invocations ==
+                (std::numeric_limits<std::uint64_t>::max)()) {
+                downstream_active_wall_saturated = true;
+            } else {
+                ++downstream_active_wall_unavailable_invocations;
+            }
+            return;
+        }
+        if (receipt.elapsed_ns >
+            (std::numeric_limits<std::uint64_t>::max)() - downstream_active_wall_ns) {
+            downstream_active_wall_saturated = true;
+            downstream_active_wall_ns = (std::numeric_limits<std::uint64_t>::max)();
+            return;
+        }
+        downstream_active_wall_ns += receipt.elapsed_ns;
+    }
 
     /// Merge completed exact-SIMD query-sketch statistics.
     void record_exact_simd_query_execution_stats(const two_stack_execution_stats& stats) noexcept {
@@ -880,18 +1511,26 @@ struct match_result_collection {
     void begin_region_host_stage(const std::uint64_t started_ns) noexcept {
         if (is_region_host_stage_active || is_alignment_result_host_stage_active) {
             is_host_stage_timing_saturated = true;
+            if (downstream_active_wall_tracker_ != nullptr) {
+                downstream_active_wall_tracker_->invalidate();
+            }
         }
         region_host_stage_started_ns = started_ns;
         is_region_host_stage_active = true;
     }
 
-    /// Close regions and, when alignment is enabled, reuse the exact same
-    /// boundary as the start of the inclusive alignment/result owner.
+    /// Close regions and start the inclusive alignment/result work owner.
+    /// The shared wall-union tracker timestamps under its mutex so concurrent
+    /// event order and timestamp order cannot disagree.
     void transition_region_to_alignment_result_host_stage(const std::uint64_t boundary_ns,
-                                                          const bool alignment_enabled) noexcept {
+                                                          const bool downstream_enabled) noexcept {
         if (!is_region_host_stage_active || boundary_ns < region_host_stage_started_ns ||
             is_alignment_result_host_stage_active) {
             is_host_stage_timing_saturated = true;
+            if (downstream_active_wall_tracker_ != nullptr) {
+                downstream_active_wall_tracker_->invalidate();
+            }
+            downstream_active_wall_tracker_entered_ = false;
             is_region_host_stage_active = false;
             is_alignment_result_host_stage_active = false;
             return;
@@ -899,9 +1538,13 @@ struct match_result_collection {
         record_region_generation_host_time(
             std::max<std::uint64_t>(1u, boundary_ns - region_host_stage_started_ns));
         is_region_host_stage_active = false;
-        if (alignment_enabled) {
+        if (downstream_enabled) {
             alignment_result_host_stage_started_ns = boundary_ns;
             is_alignment_result_host_stage_active = true;
+            if (downstream_active_wall_tracker_ != nullptr) {
+                downstream_active_wall_tracker_->enter();
+                downstream_active_wall_tracker_entered_ = true;
+            }
         }
     }
 
@@ -913,16 +1556,36 @@ struct match_result_collection {
         }
         if (finished_ns < alignment_result_host_stage_started_ns) {
             is_host_stage_timing_saturated = true;
+            if (downstream_active_wall_tracker_entered_ &&
+                downstream_active_wall_tracker_ != nullptr) {
+                downstream_active_wall_tracker_->invalidate();
+            }
+            downstream_active_wall_tracker_entered_ = false;
             is_alignment_result_host_stage_active = false;
             return;
         }
+        if (downstream_active_wall_tracker_entered_ && downstream_active_wall_tracker_ != nullptr) {
+            downstream_active_wall_tracker_->leave();
+        }
         record_alignment_result_host_time(
             std::max<std::uint64_t>(1u, finished_ns - alignment_result_host_stage_started_ns));
+        downstream_active_wall_tracker_entered_ = false;
         is_alignment_result_host_stage_active = false;
     }
 
-    /// Merge all completed execution statistics without moving results.
+    /// Merge completed statistics without moving biological results. Campaign
+    /// and test calls additionally transfer one-shot authority; production
+    /// builds retain the original const, nonthrowing interface and representation.
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    void combine_execution_stats(match_result_collection& other) {
+        retain_completed_vulkan_chaining(other);
+        retain_transient_cpu_target_generation_receipt(other);
+#elif defined(BIOSEQ_TEST_INDEXES)
+    void combine_execution_stats(match_result_collection& other) noexcept {
+        retain_transient_cpu_target_generation_receipt(other);
+#else
     void combine_execution_stats(const match_result_collection& other) noexcept {
+#endif
         if (other.exact_simd_query_execution_stats_available) {
             record_exact_simd_query_execution_stats(other.exact_simd_query_execution_stats);
         }
@@ -955,6 +1618,74 @@ struct match_result_collection {
         if (other.fragment_native_query_stats_available) {
             record_fragment_native_query_stats(other.fragment_native_query_stats);
         }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        if (other.observed_minimizer_algorithm_available) {
+            if (!observed_minimizer_algorithm_available) {
+                observed_minimizer_algorithm = other.observed_minimizer_algorithm;
+                observed_minimizer_algorithm_available = true;
+            } else if (observed_minimizer_algorithm != other.observed_minimizer_algorithm) {
+                observed_minimizer_algorithm_conflict = true;
+            }
+        }
+        if (other.observed_chaining_algorithm_available) {
+            if (!observed_chaining_algorithm_available) {
+                observed_chaining_algorithm = other.observed_chaining_algorithm;
+                observed_chaining_algorithm_available = true;
+            } else if (observed_chaining_algorithm != other.observed_chaining_algorithm) {
+                observed_chaining_algorithm_conflict = true;
+            }
+        }
+        if (other.observed_base_alignment_algorithm_available) {
+            if (!observed_base_alignment_algorithm_available) {
+                observed_base_alignment_algorithm = other.observed_base_alignment_algorithm;
+                observed_base_alignment_algorithm_available = true;
+            } else if (observed_base_alignment_algorithm !=
+                       other.observed_base_alignment_algorithm) {
+                observed_base_alignment_algorithm_conflict = true;
+            }
+        }
+        observed_minimizer_algorithm_conflict =
+            observed_minimizer_algorithm_conflict || other.observed_minimizer_algorithm_conflict ||
+            (!other.observed_minimizer_algorithm_available &&
+             other.observed_minimizer_algorithm != minimizer_algorithm::scalar);
+        observed_chaining_algorithm_conflict =
+            observed_chaining_algorithm_conflict || other.observed_chaining_algorithm_conflict ||
+            (!other.observed_chaining_algorithm_available &&
+             other.observed_chaining_algorithm != chaining_algorithm::scalar_minimap2);
+        observed_base_alignment_algorithm_conflict =
+            observed_base_alignment_algorithm_conflict ||
+            other.observed_base_alignment_algorithm_conflict ||
+            (!other.observed_base_alignment_algorithm_available &&
+             other.observed_base_alignment_algorithm != base_alignment_algorithm::ksw2);
+        if (other.mapq_execution_available) {
+            record_mapq_execution(other.mapq_executed);
+        } else if (other.mapq_executed) {
+            mapq_execution_conflict = true;
+        }
+        mapq_execution_conflict = mapq_execution_conflict || other.mapq_execution_conflict;
+#endif
+        const auto merge_downstream_counter = [this](std::uint64_t& destination,
+                                                     const std::uint64_t incoming) noexcept {
+            if (incoming > (std::numeric_limits<std::uint64_t>::max)() - destination) {
+                destination = (std::numeric_limits<std::uint64_t>::max)();
+                downstream_active_wall_saturated = true;
+            } else {
+                destination += incoming;
+            }
+        };
+        merge_downstream_counter(downstream_active_wall_ns, other.downstream_active_wall_ns);
+        merge_downstream_counter(downstream_active_wall_invocations,
+                                 other.downstream_active_wall_invocations);
+        merge_downstream_counter(downstream_active_wall_unavailable_invocations,
+                                 other.downstream_active_wall_unavailable_invocations);
+        if (other.downstream_active_wall_unavailable_invocations >
+                other.downstream_active_wall_invocations ||
+            (other.downstream_active_wall_invocations == 0u &&
+             other.downstream_active_wall_ns != 0u)) {
+            downstream_active_wall_saturated = true;
+        }
+        downstream_active_wall_saturated =
+            downstream_active_wall_saturated || other.downstream_active_wall_saturated;
         record_query_sketch_host_time(other.query_sketch_host_wall_ns);
         record_persisted_index_decode_host_time(other.persisted_index_decode_host_wall_ns);
         record_seed_lookup_host_time(other.seed_lookup_host_wall_ns);
@@ -1020,9 +1751,17 @@ struct match_result_collection {
     is_selected_simd_sketch_execution_consistent(minimizer_algorithm selected,
                                                  bool require_target_sketch,
                                                  bool require_nonempty_vector_work) const noexcept {
-        if (partial_vulkan_stats != partial_vulkan_execution_stats{}) {
-            return false;
-        }
+        return partial_vulkan_stats == partial_vulkan_execution_stats{} &&
+               is_selected_simd_sketch_component_consistent(
+                   selected, require_target_sketch, require_nonempty_vector_work);
+    }
+
+    /// Validate only the selected sketch component; its caller authenticates
+    /// independently selected GPU work in other stages.
+    [[nodiscard]] bool
+    is_selected_simd_sketch_component_consistent(minimizer_algorithm selected,
+                                                bool require_target_sketch,
+                                                bool require_nonempty_vector_work) const noexcept {
 
         const bool exact_query_absent =
             !exact_simd_query_execution_stats_available &&
@@ -1074,6 +1813,18 @@ struct match_result_collection {
             scalar.chain_backtrack_calls == 0u && scalar.chain_anchor_inputs == 0u &&
             scalar.ksw2_left_calls == 0u && scalar.ksw2_gap_calls == 0u &&
             scalar.ksw2_right_calls == 0u && scalar.ksw2_input_cell_area == 0u;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        const bool exact_identity =
+            observed_minimizer_algorithm_available && observed_chaining_algorithm_available &&
+            observed_base_alignment_algorithm_available && !observed_minimizer_algorithm_conflict &&
+            !observed_chaining_algorithm_conflict && !observed_base_alignment_algorithm_conflict &&
+            observed_minimizer_algorithm == selected &&
+            observed_chaining_algorithm == chaining_algorithm::simd_minimap2 &&
+            observed_base_alignment_algorithm == base_alignment_algorithm::block_aligner;
+        if (!exact_identity) {
+            return false;
+        }
+#endif
         return is_scalar_seed_only_consistent && !ksw2_batched_execution_stats_available &&
                ksw2_batched_stats == ksw2_batched_execution_stats{} &&
                is_selected_simd_sketch_execution_consistent(
@@ -1094,6 +1845,20 @@ struct match_result_collection {
                                   block_aligner_stats == block_aligner_execution_stats{};
         const bool batched_absent = !ksw2_batched_execution_stats_available &&
                                     ksw2_batched_stats == ksw2_batched_execution_stats{};
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        const bool exact_identity =
+            observed_minimizer_algorithm_available && observed_chaining_algorithm_available &&
+            (!require_alignment || observed_base_alignment_algorithm_available) &&
+            !observed_minimizer_algorithm_conflict && !observed_chaining_algorithm_conflict &&
+            !observed_base_alignment_algorithm_conflict &&
+            observed_minimizer_algorithm == minimizer_algorithm::scalar &&
+            observed_chaining_algorithm == chaining_algorithm::scalar_minimap2 &&
+            (!require_alignment ||
+             observed_base_alignment_algorithm == base_alignment_algorithm::ksw2);
+        if (!exact_identity) {
+            return false;
+        }
+#endif
         return is_selected_scalar_sketch_execution_consistent(require_target_sketch,
                                                               /*require_nonempty_work=*/true) &&
                scalar_pipeline_stats.is_route_consistent(require_target_sketch,
@@ -1102,8 +1867,196 @@ struct match_result_collection {
                partial_vulkan_stats == partial_vulkan_execution_stats{};
     }
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    /// Validate selected seed, chain, and host-alignment components independently.
+    /// Runtime seed/index receipts still authenticate their owned storage and
+    /// operation environment at the producer boundary; no selector creates work.
+    [[nodiscard]] bool
+    is_selected_components_execution_consistent_for_observed(
+        minimizer_algorithm selected_minimizer,
+        chaining_algorithm selected_chaining,
+        base_alignment_algorithm selected_alignment,
+        simd_chaining_policy selected_chaining_policy,
+        bool require_target_sketch,
+        bool require_alignment,
+        minimizer_algorithm observed_minimizer,
+        chaining_algorithm observed_chaining,
+        base_alignment_algorithm observed_alignment,
+        const vulkan_seed_frontend_job_execution* shared_vulkan_seed = nullptr) const noexcept {
+        const auto& scalar = scalar_pipeline_stats;
+        const auto& gpu = partial_vulkan_stats;
+        const bool gpu_seed = selected_minimizer == minimizer_algorithm::vulkan_minimap_integer;
+        const bool gpu_chain =
+            selected_chaining == chaining_algorithm::vulkan_tiled_dynamic_programming;
+        const bool minimizer_identity_valid =
+            observed_minimizer == selected_minimizer ||
+             (selected_minimizer == minimizer_algorithm::simd_minimap2_reference &&
+              observed_minimizer == minimizer_algorithm::scalar);
+        const bool chaining_identity_valid = observed_chaining == selected_chaining;
+        const bool alignment_identity_valid =
+            !require_alignment || observed_alignment == selected_alignment;
+        const bool seed_lookup_valid = gpu_seed
+            ? shared_vulkan_seed != nullptr &&
+                  shared_vulkan_seed->is_internally_consistent() &&
+                  scalar.seed_lookup_calls == 0u && scalar.seed_query_minimizers == 0u
+            : scalar_pipeline_execution_stats_available && scalar.seed_lookup_calls > 0u &&
+                  scalar.seed_query_minimizers > 0u;
+        if (!minimizer_identity_valid || !chaining_identity_valid || !alignment_identity_valid ||
+            !seed_lookup_valid || scalar.is_saturated || ksw2_batched_execution_stats_available ||
+            ksw2_batched_stats != ksw2_batched_execution_stats{}) {
+            return false;
+        }
+
+        if (!gpu_seed) {
+            // Host seeding permits only a selected Vulkan score dispatch. Comparing
+            // the entire existing payload also rejects stray index/seed/fallback stats.
+            partial_vulkan_execution_stats expected{};
+            if (gpu_chain) {
+                if (gpu.chain_score_dispatches == 0u) {
+                    return false;
+                }
+                expected.chain_score_dispatches = gpu.chain_score_dispatches;
+            }
+            if (gpu != expected) {
+                return false;
+            }
+        } else {
+            partial_vulkan_execution_stats expected{};
+            if (gpu_chain) {
+                expected.chain_score_dispatches = gpu.chain_score_dispatches;
+            }
+            if (gpu != expected || require_target_sketch) {
+                return false;
+            }
+        }
+
+        const bool detailed_sketch_stats_absent =
+            scalar.query_minimizers == scalar_minimizer_execution_stats{} &&
+            scalar.target_minimizers == scalar_minimizer_execution_stats{} &&
+            !exact_simd_query_execution_stats_available &&
+            !exact_simd_target_execution_stats_available &&
+            exact_simd_query_execution_stats == two_stack_execution_stats{} &&
+            exact_simd_target_execution_stats == two_stack_execution_stats{} &&
+            !bounded_nthash_query_execution_stats_available &&
+            !bounded_nthash_target_execution_stats_available &&
+            bounded_nthash_query_execution_stats == bounded_nthash_execution_stats{} &&
+            bounded_nthash_target_execution_stats == bounded_nthash_execution_stats{};
+        const bool sketch_valid = [this, selected_minimizer, observed_minimizer,
+                                    require_target_sketch,
+                                    detailed_sketch_stats_absent]() noexcept {
+            switch (selected_minimizer) {
+            case minimizer_algorithm::scalar:
+                return is_selected_scalar_sketch_component_consistent(
+                    require_target_sketch, /*require_nonempty_work=*/true);
+            case minimizer_algorithm::two_stack_nthash:
+            case minimizer_algorithm::bounded_nthash_simd:
+                return scalar_pipeline_stats.query_minimizers == scalar_minimizer_execution_stats{} &&
+                       scalar_pipeline_stats.target_minimizers == scalar_minimizer_execution_stats{} &&
+                       is_selected_simd_sketch_component_consistent(
+                           selected_minimizer, require_target_sketch,
+                           /*require_nonempty_vector_work=*/true);
+            case minimizer_algorithm::simd_minimap2_reference:
+                if (observed_minimizer == minimizer_algorithm::scalar) {
+                    // Retain historical DNA5 requested-reference/effective-scalar
+                    // evidence. The positive identity is emitted after execution.
+                    return is_selected_scalar_sketch_component_consistent(
+                               require_target_sketch, /*require_nonempty_work=*/true) ||
+                           detailed_sketch_stats_absent;
+                }
+                return detailed_sketch_stats_absent;
+            case minimizer_algorithm::vulkan_minimap_integer:
+                return detailed_sketch_stats_absent;
+            }
+            return false;
+        }();
+
+        const bool scalar_chain_observed = scalar.chain_stage_completion_calls > 0u &&
+                                           scalar.chain_score_calls == scalar.chain_backtrack_calls;
+        const bool scalar_minimap2_chain_absent =
+            scalar.chain_stage_completion_calls == 0u &&
+            scalar.chain_stage_completed_anchor_inputs == 0u && scalar.chain_score_calls == 0u &&
+            scalar.chain_backtrack_calls == 0u && scalar.chain_anchor_inputs == 0u;
+        const bool simd_chain_absent =
+            !simd_chaining_execution_stats_available &&
+            simd_chaining_stats == bioseq::chaining::simd_chaining_execution_stats{};
+        const bool chain_valid = [this, selected_chaining, selected_chaining_policy,
+                                   scalar_chain_observed, scalar_minimap2_chain_absent,
+                                   simd_chain_absent]() noexcept {
+            switch (selected_chaining) {
+            case chaining_algorithm::scalar_minimap2:
+                return scalar_chain_observed && simd_chain_absent;
+            case chaining_algorithm::range_minimum_query:
+            case chaining_algorithm::vulkan_tiled_dynamic_programming:
+                // The existing Vulkan kernel performs its own host backtracking.
+                // These counters identify the separate scalar-minimap2 trait,
+                // not that intentionally selected host suffix.
+                return scalar_minimap2_chain_absent && simd_chain_absent;
+            case chaining_algorithm::simd_minimap2:
+                return scalar_minimap2_chain_absent &&
+                       is_simd_chaining_execution_consistent(selected_chaining_policy,
+                                                             /*require_nonempty_vector_work=*/true);
+            }
+            return false;
+        }();
+
+        const bool scalar_alignment_observed = scalar.ksw2_left_calls != 0u ||
+                                               scalar.ksw2_gap_calls != 0u ||
+                                               scalar.ksw2_right_calls != 0u;
+        const bool block_absent = !block_aligner_execution_stats_available &&
+                                  block_aligner_stats == block_aligner_execution_stats{};
+        const bool alignment_valid =
+            selected_alignment == base_alignment_algorithm::ksw2
+                ? block_absent && (!require_alignment ||
+                                   (scalar_alignment_observed && scalar.ksw2_input_cell_area > 0u))
+                : selected_alignment == base_alignment_algorithm::block_aligner &&
+                      !scalar_alignment_observed && scalar.ksw2_input_cell_area == 0u &&
+                      is_block_aligner_execution_consistent(require_alignment);
+        return sketch_valid && chain_valid && alignment_valid;
+    }
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    /// Bind the pure component validator to operation-observed E2E identities.
+    [[nodiscard]] bool
+    is_selected_components_execution_consistent(
+        minimizer_algorithm selected_minimizer,
+        chaining_algorithm selected_chaining,
+        base_alignment_algorithm selected_alignment,
+        simd_chaining_policy selected_chaining_policy,
+        bool require_target_sketch,
+        bool require_alignment,
+        const vulkan_seed_frontend_job_execution* shared_vulkan_seed = nullptr) const noexcept {
+        if (!observed_minimizer_algorithm_available ||
+            !observed_chaining_algorithm_available ||
+            (require_alignment && !observed_base_alignment_algorithm_available) ||
+            observed_minimizer_algorithm_conflict || observed_chaining_algorithm_conflict ||
+            observed_base_alignment_algorithm_conflict) {
+            return false;
+        }
+        return is_selected_components_execution_consistent_for_observed(
+            selected_minimizer,
+            selected_chaining,
+            selected_alignment,
+            selected_chaining_policy,
+            require_target_sketch,
+            require_alignment,
+            observed_minimizer_algorithm,
+            observed_chaining_algorithm,
+            observed_base_alignment_algorithm,
+            shared_vulkan_seed);
+    }
+#endif
+#endif
+
     /// Validate scalar sketches and require all accelerated sketch stats absent.
     [[nodiscard]] bool is_selected_scalar_sketch_execution_consistent(
+        const bool require_target_sketch, const bool require_nonempty_work) const noexcept {
+        return partial_vulkan_stats == partial_vulkan_execution_stats{} &&
+               is_selected_scalar_sketch_component_consistent(
+                   require_target_sketch, require_nonempty_work);
+    }
+
+    /// Validate scalar sketches without rejecting a separately selected GPU chainer.
+    [[nodiscard]] bool is_selected_scalar_sketch_component_consistent(
         const bool require_target_sketch, const bool require_nonempty_work) const noexcept {
         const bool exact_absent = !exact_simd_query_execution_stats_available &&
                                   !exact_simd_target_execution_stats_available &&
@@ -1120,8 +2073,7 @@ struct match_result_collection {
                 : scalar_pipeline_stats.target_minimizers == scalar_minimizer_execution_stats{};
         return scalar_pipeline_execution_stats_available &&
                scalar_pipeline_stats.query_minimizers.is_coherent(require_nonempty_work) &&
-               is_target_valid && exact_absent && bounded_absent &&
-               partial_vulkan_stats == partial_vulkan_execution_stats{};
+               is_target_valid && exact_absent && bounded_absent;
     }
 
     /// Return whether any algorithm emitted completed execution statistics.
@@ -1164,7 +2116,7 @@ struct match_result_collection {
 
     /// Borrow the ordered alignment results.
     [[nodiscard]] std::span<const match_result> view() const {
-        return std::span<const match_result>(results);
+        return {results.data(), results.size()};
     }
 
     /// Compute the complete biological result stats while the owning result
@@ -1264,5 +2216,20 @@ struct match_result_collection {
         }
     }
 };
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+/** Independently admitted storage for batched/segmented result owners. */
+using match_result_collection_vector =
+    admitted_alignment_result_vector<match_result_collection, false>;
+static_assert(std::is_nothrow_default_constructible_v<match_result_collection>);
+static_assert(std::is_nothrow_move_constructible_v<match_result_collection>);
+#else
+using match_result_collection_vector = std::vector<match_result_collection>;
+#endif
+
+#if defined(BIOSEQ_TEST_INDEXES)
+using test_match_result_collection_vector =
+    test_outer_alignment_result_vector<match_result_collection>;
+#endif
 
 } // namespace bioseq::simd

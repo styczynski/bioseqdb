@@ -252,13 +252,38 @@ if(BIOSEQ_TEST_INDEXES)
   target_compile_definitions(
     bioseq_pipeline_dispatch_owners PRIVATE BIOSEQ_TEST_INDEXES=1)
   target_compile_definitions(bioseq_modules_nopg PRIVATE BIOSEQ_TEST_INDEXES=1)
+  target_compile_definitions(
+    bioseq_highway_fixed_target PRIVATE BIOSEQ_TEST_INDEXES=1)
   target_compile_definitions(bioseq_testing_support PRIVATE BIOSEQ_TEST_INDEXES=1)
+  target_compile_definitions(
+    bioseq_integration_test_support PRIVATE BIOSEQ_TEST_INDEXES=1)
   if(TARGET bioseq_integration_tests)
     target_compile_definitions(bioseq_integration_tests PRIVATE BIOSEQ_TEST_INDEXES=1)
   endif()
   if(TARGET bioseq_unit_tests)
     target_compile_definitions(bioseq_unit_tests PRIVATE BIOSEQ_TEST_INDEXES=1)
   endif()
+endif()
+
+# This evidence path changes internal module layouts and samples clocks in hot
+# alignment code. Keep it target-local and absent from every ordinary user,
+# package, test, and benchmark build. The benchmark-e2e preset family owns a
+# separate build tree and is the only supported caller that enables the option.
+if(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+  if(BIOSEQ_TEST_INDEXES)
+    message(FATAL_ERROR
+      "BIOSEQ_BENCHMARK_E2E_INTERVALS requires a test-hook-free dedicated tree")
+  endif()
+  target_compile_definitions(bioseq_runtime_core PRIVATE
+    BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
+  target_compile_definitions(postgresql_bioseq PRIVATE
+    BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
+  target_compile_definitions(bioseq_pipeline_dispatch_owners PRIVATE
+    BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
+  target_compile_definitions(bioseq_modules_nopg PRIVATE
+    BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
+  target_compile_definitions(bioseq_highway_fixed_target PRIVATE
+    BIOSEQ_BENCHMARK_E2E_INTERVALS=1)
 endif()
 
 if(TARGET bioseq_integration_tests)

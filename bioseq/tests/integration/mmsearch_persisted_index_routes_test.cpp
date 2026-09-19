@@ -1307,16 +1307,19 @@ TEST_CASE("unsupported BatchJoin shapes stay on ordinary planner paths",
         format_literal(
             "ACGTACGTACGTACGTACGTACGTACGTACGT",
             seq_typmod{.alphabet = "dna5", .width = 32}));
-    const auto typmod_mismatch = explain_text<false>(
+    // Cross-alphabet operands are a semantic error before BatchJoin ownership;
+    // they must not fall through to an ordinary scalar planner path.
+    const auto typmod_mismatch = sql_error(
         ctx,
         fmt::format(
-            "SELECT q.id, t.pk FROM {} t "
+            "EXPLAIN (VERBOSE, COSTS off) SELECT q.id, t.pk FROM {} t "
             "JOIN mmsearch_batch_join_dna5 q "
             "ON mmsearch(t.seq0, q.seq, "
             "aligner_options(index_read_requirement => 1));",
             k_batch_join_target));
-    REQUIRE_FALSE(plan_contains(
-        typmod_mismatch, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE(typmod_mismatch.sqlstate == "42804");
+    REQUIRE(typmod_mismatch.contains(
+        "bioseq mmsearch requires operands with the same bound alphabet"));
 #else
     const auto unsupported_alphabet = sql_error(
         ctx,

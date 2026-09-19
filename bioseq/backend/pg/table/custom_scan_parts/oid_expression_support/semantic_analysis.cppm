@@ -3,10 +3,7 @@
  * @brief Analyzes projection, edit predicates, feature flags, and default params.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,76 +24,22 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_oid_expression_support_semantic_analysis;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
 import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
 import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
+import bioseq.postgres.support;
+import bioseq.sequences.compact_sequence_typmod;
 
-import :custom_scan_runtime_support;
+import :custom_scan_scan_feature_contracts;
 
 import :custom_scan_oid_expression_support_oid_catalog;
 import :custom_scan_oid_expression_support_expression_analysis;
 import :custom_scan_oid_expression_support_restriction_ownership;
+export import :custom_scan_planner_aligner_contracts;
+export import :custom_scan_oid_expression_support_semantic_analysis_contracts;
 
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Tests whether an OID names a match-result projection function. */
-    [[nodiscard]] inline bool is_bioseq_projection_funcid(Oid funcid, const bioseq_stub_oids& o) {
-        return funcid == o.score_oid || funcid == o.dp_score_oid || funcid == o.query_len_oid ||
-               funcid == o.query_start_oid || funcid == o.query_end_oid ||
-               funcid == o.target_len_oid || funcid == o.target_start_oid ||
-               funcid == o.target_end_oid || funcid == o.num_matches_oid ||
-               funcid == o.block_length_oid || funcid == o.edit_oid || funcid == o.mapq_oid ||
-               funcid == o.chain_score_oid || funcid == o.dp_max_score_oid ||
-               funcid == o.seed_count_oid || funcid == o.secondary_chain_score_oid ||
-               funcid == o.is_reverse_oid || funcid == o.is_primary_oid ||
-               funcid == o.has_cigar_oid || funcid == o.divergence_oid || funcid == o.cigar_oid;
-    }
-
     /** @brief Checks that a sequence-valued edit helper names the base scan's aligned column. */
     [[nodiscard]] bool
     edit_sequence_argument_matches_target(const FuncExpr* function,
@@ -151,43 +94,6 @@ export {
             function, target_relid, target_sequence_attno, oids);
     }
 
-    /** @brief Accumulates executor feature requirements discovered in expression trees. */
-    struct bioseq_feature_detector {
-        const bioseq_stub_oids* oids = nullptr;
-        scan_feature_flags flags;
-    };
-
-    /** @brief Maps mmsearch and projection calls to executor feature flags. */
-    struct feature_flag_visitor {
-        /** @brief Updates feature flags for the current node and continues traversal. */
-        [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
-                                              pg_node_view node,
-                                              bioseq_feature_detector& detector) const {
-            if (FuncExpr* fe = node.try_cast<FuncExpr>()) {
-                const bioseq_stub_oids* o = detector.oids;
-                if (is_mmsearch_funcid(fe->funcid, *o)) {
-                    detector.flags.has_mmsearch = true;
-                }
-                if (fe->funcid == o->cigar_oid || fe->funcid == o->has_cigar_oid) {
-                    detector.flags.uses_cigar = true;
-                }
-                if (fe->funcid == o->edit_oid) {
-                    detector.flags.uses_edit = true;
-                }
-                if (fe->funcid == o->divergence_oid) {
-                    detector.flags.uses_divergence = true;
-                }
-                if (fe->funcid == o->mapq_oid) {
-                    detector.flags.uses_mapq = true;
-                }
-                if (is_bioseq_projection_funcid(fe->funcid, *o)) {
-                    detector.flags.any_match_projection = true;
-                }
-            }
-            return pg_walk_step::descend;
-        }
-    };
-
     /** @brief Detects executor features referenced by target-list and qual expressions. */
     [[nodiscard]] scan_feature_flags
     detect_feature_flags(List* targetlist, List* qual, const bioseq_stub_oids& oids) {
@@ -207,16 +113,6 @@ export {
         }
         return detector.flags;
     }
-
-    /** @brief Serialization constants for an extracted strict edit predicate. */
-    inline constexpr int k_bioseq_edit_predicate_magic = 0x42534531; /* BSE1 */
-    inline constexpr int k_bioseq_edit_predicate_version = 1;
-
-    /** @brief Describes an executor-owned strict upper bound on edit distance. */
-    struct strict_edit_predicate {
-        std::int64_t exclusive_upper_bound = 0;
-        AttrNumber sequence_attno = InvalidAttrNumber;
-    };
 
     /** @brief Tracks whether an expression contains a bioseq.edit call. */
     struct edit_function_probe {
@@ -346,12 +242,6 @@ export {
         return detector.flags;
     }
 
-    /** @brief Describes a plan-time sequence storage-width coalescing decision. */
-    struct explain_typmod_coalesce {
-        bool active = false;
-        uint8_t col_alpha = 0;
-        uint8_t col_byte_width = 0;
-    };
     /** @brief Carries OIDs and the first detected typmod mismatch through an explain walk. */
     struct explain_coalesce_walk_context {
         const bioseq_stub_oids* oids;

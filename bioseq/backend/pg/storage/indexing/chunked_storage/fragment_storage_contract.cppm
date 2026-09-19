@@ -3,126 +3,60 @@
  * @brief Contract for chunked-per-fragment PostgreSQL storage and spill ownership.
  */
 module;
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 
 extern "C" {
+#include "postgres.h"
+
 #include "access/heapam.h"
 #include "access/nbtree.h"
-#include "access/parallel.h"
 #include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "access/transam.h"
-#include "access/xact.h"
-#include "catalog/indexing.h"
-#include "catalog/namespace.h" // RelnameGetRelid
-#include "catalog/pg_am_d.h"
-#include "catalog/pg_class.h"
-#include "catalog/pg_index.h"
-#include "catalog/pg_opclass_d.h"
-#include "catalog/pg_sequence.h"
-#include "catalog/pg_type_d.h"
-#include "commands/sequence.h"
-#include "commands/tablespace.h"
-#include "executor/instrument.h"
-#include "executor/spi.h"
-#include "executor/tuptable.h"
-#include "storage/buffile.h"
-#include "storage/dsm.h"
-#include "storage/fd.h"
-#include "storage/ipc.h"
-#include "storage/procarray.h"
-#include "storage/relfilelocator.h"
-#include "storage/shm_toc.h"
 #include "utils/builtins.h"
-#include "utils/inval.h"
-#include "utils/lsyscache.h"
+#include "utils/fmgroids.h"
 #include "utils/memutils.h"
-#include "utils/resowner.h"
-#include "utils/snapmgr.h"
-#include "utils/syscache.h"
-#include "utils/timestamp.h"
-#include "utils/xid8.h"
-
-#include "common/relpath.h"
-#include "miscadmin.h"
-#include "port.h"
-#include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#ifdef NDEBUG
+#include <libassert/assert-macros.hpp>
+#else
+#include <libassert/assert.hpp>
+#endif
+
 #include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <tuple>
-#include <type_traits>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:fragment_storage_contract;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.memory_budget;
+import std;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
 import bioseq.postgres.support.datums;
-import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
-import bioseq.storage.layout;           // sequence_locator
-import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
 import bioseq.indexing.storage;           // the concepts
 import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
-import bioseq.indexing.compact_hash32_direct_index;
-import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
-import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
-import bioseq.storage.lazy_sequence;           // lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
 import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
 import bioseq.postgres.storage.indexing.residency;
 import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.instrumentation.clock;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.storage.physical;
-import bioseq.postgres.storage.indexing.sql_row_codecs;
-import bioseq.postgres.storage.manager.sql_row_codecs;
-import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 import :catalog;
 import :fragment_image;
 import :generation_writer;
 import :generation_session;
 import :hash_major_writer;
-import :hash_major_session;
 export namespace bioseq::storage::indexing {
+
+/**
+ * @brief Records a successful serialized index refresh in the age catalog.
+ * @param[in] user_relid Owning user relation OID.
+ * @param[in] main_relfilenode Current main relation relfilenode.
+ * @param[in] column_attno One-based PostgreSQL column number.
+ * @param[in] index_name Refreshed index policy name.
+ */
+void mark_serialized_index_write_successful_pg(Oid user_relid,
+                                               Oid main_relfilenode,
+                                               std::int16_t column_attno,
+                                               std::string_view index_name);
 
 /// PostgreSQL adapter for chunked-per-fragment rows, generation sidecars, and
 /// spill runs owned by one logical index handle.
@@ -364,6 +298,9 @@ struct fragment_index_storage {
     // Reverse destruction drops stores/vector nodes before metadata admission.
     bioseq::parallelism::memory_permit segment_sorted_runs_metadata_permit_;
     std::vector<segment_run_entry_type> segment_sorted_runs_;
+    // Ordinal, never an iterator: segment-store insertion may relocate every entry.
+    // The named store is the only one allowed to own the reusable spill writer.
+    std::optional<std::uint32_t> active_segment_write_buffer_owner_;
     inline static std::atomic<std::uint64_t> next_segment_spill_generation_token_{1u};
     direct_minimizer_spill_storage_binding segment_spill_binding_{};
     bool segment_spill_pg_poisoned_ = false;
@@ -859,5 +796,89 @@ struct fragment_index_storage {
     /// Forget PostgreSQL aliases that transaction-abort cleanup now owns.
     void abandon_after_pg_error_noexcept() noexcept;
 };
+
+/**
+ * @brief Merges all general runs and visits each hash with its position cursor.
+ * @tparam p_callback Callable accepting a hash and read-only position cursor.
+ * @param[in] on_kmer Callback invoked in canonical hash order.
+ */
+template <class p_callback> inline void fragment_index_storage::merge_runs(p_callback&& on_kmer) {
+    if (!sorted_runs_.has_value()) {
+        return;
+    }
+    g_last_index_merge_run_count =
+        std::max<std::uint64_t>(g_last_index_merge_run_count, sorted_runs_->run_count());
+    sorted_runs_->merge_runs(std::forward<p_callback>(on_kmer));
+}
+
+/**
+ * @brief Merges per-segment runs and visits each segment/hash position cursor.
+ * @tparam p_callback Callable accepting segment, hash, and read-only position cursor.
+ * @param[in] on_segment_kmer Callback invoked in segment and canonical hash order.
+ */
+template <class p_callback>
+inline void fragment_index_storage::merge_segment_runs(p_callback&& on_segment_kmer) {
+    if (segment_spill_pg_poisoned_) {
+        minimizer_generation_storage_error_as_cpp(
+            "poisoned minimizer-sequence merge storage reused after PostgreSQL error");
+    }
+    std::uint64_t total_runs = 0;
+    for (const auto& [segment, runs] : segment_sorted_runs_) {
+        (void)segment;
+        total_runs += runs.run_count();
+    }
+    g_last_index_merge_run_count = std::max(g_last_index_merge_run_count, total_runs);
+    try {
+        // Every segment spill has completed before replay begins. Release all
+        // reusable writers as one phase so the first store's readers do not
+        // compete with later stores' dead writer capacities.
+        for (auto& [segment, runs] : segment_sorted_runs_) {
+            (void)segment;
+            runs.release_completed_write_buffer();
+        }
+        active_segment_write_buffer_owner_.reset();
+        for (auto& [segment, runs] : segment_sorted_runs_) {
+            bool first_callback = true;
+            runs.merge_runs(
+                [&on_segment_kmer, segment, &first_callback](std::uint64_t hash, auto&& positions) {
+                    if (first_callback) {
+                        first_callback = false;
+                        inject_minimizer_generation_failure_as_cpp(
+                            minimizer_generation_failure_injection::minimizer_sequence_merge,
+                            "minimizer_sequence_merge_callback");
+                    }
+                    on_segment_kmer(segment, hash, positions);
+                });
+        }
+    } catch (const bioseq::postgres::support::postgres_error&) {
+        for (auto& [segment, runs] : segment_sorted_runs_) {
+            (void)segment;
+            runs.abandon_after_pg_error_noexcept();
+        }
+        active_segment_write_buffer_owner_.reset();
+        segment_spill_binding_ = {};
+        segment_spill_pg_poisoned_ = true;
+        throw;
+    }
+}
+
+/**
+ * @brief Detects accidental public exposure of segment-spill lifecycle state.
+ * @tparam p_storage Storage adapter type examined by the compile-time gate.
+ */
+template <class p_storage>
+concept publicly_mutable_minimizer_sequence_segment_spill_state = requires(p_storage& storage) {
+    storage.segment_sorted_runs_;
+    storage.segment_spill_binding_;
+    storage.segment_spill_pg_poisoned_;
+    storage.next_segment_spill_generation_token_;
+};
+
+static_assert(!publicly_mutable_minimizer_sequence_segment_spill_state<fragment_index_storage>);
+static_assert(!std::is_move_assignable_v<fragment_index_storage>);
+static_assert(
+    bioseq::indexing::is_index_chunked_storage_for<fragment_index_storage,
+                                                   sequence_index_layout::fragment_chunks>,
+    "fragment_index_storage must satisfy CHUNKED_PER_FRAGMENT");
 
 } // namespace bioseq::storage::indexing

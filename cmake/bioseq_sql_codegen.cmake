@@ -233,7 +233,6 @@ function(bioseq_add_sql_codegen_context)
         ${_identity_arguments}
       DEPENDS
         ${_codegen_dependencies}
-        "${_prepare_stamp}"
         "${_compile_database}"
         "${_pcm_manifest}"
         "${_registry_file}"
@@ -1246,25 +1245,86 @@ function(bioseq_finalize_sql_owner_registry)
     PROPERTY "${_context_prefix}_SOURCES")
   get_property(_audit_roots GLOBAL
     PROPERTY "${_context_prefix}_AUDIT_ROOTS")
+  set(_audit_candidates)
   foreach(_audit_root IN LISTS _audit_roots)
-    file(GLOB_RECURSE _audit_candidates CONFIGURE_DEPENDS
+    file(GLOB_RECURSE _audit_root_candidates
+      LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
       "${_audit_root}/*.cppm")
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-      ${_audit_candidates})
-    foreach(_candidate IN LISTS _audit_candidates)
-      file(READ "${_candidate}" _candidate_content)
-      string(FIND "${_candidate_content}" "bioseq_sql::" _annotation_index)
-      if(NOT _annotation_index EQUAL -1)
-        file(REAL_PATH "${_candidate}" _candidate_real)
-        list(FIND _registered_sources "${_candidate_real}" _registered_index)
-        if(_registered_index EQUAL -1)
-          _bioseq_sql_registry_fail(
-            "annotated source is not explicitly registered: "
-            "${_candidate_real}")
-        endif()
-      endif()
-    endforeach()
+    list(APPEND _audit_candidates ${_audit_root_candidates})
   endforeach()
+  list(SORT _audit_candidates)
+  list(REMOVE_DUPLICATES _audit_candidates)
+
+  set(_annotation_audit_literal "bioseq_sql::")
+  set(_normalized_audit_candidates)
+  set(_annotated_audit_sources)
+  foreach(_candidate IN LISTS _audit_candidates)
+    cmake_path(NORMAL_PATH _candidate OUTPUT_VARIABLE _candidate_normal)
+    list(APPEND _normalized_audit_candidates "${_candidate_normal}")
+    file(READ "${_candidate_normal}" _candidate_content)
+    string(FIND "${_candidate_content}"
+      "${_annotation_audit_literal}" _annotation_index)
+    if(NOT _annotation_index EQUAL -1)
+      file(REAL_PATH "${_candidate_normal}" _candidate_real)
+      list(APPEND _annotated_audit_sources "${_candidate_real}")
+      list(FIND _registered_sources "${_candidate_real}" _registered_index)
+      if(_registered_index EQUAL -1)
+        _bioseq_sql_registry_fail(
+          "annotated source is not explicitly registered: "
+          "${_candidate_real}")
+      endif()
+    endif()
+  endforeach()
+  list(SORT _normalized_audit_candidates)
+  list(REMOVE_DUPLICATES _normalized_audit_candidates)
+  list(SORT _annotated_audit_sources)
+  list(REMOVE_DUPLICATES _annotated_audit_sources)
+
+  # Source topology remains configure-owned through GLOB_RECURSE
+  # CONFIGURE_DEPENDS. For this registration audit, content changes run only
+  # the cheap literal scanner; CMake regenerates when its normalized
+  # annotated-source inventory changes.
+  set(_annotation_audit_source_list
+    "${_output_dir}/annotation-audit-sources.txt")
+  set(_annotation_audit_inventory
+    "${_output_dir}/annotation-owner-inventory.txt")
+  set(_annotation_audit_stamp
+    "${_output_dir}/annotation-audit-scan.stamp")
+  set(_annotation_audit_depfile
+    "${_output_dir}/annotation-audit-scan.d")
+  set(_annotation_audit_script
+    "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/scan_sql_annotation_owners.cmake")
+  if(NOT EXISTS "${_annotation_audit_script}")
+    _bioseq_sql_registry_fail(
+      "annotation-owner scanner does not exist: ${_annotation_audit_script}")
+  endif()
+  _bioseq_sql_write_registry_file(
+    "${_annotation_audit_source_list}" ${_normalized_audit_candidates})
+  _bioseq_sql_write_registry_file(
+    "${_annotation_audit_inventory}" ${_annotated_audit_sources})
+
+  add_custom_command(
+    OUTPUT "${_annotation_audit_stamp}"
+    BYPRODUCTS "${_annotation_audit_inventory}"
+    COMMAND "${CMAKE_COMMAND}"
+      "-DSOURCE_LIST_FILE:FILEPATH=${_annotation_audit_source_list}"
+      "-DOUTPUT_FILE:FILEPATH=${_annotation_audit_inventory}"
+      "-DSTAMP_FILE:FILEPATH=${_annotation_audit_stamp}"
+      "-DDEPFILE:FILEPATH=${_annotation_audit_depfile}"
+      "-DANNOTATION_LITERAL:STRING=${_annotation_audit_literal}"
+      -P "${_annotation_audit_script}"
+    DEPENDS
+      "${_annotation_audit_script}"
+      "${_annotation_audit_source_list}"
+    DEPFILE "${_annotation_audit_depfile}"
+    COMMENT "Scanning ${_context_key} SQL annotation-owner topology"
+    VERBATIM)
+  string(TOLOWER "${_context_key}" _annotation_audit_context)
+  add_custom_target(
+    "bioseq_sql_${_annotation_audit_context}_annotation_audit_scan"
+    DEPENDS "${_annotation_audit_stamp}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${_annotation_audit_inventory}")
 
   get_property(_profiles GLOBAL
     PROPERTY "${_context_prefix}_PROFILES")

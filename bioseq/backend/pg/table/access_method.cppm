@@ -31,7 +31,6 @@ import bioseq.postgres.table.io;
 import bioseq.postgres.support;
 import bioseq.postgres.support.sql_boundary;
 import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.storage.indexing.admin;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.chunked_storage.sql_entities;
 import bioseq.postgres.storage.manager;
@@ -42,13 +41,11 @@ import bioseq.storage.layout;
 import bioseq.postgres.table.am_cache;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.column.table_access;
+import :access_callback_state;
 import :access_identity;
 import :access_common;
 import :access_hooks;
-export import :access_method_scan_callbacks;
-import :access_method_tuple_mutation;
-import :access_method_index_callbacks;
-export import :access_method_maintenance;
+export import :access_method_contract;
 
 /** Page-cache state shared by paired scan and speculative callbacks. */
 bool previous_cache_enabled_state = false;

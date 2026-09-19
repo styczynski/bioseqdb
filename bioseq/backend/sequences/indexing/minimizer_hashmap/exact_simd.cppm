@@ -20,6 +20,7 @@ import bioseq.indexing.hash_major_minimizer_index;
 import bioseq.common.checked_arithmetic;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.bounded_nthash_seed_policy;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.storage.scanner;
@@ -229,6 +230,355 @@ struct exact_simd_index_execution_stats {
                          (bp_consumed > 0 && vector_batches > 0 && packed_decode_batches > 0));
     }
 };
+
+/// Operation-originated evidence from the generated minimap2-reference owner.
+///
+/// The reference kernel exposes fewer counters than the continuation-based
+/// two-stack kernel.  This wrapper nevertheless authenticates the selected
+/// table slot, native packed width, and absence of its scalable-storage
+/// fallback.  It is kept distinct from `exact_simd_index_execution_stats` so
+/// a reference execution can never be reported as two-stack work.
+struct reference_simd_index_execution_stats {
+    std::uint64_t kernel_calls = 0u;
+    std::uint64_t vector_callback_batches = 0u;
+    std::uint64_t vector_lane_visits = 0u;
+    std::uint64_t last_storage_unit_bytes = 0u;
+    std::uint64_t scalable_storage_fallback_calls = 0u;
+    std::uint64_t scalable_storage_fallback_input_symbols = 0u;
+    std::uint64_t scalable_storage_fallback_minimizers_emitted = 0u;
+    bool saturated = false;
+
+    [[nodiscard]] constexpr bool
+    operator==(const reference_simd_index_execution_stats&) const noexcept = default;
+
+    /// Merge one completed reference-kernel invocation without wrapping.
+    void merge(const reference_simd_index_execution_stats& other) noexcept {
+        const auto add = [this](std::uint64_t& destination, std::uint64_t increment) noexcept {
+            if (increment > (std::numeric_limits<std::uint64_t>::max)() - destination) {
+                destination = (std::numeric_limits<std::uint64_t>::max)();
+                saturated = true;
+                return;
+            }
+            destination += increment;
+        };
+        saturated = saturated || other.saturated;
+        add(kernel_calls, other.kernel_calls);
+        add(vector_callback_batches, other.vector_callback_batches);
+        add(vector_lane_visits, other.vector_lane_visits);
+        add(scalable_storage_fallback_calls, other.scalable_storage_fallback_calls);
+        add(scalable_storage_fallback_input_symbols,
+            other.scalable_storage_fallback_input_symbols);
+        add(scalable_storage_fallback_minimizers_emitted,
+            other.scalable_storage_fallback_minimizers_emitted);
+        if (last_storage_unit_bytes != 0u && other.last_storage_unit_bytes != 0u &&
+            last_storage_unit_bytes != other.last_storage_unit_bytes) {
+            saturated = true;
+        }
+        if (other.last_storage_unit_bytes != 0u) {
+            last_storage_unit_bytes = other.last_storage_unit_bytes;
+        }
+    }
+
+    /// Prove that every recorded invocation used the requested native width.
+    [[nodiscard]] bool is_internally_consistent(bool require_nonempty_work,
+                                                std::size_t expected_storage_unit_bytes) const
+        noexcept {
+        const bool callback_shape = vector_callback_batches == 0u
+                                        ? vector_lane_visits == 0u
+                                        : vector_lane_visits != 0u;
+        const bool exact = !saturated && expected_storage_unit_bytes != 0u &&
+                           last_storage_unit_bytes == expected_storage_unit_bytes &&
+                           scalable_storage_fallback_calls == 0u &&
+                           scalable_storage_fallback_input_symbols == 0u &&
+                           scalable_storage_fallback_minimizers_emitted == 0u && callback_shape;
+        return exact && (!require_nonempty_work || kernel_calls != 0u);
+    }
+};
+
+namespace reference_index_detail {
+
+/// Converts exact typed reference output directly into a caller-owned collector.
+template <class p_minimizer, class p_collector> struct reference_index_sink {
+    static constexpr std::size_t k_batch_capacity = 256u;
+    static constexpr auto k_output_layout =
+        bioseq::minimizers::k_minimizer_output_layout<p_minimizer>;
+
+    static_assert(k_output_layout != bioseq::minimizers::minimizer_output_layout::unsupported);
+    static_assert(std::is_standard_layout_v<p_minimizer>);
+    static_assert(std::is_trivially_copyable_v<p_minimizer>);
+    static_assert(std::is_trivially_destructible_v<p_minimizer>);
+
+    p_collector* collector = nullptr;
+    alignas(p_minimizer) std::array<std::byte, k_batch_capacity * sizeof(p_minimizer)> batch{};
+    std::exception_ptr exception{};
+    std::size_t committed = 0u;
+    bool accepted = true;
+    bool acquired = false;
+
+    /// Acquire one layout-authenticated batch for the generated kernel.
+    [[nodiscard]] static bioseq::minimizers::minimizer_sink_batch_view
+    acquire(void* opaque, std::size_t minimum) noexcept {
+        auto& self = *static_cast<reference_index_sink*>(opaque);
+        if (!self.accepted || self.acquired || minimum > k_batch_capacity) {
+            self.accepted = false;
+            return {};
+        }
+        self.acquired = true;
+        return {
+            .data = self.batch.data(),
+            .capacity = k_batch_capacity,
+            .layout = k_output_layout,
+            .record_size = sizeof(p_minimizer),
+            .record_alignment = alignof(p_minimizer),
+        };
+    }
+
+    /// Consume constructed physical records field-wise, then end their lifetimes.
+    static void commit(void* opaque, std::size_t initialized) noexcept {
+        auto& self = *static_cast<reference_index_sink*>(opaque);
+        if (!self.acquired || initialized > k_batch_capacity) {
+            self.accepted = false;
+            return;
+        }
+        auto* records = std::launder(
+            static_cast<p_minimizer*>(static_cast<void*>(self.batch.data())));
+        if (self.accepted && self.collector != nullptr) {
+            try {
+                for (std::size_t index = 0u; index < initialized; ++index) {
+                    self.collector->collect(records[index]);
+                }
+            } catch (...) {
+                self.exception = std::current_exception();
+                self.accepted = false;
+            }
+        } else {
+            self.accepted = false;
+        }
+        std::destroy_n(records, initialized);
+        self.acquired = false;
+        if (self.accepted) {
+            if (initialized > (std::numeric_limits<std::size_t>::max)() - self.committed) {
+                self.accepted = false;
+            } else {
+                self.committed += initialized;
+            }
+        }
+    }
+
+    /// Decode the explicit packed-u64 fast path through the physical record factory.
+    [[nodiscard]] static bool append_raw_u64(
+        void* opaque,
+        bioseq::minimizers::minimizer_output_layout layout,
+        const std::uint64_t* values,
+        std::size_t count) noexcept {
+        auto& self = *static_cast<reference_index_sink*>(opaque);
+        if (!self.accepted || self.acquired || self.collector == nullptr ||
+            layout != k_output_layout || (count != 0u && values == nullptr)) {
+            self.accepted = false;
+            return false;
+        }
+        if constexpr (requires {
+                          typename p_minimizer::storage_type;
+                          requires std::same_as<typename p_minimizer::storage_type, std::uint64_t>;
+                      }) {
+            try {
+                for (std::size_t index = 0u; index < count; ++index) {
+                    const p_minimizer record = p_minimizer::from_raw_storage(values[index]);
+                    self.collector->collect(record);
+                }
+            } catch (...) {
+                self.exception = std::current_exception();
+                self.accepted = false;
+            }
+        } else {
+            self.accepted = false;
+        }
+        if (self.accepted) {
+            if (count > (std::numeric_limits<std::size_t>::max)() - self.committed) {
+                self.accepted = false;
+            } else {
+                self.committed += count;
+            }
+        }
+        return self.accepted;
+    }
+
+    /// Return the neutral callback table borrowed for one synchronous invocation.
+    [[nodiscard]] bioseq::minimizers::minimizer_sink sink() noexcept {
+        return {
+            .state = this,
+            .acquire = acquire,
+            .commit = commit,
+            .append_raw_u64 = append_raw_u64,
+        };
+    }
+
+    /// Authenticate callback completion and propagate a deferred collector failure.
+    void validate(const bioseq::minimizers::minimizer_kernel_result& result) {
+        if (exception != nullptr) {
+            std::rethrow_exception(exception);
+        }
+        if (acquired || result.emitted != committed) {
+            accepted = false;
+        }
+    }
+};
+
+/// Map neutral reference-kernel status onto the existing checked-index status.
+[[nodiscard]] constexpr exact_simd_index_status reference_status_from_kernel(
+    const bioseq::minimizers::minimizer_kernel_result& result,
+    bool sink_accepted) noexcept {
+    using status_type = bioseq::minimizers::minimizer_kernel_status;
+    if (!sink_accepted || result.status == status_type::sink_rejected) {
+        return exact_simd_index_status::collector_overflow;
+    }
+    if (result.family_status != 0u) {
+        return exact_simd_index_status::invalid_state;
+    }
+    switch (result.status) {
+    case status_type::ok:
+        return exact_simd_index_status::ok;
+    case status_type::invalid_sequence_view:
+        return exact_simd_index_status::invalid_range;
+    case status_type::invalid_configuration:
+        return exact_simd_index_status::invalid_static_configuration;
+    case status_type::invalid_continuation:
+        return exact_simd_index_status::invalid_state;
+    case status_type::sink_rejected:
+        return exact_simd_index_status::collector_overflow;
+    }
+    return exact_simd_index_status::invalid_state;
+}
+
+} // namespace reference_index_detail
+
+/// Execute the generated minimap2-reference owner on one native packed range.
+///
+/// Unlike the continuation bridge below, the reference owner accepts one
+/// resident final segment.  The helper therefore materializes exactly the
+/// requested interval at the generated profile's u32/u64 input width, invokes
+/// only `minimap2_reference`, and forwards its selected physical records to the
+/// caller without reconstructing a different record layout.
+template <class p_minimizer, class p_collector, sequence_alphabet p_alphabet>
+[[nodiscard]] inline reference_simd_index_execution_stats
+collect_reference_simd_index_range_or_throw(
+    p_collector& collector,
+    bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
+    std::uint8_t alphabet_code,
+    sequence_size_t lo_bp,
+    sequence_size_t hi_bp,
+    std::size_t runtime_w,
+    std::size_t runtime_k,
+    std::uint8_t packed_storage_bits,
+    const bioseq::minimizers::minimizer_kernels* kernels,
+    std::string_view operation) {
+    if constexpr (!bioseq::minimizers::minimizer_profile_has_alphabet<
+                      p_alphabet>()) {
+        throw exact_simd_index_runtime_error{exact_simd_index_status::unsupported_alphabet,
+                                             operation};
+    } else {
+        if (lo_bp > hi_bp || hi_bp > sequence.bp_size() ||
+            hi_bp - lo_bp >
+                static_cast<sequence_size_t>((std::numeric_limits<std::size_t>::max)())) {
+            throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_range, operation};
+        }
+        if (alphabet_code !=
+                bioseq::minimizers::minimizer_profile_alphabet_id<
+                    p_alphabet>() ||
+            kernels == nullptr ||
+            kernels->minimap2_reference == nullptr ||
+            (packed_storage_bits != 32u && packed_storage_bits != 64u)) {
+            throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_state, operation};
+        }
+        const std::uint8_t packed_width = packed_storage_bits / 8u;
+        const auto access = bioseq::storage::plan_sequence_access(
+            sequence,
+            bioseq::storage::sequence_access_requirement::contiguous_resident,
+            lo_bp,
+            hi_bp,
+            packed_width);
+        std::optional<bioseq::storage::admitted_packed_sequence<p_alphabet>> owner;
+        typename bioseq::storage::lazy_sequence_view<p_alphabet>::resident_packed_sequence
+            descriptor{};
+        if (access.route == bioseq::storage::sequence_access_route::borrow_resident &&
+            access.resident.has_value()) {
+            descriptor = *access.resident;
+        } else {
+            auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
+                access.admission_bytes);
+            if (!permit) {
+                throw exact_simd_index_runtime_error{
+                    exact_simd_index_status::non_contiguous_range, operation};
+            }
+            owner.emplace(bioseq::storage::materialize_packed_sequence(
+                sequence, lo_bp, hi_bp, packed_width, std::move(*permit)));
+            descriptor = owner->descriptor();
+        }
+        if (descriptor.logical_length != static_cast<std::size_t>(hi_bp - lo_bp) ||
+            descriptor.storage_unit_width != packed_width ||
+            descriptor.bits_per_symbol !=
+                bioseq::storage::lazy_sequence_traits<
+                    p_alphabet>::k_logical_bits_per_symbol ||
+            descriptor.leading_symbol_offset != 0u ||
+            descriptor.bit_order !=
+                bioseq::storage::lazy_sequence_view<
+                    p_alphabet>::packed_symbol_order::least_significant_symbol_first ||
+            (descriptor.logical_length != 0u && descriptor.units == nullptr)) {
+            throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_range, operation};
+        }
+
+        reference_index_detail::reference_index_sink<p_minimizer, p_collector> sink_adapter{
+            .collector = &collector,
+        };
+        bioseq::minimizers::minimizer_kernel_invocation invocation{
+            .sequence = {
+                .storage = static_cast<const std::byte*>(descriptor.units),
+                .storage_units = descriptor.unit_count,
+                .begin_symbol = 0u,
+                .end_symbol = descriptor.logical_length,
+                .alphabet_code = alphabet_code,
+                .bits_per_symbol = descriptor.bits_per_symbol,
+                .storage_unit_bytes = packed_width,
+                .final_segment = true,
+            },
+            .window = runtime_w,
+            .kmer = runtime_k,
+            .emitted_position_base = 0u,
+            .output_layout = bioseq::minimizers::k_minimizer_output_layout<p_minimizer>,
+            .output_hash_mask = static_cast<std::uint64_t>(p_minimizer::k_hash_field_mask),
+            .output_position_mask =
+                static_cast<std::uint64_t>(p_minimizer::k_position_field_mask),
+            .sink = sink_adapter.sink(),
+        };
+        const bioseq::minimizers::minimizer_kernel_result result =
+            kernels->minimap2_reference(invocation);
+        sink_adapter.validate(result);
+        const exact_simd_index_status status =
+            reference_index_detail::reference_status_from_kernel(result, sink_adapter.accepted);
+        const auto& stats = result.stats.reference;
+        const reference_simd_index_execution_stats projected{
+            .kernel_calls = stats.kernel_calls,
+            .vector_callback_batches = stats.vector_callback_batches,
+            .vector_lane_visits = stats.vector_lane_visits,
+            .last_storage_unit_bytes = stats.last_storage_unit_bytes,
+            .scalable_storage_fallback_calls = stats.scalable_storage_fallback_calls,
+            .scalable_storage_fallback_input_symbols =
+                stats.scalable_storage_fallback_input_symbols,
+            .scalable_storage_fallback_minimizers_emitted =
+                stats.scalable_storage_fallback_minimizers_emitted,
+        };
+        if (status != exact_simd_index_status::ok ||
+            result.stats.algorithm !=
+                bioseq::minimizers::minimizer_kernel_algorithm::minimap2_reference ||
+            !projected.is_internally_consistent(true, packed_width)) {
+            throw exact_simd_index_runtime_error{
+                status == exact_simd_index_status::ok ? exact_simd_index_status::invalid_state
+                                                      : status,
+                operation};
+        }
+        return projected;
+    }
+}
 
 /// Returns the exact bridge status together with operation-originated counters.
 struct exact_simd_index_bridge_result {
@@ -692,12 +1042,12 @@ rejected_packed_bounded_nthash_index_result(packed_bounded_nthash_index_status s
 [[nodiscard]] packed_bounded_nthash_index_bridge_result collect_packed_bounded_nthash_index_erased(
     const packed_bounded_nthash_index_bridge_request& request);
 
-/// Execute one bounded ntHash window through a canonical admitted u32
-/// descriptor. Only the selected logical-rank interval is materialized when the source
-/// cannot expose stable resident u32 storage. A stable resident interval is
-/// borrowed synchronously without allocating or copying it.
+/// Execute one bounded ntHash window through a checked packed descriptor.
+/// Registered seeded alphabets borrow or materialize the exact packed width
+/// selected by their generated algorithm identity. A zero selected width keeps
+/// the legacy DNA4/DNA5 access policy for the unbound 15/10 compatibility path.
 ///
-/// @tparam p_alphabet Packed source alphabet, currently restricted to DNA4.
+/// @tparam p_alphabet Registered nucleotide alphabet with a bounded-ntHash seed policy.
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] packed_bounded_nthash_index_bridge_result
 collect_packed_bounded_nthash_index_lazy(bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
@@ -709,14 +1059,33 @@ collect_packed_bounded_nthash_index_lazy(bioseq::storage::lazy_sequence_view<p_a
                                          std::uint16_t kmer_size,
                                          const bioseq::minimizers::minimizer_kernels* kernels,
                                          sketch_collector& collector,
-                                         std::uint64_t* materialized_window_bp_out = nullptr) {
+                                         std::uint64_t* materialized_window_bp_out = nullptr,
+                                         std::uint8_t expected_packed_storage_bits = 0u) {
     if (materialized_window_bp_out != nullptr) {
         *materialized_window_bp_out = 0u;
     }
-    if constexpr (!std::same_as<p_alphabet, seq::dna4>) {
+    if constexpr (!bioseq::minimizers::bounded_nthash_seeded_alphabet<p_alphabet> ||
+                  !bioseq::minimizers::minimizer_profile_has_alphabet<p_alphabet>()) {
         return rejected_packed_bounded_nthash_index_result(
             packed_bounded_nthash_index_status::unsupported_alphabet);
     } else {
+        if (alphabet_code !=
+            bioseq::minimizers::minimizer_profile_alphabet_id<p_alphabet>()) {
+            return rejected_packed_bounded_nthash_index_result(
+                packed_bounded_nthash_index_status::unsupported_alphabet);
+        }
+        if (expected_packed_storage_bits != 0u &&
+            expected_packed_storage_bits != 32u &&
+            expected_packed_storage_bits != 64u) {
+            return rejected_packed_bounded_nthash_index_result(
+                packed_bounded_nthash_index_status::unsupported_storage);
+        }
+        if (expected_packed_storage_bits == 0u &&
+            !std::same_as<p_alphabet, seq::dna4> &&
+            !std::same_as<p_alphabet, seq::dna5>) {
+            return rejected_packed_bounded_nthash_index_result(
+                packed_bounded_nthash_index_status::unsupported_storage);
+        }
         if (lo_bp > hi_bp || hi_bp > sequence.bp_size() ||
             local_bp_size != static_cast<std::uint64_t>(hi_bp - lo_bp)) {
             return rejected_packed_bounded_nthash_index_result(
@@ -737,75 +1106,116 @@ collect_packed_bounded_nthash_index_lazy(bioseq::storage::lazy_sequence_view<p_a
                 packed_bounded_nthash_index_status::invalid_state);
         }
 
-        constexpr std::uint8_t packed_width = sizeof(std::uint32_t);
-        const auto access = bioseq::storage::plan_sequence_access(
-            sequence,
-            bioseq::storage::sequence_access_requirement::contiguous_resident,
-            lo_bp,
-            hi_bp,
-            packed_width);
-        std::optional<bioseq::storage::admitted_packed_sequence<p_alphabet>> owner;
-        typename bioseq::storage::lazy_sequence_view<p_alphabet>::resident_packed_sequence
-            descriptor{};
-        if (access.route == bioseq::storage::sequence_access_route::borrow_resident &&
-            access.resident.has_value()) {
-            descriptor = *access.resident;
-        } else {
-            auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
-                access.admission_bytes);
-            if (!permit) {
-                return rejected_packed_bounded_nthash_index_result(
-                    packed_bounded_nthash_index_status::admission_denied);
-            }
-            owner.emplace(bioseq::storage::materialize_packed_sequence(
-                sequence, lo_bp, hi_bp, packed_width, std::move(*permit)));
-            descriptor = owner->descriptor();
-        }
-        if (descriptor.logical_length != local_bp_size ||
-            descriptor.storage_unit_width != packed_width ||
-            descriptor.bits_per_symbol !=
-                bioseq::storage::lazy_sequence_traits<p_alphabet>::k_logical_bits_per_symbol ||
-            descriptor.leading_symbol_offset != 0u ||
-            descriptor.bit_order !=
-                bioseq::storage::lazy_sequence_view<
-                    p_alphabet>::packed_symbol_order::least_significant_symbol_first ||
-            (descriptor.logical_length != 0u && descriptor.units == nullptr)) {
-            return rejected_packed_bounded_nthash_index_result(
-                packed_bounded_nthash_index_status::invalid_range);
-        }
-        if (materialized_window_bp_out != nullptr) {
-            *materialized_window_bp_out = owner.has_value() ? local_bp_size : 0u;
-            DEBUG_ASSERT((*materialized_window_bp_out != 0u) == owner.has_value(),
-                         "bounded materialization receipt must name only owned storage");
-        }
-        if (const auto forced = consume_forced_packed_bounded_index_status_for_test()) {
-            return rejected_packed_bounded_nthash_index_result(*forced);
-        }
-        return collect_packed_bounded_nthash_index_erased(
-            packed_bounded_nthash_index_bridge_request{
-                .kernels = kernels,
-                .sequence =
-                    bioseq::minimizers::packed_sequence_kernel_view{
-                        .storage = reinterpret_cast<const std::byte*>(descriptor.units),
-                        .storage_units = descriptor.unit_count,
-                        .begin_symbol = 0u,
-                        .end_symbol = static_cast<std::size_t>(local_bp_size),
-                        .alphabet_code = alphabet_code,
-                        .bits_per_symbol = descriptor.bits_per_symbol,
+        using descriptor_type =
+            typename bioseq::storage::lazy_sequence_view<
+                p_alphabet>::resident_packed_sequence;
+        const auto invoke_descriptor =
+            [local_bp_size,
+             materialized_window_bp_out,
+             kernels,
+             alphabet_code,
+             window_size,
+             kmer_size,
+             expected_packed_storage_bits,
+             &collector](descriptor_type& descriptor, bool materialized)
+                [[gnu::always_inline]] {
+                if (descriptor.logical_length != local_bp_size ||
+                    (descriptor.storage_unit_width != sizeof(std::uint32_t) &&
+                     descriptor.storage_unit_width != sizeof(std::uint64_t)) ||
+                    (expected_packed_storage_bits != 0u &&
+                     descriptor.storage_unit_width * 8u !=
+                         expected_packed_storage_bits) ||
+                    (std::same_as<p_alphabet, seq::dna4> &&
+                     expected_packed_storage_bits == 0u &&
+                     descriptor.storage_unit_width != sizeof(std::uint32_t)) ||
+                    descriptor.bits_per_symbol !=
+                        bioseq::storage::lazy_sequence_traits<
+                            p_alphabet>::k_logical_bits_per_symbol ||
+                    descriptor.leading_symbol_offset != 0u ||
+                    descriptor.bit_order !=
+                        bioseq::storage::lazy_sequence_view<
+                            p_alphabet>::packed_symbol_order::least_significant_symbol_first ||
+                    (descriptor.logical_length != 0u && descriptor.units == nullptr)) {
+                    return rejected_packed_bounded_nthash_index_result(
+                        packed_bounded_nthash_index_status::invalid_range);
+                }
+                if (materialized_window_bp_out != nullptr) {
+                    *materialized_window_bp_out = materialized ? local_bp_size : 0u;
+                    DEBUG_ASSERT((*materialized_window_bp_out != 0u) == materialized,
+                                 "bounded materialization receipt must name only owned storage");
+                }
+                if (const auto forced = consume_forced_packed_bounded_index_status_for_test()) {
+                    return rejected_packed_bounded_nthash_index_result(*forced);
+                }
+                return collect_packed_bounded_nthash_index_erased(
+                    packed_bounded_nthash_index_bridge_request{
+                        .kernels = kernels,
+                        .sequence =
+                            bioseq::minimizers::packed_sequence_kernel_view{
+                                .storage = reinterpret_cast<const std::byte*>(descriptor.units),
+                                .storage_units = descriptor.unit_count,
+                                .begin_symbol = 0u,
+                                .end_symbol = static_cast<std::size_t>(local_bp_size),
+                                .alphabet_code = alphabet_code,
+                                .bits_per_symbol = descriptor.bits_per_symbol,
+                                .storage_unit_bytes = descriptor.storage_unit_width,
+                                .final_segment = true,
+                            },
+                        .sequence_context = std::addressof(descriptor),
+                        .collector_context = std::addressof(collector),
                         .storage_unit_bytes = descriptor.storage_unit_width,
-                        .final_segment = true,
-                    },
-                .sequence_context = std::addressof(descriptor),
-                .collector_context = std::addressof(collector),
-                .storage_unit_bytes = packed_width,
-                .letters_per_unit =
-                    descriptor.storage_unit_width * 8u /
-                    bioseq::storage::lazy_sequence_traits<p_alphabet>::k_logical_bits_per_symbol,
-                .storage_units = descriptor.unit_count,
-                .local_bp_size = static_cast<std::size_t>(local_bp_size),
-                .window_size = window_size,
-                .kmer_size = kmer_size,
-            });
+                        .letters_per_unit =
+                            descriptor.storage_unit_width * 8u /
+                            bioseq::storage::lazy_sequence_traits<
+                                p_alphabet>::k_logical_bits_per_symbol,
+                        .storage_units = descriptor.unit_count,
+                        .local_bp_size = static_cast<std::size_t>(local_bp_size),
+                        .window_size = window_size,
+                        .kmer_size = kmer_size,
+                    });
+            };
+
+        const auto run_width_access =
+            [&sequence, lo_bp, hi_bp, &invoke_descriptor](const std::uint8_t packed_width)
+                [[gnu::always_inline]] {
+            const auto access = bioseq::storage::plan_sequence_access(
+                sequence,
+                bioseq::storage::sequence_access_requirement::contiguous_resident,
+                lo_bp,
+                hi_bp,
+                packed_width);
+            std::optional<bioseq::storage::admitted_packed_sequence<p_alphabet>> owner;
+            descriptor_type descriptor{};
+            if (access.route == bioseq::storage::sequence_access_route::borrow_resident &&
+                access.resident.has_value()) {
+                descriptor = *access.resident;
+            } else {
+                auto permit =
+                    bioseq::parallelism::memory_admission_controller::instance().try_reserve(
+                        access.admission_bytes);
+                if (!permit) {
+                    return rejected_packed_bounded_nthash_index_result(
+                        packed_bounded_nthash_index_status::admission_denied);
+                }
+                owner.emplace(bioseq::storage::materialize_packed_sequence(
+                    sequence, lo_bp, hi_bp, packed_width, std::move(*permit)));
+                descriptor = owner->descriptor();
+            }
+            return invoke_descriptor(descriptor, owner.has_value());
+        };
+
+        if (expected_packed_storage_bits != 0u) {
+            return run_width_access(
+                static_cast<std::uint8_t>(expected_packed_storage_bits / 8u));
+        }
+        if constexpr (std::same_as<p_alphabet, seq::dna5>) {
+            if (auto resident = sequence.try_resident_packed(
+                    lo_bp, hi_bp, sizeof(std::uint64_t));
+                resident.has_value() && resident->leading_symbol_offset == 0u) {
+                return invoke_descriptor(*resident, /*materialized=*/false);
+            }
+        }
+        return run_width_access(sizeof(std::uint32_t));
     }
 }
 

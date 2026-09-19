@@ -639,7 +639,9 @@ struct cpp_template_binding final {
         std::string_view source_module) noexcept {
     return source_module == "bioseq.postgres.table:access_hooks"
         || source_module == "bioseq.postgres.table:access_method"
-        || source_module == "bioseq.postgres.table:custom_scan";
+        || source_module == "bioseq.postgres.table:custom_scan"
+        || source_module
+            == "bioseq.postgres.table:custom_scan_sql_probe_contracts";
 }
 
 [[nodiscard]] inline bool registered_module_closure_contains(
@@ -1130,7 +1132,12 @@ struct cpp_template_binding final {
                "extern \"C\" {\n"
                "#include \"postgres.h\"\n"
                "#include \"fmgr.h\"\n"
-               "}\n\n";
+               "#include \"utils/date.h\"\n"
+               "}\n\n"
+               "#undef Min\n"
+               "#undef Max\n"
+               "#undef snprintf\n"
+               "#undef vsnprintf\n\n";
     }
     throw std::runtime_error(
         "unsupported generated fmgr prelude '"

@@ -3,10 +3,7 @@
  * @brief Normalizes authoritative targets and private path spines.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,60 +24,13 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_per_row_join_paths_target_normalization;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
 
-import :custom_scan_support;
-import :custom_scan_slice_projection;
-
-import :custom_scan_join_ownership;
-
-import :custom_scan_per_row_join_paths_carrier_analysis;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_join_ownership_target_contracts;
+import :custom_scan_per_row_join_paths_carrier_contracts;
+export import :custom_scan_per_row_join_paths_reconstruction_contracts;
+export import :custom_scan_per_row_join_paths_target_normalization_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -433,29 +383,5 @@ export {
         rel->reltarget = create_empty_pathtarget();
         return rel;
     }
-
-    /** @brief Accumulates per-stage rejection and reconstruction counts for path admission. */
-    struct per_row_reconstruction_rejections {
-        std::size_t incumbents = 0u;
-        std::size_t unsupported_path = 0u;
-        std::size_t invalid_join = 0u;
-        std::size_t missing_owned_identity = 0u;
-        std::size_t replacement_missing = 0u;
-        std::size_t projection_or_leak = 0u;
-        std::size_t new_external_parameter = 0u;
-        std::size_t unusable_algorithm_clause = 0u;
-        std::size_t reconstructed = 0u;
-        std::size_t cloned = 0u;
-        std::size_t tag_missing = 0u;
-        std::size_t source_projection_missing = 0u;
-        std::size_t nonfinite_cost = 0u;
-        std::size_t owners_created = 0u;
-        int last_incumbent_tag = -1;
-        int last_outer_tag = -1;
-        int last_inner_tag = -1;
-        const char* last_incumbent_custom_name = "none";
-        const char* last_outer_custom_name = "none";
-        const char* last_inner_custom_name = "none";
-    };
 
 } // export custom-scan partition declarations

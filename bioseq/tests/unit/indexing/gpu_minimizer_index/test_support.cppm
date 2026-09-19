@@ -12,6 +12,8 @@ module;
 export module bioseq.tests.unit.indexing.gpu_minimizer_index_support;
 
 import std;
+import bioseq.pipeline.runtime_contract;
+import bioseq.common.seqan_adapter;
 import bioseq.common.logging;
 import bioseq.sequences.kmers;
 import bioseq.indexing.minimizer_hashmap;
@@ -251,6 +253,15 @@ struct grouped_soa_gpu_resident_fixture {
 /// Construct the identity expected by grouped-SoA GPU ingestion.
 [[nodiscard]] constexpr idx_ns::expected_minimizer_generation_identity
 grouped_soa_gpu_expected_identity() noexcept {
+    constexpr auto physical_layout =
+        bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+            bioseq::simd::minimizer_algorithm::two_stack_nthash,
+            idx_ns::k_minimizer_fragment_algorithm_position_extent_bp,
+            15u,
+            10u);
+    constexpr auto algorithm_identity =
+        idx_ns::make_minimizer_generation_algorithm_identity(physical_layout);
+    static_assert(algorithm_identity.has_value());
     return {
         .layout = idx_ns::minimizer_generation_layout::
             grouped_soa_segment_local,
@@ -264,6 +275,7 @@ grouped_soa_gpu_expected_identity() noexcept {
         .producer_backend_id = idx_ns::minimizer_producer_backend::exact_simd,
         .producer_identity_revision =
             idx_ns::k_minimizer_producer_identity_revision,
+        .algorithm_identity = *algorithm_identity,
         .max_occ_cap = 10u,
     };
 }
@@ -280,6 +292,15 @@ make_grouped_soa_gpu_resident_fixture() {
     if (!profile) {
         throw std::runtime_error("failed to derive grouped-SoA GPU profile");
     }
+    constexpr auto physical_layout =
+        bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+            bioseq::simd::minimizer_algorithm::two_stack_nthash,
+            idx_ns::k_minimizer_fragment_algorithm_position_extent_bp,
+            15u,
+            10u);
+    constexpr auto algorithm_identity =
+        idx_ns::make_minimizer_generation_algorithm_identity(physical_layout);
+    static_assert(algorithm_identity.has_value());
 
     const std::array<std::vector<std::uint32_t>, 2> hashes{{
         {1u, 2u}, {3u},
@@ -424,6 +445,7 @@ make_grouped_soa_gpu_resident_fixture() {
         .producer_backend_id = idx_ns::minimizer_producer_backend::exact_simd,
         .producer_identity_revision =
             idx_ns::k_minimizer_producer_identity_revision,
+        .algorithm_identity = *algorithm_identity,
         .hash_width = profile->hash_width,
         .position_width = profile->position_width,
         .count_width = profile->count_width,

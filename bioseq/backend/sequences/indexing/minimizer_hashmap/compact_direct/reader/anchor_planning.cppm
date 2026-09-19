@@ -1,6 +1,10 @@
 /**
  * @file compact_direct/reader/anchor_planning.cppm
- * @brief Query-wave planning, admission, grouped execution, and final anchors.
+ * @brief Query-wave anchor planning for grouped-SoA control scans and compact-direct lookup.
+ *
+ * Implements the shared preparation pipeline selected by @c prepare_fragment_anchor_batch
+ * route dispatch: occurrence packing, unique-hash planning, and either grouped-SoA
+ * multi-pass control/orientation/emission or compact-H32 direct anchor materialization.
  */
 
 module;
@@ -48,18 +52,49 @@ export namespace bioseq::indexing {
 /**
  * Prepares one immutable anchor batch for a single query wave.
  *
- * \tparam p_oracle Selects the oracle query-plan matcher instead of the production
- *     bucket-direct matcher view.
- * \tparam p_compact_direct Selects the compact-H32 direct route without grouped-SoA
- *     control scans.
+ * Route is fixed at compile time by the template flags. Exactly one of three
+ * geometries is selected:
+ * - @c p_compact_direct: one compact-H32 lookup per unique query hash, then direct
+ *   layout, allocation, emission, and per-query local ordering.
+ * - @c p_oracle: grouped-SoA control scans indexed by explicit native-width query-plan rows
+ *   (baseline matcher for testing).
+ * - neither flag: production bucket-direct matcher with membership filter, radix, and
+ *   group offsets over hash-sorted occurrence references.
  *
- * Validates query descriptors, packs occurrence references, admits scratch and batch
- * memory, then either plans compact-direct anchors or runs grouped-SoA control-count,
- * orientation, emission, and per-block sort passes. Scratch moves to outstanding on
- * success. Each prepared query carries a compositional sortedness receipt.
+ * @tparam p_oracle When @c true, builds native-width query-plan rows and radix cursors for
+ *     the oracle matcher. Mutually exclusive with @c p_compact_direct.
+ * @tparam p_compact_direct When @c true, skips grouped-SoA control scans and delegates
+ *     anchor materialization to @c prepare_compact_direct_anchors_. Requires an attached
+ *     compact-direct index on the reader.
  *
- * \throws persisted_minimizer_lookup_error when readiness, policy, admission, decode,
- *     or pass-equation checks fail.
+ * @param admission Controller used to admit the returned batch permit and any scratch
+ *     growth during preparation. Must match @c scratch.admission_.
+ * @param queries Per-query minimizer views and geometry. Each @c minimizers span must
+ *     outlive the returned batch because @c prepared_query_anchors stores raw pointers.
+ *     Descriptors are validated against the reader profile (@c kmer_size, @c max_hash) and
+ *     representable minimizer coordinates.
+ * @param max_occ Per-hash posting cap for this wave. Must equal the reader's configured
+ *     @c max_occ_. For compact-direct, @c 0 selects the empty-postings fast path without
+ *     touching grouped-SoA payload or direct postings.
+ * @param scratch Reusable wave planner state. Must be @c idle and bound to @p admission.
+ *     On success the state becomes @c outstanding until the caller joins and completes
+ *     the wave. On failure @c reset_failed_wave_ restores @c idle.
+ * @param verify_compositional_order_for_testing When @c true, checks that each query's
+ *     emitted anchors are non-decreasing under @c canonical_anchor_less. Forced @c true
+ *     in debug builds regardless of this argument.
+ *
+ * @return A @c prepared_fragment_anchor_batch with @c ready_ @c true, per-query anchor
+ *     arrays owned by the batch permit, and @c sortedness_receipt_ stamped on every query.
+ *     Grouped-SoA routes fill forward then reverse slices per block before composing query
+ *     order. Compact-direct routes emit one forward and one reverse slice per query.
+ *
+ * @pre Reader @c ready_ is @c true and backing payload matches the selected route.
+ * @pre @c scratch.wave_state_ is @c idle (single-wave exclusivity).
+ *
+ * @throws persisted_minimizer_lookup_error On reader readiness or route-state mismatch,
+ *     invalid query descriptors or occurrence layout, scratch identity or busy-state
+ *     conflict, admission or allocation failure, wire decode errors surfaced from grouped
+ *     passes, stats pass-equation disagreement, or compositional order verification failure.
  */
 template <bool p_oracle, bool p_compact_direct>
 [[nodiscard]] inline prepared_fragment_anchor_batch
@@ -70,6 +105,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
     query_wave_scratch& scratch,
     bool verify_compositional_order_for_testing) const {
     using query_hash_plan = query_wave_scratch::query_hash_plan;
+    using query_hash_plan_h64 = query_wave_scratch::query_hash_plan_h64;
     using bioseq::common::saturating_add;
     using bioseq::common::saturating_mul;
 
@@ -132,6 +168,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                 "fragment-native grouped-SoA query scratch identity is inconsistent");
         }
         scratch.clear_wave_storage_noexcept_();
+        scratch.select_occurrence_hash_width_(profile_.hash_width);
         if constexpr (p_compact_direct) {
             // This route never probes grouped-SoA controls.  Retained Bloom,
             // radix, group-directory, and atomic-counter owners from a
@@ -150,10 +187,14 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
             scratch.active_occurrence_count_ = 0u;
             scratch.permit_.shrink_to(scratch.retained_capacity_bytes_());
         }
-        if (use_bucket_direct_matcher && scratch.query_plans_.capacity() != 0u) {
+        if (use_bucket_direct_matcher &&
+            (scratch.query_plans_.capacity() != 0u ||
+             scratch.query_plans_h64_.capacity() != 0u)) {
             {
                 std::vector<query_hash_plan> no_baseline_plans;
+                std::vector<query_hash_plan_h64> no_baseline_plans_h64;
                 scratch.query_plans_.swap(no_baseline_plans);
+                scratch.query_plans_h64_.swap(no_baseline_plans_h64);
             }
             scratch.query_plan_reserve_request_ = 0u;
             scratch.permit_.shrink_to(scratch.retained_capacity_bytes_());
@@ -161,8 +202,15 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
         std::uint64_t total_query_minimizers = 0u;
         std::uint64_t largest_query_minimizer_count = 0u;
         for (const fragment_seed_query& query : queries) {
-            if (!bioseq::minimizers::is_minimizer_query_length_representable<minimap_sketch_data>(
-                    query.query_length) ||
+            const auto* query_record =
+                ::bioseq::minimizers::find_minimizer_physical_record(
+                    query.minimizers.record_id());
+            if (query_record == nullptr ||
+                profile_.hash_width != manifest_.algorithm_identity.hash_width ||
+                query_record->physical_kmer_size !=
+                    manifest_.algorithm_identity.physical_kmer_size ||
+                query.query_length >
+                    (::bioseq::storage::sequence_size_t{1u} << query_record->position_log2) ||
                 query.kmer_size <= 0 ||
                 query.kmer_size > (std::numeric_limits<std::uint8_t>::max)() ||
                 query.kmer_size != static_cast<std::int32_t>(profile_.kmer_size) ||
@@ -174,16 +222,19 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                 throw persisted_minimizer_lookup_error(
                     "fragment-native grouped-SoA query descriptor is invalid");
             }
-            for (const minimap_sketch_data& minimizer : query.minimizers) {
-                const std::uint64_t forward_last = minimizer.pos_strand_encoded() >> 1u;
-                if (minimizer.kmer() > profile_.max_hash ||
-                    minimizer.kmer() > (std::numeric_limits<std::uint32_t>::max)() ||
-                    forward_last >= query.query_length ||
-                    forward_last + 1u < static_cast<std::uint64_t>(query.kmer_size)) {
-                    throw persisted_minimizer_lookup_error(
-                        "fragment-native grouped-SoA query minimizer is invalid");
-                }
-            }
+            query.minimizers.for_each_decoded(
+                [this, &query](const std::size_t,
+                               const ::bioseq::minimizers::minimizer_physical_record_value
+                                   minimizer) {
+                    const std::uint64_t forward_last =
+                        minimizer.pos_strand_encoded() >> 1u;
+                    if (minimizer.kmer() > profile_.max_hash ||
+                        forward_last >= query.query_length ||
+                        forward_last + 1u < static_cast<std::uint64_t>(query.kmer_size)) {
+                        throw persisted_minimizer_lookup_error(
+                            "fragment-native grouped-SoA query minimizer is invalid");
+                    }
+                });
             total_query_minimizers += query.minimizers.size();
             largest_query_minimizer_count =
                 std::max<std::uint64_t>(largest_query_minimizer_count, query.minimizers.size());
@@ -238,7 +289,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
         for (std::size_t query_ordinal = 0u; query_ordinal < queries.size(); ++query_ordinal) {
             prepared_query_anchors& destination = batch.queries_[query_ordinal];
             const fragment_seed_query& source = queries[query_ordinal];
-            destination.minimizer_data = source.minimizers.data();
+            destination.minimizers = source.minimizers;
             destination.minimizer_count = source.minimizers.size();
             destination.query_length = source.query_length;
             destination.kmer_size = source.kmer_size;
@@ -278,15 +329,40 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
         prepare_query_occurrences_<p_oracle, p_compact_direct>(
             queries, occurrence_layout, occurrence_count, scratch, batch);
 
+        const auto finish_native_batch =
+            [this,
+             &admission,
+             queries,
+             max_occ,
+             &scratch,
+             &batch,
+             occurrence_layout,
+             occurrence_count,
+             use_fixed_h32_c16_p16,
+             use_bucket_direct_matcher,
+             &verify_compositional_order_for_testing]<class p_packed_occurrence,
+                                                       class p_wide_occurrence,
+                                                       class p_query_hash_plan>(
+                std::vector<p_packed_occurrence>& packed_occurrences,
+                std::vector<p_wide_occurrence>& wide_occurrences,
+                std::vector<p_query_hash_plan>& query_plans) {
+        using occurrence_hash_type = typename p_packed_occurrence::hash_type;
+        static_assert(std::same_as<occurrence_hash_type,
+                                   typename p_wide_occurrence::hash_type>);
+        static_assert(std::same_as<occurrence_hash_type,
+                                   typename p_query_hash_plan::hash_type>);
+        constexpr bool h64_occurrences = std::same_as<occurrence_hash_type, std::uint64_t>;
+
         const std::uint64_t unique_plan_started_ns = stage_now_ns_();
-        const std::size_t old_query_plan_capacity = scratch.query_plans_.capacity();
+        const std::size_t old_query_plan_capacity = query_plans.capacity();
         std::uint64_t compact_direct_group_key_set_checksum =
             compact_direct_query_set_checksum_prefix(
                 static_cast<std::uint32_t>(profile_.kmer_size),
                 static_cast<std::uint32_t>(manifest_.window_size),
                 static_cast<std::uint32_t>(max_occ));
-        const auto build_query_plans = [&scratch, &compact_direct_group_key_set_checksum](
-                                           const auto& occurrences) {
+        const auto build_query_plans =
+            [&scratch, &query_plans, &compact_direct_group_key_set_checksum](
+                const auto& occurrences) {
             std::size_t unique_count = 0u;
             for (std::size_t begin = 0u; begin < occurrences.size();) {
                 std::size_t end = begin + 1u;
@@ -302,16 +378,16 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                     "fragment-native unique query plan count overflow");
             }
             scratch.query_plan_reserve_request_ = unique_count;
-            scratch.ensure_vector_capacity_(scratch.query_plans_, unique_count);
-            scratch.query_plans_.clear();
+            scratch.ensure_vector_capacity_(query_plans, unique_count);
+            query_plans.clear();
             for (std::size_t begin = 0u; begin < occurrences.size();) {
                 std::size_t end = begin + 1u;
                 while (end < occurrences.size() &&
                        occurrences[end].hash == occurrences[begin].hash) {
                     ++end;
                 }
-                const std::uint32_t hash = occurrences[begin].hash;
-                scratch.query_plans_.push_back(query_hash_plan{
+                const occurrence_hash_type hash = occurrences[begin].hash;
+                query_plans.push_back(p_query_hash_plan{
                     .hash = hash,
                     .occurrence_ref_begin = static_cast<std::uint32_t>(begin),
                     .occurrence_ref_count = static_cast<std::uint32_t>(end - begin),
@@ -344,11 +420,11 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
             scratch.query_membership_filter_word_capacity_;
         if constexpr (p_oracle || p_compact_direct) {
             if (occurrence_layout->packed()) {
-                build_query_plans(scratch.packed_occurrences_);
+                build_query_plans(packed_occurrences);
             } else {
-                build_query_plans(scratch.wide_occurrences_);
+                build_query_plans(wide_occurrences);
             }
-            unique_occurrence_group_count = scratch.query_plans_.size();
+            unique_occurrence_group_count = query_plans.size();
             if constexpr (p_compact_direct) {
                 batch.compact_direct_query_set_stats_ = compact_direct_query_set_stats{
                     .query_count = queries.size(),
@@ -362,8 +438,8 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
             scratch.query_plan_reserve_request_ = 0u;
             unique_occurrence_group_count =
                 occurrence_layout->packed()
-                    ? count_unique_occurrence_groups(scratch.packed_occurrences_)
-                    : count_unique_occurrence_groups(scratch.wide_occurrences_);
+                    ? count_unique_occurrence_groups(packed_occurrences)
+                    : count_unique_occurrence_groups(wide_occurrences);
             if (unique_occurrence_group_count > (std::numeric_limits<std::uint32_t>::max)() ||
                 unique_occurrence_group_count == (std::numeric_limits<std::size_t>::max)()) {
                 throw persisted_minimizer_lookup_error(
@@ -379,7 +455,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                         const auto& occurrences) noexcept {
                         std::size_t group_ordinal = 0u;
                         bool have_previous_hash = false;
-                        std::uint32_t previous_hash = 0u;
+                        std::uint64_t previous_hash = 0u;
                         bool strictly_monotonic = true;
                         for (std::size_t begin = 0u; begin < occurrences.size();) {
                             std::size_t end = begin + 1u;
@@ -389,7 +465,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                             }
                             scratch.query_group_offsets_[group_ordinal++] =
                                 static_cast<std::uint32_t>(begin);
-                            const std::uint32_t hash = occurrences[begin].hash;
+                            const std::uint64_t hash = occurrences[begin].hash;
                             strictly_monotonic =
                                 strictly_monotonic && (!have_previous_hash || previous_hash < hash);
                             previous_hash = hash;
@@ -405,20 +481,22 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                         return group_ordinal;
                     };
                 const std::size_t built_group_count =
-                    occurrence_layout->packed() ? build_group_index(scratch.packed_occurrences_)
-                                                : build_group_index(scratch.wide_occurrences_);
+                    occurrence_layout->packed() ? build_group_index(packed_occurrences)
+                                                : build_group_index(wide_occurrences);
                 if (built_group_count != unique_occurrence_group_count ||
                     !production_group_hashes_strictly_monotonic) {
                     throw persisted_minimizer_lookup_error(
                         "fragment-native occurrence group receipt disagrees");
                 }
                 const auto group_hash = [&scratch,
-                                         occurrence_layout](std::size_t group_ordinal) noexcept {
+                                         occurrence_layout,
+                                         &packed_occurrences,
+                                         &wide_occurrences](std::size_t group_ordinal) noexcept {
                     const std::uint32_t occurrence_ordinal =
                         scratch.query_group_offsets_[group_ordinal];
                     return occurrence_layout->packed()
-                               ? scratch.packed_occurrences_[occurrence_ordinal].hash
-                               : scratch.wide_occurrences_[occurrence_ordinal].hash;
+                               ? packed_occurrences[occurrence_ordinal].hash
+                               : wide_occurrences[occurrence_ordinal].hash;
                 };
                 std::uint32_t group_cursor = 0u;
                 for (std::uint32_t bucket = 0u; bucket <= query_radix_bucket_count_; ++bucket) {
@@ -432,12 +510,12 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
         }
         batch.stats_.query_plan_allocations =
             ((p_oracle || p_compact_direct) &&
-             scratch.query_plans_.capacity() > old_query_plan_capacity)
+             query_plans.capacity() > old_query_plan_capacity)
                 ? 1u
                 : 0u;
         batch.stats_.peak_query_plan_capacity_bytes =
             (p_oracle || p_compact_direct)
-                ? saturating_mul(scratch.query_plans_.capacity(), sizeof(query_hash_plan))
+                ? saturating_mul(query_plans.capacity(), sizeof(p_query_hash_plan))
                 : 0u;
         batch.stats_.query_group_offset_allocations =
             use_bucket_direct_matcher &&
@@ -477,10 +555,10 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                 scratch.query_plan_radix_.resize(radix_size);
                 std::uint32_t plan_cursor = 0u;
                 const std::uint32_t radix_item_count =
-                    static_cast<std::uint32_t>(scratch.query_plans_.size());
+                    static_cast<std::uint32_t>(query_plans.size());
                 for (std::uint32_t bucket = 0u; bucket <= query_radix_bucket_count_; ++bucket) {
                     while (plan_cursor < radix_item_count &&
-                           query_bucket_(scratch.query_plans_[plan_cursor].hash) < bucket) {
+                           query_bucket_(query_plans[plan_cursor].hash) < bucket) {
                         ++plan_cursor;
                     }
                     scratch.query_plan_radix_[bucket] = plan_cursor;
@@ -489,7 +567,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                     elapsed_stage_ns_(query_radix_fill_started_ns);
             }
             const std::size_t old_occurrence_count_capacity = scratch.occurrence_count_capacity_;
-            scratch.ensure_occurrence_count_capacity_(p_oracle ? scratch.query_plans_.size()
+            scratch.ensure_occurrence_count_capacity_(p_oracle ? query_plans.size()
                                                                : unique_occurrence_group_count);
             batch.stats_.occurrence_count_allocations =
                 scratch.occurrence_count_capacity_ > old_occurrence_count_capacity ? 1u : 0u;
@@ -502,12 +580,10 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
             if constexpr (!p_oracle) {
                 const bool route_storage_matches =
                     occurrence_layout->packed()
-                        ? scratch.packed_occurrences_.size() == occurrence_count &&
-                              scratch.wide_occurrences_.empty() &&
-                              scratch.packed_occurrences_.data() != nullptr
-                        : scratch.wide_occurrences_.size() == occurrence_count &&
-                              scratch.packed_occurrences_.empty() &&
-                              scratch.wide_occurrences_.data() != nullptr;
+                        ? packed_occurrences.size() == occurrence_count &&
+                              wide_occurrences.empty() && packed_occurrences.data() != nullptr
+                        : wide_occurrences.size() == occurrence_count &&
+                              packed_occurrences.empty() && wide_occurrences.data() != nullptr;
                 if (!production_group_hashes_strictly_monotonic ||
                     !valid_query_occurrence_packing_layout(scratch.occurrence_layout_) ||
                     scratch.occurrence_layout_ != *occurrence_layout || !route_storage_matches ||
@@ -532,18 +608,33 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                     .membership_filter = scratch.query_membership_filter_.get(),
                     .radix = scratch.query_plan_radix_.data(),
                     .group_offsets = scratch.query_group_offsets_.data(),
-                    .packed_occurrences = scratch.packed_occurrences_.data(),
-                    .wide_occurrences = scratch.wide_occurrences_.data(),
                     .occurrence_counts = scratch.occurrence_counts_.get(),
                     .membership_filter_word_count = scratch.query_membership_filter_word_capacity_,
                     .radix_count = scratch.query_plan_radix_.size(),
                     .group_offset_count = scratch.query_group_offsets_.size(),
-                    .packed_occurrence_count = scratch.packed_occurrences_.size(),
-                    .wide_occurrence_count = scratch.wide_occurrences_.size(),
                     .occurrence_count = occurrence_count,
                     .counter_count = scratch.active_occurrence_count_,
                     .occurrence_layout = scratch.occurrence_layout_,
+                    .hash_width = scratch.occurrence_hash_width_,
                 };
+                if constexpr (h64_occurrences) {
+                    bucket_direct_matcher_storage.packed_occurrences_h64 =
+                        packed_occurrences.data();
+                    bucket_direct_matcher_storage.wide_occurrences_h64 =
+                        wide_occurrences.data();
+                    bucket_direct_matcher_storage.packed_occurrence_h64_count =
+                        packed_occurrences.size();
+                    bucket_direct_matcher_storage.wide_occurrence_h64_count =
+                        wide_occurrences.size();
+                } else {
+                    bucket_direct_matcher_storage.packed_occurrences =
+                        packed_occurrences.data();
+                    bucket_direct_matcher_storage.wide_occurrences = wide_occurrences.data();
+                    bucket_direct_matcher_storage.packed_occurrence_count =
+                        packed_occurrences.size();
+                    bucket_direct_matcher_storage.wide_occurrence_count =
+                        wide_occurrences.size();
+                }
                 bucket_direct_matcher = &bucket_direct_matcher_storage;
                 batch.stats_.bucket_direct_matcher_view_receipts = 1u;
             }
@@ -557,11 +648,12 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                 block_count_,
                 [this,
                  &scratch,
+                 &query_plans,
                  &first_error,
                  max_occ_u32,
                  use_fixed_h32_c16_p16,
                  bucket_direct_matcher](std::size_t block_begin, std::size_t block_end) noexcept {
-                    const std::span<const query_hash_plan> plans{scratch.query_plans_};
+                    const std::span<const p_query_hash_plan> plans{query_plans};
                     const std::span<const std::uint32_t> radix{scratch.query_plan_radix_};
                     for (std::size_t block_ordinal = block_begin; block_ordinal < block_end;
                          ++block_ordinal) {
@@ -573,18 +665,19 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                             .pass = fragment_probe_pass::control_count,
                             .block = &block_plans_[block_ordinal],
                             .block_ordinal = block_ordinal,
-                            .plans = plans,
                             .query_plan_radix = radix,
                             .scratch = &scratch,
                             .bucket_direct_matcher = bucket_direct_matcher,
                             .max_occ = max_occ_u32,
                         };
                         if (use_fixed_h32_c16_p16) {
-                            counted = probe_block_h32_c16_p16_<p_oracle>(context);
+                            counted = probe_block_h32_c16_p16_<p_oracle>(
+                                context, std::span<const query_hash_plan>{scratch.query_plans_});
                         } else {
                             counted = visit_matched_control_counts_<p_oracle>(
                                 block_plans_[block_ordinal],
                                 context,
+                                plans,
                                 [&context, max_occ_u32](const query_occurrence_group& group,
                                                         std::uint64_t local_count) noexcept
                                     -> std::optional<minimizer_generation_encoding_error> {
@@ -652,9 +745,9 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                     }
                 };
             if constexpr (p_oracle) {
-                for (std::size_t plan_ordinal = 0u; plan_ordinal < scratch.query_plans_.size();
+                for (std::size_t plan_ordinal = 0u; plan_ordinal < query_plans.size();
                      ++plan_ordinal) {
-                    query_hash_plan& plan = scratch.query_plans_[plan_ordinal];
+                    p_query_hash_plan& plan = query_plans[plan_ordinal];
                     const query_occurrence_group group{
                         .hash = plan.hash,
                         .occurrence_ref_begin = plan.occurrence_ref_begin,
@@ -688,11 +781,11 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                                 .counter_ordinal = static_cast<std::uint32_t>(group_ordinal),
                             });
                         }
-                    };
+                };
                 if (view.occurrence_layout.packed()) {
-                    consume_indexed_groups(view.packed_occurrences, view.packed_occurrence_count);
+                    consume_indexed_groups(packed_occurrences.data(), packed_occurrences.size());
                 } else {
-                    consume_indexed_groups(view.wide_occurrences, view.wide_occurrence_count);
+                    consume_indexed_groups(wide_occurrences.data(), wide_occurrences.size());
                 }
             }
 
@@ -714,6 +807,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                         block_count_,
                         [this,
                          &scratch,
+                         &query_plans,
                          &first_error,
                          &rejected_prefix_bytes,
                          &rejected_matched_count_bytes,
@@ -721,7 +815,7 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                          use_fixed_h32_c16_p16,
                          bucket_direct_matcher](std::size_t block_begin,
                                                 std::size_t block_end) noexcept {
-                            const std::span<const query_hash_plan> plans{scratch.query_plans_};
+                            const std::span<const p_query_hash_plan> plans{query_plans};
                             const std::span<const std::uint32_t> radix{scratch.query_plan_radix_};
                             for (std::size_t block_ordinal = block_begin; block_ordinal < block_end;
                                  ++block_ordinal) {
@@ -736,7 +830,6 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                                     .pass = fragment_probe_pass::rejected_validation,
                                     .block = &block_plans_[block_ordinal],
                                     .block_ordinal = block_ordinal,
-                                    .plans = plans,
                                     .query_plan_radix = radix,
                                     .scratch = &scratch,
                                     .bucket_direct_matcher = bucket_direct_matcher,
@@ -745,11 +838,14 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                                     .rejected_prefix_bytes = &block_prefix_bytes,
                                 };
                                 if (use_fixed_h32_c16_p16) {
-                                    validated = probe_block_h32_c16_p16_<p_oracle>(context);
+                                    validated = probe_block_h32_c16_p16_<p_oracle>(
+                                        context,
+                                        std::span<const query_hash_plan>{scratch.query_plans_});
                                 } else {
                                     validated = visit_matched_controls_<p_oracle>(
                                         block_plans_[block_ordinal],
                                         context,
+                                        plans,
                                         [](std::size_t,
                                            const query_occurrence_group&,
                                            const grouped_soa_decoded_control&) noexcept
@@ -837,12 +933,13 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                     [this,
                      queries,
                      &scratch,
+                     &query_plans,
                      &first_error,
                      max_occ_u32,
                      use_fixed_h32_c16_p16,
                      bucket_direct_matcher](std::size_t block_begin,
                                             std::size_t block_end) noexcept {
-                        const std::span<const query_hash_plan> plans{scratch.query_plans_};
+                        const std::span<const p_query_hash_plan> plans{query_plans};
                         const std::span<const std::uint32_t> radix{scratch.query_plan_radix_};
                         for (std::size_t block_ordinal = block_begin; block_ordinal < block_end;
                              ++block_ordinal) {
@@ -858,7 +955,6 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                                 .pass = fragment_probe_pass::orientation,
                                 .block = &block_plans_[block_ordinal],
                                 .block_ordinal = block_ordinal,
-                                .plans = plans,
                                 .query_plan_radix = radix,
                                 .queries = queries,
                                 .scratch = &scratch,
@@ -870,11 +966,14 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                                 .position_bytes = &block_position_bytes,
                             };
                             if (use_fixed_h32_c16_p16) {
-                                counted = probe_block_h32_c16_p16_<p_oracle>(context);
+                                counted = probe_block_h32_c16_p16_<p_oracle>(
+                                    context,
+                                    std::span<const query_hash_plan>{scratch.query_plans_});
                             } else {
                                 counted = visit_matched_controls_<p_oracle>(
                                     block_plans_[block_ordinal],
                                     context,
+                                    plans,
                                     [this,
                                      queries,
                                      &scratch,
@@ -1072,12 +1171,13 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                      queries,
                      &batch,
                      &scratch,
+                     &query_plans,
                      &first_error,
                      max_occ_u32,
                      use_fixed_h32_c16_p16,
                      bucket_direct_matcher](std::size_t block_begin,
                                             std::size_t block_end) noexcept {
-                        const std::span<const query_hash_plan> plans{scratch.query_plans_};
+                        const std::span<const p_query_hash_plan> plans{query_plans};
                         const std::span<const std::uint32_t> radix{scratch.query_plan_radix_};
                         for (std::size_t block_ordinal = block_begin; block_ordinal < block_end;
                              ++block_ordinal) {
@@ -1094,7 +1194,6 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                                 .pass = fragment_probe_pass::emission,
                                 .block = &block,
                                 .block_ordinal = block_ordinal,
-                                .plans = plans,
                                 .query_plan_radix = radix,
                                 .queries = queries,
                                 .scratch = &scratch,
@@ -1107,11 +1206,14 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
                                 .anchors_constructed = &block_anchors_constructed,
                             };
                             if (use_fixed_h32_c16_p16) {
-                                emitted = probe_block_h32_c16_p16_<p_oracle>(context);
+                                emitted = probe_block_h32_c16_p16_<p_oracle>(
+                                    context,
+                                    std::span<const query_hash_plan>{scratch.query_plans_});
                             } else {
                                 emitted = visit_matched_controls_<p_oracle>(
                                     block,
                                     context,
+                                    plans,
                                     [this,
                                      queries,
                                      &batch,
@@ -1462,6 +1564,28 @@ prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(
         batch.ready_ = true;
         scratch.wave_state_.store(query_wave_scratch::wave_state::outstanding,
                                   std::memory_order_release);
+        };
+        if constexpr (p_compact_direct) {
+            finish_native_batch(scratch.packed_occurrences_,
+                                scratch.wide_occurrences_,
+                                scratch.query_plans_);
+        } else {
+            switch (profile_.hash_width) {
+            case minimizer_scalar_width::u32:
+                finish_native_batch(scratch.packed_occurrences_,
+                                    scratch.wide_occurrences_,
+                                    scratch.query_plans_);
+                break;
+            case minimizer_scalar_width::u64:
+                finish_native_batch(scratch.packed_occurrences_h64_,
+                                    scratch.wide_occurrences_h64_,
+                                    scratch.query_plans_h64_);
+                break;
+            case minimizer_scalar_width::u16:
+                throw persisted_minimizer_lookup_error(
+                    "fragment-native query occurrence hash width is unsupported");
+            }
+        }
         return batch;
     } catch (...) {
         scratch.reset_failed_wave_();

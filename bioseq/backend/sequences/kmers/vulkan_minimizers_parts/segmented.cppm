@@ -140,7 +140,9 @@ decode_sorted_pair_bytes(
  * @throws vulkan_runtime_error For every selected-Vulkan rejection.
  */
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw
-template <class p_sequence>
+template <bioseq::minimizers::generated_minimizer_physical_record p_minimizer_type =
+              bioseq::minimizers::minimap_sketch_data,
+          class p_sequence>
 [[nodiscard]] vulkan_owned_segment_pairs
 collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
     const p_sequence& seq,
@@ -154,7 +156,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
     vulkan_segment_pair_execution_stats* execution_stats_out = nullptr)
 {
     using bare = std::remove_cvref_t<p_sequence>;
-    using minimizer_type = bioseq::minimizers::minimap_sketch_data;
+    using minimizer_type = p_minimizer_type;
     vulkan_segment_pair_execution_stats execution_stats{};
     if (execution_stats_out != nullptr) {
         *execution_stats_out = {};
@@ -184,6 +186,19 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 throw_vulkan_strict_decline(
                     "Vulkan segment minimizer pair path", path_decline);
             }
+            // Direct resident callers must not bypass the facade's physical
+            // capacity selection. The two-word wire reserves one span byte.
+            constexpr std::size_t record_hash_bits =
+                minimizer_type::layout_type::k_hash_bits;
+            constexpr std::size_t wire_hash_bits = sizeof(minimizer_type) == 16u
+                ? std::min<std::size_t>(record_hash_bits, 56u)
+                : record_hash_bits;
+            if (kmer_size > wire_hash_bits / 2u) {
+                path_decline.reason =
+                    vulkan_sketch_decline_reason::kmer_size_unsupported;
+                throw_vulkan_strict_decline(
+                    "Vulkan segment minimizer pair record capacity", path_decline);
+            }
             if (!vulkan_minimizer_window_size_supported(window_size)) {
                 path_decline.reason =
                     vulkan_sketch_decline_reason::window_size_unsupported;
@@ -201,7 +216,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 throw_vulkan_strict_decline(
                     "Vulkan segment minimizer pair path", path_decline);
             }
-            if (descriptor.window_bp
+            if (descriptor.window_bp - 1u
                 > static_cast<std::uint64_t>(
                     minimizer_type::k_position_field_mask)) {
                 path_decline.reason =

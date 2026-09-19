@@ -4,111 +4,41 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <bioseq/pg_compat.h>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <libassert/assert.hpp>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+extern "C" {
+#include "postgres.h"
 
-export module bioseq.postgres.scheduler.dispatch_processor.typed_support:pg_alignment_errors;
+#include "utils/errcodes.h"
+}
 
-import bioseq.postgres.scheduler.dispatch_processor;
-import :policy_stats;
-import bioseq.highway.dispatch_contract;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <new>
+
+export module bioseq.postgres.scheduler.dispatch_processor.typed_support.pg_alignment_errors;
+
+export import bioseq.postgres.scheduler.dispatch_processor.checked_alignment_calls;
+import std;
+import bioseq.postgres.scheduler.dispatch_processor.operational_stats;
 import bioseq.common.seqan_adapter;
 import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.configuration.scheduler;
-import bioseq.indexing.type;
-import bioseq.indexing.traits;
-import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
+import bioseq.postgres.storage.indexing.active_read_policy;
 import bioseq.sequences;
-import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
 import bioseq.sequences.cigar;
 import bioseq.pipeline.minimap_port;
 import bioseq.pipeline.pipe;
 import bioseq.gpu.vulkan.runtime;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.instrumentation.clock;
-import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
-import bioseq.instrumentation.profiler_state;
-import bioseq.instrumentation.region;
-import bioseq.instrumentation.runtime;
-import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-// PostgreSQL ERROR is implemented with longjmp.  Keep diagnostic formatting and
-// every owning C++ object in the ordinary C++ caller, and enter PostgreSQL only
-// through this primitive-capture leaf.  invoke_pg_as_cpp converts the ERROR to a
-// postgres_error after leaving PG_TRY, so normal C++ unwinding owns all
-// destruction.
-[[noreturn]] inline void raise_typed_dispatch_pg_error_as_cpp(const int sqlstate,
-                                                              const char* message,
-                                                              const char* detail = nullptr,
-                                                              const char* hint = nullptr) {
-    bioseq::postgres::support::invoke_pg_as_cpp([sqlstate, message, detail, hint] {
-        if (detail != nullptr && hint != nullptr) {
-            ereport(ERROR,
-                    (errcode(sqlstate),
-                     errmsg_internal("%s", message),
-                     errdetail_internal("%s", detail),
-                     errhint("%s", hint)));
-        } else if (detail != nullptr) {
-            ereport(ERROR,
-                    (errcode(sqlstate),
-                     errmsg_internal("%s", message),
-                     errdetail_internal("%s", detail)));
-        } else if (hint != nullptr) {
-            ereport(ERROR,
-                    (errcode(sqlstate), errmsg_internal("%s", message), errhint("%s", hint)));
-        } else {
-            ereport(ERROR, (errcode(sqlstate), errmsg_internal("%s", message)));
-        }
-    });
-    pg_unreachable();
-}
-
 /** Reports that a row requires a compatible persisted minimizer index and none is wired. */
+template <class p_scanner_pg_context>
 [[noreturn]] inline void
-raise_required_persisted_index_error(const batch_processor::scanner_pg_context* scanner_pg_ctx,
+raise_required_persisted_index_error(const p_scanner_pg_context* scanner_pg_ctx,
                                      const std::int64_t target_row,
                                      std::string_view reason) {
     const std::string_view active_index =
@@ -121,7 +51,7 @@ raise_required_persisted_index_error(const batch_processor::scanner_pg_context* 
                   scanner_pg_ctx->active_index_policy_source)
             : std::string_view{"no_scanner_context"};
     const std::string detail =
-        fmt::format("index_read_requirement=require_compatible_persisted "
+        std::format("index_read_requirement=require_compatible_persisted "
                     "target_row={} active_index={} active_index_policy_source={} reason={}",
                     static_cast<long long>(target_row),
                     active_index,
@@ -170,11 +100,11 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
             "GPU CIGAR extension received inverted sequence window");
     }
     const sequence_size_t len_bp = end_bp - start_bp;
-    if (len_bp > bioseq::gpu::vulkan::k_gpu_alignment_simple_cigar_max_len) {
+    if (len_bp > bioseq::gpu::vulkan::k_gpu_alignment_cigar_operation_max_len) {
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
-            fmt::format("GPU CIGAR extension window length {} exceeds simple CIGAR limit {}",
+            std::format("GPU CIGAR extension window length {} exceeds packed-operation limit {}",
                         len_bp,
-                        bioseq::gpu::vulkan::k_gpu_alignment_simple_cigar_max_len));
+                        bioseq::gpu::vulkan::k_gpu_alignment_cigar_operation_max_len));
     }
     if (end_bp > static_cast<sequence_size_t>(seq.bp_size())) {
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
@@ -254,9 +184,9 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
             "GPU CIGAR lazy sequence window is invalid");
     }
     const sequence_size_t length_bp = end_bp - start_bp;
-    if (length_bp > bioseq::gpu::vulkan::k_gpu_alignment_simple_cigar_max_len) {
+    if (length_bp > bioseq::gpu::vulkan::k_gpu_alignment_cigar_operation_max_len) {
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
-            "GPU CIGAR lazy sequence window exceeds the supported limit");
+            "GPU CIGAR lazy sequence window exceeds the packed-operation limit");
     }
     const std::size_t length = static_cast<std::size_t>(length_bp);
     const std::size_t output_offset = destination.size();
@@ -364,7 +294,8 @@ gpu_alignment_common_match_run(std::span<const std::uint32_t> query_symbols,
 }
 
 /** Decodes packed GPU CIGAR words into @p destination and merges adjacent identical opcodes. */
-inline void append_packed_cigar_slice(std::vector<cigar_operation>& destination,
+template <class p_cigar_storage>
+inline void append_packed_cigar_slice(p_cigar_storage& destination,
                                       std::span<const std::uint32_t> packed) {
     for (std::uint32_t entry : packed) {
         const std::uint32_t opcode = entry & 0xfU;
@@ -380,179 +311,12 @@ inline void append_packed_cigar_slice(std::vector<cigar_operation>& destination,
     }
 }
 
-/** Maps a Vulkan aligner failure to ERRCODE_INTERNAL_ERROR with no CPU fallback hint. */
-[[noreturn]] inline void raise_vulkan_pg_error(std::string_view stage, std::string_view detail) {
-    const std::string diagnostic = fmt::format("{}: {}", stage, detail);
-    raise_typed_dispatch_pg_error_as_cpp(
-        ERRCODE_INTERNAL_ERROR,
-        "Vulkan aligner execution failed",
-        diagnostic.c_str(),
-        "Selected Vulkan execution has no CPU fallback; fix the Vulkan "
-        "runtime or select a non-Vulkan algorithm before dispatch.");
-}
-
-/** Maps an exact SIMD minimizer failure to ERRCODE_FEATURE_NOT_SUPPORTED. */
-[[noreturn]] inline void raise_exact_simd_pg_error(std::string_view stage,
-                                                   std::string_view detail) {
-    const std::string diagnostic = fmt::format("{}: {}", stage, detail);
-    raise_typed_dispatch_pg_error_as_cpp(
-        ERRCODE_FEATURE_NOT_SUPPORTED,
-        "Exact SIMD minimizer execution is unsupported for this request",
-        diagnostic.c_str(),
-        "Exact SIMD has no scalar fallback; use DNA4 with a supported packed "
-        "storage width and supported W/K/vector shape, or select a different "
-        "algorithm tuple explicitly.");
-}
-
-/** Maps a bounded ntHash SIMD failure to ERRCODE_FEATURE_NOT_SUPPORTED. */
-[[noreturn]] inline void raise_bounded_nthash_pg_error(std::string_view stage,
-                                                       std::string_view detail) {
-    const std::string diagnostic = fmt::format("{}: {}", stage, detail);
-    raise_typed_dispatch_pg_error_as_cpp(
-        ERRCODE_FEATURE_NOT_SUPPORTED,
-        "Bounded ntHash SIMD minimizer execution is unsupported for this request",
-        diagnostic.c_str(),
-        "Bounded ntHash SIMD has no scalar or Exact SIMD fallback; use "
-        "DNA4 with packed uint32/uint64 storage, W=10, K=15, and an "
-        "admissible range, or select another algorithm explicitly.");
-}
-
-/** Maps SIMD chaining failure to invalid-parameter or unsupported-feature PostgreSQL errors. */
-[[noreturn]] inline void raise_simd_chaining_pg_error(std::string_view stage,
-                                                      pipe::simd_chaining_status status,
-                                                      std::string_view detail) {
-    const std::string diagnostic = fmt::format("{}: {}", stage, detail);
-    if (status == pipe::simd_chaining_status::invalid_policy) {
-        raise_typed_dispatch_pg_error_as_cpp(
-            ERRCODE_INVALID_PARAMETER_VALUE,
-            "SIMD chaining policy is invalid for this request",
-            diagnostic.c_str(),
-            "Select exact_visited or bounded_batch_approximate explicitly; "
-            "the rejected request is not retried with exact or scalar chaining.");
-    }
-    raise_typed_dispatch_pg_error_as_cpp(
-        ERRCODE_FEATURE_NOT_SUPPORTED,
-        "SIMD chaining execution is unsupported for this request",
-        diagnostic.c_str(),
-        "The selected SIMD chaining policy has no exact or scalar fallback; use "
-        "a supported SIMD target and valid parameters, or explicitly select a "
-        "different chaining algorithm before dispatch.");
-}
-
-/** Maps inconsistent persisted minimizer lookup to ERRCODE_DATA_CORRUPTED. */
-[[noreturn]] inline void raise_persisted_minimizer_lookup_pg_error(std::string_view stage,
-                                                                   std::string_view detail) {
-    const std::string diagnostic = fmt::format("{}: {}", stage, detail);
-    raise_typed_dispatch_pg_error_as_cpp(
-        ERRCODE_DATA_CORRUPTED,
-        "Persisted minimizer lookup is incomplete or inconsistent",
-        diagnostic.c_str(),
-        "Rebuild the compatible persisted index generation; this path has no "
-        "recompute or scalar fallback.");
-}
-
-/** Copies @p source into @p destination without exceeding capacity and returns the byte length. */
-template <std::size_t p_capacity>
-[[nodiscard]] inline std::size_t copy_pg_error_detail(std::array<char, p_capacity>& destination,
-                                                      const char* source) noexcept {
-    static_assert(p_capacity > 0u);
-    if (source == nullptr) {
-        destination[0] = '\0';
-        return 0u;
-    }
-    std::size_t size = 0u;
-    while (size + 1u < p_capacity && source[size] != '\0') {
-        destination[size] = source[size];
-        ++size;
-    }
-    destination[size] = '\0';
-    return size;
-}
-
-/** Runs an aligner callable and re-raises typed runtime failures as PostgreSQL ERROR. */
-template <class p_function>
-[[nodiscard]] match_result_collection run_aligner_pg_checked(std::string_view stage,
-                                                             p_function&& fn) {
-    /** Classifies which raise_*_pg_error path follows a caught aligner exception. */
-    enum class failure_kind : std::uint8_t {
-        none,
-        vulkan,
-        exact_simd,
-        bounded_nthash,
-        simd_chaining,
-        persisted_minimizer_lookup,
-    };
-    failure_kind failure = failure_kind::none;
-    pipe::simd_chaining_status simd_chaining_status = pipe::simd_chaining_status::ok;
-    // PostgreSQL ERROR is a longjmp. Keep only trivially destructible state
-    // alive after the C++ catch blocks; a std::string here would have its
-    // destructor skipped by every raise_*_pg_error call below.
-    std::array<char, 2048> detail{};
-    std::size_t detail_size = 0u;
-    try {
-        return std::forward<p_function>(fn)();
-    } catch (const bioseq::gpu::vulkan::vulkan_runtime_error& err) {
-        failure = failure_kind::vulkan;
-        detail_size = copy_pg_error_detail(detail, err.what());
-    } catch (const pipe::exact_simd_runtime_error& err) {
-        failure = failure_kind::exact_simd;
-        detail_size = copy_pg_error_detail(detail, err.what());
-    } catch (const pipe::bounded_nthash_runtime_error& err) {
-        failure = failure_kind::bounded_nthash;
-        detail_size = copy_pg_error_detail(detail, err.what());
-    } catch (const pipe::simd_chaining_runtime_error& err) {
-        failure = failure_kind::simd_chaining;
-        simd_chaining_status = err.status();
-        detail_size = copy_pg_error_detail(detail, err.what());
-    } catch (const bioseq::indexing::persisted_minimizer_lookup_error& err) {
-        failure = failure_kind::persisted_minimizer_lookup;
-        detail_size = copy_pg_error_detail(detail, err.what());
-    }
-    // The C++ exception object has been destroyed, and only the fixed buffer,
-    // length, enum, and string_view arguments remain across PostgreSQL ERROR.
-    const std::string_view detail_view{detail.data(), detail_size};
-    switch (failure) {
-    case failure_kind::vulkan:
-        raise_vulkan_pg_error(stage, detail_view);
-    case failure_kind::exact_simd:
-        raise_exact_simd_pg_error(stage, detail_view);
-    case failure_kind::bounded_nthash:
-        raise_bounded_nthash_pg_error(stage, detail_view);
-    case failure_kind::simd_chaining:
-        raise_simd_chaining_pg_error(stage, simd_chaining_status, detail_view);
-    case failure_kind::persisted_minimizer_lookup:
-        raise_persisted_minimizer_lookup_pg_error(stage, detail_view);
-    case failure_kind::none:
-        break;
-    }
-    __builtin_unreachable();
-}
-
 /** PostgreSQL-checked wrapper around minimap_port_raw_owned. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_raw_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked("minimap_port", [&args...]() -> match_result_collection {
-        return minimap_port_raw_owned(std::forward<p_arguments>(args)...);
+        return ::bioseq::simd::minimap_port_raw_owned(std::forward<p_arguments>(args)...);
     });
-}
-
-/** PostgreSQL-checked wrapper around minimap_port_segmented_owned. */
-template <class... p_arguments>
-[[nodiscard]] match_result_collection minimap_port_segmented_pg_checked(p_arguments&&... args) {
-    return run_aligner_pg_checked(
-        "minimap_port_segmented", [&args...]() -> match_result_collection {
-            return minimap_port_segmented_owned(std::forward<p_arguments>(args)...);
-        });
-}
-
-/** PostgreSQL-checked wrapper around minimap_port_fragment_index_vector_owned. */
-template <class... p_arguments>
-[[nodiscard]] match_result_collection
-minimap_port_fragment_index_vector_pg_checked(p_arguments&&... args) {
-    return run_aligner_pg_checked(
-        "minimap2_port_with_index", [&args...]() -> match_result_collection {
-            return minimap_port_fragment_index_vector_owned(std::forward<p_arguments>(args)...);
-        });
 }
 
 /** PostgreSQL-checked wrapper around minimap_port_hash_major_owned. */
@@ -560,7 +324,8 @@ template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_hash_major_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked(
         "minimap2_port_with_index", [&args...]() -> match_result_collection {
-            return minimap_port_hash_major_owned(std::forward<p_arguments>(args)...);
+            return ::bioseq::simd::minimap_port_hash_major_owned(
+                std::forward<p_arguments>(args)...);
         });
 }
 
@@ -569,7 +334,8 @@ template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_grouped_soa_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked(
         "minimap2_port_with_index", [&args...]() -> match_result_collection {
-            return minimap_port_grouped_soa_owned(std::forward<p_arguments>(args)...);
+            return ::bioseq::simd::minimap_port_grouped_soa_owned(
+                std::forward<p_arguments>(args)...);
         });
 }
 

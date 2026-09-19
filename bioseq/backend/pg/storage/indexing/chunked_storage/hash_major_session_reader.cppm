@@ -51,37 +51,15 @@ extern "C" {
 #include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
 #include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <tuple>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
-export module bioseq.postgres.storage.indexing.chunked_storage:hash_major_session_reader;
+#include <cstdint>
+#include <new>
+export module bioseq.postgres.storage.indexing.hash_major_session_reader;
+import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
@@ -98,7 +76,6 @@ import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimi
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
@@ -116,9 +93,8 @@ import bioseq.postgres.storage.physical;
 import bioseq.postgres.storage.indexing.sql_row_codecs;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
-import :catalog;
-import :hash_major_writer;
-import :hash_major_parallel_probe;
+import bioseq.postgres.storage.indexing.chunked_storage;
+export import bioseq.postgres.storage.indexing.hash_major_parallel_probe_contract;
 export namespace bioseq::storage::indexing {
 /// Snapshot-bound reader for one READY hash-major generation and its three streams.
 class index_storage_hash_major_minimizer_read_session {
@@ -1087,38 +1063,33 @@ class index_storage_hash_major_minimizer_read_session {
         minimizer_generation_catalog_source_authorization&& authorization) {
         try {
             if (state_ != operation_state::metadata_ready || !head_ || !manifest_ ||
-                !authorization.valid_ || !authorization.stats_.timed_equation_holds() ||
-                authorization.snapshot_ != snapshot_ ||
-                authorization.database_oid_ != MyDatabaseId ||
-                authorization.tablespace_oid_ != expected_tablespace_oid_ ||
-                authorization.index_name_ != index_name_ ||
-                authorization.source_.sequence_rowno != query_key_ ||
-                authorization.table_name_ != table_name_) {
-                authorization.invalidate_();
+                !authorization.matches_hash_major_reader(snapshot_,
+                                                          MyDatabaseId,
+                                                          expected_tablespace_oid_,
+                                                          index_name_,
+                                                          query_key_,
+                                                          table_name_)) {
+                authorization.invalidate_after_consumption();
                 fail_("hash-major source authorization binding/work disagrees");
             }
+            const auto& authorized_source = authorization.source_for_diagnostics();
+            const std::uint64_t authorized_checksum =
+                authorization.source_content_checksum_for_diagnostics();
             const auto source_identity = bioseq::indexing::hash_major_minimizer_source_identity(
                 query_key_,
-                authorization.source_.locator.source_epoch,
-                authorization.source_content_checksum_,
-                authorization.source_.locator.logical_length);
-            if (authorization.source_.locator.source_epoch != manifest_->source_epoch ||
-                authorization.source_content_checksum_ != manifest_->source_content_crc64 ||
-                authorization.source_.locator.logical_length != manifest_->target_length ||
-                authorization.source_.alphabet_code != manifest_->storage_profile.alphabet_code ||
+                authorized_source.locator.source_epoch,
+                authorized_checksum,
+                authorized_source.locator.logical_length);
+            if (authorized_source.locator.source_epoch != manifest_->source_epoch ||
+                authorized_checksum != manifest_->source_content_crc64 ||
+                authorized_source.locator.logical_length != manifest_->target_length ||
+                authorized_source.alphabet_code != manifest_->storage_profile.alphabet_code ||
                 source_identity != manifest_->source_identity ||
                 source_identity != head_->source_identity) {
-                authorization.invalidate_();
+                authorization.invalidate_after_consumption();
                 fail_("hash-major source identity/content disagrees");
             }
-            stats_.source_parent_rows_read = authorization.stats_.parent_rows_read;
-            stats_.source_catalog_rows_read = authorization.stats_.catalog_rows_read;
-            stats_.source_catalog_index_scans = authorization.stats_.catalog_index_scans;
-            stats_.source_fragment_rows_read = authorization.stats_.fragment_rows_read;
-            stats_.source_decoded_bp = authorization.stats_.decoded_bp;
-            stats_.source_storage_incarnations_checked =
-                authorization.stats_.storage_incarnations_checked;
-            stats_.cold.merge(authorization.cold_stats_);
+            authorization.record_hash_major_reader_stats(stats_);
             expected_generation_.emplace(expected_hash_major_minimizer_generation{
                 .generation_id = head_->generation_id,
                 .query_key = query_key_,
@@ -1127,11 +1098,11 @@ class index_storage_hash_major_minimizer_read_session {
                 .target_length = manifest_->target_length,
                 .storage_profile = manifest_->storage_profile,
             });
-            authorization.invalidate_();
+            authorization.invalidate_after_consumption();
             state_ = operation_state::source_authorized;
             return *expected_generation_;
         } catch (...) {
-            authorization.invalidate_();
+            authorization.invalidate_after_consumption();
             state_ = operation_state::failed;
             throw;
         }
@@ -1152,14 +1123,7 @@ class index_storage_hash_major_minimizer_read_session {
     /// Execute the isolated process-parallel transport experiment without
     /// changing the production selective-reader callbacks.
     [[nodiscard]] hash_major_minimizer_parallel_scan_stats
-    run_parallel_scan_probe(std::uint32_t requested_workers) {
-        if (state_ != operation_state::source_authorized || active_scan_ != nullptr ||
-            heap_relation_ == nullptr || !manifest_) {
-            fail_("hash-major parallel scan probe is out of order");
-        }
-        return hash_major_minimizer_parallel_probe_detail::run_probe(
-            heap_relation_, snapshot_, *manifest_, query_key_, requested_workers);
-    }
+    run_parallel_scan_probe(std::uint32_t requested_workers);
 
     /// Administrative/restart audit. Each stream is reread in primary-key
     /// order with one physical row resident at a time. The scan authenticates
@@ -1257,5 +1221,58 @@ static_assert(!std::is_default_constructible_v<index_storage_hash_major_minimize
 static_assert(!std::is_copy_constructible_v<index_storage_hash_major_minimizer_read_session>);
 static_assert(
     std::is_nothrow_move_constructible_v<index_storage_hash_major_minimizer_read_session>);
+
+/// Normal open outcome with either an owned reader or classified absence.
+struct hash_major_minimizer_read_session_open_result {
+    std::optional<index_storage_hash_major_minimizer_read_session> session{};
+    minimizer_generation_relation_inspection relation_failure{
+        .kind = minimizer_generation_relation_kind::malformed,
+        .schema_error = minimizer_generation_schema_error::none,
+    };
+    bool head_absent = false;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return session.has_value();
+    }
+};
+
+/// Open the exact current-generation reader or return a classified absence
+/// without weakening schema validation.
+[[nodiscard]] inline hash_major_minimizer_read_session_open_result
+open_exact_hash_major_minimizer_read_session_pg(
+    std::string_view table_name,
+    std::string_view index_name,
+    std::uint64_t query_key,
+    const borrowed_executor_read_context& executor_read) {
+    if (!executor_read.valid()) {
+        minimizer_generation_storage_error_as_cpp(
+            "hash-major read requires a valid executor context");
+    }
+    hash_major_minimizer_read_session_open_result result{};
+    try {
+        result.session.emplace(table_name,
+                               index_name,
+                               query_key,
+                               executor_read.snapshot(),
+                               executor_read.tablespace_oid());
+        if (!result.session->read_active_head_manifest_once()) {
+            result.session->close_head_absent();
+            result.session.reset();
+            result.head_absent = true;
+            result.relation_failure = {
+                .kind = minimizer_generation_relation_kind::current_exact,
+                .schema_error = minimizer_generation_schema_error::none,
+            };
+        } else {
+            result.relation_failure = {
+                .kind = minimizer_generation_relation_kind::current_exact,
+                .schema_error = minimizer_generation_schema_error::none,
+            };
+        }
+    } catch (const minimizer_generation_relation_open_failure& failure) {
+        result.relation_failure = failure.inspection;
+    }
+    return result;
+}
 
 } // namespace bioseq::storage::indexing

@@ -4,79 +4,38 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <bioseq/pg_compat.h>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <libassert/assert.hpp>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+extern "C" {
+#include "postgres.h"
+#include "access/attnum.h"
+#include "miscadmin.h"
+#include "utils/errcodes.h"
+#include "utils/memutils.h"
+#include "varatt.h"
+}
 
-export module bioseq.postgres.scheduler.dispatch_processor.typed_support:generic_rows;
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
+#include <new>
+
+export module bioseq.postgres.scheduler.dispatch_processor.typed_support.generic_rows;
+
+import std;
 import bioseq.postgres.scheduler.dispatch_processor;
-import :policy_stats;
-import :pg_alignment_errors;
-import :transient_storage;
-import :resident_targets;
-import :row_adapters;
-import :scanner_row;
-import bioseq.highway.dispatch_contract;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.policy_stats;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.pg_alignment_errors;
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
-import bioseq.common.seqan_adapter;
 import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.configuration.scheduler;
-import bioseq.indexing.type;
-import bioseq.indexing.traits;
-import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
 import bioseq.sequences;
-import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.gpu.vulkan.runtime;
+import bioseq.pipeline.minimizer_execution_contract;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.instrumentation.clock;
-import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
-import bioseq.instrumentation.profiler_state;
-import bioseq.instrumentation.region;
-import bioseq.instrumentation.runtime;
-import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
@@ -84,7 +43,12 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
  * Runs the non-Vulkan row dispatcher, retaining worker ordering, cancellation
  * points, source accounting, and the scanner/in-memory generated identities.
  */
-template <class p_sequence, class p_pool, class p_scanner_row, class p_inmemory_row>
+template <class p_sequence,
+          class p_pool,
+          class p_scanner_row,
+          class p_inmemory_row,
+          class p_with_pg_sequence_recipe,
+          class p_with_source_provider_pg_locator>
 void process_generic_rows(
     const size_t batch_size,
     const uint8_t alphabet_code,
@@ -93,7 +57,7 @@ void process_generic_rows(
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>& target_hdrs,
     const std::array<int32_t, dispatch_batch_capacity>& query_ids,
-    const minimap2_parameters& dispatch_params,
+    pipe::statement_execution_plan_owner execution_plan,
     const std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     batch_processor::scanner_pg_context* scanner_pg_ctx,
@@ -102,16 +66,21 @@ void process_generic_rows(
     bool& shared_target_outcome_recorded,
     const bool chunked_scanner_forced,
     const bool use_scanner_pg,
-    std::optional<std::vector<minimap_sketch_data>>& cached_query_minimizers,
+    std::shared_ptr<const std::vector<minimap_sketch_data>>& cached_query_minimizers,
     std::optional<pipe::minimizer_range_execution_stats>& cached_query_minimizer_stats,
     bool& cached_query_minimizer_stats_accounted,
     p_pool& pool,
     p_scanner_row& scanner_row,
     p_inmemory_row& inmemory_row,
-    std::map<int32_t, std::vector<match_result>>& results) {
+    match_result_map& results,
+    p_with_pg_sequence_recipe& with_pg_sequence_recipe_fn,
+    p_with_source_provider_pg_locator& with_source_provider_pg_locator_fn) {
+    if (!execution_plan) {
+        throw std::invalid_argument("generic rows require a statement plan owner");
+    }
+    const minimap2_parameters& dispatch_params = execution_plan->frozen_parameters;
     std::vector<std::uint8_t> parallel_done;
-    std::vector<match_result_collection> parallel_collections;
-    std::vector<minimap2_parameters> parallel_params;
+    match_result_collection_vector parallel_collections;
 
     const bool may_dispatch_parallel =
         !dispatch_params.enable_profiling && !selected_vulkan_accelerator(dispatch_params) &&
@@ -120,8 +89,10 @@ void process_generic_rows(
         pool.maximum_concurrency() > 1 && batch_size >= 2;
     if (may_dispatch_parallel) {
         parallel_done.assign(batch_size, 0);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        parallel_collections.set_logical_bounds(batch_size, batch_size);
+#endif
         parallel_collections.resize(batch_size);
-        parallel_params.resize(batch_size);
 
         pool.parallel_for_with_context(
             0,
@@ -135,10 +106,13 @@ void process_generic_rows(
                  per_row_query_hdrs,
                  per_row_query_mode,
                  &target_hdrs,
-                 &dispatch_params,
+                 execution_plan,
                  &parallel_done,
                  &parallel_collections,
-                 &parallel_params,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                 scanner_pg_ctx,
+                 broadcast_query_ordinal,
+#endif
                  &inmemory_row](const std::size_t range_begin, const std::size_t range_end) {
                     for (std::size_t row_index = range_begin;
                          row_index < range_end && row_index < batch_size;
@@ -158,17 +132,21 @@ void process_generic_rows(
                         if (target_hdr->bp_size > postgres_segmentation_threshold_bp) {
                             continue;
                         }
-                        const size_t min_bp =
-                            std::min<size_t>(static_cast<size_t>(row_query_hdr->bp_size),
-                                             static_cast<size_t>(target_hdr->bp_size));
-                        minimap2_parameters params = apply_size_heuristic(dispatch_params, min_bp);
+                        const minimap2_parameters& params = execution_plan->frozen_parameters;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                        const auto origin_scope = bind_benchmark_e2e_operation_origin(
+                            execution_plan,
+                            scanner_pg_ctx,
+                            row_index,
+                            per_row_query_mode,
+                            broadcast_query_ordinal);
+#endif
                         parallel_collections[row_index] =
                             inmemory_row(row_query_hdr,
                                          target_hdr,
                                          static_cast<sequence_size_t>(target_hdr->bp_size),
-                                         params,
+                                         execution_plan,
                                          false);
-                        parallel_params[row_index] = params;
                         parallel_done[row_index] = 1;
                     }
                 }});
@@ -196,7 +174,7 @@ void process_generic_rows(
                 shared_target_outcome_recorded = true;
             }
             record_unattested_job(stats,
-                                  parallel_params[row_index],
+                                  execution_plan,
                                   requested_source,
                                   ::bioseq::pipeline_stats::target_index_source::recomputed,
                                   scanner_pg_ctx,
@@ -215,10 +193,10 @@ void process_generic_rows(
                 "[dispatch-parallel]",
                 static_cast<int>(query_ids[row_index]),
                 target_bp_size,
-                parallel_params[row_index].kmer_size,
-                parallel_params[row_index].window_size,
-                parallel_params[row_index].min_chain_score,
-                parallel_params[row_index].min_seed_count,
+                dispatch_params.kmer_size,
+                dispatch_params.window_size,
+                dispatch_params.min_chain_score,
+                dispatch_params.min_seed_count,
                 false,
                 match_count);
             if (!parallel_collections[row_index].is_empty()) {
@@ -355,7 +333,15 @@ void process_generic_rows(
         const size_t min_bp = std::min<size_t>(static_cast<size_t>(row_query_bp_size),
                                                static_cast<size_t>(target_bp_size));
 
-        minimap2_parameters params = apply_size_heuristic(dispatch_params, min_bp);
+        const minimap2_parameters& params = execution_plan->frozen_parameters;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        const auto origin_scope = bind_benchmark_e2e_operation_origin(
+            execution_plan,
+            scanner_pg_ctx,
+            row_index,
+            per_row_query_mode,
+            broadcast_query_ordinal);
+#endif
         match_result_collection collection;
         bool consumed_shared_cached_query_stats = false;
         {
@@ -371,8 +357,7 @@ void process_generic_rows(
                                         row_index,
                                         target_bp_size,
                                         min_bp,
-                                        &dispatch_params,
-                                        &params,
+                                        execution_plan,
                                         per_row_query_mode,
                                         &cached_query_minimizers,
                                         &cached_query_minimizer_stats,
@@ -380,7 +365,8 @@ void process_generic_rows(
                                         alphabet_code,
                                         storage_unit_byte_width,
                                         scanner_pg_ctx,
-                                        &pool](row_view query_lazy_view,
+                                        &pool,
+                                        &scanner_row](row_view query_lazy_view,
                                                std::optional<row_view> target_lazy_view,
                                                pg_sequence_read_session* active_session) {
                     return scanner_row(query_lazy_view,
@@ -389,8 +375,7 @@ void process_generic_rows(
                                        row_index,
                                        target_bp_size,
                                        min_bp,
-                                       dispatch_params,
-                                       params,
+                                       execution_plan,
                                        per_row_query_mode,
                                        cached_query_minimizers,
                                        cached_query_minimizer_stats,
@@ -434,7 +419,7 @@ void process_generic_rows(
                                                      active_session);
                     };
                 if (has_query_recipe) {
-                    with_pg_sequence_recipe<row_alphabet>(
+                    with_pg_sequence_recipe_fn.template operator()<row_alphabet>(
                         *scanner_pg_ctx,
                         query_recipe,
                         scanner_pg_ctx->query_recipe_descriptors[row_index],
@@ -462,7 +447,7 @@ void process_generic_rows(
                         raise_typed_dispatch_pg_error_as_cpp(
                             ERRCODE_DATA_CORRUPTED, "per-row query locator padding is invalid");
                     }
-                    with_source_provider_pg_locator<row_alphabet>(
+                    with_source_provider_pg_locator_fn.template operator()<row_alphabet>(
                         *scanner_pg_ctx,
                         *query_locator,
                         static_cast<AttrNumber>(scanner_pg_ctx->mmsearch_query_attno),
@@ -479,7 +464,7 @@ void process_generic_rows(
                     const row_view query_lazy_view =
                         bioseq::storage::make_lazy_sequence_view(query_seq);
                     if (has_target_recipe) {
-                        with_pg_sequence_recipe<row_alphabet>(
+                        with_pg_sequence_recipe_fn.template operator()<row_alphabet>(
                             *scanner_pg_ctx,
                             target_recipe,
                             scanner_pg_ctx->target_recipe_descriptors[row_index],
@@ -500,7 +485,7 @@ void process_generic_rows(
                 }
             } else if (target_hdr != nullptr) {
                 collection = inmemory_row(
-                    row_query_hdr, target_hdr, target_bp_size, params, chunked_scanner_forced);
+                    row_query_hdr, target_hdr, target_bp_size, execution_plan, chunked_scanner_forced);
             } else if (scanner_pg_ctx != nullptr &&
                        scanner_pg_ctx->target_locators[row_index].has_value()) {
                 // inmemory_forced=ON cannot satisfy its
@@ -539,7 +524,7 @@ void process_generic_rows(
             shared_target_outcome_recorded = true;
         }
         record_unattested_job(stats,
-                              params,
+                              execution_plan,
                               requested_source,
                               target_index_source,
                               scanner_pg_ctx,

@@ -4,31 +4,42 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
-
 extern "C" {
-#include "access/xact.h"
+#include "postgres.h"
+
+#include "access/attnum.h"
 #include "access/relation.h"
 #include "access/table.h"
+#include "access/tupdesc.h"
+#include "access/xact.h"
+#include "fmgr.h"
+#include "miscadmin.h"
+#include "nodes/pg_list.h"
+#include "storage/lockdefs.h"
+#include "utils/errcodes.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
+#include "varatt.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <exception>
 #include <limits>
-#include <memory>
 #include <new>
 #include <span>
-#include <type_traits>
 #include <utility>
 
-export module bioseq.postgres.storage.scanner:fragment_scanner;
+export module bioseq.postgres.storage.scanner.fragment_scanner;
 
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;

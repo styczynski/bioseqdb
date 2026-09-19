@@ -53,20 +53,36 @@ class query_wave_scratch {
         cleaning,
     };
 
-    /// One sorted unique query hash with occurrence-ref bounds and global count.
+    /// One sorted unique native-H32 query hash with occurrence-ref bounds and global count.
     struct query_hash_plan {
-        std::uint32_t hash = 0u;
+        using hash_type = std::uint32_t;
+
+        hash_type hash = 0u;
         std::uint32_t occurrence_ref_begin = 0u;
         std::uint32_t occurrence_ref_count = 0u;
         std::uint32_t global_occurrence_count = 0u;
     };
     static_assert(sizeof(query_hash_plan) == 16u);
 
+    /// One sorted unique H64-oracle query hash with the same logical plan fields.
+    struct query_hash_plan_h64 {
+        using hash_type = std::uint64_t;
+
+        hash_type hash = 0u;
+        std::uint32_t occurrence_ref_begin = 0u;
+        std::uint32_t occurrence_ref_count = 0u;
+        std::uint32_t global_occurrence_count = 0u;
+    };
+    static_assert(sizeof(query_hash_plan_h64) == 24u);
+
     // Declared first so all owned capacities die before their permit.
     bioseq::parallelism::memory_permit permit_{};
     std::vector<packed_query_occurrence> packed_occurrences_{};
     std::vector<wide_query_occurrence> wide_occurrences_{};
+    std::vector<packed_query_occurrence_h64> packed_occurrences_h64_{};
+    std::vector<wide_query_occurrence_h64> wide_occurrences_h64_{};
     std::vector<query_hash_plan> query_plans_{};
+    std::vector<query_hash_plan_h64> query_plans_h64_{};
     std::vector<std::uint32_t> query_group_offsets_{};
     std::vector<std::uint32_t> query_plan_radix_{};
     std::unique_ptr<std::uint64_t[]> query_membership_filter_{};
@@ -77,6 +93,7 @@ class query_wave_scratch {
     std::vector<block_query_anchor_layout> block_query_layouts_{};
     std::vector<fragment_block_wave_stats> block_stats_{};
     query_occurrence_packing_layout occurrence_layout_{};
+    minimizer_scalar_width occurrence_hash_width_ = minimizer_scalar_width::u32;
     std::size_t query_plan_reserve_request_ = 0u;
     bool occurrence_radix_invoked_ = false;
     bool parallel_occurrence_radix_split_selected_ = false;
@@ -92,9 +109,17 @@ class query_wave_scratch {
     [[nodiscard]] std::uint64_t retained_occurrence_capacity_bytes_() const noexcept {
         using bioseq::common::saturating_add;
         using bioseq::common::saturating_mul;
-        return saturating_add(
+        std::uint64_t bytes = saturating_add(
             saturating_mul(packed_occurrences_.capacity(), sizeof(packed_query_occurrence)),
             saturating_mul(wide_occurrences_.capacity(), sizeof(wide_query_occurrence)));
+        bytes = saturating_add(
+            bytes,
+            saturating_mul(packed_occurrences_h64_.capacity(),
+                           sizeof(packed_query_occurrence_h64)));
+        return saturating_add(
+            bytes,
+            saturating_mul(wide_occurrences_h64_.capacity(),
+                           sizeof(wide_query_occurrence_h64)));
     }
 
     /// Returns total retained scratch capacity in bytes across all owned buffers.
@@ -104,6 +129,9 @@ class query_wave_scratch {
         std::uint64_t bytes = retained_occurrence_capacity_bytes_();
         bytes =
             saturating_add(bytes, saturating_mul(query_plans_.capacity(), sizeof(query_hash_plan)));
+        bytes = saturating_add(
+            bytes,
+            saturating_mul(query_plans_h64_.capacity(), sizeof(query_hash_plan_h64)));
         bytes = saturating_add(
             bytes, saturating_mul(query_group_offsets_.capacity(), sizeof(std::uint32_t)));
         bytes = saturating_add(bytes,
@@ -125,14 +153,20 @@ class query_wave_scratch {
         {
             std::vector<packed_query_occurrence> empty_packed_occurrences;
             std::vector<wide_query_occurrence> empty_wide_occurrences;
+            std::vector<packed_query_occurrence_h64> empty_packed_occurrences_h64;
+            std::vector<wide_query_occurrence_h64> empty_wide_occurrences_h64;
             std::vector<query_hash_plan> empty_plans;
+            std::vector<query_hash_plan_h64> empty_plans_h64;
             std::vector<std::uint32_t> empty_group_offsets;
             std::vector<std::uint32_t> empty_radix;
             std::vector<block_query_anchor_layout> empty_layouts;
             std::vector<fragment_block_wave_stats> empty_block_stats;
             packed_occurrences_.swap(empty_packed_occurrences);
             wide_occurrences_.swap(empty_wide_occurrences);
+            packed_occurrences_h64_.swap(empty_packed_occurrences_h64);
+            wide_occurrences_h64_.swap(empty_wide_occurrences_h64);
             query_plans_.swap(empty_plans);
+            query_plans_h64_.swap(empty_plans_h64);
             query_group_offsets_.swap(empty_group_offsets);
             query_plan_radix_.swap(empty_radix);
             block_query_layouts_.swap(empty_layouts);
@@ -144,6 +178,7 @@ class query_wave_scratch {
         occurrence_count_capacity_ = 0u;
         active_occurrence_count_ = 0u;
         occurrence_layout_ = {};
+        occurrence_hash_width_ = minimizer_scalar_width::u32;
         query_plan_reserve_request_ = 0u;
         occurrence_radix_invoked_ = false;
         parallel_occurrence_radix_split_selected_ = false;
@@ -292,7 +327,10 @@ class query_wave_scratch {
         active_occurrence_count_ = 0u;
         packed_occurrences_.clear();
         wide_occurrences_.clear();
+        packed_occurrences_h64_.clear();
+        wide_occurrences_h64_.clear();
         query_plans_.clear();
+        query_plans_h64_.clear();
         query_group_offsets_.clear();
         query_plan_radix_.clear();
         block_query_layouts_.clear();
@@ -302,6 +340,30 @@ class query_wave_scratch {
         occurrence_radix_invoked_ = false;
         parallel_occurrence_radix_split_selected_ = false;
         bucket_direct_matcher_active_ = false;
+    }
+
+    /// Retain capacity only for the manifest-selected native hash width.
+    void select_occurrence_hash_width_(const minimizer_scalar_width width) {
+        if (width == minimizer_scalar_width::u32) {
+            std::vector<packed_query_occurrence_h64> empty_packed;
+            std::vector<wide_query_occurrence_h64> empty_wide;
+            std::vector<query_hash_plan_h64> empty_plans;
+            packed_occurrences_h64_.swap(empty_packed);
+            wide_occurrences_h64_.swap(empty_wide);
+            query_plans_h64_.swap(empty_plans);
+        } else if (width == minimizer_scalar_width::u64) {
+            std::vector<packed_query_occurrence> empty_packed;
+            std::vector<wide_query_occurrence> empty_wide;
+            std::vector<query_hash_plan> empty_plans;
+            packed_occurrences_.swap(empty_packed);
+            wide_occurrences_.swap(empty_wide);
+            query_plans_.swap(empty_plans);
+        } else {
+            throw persisted_minimizer_lookup_error(
+                "fragment-native query occurrence hash width is unsupported");
+        }
+        occurrence_hash_width_ = width;
+        permit_.shrink_to(retained_capacity_bytes_());
     }
 
     /// Clears wave storage and returns the scratch to idle after a failed preparation.
@@ -316,7 +378,10 @@ class query_wave_scratch {
         : permit_(std::move(other.permit_)),
           packed_occurrences_(std::move(other.packed_occurrences_)),
           wide_occurrences_(std::move(other.wide_occurrences_)),
+          packed_occurrences_h64_(std::move(other.packed_occurrences_h64_)),
+          wide_occurrences_h64_(std::move(other.wide_occurrences_h64_)),
           query_plans_(std::move(other.query_plans_)),
+          query_plans_h64_(std::move(other.query_plans_h64_)),
           query_group_offsets_(std::move(other.query_group_offsets_)),
           query_plan_radix_(std::move(other.query_plan_radix_)),
           query_membership_filter_(std::move(other.query_membership_filter_)),
@@ -326,6 +391,7 @@ class query_wave_scratch {
           active_occurrence_count_(other.active_occurrence_count_),
           block_query_layouts_(std::move(other.block_query_layouts_)),
           block_stats_(std::move(other.block_stats_)), occurrence_layout_(other.occurrence_layout_),
+          occurrence_hash_width_(other.occurrence_hash_width_),
           query_plan_reserve_request_(other.query_plan_reserve_request_),
           occurrence_radix_invoked_(other.occurrence_radix_invoked_),
           parallel_occurrence_radix_split_selected_(
@@ -336,6 +402,7 @@ class query_wave_scratch {
         other.occurrence_count_capacity_ = 0u;
         other.active_occurrence_count_ = 0u;
         other.occurrence_layout_ = {};
+        other.occurrence_hash_width_ = minimizer_scalar_width::u32;
         other.query_plan_reserve_request_ = 0u;
         other.occurrence_radix_invoked_ = false;
         other.parallel_occurrence_radix_split_selected_ = false;
@@ -401,14 +468,17 @@ class query_wave_scratch {
 
     /// Returns live sizes, capacities, and route flags for diagnostics and tests.
     [[nodiscard]] query_occurrence_capacity_snapshot occurrence_capacity_snapshot() const noexcept {
+        const bool h64 = occurrence_hash_width_ == minimizer_scalar_width::u64;
         return query_occurrence_capacity_snapshot{
             .route = occurrence_layout_.route,
-            .packed_size = packed_occurrences_.size(),
-            .packed_capacity = packed_occurrences_.capacity(),
-            .wide_size = wide_occurrences_.size(),
-            .wide_capacity = wide_occurrences_.capacity(),
-            .query_plan_size = query_plans_.size(),
-            .query_plan_capacity = query_plans_.capacity(),
+            .packed_size = h64 ? packed_occurrences_h64_.size() : packed_occurrences_.size(),
+            .packed_capacity = h64 ? packed_occurrences_h64_.capacity()
+                                   : packed_occurrences_.capacity(),
+            .wide_size = h64 ? wide_occurrences_h64_.size() : wide_occurrences_.size(),
+            .wide_capacity = h64 ? wide_occurrences_h64_.capacity()
+                                 : wide_occurrences_.capacity(),
+            .query_plan_size = h64 ? query_plans_h64_.size() : query_plans_.size(),
+            .query_plan_capacity = h64 ? query_plans_h64_.capacity() : query_plans_.capacity(),
             .query_plan_reserve_request = query_plan_reserve_request_,
             .query_group_offset_size = query_group_offsets_.size(),
             .query_group_offset_capacity = query_group_offsets_.capacity(),
@@ -469,17 +539,19 @@ class prepared_fragment_anchor_batch {
         /// Returns canonical ordered fragment seed anchors after identity checks against the batch.
         /// Throws persisted_minimizer_lookup_error when arguments or receipts disagree.
         [[nodiscard]] std::span<const bioseq::chaining::anchor>
-        ordered_fragment_seed_anchors(std::span<const minimap_sketch_data> minimizers,
-                                      sequence_size_t query_length,
-                                      std::int32_t max_occ,
-                                      std::int32_t kmer_size) const {
+        ordered_fragment_seed_anchors(
+            ::bioseq::minimizers::minimizer_physical_batch_view minimizers,
+            sequence_size_t query_length,
+            std::int32_t max_occ,
+            std::int32_t kmer_size) const {
             if (batch_ == nullptr || !batch_->ready_ || query_index_ >= batch_->query_count_ ||
                 max_occ < 0 || static_cast<std::uint64_t>(max_occ) != batch_->max_occ_) {
                 throw persisted_minimizer_lookup_error(
                     "prepared fragment anchor batch is inconsistent");
             }
             const prepared_query_anchors& query = batch_->queries_[query_index_];
-            if (query.minimizer_data != minimizers.data() ||
+            if (query.minimizers.record_id() != minimizers.record_id() ||
+                query.minimizers.data_owner_address() != minimizers.data_owner_address() ||
                 query.minimizer_count != minimizers.size() || query.query_length != query_length ||
                 query.kmer_size != kmer_size || query.sortedness_receipt != sortedness_receipt_ ||
                 query.anchor_count > (std::numeric_limits<std::size_t>::max)() ||

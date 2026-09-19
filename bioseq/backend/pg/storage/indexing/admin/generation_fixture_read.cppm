@@ -3,6 +3,10 @@
  * @brief PostgreSQL grouped-SoA generation fixture read and failure support.
  */
 module;
+#include <new>
+#include <fmt/format.h>
+#include <bioseq/pg_compat.h>
+
 #include "access/heapam.h"
 #include "access/relation.h"
 #include "access/table.h"
@@ -13,90 +17,30 @@ module;
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 extern "C" {
 #include "storage/buffile.h"
 }
-#include <algorithm>
-#include <array>
-#include <concepts>
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <limits>
-#include <map>
-#include <new>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <variant>
-#include <vector>
 export module bioseq.postgres.storage.indexing.admin:generation_fixture_read;
-import bioseq.common.logging;
+import std;
+import :generation_api;
+import :hash_major;
+import bioseq.postgres.storage.indexing.admin.diagnostic_support;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support;
-import bioseq.postgres.sql_boundary;
 import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, is_locator_stub, decode_locator_from_stub
 import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.lazy_sequence;           // make_resident_lazy_sequence
-import bioseq.storage.scanner;                 // sequence access requirements
-import bioseq.postgres.storage.scanner;        // with_postgres_lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.common.seqan_adapter;            // seqan3::char_is_valid_for
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
-import bioseq.indexing.traits;
-import bioseq.indexing.registry;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.hash_major_minimizer_index;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.pipeline.runtime_contract; // minimizer_algorithm
-import bioseq.sequences.kmers;           // minimizer/index APIs
 import bioseq.sequences.kmers.highway_minimizer_contract;
-import bioseq.highway.dispatch_contract;
-import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.residency;
 import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.pool;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.postgres.table.io;
-import bioseq.postgres.storage.indexing.handles;
+import bioseq.postgres.storage.indexing.index_relation_identity;
 import bioseq.postgres.column.table_access;
-import bioseq.postgres.storage.metadata; // column_table_row_count
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
-import :policy_catalog;
-import :hash_major;
-import :grouped_soa;
-import :rebuild;
-import :generation_fixture_write;
-import :inspection_policy;
 
 export namespace bioseq::storage::indexing {
-
-/// Integration-only validation result for the one-scan full-generation payload.
-struct minimizer_generation_full_payload_fixture_result {
-    std::string table_name;
-    std::string selected_backend_name;
-    std::uint64_t generation_id = 0;
-    std::uint64_t control_bytes = 0;
-    std::uint64_t position_bytes = 0;
-    std::uint64_t control_checksum = 0;
-    std::uint64_t position_checksum = 0;
-    minimizer_generation_read_stats read_stats{};
-};
 
 /**
  * @brief Reopen and consume one active fixture generation under an independent MVCC snapshot.
@@ -109,7 +53,7 @@ struct minimizer_generation_full_payload_fixture_result {
  * @param backend Required producer backend; no fallback is permitted.
  * @return Authenticated fixture metadata and read receipts.
  */
-[[nodiscard]] inline minimizer_generation_integration_fixture_result
+[[nodiscard]] minimizer_generation_integration_fixture_result
 read_minimizer_generation_integration_fixture_impl(
     Oid rel_oid,
     std::string_view index_name,
@@ -207,10 +151,26 @@ read_minimizer_generation_integration_fixture_impl(
         result.source_padding_letters = source.padding_letters;
         identity.table_name = result.table_name;
 
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_for_backend(
+                backend,
+                index_name == k_minimizers_per_fragment_index_name
+                    ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                    : source.locator.logical_length,
+                source.alphabet_code,
+                static_cast<std::uint8_t>(source.storage_unit_byte_width * 8u),
+                kmer_size,
+                window_size);
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq minimizer generation fixture algorithm identity is not READY");
+        }
         const auto expected =
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 layout,
                 backend,
+                *algorithm_identity,
                 source.alphabet_code,
                 source.storage_unit_byte_width,
                 kmer_size,
@@ -760,7 +720,7 @@ read_minimizer_generation_integration_fixture_impl(
 /// Reopen a READY grouped-SoA generation and stream its complete opaque payload
 /// through the generation-wide single-scan API. This seam deliberately does
 /// not decode either payload and exists only for integration validation.
-[[nodiscard]] inline minimizer_generation_full_payload_fixture_result
+[[nodiscard]] minimizer_generation_full_payload_fixture_result
 read_minimizer_generation_full_payload_fixture_impl(
     Oid rel_oid,
     std::string_view index_name,
@@ -832,10 +792,26 @@ read_minimizer_generation_full_payload_fixture_impl(
                                                source.locator.shard_index);
         result.selected_backend_name = bioseq::minimizers::minimizer_sketch_backend_name(backend);
         identity.table_name = result.table_name;
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_for_backend(
+                backend,
+                index_name == k_minimizers_per_fragment_index_name
+                    ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                    : source.locator.logical_length,
+                source.alphabet_code,
+                static_cast<std::uint8_t>(source.storage_unit_byte_width * 8u),
+                kmer_size,
+                window_size);
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq full-generation algorithm identity is not READY");
+        }
         const auto expected =
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 layout,
                 backend,
+                *algorithm_identity,
                 source.alphabet_code,
                 source.storage_unit_byte_width,
                 kmer_size,
@@ -944,7 +920,7 @@ read_minimizer_generation_full_payload_fixture_impl(
 /// fail while walking the same locator under its registered snapshot.  Ordinal
 /// zero is deliberately forbidden so this seam validates later-fragment
 /// participation rather than merely checking the first physical row.
-inline void remove_sequence_fragment_impl(Oid rel_oid,
+void remove_sequence_fragment_impl(Oid rel_oid,
                                           std::string_view index_name,
                                           std::uint64_t sequence_rowno,
                                           std::uint32_t fragment_ordinal) {
@@ -1084,7 +1060,7 @@ inline void remove_sequence_fragment_impl(Oid rel_oid,
 
 /// Exercise read-session failure transitions against the live fixture while
 /// restoring the backend memory cap and registered snapshot on every ERROR.
-inline void exercise_minimizer_generation_session_failure_impl(Oid rel_oid,
+void exercise_minimizer_generation_session_failure_impl(Oid rel_oid,
                                                                std::string_view index_name,
                                                                std::uint64_t sequence_rowno,
                                                                std::string_view mode) {
@@ -1146,9 +1122,25 @@ inline void exercise_minimizer_generation_session_failure_impl(Oid rel_oid,
             admission.set_index_memory_cap_bytes(1);
             state->cap_changed = true;
         }
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_for_backend(
+                bioseq::minimizers::minimizer_sketch_backend::scalar,
+                index_name == k_minimizers_per_fragment_index_name
+                    ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                    : source.locator.logical_length,
+                source.alphabet_code,
+                static_cast<std::uint8_t>(source.storage_unit_byte_width * 8u),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::kmer_size),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::window_size));
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq minimizer session algorithm identity is not READY");
+        }
         auto expected = bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
             bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
             bioseq::minimizers::minimizer_sketch_backend::scalar,
+            *algorithm_identity,
             source.alphabet_code,
             source.storage_unit_byte_width,
             static_cast<std::uint16_t>(bioseq::aligner::settings::minimizer::kmer_size),

@@ -106,7 +106,7 @@ TEST_CASE("published generation inspection SQL surface is narrow and administrat
     REQUIRE(row[3].value() == "1");       // STRICT
     REQUIRE(row[4].value() == "1");       // RETURNS TABLE / SETOF record
     REQUIRE(row[5].value() == "3");       // exact input signature
-    REQUIRE(row[6].value() == "26");      // 3 inputs + 23 named outputs
+    REQUIRE(row[6].value() == "37");      // 3 inputs + 34 named outputs
     REQUIRE(row[7].value() == "1");       // PUBLIC has no EXECUTE grant
 }
 

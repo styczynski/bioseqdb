@@ -5,34 +5,17 @@
 module;
 
 #include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <iterator>
-#include <libassert/assert.hpp>
-#include <limits>
-#include <memory>
 #include <new>
-#include <optional>
 #include <span>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
 export module bioseq.indexing.minimizer_sequence:read_assembly_query_assembly;
 
 import :read_assembly_contract;
-import :admitted_runs;
-import :bucket_codec;
-import :replay_build;
+import bioseq.indexing.minimizer_sequence.admitted_runs;
+import bioseq.indexing.minimizer_sequence.bucket_codec;
+import bioseq.indexing.minimizer_sequence.generation;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
 import bioseq.common.seqan_adapter;

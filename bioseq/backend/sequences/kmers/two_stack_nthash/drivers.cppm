@@ -73,7 +73,7 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
         return two_stack_finalize_result{.status = status, .stats = stats};
     };
 
-    if constexpr (!exact_simd_minimizer_representation<p_minimizer_type>) {
+    if constexpr (!two_stack_simd_minimizer_representation<p_minimizer_type>) {
         return rejected(
             two_stack_continuation_status::unsupported_representation);
     } else if constexpr (!seqan3::nucleotide_alphabet<
@@ -200,7 +200,8 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_or_throw(
     // Besides enabling loop folding, this keeps p_window_size=10 scratch arrays out of the
     // dynamic p_window_size=256 frame.  Other shapes retain the checked generic route.
     two_stack_finalize_result result;
-    if constexpr (p_window_size == 0 && p_kmer_size == 0) {
+    if constexpr (p_window_size == 0 && p_kmer_size == 0
+                  && exact_simd_minimizer_representation<p_minimizer_type>) {
         if (runtime_w == 10 && runtime_k == 15) [[likely]] {
             result = collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked<
                 10, 15, p_minimizer_type>(
@@ -289,7 +290,7 @@ collect_minimizers_two_stack_nthash_exact_range_checked(
         return two_stack_finalize_result{.status = status, .stats = stats};
     };
 
-    if constexpr (!exact_simd_minimizer_representation<p_minimizer_type>) {
+    if constexpr (!two_stack_simd_minimizer_representation<p_minimizer_type>) {
         return rejected(
             two_stack_continuation_status::unsupported_representation);
     } else if constexpr (!seqan3::nucleotide_alphabet<p_alphabet>) {
@@ -395,7 +396,8 @@ collect_minimizers_two_stack_nthash_exact_range_or_throw(
     std::string_view operation = "minimizer sketch")
 {
     two_stack_finalize_result result;
-    if constexpr (p_window_size == 0 && p_kmer_size == 0) {
+    if constexpr (p_window_size == 0 && p_kmer_size == 0
+                  && exact_simd_minimizer_representation<p_minimizer_type>) {
         if (runtime_w == 10u && runtime_k == 15u) [[likely]] {
             result = collect_minimizers_two_stack_nthash_exact_range_checked<
                 10, 15, p_minimizer_type>(
@@ -467,18 +469,32 @@ template<class p_minimizer_type,
                 minimizer_sink_collector<p_minimizer_type> collector{
                     invocation.sink};
                 two_stack_finalize_result native{};
-                if (invocation.window == 10u
-                    && invocation.kmer == 15u) {
-                    native =
-                        collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked<
-                            10u, 15u, p_minimizer_type>(
-                                collector,
-                                range,
-                                0u,
-                                static_cast<std::size_t>(range.size()),
-                                invocation.window,
-                                invocation.kmer,
-                                invocation.emitted_position_base);
+                if constexpr (
+                    exact_simd_minimizer_representation<p_minimizer_type>) {
+                    if (invocation.window == 10u
+                        && invocation.kmer == 15u) {
+                        native =
+                            collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked<
+                                10u, 15u, p_minimizer_type>(
+                                    collector,
+                                    range,
+                                    0u,
+                                    static_cast<std::size_t>(range.size()),
+                                    invocation.window,
+                                    invocation.kmer,
+                                    invocation.emitted_position_base);
+                    } else {
+                        native =
+                            collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked<
+                                0u, 0u, p_minimizer_type>(
+                                    collector,
+                                    range,
+                                    0u,
+                                    static_cast<std::size_t>(range.size()),
+                                    invocation.window,
+                                    invocation.kmer,
+                                    invocation.emitted_position_base);
+                    }
                 } else {
                     native =
                         collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked<
@@ -635,9 +651,16 @@ template<class p_minimizer_type,
     minimizer_kernel_invocation& invocation,
     minimizer_kernel_result& result)
 {
-    if (invocation.window == 10u && invocation.kmer == 15u) {
-        run_fragmented_impl<10u, 15u, p_minimizer_type, p_alphabet, p_storage_unit>(
-            invocation, result);
+    if constexpr (exact_simd_minimizer_representation<p_minimizer_type>) {
+        if (invocation.window == 10u && invocation.kmer == 15u) {
+            run_fragmented_impl<
+                10u, 15u, p_minimizer_type, p_alphabet, p_storage_unit>(
+                    invocation, result);
+        } else {
+            run_fragmented_impl<
+                0u, 0u, p_minimizer_type, p_alphabet, p_storage_unit>(
+                    invocation, result);
+        }
     } else {
         run_fragmented_impl<0u, 0u, p_minimizer_type, p_alphabet, p_storage_unit>(
             invocation, result);
@@ -706,7 +729,7 @@ template<class p_minimizer_type,
     minimizer_kernel_invocation& invocation,
     minimizer_kernel_result& result)
 {
-    static_assert(exact_simd_minimizer_representation<p_minimizer_type>);
+    static_assert(two_stack_simd_minimizer_representation<p_minimizer_type>);
 
     if (invocation.output_hash_mask
             != static_cast<std::uint64_t>(p_minimizer_type::k_hash_field_mask)
@@ -727,23 +750,27 @@ template<class p_minimizer_type,
                 : run<p_minimizer_type, p_alphabet, p_storage_unit>(
                     invocation, result);
         case two_stack_route::resident_vector_stream:
-            if constexpr (!std::same_as<p_alphabet, seq::dna4>
-                          || !std::same_as<p_storage_unit, std::uint32_t>) {
+            if constexpr (
+                !exact_simd_minimizer_representation<p_minimizer_type>
+                || !std::same_as<p_alphabet, seq::dna4>
+                || !std::same_as<p_storage_unit, std::uint32_t>) {
                 result.family_status = static_cast<std::uint32_t>(
                     two_stack_continuation_status::invalid_static_configuration);
                 result.status = minimizer_kernel_status::invalid_configuration;
                 return false;
+            } else {
+                if (invocation.window != 10u
+                    || invocation.kmer != 15u
+                    || invocation.emitted_position_base != 0u
+                    || invocation.fragments.is_present()) {
+                    result.family_status = static_cast<std::uint32_t>(
+                        two_stack_continuation_status::invalid_static_configuration);
+                    result.status = minimizer_kernel_status::invalid_configuration;
+                    return false;
+                }
+                return run_resident_vector_stream<p_minimizer_type>(
+                    invocation, result);
             }
-            if (invocation.window != 10u
-                || invocation.kmer != 15u
-                || invocation.emitted_position_base != 0u
-                || invocation.fragments.is_present()) {
-                result.family_status = static_cast<std::uint32_t>(
-                    two_stack_continuation_status::invalid_static_configuration);
-                result.status = minimizer_kernel_status::invalid_configuration;
-                return false;
-            }
-            return run_resident_vector_stream<p_minimizer_type>(invocation, result);
     }
     return false;
 }

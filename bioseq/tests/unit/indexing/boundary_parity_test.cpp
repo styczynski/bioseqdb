@@ -157,8 +157,8 @@ template <class p_scanner> void check_segment_parity(std::size_t symbol_count, s
     const auto got = assembled_map(assembled, baseline);
     if (got != baseline)
         bioseq_log<logging_level::debug>(
-                "[boundary-parity] n={} nfrag={} baseline_kmers={} got_kmers={}",
-                n, nfrag, baseline.size(), got.size());
+                "[boundary-parity] symbols={} nfrag={} baseline_kmers={} got_kmers={}",
+                symbol_count, nfrag, baseline.size(), got.size());
     REQUIRE(got == baseline);
 }
 

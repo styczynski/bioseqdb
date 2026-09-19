@@ -9,6 +9,7 @@ module;
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <map>
 #include <new>
 #include <optional>
@@ -31,7 +32,7 @@ import bioseq.postgres.table.io;
 import bioseq.postgres.support;
 import bioseq.postgres.support.sql_boundary;
 import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.storage.indexing.admin;
+import bioseq.postgres.storage.indexing.admin.policy_catalog;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.chunked_storage.sql_entities;
 import bioseq.postgres.storage.manager;
@@ -42,35 +43,168 @@ import bioseq.storage.layout;
 import bioseq.postgres.table.am_cache;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.column.table_access;
+import :access_callback_state;
 import :access_identity;
 import :access_common;
-import :access_hooks;
-import :access_method_scan_callbacks;
 
-/**
- * Pending sequence-source authority retained for one speculative parent row.
- */
+/** Pending sequence-source authority retained for one speculative parent row. */
 struct pending_speculative_sources {
     SubTransactionId subtransaction_id = InvalidSubTransactionId;
     std::vector<bioseq::storage::pending_sequence_source> sources;
 };
 
-/** @brief Per-sequence-column authorities produced while preparing one parent row. */
+/** Per-sequence-column authorities produced while preparing one parent row. */
 using pending_sequence_source_slots =
     std::vector<std::optional<bioseq::storage::pending_sequence_source>>;
-/** @brief Identifies speculative publication state by relation and virtual row number. */
+
+/** Identifies speculative publication state by relation and virtual row number. */
 using pending_speculative_key = std::pair<Oid, std::uint64_t>;
-/** @brief Owns unconsumed speculative authorities until confirmation or abort. */
+
+/** Owns unconsumed speculative authorities until confirmation or abort. */
 using pending_speculative_source_map =
     std::map<pending_speculative_key, pending_speculative_sources>;
 
 static_assert(!std::is_trivially_destructible_v<pending_sequence_source_slots>);
-static_assert(std::is_nothrow_move_constructible_v<bioseq::storage::pending_sequence_source>);
+static_assert(
+    std::is_nothrow_move_constructible_v<bioseq::storage::pending_sequence_source>);
 
 /** Returns active speculative authorities keyed by relation and virtual row. */
 [[nodiscard]] auto& access_pending_speculative_sources() {
     static pending_speculative_source_map pending;
     return pending;
+}
+
+/** Allocation-free diagnostics retained after a terminal transaction event. */
+struct pending_speculative_terminal_quarantine {
+    std::uint64_t invariant_events = 0u;
+    std::uint64_t quarantined_rows = 0u;
+    std::uint64_t quarantined_sources = 0u;
+    XactEvent last_event = XACT_EVENT_COMMIT;
+    bool storage_exhausted = false;
+    bool active_map_quarantined = false;
+};
+
+/** Returns fixed storage for authorities retained after a terminal callback. */
+[[nodiscard]] auto& quarantined_speculative_sources_noexcept() noexcept {
+    static std::array<pending_speculative_source_map, 4u> quarantined;
+    return quarantined;
+}
+
+/** Returns terminal speculative-source diagnostics. */
+[[nodiscard]] auto& speculative_source_quarantine_state_noexcept() noexcept {
+    static pending_speculative_terminal_quarantine state;
+    return state;
+}
+
+static_assert(noexcept(std::declval<pending_speculative_source_map&>().swap(
+    std::declval<pending_speculative_source_map&>())));
+
+/** Retain impossible speculative authorities without allocating or throwing. */
+void quarantine_pending_speculative_sources_noexcept(XactEvent event) noexcept {
+    constexpr auto k_max_count = std::numeric_limits<std::uint64_t>::max();
+    auto& pending = access_pending_speculative_sources();
+    if (pending.empty()) return;
+
+    std::uint64_t source_count = 0u;
+    for (const auto& [key, entry] : pending) {
+        (void)key;
+        const auto entry_count =
+            static_cast<std::uint64_t>(entry.sources.size());
+        source_count = k_max_count - source_count < entry_count
+                           ? k_max_count
+                           : source_count + entry_count;
+    }
+
+    auto& state = speculative_source_quarantine_state_noexcept();
+    if (state.invariant_events != k_max_count) ++state.invariant_events;
+    const auto pending_rows = static_cast<std::uint64_t>(pending.size());
+    state.quarantined_rows =
+        k_max_count - state.quarantined_rows < pending_rows
+            ? k_max_count
+            : state.quarantined_rows + pending_rows;
+    state.quarantined_sources =
+        k_max_count - state.quarantined_sources < source_count
+            ? k_max_count
+            : state.quarantined_sources + source_count;
+    state.last_event = event;
+
+    for (auto& quarantine : quarantined_speculative_sources_noexcept()) {
+        if (quarantine.empty()) {
+            quarantine.swap(pending);
+            return;
+        }
+    }
+    state.storage_exhausted = true;
+    state.active_map_quarantined = true;
+}
+
+/** Fail a pre-commit boundary when speculative publication remains unresolved. */
+void require_no_pending_speculative_sources(const char* operation) {
+    const auto& pending = access_pending_speculative_sources();
+    if (pending.empty()) return;
+
+    std::size_t source_count = 0;
+    for (const auto& [key, entry] : pending) {
+        (void)key;
+        source_count += entry.sources.size();
+    }
+    ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq speculative source publication authority was not consumed"),
+             errdetail("operation=%s speculative_rows=%zu pending_sources=%zu",
+                       operation,
+                       pending.size(),
+                       source_count)));
+}
+
+/** Apply speculative-source state changes for one transaction event. */
+void handle_pending_speculative_xact_event(XactEvent event) {
+    switch (event) {
+    case XACT_EVENT_COMMIT:
+    case XACT_EVENT_PARALLEL_COMMIT:
+    case XACT_EVENT_PREPARE:
+        quarantine_pending_speculative_sources_noexcept(event);
+        break;
+    case XACT_EVENT_ABORT:
+    case XACT_EVENT_PARALLEL_ABORT:
+        if (!speculative_source_quarantine_state_noexcept()
+                 .active_map_quarantined) {
+            access_pending_speculative_sources().clear();
+        }
+        break;
+    case XACT_EVENT_PRE_COMMIT:
+    case XACT_EVENT_PARALLEL_PRE_COMMIT:
+    case XACT_EVENT_PRE_PREPARE:
+        require_no_pending_speculative_sources("pre-commit/pre-prepare");
+        break;
+    }
+}
+
+/** Apply speculative-source state changes for one subtransaction event. */
+void handle_pending_speculative_subxact_event(
+    SubXactEvent event,
+    SubTransactionId my_subid,
+    SubTransactionId parent_subid) {
+    switch (event) {
+    case SUBXACT_EVENT_START_SUB:
+    case SUBXACT_EVENT_COMMIT_SUB:
+        for (auto& [key, pending] : access_pending_speculative_sources()) {
+            (void)key;
+            if (pending.subtransaction_id == my_subid) {
+                pending.subtransaction_id = parent_subid;
+            }
+        }
+        break;
+    case SUBXACT_EVENT_ABORT_SUB:
+        std::erase_if(
+            access_pending_speculative_sources(),
+            [my_subid](const auto& entry) {
+                return entry.second.subtransaction_id == my_subid;
+            });
+        break;
+    case SUBXACT_EVENT_PRE_COMMIT_SUB:
+        break;
+    }
 }
 
 /** PostgreSQL error-context record for restoring the page-cache setting. */
@@ -91,49 +225,6 @@ static void restore_ordinary_insert_page_cache_on_error(void* argument) noexcept
     }
     bioseq::settings::column_cache::enabled = restore->previous_value;
     restore->armed = false;
-}
-
-/** Return the write-side sequence cache owned by a column write state. */
-[[nodiscard]] static bioseq::storage::seq_caches*
-ensure_write_side_seq_caches(Relation relation, column_write_state* write_state) {
-    if (relation == nullptr || write_state == nullptr ||
-        write_state->stripe_write_context == nullptr) {
-        bioseq::postgres::support::invoke_pg_as_cpp([] {
-            bioseq_log<logging_level::error, logging_target::postgres>(
-                "bioseq storage: sequence write cache owner is unavailable");
-        });
-    }
-
-    if (write_state->seq_caches == nullptr) {
-        MemoryContext owner = MemoryContextGetParent(write_state->stripe_write_context);
-        if (owner == nullptr) {
-            bioseq::postgres::support::invoke_pg_as_cpp([] {
-                bioseq_log<logging_level::error, logging_target::postgres>(
-                    "bioseq storage: sequence write cache context is unavailable");
-            });
-        }
-        auto* fresh = bioseq::postgres::support::invoke_pg_as_cpp(
-            [owner] { return bioseq::storage::alloc_seq_caches(owner); });
-        fresh->side = bioseq::storage::seq_caches::access_side::write;
-        fresh->lock_mode = RowExclusiveLock;
-        fresh->main_database_oid = relation->rd_locator.dbOid;
-        fresh->main_tablespace_oid = relation->rd_locator.spcOid;
-        fresh->main_relfilenode = relation->rd_locator.relNumber;
-        fresh->cap_bytes_snapshot = bioseq::storage::read_max_sub_table_cap_bytes();
-        write_state->seq_caches = fresh;
-    }
-
-    auto* caches = static_cast<bioseq::storage::seq_caches*>(write_state->seq_caches);
-    if (caches->side != bioseq::storage::seq_caches::access_side::write ||
-        caches->main_database_oid != relation->rd_locator.dbOid ||
-        caches->main_tablespace_oid != relation->rd_locator.spcOid ||
-        caches->main_relfilenode != relation->rd_locator.relNumber) {
-        bioseq::postgres::support::invoke_pg_as_cpp([] {
-            bioseq_log<logging_level::error, logging_target::postgres>(
-                "bioseq storage: sequence write cache relation identity changed");
-        });
-    }
-    return caches;
 }
 
 /**

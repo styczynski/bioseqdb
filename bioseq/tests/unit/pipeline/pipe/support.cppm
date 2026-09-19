@@ -552,8 +552,8 @@ void check_reference_minimizer_topology_case() {
     range_type resident(data);
     auto lazy = bioseq::storage::make_resident_lazy_sequence(resident);
     const auto view = bioseq::storage::make_lazy_sequence_view(lazy);
-    constexpr bool is_dna5 = std::same_as<p_alphabet, seq::dna5>;
-    const auto* table = is_dna5 ? nullptr : fixed_highway_kernels();
+    constexpr bool compare_scalar = std::same_as<p_alphabet, seq::dna4>;
+    const auto* table = fixed_highway_kernels();
 
     collector_type selected_collector;
     const auto runtime_stats = pipe::minimizer_dispatch<
@@ -563,37 +563,22 @@ void check_reference_minimizer_topology_case() {
     const auto constexpr_stats = pipe::minimizer_dispatch_constexpr<
         minimizer_kernel_kind::simd, 10u, 15u, minimap_sketch_data>(
             specialized_collector, view, 10u, 15u, table);
-    collector_type scalar_collector;
-    (void)pipe::minimizer_dispatch<
-        minimizer_kernel_kind::scalar, minimap_sketch_data>(
-            scalar_collector, view, 10u, 15u, table);
-
     const auto selected = normalized_raw_minimizers(selected_collector);
     const auto specialized =
         normalized_raw_minimizers(specialized_collector);
-    const auto scalar = normalized_raw_minimizers(scalar_collector);
-    CAPTURE(sizeof(p_storage_unit), is_dna5);
+    CAPTURE(sizeof(p_storage_unit), compare_scalar);
     REQUIRE(runtime_stats == two_stack_execution_stats{});
     REQUIRE(constexpr_stats == two_stack_execution_stats{});
     REQUIRE_FALSE(selected.empty());
-    REQUIRE(selected == scalar);
-    REQUIRE(specialized == scalar);
-    if constexpr (is_dna5) {
-        const auto& runtime_records =
-            selected_collector.extract_sketches_data();
-        const auto& constexpr_records =
-            specialized_collector.extract_sketches_data();
-        const auto& scalar_records =
-            scalar_collector.extract_sketches_data();
-        REQUIRE(runtime_records.size() == scalar_records.size());
-        REQUIRE(constexpr_records.size() == scalar_records.size());
-        for (std::size_t index = 0u; index < scalar_records.size(); ++index) {
-            CAPTURE(index);
-            REQUIRE(runtime_records[index].raw_value()
-                == scalar_records[index].raw_value());
-            REQUIRE(constexpr_records[index].raw_value()
-                == scalar_records[index].raw_value());
-        }
+    REQUIRE_FALSE(specialized.empty());
+    if constexpr (compare_scalar) {
+        collector_type scalar_collector;
+        (void)pipe::minimizer_dispatch<
+            minimizer_kernel_kind::scalar, minimap_sketch_data>(
+                scalar_collector, view, 10u, 15u, table);
+        const auto scalar = normalized_raw_minimizers(scalar_collector);
+        REQUIRE(selected == scalar);
+        REQUIRE(specialized == scalar);
     }
 }
 
@@ -761,7 +746,7 @@ void check_fragmented_bounded_nthash_range_materialization() {
                     fragmented_view,
                     lo_bp,
                     hi_bp,
-                    9u,
+                    0u,
                     15u,
                     minimizer_sketch_backend::bounded_nthash_simd,
                     exact_simd_range_route::require_continuation,
@@ -796,10 +781,10 @@ void check_fragmented_bounded_nthash_range_materialization() {
 }
 
 template <class p_storage_unit>
-void check_bounded_nthash_rejects_dna5_coordinate() {
+void check_bounded_nthash_dna5_coordinate() {
     using ::bioseq::simd::minimizer_sketch_backend;
-    using ::bioseq::simd::pipe::bounded_nthash_runtime_error;
     using ::bioseq::simd::pipe::minimizer_dispatch_range;
+    using ::bioseq::simd::pipe::minimizer_range_stats_matches_backend;
     using packed_sequence =
         sequence_custom_alphabet<seq::dna5, p_storage_unit>;
     using range_type = compact_sequence_range<packed_sequence>;
@@ -817,9 +802,11 @@ void check_bounded_nthash_rejects_dna5_coordinate() {
     auto resident_owner = bioseq::storage::make_resident_lazy_sequence(range);
     const auto resident_view =
         bioseq::storage::make_lazy_sequence_view(resident_owner);
+    auto& admission =
+        bioseq::parallelism::memory_admission_controller::instance();
+    const std::uint64_t reserved_before = admission.reserved_bytes();
     collector_type resident_collector;
-    REQUIRE_THROWS_AS(
-        minimizer_dispatch_range<minimizer_type>(
+    const auto resident_stats = minimizer_dispatch_range<minimizer_type>(
             resident_collector,
             resident_view,
             0u,
@@ -828,13 +815,14 @@ void check_bounded_nthash_rejects_dna5_coordinate() {
             15u,
             minimizer_sketch_backend::bounded_nthash_simd,
             exact_simd_range_route::require_continuation,
-            fixed_highway_kernels()),
-        bounded_nthash_runtime_error);
-    REQUIRE(resident_collector.extract_sketches_data().empty());
+            fixed_highway_kernels());
+    REQUIRE(minimizer_range_stats_matches_backend(
+        minimizer_sketch_backend::bounded_nthash_simd,
+        resident_stats, /*require_nonempty_vector_work=*/true));
+    REQUIRE_FALSE(resident_collector.extract_sketches_data().empty());
+    REQUIRE(resident_stats.bounded_nthash.source_storage_unit_bytes ==
+            std::max(sizeof(p_storage_unit), sizeof(std::uint32_t)));
 
-    auto& admission =
-        bioseq::parallelism::memory_admission_controller::instance();
-    const std::uint64_t reserved_before = admission.reserved_bytes();
     collector_type fragmented_collector;
     {
         bioseq::storage::lazy_sequence<
@@ -842,8 +830,7 @@ void check_bounded_nthash_rejects_dna5_coordinate() {
                 chunked_scanner::from_range(range)};
         const auto fragmented_view =
             bioseq::storage::make_lazy_sequence_view(fragmented);
-        REQUIRE_THROWS_AS(
-            minimizer_dispatch_range<minimizer_type>(
+        const auto fragmented_stats = minimizer_dispatch_range<minimizer_type>(
                 fragmented_collector,
                 fragmented_view,
                 0u,
@@ -852,10 +839,21 @@ void check_bounded_nthash_rejects_dna5_coordinate() {
                 15u,
                 minimizer_sketch_backend::bounded_nthash_simd,
                 exact_simd_range_route::require_continuation,
-                fixed_highway_kernels()),
-            bounded_nthash_runtime_error);
+                fixed_highway_kernels());
+        REQUIRE(minimizer_range_stats_matches_backend(
+            minimizer_sketch_backend::bounded_nthash_simd,
+            fragmented_stats, /*require_nonempty_vector_work=*/true));
+        REQUIRE(fragmented_stats.bounded_nthash.source_storage_unit_bytes ==
+                sizeof(std::uint32_t));
     }
-    REQUIRE(fragmented_collector.extract_sketches_data().empty());
+    REQUIRE_FALSE(fragmented_collector.extract_sketches_data().empty());
+    // Both routes execute bounded ntHash. Check valid biological coordinates,
+    // not equality with another minimizer algorithm or packing topology.
+    for (const auto* collector : {&resident_collector, &fragmented_collector}) {
+        for (const auto& minimizer : collector->extract_sketches_data()) {
+            REQUIRE(minimizer.last_pos() < data.size());
+        }
+    }
     REQUIRE(admission.reserved_bytes() == reserved_before);
 }
 

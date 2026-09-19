@@ -67,6 +67,9 @@ enum class shader_kind : std::uint8_t {
     gatekeeper_rank_batch_l32_e4 = 56,
     gatekeeper_rank_batch_l64_e2 = 57,
     gatekeeper_rank_batch_l64_e4 = 58,
+    // Append-only transient full-Vulkan MAPQ pipeline identities.
+    chain_candidate_reduce = 59,
+    mapping_quality_reduce = 60,
 };
 
 /// @brief Return whether a shader kind belongs to the GateKeeper rank-batch family.
@@ -102,6 +105,10 @@ enum class descriptor_layout_kind : std::uint8_t {
     align_extension_cigar = 13,
     // Nine-buffer direct grouped-SoA seed layout.
     grouped_soa_seed = 18,
+    // Accepted-chain extraction binds chaining scratch plus candidate evidence.
+    chain_candidate_reduce = 19,
+    // Post-alignment MAPQ binds headers, candidates, bindings, results and output.
+    mapping_quality_reduce = 20,
 };
 
 /// @brief Number of std430 storage-buffer bindings in each descriptor layout.
@@ -138,7 +145,11 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
     case descriptor_layout_kind::align_extension_cigar:
         return 6;
     case descriptor_layout_kind::grouped_soa_seed:
-        return 9;
+        return 10;
+    case descriptor_layout_kind::chain_candidate_reduce:
+        return 10;
+    case descriptor_layout_kind::mapping_quality_reduce:
+        return 5;
     }
     return 0;
 }
@@ -198,6 +209,10 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
         return descriptor_layout_kind::align_extension;
     case shader_kind::align_extend_simple_cigar:
         return descriptor_layout_kind::align_extension_cigar;
+    case shader_kind::chain_candidate_reduce:
+        return descriptor_layout_kind::chain_candidate_reduce;
+    case shader_kind::mapping_quality_reduce:
+        return descriptor_layout_kind::mapping_quality_reduce;
     case shader_kind::sneaky_snake_rank_batch:
     case shader_kind::gatekeeper_rank_batch:
     case shader_kind::gatekeeper_rank_batch_l32_e2:
@@ -216,7 +231,7 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
     case shader_kind::chain_tiled_dp_u64:
         return 36; // ChainingPushConstants
     case shader_kind::seed_lookup_anchors:
-        return 44; // 11 x uint32
+        return 48; // 12 x uint32, including shared query-record base
     case shader_kind::sort_anchors_bitonic:
         return 0;
     // Per-family push blocks are mirrored by runtime wire structures.
@@ -233,7 +248,7 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
         return 52; // SeedPushC (13 × u32)
     case shader_kind::grouped_soa_seed_count:
     case shader_kind::grouped_soa_seed_emit:
-        return 72; // grouped-SoA seed push block
+        return 108; // grouped-SoA seed push block (27 × u32)
     case shader_kind::radix_sort_histogram:
     case shader_kind::radix_sort_scan:
     case shader_kind::radix_sort_scatter:
@@ -265,7 +280,11 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
     case shader_kind::align_extend_banded_affine:
         return 44; // alignment_extension_push_constants
     case shader_kind::align_extend_simple_cigar:
-        return 60; // alignment_cigar_push_constants
+        return 92; // alignment_cigar_push_constants
+    case shader_kind::chain_candidate_reduce:
+        return 80; // gpu_chain_candidate_reduce_push
+    case shader_kind::mapping_quality_reduce:
+        return 60; // gpu_mapq_reduce_push
     case shader_kind::sneaky_snake_rank_batch:
     case shader_kind::gatekeeper_rank_batch:
     case shader_kind::gatekeeper_rank_batch_l32_e2:

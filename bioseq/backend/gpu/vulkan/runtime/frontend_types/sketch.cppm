@@ -183,9 +183,10 @@ struct gpu_sketch_query_layout_wire {
 
 /// @brief Move-only authority for one device-only query sketch.  Only runtime can
 /// issue it, after the exact count/scan/emit submissions have completed.  The
-/// authority is consumed by the persisted grouped-SoA coordinate operation. A
-/// copied dispatch counter can therefore never stand in for the resident
-/// query buffer that produced the operation.
+/// authority is consumed by either persisted grouped-SoA coordinate execution
+/// or its seed-only MPS prefix. The authorized host readback borrows it without
+/// consuming it. A copied dispatch counter can therefore never stand in for the
+/// resident query buffer that produced the operation.
 class device_query_sketch_authorization {
   public:
     /// @brief Constructs an empty invalid authorization.
@@ -213,9 +214,20 @@ class device_query_sketch_authorization {
     /// the immutable pipeline provenance required by persisted grouped-SoA.
     /// @return `true` when every authorized minimizer span covers device output.
     [[nodiscard]] bool does_cover_device_output() const noexcept {
+        const auto exact_logical_bytes = minimizer_word_kind_ == 0u
+            ? bioseq::common::checked_mul(
+                  bioseq::common::ceil_div(minimizer_count_, std::uint64_t{2u}),
+                  sizeof(std::uint32_t))
+            : bioseq::common::checked_mul(
+                  minimizer_count_,
+                  static_cast<std::uint64_t>(minimizer_words32_per_record_) *
+                      sizeof(std::uint32_t));
         const bool shape_valid =
             identity_ != 0u && runtime_ != nullptr && buffer_ != VK_NULL_HANDLE &&
             memory_identity_ != 0u && buffer_bytes_ != 0u && allocation_bytes_ >= buffer_bytes_ &&
+            exact_logical_bytes.has_value() &&
+            logical_minimizer_bytes_ == *exact_logical_bytes &&
+            logical_minimizer_bytes_ <= buffer_bytes_ &&
             materialization_ == vulkan_sketch_host_materialization::device_only &&
             dispatch_stats_.is_internally_consistent() && window_size_ != 0u && kmer_size_ != 0u &&
             minimizer_word_kind_ <= 3u && minimizer_words32_per_record_ != 0u &&
@@ -242,6 +254,11 @@ class device_query_sketch_authorization {
     /// @return Runtime-issued identity, or zero for an invalid authorization.
     [[nodiscard]] std::uint64_t identity() const noexcept {
         return identity_;
+    }
+    /// @brief Returns the exact typed minimizer payload covered by this authority.
+    /// @return Logical payload bytes, excluding Vulkan's nonzero empty-buffer padding.
+    [[nodiscard]] std::uint64_t logical_minimizer_bytes() const noexcept {
+        return logical_minimizer_bytes_;
     }
     /// @brief Computes retained host-vector capacity owned by the authorization.
     /// @return Retained bytes, saturated at the maximum `uint64_t` value.
@@ -270,6 +287,7 @@ class device_query_sketch_authorization {
         memory_identity_ = 0u;
         buffer_bytes_ = 0u;
         allocation_bytes_ = 0u;
+        logical_minimizer_bytes_ = 0u;
         minimizer_count_ = 0u;
         window_size_ = 0u;
         kmer_size_ = 0u;
@@ -292,6 +310,7 @@ class device_query_sketch_authorization {
         memory_identity_ = other.memory_identity_;
         buffer_bytes_ = other.buffer_bytes_;
         allocation_bytes_ = other.allocation_bytes_;
+        logical_minimizer_bytes_ = other.logical_minimizer_bytes_;
         minimizer_count_ = other.minimizer_count_;
         window_size_ = other.window_size_;
         kmer_size_ = other.kmer_size_;
@@ -312,8 +331,9 @@ class device_query_sketch_authorization {
     runtime* runtime_ = nullptr;                                 ///< Issuing runtime, or null after `clear`.
     VkBuffer buffer_ = VK_NULL_HANDLE;                           ///< Resident minimizer buffer handle.
     std::uint64_t memory_identity_ = 0u;                        ///< Device-memory identity for `buffer_`.
-    std::uint64_t buffer_bytes_ = 0u;                           ///< Logical minimizer bytes covered by authority.
+    std::uint64_t buffer_bytes_ = 0u;                           ///< Vulkan buffer range, including required padding.
     std::uint64_t allocation_bytes_ = 0u;                        ///< Physical allocation bytes for `buffer_`.
+    std::uint64_t logical_minimizer_bytes_ = 0u;                 ///< Exact record payload excluding Vulkan's empty minimum.
     std::uint64_t minimizer_count_ = 0u;                         ///< Total minimizer records authorized.
     std::uint32_t window_size_ = 0u;                             ///< Sketch window size sealed into authority.
     std::uint32_t kmer_size_ = 0u;                               ///< Sketch k-mer size sealed into authority.
@@ -357,6 +377,26 @@ struct gpu_sketch_batch_allocation_requirements {
     std::uint64_t pessimistic_output_allocation_bytes = 0; ///< Physical output bytes at pessimistic cap.
 };
 
+/** @brief Owns downloaded anchor bytes and telemetry from one seed lookup. */
+struct seed_lookup_result {
+    std::vector<std::byte> host_bytes;
+    std::uint64_t count = 0;
+    std::uint64_t actual_vulkan_allocation_bytes = 0u;
+    seed_anchor_canonical_order_audit anchor_order_audit{};
+    std::uint64_t canonical_tie_normalization_runs = 0u;
+    std::uint64_t canonical_tie_normalization_anchors = 0u;
+    std::uint64_t seed_lookup_dispatches = 0;
+    std::uint64_t open_addressed_lookup_dispatches = 0;
+    std::uint64_t sorted_dense_lookup_dispatches = 0;
+    seed_lookup_sort_execution_stats sort_stats{};
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    // Host operation ownership belongs to the runtime, not its wire ABI. The
+    // token is attached only after actual dispatch/fence and readback checks.
+    runtime_pipeline_operation_token seed_operation_receipt{};
+#endif
+};
+
+
 /// @brief Inputs to the seed-hit lookup roundtrip. The query minimizers
 /// arrive either as a resident device buffer (`device_minimizer_words`,
 /// all-Vulkan sketch+seed path) or as host bytes to upload once. `slots` and
@@ -372,6 +412,7 @@ struct runtime_seed_lookup_inputs {
     // count. Zero selects open addressing via `slot_mask`.
     std::uint32_t bucket_count = 0;                    ///< Dense bucket count when slots are hash-sorted, else zero.
     std::uint32_t position_count = 0;                ///< Number of encoded positions in `positions`.
+    std::uint32_t query_minimizer_record_offset = 0; ///< First query record in the bound whole buffer.
     std::uint32_t minimizer_word_kind = 0;             ///< Minimizer word encoding kind for shaders.
     std::uint32_t minimizer_words32_per_record = 0;    ///< `uint32_t` words per minimizer record.
     std::uint32_t hash_shift = 0;                      ///< Right-shift applied before slot indexing.

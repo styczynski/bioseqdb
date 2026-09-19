@@ -5,6 +5,7 @@
 export module bioseq.pipeline.minimap_port:results;
 
 import std;
+export import bioseq.pipeline.algorithm_identity_contract;
 import bioseq.highway.dispatch_contract;
 import bioseq.chaining.core;
 import bioseq.chaining.scalar;
@@ -14,6 +15,7 @@ import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_index;
 import bioseq.sequences.cigar;
 import bioseq.storage.size;
+export import bioseq.pipeline.minimap_port.match_result_contract;
 
 export {
 
@@ -47,91 +49,11 @@ export {
 
     namespace bioseq::simd {
 
-    /// Return the stable display name of a chaining algorithm.
-    [[nodiscard]] constexpr const char* chaining_algorithm_name(chaining_algorithm mode) {
-        switch (mode) {
-        case chaining_algorithm::scalar_minimap2:
-            return "Minimap2 Scalar";
-        case chaining_algorithm::simd_minimap2:
-            return "Minimap2 SIMD";
-        case chaining_algorithm::range_minimum_query:
-            return "Minimap2 RMQ";
-        case chaining_algorithm::vulkan_tiled_dynamic_programming:
-            return "Vulkan tiled DP";
-        }
-        return "unknown";
-    }
-
-    /// Return the stable display name of a base-alignment algorithm.
-    [[nodiscard]] constexpr const char*
-    base_alignment_algorithm_name(base_alignment_algorithm mode) {
-        switch (mode) {
-        case base_alignment_algorithm::ksw2:
-            return "KSW2";
-        case base_alignment_algorithm::block_aligner:
-            return "Block Aligner";
-        case base_alignment_algorithm::ksw2_batched:
-            return "KSW2 (inter-region batched)";
-        }
-        return "unknown";
-    }
-
-    /// Return the stable display name of a minimizer algorithm.
-    [[nodiscard]] constexpr const char* minimizer_algorithm_name(minimizer_algorithm mode) {
-        switch (mode) {
-        case minimizer_algorithm::scalar:
-            return "Scalar Minimizers";
-        case minimizer_algorithm::simd_minimap2_reference:
-            return "SIMD Minimap2 (slow reference)";
-        case minimizer_algorithm::two_stack_nthash:
-            return "Two-Stack nthash SIMD Minimizers";
-        case minimizer_algorithm::vulkan_minimap_integer:
-            return "Vulkan minimap-int minimizers";
-        case minimizer_algorithm::bounded_nthash_simd:
-            return "Bounded u32 ntHash SIMD Minimizers";
-        }
-        return "unknown";
-    }
-
     // ============================================================================
     // Constants — mirrors minimap2 defaults from mm_mapopt_t
     // ============================================================================
 
     // CIGAR opcodes and cigar_operation are imported from bioseq_cigar module.
-
-    /**
-     * @brief PAF-like alignment result.
-     *
-     * Maps to the 12 mandatory PAF columns plus alignment details.
-     */
-    struct match_result {
-        // PAF mandatory columns.: every length / absolute coordinate
-        // (cols 2,3,4,7,8,9,10,11) is `sequence_size_t` (uint64) so it is never
-        // truncated for sequences longer than 2^31. PAF emits them as decimal
-        // strings, so the wire width is unchanged.
-        sequence_size_t query_len = 0;    ///< col 2: query sequence length
-        sequence_size_t query_start = 0;  ///< col 3: query start (0-based, closed)
-        sequence_size_t query_end = 0;    ///< col 4: query end (0-based, open)
-        bool is_reverse = false;          ///< col 5: '+' or '-'
-        sequence_size_t target_len = 0;   ///< col 7: target sequence length
-        sequence_size_t target_start = 0; ///< col 8: target start on original strand
-        sequence_size_t target_end = 0;   ///< col 9: target end on original strand
-        sequence_size_t num_matches = 0;  ///< col 10: number of residue matches (mlen)
-        sequence_size_t block_length = 0; ///< col 11: alignment block length (blen)
-        std::int32_t mapq = 0;            ///< col 12: mapping quality (0-255)
-
-        // Additional alignment info
-        std::int32_t chain_score = 0;           ///< chaining score
-        std::int32_t dp_score = 0;              ///< DP alignment score
-        std::int32_t dp_max_score = 0;          ///< max scoring segment score (dp_max0 in original)
-        std::int32_t seed_count = 0;            ///< number of seeds in chain
-        std::int32_t secondary_chain_score = 0; ///< best secondary score against this primary
-        float divergence = -1.f;            ///< sequence divergence estimate
-        bool is_primary = true;             ///< primary mapping flag
-        bool has_cigar = false;             ///< whether CIGAR alignment was performed
-        std::vector<cigar_operation> cigar; ///< CIGAR string
-        sequence_size_t edit_distance = 0;  ///< exact unit-cost edits in the reported alignment
-    };
 
     /// Exact, truncation-resistant fingerprint of one complete match_result stream.
     /// Storage/index checksums deliberately do not feed this value: this is

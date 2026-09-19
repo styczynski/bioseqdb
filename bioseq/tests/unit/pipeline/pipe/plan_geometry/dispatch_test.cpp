@@ -7,12 +7,262 @@
 
 import std;
 import bioseq.tests.unit.pipeline.pipe_support;
+import bioseq.sequences.kmers.minimizer_physical_registry;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 
 using namespace bioseq::tests::pipeline::pipe_support;
 
 namespace bioseq::simd::pipe {
 
 using namespace ::bioseq::tests::pipeline::pipe_support;
+
+template <class p_query_minimizers>
+concept accepts_owned_prebuilt_query = requires(
+    ::bioseq::storage::lazy_sequence_view<::seq::dna4> sequence,
+    p_query_minimizers&& query_minimizers,
+    const ::bioseq::indexing::minimizer_hashmap_fragment_index& index,
+    statement_execution_plan_owner plan) {
+    ::bioseq::simd::minimap2_port_with_index<
+        ::bioseq::minimizers::minimizer_representation<28u, 15u>, ::seq::dna4>(
+        sequence, sequence, std::forward<p_query_minimizers>(query_minimizers),
+        index, plan);
+};
+
+TEST_CASE("minimizer batch retains its checked host subrange without copying records",
+          "[component:bioseq][layer:unit][feature:planner]")
+{
+    using record = ::bioseq::minimizers::minimizer_representation<28u, 15u>;
+    using batch = minimizer_batch_view<record>;
+    static_assert(!std::is_constructible_v<batch, std::span<const record>>);
+    static_assert(!std::is_constructible_v<batch, const std::vector<record>&>);
+    static_assert(accepts_owned_prebuilt_query<batch>);
+    static_assert(accepts_owned_prebuilt_query<std::shared_ptr<const std::vector<record>>>);
+    static_assert(!accepts_owned_prebuilt_query<const std::vector<record>&>);
+    static_assert(!accepts_owned_prebuilt_query<std::span<const record>>);
+    auto storage = std::make_shared<const std::vector<record>>(3u);
+    const auto* original_data = storage->data();
+    const std::weak_ptr<const std::vector<record>> lifetime = storage;
+    auto view = batch::from_shared_host(storage, 1u, 2u);
+    REQUIRE(view.data() == original_data + 1u);
+    REQUIRE(view.size() == 2u);
+    const std::array<canonical_seed_job_span, 3u> jobs{{
+        {0u, 0u, 0u}, {1u, 0u, 2u}, {2u, 2u, 1u}}};
+    for (const auto& job : jobs) {
+        const auto job_view = batch::from_shared_host(storage, job.offset, job.count);
+        REQUIRE(job_view.data() == original_data + job.offset);
+        REQUIRE(job_view.size() == job.count);
+    }
+    REQUIRE_THROWS_AS(batch::from_shared_host(storage, 4u, 0u), std::invalid_argument);
+    REQUIRE_THROWS_AS(batch::from_shared_host(storage, 1u, ~std::size_t{0}),
+                      std::invalid_argument);
+    REQUIRE_THROWS_AS(batch::from_shared_host({}, 0u, 0u), std::invalid_argument);
+    storage.reset();
+    REQUIRE_FALSE(lifetime.expired());
+    REQUIRE(view.data() == original_data + 1u);
+    auto retained = std::move(view);
+    REQUIRE(retained.data() == original_data + 1u);
+    REQUIRE_FALSE(view.has_host_owner());
+    REQUIRE(view.size() == 0u);
+    {
+        using cep_type = static_aligner_parameters<10u, 15u, 28u>;
+        std::vector<alignment_region> observed;
+        int on_batch_count = 0;
+        exact_filter_probe_sink probe{&observed, &on_batch_count};
+        divergence_stage<record> divergence{
+            {}, std::move(retained), 100u, 100u, 15, false};
+        auto bound = divergence.template attach<cep_type>(probe);
+        REQUIRE_FALSE(retained.has_host_owner());
+        REQUIRE_FALSE(divergence.query_minimizers_.has_host_owner());
+        REQUIRE_FALSE(lifetime.expired());
+        REQUIRE(bound.self_.query_minimizers_.data() == original_data + 1u);
+        REQUIRE(bound.self_.query_minimizers_.size() == 2u);
+
+        std::vector<alignment_region> regions(1u);
+        regions.front().mapq = 42;
+        const std::vector<::bioseq::chaining::anchor> anchors;
+        bound.on_batch_pair(std::span<alignment_region>{regions},
+                            std::span<const ::bioseq::chaining::anchor>{anchors});
+        bound.on_completed();
+        REQUIRE(on_batch_count == 1);
+        REQUIRE(observed.size() == 1u);
+        REQUIRE(observed.front().mapq == 42);
+        REQUIRE_FALSE(lifetime.expired());
+    }
+    REQUIRE(lifetime.expired());
+}
+
+TEST_CASE("statement plan independently classifies all seed and chain selections",
+          "[component:bioseq][layer:unit][feature:planner]")
+{
+    using seed = ::bioseq::simd::minimizer_algorithm;
+    using chain = ::bioseq::simd::chaining_algorithm;
+    for (const auto selected_seed : {seed::scalar, seed::simd_minimap2_reference,
+                                    seed::two_stack_nthash, seed::bounded_nthash_simd,
+                                    seed::vulkan_minimap_integer}) {
+        for (const auto selected_chain : {chain::scalar_minimap2, chain::simd_minimap2,
+                                         chain::range_minimum_query,
+                                         chain::vulkan_tiled_dynamic_programming}) {
+            ::bioseq::simd::minimap2_parameters params;
+            params.minimizer_algorithm = selected_seed;
+            params.chaining_algorithm = selected_chain;
+            params.vulkan_seed_hits_enabled = selected_seed == seed::vulkan_minimap_integer;
+            bind_fixed_highway(params);
+            const auto plan = make_statement_execution_plan(std::move(params));
+            const bool gpu_seed = selected_seed == seed::vulkan_minimap_integer;
+            const bool gpu_chain = selected_chain == chain::vulkan_tiled_dynamic_programming;
+            const auto expected = gpu_seed
+                ? (gpu_chain ? seed_chain_route::vulkan_seed_vulkan_chain
+                             : seed_chain_route::vulkan_seed_host_chain)
+                : (gpu_chain ? seed_chain_route::host_seed_vulkan_chain
+                             : seed_chain_route::host_seed_host_chain);
+            REQUIRE(plan->route == expected);
+            REQUIRE(plan->uses_vulkan_seed() == gpu_seed);
+            REQUIRE(plan->frozen_parameters.minimizer_algorithm == selected_seed);
+            REQUIRE(plan->frozen_parameters.chaining_algorithm == selected_chain);
+            const statement_execution_plan_owner retained = plan;
+            REQUIRE(retained.get() == plan.get());
+            REQUIRE_FALSE(retained.owner_before(plan));
+            REQUIRE_FALSE(plan.owner_before(retained));
+        }
+    }
+    ::bioseq::simd::minimap2_parameters invalid;
+    invalid.minimizer_algorithm = static_cast<seed>(255);
+    REQUIRE_THROWS_AS(make_statement_execution_plan(invalid), std::invalid_argument);
+    invalid.minimizer_algorithm = seed::scalar;
+    invalid.chaining_algorithm = static_cast<chain>(255);
+    REQUIRE_THROWS_AS(make_statement_execution_plan(invalid), std::invalid_argument);
+}
+
+#if defined(BIOSEQ_TEST_INDEXES)
+TEST_CASE("statement plan route is identical across scan join union admission stats and pipeline entry",
+          "[component:bioseq][layer:unit][feature:planner]")
+{
+    const auto make_guarded_plan = [](downstream_active_wall_tracker& tracker) {
+        minimap2_parameters params;
+        params.downstream_active_wall = &tracker;
+        bind_fixed_highway(params);
+        auto plan = make_statement_execution_plan(std::move(params));
+        // Automatic binding is E2E-only. Ordinary TEST executors can contain
+        // multiple scan-node plans sharing one downstream timing union.
+        REQUIRE(tracker.bind_benchmark_e2e_statement_owner(plan));
+        return plan;
+    };
+    const auto attest = [](downstream_active_wall_tracker& tracker,
+                           const statement_execution_plan_owner& plan,
+                           const benchmark_e2e_statement_plan_checkpoint checkpoint) {
+        REQUIRE(tracker.attest_benchmark_e2e_statement_plan_checkpoint(plan, checkpoint));
+    };
+    const auto record_existing_downstream_work = [](downstream_active_wall_tracker& tracker) {
+        tracker.enter();
+        tracker.leave();
+    };
+
+    SECTION("column scan requires only the common executed route") {
+        downstream_active_wall_tracker tracker;
+        const auto plan = make_guarded_plan(tracker);
+        REQUIRE(tracker.begin_benchmark_e2e_statement_plan_proof(
+            plan, benchmark_e2e_statement_plan_shape::column_scan));
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::scan_dispatch);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::pipeline);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::statistics);
+        record_existing_downstream_work(tracker);
+        REQUIRE(tracker.finalize().available);
+    }
+
+    SECTION("batch join attests optional union and overlapping completed retries") {
+        downstream_active_wall_tracker tracker;
+        const auto plan = make_guarded_plan(tracker);
+        REQUIRE(tracker.begin_benchmark_e2e_statement_plan_proof(
+            plan, benchmark_e2e_statement_plan_shape::batch_join));
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::join_preparation);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::query_union);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::scan_dispatch);
+        // Distinct native-batch callbacks can overlap. Their pending edges stay
+        // callback-local; the statement tracker accepts each exact-owner edge.
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::retry_request);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::retry_request);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::retry_reentry);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::retry_reentry);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::pipeline);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::statistics);
+        record_existing_downstream_work(tracker);
+        REQUIRE(tracker.finalize().available);
+    }
+
+    SECTION("batch join does not require a query union on routes that skip it") {
+        downstream_active_wall_tracker tracker;
+        const auto plan = make_guarded_plan(tracker);
+        REQUIRE(tracker.begin_benchmark_e2e_statement_plan_proof(
+            plan, benchmark_e2e_statement_plan_shape::batch_join));
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::join_preparation);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::scan_dispatch);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::pipeline);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::statistics);
+        record_existing_downstream_work(tracker);
+        REQUIRE(tracker.finalize().available);
+    }
+
+    SECTION("final validation rejects a retry request without re-entry") {
+        downstream_active_wall_tracker tracker;
+        const auto plan = make_guarded_plan(tracker);
+        REQUIRE(tracker.begin_benchmark_e2e_statement_plan_proof(
+            plan, benchmark_e2e_statement_plan_shape::column_scan));
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::scan_dispatch);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::retry_request);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::pipeline);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::statistics);
+        record_existing_downstream_work(tracker);
+        REQUIRE_FALSE(tracker.finalize().available);
+    }
+
+    SECTION("final validation rejects missing required handoff") {
+        downstream_active_wall_tracker tracker;
+        const auto plan = make_guarded_plan(tracker);
+        REQUIRE(tracker.begin_benchmark_e2e_statement_plan_proof(
+            plan, benchmark_e2e_statement_plan_shape::batch_join));
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::scan_dispatch);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::pipeline);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::statistics);
+        record_existing_downstream_work(tracker);
+        REQUIRE_FALSE(tracker.finalize().available);
+    }
+
+    SECTION("final validation observes but does not retain owner lifetime") {
+        downstream_active_wall_tracker tracker;
+        auto plan = make_guarded_plan(tracker);
+        REQUIRE(tracker.begin_benchmark_e2e_statement_plan_proof(
+            plan, benchmark_e2e_statement_plan_shape::column_scan));
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::scan_dispatch);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::pipeline);
+        attest(tracker, plan, benchmark_e2e_statement_plan_checkpoint::statistics);
+        record_existing_downstream_work(tracker);
+        plan.reset();
+        REQUIRE_FALSE(tracker.finalize().available);
+    }
+
+    SECTION("equal parameters in a different control block are rejected") {
+        downstream_active_wall_tracker tracker;
+        const auto plan = make_guarded_plan(tracker);
+        auto duplicate_parameters = plan->frozen_parameters;
+        const auto duplicate =
+            make_statement_execution_plan(std::move(duplicate_parameters));
+        REQUIRE(duplicate.get() != plan.get());
+        REQUIRE_FALSE(tracker.bind_benchmark_e2e_statement_owner(duplicate));
+    }
+
+    SECTION("ordinary test plans may share timing without automatic campaign binding") {
+        downstream_active_wall_tracker tracker;
+        minimap2_parameters params;
+        params.downstream_active_wall = &tracker;
+        bind_fixed_highway(params);
+        const auto first = make_statement_execution_plan(params);
+        const auto second = make_statement_execution_plan(std::move(params));
+        REQUIRE(first.get() != second.get());
+        record_existing_downstream_work(tracker);
+        REQUIRE(tracker.finalize().available);
+    }
+}
+#endif
 
 TEST_CASE("dispatch_exact_value_or_default falls back to DefaultValue",
           "[component:bioseq][layer:unit][feature:planner]")
@@ -310,9 +560,13 @@ TEST_CASE("pipeline_run_leaf::call routes Cep on (W, K) runtime match",
         const auto t_view = bioseq::storage::make_lazy_sequence_view(t_owner);
         using minimizer_type =
             ::bioseq::simd::minimizer_representation<15u, 15u>;
-        const std::vector<minimizer_type> mins{};
+        const auto minimizers_owner =
+            std::make_shared<const std::vector<minimizer_type>>();
+        const auto mins = minimizer_batch_view<minimizer_type>::from_shared_host(
+            minimizers_owner, 0u, 0u);
+        const auto plan = make_statement_execution_plan(std::move(params));
         ::bioseq::indexing::minimizer_hashmap_fragment_index idx;
-        idx.build(mins, t.bp_size());
+        idx.build(*minimizers_owner, t.bp_size());
         // The leaf's W==10 && K==15 branch picks SpecCep.
         auto result = detail::pipeline_run_leaf<
             pipeline_entry_point::with_prebuilt_minimizers,
@@ -320,7 +574,7 @@ TEST_CASE("pipeline_run_leaf::call routes Cep on (W, K) runtime match",
             minimizer_type, ::bioseq::indexing::minimizer_hashmap_fragment_index,
             15u, 15u,
             base_alignment_algorithm_type::block_aligner, chaining_algorithm_type::scalar_minimap2, minimizer_algorithm_type::scalar>::call(
-                params, q_view, t_view, mins, idx,
+                plan->frozen_parameters, q_view, t_view, mins, idx, plan,
                 nullptr, ::bioseq::indexing::gpu_index_cache_identity{}, false);
         REQUIRE(result.size() == 0u);
     }
@@ -342,16 +596,20 @@ TEST_CASE("pipeline_run_leaf::call routes Cep on (W, K) runtime match",
         const auto t_view = bioseq::storage::make_lazy_sequence_view(t_owner);
         using minimizer_type =
             ::bioseq::simd::minimizer_representation<15u, 15u>;
-        const std::vector<minimizer_type> mins{};
+        const auto minimizers_owner =
+            std::make_shared<const std::vector<minimizer_type>>();
+        const auto mins = minimizer_batch_view<minimizer_type>::from_shared_host(
+            minimizers_owner, 0u, 0u);
+        const auto plan = make_statement_execution_plan(std::move(params));
         ::bioseq::indexing::minimizer_hashmap_fragment_index idx;
-        idx.build(mins, t.bp_size());
+        idx.build(*minimizers_owner, t.bp_size());
         auto result = detail::pipeline_run_leaf<
             pipeline_entry_point::with_prebuilt_minimizers,
             seq::dna4,
             minimizer_type, ::bioseq::indexing::minimizer_hashmap_fragment_index,
             15u, 15u,
             base_alignment_algorithm_type::block_aligner, chaining_algorithm_type::scalar_minimap2, minimizer_algorithm_type::scalar>::call(
-                params, q_view, t_view, mins, idx,
+                plan->frozen_parameters, q_view, t_view, mins, idx, plan,
                 nullptr, ::bioseq::indexing::gpu_index_cache_identity{}, false);
         REQUIRE(result.size() == 0u);
     }
@@ -441,6 +699,59 @@ TEST_CASE("dispatch_chain rejects rvalue args at compile time",
     // rvalue ref is rejected.
     static_assert(!dispatch_test_support::chain_accepts_v<base_alignment_algorithm_type&&, chaining_algorithm_type&&, minimizer_algorithm_type&&>);
     SUCCEED();
+}
+
+TEST_CASE("algorithm-aware k20 layout separates physical K from runtime biological k w",
+          "[component:bioseq][layer:unit][feature:planner]") {
+    using namespace ::bioseq::minimizers;
+    using algorithm = ::bioseq::simd::minimizer_algorithm;
+    for (const auto selected : {algorithm::bounded_nthash_simd, algorithm::two_stack_nthash}) {
+        // Bounded keeps its u32 hash; two-stack's selected K20 profile uses
+        // the existing wider record for query/index hash-mask compatibility.
+        const auto expected_physical_k =
+            selected == algorithm::bounded_nthash_simd ? 15u : 20u;
+        const auto expected_position_log2 =
+            selected == algorithm::bounded_nthash_simd ? 28u : 63u;
+        const auto layout = select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
+            selected, std::uint64_t{1u} << 28u, 20u, 15u);
+        REQUIRE(layout.physical_kmer_size == expected_physical_k);
+        REQUIRE(layout.record_position_log2 == expected_position_log2);
+        REQUIRE(layout.runtime_kmer_size == 20u);
+        REQUIRE(layout.runtime_window_size == 15u);
+        REQUIRE(layout.effective_algorithm == selected);
+        const auto physical_k = visit_minimizer_physical_layout(
+            layout, []<class record>() { return record::layout_type::k_physical_kmer_size; });
+        REQUIRE(physical_k == expected_physical_k);
+        const auto wide = select_minimizer_physical_layout<seq::dna5, std::uint64_t>(
+            selected, (std::uint64_t{1u} << 28u) + 1u, 20u, 15u);
+        REQUIRE(wide.record_position_log2 == 63u);
+        REQUIRE(wide.physical_kmer_size == expected_physical_k);
+    }
+    const auto reference = select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+        algorithm::simd_minimap2_reference, (std::uint64_t{1u} << 20u) + 1u, 20u, 15u);
+    REQUIRE(reference.record_position_log2 == 23u);
+    REQUIRE(reference.physical_kmer_size == 20u);
+    REQUIRE(reference.hash_width == minimizer_scalar_width::u64);
+    auto mismatched = reference;
+    mismatched.hash_width = minimizer_scalar_width::u32;
+    REQUIRE_THROWS_AS(visit_minimizer_physical_layout(
+        mismatched, []<class record>() { return sizeof(record); }), std::invalid_argument);
+    const auto vulkan = select_minimizer_physical_layout<seq::dna5, std::uint64_t>(
+        algorithm::vulkan_minimap_integer, 4'000'000'000u, 20u, 15u);
+    REQUIRE(vulkan.requested_algorithm == algorithm::vulkan_minimap_integer);
+    REQUIRE(vulkan.effective_algorithm == algorithm::vulkan_minimap_integer);
+    REQUIRE(vulkan.physical_kmer_size == 20u);
+    REQUIRE(vulkan.record_position_log2 == 63u);
+    REQUIRE_THROWS_AS((select_minimizer_physical_layout<seq::dna4, std::uint32_t>(
+        algorithm::simd_minimap2_reference, 1024u, 20u, 15u)), std::invalid_argument);
+    const auto dna5 = select_minimizer_physical_layout<seq::dna5, std::uint32_t>(
+        algorithm::simd_minimap2_reference, 1024u, 20u, 15u);
+    REQUIRE(dna5.requested_algorithm == algorithm::simd_minimap2_reference);
+    REQUIRE(dna5.effective_algorithm == algorithm::simd_minimap2_reference);
+    REQUIRE(dna5.physical_kmer_size == 20u);
+    REQUIRE_THROWS_AS((select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
+        algorithm::bounded_nthash_simd, (std::uint64_t{1u} << 63u) + 1u, 20u, 15u)),
+        std::length_error);
 }
 
 } // namespace bioseq::simd::pipe

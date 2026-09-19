@@ -79,14 +79,20 @@ struct vulkan_device_minimizer_storage {
 template <class p_minimizer_type>
 struct vulkan_device_minimizer_span {
     std::shared_ptr<const vulkan_device_minimizer_storage<p_minimizer_type>> owner{};
+    std::uint64_t record_offset = 0u;
+    std::uint64_t record_count = 0u;
 
     /** @brief Returns the device buffer, or null for an empty span. */
     [[nodiscard]] const buffer* words() const noexcept {
         return owner ? &owner->words : nullptr;
     }
+    /** @brief Returns the first physical record in the shared device buffer. */
+    [[nodiscard]] std::uint64_t offset() const noexcept {
+        return record_offset;
+    }
     /** @brief Returns the number of resident minimizer records. */
     [[nodiscard]] std::uint64_t count() const noexcept {
-        return owner ? owner->count : 0u;
+        return owner ? record_count : 0u;
     }
     /** @brief Returns the device-word stride of one minimizer. */
     [[nodiscard]] std::uint32_t words32_per_minimizer() const noexcept {
@@ -95,6 +101,27 @@ struct vulkan_device_minimizer_span {
     /** @brief Returns the resident minimizer word encoding. */
     [[nodiscard]] minimizer_word_kind word_kind() const noexcept {
         return owner ? owner->word_kind : minimizer_word_kind::u32;
+    }
+
+    /**
+     * @brief Borrow a checked record subrange without changing the descriptor offset.
+     *
+     * The runtime binds the owner's complete buffer and carries `record_offset`
+     * in its existing query-record/push wire. This deliberately avoids assuming
+     * that a minimizer-record boundary satisfies Vulkan's storage-buffer offset
+     * alignment.
+     */
+    [[nodiscard]] vulkan_device_minimizer_span
+    subspan(std::uint64_t first, std::uint64_t count) const {
+        if (!owner || record_offset > owner->count || record_count > owner->count - record_offset ||
+            first > record_count || count > record_count - first) {
+            throw vulkan_runtime_error{"Vulkan minimizer device subspan is out of range"};
+        }
+        return vulkan_device_minimizer_span{
+            .owner = owner,
+            .record_offset = record_offset + first,
+            .record_count = count,
+        };
     }
 };
 
@@ -290,7 +317,11 @@ struct vulkan_sketch_result {
 
     /** @brief Returns a shared view of device-resident minimizers. */
     [[nodiscard]] vulkan_device_minimizer_span<p_minimizer_type> device_span() const noexcept {
-        return vulkan_device_minimizer_span<p_minimizer_type>{.owner = device};
+        return vulkan_device_minimizer_span<p_minimizer_type>{
+            .owner = device,
+            .record_offset = 0u,
+            .record_count = device ? device->count : 0u,
+        };
     }
 };
 
@@ -306,6 +337,9 @@ struct vulkan_batch_sketch_result {
     // It is declared first so reverse destruction releases every accounted
     // vector/device before the final admission anchor.
     std::shared_ptr<vulkan_batch_sketch_memory_retention> memory_retention;
+    // The optional authorized readback is a later, independent physical
+    // allocation. It is not charged again to the completed sketch reservation.
+    bioseq::parallelism::memory_permit host_readback_permit;
     std::vector<p_minimizer_type> host_minimizers;
     std::vector<gpu_seed_query_record_wire> query_records;
     std::shared_ptr<vulkan_device_minimizer_storage<p_minimizer_type>> device;
@@ -315,10 +349,66 @@ struct vulkan_batch_sketch_result {
         vulkan_sketch_host_materialization::host_and_device;
     std::uint64_t device_minimizer_count = 0;
     bool overflow = false;
+    bool host_readback_completed = false;
+
+    vulkan_batch_sketch_result() = default;
+    explicit vulkan_batch_sketch_result(
+        vulkan_sketch_host_materialization selected_materialization) noexcept
+        : materialization(selected_materialization) {}
+    vulkan_batch_sketch_result(
+        std::shared_ptr<vulkan_batch_sketch_memory_retention> retained_memory,
+        vulkan_sketch_host_materialization selected_materialization) noexcept
+        : memory_retention(std::move(retained_memory)),
+          materialization(selected_materialization) {}
+
+    vulkan_batch_sketch_result(const vulkan_batch_sketch_result&) = delete;
+    vulkan_batch_sketch_result& operator=(const vulkan_batch_sketch_result&) = delete;
+
+    /// Move physical allocations before moving the permits that authorize them.
+    vulkan_batch_sketch_result(vulkan_batch_sketch_result&& other) noexcept {
+        adopt_empty(other);
+    }
+
+    vulkan_batch_sketch_result& operator=(vulkan_batch_sketch_result&& other) noexcept {
+        if (this == std::addressof(other)) {
+            return *this;
+        }
+        query_authority = {};
+        device.reset();
+        {
+            std::vector<gpu_seed_query_record_wire> empty_records;
+            query_records.swap(empty_records);
+        }
+        bioseq::parallelism::release_admitted_vector_capacity_before_permit(
+            host_minimizers, host_readback_permit);
+        memory_retention.reset();
+        adopt_empty(other);
+        return *this;
+    }
 
     /** @brief Returns a shared view of device-resident minimizers. */
     [[nodiscard]] vulkan_device_minimizer_span<p_minimizer_type> device_span() const noexcept {
-        return vulkan_device_minimizer_span<p_minimizer_type>{.owner = device};
+        return vulkan_device_minimizer_span<p_minimizer_type>{
+            .owner = device,
+            .record_offset = 0u,
+            .record_count = device ? device->count : 0u,
+        };
+    }
+
+private:
+    /// The destination has no physical storage or admission when called.
+    void adopt_empty(vulkan_batch_sketch_result& other) noexcept {
+        host_minimizers.swap(other.host_minimizers);
+        query_records.swap(other.query_records);
+        device = std::move(other.device);
+        query_authority = std::move(other.query_authority);
+        dispatch_stats = std::exchange(other.dispatch_stats, {});
+        materialization = other.materialization;
+        device_minimizer_count = std::exchange(other.device_minimizer_count, 0u);
+        overflow = std::exchange(other.overflow, false);
+        host_readback_completed = std::exchange(other.host_readback_completed, false);
+        host_readback_permit = std::move(other.host_readback_permit);
+        memory_retention = std::move(other.memory_retention);
     }
 };
 

@@ -27,7 +27,9 @@ module;
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <span>
+#include <utility>
 
 #include <vulkan/vulkan.h>
 
@@ -85,7 +87,6 @@ choose_vulkan_chaining_pipeline(
         bioseq::gpu::vulkan::vulkan_static_variant_inputs{
             .max_workgroup_invocations = features.max_workgroup_invocations,
             .max_shared_memory_bytes = features.max_shared_memory_bytes,
-            .default_window_size = 10u,
     });
 }
 
@@ -309,6 +310,65 @@ public:
 };
 
 namespace vulkan_chaining_detail {
+
+/**
+ * @brief Creates one device allocation with an adjacent physical permit.
+ * @param allocation_permit Null outside an admitted attempt; otherwise receives
+ * only unreflected driver allocation bytes and must outlive the returned buffer.
+ * The driver requirement is resolved before the admission transaction, avoiding
+ * acquisition of the runtime planning mutex while materialization is locked.
+ */
+[[nodiscard]] inline bioseq::gpu::vulkan::buffer make_chaining_device_buffer(
+    bioseq::gpu::vulkan::runtime& vulkan_runtime,
+    std::uint64_t requested_bytes,
+    VkBufferUsageFlags usage,
+    std::uint64_t allocation_requirement,
+    const vulkan_chaining_memory_plan& memory_plan,
+    bioseq::parallelism::memory_permit* allocation_permit) {
+    if (allocation_permit == nullptr) {
+        return vulkan_runtime.create_device_buffer(requested_bytes, usage);
+    }
+    if (*allocation_permit || requested_bytes == 0u || allocation_requirement < requested_bytes) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error(
+            "Vulkan chaining physical allocation requires fresh matching authority");
+    }
+    bioseq::parallelism::memory_admission_failure failure{};
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    auto candidate = admission.try_reserve(allocation_requirement, &failure);
+    if (!candidate) {
+        throw vulkan_chaining_admission_error{memory_plan, failure};
+    }
+    *allocation_permit = std::move(*candidate);
+    // Local storage is destroyed before the caller's still-live permit on any
+    // allocation, mapping, initialization, or receipt failure.
+    bioseq::gpu::vulkan::buffer created{};
+    const auto materialization = admission.materialize(
+        *allocation_permit,
+        [&vulkan_runtime, &created, requested_bytes, usage, allocation_requirement]() {
+            created = vulkan_runtime.create_device_buffer(requested_bytes, usage);
+            if (created.allocation_bytes != allocation_requirement ||
+                created.allocation_bytes > (std::numeric_limits<std::size_t>::max)() ||
+                created.mapped == nullptr || !created.is_host_visible_coherent()) {
+                throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                    "Vulkan chaining physical allocation does not match its admitted requirement");
+            }
+            std::memset(created.mapped, 0,
+                        static_cast<std::size_t>(created.allocation_bytes));
+            return bioseq::parallelism::memory_materialization_snapshot{
+                .actual_allocation_bytes = created.allocation_bytes,
+                .fully_touched_bytes = created.allocation_bytes,
+                .is_host_visible = true,
+                .is_host_coherent = true,
+                .is_process_footprint_reflected = created.process_footprint_reflected,
+            };
+        });
+    if (materialization.admitted_bytes != allocation_requirement ||
+        materialization.is_permit_released == static_cast<bool>(*allocation_permit)) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error(
+            "Vulkan chaining physical allocation receipt is inconsistent");
+    }
+    return created;
+}
 
 /// Materialise the hard chaining ranges into a chain-arena array. The boundary
 /// predicate matches `analyze_gpu_chaining_shape` exactly so the fill count equals
@@ -552,8 +612,26 @@ struct vulkan_chaining_shape_plan {
     std::span<const anchor> anchors,
     const chaining_parameters& params,
     arena_slab<chain>& chains_out,
-    arena_slab<anchor>& reordered_anchors_out)
+    arena_slab<anchor>& reordered_anchors_out,
+    bioseq::parallelism::operation_memory_retention* attempt_retention
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    , bioseq::gpu::vulkan::runtime_pipeline_operation_token* completed_operation
+#endif
+    )
 {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (completed_operation != nullptr &&
+        (params.coordinate_only || completed_operation->audit().kind !=
+            bioseq::gpu::vulkan::runtime_pipeline_operation_kind::invalid)) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error(
+            "chaining completion output requires ordinary DP and an unissued token");
+    }
+#endif
+    if (attempt_retention != nullptr &&
+        (!context::current().has_backing_allocation_hook() || params.coordinate_only)) {
+        throw bioseq::gpu::vulkan::vulkan_runtime_error(
+            "admitted Vulkan chaining requires a hooked context and ordinary host backtracking");
+    }
     const std::size_t anchor_count = anchors.size();
     const std::uint64_t anchor_count_u64 =
         static_cast<std::uint64_t>(anchor_count);
@@ -597,13 +675,18 @@ struct vulkan_chaining_shape_plan {
             params.coordinate_only);
     apply_vulkan_chaining_allocation_requirements(
         memory_plan, vulkan_runtime, params.coordinate_only);
-    bioseq::parallelism::memory_admission_failure admission_failure{};
-    auto permit = bioseq::parallelism::memory_admission_controller::instance()
-        .try_reserve(memory_plan.total_bytes, &admission_failure);
-    if (!permit) {
-        throw vulkan_chaining_admission_error{
-            memory_plan, admission_failure};
+    std::optional<bioseq::parallelism::memory_permit> legacy_permit;
+    if (attempt_retention == nullptr) {
+        bioseq::parallelism::memory_admission_failure admission_failure{};
+        legacy_permit = bioseq::parallelism::memory_admission_controller::instance()
+            .try_reserve(memory_plan.total_bytes, &admission_failure);
+        if (!legacy_permit) {
+            throw vulkan_chaining_admission_error{memory_plan, admission_failure};
+        }
     }
+    // In an admitted attempt, the installed hook transfers exact unreflected
+    // context blocks directly to attempt_retention at allocation time. Logical
+    // range/compaction/backtracking extents therefore acquire no second permit.
 
     auto dp_scope = context::current().push<context::arena::chain>();
     auto ranges = build_gpu_chain_ranges(
@@ -635,22 +718,34 @@ struct vulkan_chaining_shape_plan {
     // transfer parameter remains an invalid sentinel and allocates no 24*N
     // bounce buffer.
     bioseq::gpu::vulkan::buffer transfer_scratch{};
-    auto anchor_buffer = vulkan_runtime.create_device_buffer(
+    bioseq::parallelism::memory_permit anchor_permit{};
+    auto anchor_buffer = make_chaining_device_buffer(vulkan_runtime,
         device_anchor_count_u64 * sizeof(anchor),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    auto range_buffer = vulkan_runtime.create_device_buffer(
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        memory_plan.device_anchor_bytes, memory_plan,
+        attempt_retention == nullptr ? nullptr : &anchor_permit);
+    bioseq::parallelism::memory_permit range_permit{};
+    auto range_buffer = make_chaining_device_buffer(vulkan_runtime,
         dp_ranges.size() * sizeof(bioseq::gpu::vulkan::gpu_chain_range),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    auto score_buffer = vulkan_runtime.create_device_buffer(
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        memory_plan.device_range_bytes, memory_plan,
+        attempt_retention == nullptr ? nullptr : &range_permit);
+    bioseq::parallelism::memory_permit score_permit{};
+    auto score_buffer = make_chaining_device_buffer(vulkan_runtime,
         device_anchor_count_u64 * sizeof(int32_t),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
         VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-    auto predecessor_buffer = vulkan_runtime.create_device_buffer(
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        memory_plan.device_score_bytes, memory_plan,
+        attempt_retention == nullptr ? nullptr : &score_permit);
+    bioseq::parallelism::memory_permit predecessor_permit{};
+    auto predecessor_buffer = make_chaining_device_buffer(vulkan_runtime,
         device_anchor_count_u64 * sizeof(int64_t),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
         VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        memory_plan.device_predecessor_bytes, memory_plan,
+        attempt_retention == nullptr ? nullptr : &predecessor_permit);
     if (anchor_buffer.mapped == nullptr || range_buffer.mapped == nullptr
         || score_buffer.mapped == nullptr
         || predecessor_buffer.mapped == nullptr
@@ -730,6 +825,9 @@ struct vulkan_chaining_shape_plan {
         return true;
     }
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    bioseq::gpu::vulkan::runtime_pipeline_operation_token pending_operation;
+#endif
     vulkan_runtime.run_chaining_tiled_dp_roundtrip(
         key,
         transfer_scratch,
@@ -750,7 +848,11 @@ struct vulkan_chaining_shape_plan {
         gpu_max_chain_iter,
         params.gap_penalty,
         params.skip_penalty,
-        params.max_chain_skip);
+        params.max_chain_skip
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        , completed_operation == nullptr ? nullptr : &pending_operation
+#endif
+        );
 
     // The queue fence completed inside the runtime call.  Anchors and hard
     // ranges are host-owned below and their device copies are dead before CPU
@@ -758,7 +860,9 @@ struct vulkan_chaining_shape_plan {
     // split makes the admitted peak the maximum of GPU execution and host
     // backtracking memory rather than their sum.
     anchor_buffer.reset();
+    anchor_permit.release();
     range_buffer.reset();
+    range_permit.release();
 
     for (std::size_t i = 0; i < device_anchor_count; ++i) {
         const int64_t predecessor = predecessors[i];
@@ -781,6 +885,16 @@ struct vulkan_chaining_shape_plan {
         params.min_seed_count,
         chains_out,
         reordered_anchors_out);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (completed_operation != nullptr) {
+        // Publish authority only after the existing host backtracking succeeds.
+        if (!pending_operation.is_valid_for_chaining_tiled_dp()) {
+            throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                "completed chaining lacks its causal GPU receipt");
+        }
+        *completed_operation = std::move(pending_operation);
+    }
+#endif
     return true;
 }
 
@@ -796,6 +910,9 @@ struct vulkan_chaining_shape_plan {
  * @param params Chaining distances, penalties, and execution policy.
  * @param chains_out Arena-backed destination for chain descriptors.
  * @param reordered_anchors_out Arena-backed destination for anchors in chain order.
+ * @param attempt_retention Retention owned by the installed admitted context;
+ * null preserves ordinary non-campaign admission. The context hook transfers its
+ * physical blocks directly into this retention; device buffers stay independent.
  * @return `true` when Vulkan completed the selected operation.
  * @throws vulkan_runtime_error If the device, shape, dispatch, or result contract is rejected.
  * @throws vulkan_chaining_admission_error If the exact memory plan is denied.
@@ -804,7 +921,12 @@ inline bool chain_anchors_vulkan(
     std::span<const anchor> anchors,
     const chaining_parameters& params,
     arena_slab<chain>& chains_out,
-    arena_slab<anchor>& reordered_anchors_out)
+    arena_slab<anchor>& reordered_anchors_out,
+    bioseq::parallelism::operation_memory_retention* attempt_retention = nullptr
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    , bioseq::gpu::vulkan::runtime_pipeline_operation_token* completed_operation = nullptr
+#endif
+    )
 {
     static_assert(sizeof(anchor) == 24);
     static_assert(offsetof(anchor, ref_position) == 0);
@@ -821,7 +943,11 @@ inline bool chain_anchors_vulkan(
         bioseq::instrumentation::region(instrumentation_descriptor);
 
     return vulkan_chaining_detail::execute_vulkan_chaining(
-        anchors, params, chains_out, reordered_anchors_out);
+        anchors, params, chains_out, reordered_anchors_out, attempt_retention
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        , completed_operation
+#endif
+        );
 }
 
 }  // namespace bioseq::chaining

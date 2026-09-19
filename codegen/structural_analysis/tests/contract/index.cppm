@@ -650,7 +650,7 @@ constexpr int indirect = 9;
 
     const auto selected_namespace = std::ranges::find(
         token_slice.namespaces,
-        "envelope::selected",
+        std::string{"envelope::selected"},
         &namespace_record::qualified_name);
     require(
         selected_namespace != token_slice.namespaces.end(),
@@ -802,7 +802,7 @@ constexpr int indirect = 9;
         "token-slice shared attribute block did not retain both segments");
     const auto table_marker = std::ranges::find(
         table.attributes,
-        "bioseq::template_flatten_when",
+        std::string{"bioseq::template_flatten_when"},
         &attribute_record::qualified_name);
     require(
         table_marker != table.attributes.end()
@@ -853,7 +853,7 @@ constexpr int indirect = 9;
         "changed");
     const auto map_marker = std::ranges::find(
         map_value.attributes,
-        "bioseq::template_flatten_entry",
+        std::string{"bioseq::template_flatten_entry"},
         &attribute_record::qualified_name);
     require(
         map_marker != map_value.attributes.end()
@@ -879,7 +879,7 @@ constexpr int indirect = 9;
         "token-slice alias RHS geometry or classification changed");
     const auto indirect = std::ranges::find(
         token_slice.declarations,
-        "indirect",
+        std::string{"indirect"},
         &declaration_record::name);
     require(
         indirect != token_slice.declarations.end()
@@ -935,7 +935,7 @@ constexpr int indirect = 9;
         "final_token_contract.cppm", final_token_source);
     const auto retained = std::ranges::find(
         final_token_slice.declarations,
-        "retained",
+        std::string{"retained"},
         &declaration_record::name);
     require(
         !final_token_slice.tokens.empty()
@@ -1307,11 +1307,11 @@ scalar_type map_value(scalar_type value);
         "declaration probe lost its collection mode or module identity");
     const auto probed_scalar = std::ranges::find(
         declaration_probe.declarations,
-        "canonical.cppm#declaration:101",
+        std::string{"canonical.cppm#declaration:101"},
         &declaration_record::source_identity);
     const auto probed_map = std::ranges::find(
         declaration_probe.declarations,
-        "canonical.cppm#declaration:202",
+        std::string{"canonical.cppm#declaration:202"},
         &declaration_record::source_identity);
     require(
         probed_scalar != declaration_probe.declarations.end()
@@ -1362,7 +1362,7 @@ extern int global_value;
         "global_declaration_probe_contract");
     const auto global_value = std::ranges::find(
         global_probe.declarations,
-        "global.cpp#declaration:11",
+        std::string{"global.cpp#declaration:11"},
         &declaration_record::source_identity);
     require(
         global_value != global_probe.declarations.end()

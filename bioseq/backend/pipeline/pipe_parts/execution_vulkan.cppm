@@ -71,7 +71,13 @@ export {
     struct seed_hit_stage : stage_base<seed_hit_stage, ::bioseq::chaining::anchor> {
         static constexpr std::string_view stage_name = "seed_hit_stage";
 
-        ::bioseq::simd::minimap2_parameters params;
+        statement_execution_plan_owner execution_plan;
+
+        /// Borrow the sole immutable statement snapshot.
+        [[nodiscard, gnu::always_inline]] const minimap2_parameters&
+        parameters() const noexcept {
+            return execution_plan->frozen_parameters;
+        }
         sequence_size_t query_len;
         // Batch- or segment-wave-scoped GPU index cache. The outer
         // wave creates one cache, passes `&cache` here, and clears it at wave end.
@@ -80,6 +86,8 @@ export {
         match_result_collection* stats_dst = nullptr;
         post_seed_owned_lifetime* post_seed_lifetime = nullptr;
         match_result_collection* host_timing_dst = nullptr;
+        route_attempt_memory* attempt_memory = nullptr;
+        std::uint32_t submitted_query_ordinal = 0u;
 
         // Host/device accessors cover both the std::span CPU shape and
         // the minimizer_batch_view device shape.
@@ -91,7 +99,7 @@ export {
         template <class p_minimizer>
         [[nodiscard, gnu::always_inline]] static std::span<const p_minimizer>
         sketch_span_of(const minimizer_batch_view<p_minimizer>& b) noexcept {
-            return b.host;
+            return b.as_span();
         }
 
         template <class p_minimizer>
@@ -119,9 +127,10 @@ export {
                            emit_token<p_sink>&& token) {
             const std::uint64_t host_stage_started =
                 host_timing_dst == nullptr ? 0u : host_stage_now_ns();
-            const std::int32_t kmer_size = p_aligner_parameters::generic_fallback
-                                          ? params.kmer_size
-                                          : static_cast<std::int32_t>(p_aligner_parameters::kmer_len);
+            const std::int32_t kmer_size =
+                p_aligner_parameters::generic_fallback
+                    ? parameters().kmer_size
+                    : static_cast<std::int32_t>(p_aligner_parameters::kmer_len);
 
             using p_minimizer =
                 std::remove_const_t<typename std::remove_cvref_t<p_batch>::value_type>;
@@ -135,21 +144,34 @@ export {
             // Run the selected GPU seed-hit lookup before the CPU
             // path. If it declines, the selected Vulkan pipeline fails loudly.
             // Only the concrete minimizer_hashmap_fragment_index carries the GPU view.
-            if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
+            const bool gpu_seed_selected =
+                execution_plan->route == seed_chain_route::vulkan_seed_host_chain ||
+                execution_plan->route == seed_chain_route::vulkan_seed_vulkan_chain;
+            if (gpu_seed_selected) {
                 bool seed_gpu_declined = false;
                 bioseq::seeding::vulkan_seed_lookup_decline seed_decline{
                     .query_length = static_cast<std::uint64_t>(query_len),
                     .query_minimizer_count = static_cast<std::uint64_t>(sketch_span.size()),
                     .kmer_size = kmer_size,
-                    .max_occ = params.max_occ,
-                    .fused_frontend = params.vulkan_fused_frontend_enabled,
+                    .max_occ = parameters().max_occ,
+                    .fused_frontend = parameters().vulkan_fused_frontend_enabled,
                 };
                 if constexpr (std::same_as<std::remove_cvref_t<p_index>,
                                            bioseq::indexing::minimizer_hashmap_fragment_index>) {
                     // Strict Vulkan selection owns its anchor allocation. A
                     // prepared fragment view has no resident GPU index and reaches
                     // the fail-closed decline below without allocating CPU output.
-                    auto anchors_slab = make_arena_slab<anchor>();
+                    bioseq::parallelism::memory_permit canonical_job_permit{};
+                    canonical_seed_batch seed_batch{};
+                    if (attempt_memory != nullptr) {
+                        attempt_memory->prepare_seed_job_storage(
+                            seed_batch.jobs, canonical_job_permit, 1u);
+                        if (post_seed_lifetime != nullptr &&
+                            post_seed_lifetime->retained_seed_arena_permit) {
+                            throw std::logic_error{"campaign MPF retained a legacy slab permit"};
+                        }
+                    }
+                    auto& anchors_slab = seed_batch.anchors;
                     if (gpu_index_identity.source_direct_sorted_dense &&
                         gpu_index_identity.canonical_empty) {
                         if (!bioseq::indexing::gpu_source_direct_identity_well_formed(
@@ -158,9 +180,14 @@ export {
                             !target_index_ref.positions.empty() ||
                             gpu_index_identity.table_size != 0u ||
                             gpu_index_identity.position_count != 0u || gpu_index_cache != nullptr ||
-                            direct_ledger == nullptr || params.vulkan_fused_frontend_enabled) {
+                            direct_ledger == nullptr || parameters().vulkan_fused_frontend_enabled) {
                             throw bioseq::gpu::vulkan::vulkan_runtime_error{
                                 "canonical empty source-direct route is invalid"};
+                        }
+                        if (!bioseq::seeding::publish_empty_canonical_seed_batch(
+                                submitted_query_ordinal, seed_batch,
+                                std::move(seed_batch.jobs))) {
+                            throw std::logic_error{"empty MPF seed job could not be published"};
                         }
                         direct_ledger->empty_bypass = true;
                         if (post_seed_lifetime != nullptr &&
@@ -190,7 +217,7 @@ export {
                             if (!bioseq::indexing::gpu_source_direct_identity_well_formed(
                                     gpu_index_identity) ||
                                 gpu_index_identity.canonical_empty ||
-                                params.vulkan_fused_frontend_enabled || direct_ledger == nullptr) {
+                                parameters().vulkan_fused_frontend_enabled || direct_ledger == nullptr) {
                                 throw bioseq::gpu::vulkan::vulkan_runtime_error{
                                     "source-direct resident seed identity is invalid"};
                             }
@@ -212,7 +239,7 @@ export {
                                 gpu_index_cache->get_or_upload(runtime,
                                                                target_index_ref,
                                                                key,
-                                                               params.vulkan_index_cache_enabled,
+                                                               parameters().vulkan_index_cache_enabled,
                                                                &index_materialization);
                             if (!resident_index) {
                                 seed_decline.index_upload = index_materialization;
@@ -249,14 +276,16 @@ export {
                                 bioseq::seeding::collect_seed_hits_vulkan<p_minimizer>(
                                     sketch_span,
                                     device_span,
-                                    target_index_ref,
+                                    std::addressof(target_index_ref),
                                     resident_index,
-                                    params.vulkan_enabled,
+                                    parameters().vulkan_enabled,
                                     query_len,
-                                    params.max_occ,
+                                    parameters().max_occ,
                                     kmer_size,
-                                    anchors_slab,
-                                    params.vulkan_fused_frontend_enabled,
+                                    submitted_query_ordinal,
+                                    seed_batch,
+                                    attempt_memory != nullptr,
+                                    parameters().vulkan_fused_frontend_enabled,
                                     &seed_decline);
                         }
                         if (direct_ledger != nullptr) {
@@ -314,20 +343,32 @@ export {
                             }
                         }
                         if (seed_completion.retained_anchor_permit) {
-                            if (post_seed_lifetime == nullptr ||
-                                post_seed_lifetime->retained_seed_arena_permit) {
-                                throw bioseq::gpu::vulkan::vulkan_runtime_error{
-                                    "source-direct seed permit owner is invalid"};
-                            }
-                            post_seed_lifetime->retained_seed_arena_permit =
-                                std::move(seed_completion.retained_anchor_permit);
                             if (seed_completion.retained_anchor_bytes !=
-                                post_seed_lifetime->retained_seed_arena_permit.bytes()) {
+                                seed_completion.retained_anchor_permit.bytes()) {
                                 throw bioseq::gpu::vulkan::vulkan_runtime_error{
-                                    "source-direct seed permit byte authority is invalid"};
+                                    "seed permit byte authority is invalid"};
+                            }
+                            if (attempt_memory != nullptr) {
+                                if (!attempt_memory->retention.retain_context_block(
+                                        std::move(seed_completion.retained_anchor_permit))) {
+                                    throw std::logic_error{"seed block permit lost its attempt owner"};
+                                }
+                            } else {
+                                if (post_seed_lifetime == nullptr ||
+                                    post_seed_lifetime->retained_seed_arena_permit) {
+                                    throw bioseq::gpu::vulkan::vulkan_runtime_error{
+                                        "legacy seed permit owner is invalid"};
+                                }
+                                post_seed_lifetime->retained_seed_arena_permit =
+                                    std::move(seed_completion.retained_anchor_permit);
                             }
                         }
                         if (resident_index && seed_completion) {
+                            const std::array<std::uint32_t, 1u> submitted_ordinals{
+                                submitted_query_ordinal};
+                            if (!canonical_seed_jobs_match_submission(seed_batch, submitted_ordinals)) {
+                                throw std::logic_error{"MPF seed jobs differ from the submitted query"};
+                            }
                             if (stats_dst == nullptr) {
                                 throw bioseq::gpu::vulkan::vulkan_runtime_error{
                                     "Vulkan seed stage has no execution-stats sink"};
@@ -482,14 +523,11 @@ export {
 
             if constexpr (bioseq::indexing::prepared_fragment_anchor_query_index<
                               std::remove_cvref_t<p_index>>) {
-                static_assert(std::same_as<p_minimizer, minimap_sketch_data>,
-                              "prepared fragment anchors require canonical query minimizers");
                 const std::span<const anchor> ordered_anchors =
                     target_index_ref.ordered_fragment_seed_anchors(
-                        std::span<const minimap_sketch_data>{sketch_span.data(),
-                                                             sketch_span.size()},
+                        sketch_span,
                         query_len,
-                        params.max_occ,
+                        parameters().max_occ,
                         kmer_size);
                 record_cpu_seed_completion();
                 // The owning PreparedFragmentAnchorBatch outlives this synchronous
@@ -498,7 +536,18 @@ export {
                 return std::move(token).emit_batch(ordered_anchors);
             } else {
                 // Ordinary per-hash lookup retains the arena-producing kernel.
-                auto anchors_slab = make_arena_slab<anchor>();
+                // The metadata permit precedes its physical vector; neither
+                // reserves the logical anchor extent a second time.
+                bioseq::parallelism::memory_permit canonical_job_permit{};
+                canonical_seed_batch seed_batch{};
+                if (attempt_memory != nullptr) {
+                    attempt_memory->prepare_seed_job_storage(
+                        seed_batch.jobs, canonical_job_permit, 1u);
+                } else {
+                    seed_batch.jobs.reserve(1u);
+                }
+                seed_batch.anchors = make_arena_slab<anchor>();
+                auto& anchors_slab = seed_batch.anchors;
                 anchors_slab.reserve(detail::estimated_anchor_count(
                     sketch_span.size(),
                     static_cast<std::size_t>(query_len),
@@ -507,9 +556,16 @@ export {
                 collect_seed_hits<p_minimizer>(sketch_span,
                                                target_index_ref,
                                                query_len,
-                                               params.max_occ,
+                                               parameters().max_occ,
                                                kmer_size,
                                                anchors_slab);
+                seed_batch.jobs.push_back(
+                    {submitted_query_ordinal, 0u, anchors_slab.size()});
+                const std::array<std::uint32_t, 1u> submitted_ordinals{
+                    submitted_query_ordinal};
+                if (!canonical_seed_jobs_match_submission(seed_batch, submitted_ordinals)) {
+                    throw std::logic_error{"host seed jobs differ from the submitted query"};
+                }
                 record_cpu_seed_completion();
                 return std::move(token).emit_batch(
                     std::span<anchor>{anchors_slab.data(), anchors_slab.size()});
@@ -522,7 +578,7 @@ export {
             desc.stage_name = std::string{stage_name};
             stage_algorithm_description algo;
             algo.name = "Seed hits + canonical CPU ordering";
-            algo.parameters.push_back({"max_occ", std::to_string(params.max_occ)});
+            algo.parameters.push_back({"max_occ", std::to_string(parameters().max_occ)});
             algo.parameters.push_back({"query_len", std::to_string(query_len)});
             desc.algorithm = std::move(algo);
             // Reserve the estimated anchor count for the stage slab. The actual
@@ -535,7 +591,7 @@ export {
                 detail::estimated_anchor_count(approx_sketch_count,
                                                static_cast<std::size_t>(query_len),
                                                /*target_bp=*/static_cast<std::size_t>(query_len),
-                                               params.kmer_size);
+                                               parameters().kmer_size);
             return desc;
         }
     };
@@ -569,7 +625,13 @@ export {
     struct prefilter_stage : stage_base<prefilter_stage<p_alphabet>, alignment_region> {
         static constexpr std::string_view stage_name = "prefilter_stage";
 
-        ::bioseq::simd::minimap2_parameters params;
+        statement_execution_plan_owner execution_plan;
+
+        /// Borrow the sole immutable statement snapshot.
+        [[nodiscard, gnu::always_inline]] const minimap2_parameters&
+        parameters() const noexcept {
+            return execution_plan->frozen_parameters;
+        }
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_;
         bioseq::storage::lazy_sequence_view<p_alphabet> target_seq_;
         match_result_collection* stats_dst_ = nullptr;
@@ -597,7 +659,7 @@ export {
         emitted_token<p_sink> process_pair(p_region_batch&& regions,
                                            p_anchor_batch&& anchors,
                                            emit_token<p_sink>&& token) {
-            if (!params.prefilter_enabled || !params.compute_edit_distance || regions.size() == 0) {
+            if (!parameters().prefilter_enabled || !parameters().compute_edit_distance || regions.size() == 0) {
                 return std::move(token).emit_batch_pair(
                     std::span<alignment_region>{regions.data(), regions.size()},
                     std::span<const anchor>{anchors.data(), anchors.size()});
@@ -618,7 +680,7 @@ export {
                 (void)for_each_mandatory_alignment_gap(
                     region,
                     std::span<const anchor>{anchors.data(), anchors.size()},
-                    params,
+                    parameters(),
                     [this,
                      &query_ranks,
                      &target_ranks,
@@ -671,7 +733,7 @@ export {
                             .target_offset = target_offset,
                             .query_length = static_cast<std::uint32_t>(query_length),
                             .target_length = static_cast<std::uint32_t>(target_length),
-                            .max_edits = params.prefilter_max_edits,
+                            .max_edits = parameters().prefilter_max_edits,
                         });
                         job_regions.push_back(region_index);
                         return true;
@@ -692,9 +754,9 @@ export {
             std::vector<prefilter::prefilter_result> results;
             using backend_type = ::bioseq::prefilter::prefilter_backend;
             using algorithm_type = ::bioseq::prefilter::resolved_prefilter_algorithm;
-            const backend_type selected = params.prefilter_backend == backend_type::automatic
+            const backend_type selected = parameters().prefilter_backend == backend_type::automatic
                                               ? backend_type::simd
-                                              : params.prefilter_backend;
+                                              : parameters().prefilter_backend;
             const algorithm_type algorithm = resolve_prefilter_algorithm(selected, jobs);
             switch (selected) {
             case backend_type::scalar:
@@ -702,13 +764,13 @@ export {
                 break;
             case backend_type::simd:
             case backend_type::automatic: {
-                if (params.highway_kernels == nullptr ||
-                    !params.highway_kernels->has_kernel(::bioseq::simd_dispatch::highway_kernel::
+                if (parameters().highway_kernels == nullptr ||
+                    !parameters().highway_kernels->has_kernel(::bioseq::simd_dispatch::highway_kernel::
                                                             prefilter_sneaky_snake_simd_batch) ||
-                    params.highway_kernels->common.sneaky_snake_simd_batch == nullptr) {
+                    parameters().highway_kernels->common.sneaky_snake_simd_batch == nullptr) {
                     throw std::logic_error{"selected Highway table has no SneakySnake kernel"};
                 }
-                results = params.highway_kernels->common.sneaky_snake_simd_batch(input, {});
+                results = parameters().highway_kernels->common.sneaky_snake_simd_batch(input, {});
                 break;
             }
             case backend_type::vulkan: {
@@ -775,7 +837,7 @@ export {
                 lower_bounds[region_index] = bioseq::common::saturating_add(
                     lower_bounds[region_index], static_cast<std::uint64_t>(result.lower_bound));
                 if (!prefilter::is_prefilter_accepted(result) ||
-                    lower_bounds[region_index] > params.prefilter_max_edits) {
+                    lower_bounds[region_index] > parameters().prefilter_max_edits) {
                     keep[region_index] = false;
                 }
             }
@@ -818,17 +880,17 @@ export {
             using backend_type = ::bioseq::prefilter::prefilter_backend;
             stage_description desc;
             desc.stage_name = std::string{stage_name};
-            if (params.prefilter_enabled) {
+            if (parameters().prefilter_enabled) {
                 stage_algorithm_description algorithm;
                 algorithm.name = "Rank edit-distance prefilter";
                 algorithm.parameters.push_back(
-                    {"backend", std::string{backend_name(params.prefilter_backend)}});
+                    {"backend", std::string{backend_name(parameters().prefilter_backend)}});
                 algorithm.parameters.push_back({"algorithm",
-                                                params.prefilter_backend == backend_type::vulkan
+                                                parameters().prefilter_backend == backend_type::vulkan
                                                     ? "batch_resolved_gatekeeper_or_sneaky_snake"
                                                     : "sneaky_snake"});
                 algorithm.parameters.push_back(
-                    {"max_edits", std::to_string(params.prefilter_max_edits)});
+                    {"max_edits", std::to_string(parameters().prefilter_max_edits)});
                 algorithm.parameters.push_back(
                     {"submaze_width",
                      std::to_string(prefilter::k_sneaky_snake_default_submaze_width)});
@@ -838,8 +900,8 @@ export {
                     {"survivor_check", "exact post-alignment edit distance"});
                 algorithm.computed_properties.push_back(
                     {"gatekeeper_auto_domain", "length in {32,64}, E in {2,4}"});
-                if (params.prefilter_backend == backend_type::simd ||
-                    params.prefilter_backend == backend_type::automatic) {
+                if (parameters().prefilter_backend == backend_type::simd ||
+                    parameters().prefilter_backend == backend_type::automatic) {
                     algorithm.highway_kernels = ::bioseq::simd_dispatch::highway_kernel_mask_for(
                         ::bioseq::simd_dispatch::highway_kernel::prefilter_sneaky_snake_simd_batch);
                 }
@@ -891,10 +953,13 @@ export {
                    ::bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming &&
                params.base_alignment_algorithm ==
                    ::bioseq::simd::base_alignment_algorithm::block_aligner &&
-               !params.compute_divergence && !params.compute_mapq &&
-               !params.compute_edit_distance && !params.exact_edit_filter_enabled &&
-               !params.prefilter_enabled && params.max_occ >= 0 &&
-               (!params.do_cigar || params.vulkan_extend_enabled);
+               // Dedicated target routes resolve the MAPQ projection internally.
+               // Persisted grouped-SoA executes its physical Vulkan MAPQ stage;
+               // routes without exact evidence remain explicitly unexecuted. The
+               // projection never admits a CPU/SIMD biological stage.
+               !params.compute_divergence && !params.compute_edit_distance &&
+               !params.exact_edit_filter_enabled && !params.prefilter_enabled &&
+               params.max_occ >= 0 && (!params.do_cigar || params.vulkan_extend_enabled);
     }
 
     /// Validate the target-format and algorithm tuple admitted by the dedicated

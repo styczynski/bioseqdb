@@ -41,6 +41,11 @@ void configure_highway_simd_pipeline(const connection_test_context& ctx) {
     exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';");
     exec_sql(ctx, "SET bioseq.aligner.chaining.algorithm = 'simd_minimap2';");
     exec_sql(ctx, "SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
+    // k=15,w=10 requires at least 24 bp to emit a minimizer. Callers that
+    // require a nonempty result seed a qualifying exact probe; admit its real
+    // chain while keeping the statement parameters frozen.
+    exec_sql(ctx, "SET bioseq.aligner.chaining.minimum_score = 10;");
+    exec_sql(ctx, "SET bioseq.aligner.chaining.minimum_seed_count = 1;");
 }
 
 /** Expected function and stage pair in structured Highway plan text. */

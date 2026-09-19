@@ -2,85 +2,57 @@
  * @file implementation_parts/query_union.cppm
  * @brief Owns admitted CPU query-union preparation and compact-direct validation.
  */
+module;
+
+extern "C" {
+#include "postgres.h"
+#include "utils/errcodes.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <algorithm>
-#include <array>
-#include <bit>
-#include <cstdio>
-#include <cstring>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
-#include <expected>
-#include <fstream>
-#include <iterator>
 #include <limits>
-#include <map>
-#include <memory>
 #include <new>
 #include <optional>
-#include <queue>
 #include <span>
 #include <stdexcept>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
-export module bioseq.postgres.scheduler.dispatch_processor:query_union;
+module bioseq.postgres.scheduler.dispatch_processor;
 
-import bioseq.postgres.scheduler.dispatch_processor;
-
-import :highway_registry;
 import :cpu_preparation;
-import :typed_flat_selector;
-import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
-import bioseq.common.seqan_adapter;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.support;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.indexing.type;
-import bioseq.indexing.storage;
-import bioseq.indexing.traits;
+import bioseq.common.radix_sort;
 import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.compact_hash32_direct_index;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
 import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.sequences;
-import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.postgres.types.compact_sequence;
 import bioseq.instrumentation.clock;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.lazy_sequence;
-import bioseq.storage.scanner;
-import bioseq.postgres.storage.scanner;
-import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.pool;
+import bioseq.pipeline.minimizer_execution_contract;
+import bioseq.pipeline.pipe;
+import bioseq.pipeline.runtime_contract;
+import bioseq.postgres.support;
+import bioseq.postgres.types.compact_sequence;
+import bioseq.sequences.kmers;
+import bioseq.storage.lazy_sequence_view;
 
 namespace bioseq::simd {
 
 namespace {
 
 using cpu_preparation_status = batch_processor::cpu_preparation_status;
-using cpu_preparation_detail::admitted_canonical_u32_query_collector;
+using cpu_preparation_detail::append_physical_query_hashes;
 
 /**
  * @brief Reserves independently prepared query slots under one memory permit.
@@ -142,8 +114,8 @@ using cpu_preparation_detail::admitted_canonical_u32_query_collector;
  *
  * Resets @p prepared_target union state, validates query column shapes and exclusive
  * header-or-recipe ownership, and admits memory for union and optional sketch-cache
- * retention. Groups queries by minimizer parameters, or a persisted k15 w10 group when
- * requested, optionally preparing sketches in parallel for uniform batches. Finalizes each
+ * retention. Groups queries by the frozen statement minimizer parameters,
+ * optionally preparing sketches in parallel for uniform batches. Finalizes each
  * group with deduplicated unions or retained sketches per @p union_storage and records
  * admission bytes and checksums on @p prepared_target.
  */
@@ -157,11 +129,24 @@ void batch_processor::prepare_cpu_shared_query_unions(
     pg_sequence_read_session* query_read_session,
     const bioseq::storage::sequence_payload_allocation_observer* query_payload_observer,
     const std::span<const std::uint64_t> query_ordinals,
-    const minimap2_parameters& base_params,
+    pipe::statement_execution_plan_owner execution_plan,
     const bool include_persisted_parameter_group,
     const cpu_query_union_storage union_storage,
     const cpu_preparation_typmod_operations& typmod_ops,
     cpu_prepared_target& prepared_target) {
+    if (!execution_plan || !prepared_target.highway_binding_matches(execution_plan)) {
+        throw std::logic_error{"CPU preparation requires the exact statement plan owner"};
+    }
+    const minimap2_parameters& base_params = execution_plan->frozen_parameters;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    if (base_params.downstream_active_wall != nullptr &&
+        !base_params.downstream_active_wall
+             ->attest_benchmark_e2e_statement_plan_checkpoint(
+                 execution_plan,
+                 benchmark_e2e_statement_plan_checkpoint::query_union)) {
+        throw std::logic_error{"CPU query union changed its guarded statement-plan owner"};
+    }
+#endif
     if (!typmod_ops.matches(alphabet_code, storage_unit_byte_width)) {
         throw std::logic_error{"CPU preparation typmod operations disagree with the request"};
     }
@@ -177,11 +162,11 @@ void batch_processor::prepare_cpu_shared_query_unions(
     prepared_target.unions_ready = false;
     prepared_target.query_union_prepare_host_wall_published = false;
     cpu_query_union_storage effective_union_storage = union_storage;
-    if (pipe::vulkan_components_requested(base_params)) {
+    if (execution_plan->uses_vulkan_seed()) {
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("Vulkan batch join cannot use CPU target preparation"),
-                 errdetail("biological Vulkan components were requested for this statement")));
+                 errmsg("Vulkan seeding cannot use CPU target preparation"),
+                 errdetail("the statement plan selected a device seed route")));
     }
     if (query_recipe_datums.size() != query_headers.size() ||
         query_recipe_descriptors.size() != query_headers.size() ||
@@ -190,7 +175,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("bioseq batch join query preparation columns disagree")));
     }
-    std::vector<std::uint64_t> query_bp_sizes(query_headers.size(), 0u);
+    std::uint64_t maximum_query_bp = 0u;
     bool has_recipe_query = false;
     for (std::size_t query_index = 0u; query_index < query_headers.size(); ++query_index) {
         const bioseq::pg_types::seq* query_header = query_headers[query_index];
@@ -209,7 +194,8 @@ void batch_processor::prepare_cpu_shared_query_unions(
                         (errcode(ERRCODE_DATATYPE_MISMATCH),
                          errmsg("bioseq batch join query typmod changed during CPU preparation")));
             }
-            query_bp_sizes[query_index] = query_header->bp_size;
+            maximum_query_bp =
+                std::max(maximum_query_bp, static_cast<std::uint64_t>(query_header->bp_size));
         } else {
             has_recipe_query = true;
             const auto& descriptor = query_recipe_descriptors[query_index];
@@ -222,14 +208,8 @@ void batch_processor::prepare_cpu_shared_query_unions(
                          errmsg("bioseq batch join query recipe metadata is invalid during CPU "
                                 "preparation")));
             }
-            query_bp_sizes[query_index] = descriptor.bp_length;
-        }
-        if (!is_minimizer_query_length_representable<minimap_sketch_data>(
-                query_bp_sizes[query_index])) {
-            ereport(
-                ERROR,
-                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                 errmsg("bioseq batch join query exceeds the 28-bit minimizer position domain")));
+            maximum_query_bp =
+                std::max(maximum_query_bp, static_cast<std::uint64_t>(descriptor.bp_length));
         }
     }
     for (std::size_t index = 1u; index < query_ordinals.size(); ++index) {
@@ -239,6 +219,38 @@ void batch_processor::prepare_cpu_shared_query_unions(
                      errmsg("bioseq batch join query ordinals are not strictly ordered")));
         }
     }
+    const auto registered_query_layout = typmod_ops.select_query_layout(
+        base_params.minimizer_algorithm,
+        maximum_query_bp,
+        base_params.kmer_size,
+        base_params.window_size);
+    auto query_execution_layout = registered_query_layout;
+    if (effective_union_storage == cpu_query_union_storage::minimizer_sketch) {
+        const auto legacy_query_layout =
+            pipe::try_select_legacy_minimap_sketch_data_execution_layout(
+                base_params.minimizer_algorithm,
+                static_cast<std::uint16_t>(alphabet_code),
+                maximum_query_bp,
+                static_cast<std::uint16_t>(base_params.kmer_size),
+                static_cast<std::uint16_t>(base_params.window_size),
+                static_cast<std::uint8_t>(storage_unit_byte_width * 8u));
+        if (legacy_query_layout) {
+            query_execution_layout = *legacy_query_layout;
+        } else {
+            /* The registered profile remains authoritative, but its concrete
+             * record cannot be written into minimap_sketch_data. Retain that
+             * exact physical owner and canonical hashes instead (notably for
+             * scalar K20 and queries beyond the legacy L28 position domain). */
+            effective_union_storage = cpu_query_union_storage::canonical_hashes;
+        }
+    }
+    const auto selected_query_backend = pipe::minimizer_sketch_backend_for_effective_algorithm(
+        query_execution_layout.effective_algorithm);
+    if (!selected_query_backend ||
+        *selected_query_backend == minimizer_sketch_backend::vulkan_segment) {
+        throw std::invalid_argument{
+            "CPU preparation has no selected host minimizer implementation"};
+    }
     auto union_permit =
         bioseq::parallelism::memory_admission_controller::instance().try_reserve(0u);
     if (!union_permit) {
@@ -247,22 +259,40 @@ void batch_processor::prepare_cpu_shared_query_unions(
                  errmsg("bioseq batch join query-hash union admission owner is unavailable")));
     }
     prepared_target.query_union_permit.emplace(std::move(*union_permit));
-    if (effective_union_storage == cpu_query_union_storage::canonical_u32 ||
+    if (effective_union_storage == cpu_query_union_storage::canonical_hashes ||
+        effective_union_storage ==
+            cpu_query_union_storage::canonical_hashes_sequential_fallback ||
         effective_union_storage == cpu_query_union_storage::retained_sketch_only) {
         auto retained_query_permit =
             bioseq::parallelism::memory_admission_controller::instance().try_reserve(0u);
-        if (retained_query_permit) {
-            prepared_target.query_sketch_cache_permit.emplace(std::move(*retained_query_permit));
+        if (!retained_query_permit) {
+            bioseq::postgres::support::invoke_pg_as_cpp([] {
+                ereport(ERROR,
+                        (errcode(ERRCODE_OUT_OF_MEMORY),
+                         errmsg("bioseq batch join query-sketch owner admission is unavailable")));
+            });
+            pg_unreachable();
         }
+        prepared_target.query_sketch_cache_permit.emplace(std::move(*retained_query_permit));
     }
     auto find_or_create_group =
         [&prepared_target](
             const std::int32_t kmer_size,
             const std::int32_t window_size,
             const std::int32_t max_occ,
-            const minimizer_sketch_backend sketch_backend) -> cpu_prepared_index_group& {
+            const ::bioseq::minimizers::minimizer_physical_layout_selection&
+                execution_layout) -> cpu_prepared_index_group& {
+        const auto backend = pipe::minimizer_sketch_backend_for_effective_algorithm(
+            execution_layout.effective_algorithm);
+        if (!backend.has_value() || *backend == minimizer_sketch_backend::vulkan_segment) {
+            throw std::logic_error{"CPU query group has no selected host backend"};
+        }
         if (auto* existing =
-                prepared_target.find_group(kmer_size, window_size, max_occ, sketch_backend)) {
+                prepared_target.find_group(kmer_size, window_size, max_occ, *backend)) {
+            if (existing->execution_layout != execution_layout) {
+                throw std::logic_error{
+                    "CPU query group aliases distinct generated minimizer identities"};
+            }
             return *existing;
         }
         if (prepared_target.groups.size() == prepared_target.groups.capacity()) {
@@ -320,33 +350,18 @@ void batch_processor::prepare_cpu_shared_query_unions(
             .kmer_size = kmer_size,
             .window_size = window_size,
             .max_occ = max_occ,
-            .sketch_backend = sketch_backend,
+            .sketch_backend = *backend,
+            .execution_layout = execution_layout,
         });
         return prepared_target.groups.back();
     };
     bool used_parallel_canonical_preparation = false;
     bool parallel_group_is_uniform =
-        (effective_union_storage == cpu_query_union_storage::canonical_u32 ||
+        (effective_union_storage == cpu_query_union_storage::canonical_hashes ||
          effective_union_storage == cpu_query_union_storage::retained_sketch_only) &&
         include_persisted_parameter_group && !has_recipe_query && query_headers.size() >= 2u &&
         prepared_target.query_sketch_cache_permit.has_value();
-    std::int32_t parallel_max_occ = 0;
-    minimizer_sketch_backend parallel_sketch_backend = minimizer_sketch_backend::scalar;
-    for (std::size_t query_index = 0u;
-         parallel_group_is_uniform && query_index < query_headers.size();
-         ++query_index) {
-        const minimap2_parameters effective = effective_params_for_pair(
-            base_params, std::min<std::uint64_t>(target_bp_size, query_bp_sizes[query_index]));
-        const minimizer_sketch_backend sketch_backend =
-            pipe::target_index_sketch_backend_from_params(effective);
-        if (query_index == 0u) {
-            parallel_max_occ = effective.max_occ;
-            parallel_sketch_backend = sketch_backend;
-        } else if (parallel_max_occ != effective.max_occ ||
-                   parallel_sketch_backend != sketch_backend) {
-            parallel_group_is_uniform = false;
-        }
-    }
+    const std::int32_t parallel_max_occ = base_params.max_occ;
     auto& pool = bioseq::parallelism::global_pool::instance();
     parallel_group_is_uniform = parallel_group_is_uniform &&
                                 bioseq::parallelism::has_parallel_dispatch(pool.get_mode()) &&
@@ -356,11 +371,12 @@ void batch_processor::prepare_cpu_shared_query_unions(
         /* Retention is an optimization, not a correctness prerequisite.  If
          * full-batch retention cannot be proven before sketching starts, retain
          * the admitted canonical owner and publish synchronously. */
-        effective_union_storage = cpu_query_union_storage::canonical_u32;
+        effective_union_storage = cpu_query_union_storage::canonical_hashes;
     }
     if (parallel_group_is_uniform) {
         cpu_prepared_index_group& group =
-            find_or_create_group(15, 10, parallel_max_occ, parallel_sketch_backend);
+            find_or_create_group(base_params.kmer_size, base_params.window_size,
+                                 parallel_max_occ, query_execution_layout);
         if (!reserve_parallel_query_sketch_slots(
                 group.retained_query_sketches,
                 query_headers.size(),
@@ -382,7 +398,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
             query_headers.size(),
             1u,
             bioseq::parallelism::range_body{
-                [&base_params,
+                [execution_plan, &base_params,
                  &exceptions,
                  &group,
                  &query_headers,
@@ -398,6 +414,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
                                 group.kmer_size,
                                 group.window_size,
                                 group.sketch_backend,
+                                group.execution_layout,
                                 base_params.highway_kernels,
                                 group.retained_query_sketches[query_index]);
                         } catch (...) {
@@ -417,8 +434,8 @@ void batch_processor::prepare_cpu_shared_query_unions(
                 bioseq::postgres::support::invoke_pg_as_cpp([] {
                     ereport(ERROR,
                             (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                             errmsg("bioseq batch join query exceeds the 28-bit minimizer position "
-                                    "domain")));
+                             errmsg("bioseq batch join query exceeds its selected minimizer "
+                                    "position domain")));
                 });
                 pg_unreachable();
             case cpu_preparation_status::admission_unavailable:
@@ -457,22 +474,22 @@ void batch_processor::prepare_cpu_shared_query_unions(
             }
         }
         const bool materialize_canonical =
-            effective_union_storage == cpu_query_union_storage::canonical_u32;
-        std::size_t canonical_size = 0u;
+            effective_union_storage == cpu_query_union_storage::canonical_hashes;
+        if (materialize_canonical) {
+            group.canonical_query_hash_width =
+                static_cast<std::uint8_t>(group.execution_layout.hash_width);
+        }
         for (cpu_prepared_query_sketch& retained : group.retained_query_sketches) {
-            const std::uint64_t retained_minimizer_bytes = bioseq::common::saturating_mul(
-                retained.minimizers.capacity(), sizeof(minimap_sketch_data));
+            const std::uint64_t retained_minimizer_bytes = retained.minimizers.capacity_bytes();
             const std::uint64_t reconciled_cache_bytes = bioseq::common::saturating_add(
                 prepared_target.query_sketch_cache_admission_bytes, retained_minimizer_bytes);
-            if (!retained.parallel_preparation_permit.has_value() ||
+            if (!retained.parallel_preparation_permit || !retained.minimizers.valid() ||
+                retained.minimizers.layout() != group.execution_layout ||
                 retained_minimizer_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
                 retained_minimizer_bytes != retained.parallel_preparation_permit->bytes() ||
                 reconciled_cache_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
                 !prepared_target.query_sketch_cache_permit->absorb(
-                    std::move(*retained.parallel_preparation_permit)) ||
-                (materialize_canonical &&
-                 retained.minimizers.size() >
-                     group.canonical_query_hash_union_u32.max_size() - canonical_size)) {
+                    std::move(*retained.parallel_preparation_permit))) {
                 bioseq::postgres::support::invoke_pg_as_cpp([] {
                     ereport(
                         ERROR,
@@ -484,45 +501,29 @@ void batch_processor::prepare_cpu_shared_query_unions(
             retained.parallel_preparation_permit.reset();
             prepared_target.query_sketch_cache_admission_bytes = reconciled_cache_bytes;
             if (materialize_canonical) {
-                canonical_size += retained.minimizers.size();
-            }
-        }
-        if (materialize_canonical) {
-            admitted_canonical_u32_query_collector canonical_collector{
-                group.canonical_query_hash_union_u32,
-                *prepared_target.query_union_permit,
-                prepared_target.query_union_admission_bytes};
-            if (!canonical_collector.reserve(canonical_size)) {
-                bioseq::postgres::support::invoke_pg_as_cpp([] {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_OUT_OF_MEMORY),
-                             errmsg("bioseq batch join parallel canonical query union cannot be "
-                                    "admitted")));
-                });
-                pg_unreachable();
-            }
-            for (const cpu_prepared_query_sketch& retained : group.retained_query_sketches) {
-                for (const minimap_sketch_data& minimizer : retained.minimizers) {
-                    canonical_collector.collect(minimizer);
+                const auto records = retained.minimizers.view();
+                const bool appended = group.canonical_query_hash_width == sizeof(std::uint32_t)
+                                          ? append_physical_query_hashes<std::uint32_t>(
+                                                records,
+                                                group.canonical_query_hash_union_u32,
+                                                *prepared_target.query_union_permit,
+                                                prepared_target.query_union_admission_bytes)
+                                          : group.canonical_query_hash_width == sizeof(std::uint64_t)
+                                                ? append_physical_query_hashes<std::uint64_t>(
+                                                      records,
+                                                      group.canonical_query_hash_union_u64,
+                                                      *prepared_target.query_union_permit,
+                                                      prepared_target.query_union_admission_bytes)
+                                                : false;
+                if (!appended) {
+                    bioseq::postgres::support::invoke_pg_as_cpp([] {
+                        ereport(ERROR,
+                                (errcode(ERRCODE_OUT_OF_MEMORY),
+                                 errmsg("bioseq batch join parallel canonical query union cannot "
+                                        "be admitted")));
+                    });
+                    pg_unreachable();
                 }
-            }
-            if (!canonical_collector.hash_width_valid()) {
-                bioseq::postgres::support::invoke_pg_as_cpp([] {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_DATA_CORRUPTED),
-                             errmsg("hash-major canonical query hash exceeds its authenticated u32 "
-                                    "profile")));
-                });
-                pg_unreachable();
-            }
-            if (!canonical_collector.is_ok()) {
-                bioseq::postgres::support::invoke_pg_as_cpp([] {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_OUT_OF_MEMORY),
-                             errmsg("bioseq batch join parallel canonical query union growth "
-                                    "cannot be admitted")));
-                });
-                pg_unreachable();
             }
         }
         used_parallel_canonical_preparation = true;
@@ -531,11 +532,8 @@ void batch_processor::prepare_cpu_shared_query_unions(
         for (std::size_t query_index = 0u; query_index < query_headers.size(); ++query_index) {
             const bioseq::pg_types::seq* const query_header = query_headers[query_index];
             const std::uint64_t query_ordinal = query_ordinals[query_index];
-            const minimap2_parameters effective = effective_params_for_pair(
-                base_params, std::min<std::uint64_t>(target_bp_size, query_bp_sizes[query_index]));
-            const minimizer_sketch_backend sketch_backend =
-                pipe::target_index_sketch_backend_from_params(effective);
-            auto append_to = [&base_params,
+            const minimap2_parameters& effective = execution_plan->frozen_parameters;
+            auto append_to = [execution_plan, &base_params,
                               &effective_union_storage,
                               &prepared_target,
                               &query_header,
@@ -546,60 +544,100 @@ void batch_processor::prepare_cpu_shared_query_unions(
                               &query_recipe_datums,
                               &query_recipe_descriptors,
                               &typmod_ops](cpu_prepared_index_group& group) {
-                if (effective_union_storage == cpu_query_union_storage::canonical_u32 ||
+                if (effective_union_storage == cpu_query_union_storage::canonical_hashes ||
                     effective_union_storage ==
-                        cpu_query_union_storage::canonical_u32_sequential_fallback) {
-                    const auto append_canonical = [query_ordinal,
-                                                   &group,
-                                                   &prepared_target,
-                                                   &base_params](auto&& append_function) {
-                        append_function(query_ordinal,
-                                        group.kmer_size,
-                                        group.window_size,
-                                        group.sketch_backend,
-                                        base_params.highway_kernels,
-                                        group.canonical_query_hash_union_u32,
-                                        *prepared_target.query_union_permit,
-                                        prepared_target.query_union_admission_bytes,
-                                        prepared_target.query_sketch_cache_permit
-                                            ? &group.retained_query_sketches
-                                            : nullptr,
-                                        prepared_target.query_sketch_cache_permit
-                                            ? &*prepared_target.query_sketch_cache_permit
-                                            : nullptr,
-                                        prepared_target.query_sketch_cache_permit
-                                            ? &prepared_target.query_sketch_cache_admission_bytes
-                                            : nullptr);
-                    };
-                    if (query_header != nullptr) {
-                        append_canonical([&typmod_ops, query_header](auto&&... arguments) {
-                            typmod_ops.append_header_u32(
-                                *query_header, std::forward<decltype(arguments)>(arguments)...);
-                        });
+                        cpu_query_union_storage::canonical_hashes_sequential_fallback) {
+                    group.canonical_query_hash_width =
+                        static_cast<std::uint8_t>(group.execution_layout.hash_width);
+                    const auto append_canonical =
+                        [query_ordinal,
+                         &group,
+                         &prepared_target,
+                         &base_params](auto&& append_function, auto& destination) {
+                            append_function(
+                                query_ordinal,
+                                group.kmer_size,
+                                group.window_size,
+                                group.sketch_backend,
+                                group.execution_layout,
+                                base_params.highway_kernels,
+                                destination,
+                                *prepared_target.query_union_permit,
+                                prepared_target.query_union_admission_bytes,
+                                &group.retained_query_sketches,
+                                &*prepared_target.query_sketch_cache_permit,
+                                &prepared_target.query_sketch_cache_admission_bytes);
+                        };
+                    if (group.canonical_query_hash_width == sizeof(std::uint32_t)) {
+                        if (query_header != nullptr) {
+                            const auto append_header =
+                                [&typmod_ops, query_header](auto&&... arguments) {
+                                    typmod_ops.append_header_u32(
+                                        *query_header,
+                                        std::forward<decltype(arguments)>(arguments)...);
+                                };
+                            append_canonical(append_header,
+                                             group.canonical_query_hash_union_u32);
+                        } else {
+                            const auto append_recipe =
+                                [query_recipe_datums,
+                                 query_recipe_descriptors,
+                                 query_index,
+                                 query_read_session,
+                                 query_payload_observer,
+                                 &typmod_ops](auto&&... arguments) {
+                                    typmod_ops.append_recipe_u32(
+                                        query_recipe_datums[query_index],
+                                        query_recipe_descriptors[query_index],
+                                        *query_read_session,
+                                        query_payload_observer,
+                                        std::forward<decltype(arguments)>(arguments)...);
+                                };
+                            append_canonical(append_recipe,
+                                             group.canonical_query_hash_union_u32);
+                        }
+                    } else if (group.canonical_query_hash_width == sizeof(std::uint64_t)) {
+                        if (query_header != nullptr) {
+                            const auto append_header =
+                                [&typmod_ops, query_header](auto&&... arguments) {
+                                    typmod_ops.append_header_u64(
+                                        *query_header,
+                                        std::forward<decltype(arguments)>(arguments)...);
+                                };
+                            append_canonical(append_header,
+                                             group.canonical_query_hash_union_u64);
+                        } else {
+                            const auto append_recipe =
+                                [query_recipe_datums,
+                                 query_recipe_descriptors,
+                                 query_index,
+                                 query_read_session,
+                                 query_payload_observer,
+                                 &typmod_ops](auto&&... arguments) {
+                                    typmod_ops.append_recipe_u64(
+                                        query_recipe_datums[query_index],
+                                        query_recipe_descriptors[query_index],
+                                        *query_read_session,
+                                        query_payload_observer,
+                                        std::forward<decltype(arguments)>(arguments)...);
+                                };
+                            append_canonical(append_recipe,
+                                             group.canonical_query_hash_union_u64);
+                        }
                     } else {
-                        append_canonical([&typmod_ops,
-                                          query_recipe_datums,
-                                          query_recipe_descriptors,
-                                          query_index,
-                                          query_read_session,
-                                          query_payload_observer](auto&&... arguments) {
-                            typmod_ops.append_recipe_u32(
-                                query_recipe_datums[query_index],
-                                query_recipe_descriptors[query_index],
-                                *query_read_session,
-                                query_payload_observer,
-                                std::forward<decltype(arguments)>(arguments)...);
-                        });
+                        throw std::logic_error{
+                            "CPU canonical query union has an unsupported generated hash width"};
                     }
                 } else {
                     const auto append_union = [query_ordinal,
                                                &group,
                                                &prepared_target,
-                                               &base_params](auto&& append_function) {
+                                               execution_plan, &base_params](auto&& append_function) {
                         append_function(query_ordinal,
                                         group.kmer_size,
                                         group.window_size,
                                         group.sketch_backend,
+                                        group.execution_layout,
                                         base_params.highway_kernels,
                                         group.query_hash_union,
                                         *prepared_target.query_union_permit,
@@ -635,10 +673,14 @@ void batch_processor::prepare_cpu_shared_query_unions(
                 }
             };
             if (include_persisted_parameter_group) {
-                append_to(find_or_create_group(15, 10, effective.max_occ, sketch_backend));
+                append_to(find_or_create_group(effective.kmer_size, effective.window_size,
+                                               effective.max_occ, query_execution_layout));
             } else {
                 append_to(find_or_create_group(
-                    effective.kmer_size, effective.window_size, effective.max_occ, sketch_backend));
+                    effective.kmer_size,
+                    effective.window_size,
+                    effective.max_occ,
+                    query_execution_layout));
             }
         }
     }
@@ -648,16 +690,23 @@ void batch_processor::prepare_cpu_shared_query_unions(
                 group.retained_query_sketches.size() == query_headers.size() &&
                 group.query_hash_union.empty() && group.query_hash_union.capacity() == 0u &&
                 group.canonical_query_hash_union_u32.empty() &&
-                group.canonical_query_hash_union_u32.capacity() == 0u;
+                group.canonical_query_hash_union_u32.capacity() == 0u &&
+                group.canonical_query_hash_union_u64.empty() &&
+                group.canonical_query_hash_union_u64.capacity() == 0u &&
+                group.canonical_query_hash_width == 0u;
             for (std::size_t query_index = 0u;
                  retained_stats_match && query_index < group.retained_query_sketches.size();
                  ++query_index) {
                 const cpu_prepared_query_sketch& retained =
                     group.retained_query_sketches[query_index];
                 retained_stats_match = retained.query_ordinal == query_ordinals[query_index] &&
-                                       retained.query_bp_size == query_bp_sizes[query_index] &&
-                                       pipe::minimizer_range_stats_matches_backend(
-                                           group.sketch_backend,
+                                       retained.query_bp_size ==
+                                           static_cast<std::uint64_t>(
+                                               query_headers[query_index]->bp_size) &&
+                                       retained.minimizers.valid() &&
+                                       retained.minimizers.layout() == group.execution_layout &&
+                                       pipe::minimizer_range_stats_matches_effective_algorithm(
+                                           group.execution_layout.effective_algorithm,
                                            retained.execution_stats,
                                            /*require_nonempty_vector_work=*/false,
                                            pipe::exact_simd_range_route::require_continuation);
@@ -674,39 +723,31 @@ void batch_processor::prepare_cpu_shared_query_unions(
             group.compact_direct_query_set_validation_pending = true;
             continue;
         }
-        if (effective_union_storage == cpu_query_union_storage::canonical_u32 ||
-            effective_union_storage == cpu_query_union_storage::canonical_u32_sequential_fallback) {
+        if (effective_union_storage == cpu_query_union_storage::canonical_hashes ||
+            effective_union_storage == cpu_query_union_storage::canonical_hashes_sequential_fallback) {
             if (!group.query_hash_union.empty() || group.query_hash_union.capacity() != 0u) {
                 bioseq::postgres::support::invoke_pg_as_cpp([] {
                     ereport(ERROR,
                             (errcode(ERRCODE_DATA_CORRUPTED),
-                             errmsg("hash-major canonical query preparation retained a duplicate "
+                             errmsg("canonical query preparation retained a duplicate "
                                     "sketch owner")));
                 });
                 pg_unreachable();
             }
             for (const cpu_prepared_query_sketch& retained : group.retained_query_sketches) {
-                if (!pipe::minimizer_range_stats_matches_backend(
-                        group.sketch_backend,
+                if (!pipe::minimizer_range_stats_matches_effective_algorithm(
+                        group.execution_layout.effective_algorithm,
                         retained.execution_stats,
                         /*require_nonempty_vector_work=*/false,
                         pipe::exact_simd_range_route::require_continuation)) {
                     bioseq::postgres::support::invoke_pg_as_cpp([] {
                         ereport(ERROR,
                                 (errcode(ERRCODE_DATA_CORRUPTED),
-                                 errmsg("hash-major retained query sketch stats are invalid")));
+                                 errmsg("retained physical query sketch stats are invalid")));
                     });
                     pg_unreachable();
                 }
             }
-            auto& canonical_hashes = group.canonical_query_hash_union_u32;
-            if (canonical_hashes.size() > 1u) {
-                bioseq::sorting::radix_sort(canonical_hashes.data(),
-                                            canonical_hashes.data() + canonical_hashes.size(),
-                                            [](const std::uint32_t hash) noexcept { return hash; });
-            }
-            canonical_hashes.erase(std::unique(canonical_hashes.begin(), canonical_hashes.end()),
-                                   canonical_hashes.end());
             const auto fnv_mix_u64 = [](std::uint64_t hash, std::uint64_t value) noexcept {
                 for (int byte_index = 0; byte_index < 8; ++byte_index) {
                     hash ^= value & 0xffu;
@@ -715,38 +756,70 @@ void batch_processor::prepare_cpu_shared_query_unions(
                 }
                 return hash;
             };
-            std::uint64_t group_key_signature = 1469598103934665603ull;
-            group_key_signature =
-                fnv_mix_u64(group_key_signature, static_cast<std::uint32_t>(group.kmer_size));
-            group_key_signature =
-                fnv_mix_u64(group_key_signature, static_cast<std::uint32_t>(group.window_size));
-            group_key_signature =
-                fnv_mix_u64(group_key_signature, static_cast<std::uint32_t>(group.max_occ));
-            for (const std::uint32_t hash : canonical_hashes) {
-                group_key_signature = fnv_mix_u64(group_key_signature, hash);
+            const auto finalize_canonical =
+                [&group,
+                 &prepared_target,
+                 fnv_mix_u64]<class p_hash>(std::vector<p_hash>& canonical_hashes) {
+                    if (canonical_hashes.size() > 1u) {
+                        bioseq::sorting::radix_sort(
+                            canonical_hashes.data(),
+                            canonical_hashes.data() + canonical_hashes.size(),
+                            [](const p_hash hash) noexcept { return hash; });
+                    }
+                    canonical_hashes.erase(
+                        std::unique(canonical_hashes.begin(), canonical_hashes.end()),
+                        canonical_hashes.end());
+                    std::uint64_t group_key_signature = 1469598103934665603ull;
+                    group_key_signature = fnv_mix_u64(
+                        group_key_signature, static_cast<std::uint32_t>(group.kmer_size));
+                    group_key_signature = fnv_mix_u64(
+                        group_key_signature, static_cast<std::uint32_t>(group.window_size));
+                    group_key_signature = fnv_mix_u64(
+                        group_key_signature, static_cast<std::uint32_t>(group.max_occ));
+                    for (const p_hash hash : canonical_hashes) {
+                        group_key_signature = fnv_mix_u64(group_key_signature, hash);
+                    }
+                    group.key_set_checksum = group_key_signature;
+                    prepared_target.total_unique_keys = bioseq::common::saturating_add(
+                        prepared_target.total_unique_keys,
+                        static_cast<std::uint64_t>(canonical_hashes.size()));
+                    const auto mix_target_checksum =
+                        [&prepared_target](const std::uint64_t value) noexcept {
+                            prepared_target.key_set_checksum ^= value;
+                            prepared_target.key_set_checksum *= 1099511628211ull;
+                        };
+                    mix_target_checksum(static_cast<std::uint64_t>(group.kmer_size));
+                    mix_target_checksum(static_cast<std::uint64_t>(group.window_size));
+                    mix_target_checksum(static_cast<std::uint64_t>(group.max_occ));
+                    mix_target_checksum(static_cast<std::uint64_t>(group.sketch_backend));
+                    mix_target_checksum(static_cast<std::uint64_t>(canonical_hashes.size()));
+                    mix_target_checksum(group.key_set_checksum);
+                };
+            if (group.canonical_query_hash_width == sizeof(std::uint32_t) &&
+                group.canonical_query_hash_union_u64.capacity() == 0u) {
+                finalize_canonical(group.canonical_query_hash_union_u32);
+            } else if (group.canonical_query_hash_width == sizeof(std::uint64_t) &&
+                       group.canonical_query_hash_union_u32.capacity() == 0u) {
+                finalize_canonical(group.canonical_query_hash_union_u64);
+            } else {
+                bioseq::postgres::support::invoke_pg_as_cpp([] {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("canonical query union retained an ambiguous hash width")));
+                });
+                pg_unreachable();
             }
-            group.key_set_checksum = group_key_signature;
-            prepared_target.total_unique_keys =
-                bioseq::common::saturating_add(prepared_target.total_unique_keys,
-                                               static_cast<std::uint64_t>(canonical_hashes.size()));
-            auto mix_target_checksum = [&prepared_target](const std::uint64_t value) noexcept {
-                prepared_target.key_set_checksum ^= value;
-                prepared_target.key_set_checksum *= 1099511628211ull;
-            };
-            mix_target_checksum(static_cast<std::uint64_t>(group.kmer_size));
-            mix_target_checksum(static_cast<std::uint64_t>(group.window_size));
-            mix_target_checksum(static_cast<std::uint64_t>(group.max_occ));
-            mix_target_checksum(static_cast<std::uint64_t>(group.sketch_backend));
-            mix_target_checksum(static_cast<std::uint64_t>(canonical_hashes.size()));
-            mix_target_checksum(group.key_set_checksum);
             continue;
         }
         if (!group.canonical_query_hash_union_u32.empty() ||
-            group.canonical_query_hash_union_u32.capacity() != 0u) {
+            group.canonical_query_hash_union_u32.capacity() != 0u ||
+            !group.canonical_query_hash_union_u64.empty() ||
+            group.canonical_query_hash_union_u64.capacity() != 0u ||
+            group.canonical_query_hash_width != 0u) {
             bioseq::postgres::support::invoke_pg_as_cpp([] {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),
-                         errmsg("grouped-SoA query preparation retained a duplicate canonical u32 "
+                         errmsg("native query preparation retained a duplicate canonical hash "
                                 "owner")));
             });
             pg_unreachable();
@@ -757,7 +830,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
                 ereport(
                     ERROR,
                     (errcode(ERRCODE_DATA_CORRUPTED),
-                     errmsg("grouped-SoA query preparation retained a hash-major query cache")));
+                     errmsg("legacy query preparation retained a physical query cache")));
             });
             pg_unreachable();
         }
@@ -771,10 +844,10 @@ void batch_processor::prepare_cpu_shared_query_unions(
                 maximum_hash = std::max(maximum_hash, minimizer.kmer());
             }
             if (maximum_hash <= (std::numeric_limits<std::uint32_t>::max)()) {
-                /* Every currently registered persisted DNA4 profile is at
-                 * most 32 bits. Returning the proven narrower key avoids four
-                 * known-zero radix passes while the fallback below keeps the
-                 * generic 35-bit minimap_sketch_data contract intact. */
+                /* This legacy fixed-record branch happens to fit in 32 bits.
+                 * Returning the proven narrower key avoids four known-zero
+                 * radix passes while the fallback below keeps the generic
+                 * 35-bit minimap_sketch_data contract intact. */
                 bioseq::sorting::radix_sort(
                     group.query_hash_union.data(),
                     group.query_hash_union.data() + group.query_hash_union.size(),
@@ -830,6 +903,10 @@ void batch_processor::prepare_cpu_shared_query_unions(
             measured_query_union_bytes,
             bioseq::common::saturating_mul(group.canonical_query_hash_union_u32.capacity(),
                                            static_cast<std::uint64_t>(sizeof(std::uint32_t))));
+        measured_query_union_bytes = bioseq::common::saturating_add(
+            measured_query_union_bytes,
+            bioseq::common::saturating_mul(group.canonical_query_hash_union_u64.capacity(),
+                                           static_cast<std::uint64_t>(sizeof(std::uint64_t))));
     }
     if (measured_query_union_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
         measured_query_union_bytes != tracked_query_union_bytes ||
@@ -858,9 +935,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
         for (const cpu_prepared_query_sketch& retained : group.retained_query_sketches) {
             measured_query_sketch_cache_bytes = bioseq::common::saturating_add(
                 measured_query_sketch_cache_bytes,
-                bioseq::common::saturating_mul(
-                    retained.minimizers.capacity(),
-                    static_cast<std::uint64_t>(sizeof(minimap_sketch_data))));
+                retained.minimizers.capacity_bytes());
         }
     }
     if (measured_query_sketch_cache_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
@@ -907,6 +982,9 @@ bool batch_processor::publish_compact_direct_query_set_stats(
         !group.query_hash_union.empty() || group.query_hash_union.capacity() != 0u ||
         !group.canonical_query_hash_union_u32.empty() ||
         group.canonical_query_hash_union_u32.capacity() != 0u ||
+        !group.canonical_query_hash_union_u64.empty() ||
+        group.canonical_query_hash_union_u64.capacity() != 0u ||
+        group.canonical_query_hash_width != 0u ||
         prepared_target.total_unique_keys != 0u ||
         prepared_target.key_set_checksum !=
             bioseq::indexing::k_compact_direct_query_set_fnv_offset ||
@@ -963,7 +1041,10 @@ void batch_processor::finalize_pending_compact_direct_query_set_validation_fallb
         group.retained_query_sketches.size() != prepared_target.query_count ||
         !group.query_hash_union.empty() || group.query_hash_union.capacity() != 0u ||
         !group.canonical_query_hash_union_u32.empty() ||
-        group.canonical_query_hash_union_u32.capacity() != 0u) {
+        group.canonical_query_hash_union_u32.capacity() != 0u ||
+        !group.canonical_query_hash_union_u64.empty() ||
+        group.canonical_query_hash_union_u64.capacity() != 0u ||
+        group.canonical_query_hash_width != 0u) {
         throw bioseq::indexing::persisted_minimizer_lookup_error(
             "compact-direct query-set fallback retained state is incomplete");
     }
@@ -972,8 +1053,12 @@ void batch_processor::finalize_pending_compact_direct_query_set_validation_fallb
     std::optional<std::uint64_t> previous_query_ordinal;
     for (const cpu_prepared_query_sketch& retained : group.retained_query_sketches) {
         if ((previous_query_ordinal && *previous_query_ordinal >= retained.query_ordinal) ||
-            !pipe::minimizer_range_stats_matches_backend(
-                group.sketch_backend,
+            !retained.minimizers.valid() ||
+            retained.minimizers.layout() != group.execution_layout ||
+            retained.minimizers.layout().hash_width !=
+                ::bioseq::minimizers::minimizer_scalar_width::u32 ||
+            !pipe::minimizer_range_stats_matches_effective_algorithm(
+                group.execution_layout.effective_algorithm,
                 retained.execution_stats,
                 /*require_nonempty_vector_work=*/false,
                 pipe::exact_simd_range_route::require_continuation)) {
@@ -1015,13 +1100,27 @@ void batch_processor::finalize_pending_compact_direct_query_set_validation_fallb
         }
         fallback_permit->shrink_to(measured_bytes);
         for (const cpu_prepared_query_sketch& retained : group.retained_query_sketches) {
-            for (const minimap_sketch_data& minimizer : retained.minimizers) {
-                if (minimizer.kmer() > (std::numeric_limits<std::uint32_t>::max)()) {
-                    throw bioseq::indexing::persisted_minimizer_lookup_error(
-                        "compact-direct query-set fallback hash exceeds u32");
-                }
-                canonical_hashes.push_back(static_cast<std::uint32_t>(minimizer.kmer()));
+            const auto minimizers = retained.minimizers.view();
+            bool hashes_fit = true;
+            minimizers.for_each_decoded(
+                [&hashes_fit](const std::size_t,
+                              const ::bioseq::minimizers::minimizer_physical_record_value
+                                  minimizer) {
+                    hashes_fit = hashes_fit &&
+                                 minimizer.kmer() <=
+                                     (std::numeric_limits<std::uint32_t>::max)();
+                });
+            if (!hashes_fit) {
+                throw bioseq::indexing::persisted_minimizer_lookup_error(
+                    "compact-direct query-set fallback hash exceeds u32");
             }
+            minimizers.for_each_decoded(
+                [&canonical_hashes](const std::size_t,
+                                    const ::bioseq::minimizers::minimizer_physical_record_value
+                                        minimizer) {
+                    canonical_hashes.push_back(
+                        static_cast<std::uint32_t>(minimizer.kmer()));
+                });
         }
         if (canonical_hashes.size() > 1u) {
             bioseq::sorting::radix_sort(canonical_hashes.data(),

@@ -41,6 +41,12 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
+/** Selects native-width host queries or the non-queryable mapped GPU source adapter. */
+enum class prepared_minimizer_fragment_reader_mode : std::uint8_t {
+    queryable_native,
+    gpu_source_only,
+};
+
 /// Fragment-native grouped-SoA reader.  Every physical position segment remains
 /// an independently persisted mmap view. Seed collection probes fragment-local
 /// controls and packed positions directly. Max-occ reduction is transient
@@ -170,16 +176,18 @@ class prepared_minimizer_fragment_reader {
     std::uint16_t query_membership_filter_mask_id_mask_ = 0x7ffu;
     fragment_encoding_dispatch wire_dispatch_ = fragment_encoding_dispatch::checked_dynamic;
     backing_kind backing_kind_ = backing_kind::grouped_soa_fragments;
+    prepared_minimizer_fragment_reader_mode mode_ =
+        prepared_minimizer_fragment_reader_mode::queryable_native;
     bool ready_ = false;
 
     prepared_minimizer_fragment_reader() = default;
 
     [[nodiscard]] static constexpr std::uint32_t
-    project_query_bucket_(std::uint32_t hash, std::uint8_t shift) noexcept {
-        return (hash >> shift) & query_radix_bucket_mask_;
+    project_query_bucket_(std::uint64_t hash, std::uint8_t shift) noexcept {
+        return static_cast<std::uint32_t>((hash >> shift) & query_radix_bucket_mask_);
     }
 
-    [[nodiscard]] constexpr std::uint32_t query_bucket_(std::uint32_t hash) const noexcept {
+    [[nodiscard]] constexpr std::uint32_t query_bucket_(std::uint64_t hash) const noexcept {
         return project_query_bucket_(hash, query_radix_shift_);
     }
 
@@ -338,12 +346,12 @@ class prepared_minimizer_fragment_reader {
     };
 
     struct query_occurrence_group final {
-        std::uint32_t hash = 0u;
+        std::uint64_t hash = 0u;
         std::uint32_t occurrence_ref_begin = 0u;
         std::uint32_t occurrence_ref_count = 0u;
         std::uint32_t counter_ordinal = 0u;
     };
-    static_assert(sizeof(query_occurrence_group) == 16u);
+    static_assert(sizeof(query_occurrence_group) == 24u);
 
     struct bucket_direct_matcher_view final {
         const std::uint64_t* membership_filter = nullptr;
@@ -351,22 +359,26 @@ class prepared_minimizer_fragment_reader {
         const std::uint32_t* group_offsets = nullptr;
         const packed_query_occurrence* packed_occurrences = nullptr;
         const wide_query_occurrence* wide_occurrences = nullptr;
+        const packed_query_occurrence_h64* packed_occurrences_h64 = nullptr;
+        const wide_query_occurrence_h64* wide_occurrences_h64 = nullptr;
         occurrence_count_atomic* occurrence_counts = nullptr;
         std::size_t membership_filter_word_count = 0u;
         std::size_t radix_count = 0u;
         std::size_t group_offset_count = 0u;
         std::size_t packed_occurrence_count = 0u;
         std::size_t wide_occurrence_count = 0u;
+        std::size_t packed_occurrence_h64_count = 0u;
+        std::size_t wide_occurrence_h64_count = 0u;
         std::size_t occurrence_count = 0u;
         std::size_t counter_count = 0u;
         query_occurrence_packing_layout occurrence_layout{};
+        minimizer_scalar_width hash_width = minimizer_scalar_width::u32;
     };
 
     struct fragment_probe_context final {
         fragment_probe_pass pass = fragment_probe_pass::control_count;
         const fragment_block_plan* block = nullptr;
         std::size_t block_ordinal = 0u;
-        std::span<const query_wave_scratch::query_hash_plan> plans{};
         std::span<const std::uint32_t> query_plan_radix{};
         std::span<const fragment_seed_query> queries{};
         query_wave_scratch* scratch = nullptr;
@@ -425,7 +437,7 @@ class prepared_minimizer_fragment_reader {
         }();
 
     [[nodiscard, gnu::always_inline]] constexpr std::uint64_t
-    query_membership_filter_mask_(std::uint32_t hash) const noexcept {
+    query_membership_filter_mask_(std::uint64_t hash) const noexcept {
         // Reader open derives the low-bit mask from the persisted hash domain.
         // Those remaining bits identify a hash inside one filter word; one
         // compile-time LUT preserves the exact six register-blocked positions
@@ -437,12 +449,12 @@ class prepared_minimizer_fragment_reader {
     }
 
     [[nodiscard]] static constexpr std::size_t
-    project_query_membership_filter_word_(std::uint32_t hash, std::uint8_t shift) noexcept {
+    project_query_membership_filter_word_(std::uint64_t hash, std::uint8_t shift) noexcept {
         return static_cast<std::size_t>((hash >> shift) & query_membership_filter_word_mask_);
     }
 
     [[nodiscard, gnu::always_inline]] constexpr std::size_t
-    query_membership_filter_word_(std::uint32_t hash) const noexcept {
+    query_membership_filter_word_(std::uint64_t hash) const noexcept {
         return project_query_membership_filter_word_(hash, query_membership_filter_shift_);
     }
 
@@ -459,12 +471,43 @@ class prepared_minimizer_fragment_reader {
     }
 
     [[nodiscard, gnu::always_inline]] static query_occurrence_reference
+    query_occurrence_reference_(const packed_query_occurrence_h64& occurrence,
+                                const query_occurrence_packing_layout& layout) noexcept {
+        return decode_packed_query_occurrence_trusted(layout, occurrence.query_and_ordinal);
+    }
+
+    [[nodiscard, gnu::always_inline]] static query_occurrence_reference
     query_occurrence_reference_(const wide_query_occurrence& occurrence,
                                 const query_occurrence_packing_layout&) noexcept {
         return query_occurrence_reference{
             .batch_query_ordinal = occurrence.batch_query_ordinal,
             .query_ordinal = occurrence.query_ordinal,
         };
+    }
+
+    [[nodiscard, gnu::always_inline]] static query_occurrence_reference
+    query_occurrence_reference_(const wide_query_occurrence_h64& occurrence,
+                                const query_occurrence_packing_layout&) noexcept {
+        return query_occurrence_reference{
+            .batch_query_ordinal = occurrence.batch_query_ordinal,
+            .query_ordinal = occurrence.query_ordinal,
+        };
+    }
+
+    /** Resolve query position/strand from its authenticated physical owner. */
+    [[nodiscard, gnu::always_inline]] static std::expected<
+        std::uint64_t,
+        minimizer_generation_encoding_error>
+    query_position_strand_(const query_occurrence_reference occurrence,
+                           const std::span<const fragment_seed_query> queries) noexcept {
+        if (occurrence.batch_query_ordinal >= queries.size()) {
+            return std::unexpected(minimizer_generation_encoding_error::partition_id);
+        }
+        const auto minimizers = queries[occurrence.batch_query_ordinal].minimizers;
+        if (occurrence.query_ordinal >= minimizers.size()) {
+            return std::unexpected(minimizer_generation_encoding_error::partition_id);
+        }
+        return minimizers.position_strand_at_unchecked(occurrence.query_ordinal);
     }
 
     /// Select packed or wide storage once for a complete hash plan. The
@@ -698,30 +741,33 @@ class prepared_minimizer_fragment_reader {
     [[nodiscard]] static std::expected<bioseq::chaining::anchor,
                                        minimizer_generation_encoding_error>
     make_fragment_anchor_(std::uint64_t packed_target,
-                          const minimap_sketch_data& minimizer,
+                          std::uint64_t query_position_strand,
                           sequence_size_t query_length,
                           std::uint8_t query_span) noexcept;
 
-    template <bool p_oracle, class p_visitor>
+    template <bool p_oracle, class p_query_hash_plan, class p_visitor>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     visit_matched_control_counts_(const fragment_block_plan& block,
                                   fragment_probe_context& context,
+                                  std::span<const p_query_hash_plan> query_plans,
                                   p_visitor&& visitor) const noexcept;
 
-    template <bool p_oracle, class p_visitor>
+    template <bool p_oracle, class p_query_hash_plan, class p_visitor>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     visit_matched_controls_(const fragment_block_plan& block,
                             fragment_probe_context& context,
+                            std::span<const p_query_hash_plan> query_plans,
                             p_visitor&& visitor,
                             std::uint64_t* accepted_prefix_bytes = nullptr,
                             std::uint64_t* rejected_prefix_bytes = nullptr,
                             bool validate_rejected_prefixes = true) const noexcept;
 
-    template <bool p_oracle>
+    template <bool p_oracle, class p_query_hash_plan>
     [[nodiscard, gnu::always_inline]]
     std::optional<query_occurrence_group>
-    match_query_group_(std::uint32_t hash,
+    match_query_group_(std::uint64_t hash,
                        const fragment_probe_context& context,
+                       std::span<const p_query_hash_plan> query_plans,
                        std::uint32_t& active_bucket,
                        std::uint32_t& plan_cursor,
                        std::uint32_t& plan_end) const noexcept;
@@ -750,37 +796,42 @@ class prepared_minimizer_fragment_reader {
     template <bool p_oracle>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     probe_entry_h32_c16_count_(fragment_probe_context& context,
+                               std::span<const query_wave_scratch::query_hash_plan> query_plans,
                                std::size_t entry_ordinal) const noexcept;
 
     template <bool p_oracle, minimizer_scalar_width p_offset_width>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     probe_entry_h32_c16_p16_matched_(fragment_probe_context& context,
+                                     std::span<const query_wave_scratch::query_hash_plan> query_plans,
                                      std::size_t entry_ordinal) const noexcept;
 
     template <bool p_oracle>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     probe_entry_h32_c16_p16_dispatch_(fragment_probe_context& context,
+                                      std::span<const query_wave_scratch::query_hash_plan> query_plans,
                                       std::size_t entry_ordinal) const noexcept {
         if (context.pass == fragment_probe_pass::control_count) {
-            return probe_entry_h32_c16_count_<p_oracle>(context, entry_ordinal);
+            return probe_entry_h32_c16_count_<p_oracle>(context, query_plans, entry_ordinal);
         }
         switch (entry_plans_[entry_ordinal].shape_offset_width) {
         case minimizer_scalar_width::u16:
             return probe_entry_h32_c16_p16_matched_<p_oracle, minimizer_scalar_width::u16>(
-                context, entry_ordinal);
+                context, query_plans, entry_ordinal);
         case minimizer_scalar_width::u32:
             return probe_entry_h32_c16_p16_matched_<p_oracle, minimizer_scalar_width::u32>(
-                context, entry_ordinal);
+                context, query_plans, entry_ordinal);
         case minimizer_scalar_width::u64:
             return probe_entry_h32_c16_p16_matched_<p_oracle, minimizer_scalar_width::u64>(
-                context, entry_ordinal);
+                context, query_plans, entry_ordinal);
         }
         return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
 
     template <bool p_oracle>
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
-    probe_block_h32_c16_p16_(fragment_probe_context& context) const noexcept {
+    probe_block_h32_c16_p16_(
+        fragment_probe_context& context,
+        std::span<const query_wave_scratch::query_hash_plan> query_plans) const noexcept {
         if (context.block == nullptr || context.block->entry_begin >= context.block->entry_end ||
             context.block->entry_end > entry_count_) {
             return std::unexpected(minimizer_generation_encoding_error::directory_size);
@@ -788,7 +839,8 @@ class prepared_minimizer_fragment_reader {
         for (std::size_t entry_ordinal = context.block->entry_begin;
              entry_ordinal < context.block->entry_end;
              ++entry_ordinal) {
-            const auto probed = probe_entry_h32_c16_p16_dispatch_<p_oracle>(context, entry_ordinal);
+            const auto probed = probe_entry_h32_c16_p16_dispatch_<p_oracle>(
+                context, query_plans, entry_ordinal);
             if (!probed)
                 return probed;
         }
@@ -859,7 +911,39 @@ class prepared_minimizer_fragment_reader {
          std::uint64_t max_occ,
          std::shared_ptr<const void> mapped_payload_owner,
          std::span<const std::byte> mapped_payload,
-         std::optional<owned_compact_hash32_direct_index_view> compact_direct = std::nullopt);
+         std::optional<owned_compact_hash32_direct_index_view> compact_direct = std::nullopt,
+         prepared_minimizer_fragment_reader_mode mode =
+             prepared_minimizer_fragment_reader_mode::queryable_native);
+
+    using complete_control_group_visitor =
+        bool (*)(void*, std::uint64_t hash, std::uint64_t exact_position_count) noexcept;
+    using complete_posting_visitor =
+        bool (*)(void*, std::uint64_t hash, std::uint64_t encoded_position) noexcept;
+
+    /** @brief Upper bound on distinct controls while preserving fragment-local duplicates. */
+    [[nodiscard]] std::uint64_t fragment_source_control_upper_bound() const noexcept {
+        return gpu_source_ready() ? manifest_.control_count : 0u;
+    }
+
+    /** @brief Exact number of encoded positions in the authenticated mapped source. */
+    [[nodiscard]] std::uint64_t fragment_source_position_count() const noexcept {
+        return gpu_source_ready() ? manifest_.position_count : 0u;
+    }
+
+    /** @brief Hash bits carried by each authenticated fragment-local control. */
+    [[nodiscard]] std::uint32_t fragment_source_hash_bits() const noexcept {
+        return gpu_source_ready()
+            ? static_cast<std::uint32_t>(std::bit_width(profile_.max_hash))
+            : 0u;
+    }
+
+    /** @brief Visit every fragment-local hash group once without constructing a host index. */
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
+    visit_complete_control_groups(void* context, complete_control_group_visitor visitor) const;
+
+    /** @brief Visit every authenticated `(hash,global-position)` source occurrence once. */
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
+    visit_complete_postings(void* context, complete_posting_visitor visitor) const;
 
     /// Prepare one immutable, canonically ordered anchor span per query.
     /// grouped-SoA control scans use count/layout/emission passes. The explicit
@@ -887,6 +971,15 @@ class prepared_minimizer_fragment_reader {
 
     [[nodiscard]] bool ready() const noexcept {
         return ready_;
+    }
+
+    /** @brief True only for the non-queryable full mapped source adapter. */
+    [[nodiscard]] bool gpu_source_ready() const noexcept {
+        return ready_ &&
+               mode_ == prepared_minimizer_fragment_reader_mode::gpu_source_only &&
+               backing_kind_ == backing_kind::grouped_soa_fragments &&
+               !compact_direct_.has_value() && mapped_payload_owner_ != nullptr &&
+               mapped_payload_.size() == manifest_.payload_bytes;
     }
 
     [[nodiscard]] bool compact_direct_ready() const noexcept {

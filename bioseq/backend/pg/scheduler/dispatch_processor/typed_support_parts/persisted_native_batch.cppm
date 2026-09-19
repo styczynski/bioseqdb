@@ -4,79 +4,44 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <bioseq/pg_compat.h>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <libassert/assert.hpp>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+extern "C" {
+#include "postgres.h"
+#include "miscadmin.h"
+}
 
-export module bioseq.postgres.scheduler.dispatch_processor.typed_support:persisted_native_batch;
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
+#include <new>
+
+export module bioseq.postgres.scheduler.dispatch_processor.typed_support.persisted_native_batch;
+
+import std;
 import bioseq.postgres.scheduler.dispatch_processor;
-import :policy_stats;
-import :pg_alignment_errors;
-import :transient_storage;
-import :resident_targets;
-import :row_adapters;
-import :scanner_row;
-import bioseq.highway.dispatch_contract;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.policy_stats;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.pg_alignment_errors;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
 import bioseq.common.seqan_adapter;
 import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.configuration.scheduler;
 import bioseq.indexing.type;
-import bioseq.indexing.traits;
-import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_sequence;
+import bioseq.indexing.minimizer_index;
 import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
+import bioseq.indexing.minimizer_hashmap;
 import bioseq.sequences;
-import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.minimap_port;
 import bioseq.pipeline.pipe;
-import bioseq.gpu.vulkan.runtime;
+import bioseq.pipeline.minimizer_execution_contract;
+import bioseq.pipeline.runtime_contract;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.instrumentation.clock;
-import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
-import bioseq.instrumentation.profiler_state;
-import bioseq.instrumentation.region;
-import bioseq.instrumentation.runtime;
-import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
 import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
@@ -86,7 +51,15 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
  * the compile-time generic-row continuation only when the native batch did
  * not produce the complete result.
  */
-template <class p_sequence, class p_pool, class p_generic_rows>
+template <class p_sequence,
+          class p_pool,
+          class p_generic_rows,
+          class p_materialize_target,
+          class p_same_target_locator,
+          class p_hash_major_identity_valid,
+          class p_fragment_identity_valid,
+          class p_with_pg_target,
+          class p_attach_query_stats>
 void process_persisted_native_batch(
     const size_t batch_size,
     const uint8_t alphabet_code,
@@ -94,7 +67,7 @@ void process_persisted_native_batch(
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity>& target_hdrs,
     const std::array<int32_t, dispatch_batch_capacity>& query_ids,
-    const minimap2_parameters& dispatch_params,
+    pipe::statement_execution_plan_owner execution_plan,
     const std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     batch_processor::scanner_pg_context* scanner_pg_ctx,
@@ -106,7 +79,17 @@ void process_persisted_native_batch(
     bool& cached_query_minimizer_stats_accounted,
     p_pool& pool,
     p_generic_rows& generic_rows,
-    std::map<int32_t, std::vector<match_result>>& results) {
+    const p_materialize_target& materialize_target,
+    const p_same_target_locator& same_target_locator,
+    const p_hash_major_identity_valid& hash_major_identity_valid,
+    const p_fragment_identity_valid& fragment_identity_valid,
+    const p_with_pg_target& with_pg_target,
+    const p_attach_query_stats& attach_query_stats,
+    match_result_map& results) {
+    if (!execution_plan) {
+        throw std::invalid_argument("persisted native batch requires a statement plan owner");
+    }
+    const minimap2_parameters& dispatch_params = execution_plan->frozen_parameters;
     const bool may_parallel_persisted_native =
         persisted_required && use_scanner_pg && scanner_pg_ctx != nullptr &&
         scanner_pg_ctx->explicit_query_ordinals && per_row_query_mode &&
@@ -117,9 +100,45 @@ void process_persisted_native_batch(
         batch_size >= bioseq::parallelism::task_parallel_minimums::k_query_count &&
         scanner_pg_ctx->cpu_prepared_target != nullptr;
     if (may_parallel_persisted_native) {
-        auto* const prepared_target = scanner_pg_ctx->cpu_prepared_target;
+        using query_alphabet =
+            typename compact_sequence_range<p_sequence>::traits::alphabet_type;
+        using query_storage_unit =
+            typename compact_sequence_range<p_sequence>::traits::storage_unit;
+        const auto prepared_target = scanner_pg_ctx->cpu_prepared_target;
+        if (dispatch_params.kmer_size < 0 || dispatch_params.window_size < 0 ||
+            static_cast<std::uint64_t>(dispatch_params.kmer_size) >
+                (std::numeric_limits<std::uint16_t>::max)() ||
+            static_cast<std::uint64_t>(dispatch_params.window_size) >
+                (std::numeric_limits<std::uint16_t>::max)()) {
+            throw std::invalid_argument{
+                "persisted native CPU batch has no generated query minimizer layout"};
+        }
+        std::uint64_t maximum_query_bp = 0u;
+        if (prepared_target->groups.size() == 1u) {
+            for (const auto& retained :
+                 prepared_target->groups.front().retained_query_sketches) {
+                maximum_query_bp = std::max(maximum_query_bp, retained.query_bp_size);
+            }
+        }
+        const auto query_execution_layout =
+            pipe::select_minimizer_execution_layout_prefer_native<query_alphabet>(
+                dispatch_params.minimizer_algorithm,
+                maximum_query_bp,
+                static_cast<std::uint16_t>(dispatch_params.kmer_size),
+                static_cast<std::uint16_t>(dispatch_params.window_size),
+                static_cast<std::uint8_t>(sizeof(query_storage_unit) * 8u));
+        const auto selected_query_backend =
+            pipe::minimizer_sketch_backend_for_effective_algorithm(
+                query_execution_layout.effective_algorithm);
+        if (!selected_query_backend ||
+            *selected_query_backend == minimizer_sketch_backend::vulkan_segment) {
+            throw std::invalid_argument{
+                "persisted native CPU batch cannot represent the selected query minimizer "
+                "record"};
+        }
         bool batch_identity_valid =
-            prepared_target->unions_ready && prepared_target->target_rowno >= 0 &&
+            prepared_target->unions_ready && prepared_target->groups.size() == 1u &&
+            prepared_target->target_rowno >= 0 &&
             prepared_target->query_count >= static_cast<std::uint64_t>(batch_size) &&
             (prepared_target->query_set_validation_ready() ||
              prepared_target->query_count == static_cast<std::uint64_t>(batch_size)) &&
@@ -131,7 +150,9 @@ void process_persisted_native_batch(
         batch_processor::cpu_prepared_index_group* native_group = nullptr;
         std::vector<const batch_processor::cpu_prepared_query_sketch*> retained_query_sketches(
             batch_size, nullptr);
-        std::vector<minimap2_parameters> native_query_params(batch_size);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        std::vector<benchmark_e2e_operation_binding> native_query_origins(batch_size);
+#endif
 
         for (std::size_t row = 0; batch_identity_valid && row < batch_size; ++row) {
             const bioseq::pg_types::seq* const row_query_hdr = (*per_row_query_hdrs)[row];
@@ -152,28 +173,28 @@ void process_persisted_native_batch(
             }
             if (shared_locator == nullptr) {
                 shared_locator = &*locator;
-            } else if (!same_dispatch_target_locator(*shared_locator, *locator)) {
+            } else if (!same_target_locator(*shared_locator, *locator)) {
                 batch_identity_valid = false;
                 break;
             }
 
-            const std::size_t min_bp =
-                std::min<std::size_t>(static_cast<std::size_t>(row_query_hdr->bp_size),
-                                      static_cast<std::size_t>(shared_target_bp_size));
-            minimap2_parameters params = dispatch_params;
-            params.kmer_size = 15;
-            params.window_size = 10;
-            if (min_bp < 50u) {
-                params.min_chain_score = 10;
-                params.min_seed_count = 1;
-            } else if (min_bp < 200u) {
-                params.min_chain_score = 20;
-                params.min_seed_count = 2;
-            }
-            const auto backend = pipe::target_index_sketch_backend_from_params(params);
+            const minimap2_parameters& params = execution_plan->frozen_parameters;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            const auto origin_scope = bind_benchmark_e2e_operation_origin(
+                execution_plan,
+                scanner_pg_ctx,
+                row,
+                per_row_query_mode,
+                broadcast_query_ordinal);
+            native_query_origins[row] = current_benchmark_e2e_operation_binding();
+#endif
             auto* const group = prepared_target->find_group(
-                params.kmer_size, params.window_size, params.max_occ, backend);
-            if (group == nullptr || (native_group != nullptr && native_group != group)) {
+                params.kmer_size,
+                params.window_size,
+                params.max_occ,
+                *selected_query_backend);
+            if (group == nullptr || group->execution_layout != query_execution_layout ||
+                (native_group != nullptr && native_group != group)) {
                 batch_identity_valid = false;
                 break;
             }
@@ -182,8 +203,10 @@ void process_persisted_native_batch(
                 group->find_retained_query_sketch(scanner_pg_ctx->query_ordinals[row]);
             if (retained == nullptr ||
                 retained->query_bp_size != static_cast<std::uint64_t>(row_query_hdr->bp_size) ||
-                !pipe::minimizer_range_stats_matches_backend(
-                    backend,
+                !retained->minimizers.valid() ||
+                retained->minimizers.layout() != query_execution_layout ||
+                !pipe::minimizer_range_stats_matches_effective_algorithm(
+                    query_execution_layout.effective_algorithm,
                     retained->execution_stats,
                     /*require_nonempty_vector_work=*/false,
                     pipe::exact_simd_range_route::require_continuation)) {
@@ -191,20 +214,19 @@ void process_persisted_native_batch(
                 break;
             }
             retained_query_sketches[row] = retained;
-            native_query_params[row] = params;
         }
 
         batch_identity_valid =
             batch_identity_valid && shared_locator != nullptr && native_group != nullptr &&
-            (hash_major_parallel_reader_identity_valid(*native_group, shared_target_bp_size) ||
-             fragment_parallel_reader_identity_valid(*native_group, shared_target_bp_size));
+            (hash_major_identity_valid(*native_group, shared_target_bp_size) ||
+             fragment_identity_valid(*native_group, shared_target_bp_size));
         if (batch_identity_valid) {
             const std::size_t letters_per_unit = facade_letters_per_unit;
             const std::uint64_t target_remainder = shared_target_bp_size % letters_per_unit;
             const std::size_t padding = static_cast<std::size_t>(
                 target_remainder == 0u ? 0u : letters_per_unit - target_remainder);
             bool native_batch_completed = false;
-            with_source_provider_pg_target<p_sequence>(
+            with_pg_target(
                 *scanner_pg_ctx,
                 *shared_locator,
                 alphabet_code,
@@ -216,7 +238,10 @@ void process_persisted_native_batch(
                  native_group,
                  batch_size,
                  &pool,
-                 &native_query_params,
+                 execution_plan,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                 &native_query_origins,
+#endif
                  &retained_query_sketches,
                  per_row_query_hdrs,
                  scanner_pg_ctx,
@@ -228,8 +253,10 @@ void process_persisted_native_batch(
                  &query_ids,
                  &results,
                  &native_batch_completed,
+                 &materialize_target,
+                 &attach_query_stats,
                  storage_unit_byte_width](auto fragmented_target_view, pg_sequence_read_session*) {
-                    auto resident = try_materialize_target_for_segment_workers(
+                    auto resident = materialize_target(
                         fragmented_target_view,
                         storage_unit_byte_width,
                         static_cast<std::uint64_t>(shared_target_rowno));
@@ -261,11 +288,18 @@ void process_persisted_native_batch(
                                             direct_compact_hash_lookup
                                 ? batch_size
                                 : worker_bounded_fragment_wave_size;
-                        std::vector<match_result_collection> native_collections(batch_size);
+                        match_result_collection_vector native_collections;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                        native_collections.set_logical_bounds(batch_size, batch_size);
+#endif
+                        native_collections.resize(batch_size);
                         (void)run_aligner_pg_checked(
                             "persisted fragment-native parallel seed wave",
                             [&native_collections,
-                             &native_query_params,
+                             execution_plan,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                 &native_query_origins,
+#endif
                              resident_target_view,
                              &retained_query_sketches,
                              per_row_query_hdrs,
@@ -283,13 +317,20 @@ void process_persisted_native_batch(
                                  */
                                 const auto align_hash_major_query =
                                     [&native_collections,
-                                     &native_query_params,
+                                     execution_plan,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                 &native_query_origins,
+#endif
                                      resident_target_view,
                                      &retained_query_sketches,
                                      per_row_query_hdrs](
                                         const std::size_t row,
                                         const bioseq::indexing::
                                             hash_major_minimizer_selective_reader& target_index) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                        const benchmark_e2e_operation_scope origin_scope{
+                                            native_query_origins[row]};
+#endif
                                         compact_sequence_range<p_sequence> query_seq{
                                             *(*per_row_query_hdrs)[row]};
                                         const auto lazy_query_view =
@@ -299,7 +340,7 @@ void process_persisted_native_batch(
                                             resident_target_view,
                                             retained_query_sketches[row]->minimizers,
                                             target_index,
-                                            native_query_params[row],
+                                            execution_plan,
                                             /*gpu_index_cache=*/nullptr,
                                             bioseq::indexing::gpu_index_cache_identity{});
                                     };
@@ -309,13 +350,20 @@ void process_persisted_native_batch(
                                  */
                                 const auto align_fragment_query =
                                     [&native_collections,
-                                     &native_query_params,
+                                     execution_plan,
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                 &native_query_origins,
+#endif
                                      resident_target_view,
                                      &retained_query_sketches,
                                      per_row_query_hdrs](
                                         const std::size_t row,
                                         const bioseq::indexing::prepared_fragment_anchor_batch::
                                             query_handle& target_index) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                        const benchmark_e2e_operation_scope origin_scope{
+                                            native_query_origins[row]};
+#endif
                                         compact_sequence_range<p_sequence> query_seq{
                                             *(*per_row_query_hdrs)[row]};
                                         const auto lazy_query_view =
@@ -325,7 +373,7 @@ void process_persisted_native_batch(
                                             resident_target_view,
                                             retained_query_sketches[row]->minimizers,
                                             target_index,
-                                            native_query_params[row],
+                                            execution_plan,
                                             /*gpu_index_cache=*/nullptr,
                                             bioseq::indexing::gpu_index_cache_identity{});
                                     };
@@ -426,7 +474,30 @@ void process_persisted_native_batch(
                                             direct_compact_hash_lookup &&
                                     fragment_wave_size == batch_size &&
                                     worker_bounded_fragment_wave_size < batch_size;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                // This pending edge belongs to this callback's admitted scratch
+                                // owner, not to the statement tracker. Concurrent target jobs may
+                                // therefore retry independently while the tracker records only
+                                // exact-owner checkpoints under its mutex.
+                                auto* const benchmark_e2e_statement_plan_tracker =
+                                    execution_plan->frozen_parameters.downstream_active_wall;
+                                bool benchmark_e2e_retry_reentry_pending = false;
+#endif
                                 for (std::size_t wave_begin = 0u; wave_begin < batch_size;) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                    if (benchmark_e2e_retry_reentry_pending &&
+                                        (benchmark_e2e_statement_plan_tracker == nullptr ||
+                                         !benchmark_e2e_statement_plan_tracker
+                                              ->attest_benchmark_e2e_statement_plan_checkpoint(
+                                                  execution_plan,
+                                                  benchmark_e2e_statement_plan_checkpoint::
+                                                      retry_reentry))) {
+                                        throw std::logic_error{
+                                            "fragment-native retry changed its guarded "
+                                            "statement-plan owner"};
+                                    }
+                                    benchmark_e2e_retry_reentry_pending = false;
+#endif
                                     const std::uint64_t seed_wave_prepare_started_ns =
                                         wave_begin == 0u ? first_wave_prepare_started_ns
                                                          : dispatch_host_now_ns();
@@ -437,10 +508,10 @@ void process_persisted_native_batch(
                                         wave_queries.push_back(
                                             bioseq::indexing::fragment_seed_query{
                                                 .minimizers =
-                                                    retained_query_sketches[row]->minimizers,
+                                                    retained_query_sketches[row]->minimizers.view(),
                                                 .query_length = static_cast<sequence_size_t>(
                                                     (*per_row_query_hdrs)[row]->bp_size),
-                                                .kmer_size = native_query_params[row].kmer_size,
+                                                .kmer_size = execution_plan->frozen_parameters.kmer_size,
                                             });
                                     }
                                     bool retry_at_worker_bound = false;
@@ -457,7 +528,7 @@ void process_persisted_native_batch(
                                                     std::span<const bioseq::indexing::
                                                                   fragment_seed_query>{
                                                         wave_queries},
-                                                    native_query_params[wave_begin].max_occ,
+                                                    execution_plan->frozen_parameters.max_occ,
                                                     query_wave_scratch,
                                                     /*baseline_query_plan_matcher_for_testing=*/
                                                     false,
@@ -543,10 +614,31 @@ void process_persisted_native_batch(
                                         active_fragment_wave_size =
                                             worker_bounded_fragment_wave_size;
                                         wave_queries.clear();
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                        if (benchmark_e2e_statement_plan_tracker != nullptr) {
+                                            if (!benchmark_e2e_statement_plan_tracker
+                                                     ->attest_benchmark_e2e_statement_plan_checkpoint(
+                                                         execution_plan,
+                                                         benchmark_e2e_statement_plan_checkpoint::
+                                                             retry_request)) {
+                                                throw std::logic_error{
+                                                    "fragment-native retry lost its guarded "
+                                                    "statement-plan owner"};
+                                            }
+                                            benchmark_e2e_retry_reentry_pending = true;
+                                        }
+#endif
                                         continue;
                                     }
                                     wave_begin = wave_end;
                                 }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                if (benchmark_e2e_retry_reentry_pending) {
+                                    throw std::logic_error{
+                                        "fragment-native retry did not re-enter its guarded "
+                                        "statement plan"};
+                                }
+#endif
                                 return {};
                             });
 
@@ -557,7 +649,7 @@ void process_persisted_native_batch(
                                 native_group->persisted_reader_load_host_wall_ns);
                         }
                         for (std::size_t row = 0; row < batch_size; ++row) {
-                            attach_retained_hash_major_query_stats(
+                            attach_query_stats(
                                 native_collections[row],
                                 retained_query_sketches[row]->execution_stats);
                             scanner_pg_ctx->target_index_sources[row] =
@@ -583,7 +675,7 @@ void process_persisted_native_batch(
                             }
                             record_unattested_job(
                                 stats,
-                                native_query_params[row],
+                                execution_plan,
                                 requested_source,
                                 ::bioseq::pipeline_stats::target_index_source::persisted,
                                 scanner_pg_ctx,
@@ -600,10 +692,10 @@ void process_persisted_native_batch(
                                 "{} match(es) [fragment-native-query-parallel]",
                                 static_cast<int>(query_ids[row]),
                                 shared_target_bp_size,
-                                native_query_params[row].kmer_size,
-                                native_query_params[row].window_size,
-                                native_query_params[row].min_chain_score,
-                                native_query_params[row].min_seed_count,
+                                execution_plan->frozen_parameters.kmer_size,
+                                execution_plan->frozen_parameters.window_size,
+                                execution_plan->frozen_parameters.min_chain_score,
+                                execution_plan->frozen_parameters.min_seed_count,
                                 native_collections[row].size());
                             if (!native_collections[row].is_empty()) {
                                 results[query_ids[row]] =

@@ -25,6 +25,8 @@ export module bioseq.indexing.hash_major_minimizer_index:codec;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
 import bioseq.indexing.storage;
+import bioseq.pipeline.runtime_contract;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 
 namespace bioseq::indexing::hash_major_minimizer_detail {
 
@@ -451,8 +453,7 @@ hash_major_minimizer_storage_profile_digest(
         const hash_major_minimizer_storage_profile& value,
         std::uint64_t target_length) noexcept {
     if (target_length > (std::uint64_t{1} << 63u)
-        || value.alphabet_code != 0u || value.kmer_size != 15u
-        || value.window_size != 10u || value.hash_width_bytes != 4u
+        || (value.hash_width_bytes != 4u && value.hash_width_bytes != 8u)
         || (value.stored_posting_width_bytes != 4u
             && value.stored_posting_width_bytes != 8u)
         || value.stored_posting_width_bytes
@@ -464,27 +465,72 @@ hash_major_minimizer_storage_profile_digest(
         || value.hash_seed != 0u) {
         return false;
     }
-    const bool original_scheme = value.hash_scheme_identity == 0u
-        && value.hash_scheme_revision == 0u
-        && ((value.producer_backend_identity == 1u
-                && value.producer_backend_revision == 1u)
-            || (value.producer_backend_identity == 2u
-                && value.producer_backend_revision == 1u)
-            || (value.producer_backend_identity == 4u
-                && value.producer_backend_revision == 1u));
-    const bool bounded_scheme = value.hash_scheme_identity == 1u
-        && value.hash_scheme_revision == 1u
-        && value.producer_backend_identity == 3u
-        && value.producer_backend_revision == 1u;
-    return original_scheme || bounded_scheme;
+    if (value.producer_backend_revision != 1u) {
+        return false;
+    }
+
+    // The revision-6 hash-major format predates physical-record and packed-input
+    // identity fields. Preserve that legitimate unbound boundary by accepting a
+    // biological profile only when at least one generated binding supplies its
+    // exact alphabet, k/w, hash width, scheme, and effective producer. The
+    // generated selector remains the authority; this codec does not recreate a
+    // finite campaign-pair or alphabet list.
+    for (const auto& candidate :
+         bioseq::minimizers::registered_minimizer_runtime_profiles()) {
+        if (candidate.alphabet_id != value.alphabet_code) {
+            continue;
+        }
+        const auto* selected = bioseq::minimizers::find_minimizer_runtime_profile(
+            candidate.requested_algorithm,
+            candidate.alphabet_id,
+            value.kmer_size,
+            value.window_size,
+            candidate.minimum_position_log2,
+            candidate.packed_storage_bits);
+        if (selected == nullptr || selected->alphabet_id != value.alphabet_code ||
+            !bioseq::minimizers::minimizer_runtime_profile_accepts_shape(
+                *selected, value.kmer_size, value.window_size) ||
+            static_cast<std::uint8_t>(selected->hash_width) != value.hash_width_bytes) {
+            continue;
+        }
+
+        using algorithm_type = bioseq::simd::minimizer_algorithm;
+        const bool producer_matches =
+            (selected->effective_algorithm == algorithm_type::scalar &&
+             value.producer_backend_identity == 1u) ||
+            ((selected->effective_algorithm == algorithm_type::simd_minimap2_reference ||
+              selected->effective_algorithm == algorithm_type::two_stack_nthash) &&
+             value.producer_backend_identity == 2u) ||
+            (selected->effective_algorithm == algorithm_type::bounded_nthash_simd &&
+             value.producer_backend_identity == 3u) ||
+            (selected->effective_algorithm == algorithm_type::vulkan_minimap_integer &&
+             value.producer_backend_identity == 4u);
+        const bool bounded_scheme =
+            selected->effective_algorithm == algorithm_type::bounded_nthash_simd;
+        const bool scheme_matches =
+            value.hash_scheme_identity == (bounded_scheme ? 1u : 0u) &&
+            value.hash_scheme_revision == (bounded_scheme ? 1u : 0u);
+        if (producer_matches && scheme_matches) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /** @brief Returns the maximum hash representable by the selected hash scheme. */
 [[nodiscard]] constexpr std::uint64_t hash_major_minimizer_max_hash(
         const hash_major_minimizer_storage_profile& profile) noexcept {
-    return profile.hash_scheme_identity == 0u
-            && profile.hash_scheme_revision == 0u
-        ? 0x3fffffffu : 0xffffffffu;
+    if (profile.hash_scheme_identity != 0u || profile.hash_scheme_revision != 0u) {
+        return 0xffffffffu;
+    }
+    const std::uint32_t biological_hash_bits =
+        static_cast<std::uint32_t>(profile.kmer_size) * 2u;
+    if (biological_hash_bits == 0u) {
+        return 0u;
+    }
+    return biological_hash_bits >= 64u
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : (std::uint64_t{1u} << biological_hash_bits) - 1u;
 }
 
 } // namespace bioseq::indexing

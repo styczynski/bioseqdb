@@ -14,6 +14,9 @@ extern "C" {
 }
 
 #include <algorithm>
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+#include <cstdio>
+#endif
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +32,9 @@ extern "C" {
 export module bioseq.postgres.storage.indexing.sorted_runs:sorted_runs_storage;
 
 import bioseq.common.checked_arithmetic;
+#if defined(BIOSEQ_TEST_INDEXES)
+import bioseq.common.logging;
+#endif
 import bioseq.postgres.support;
 import bioseq.parallelism.memory_admission;
 
@@ -48,6 +54,8 @@ static_assert(offsetof(sorted_pair_wire, encoded) == 8);
 
 inline constexpr std::uint64_t target_position_batch_bytes = std::uint64_t{8} << 20;
 inline constexpr std::uint64_t minimum_position_batch_bytes = std::uint64_t{32} << 10;
+inline constexpr std::uint64_t minimum_merge_reader_buffer_bytes = std::uint64_t{32} << 10;
+inline constexpr std::uint64_t maximum_merge_reader_buffer_bytes = std::uint64_t{4} << 20;
 
 /// Private error codes translated by the PostgreSQL boundary leaf.
 enum class sorted_run_error : unsigned {
@@ -76,11 +84,89 @@ enum class sorted_run_error : unsigned {
     __builtin_trap();
 }
 
+/// Reservation site for one terminal sorted-run merge admission failure.
+enum class sorted_run_merge_admission_site : std::uint8_t {
+    compaction_readers,
+    merge_head_queue,
+    final_readers,
+};
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+/// Emit the controller snapshot only when a failed reservation becomes terminal.
+void emit_terminal_merge_admission_failure(
+    sorted_run_merge_admission_site site,
+    const bioseq::parallelism::memory_admission_failure& failure) noexcept {
+    const char* site_name = "unknown";
+    switch (site) {
+    case sorted_run_merge_admission_site::compaction_readers:
+        site_name = "compaction_readers";
+        break;
+    case sorted_run_merge_admission_site::merge_head_queue:
+        site_name = "merge_head_queue";
+        break;
+    case sorted_run_merge_admission_site::final_readers:
+        site_name = "final_readers";
+        break;
+    }
+    const auto failure_reason =
+        bioseq::parallelism::memory_admission_failure_reason_name(failure.reason);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    // The benchmark harness captures PostgreSQL stderr.  Bypass the shared
+    // asynchronous fallback file so a later backend cannot truncate this
+    // terminal record before the harness freezes the server log.
+    (void)std::fprintf(
+        stderr,
+        "[bioseq.sorted_runs.merge_admission] site=%s reason=%.*s requested_bytes=%llu "
+        "reserved_bytes=%llu budget_ceiling_bytes=%llu "
+        "allocatable_after_reservations_bytes=%llu process_footprint_bytes=%llu "
+        "system_available_bytes=%llu system_total_bytes=%llu process_soft_cap_bytes=%llu\n",
+        site_name,
+        static_cast<int>(failure_reason.size()),
+        failure_reason.data(),
+        static_cast<unsigned long long>(failure.requested_bytes),
+        static_cast<unsigned long long>(failure.reserved_bytes),
+        static_cast<unsigned long long>(failure.budget_ceiling_bytes),
+        static_cast<unsigned long long>(failure.allocatable_after_reservations_bytes),
+        static_cast<unsigned long long>(failure.process_footprint_bytes),
+        static_cast<unsigned long long>(failure.system_available_bytes),
+        static_cast<unsigned long long>(failure.system_total_bytes),
+        static_cast<unsigned long long>(failure.process_soft_cap_bytes));
+    (void)std::fflush(stderr);
+#endif
+#if defined(BIOSEQ_TEST_INDEXES)
+    try {
+        bioseq_log<logging_level::warning, logging_target::file>(
+            "[bioseq.sorted_runs.merge_admission] site={} reason={} requested_bytes={} "
+            "reserved_bytes={} budget_ceiling_bytes={} "
+            "allocatable_after_reservations_bytes={} process_footprint_bytes={} "
+            "system_available_bytes={} system_total_bytes={} process_soft_cap_bytes={}",
+            site_name,
+            failure_reason,
+            static_cast<unsigned long long>(failure.requested_bytes),
+            static_cast<unsigned long long>(failure.reserved_bytes),
+            static_cast<unsigned long long>(failure.budget_ceiling_bytes),
+            static_cast<unsigned long long>(failure.allocatable_after_reservations_bytes),
+            static_cast<unsigned long long>(failure.process_footprint_bytes),
+            static_cast<unsigned long long>(failure.system_available_bytes),
+            static_cast<unsigned long long>(failure.system_total_bytes),
+            static_cast<unsigned long long>(failure.process_soft_cap_bytes));
+    } catch (...) {
+        // Diagnostics must not replace the existing sorted-run PostgreSQL error.
+    }
+#endif
+}
+#endif
+
 #ifdef BIOSEQ_TEST_INDEXES
 inline thread_local sorted_run_failure_injection g_sorted_run_pg_leaf_failure =
     sorted_run_failure_injection::none;
 inline thread_local std::uint64_t g_sorted_run_pg_leaf_failure_remaining = 0;
 inline thread_local std::uint64_t g_sorted_run_merge_reader_budget_for_test = 0;
+inline thread_local sorted_run_reader_admission_injection
+    g_sorted_run_reader_admission_injection_for_test =
+        sorted_run_reader_admission_injection::none;
+inline thread_local std::uint64_t
+    g_sorted_run_reader_request_ceiling_for_test = 0;
 
 /// Arm one failure at the next matching PostgreSQL leaf call.
 void arm_sorted_run_pg_leaf_failure(sorted_run_failure_injection point) noexcept {
@@ -100,11 +186,22 @@ void set_sorted_run_merge_reader_budget_for_test(std::uint64_t bytes) noexcept {
     g_sorted_run_merge_reader_budget_for_test = bytes;
 }
 
+/// Override merge-reader admission for one deterministic resource-path test.
+void set_sorted_run_reader_admission_injection_for_test(
+    sorted_run_reader_admission_injection injection,
+    std::uint64_t request_ceiling_bytes) noexcept {
+    g_sorted_run_reader_admission_injection_for_test = injection;
+    g_sorted_run_reader_request_ceiling_for_test = request_ceiling_bytes;
+}
+
 /// Clear every sorted-run failure and budget override.
 void disarm_sorted_run_pg_leaf_failure() noexcept {
     g_sorted_run_pg_leaf_failure = sorted_run_failure_injection::none;
     g_sorted_run_pg_leaf_failure_remaining = 0;
     g_sorted_run_merge_reader_budget_for_test = 0;
+    g_sorted_run_reader_admission_injection_for_test =
+        sorted_run_reader_admission_injection::none;
+    g_sorted_run_reader_request_ceiling_for_test = 0;
 }
 
 /// Report whether a sorted-run leaf failure is armed.
@@ -590,20 +687,28 @@ struct admitted_merge_head_queue {
     admitted_merge_head_queue& operator=(admitted_merge_head_queue&&) = delete;
 };
 
-/// Create an admitted merge-head queue for the maximum input count.
-[[nodiscard]] admitted_merge_head_queue make_admitted_merge_head_queue(std::size_t maximum_heads) {
+/// Admission outcome plus the potentially allocating queue value.
+struct merge_head_queue_admission {
+    std::optional<admitted_merge_head_queue> admitted;
+    bioseq::parallelism::memory_admission_failure failure{};
+};
+
+/// Try to create an admitted merge-head queue for the maximum input count.
+[[nodiscard]] merge_head_queue_admission
+try_make_admitted_merge_head_queue(std::size_t maximum_heads) {
     const std::uint64_t logical_bytes = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(maximum_heads), static_cast<std::uint64_t>(sizeof(merge_head)));
     const std::uint64_t admitted_headroom = bioseq::common::saturating_mul(
         logical_bytes, bioseq::parallelism::k_vector_preallocation_headroom_factor);
     if (logical_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
         admitted_headroom == (std::numeric_limits<std::uint64_t>::max)()) {
-        report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+        return {};
     }
-    auto permit =
-        bioseq::parallelism::memory_admission_controller::instance().try_reserve(admitted_headroom);
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    bioseq::parallelism::memory_admission_failure admission_failure{};
+    auto permit = admission.try_reserve(admitted_headroom, &admission_failure);
     if (!permit) {
-        report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+        return merge_head_queue_admission{.failure = admission_failure};
     }
     std::vector<merge_head> backing;
     backing.reserve(maximum_heads);
@@ -621,7 +726,24 @@ struct admitted_merge_head_queue {
     admitted_merge_head_queue admitted;
     admitted.queue.swap(prepared);
     admitted.permit = std::move(*permit);
-    return admitted;
+    merge_head_queue_admission result;
+    result.admitted.emplace(std::move(admitted));
+    return result;
+}
+
+/// Create an admitted merge-head queue or preserve the existing terminal error.
+[[nodiscard]] admitted_merge_head_queue make_admitted_merge_head_queue(std::size_t maximum_heads) {
+    auto attempt = try_make_admitted_merge_head_queue(maximum_heads);
+    if (!attempt.admitted.has_value()) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        if (attempt.failure.has_failure()) {
+            emit_terminal_merge_admission_failure(
+                sorted_run_merge_admission_site::merge_head_queue, attempt.failure);
+        }
+#endif
+        report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+    }
+    return std::move(*attempt.admitted);
 }
 
 /// Count vector capacity owned by the reader set.
@@ -637,6 +759,112 @@ file_reader_owned_capacity_bytes(const std::vector<file_reader>& readers) noexce
                                            static_cast<std::uint64_t>(sizeof(sorted_pair_wire))));
     }
     return bytes;
+}
+
+/// One admitted reader-buffer geometry and its pre-allocation reservation.
+struct admitted_file_reader_budget {
+    bioseq::parallelism::memory_permit permit;
+    std::uint64_t per_reader_bytes = 0;
+};
+
+/// Own the reader and heap resources admitted before a compaction output exists.
+struct admitted_file_merge {
+    merge_resources resources;
+    std::optional<admitted_merge_head_queue> heap;
+};
+
+/// Reserve merge-reader bytes, applying only deterministic test predicates first.
+[[nodiscard]] std::optional<bioseq::parallelism::memory_permit>
+try_reserve_merge_reader_bytes(
+    std::uint64_t bytes,
+    bioseq::parallelism::memory_admission_failure* failure) noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
+    if (g_sorted_run_reader_admission_injection_for_test ==
+            sorted_run_reader_admission_injection::request_ceiling &&
+        bytes > g_sorted_run_reader_request_ceiling_for_test) {
+        if (failure != nullptr) {
+            *failure = bioseq::parallelism::memory_admission_failure{
+                .reason =
+                    bioseq::parallelism::memory_admission_failure_reason::budget_exhausted,
+                .requested_bytes = bytes,
+                .budget_ceiling_bytes = g_sorted_run_reader_request_ceiling_for_test,
+                .allocatable_after_reservations_bytes =
+                    g_sorted_run_reader_request_ceiling_for_test,
+            };
+        }
+        return std::nullopt;
+    }
+    if (g_sorted_run_reader_admission_injection_for_test ==
+        sorted_run_reader_admission_injection::system_pressure_once) {
+        g_sorted_run_reader_admission_injection_for_test =
+            sorted_run_reader_admission_injection::none;
+        g_sorted_run_reader_request_ceiling_for_test = 0;
+        if (failure != nullptr) {
+            *failure = bioseq::parallelism::memory_admission_failure{
+                .reason = bioseq::parallelism::memory_admission_failure_reason::system_pressure,
+                .requested_bytes = bytes,
+            };
+        }
+        return std::nullopt;
+    }
+#endif
+    return bioseq::parallelism::memory_admission_controller::instance().try_reserve(bytes,
+                                                                                    failure);
+}
+
+/**
+ * Try the preferred reader geometry, then smaller wire-aligned geometries when
+ * only the admission ceiling rejected the request. System pressure and
+ * arithmetic/counter overflow remain terminal.
+ */
+[[nodiscard]] std::optional<admitted_file_reader_budget>
+try_admit_file_reader_budget(
+    std::size_t reader_count,
+    std::uint64_t preferred_per_reader_bytes,
+    bioseq::parallelism::memory_admission_failure* terminal_failure = nullptr) noexcept {
+    if (terminal_failure != nullptr) {
+        *terminal_failure = {};
+    }
+    std::uint64_t per_reader_bytes = std::clamp<std::uint64_t>(
+        preferred_per_reader_bytes,
+        minimum_merge_reader_buffer_bytes,
+        maximum_merge_reader_buffer_bytes);
+    for (;;) {
+        const std::uint64_t logical_reader_bytes = bioseq::common::saturating_add(
+            bioseq::common::saturating_mul(per_reader_bytes,
+                                           static_cast<std::uint64_t>(reader_count)),
+            bioseq::common::saturating_mul(static_cast<std::uint64_t>(reader_count),
+                                           static_cast<std::uint64_t>(sizeof(file_reader))));
+        const std::uint64_t reader_headroom = bioseq::common::saturating_mul(
+            logical_reader_bytes,
+            bioseq::parallelism::k_vector_preallocation_headroom_factor);
+        if (logical_reader_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
+            reader_headroom == (std::numeric_limits<std::uint64_t>::max)()) {
+            return std::nullopt;
+        }
+
+        bioseq::parallelism::memory_admission_failure admission_failure{};
+        auto permit = try_reserve_merge_reader_bytes(reader_headroom, &admission_failure);
+        if (permit) {
+            return admitted_file_reader_budget{
+                .permit = std::move(*permit),
+                .per_reader_bytes = per_reader_bytes,
+            };
+        }
+        if (admission_failure.reason !=
+                bioseq::parallelism::memory_admission_failure_reason::budget_exhausted ||
+            per_reader_bytes == minimum_merge_reader_buffer_bytes) {
+            if (terminal_failure != nullptr) {
+                *terminal_failure = admission_failure;
+            }
+            return std::nullopt;
+        }
+
+        const std::uint64_t halved = per_reader_bytes / 2u;
+        const std::uint64_t wire_aligned =
+            halved - (halved % static_cast<std::uint64_t>(sizeof(sorted_pair_wire)));
+        per_reader_bytes = std::max(minimum_merge_reader_buffer_bytes, wire_aligned);
+    }
 }
 
 } // namespace bioseq::storage::indexing
@@ -704,6 +932,13 @@ class sorted_pair_run_store {
     /// Demote resident runs until the requested admission is available.
     void demote_resident_runs_until_available(std::uint64_t bytes_needed);
 
+    /// Release a completed spill writer while preserving every immutable run.
+    void release_completed_write_buffer();
+
+    /// Transfer a completed spill writer to a destination with an empty writer slot.
+    [[nodiscard]] bool
+    try_transfer_completed_write_buffer_to(sorted_pair_run_store& destination) noexcept;
+
     /// Merge every run and invoke a callable once per minimizer hash.
     template <class p_function> void merge_runs(p_function&& on_kmer) {
         sorted_pair_kmer_sink sink{
@@ -768,20 +1003,28 @@ class sorted_pair_run_store {
     /// Compact file runs to no more than the requested count.
     void compact_file_runs_to_output_count_(std::size_t target_output_runs);
 
+    /// Admit and allocate one compaction group's readers and merge heap.
+    [[nodiscard]] std::unique_ptr<admitted_file_merge> try_prepare_compaction_merge_(
+        std::span<buffer_file_run> runs,
+        bioseq::parallelism::memory_admission_failure& terminal_failure,
+        sorted_run_merge_admission_site& terminal_site);
+
     /// Merge one adjacent run group into a new buffer file.
-    [[nodiscard]] buffer_file_run merge_file_run_group_to_new_buffile_(std::size_t lo,
-                                                                       std::size_t hi);
+    [[nodiscard]] buffer_file_run
+    merge_file_run_group_to_new_buffile_(admitted_file_merge& admitted);
 
     /// Merge sorted file runs into one writer callback.
     template <class p_writer>
-    void merge_sorted_file_runs_to_writer_(std::span<buffer_file_run> runs,
-                                           merge_resources& resources,
+    void merge_sorted_file_runs_to_writer_(merge_resources& resources,
+                                           admitted_merge_head_queue& admitted_heap,
                                            p_writer&& writer);
     /// Try to admit and open readers for every file run.
-    [[nodiscard]] bool try_open_file_readers_(merge_resources& resources);
+    [[nodiscard]] bool try_open_file_readers_(
+        merge_resources& resources,
+        bioseq::parallelism::memory_admission_failure& terminal_failure);
 
-    /// Compact runs until readers can be opened.
-    void open_file_readers_(merge_resources& resources);
+    /// Admit the final heap and open readers, compacting between attempts.
+    [[nodiscard]] admitted_merge_head_queue open_file_readers_(merge_resources& resources);
 
     bioseq::parallelism::memory_permit memory_runs_metadata_permit_;
     std::vector<memory_run> memory_runs_;
@@ -1107,31 +1350,27 @@ std::uint64_t sorted_pair_run_store::merge_reader_budget_bytes_() const {
         available / 8, std::uint64_t{1} << 20, std::uint64_t{256} << 20);
 }
 
-bool sorted_pair_run_store::try_open_file_readers_(merge_resources& resources) {
+bool sorted_pair_run_store::try_open_file_readers_(
+    merge_resources& resources,
+    bioseq::parallelism::memory_admission_failure& terminal_failure) {
+    terminal_failure = {};
     if (file_runs_.empty()) {
         return true;
     }
     const std::uint64_t reader_budget = merge_reader_budget_bytes_();
-    std::uint64_t per_reader =
+    const std::uint64_t preferred_per_reader =
         std::clamp<std::uint64_t>(reader_budget / std::max<std::size_t>(1, file_runs_.size()),
-                                  std::uint64_t{32} << 10,
-                                  std::uint64_t{4} << 20);
-    const std::uint64_t total_reader_bytes = bioseq::common::saturating_add(
-        bioseq::common::saturating_mul(per_reader, static_cast<std::uint64_t>(file_runs_.size())),
-        bioseq::common::saturating_mul(static_cast<std::uint64_t>(file_runs_.size()),
-                                       static_cast<std::uint64_t>(sizeof(file_reader))));
-    const std::uint64_t reader_headroom = bioseq::common::saturating_mul(
-        total_reader_bytes, bioseq::parallelism::k_vector_preallocation_headroom_factor);
-    if (total_reader_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
-        reader_headroom == (std::numeric_limits<std::uint64_t>::max)()) {
+                                  minimum_merge_reader_buffer_bytes,
+                                  maximum_merge_reader_buffer_bytes);
+    bioseq::parallelism::memory_admission_failure admission_failure{};
+    auto admitted = try_admit_file_reader_budget(
+        file_runs_.size(), preferred_per_reader, &admission_failure);
+    if (!admitted) {
+        terminal_failure = admission_failure;
         return false;
     }
-    auto permit =
-        bioseq::parallelism::memory_admission_controller::instance().try_reserve(reader_headroom);
-    if (!permit) {
-        return false;
-    }
-    resources.reader_budget_permit = std::move(*permit);
+    const std::uint64_t per_reader = admitted->per_reader_bytes;
+    resources.reader_budget_permit = std::move(admitted->permit);
     resources.readers.reserve(file_runs_.size());
 
     for (buffer_file_run& run : file_runs_) {
@@ -1155,10 +1394,34 @@ bool sorted_pair_run_store::try_open_file_readers_(merge_resources& resources) {
     return true;
 }
 
-void sorted_pair_run_store::open_file_readers_(merge_resources& resources) {
-    while (!try_open_file_readers_(resources)) {
+admitted_merge_head_queue
+sorted_pair_run_store::open_file_readers_(merge_resources& resources) {
+    bioseq::parallelism::memory_admission_failure terminal_admission_failure{};
+    for (;;) {
+        {
+            if (file_runs_.size() >
+                (std::numeric_limits<std::size_t>::max)() - memory_runs_.size()) {
+                report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+            }
+            auto admitted_heap = make_admitted_merge_head_queue(
+                memory_runs_.size() + file_runs_.size());
+            if (try_open_file_readers_(resources, terminal_admission_failure)) {
+                return admitted_heap;
+            }
+        }
+        // Release the final-heap capacity before any compaction admission.
+        const bool may_compact =
+            terminal_admission_failure.reason ==
+                bioseq::parallelism::memory_admission_failure_reason::budget_exhausted;
         resources.finish_success();
-        if (file_runs_.size() <= 1) {
+        if (!may_compact || file_runs_.size() <= 1) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+            if (terminal_admission_failure.has_failure()) {
+                emit_terminal_merge_admission_failure(
+                    sorted_run_merge_admission_site::final_readers,
+                    terminal_admission_failure);
+            }
+#endif
             report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
         }
         compact_file_runs_to_output_count_(std::max<std::size_t>(1, file_runs_.size() / 2));

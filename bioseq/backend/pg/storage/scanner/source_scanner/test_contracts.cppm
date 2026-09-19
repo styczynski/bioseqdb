@@ -4,29 +4,29 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
-
 extern "C" {
+#include "postgres.h"
+
+#include "access/attnum.h"
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/xact.h"
+#include "utils/errcodes.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <cstdint>
 #include <cstring>
-#include <exception>
 #include <limits>
-#include <memory>
 #include <new>
 #include <span>
-#include <type_traits>
-#include <utility>
 
 export module bioseq.postgres.storage.scanner:source_scanner_test_contracts;
 
@@ -47,7 +47,7 @@ import bioseq.sequences;                 // compact_sequence_range, compact_sequ
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.table.io; // begin_column_read/read_column_row_by_number
 import bioseq.parallelism.pool;
-import :fragment_scanner;
+import bioseq.postgres.storage.scanner.fragment_scanner;
 import :source_registry;
 
 export import :source_scanner_promotion;

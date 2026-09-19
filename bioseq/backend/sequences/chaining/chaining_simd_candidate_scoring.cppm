@@ -150,8 +150,12 @@ template<class p_descriptor_type>
     std::span<const anchor> anchors)
 {
     const std::size_t count = anchors.size();
+    const auto elements = bioseq::chaining::simd_chaining_soa_elements(count);
+    if (!elements) {
+        throw std::length_error{"SIMD chaining SoA element count overflowed"};
+    }
     auto storage =
-        context::current().alloc_chain_array<std::uint32_t, 64>(3 * count);
+        context::current().alloc_chain_array<std::uint32_t, 64>(*elements);
     soa_anchors result{
         .ref_positions = storage.data(),
         .query_positions = storage.data() + count,

@@ -86,14 +86,29 @@ TEST_CASE("independent fragment halo and spill-run merge producers are canonical
 
     lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
     const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
-    auto fragment_producer = index_type::make_generation_replay_producer(
-        lazy_view, minimizer_sketch_backend::scalar, nullptr);
-    collecting_minimizer_row_sink fragment_sink;
     auto fragment_options = test_generation_options(range.bp_size());
+    std::uint64_t cooperative_checkpoint_calls = 0u;
+    auto fragment_producer = index_type::make_generation_replay_producer(
+        lazy_view,
+        minimizer_sketch_backend::scalar,
+        nullptr,
+        fragment_options.algorithm_identity,
+        fragment_options.window_size,
+        fragment_options.kmer_size,
+        fixed_alphabet_code<::seq::dna4>(),
+        0u,
+        cooperative_cancellation_checkpoint{
+            .context = &cooperative_checkpoint_calls,
+            .invoke_fn = +[](void* context) {
+                ++*static_cast<std::uint64_t*>(context);
+            },
+        });
+    collecting_minimizer_row_sink fragment_sink;
     auto fragment_encoding =
         encode_minimizer_generation(fragment_producer, fragment_sink, fragment_options);
     REQUIRE(fragment_encoding.has_value());
     REQUIRE(fragment_producer.scan_count() == 3);
+    REQUIRE(cooperative_checkpoint_calls > fragment_producer.scan_count());
     const minimizer_fragment_generation_execution_receipt scalar_execution =
         fragment_producer.execution_stats();
     REQUIRE(scalar_execution.is_accepted());
@@ -105,15 +120,21 @@ TEST_CASE("independent fragment halo and spill-run merge producers are canonical
     REQUIRE(fragment_producer.peak_buffered_core_bp() <= k_minimizer_preferred_segment_span_bp);
 
     fake_fragment_storage<> spill_storage;
+    auto spill_options = test_generation_options(
+        range.bp_size(), bioseq::simd::minimizer_algorithm::scalar, range.bp_size());
     auto spilled = spill_run_index_type::spill_generation_replay_runs_serial(
-        spill_storage, lazy_view, minimizer_sketch_backend::scalar, nullptr, fragment_bp);
+        spill_storage,
+        lazy_view,
+        minimizer_sketch_backend::scalar,
+        nullptr,
+        spill_options.algorithm_identity,
+        fragment_bp);
     REQUIRE(spilled.has_value());
     REQUIRE(spilled->run_count() >= 3);
     const std::uint64_t scalar_spill_run_count = spilled->run_count();
     auto spill_producer = spill_run_index_type::make_generation_replay_producer(
         spill_storage, range.bp_size(), std::move(*spilled));
     collecting_minimizer_row_sink spill_sink;
-    auto spill_options = fragment_options;
     ++spill_options.generation_id;
     auto spill_encoding = encode_minimizer_generation(spill_producer, spill_sink, spill_options);
     REQUIRE(spill_encoding.has_value());
@@ -141,13 +162,17 @@ TEST_CASE("independent fragment halo and spill-run merge producers are canonical
     // bytes are compared after normalising generation identity.
     lazy_sequence<dna4_u64, chunked> lazy_exact{chunked::from_range(range)};
     const auto lazy_exact_view = bioseq::storage::make_lazy_sequence_view(lazy_exact);
+    auto exact_fragment_options = test_generation_options(
+        range.bp_size(), bioseq::simd::minimizer_algorithm::two_stack_nthash);
     auto exact_fragment_producer =
         index_type::make_generation_replay_producer(lazy_exact_view,
                                                     minimizer_sketch_backend::exact_simd,
                                                     fixed_minimizer_kernels(),
+                                                    exact_fragment_options.algorithm_identity,
+                                                    exact_fragment_options.window_size,
+                                                    exact_fragment_options.kmer_size,
                                                     fixed_alphabet_code<::seq::dna4>());
     collecting_minimizer_row_sink exact_fragment_sink;
-    auto exact_fragment_options = fragment_options;
     exact_fragment_options.generation_id += 2;
     auto exact_fragment_encoding = encode_minimizer_generation(
         exact_fragment_producer, exact_fragment_sink, exact_fragment_options);
@@ -164,11 +189,16 @@ TEST_CASE("independent fragment halo and spill-run merge producers are canonical
     REQUIRE(exact_execution.exact_simd_stats.is_internally_consistent(true));
 
     fake_fragment_storage<> exact_spill_storage;
+    auto exact_spill_options = test_generation_options(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::two_stack_nthash,
+        range.bp_size());
     auto exact_spilled = spill_run_index_type::spill_generation_replay_runs_serial(
         exact_spill_storage,
         lazy_exact_view,
         minimizer_sketch_backend::exact_simd,
         fixed_minimizer_kernels(),
+        exact_spill_options.algorithm_identity,
         fragment_bp,
         k_minimizer_preferred_segment_span_bp,
         nullptr,
@@ -178,7 +208,6 @@ TEST_CASE("independent fragment halo and spill-run merge producers are canonical
     auto exact_spill_producer = spill_run_index_type::make_generation_replay_producer(
         exact_spill_storage, range.bp_size(), std::move(*exact_spilled));
     collecting_minimizer_row_sink exact_spill_sink;
-    auto exact_spill_options = fragment_options;
     exact_spill_options.generation_id += 3;
     auto exact_spill_encoding =
         encode_minimizer_generation(exact_spill_producer, exact_spill_sink, exact_spill_options);
@@ -194,6 +223,187 @@ TEST_CASE("independent fragment halo and spill-run merge producers are canonical
     require_complete_generation_rows(*spill_encoding, spill_sink.rows);
     require_complete_generation_rows(*exact_fragment_encoding, exact_fragment_sink.rows);
     require_complete_generation_rows(*exact_spill_encoding, exact_spill_sink.rows);
+}
+
+TEST_CASE("reference fragment and sequence producers execute the generated K20 owner",
+          "[component:bioseq][layer:unit][feature:storage][resource:highway]") {
+    using namespace bioseq::indexing;
+    constexpr std::size_t fragment_units = 128u;
+    constexpr std::uint64_t fragment_bp = fragment_units * 32u;
+    using chunked = chunked_span_sequence_scanner<std::uint64_t, fragment_units>;
+    using fragment_index_type = minimizers_per_fragment_index<fake_fragment_storage<>>;
+    using sequence_index_type = direct_minimizer_bucket_index<fake_fragment_storage<>>;
+
+    auto data = make_dna4(4096u, 0x4B32305245414459ULL);
+    range_t range(data);
+    lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
+
+    auto fragment_options = test_generation_options<::seq::dna4, std::uint64_t>(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::simd_minimap2_reference,
+        k_minimizer_fragment_algorithm_position_extent_bp,
+        20u,
+        15u);
+    REQUIRE(fragment_options.algorithm_identity.physical_kmer_size == 20u);
+    REQUIRE(fragment_options.algorithm_identity.hash_width == minimizer_scalar_width::u64);
+    REQUIRE(fragment_options.algorithm_identity.effective_algorithm ==
+            bioseq::simd::minimizer_algorithm::simd_minimap2_reference);
+    REQUIRE(fragment_options.algorithm_identity.highway_owner_id !=
+            bioseq::minimizers::minimizer_highway_owner_id::none);
+    auto fragment_producer = fragment_index_type::make_generation_replay_producer(
+        lazy_view,
+        minimizer_sketch_backend::exact_simd,
+        fixed_minimizer_kernels(),
+        fragment_options.algorithm_identity,
+        fragment_options.window_size,
+        fragment_options.kmer_size,
+        fixed_alphabet_code<::seq::dna4>());
+    collecting_minimizer_row_sink fragment_sink;
+    const auto fragment_generation =
+        encode_minimizer_generation(fragment_producer, fragment_sink, fragment_options);
+    REQUIRE(fragment_generation.has_value());
+    REQUIRE(fragment_generation->manifest.algorithm_identity ==
+            fragment_options.algorithm_identity);
+    const auto fragment_execution = fragment_producer.execution_stats();
+    REQUIRE(fragment_execution.is_accepted());
+    REQUIRE(fragment_execution.exact_simd_core_runs > 0u);
+    REQUIRE_FALSE(fragment_execution.exact_simd_stats_present);
+    REQUIRE(fragment_execution.reference_simd_stats_present);
+    REQUIRE(fragment_execution.reference_simd_stats.is_internally_consistent(
+        true, sizeof(std::uint64_t)));
+    require_complete_generation_rows(*fragment_generation, fragment_sink.rows);
+
+    fake_fragment_storage<> spill_storage;
+    auto sequence_options = test_grouped_soa_generation_options<::seq::dna4, std::uint64_t>(
+        range.bp_size(),
+        65'534u,
+        bioseq::simd::minimizer_algorithm::simd_minimap2_reference,
+        range.bp_size(),
+        20u,
+        15u);
+    auto spill = sequence_index_type::spill_generation_replay_runs_serial(
+        spill_storage,
+        lazy_view,
+        minimizer_sketch_backend::exact_simd,
+        fixed_minimizer_kernels(),
+        sequence_options.algorithm_identity,
+        fragment_bp,
+        k_minimizer_preferred_segment_span_bp,
+        nullptr,
+        fixed_alphabet_code<::seq::dna4>());
+    REQUIRE(spill.has_value());
+    REQUIRE(spill->execution_receipt().algorithm_identity ==
+            sequence_options.algorithm_identity);
+    REQUIRE(spill->execution_receipt().is_spill_valid());
+    REQUIRE_FALSE(spill->exact_simd_stats_available());
+    REQUIRE(spill->reference_simd_stats_available());
+    REQUIRE(spill->reference_simd_stats().is_internally_consistent(
+        true, sizeof(std::uint64_t)));
+    auto sequence_producer = sequence_index_type::make_generation_replay_producer(
+        spill_storage, range.bp_size(), std::move(*spill));
+    collecting_minimizer_row_sink sequence_sink;
+    ++sequence_options.generation_id;
+    const auto sequence_generation = encode_minimizer_generation(
+        sequence_producer, sequence_sink, sequence_options);
+    REQUIRE(sequence_generation.has_value());
+    REQUIRE(sequence_generation->manifest.algorithm_identity ==
+            sequence_options.algorithm_identity);
+    require_complete_generation_rows(*sequence_generation, sequence_sink.rows);
+}
+
+TEST_CASE("DNA5 reference-labelled generation executes its generated native producer",
+          "[component:bioseq][layer:unit][feature:storage][resource:highway]") {
+    using namespace bioseq::indexing;
+    constexpr std::size_t fragment_units = 128u;
+    using chunked = chunked_span_sequence_scanner<std::uint64_t, fragment_units>;
+    using fragment_index_type = minimizers_per_fragment_index<fake_fragment_storage<>>;
+
+    std::vector<seq::dna5> data(4096u);
+    for (std::size_t index = 0u; index < data.size(); ++index) {
+        data[index].assign_rank(static_cast<std::uint8_t>(index % 5u));
+    }
+    dna5_range_t range(data);
+    lazy_sequence<dna5_u64, chunked> lazy{chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
+    auto options = test_generation_options<::seq::dna5, std::uint64_t>(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::simd_minimap2_reference,
+        k_minimizer_fragment_algorithm_position_extent_bp,
+        15u,
+        10u);
+    REQUIRE(options.algorithm_identity.requested_algorithm ==
+            bioseq::simd::minimizer_algorithm::simd_minimap2_reference);
+    REQUIRE(options.algorithm_identity.effective_algorithm ==
+            bioseq::simd::minimizer_algorithm::simd_minimap2_reference);
+    const auto selected_backend = minimizer_sketch_backend_for_effective_algorithm(
+        options.algorithm_identity.effective_algorithm);
+    REQUIRE(selected_backend == minimizer_sketch_backend::exact_simd);
+
+    auto producer = fragment_index_type::make_generation_replay_producer(
+        lazy_view,
+        *selected_backend,
+        fixed_minimizer_kernels(),
+        options.algorithm_identity,
+        options.window_size,
+        options.kmer_size,
+        fixed_alphabet_code<::seq::dna5>());
+    collecting_minimizer_row_sink sink;
+    const auto generation = encode_minimizer_generation(producer, sink, options);
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->manifest.algorithm_identity == options.algorithm_identity);
+    const auto receipt = producer.execution_stats();
+    REQUIRE(receipt.is_accepted());
+    REQUIRE(receipt.selected_backend == minimizer_sketch_backend::exact_simd);
+    REQUIRE(receipt.scalar_core_runs == 0u);
+    REQUIRE(receipt.exact_simd_core_runs > 0u);
+    REQUIRE_FALSE(receipt.exact_simd_stats_present);
+    REQUIRE(receipt.reference_simd_stats_present);
+    REQUIRE(receipt.reference_simd_stats.is_internally_consistent(
+        true, sizeof(std::uint64_t)));
+    require_complete_generation_rows(*generation, sink.rows);
+}
+
+TEST_CASE("reference fragment halos retain the generated L15 owner",
+          "[component:bioseq][layer:unit][feature:storage][resource:highway]") {
+    using namespace bioseq::indexing;
+    constexpr std::size_t fragment_units = 1024u;
+    using chunked = chunked_span_sequence_scanner<std::uint64_t, fragment_units>;
+    using fragment_index_type = minimizers_per_fragment_index<fake_fragment_storage<>>;
+
+    auto data = make_dna4(33'000u, 0x4C313548414C4FULL);
+    range_t range(data);
+    lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
+    auto options = test_generation_options<::seq::dna4, std::uint64_t>(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::simd_minimap2_reference,
+        k_minimizer_fragment_algorithm_position_extent_bp,
+        15u,
+        10u);
+    REQUIRE(options.algorithm_identity.record_position_log2 == 15u);
+    REQUIRE(options.algorithm_identity.highway_owner_id !=
+            bioseq::minimizers::minimizer_highway_owner_id::none);
+
+    auto producer = fragment_index_type::make_generation_replay_producer(
+        lazy_view,
+        minimizer_sketch_backend::exact_simd,
+        fixed_minimizer_kernels(),
+        options.algorithm_identity,
+        options.window_size,
+        options.kmer_size,
+        fixed_alphabet_code<::seq::dna4>());
+    collecting_minimizer_row_sink sink;
+    const auto generation = encode_minimizer_generation(producer, sink, options);
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->manifest.algorithm_identity == options.algorithm_identity);
+    const auto receipt = producer.execution_stats();
+    REQUIRE(receipt.is_accepted());
+    REQUIRE(receipt.reference_simd_stats_present);
+    REQUIRE(receipt.reference_simd_stats.kernel_calls > receipt.exact_simd_core_runs);
+    REQUIRE(receipt.reference_simd_stats.is_internally_consistent(
+        true, sizeof(std::uint64_t)));
+    require_complete_generation_rows(*generation, sink.rows);
 }
 
 TEST_CASE("grouped-SoA spill-run exact SIMD binds the canonical shape profile",
@@ -214,6 +424,9 @@ TEST_CASE("grouped-SoA spill-run exact SIMD binds the canonical shape profile",
             lazy_view,
             minimizer_sketch_backend::exact_simd,
             fixed_minimizer_kernels(),
+            test_generation_algorithm_identity<::seq::dna4, std::uint64_t>(
+                bioseq::simd::minimizer_algorithm::two_stack_nthash,
+                range.bp_size()),
             fragment_bp,
             k_minimizer_preferred_segment_span_bp,
             nullptr,
@@ -226,7 +439,11 @@ TEST_CASE("grouped-SoA spill-run exact SIMD binds the canonical shape profile",
         REQUIRE(spill.has_value());
         REQUIRE(spill->execution_receipt().is_spill_valid());
 
-        const auto options = test_grouped_soa_generation_options(range.bp_size());
+        const auto options = test_grouped_soa_generation_options(
+            range.bp_size(),
+            65'534u,
+            bioseq::simd::minimizer_algorithm::two_stack_nthash,
+            range.bp_size());
         collecting_minimizer_row_sink sink;
         minimizer_sequence_generation_execution_receipt execution;
         const auto encoded = spill_run_index_type::encode_persisted_generation(
@@ -269,7 +486,7 @@ TEST_CASE("grouped-SoA spill-run exact SIMD binds the canonical shape profile",
     }
 
     const auto require_profile_rejection =
-        [&spill_exact, &require_wire_error](grouped_soa_generation_options options) {
+        [&spill_exact](grouped_soa_generation_options options) {
             fake_fragment_storage<> storage;
             auto spill = spill_exact(storage);
             REQUIRE(spill.has_value());
@@ -375,13 +592,20 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
     using spill_run_index_type = direct_minimizer_bucket_index<fake_fragment_storage<>>;
     auto data = make_dna4(4096, 0x494E4341524E4154ULL);
     range_t range(data);
+    const auto spill_identity = test_generation_algorithm_identity<::seq::dna4, std::uint64_t>(
+        bioseq::simd::minimizer_algorithm::scalar, range.bp_size());
 
     SECTION("duplicate physical run advances the storage mutation revision") {
         lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
         const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
         fake_fragment_storage<> storage;
         auto spill = spill_run_index_type::spill_generation_replay_runs_serial(
-            storage, lazy_view, minimizer_sketch_backend::scalar, nullptr, fragment_bp);
+            storage,
+            lazy_view,
+            minimizer_sketch_backend::scalar,
+            nullptr,
+            spill_identity,
+            fragment_bp);
         REQUIRE(spill.has_value());
         const direct_minimizer_spill_storage_binding before =
             storage.segment_spill_storage_binding();
@@ -414,7 +638,12 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
         fake_fragment_storage<> original;
         fake_fragment_storage<> replacement;
         auto spill = spill_run_index_type::spill_generation_replay_runs_serial(
-            original, lazy_view, minimizer_sketch_backend::scalar, nullptr, fragment_bp);
+            original,
+            lazy_view,
+            minimizer_sketch_backend::scalar,
+            nullptr,
+            spill_identity,
+            fragment_bp);
         REQUIRE(spill.has_value());
         collecting_minimizer_row_sink wrong_sink;
         require_wire_error(spill_run_index_type::encode_persisted_generation(
@@ -458,7 +687,12 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
         const auto empty_lazy_view = bioseq::storage::make_lazy_sequence_view(empty_lazy);
         fake_fragment_storage<> storage;
         auto spill = spill_run_index_type::spill_generation_replay_runs_serial(
-            storage, empty_lazy_view, minimizer_sketch_backend::scalar, nullptr, fragment_bp);
+            storage,
+            empty_lazy_view,
+            minimizer_sketch_backend::scalar,
+            nullptr,
+            spill_identity,
+            fragment_bp);
         REQUIRE(spill.has_value());
         const direct_minimizer_spill_storage_binding issued =
             storage.segment_spill_storage_binding();
@@ -485,7 +719,12 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
         const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
         fake_fragment_storage<> original;
         auto spill = spill_run_index_type::spill_generation_replay_runs_serial(
-            original, lazy_view, minimizer_sketch_backend::scalar, nullptr, fragment_bp);
+            original,
+            lazy_view,
+            minimizer_sketch_backend::scalar,
+            nullptr,
+            spill_identity,
+            fragment_bp);
         REQUIRE(spill.has_value());
         const direct_minimizer_spill_storage_binding issued =
             original.segment_spill_storage_binding();
@@ -508,7 +747,12 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
         const auto empty_lazy_view = bioseq::storage::make_lazy_sequence_view(empty_lazy);
         fake_fragment_storage<> original;
         auto spill = spill_run_index_type::spill_generation_replay_runs_serial(
-            original, empty_lazy_view, minimizer_sketch_backend::scalar, nullptr, fragment_bp);
+            original,
+            empty_lazy_view,
+            minimizer_sketch_backend::scalar,
+            nullptr,
+            spill_identity,
+            fragment_bp);
         REQUIRE(spill.has_value());
         REQUIRE(original.segment_spill_storage_binding().valid());
 
@@ -528,7 +772,12 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
         const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
         fake_fragment_storage<> storage;
         auto spill = spill_run_index_type::spill_generation_replay_runs_serial(
-            storage, lazy_view, minimizer_sketch_backend::scalar, nullptr, fragment_bp);
+            storage,
+            lazy_view,
+            minimizer_sketch_backend::scalar,
+            nullptr,
+            spill_identity,
+            fragment_bp);
         REQUIRE(spill.has_value());
         const direct_minimizer_spill_storage_binding before =
             storage.segment_spill_storage_binding();
@@ -563,7 +812,12 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
         const auto lazy_view = bioseq::storage::make_lazy_sequence_view(lazy);
         fake_fragment_storage<> storage;
         auto spill = spill_run_index_type::spill_generation_replay_runs_serial(
-            storage, lazy_view, minimizer_sketch_backend::scalar, nullptr, fragment_bp);
+            storage,
+            lazy_view,
+            minimizer_sketch_backend::scalar,
+            nullptr,
+            spill_identity,
+            fragment_bp);
         REQUIRE(spill.has_value());
         auto producer = spill_run_index_type::make_generation_replay_producer(
             storage, range.bp_size(), std::move(*spill));
@@ -677,17 +931,26 @@ TEST_CASE("minimizer index facades preserve biological rejection precedence",
         .kmer_size = 15u,
     };
     auto invalid_configuration = bounded_request;
-    invalid_configuration.window_size = 9u;
+    invalid_configuration.window_size = 0u;
     invalid_configuration.sequence.alphabet_code = 77u;
     invalid_configuration.storage_unit_bytes = sizeof(std::uint16_t);
     REQUIRE(collect_packed_bounded_nthash_index_erased(invalid_configuration).status ==
             packed_bounded_nthash_index_status::invalid_configuration);
 
     auto invalid_alphabet = bounded_request;
-    invalid_alphabet.sequence.alphabet_code = fixed_alphabet_code<::seq::dna5>();
+    invalid_alphabet.sequence.alphabet_code =
+        bioseq::minimizers::k_unbound_packed_alphabet_code;
     invalid_alphabet.storage_unit_bytes = sizeof(std::uint16_t);
     REQUIRE(collect_packed_bounded_nthash_index_erased(invalid_alphabet).status ==
             packed_bounded_nthash_index_status::unsupported_alphabet);
+
+    auto mismatched_dna5_encoding = bounded_request;
+    // Registered alphabet geometry is validated by the typed kernel. Supply
+    // that kernel so a missing-state rejection cannot mask this malformed view.
+    mismatched_dna5_encoding.kernels = fixed_minimizer_kernels();
+    mismatched_dna5_encoding.sequence.alphabet_code = fixed_alphabet_code<::seq::dna5>();
+    REQUIRE(collect_packed_bounded_nthash_index_erased(mismatched_dna5_encoding).status ==
+            packed_bounded_nthash_index_status::invalid_range);
 
     auto invalid_storage = bounded_request;
     invalid_storage.storage_unit_bytes = sizeof(std::uint16_t);
@@ -772,6 +1035,111 @@ TEST_CASE("bounded ntHash lazy index admits resident u64 through one canonical u
     REQUIRE(admission.reserved_bytes() == admission_before);
 }
 
+TEST_CASE("bounded ntHash lazy index admits native and fragmented DNA5 for both registered profiles",
+          "[component:bioseq][layer:unit][feature:index][resource:highway]") {
+    using namespace bioseq::indexing;
+    const std::array<std::pair<std::uint16_t, std::uint16_t>, 2> profiles{{
+        {10u, 15u},
+        {15u, 20u},
+    }};
+    std::vector<seq::dna5> data(4'123u);
+    for (std::size_t index = 0u; index < data.size(); ++index) {
+        data[index].assign_rank(static_cast<std::uint8_t>(index % 5u));
+    }
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+
+    const auto check_resident = [&]<class p_storage_unit>() {
+        using sequence_type = sequence_custom_alphabet<seq::dna5, p_storage_unit>;
+        using sequence_range = compact_sequence_range<sequence_type>;
+        sequence_range range(data);
+        auto owner = bioseq::storage::make_resident_lazy_sequence(range);
+        const auto view = bioseq::storage::make_lazy_sequence_view(owner);
+        REQUIRE(view.try_resident_packed(
+            0u, view.bp_size(), sizeof(p_storage_unit)).has_value());
+        for (const auto [window_size, kmer_size] : profiles) {
+            CAPTURE(sizeof(p_storage_unit), window_size, kmer_size);
+            const std::uint64_t admission_before = admission.reserved_bytes();
+            sketch_collector collector;
+            std::uint64_t materialized_window_bp = 1u;
+            const auto result = collect_packed_bounded_nthash_index_lazy(
+                view,
+                fixed_alphabet_code<::seq::dna5>(),
+                0u,
+                view.bp_size(),
+                view.bp_size(),
+                window_size,
+                kmer_size,
+                fixed_minimizer_kernels(),
+                collector,
+                &materialized_window_bp);
+            if (result.status ==
+                packed_bounded_nthash_index_status::unsupported_vector_shape) {
+                REQUIRE(admission.reserved_bytes() == admission_before);
+                SKIP("the compiled Highway target cannot execute packed bounded ntHash");
+            }
+            REQUIRE(result.status == packed_bounded_nthash_index_status::ok);
+            REQUIRE(result.stats.is_internally_consistent(true));
+            REQUIRE(result.stats.window_size == window_size);
+            REQUIRE(result.stats.kmer_size == kmer_size);
+            REQUIRE(result.stats.source_storage_unit_bytes == sizeof(p_storage_unit));
+            REQUIRE(result.stats.fallback_calls == 0u);
+            REQUIRE(materialized_window_bp == 0u);
+            REQUIRE_FALSE(collector.extract_sketches_data().empty());
+            for (const auto& minimizer : collector.extract_sketches_data()) {
+                REQUIRE(minimizer.last_pos() < data.size());
+            }
+            REQUIRE(admission.reserved_bytes() == admission_before);
+        }
+    };
+    check_resident.template operator()<std::uint32_t>();
+    check_resident.template operator()<std::uint64_t>();
+
+    using sequence_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+    using sequence_range = compact_sequence_range<sequence_type>;
+    using chunked_scanner =
+        bioseq::storage::chunked_span_sequence_scanner<std::uint64_t, 64u>;
+    sequence_range range(data);
+    for (const auto [window_size, kmer_size] : profiles) {
+        CAPTURE(window_size, kmer_size);
+        const std::uint64_t admission_before = admission.reserved_bytes();
+        sketch_collector collector;
+        std::uint64_t materialized_window_bp = 0u;
+        {
+            bioseq::storage::lazy_sequence<sequence_type, chunked_scanner> fragmented{
+                chunked_scanner::from_range(range)};
+            const auto view = bioseq::storage::make_lazy_sequence_view(fragmented);
+            const auto result = collect_packed_bounded_nthash_index_lazy(
+                view,
+                fixed_alphabet_code<::seq::dna5>(),
+                0u,
+                view.bp_size(),
+                view.bp_size(),
+                window_size,
+                kmer_size,
+                fixed_minimizer_kernels(),
+                collector,
+                &materialized_window_bp);
+            if (result.status ==
+                packed_bounded_nthash_index_status::unsupported_vector_shape) {
+                REQUIRE(admission.reserved_bytes() == admission_before);
+                SKIP("the compiled Highway target cannot execute packed bounded ntHash");
+            }
+            REQUIRE(result.status == packed_bounded_nthash_index_status::ok);
+            REQUIRE(result.stats.is_internally_consistent(true));
+            REQUIRE(result.stats.window_size == window_size);
+            REQUIRE(result.stats.kmer_size == kmer_size);
+            REQUIRE(result.stats.source_storage_unit_bytes == sizeof(std::uint32_t));
+            REQUIRE(result.stats.fallback_calls == 0u);
+        }
+        REQUIRE(materialized_window_bp == range.bp_size());
+        REQUIRE_FALSE(collector.extract_sketches_data().empty());
+        for (const auto& minimizer : collector.extract_sketches_data()) {
+            REQUIRE(minimizer.last_pos() < data.size());
+        }
+        REQUIRE(admission.reserved_bytes() == admission_before);
+    }
+}
+
 TEST_CASE("Vulkan fragment build records accepted operation-originated batched stats",
           "[component:bioseq][layer:unit][feature:storage][resource:gpu]") {
     using namespace bioseq::indexing;
@@ -809,6 +1177,195 @@ TEST_CASE("Vulkan fragment build records accepted operation-originated batched s
     REQUIRE(storage.number_of_chunks(k_directory_sub_key) == 1u);
     REQUIRE(*storage.template read_chunk<std::int64_t>(k_directory_sub_key, 0u) ==
             static_cast<std::int64_t>(expected_fragments));
+}
+
+TEST_CASE("grouped-SoA Vulkan replay batches adjacent persisted fragments without merging them",
+          "[component:bioseq][layer:unit][feature:storage][resource:gpu]") {
+    using namespace bioseq::indexing;
+    if (!::bioseq::gpu::vulkan::hardware_device_available(
+            ::bioseq::gpu::vulkan::runtime::instance())) {
+        SKIP("no hardware Vulkan device");
+    }
+    constexpr std::size_t source_fragment_units = 64u;
+    constexpr std::uint64_t persisted_fragment_bp = 32'768u;
+    using chunked =
+        chunked_span_sequence_scanner<std::uint64_t, source_fragment_units>;
+    using index_type = minimizers_per_fragment_index<fake_fragment_storage<>>;
+    auto data = make_dna4(98'417u, 0x4D50464241544348ULL);
+    range_t range(data);
+    lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
+    const auto view = bioseq::storage::make_lazy_sequence_view(lazy);
+    auto options = test_generation_options(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::vulkan_minimap_integer);
+    options.position_segment_span_bp = persisted_fragment_bp;
+    auto producer = index_type::make_generation_replay_producer(
+        view,
+        minimizer_sketch_backend::vulkan_segment,
+        nullptr,
+        options.algorithm_identity,
+        options.window_size,
+        options.kmer_size,
+        fixed_alphabet_code<::seq::dna4>(),
+        std::size_t{64u} << 20u);
+    collecting_minimizer_row_sink sink;
+    const auto encoded =
+        encode_minimizer_generation(producer, sink, options);
+    REQUIRE(encoded.has_value());
+    REQUIRE(encoded->manifest.position_segment_span_bp == persisted_fragment_bp);
+
+    const std::uint64_t physical_fragments =
+        (range.bp_size() + persisted_fragment_bp - 1u)
+        / persisted_fragment_bp;
+    const auto evidence = producer.execution_stats();
+    REQUIRE(evidence.is_accepted());
+    REQUIRE(evidence.selected_backend
+            == minimizer_sketch_backend::vulkan_segment);
+    REQUIRE(evidence.producer_scan_count == 3u);
+    REQUIRE(evidence.scalar_core_runs == 0u);
+    REQUIRE(evidence.exact_simd_core_runs == 0u);
+    REQUIRE(evidence.bounded_nthash_core_runs == 0u);
+    REQUIRE(evidence.vulkan_core_runs
+            == evidence.producer_scan_count * physical_fragments);
+    REQUIRE(evidence.vulkan_stats.is_internally_consistent(true));
+    REQUIRE(evidence.vulkan_stats.completed_roundtrips > 0u);
+    REQUIRE(evidence.vulkan_stats.completed_roundtrips
+            < evidence.vulkan_core_runs);
+    REQUIRE(producer.peak_buffered_core_bp() == range.bp_size());
+    REQUIRE(producer.peak_active_fragment_runs() == physical_fragments);
+    REQUIRE(producer.peak_buffered_events() > 0u);
+    require_complete_generation_rows(*encoded, sink.rows);
+
+    auto single_fragment_options = test_generation_options(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::vulkan_minimap_integer);
+    single_fragment_options.position_segment_span_bp = persisted_fragment_bp;
+    auto single_fragment_producer = index_type::make_generation_replay_producer(
+        view,
+        minimizer_sketch_backend::vulkan_segment,
+        nullptr,
+        single_fragment_options.algorithm_identity,
+        single_fragment_options.window_size,
+        single_fragment_options.kmer_size,
+        fixed_alphabet_code<::seq::dna4>(),
+        0u);
+    collecting_minimizer_row_sink single_fragment_sink;
+    const auto single_fragment_encoded = encode_minimizer_generation(
+        single_fragment_producer,
+        single_fragment_sink,
+        single_fragment_options);
+    REQUIRE(single_fragment_encoded.has_value());
+    REQUIRE(single_fragment_encoded->manifest.position_segment_span_bp
+            == persisted_fragment_bp);
+    const auto single_fragment_evidence =
+        single_fragment_producer.execution_stats();
+    REQUIRE(single_fragment_evidence.is_accepted());
+    REQUIRE(single_fragment_evidence.selected_backend
+            == minimizer_sketch_backend::vulkan_segment);
+    REQUIRE(single_fragment_evidence.vulkan_core_runs
+            == evidence.vulkan_core_runs);
+    REQUIRE(single_fragment_evidence.vulkan_stats.completed_roundtrips
+            == single_fragment_evidence.vulkan_core_runs);
+    require_complete_generation_rows(*single_fragment_encoded,
+                                     single_fragment_sink.rows);
+    require_encoded_generations_equal_normalized(
+        *encoded,
+        sink.rows,
+        *single_fragment_encoded,
+        single_fragment_sink.rows);
+    REQUIRE(decode_generation_events(*encoded, sink.rows)
+            == decode_generation_events(*single_fragment_encoded,
+                                        single_fragment_sink.rows));
+
+    // A persisted segment narrower than the physical fragment can cross a
+    // physical boundary. The buffered producer batches complete adjacent
+    // segments while the zero-buffer producer retains the one-segment route;
+    // both must preserve the identical encoded generation.
+    constexpr std::uint64_t unaligned_persisted_fragment_bp = 21'504u;
+    auto unaligned_options = test_generation_options(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::vulkan_minimap_integer);
+    unaligned_options.position_segment_span_bp =
+        unaligned_persisted_fragment_bp;
+    auto unaligned_producer = index_type::make_generation_replay_producer(
+        view,
+        minimizer_sketch_backend::vulkan_segment,
+        nullptr,
+        unaligned_options.algorithm_identity,
+        unaligned_options.window_size,
+        unaligned_options.kmer_size,
+        fixed_alphabet_code<::seq::dna4>(),
+        std::size_t{64u} << 20u);
+    collecting_minimizer_row_sink unaligned_sink;
+    const auto unaligned_encoded = encode_minimizer_generation(
+        unaligned_producer, unaligned_sink, unaligned_options);
+    REQUIRE(unaligned_encoded.has_value());
+    REQUIRE(unaligned_encoded->manifest.position_segment_span_bp
+            == unaligned_persisted_fragment_bp);
+    const auto unaligned_evidence = unaligned_producer.execution_stats();
+    REQUIRE(unaligned_evidence.is_accepted());
+    REQUIRE(unaligned_evidence.selected_backend
+            == minimizer_sketch_backend::vulkan_segment);
+    REQUIRE(unaligned_evidence.producer_scan_count == 3u);
+    REQUIRE(unaligned_evidence.scalar_core_runs == 0u);
+    REQUIRE(unaligned_evidence.exact_simd_core_runs == 0u);
+    REQUIRE(unaligned_evidence.bounded_nthash_core_runs == 0u);
+    REQUIRE(unaligned_evidence.vulkan_core_runs > 0u);
+    REQUIRE(unaligned_evidence.vulkan_stats.is_internally_consistent(true));
+    REQUIRE(unaligned_evidence.vulkan_stats.completed_roundtrips > 0u);
+    REQUIRE(unaligned_producer.peak_buffered_core_bp()
+            > unaligned_persisted_fragment_bp);
+    REQUIRE(unaligned_producer.peak_active_fragment_runs() > 1u);
+    require_complete_generation_rows(*unaligned_encoded, unaligned_sink.rows);
+
+    auto unaligned_single_options = test_generation_options(
+        range.bp_size(),
+        bioseq::simd::minimizer_algorithm::vulkan_minimap_integer);
+    unaligned_single_options.position_segment_span_bp =
+        unaligned_persisted_fragment_bp;
+    auto unaligned_single_producer =
+        index_type::make_generation_replay_producer(
+            view,
+            minimizer_sketch_backend::vulkan_segment,
+            nullptr,
+            unaligned_single_options.algorithm_identity,
+            unaligned_single_options.window_size,
+            unaligned_single_options.kmer_size,
+            fixed_alphabet_code<::seq::dna4>(),
+            0u);
+    collecting_minimizer_row_sink unaligned_single_sink;
+    const auto unaligned_single_encoded = encode_minimizer_generation(
+        unaligned_single_producer,
+        unaligned_single_sink,
+        unaligned_single_options);
+    REQUIRE(unaligned_single_encoded.has_value());
+    const auto unaligned_single_evidence =
+        unaligned_single_producer.execution_stats();
+    REQUIRE(unaligned_single_evidence.is_accepted());
+    REQUIRE(unaligned_single_evidence.selected_backend
+            == minimizer_sketch_backend::vulkan_segment);
+    REQUIRE(unaligned_single_evidence.producer_scan_count == 3u);
+    REQUIRE(unaligned_single_evidence.scalar_core_runs == 0u);
+    REQUIRE(unaligned_single_evidence.exact_simd_core_runs == 0u);
+    REQUIRE(unaligned_single_evidence.bounded_nthash_core_runs == 0u);
+    REQUIRE(unaligned_single_evidence.vulkan_core_runs
+            == unaligned_evidence.vulkan_core_runs);
+    REQUIRE(unaligned_single_evidence.vulkan_stats.is_internally_consistent(
+        true));
+    REQUIRE(unaligned_evidence.vulkan_stats.completed_roundtrips
+            < unaligned_single_evidence.vulkan_stats.completed_roundtrips);
+    REQUIRE(unaligned_single_producer.peak_buffered_core_bp()
+            <= unaligned_persisted_fragment_bp);
+    require_complete_generation_rows(
+        *unaligned_single_encoded, unaligned_single_sink.rows);
+    require_encoded_generations_equal_normalized(
+        *unaligned_encoded,
+        unaligned_sink.rows,
+        *unaligned_single_encoded,
+        unaligned_single_sink.rows);
+    REQUIRE(decode_generation_events(*unaligned_encoded, unaligned_sink.rows)
+            == decode_generation_events(*unaligned_single_encoded,
+                                        unaligned_single_sink.rows));
 }
 
 } // namespace bioseq::simd::HWY_NAMESPACE

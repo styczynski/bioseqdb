@@ -266,6 +266,12 @@ trait_driven_prepared_query_core<p_traits>::query_hash_value_(std::uint64_t hash
 }
 
 template <class p_traits>
+[[nodiscard]] constexpr std::uint64_t
+trait_driven_prepared_query_core<p_traits>::query_hash_value_(std::uint32_t hash) noexcept {
+    return hash;
+}
+
+template <class p_traits>
 [[nodiscard]] inline std::uint64_t trait_driven_prepared_query_core<p_traits>::query_hash_value_(
     const minimap_sketch_data& minimizer) noexcept {
     return minimizer.kmer();

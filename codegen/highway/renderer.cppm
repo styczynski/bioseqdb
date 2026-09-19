@@ -272,55 +272,130 @@ inline void replace_all(
     return output.str();
 }
 
-/// Renders one fixed-target owner for a bounded minimizer representation.
-[[nodiscard]] inline std::string render_minimizer_representation_instantiation(
+[[nodiscard]] inline const minimizer_physical_record_spec& minimizer_record(
+    const minimizer_registry_spec& registry,
+    const std::string_view key) {
+    const auto found = std::ranges::find(registry.records, key,
+        &minimizer_physical_record_spec::key);
+    if (found == registry.records.end()) {
+        throw std::runtime_error(
+            "minimizer owner references unknown physical record '"
+            + std::string{key} + "'");
+    }
+    return *found;
+}
+
+[[nodiscard]] inline std::string minimizer_algorithm_cpp(
+    const std::string_view algorithm) {
+    if (algorithm == "scalar" || algorithm == "simd_minimap2_reference"
+        || algorithm == "two_stack_nthash"
+        || algorithm == "vulkan_minimap_integer"
+        || algorithm == "bounded_nthash_simd") {
+        return "::bioseq::simd::minimizer_algorithm::" + std::string{algorithm};
+    }
+    throw std::runtime_error(
+        "unknown generated minimizer algorithm '" + std::string{algorithm} + "'");
+}
+
+[[nodiscard]] inline std::string minimizer_scalar_width_cpp(
+    const std::string_view width) {
+    if (width == "u16" || width == "u32" || width == "u64") {
+        return "minimizer_scalar_width::" + std::string{width};
+    }
+    throw std::runtime_error(
+        "unknown generated minimizer scalar width '" + std::string{width} + "'");
+}
+
+[[nodiscard]] inline std::string minimizer_dispatch_kind_cpp(
+    const std::string_view kind) {
+    if (kind == "highway_export" || kind == "highway_slot"
+        || kind == "scalar_collect_minimizers"
+        || kind == "vulkan_minimap_integer") {
+        return "minimizer_profile_dispatch_kind::" + std::string{kind};
+    }
+    throw std::runtime_error(
+        "unknown generated minimizer dispatch kind '" + std::string{kind} + "'");
+}
+
+/// Renders all fixed-target owners in one CMake-stable ordinary unit.
+[[nodiscard]] inline std::string render_minimizer_representation_instantiations(
     const generation_plan& plan,
     const target_spec& target,
     const namespace_materialization::materialization_coordinate& coordinate,
-    const minimizer_representation_instance_spec& instance,
-    const source_spec& source) {
-    const std::string prefix = instance.algorithm == "minimap2_reference"
-        ? "minimap2_reference_repr_"
-        : "bounded_nthash_repr_";
-    const std::string algorithm_prefix = instance.algorithm + "_";
-    if (!instance.owner_key.starts_with(algorithm_prefix)) {
-        throw std::runtime_error(
-            "minimizer representation owner lost its algorithm prefix: "
-            + instance.owner_key);
-    }
-    const std::string identity =
-        instance.owner_key.substr(algorithm_prefix.size());
+    const minimizer_registry_spec& registry,
+    const std::map<std::string, const source_spec*, std::less<>>& sources) {
     std::ostringstream output;
     output << fixed_target_fragment(plan.target_inventory, target)
-           << "// Generated bounded minimizer representation owner; do not edit.\n"
+           << "// Generated minimizer physical-record owners; do not edit.\n"
            << "module " << coordinate.module_name << ";\n\n"
            << "import std;\n"
            << "import bioseq.common.seqan_adapter;\n"
            << "import bioseq.sequences.kmers.highway_minimizer_contract;\n"
-           << "import :" << source.partition << ";\n\n"
-           << "namespace bioseq::simd::" << coordinate.identity_namespace
-           << " {\n\n";
-    for (const std::string& storage : instance.storage_types) {
-        const std::string cpp_storage = storage == "u32"
-            ? "::std::uint32_t"
-            : "::std::uint64_t";
-        output
-            << "[[nodiscard]] HWY_ATTR auto " << prefix << identity << "_"
-            << storage << "(\n"
-            << "    ::bioseq::minimizers::minimizer_kernel_invocation& invocation,\n"
-            << "    ::bioseq::minimizers::minimizer_kernel_result& result) -> bool\n"
-            << "{\n    return ";
-        if (instance.algorithm == "minimap2_reference") {
-            output << "minimizer_kernel_detail::run_reference<\n"
-                   << "        " << instance.representation_type
-                   << ", ::seq::dna4, " << cpp_storage
-                   << ">(invocation, result);\n";
-        } else {
-            output << "bounded_nthash_kernel_detail::run_bounded_nthash<\n"
-                   << "        " << instance.representation_type << ", "
-                   << cpp_storage << ">(invocation, result);\n";
+           << "import bioseq.sequences.kmers.minimizer_layout_geometry;\n";
+    std::set<std::string, std::less<>> imported_partitions;
+    for (const minimizer_highway_owner_spec& owner : registry.highway_owners) {
+        const auto source = sources.find(owner.source_key);
+        if (source == sources.end()) {
+            throw std::runtime_error(
+                "renderer cannot resolve minimizer owner source '"
+                + owner.source_key + "'");
         }
-        output << "}\n\n";
+        imported_partitions.insert(source->second->partition);
+    }
+    for (const std::string& partition : imported_partitions) {
+        output << "import :" << partition << ";\n";
+    }
+    output << "\nnamespace bioseq::simd::"
+           << coordinate.identity_namespace << " {\n\n";
+    for (const generic_reference_alphabet_spec& alphabet :
+         generic_reference_alphabets) {
+        output
+            << "static_assert(minimap2_reference_state_bits_per_rank<"
+            << alphabet.cpp_type << "> == "
+            << static_cast<unsigned>(alphabet.state_bits_per_rank)
+            << "u);\n";
+    }
+    output << '\n';
+    for (const minimizer_highway_owner_spec& owner : registry.highway_owners) {
+        const minimizer_physical_record_spec& record =
+            minimizer_record(registry, owner.record_key);
+        for (const std::string& storage : owner.storage_types) {
+            const std::string cpp_storage = storage == "u32"
+                ? "::std::uint32_t"
+                : "::std::uint64_t";
+            output
+                << "[[nodiscard]] HWY_ATTR auto " << owner.export_base << "_"
+                << storage << "(\n"
+                << "    ::bioseq::minimizers::minimizer_kernel_invocation& invocation,\n"
+                << "    ::bioseq::minimizers::minimizer_kernel_result& result) -> bool\n"
+                << "{\n"
+                << "    static_assert(::bioseq::minimizers::minimizer_layout<"
+                << static_cast<unsigned>(record.position_log2) << "u,"
+                << static_cast<unsigned>(record.physical_kmer_size)
+                << "u>::k_storage_bits == "
+                << static_cast<unsigned>(record.storage_bits) << "u);\n"
+                << "    static_assert(\n"
+                << "        ::bioseq::minimizers::minimizer_position_bucket("
+                << static_cast<unsigned>(record.position_log2) << "u,"
+                << static_cast<unsigned>(record.physical_kmer_size)
+                << "u) == " << static_cast<unsigned>(record.position_log2)
+                << "u\n        || ::bioseq::minimizers::minimizer_fixed_u32_position_bucket("
+                << static_cast<unsigned>(record.position_log2) << "u) == "
+                << static_cast<unsigned>(record.position_log2) << "u);\n"
+                << "    return ";
+            if (owner.algorithm == "minimap2_reference") {
+                output << "minimizer_kernel_detail::run_reference<\n"
+                       << "        " << record.representation_type << ", "
+                       << owner.alphabet_cpp_type << ", " << cpp_storage
+                       << ">(invocation, result);\n";
+            } else {
+                output << "bounded_nthash_kernel_detail::run_bounded_nthash<\n"
+                       << "        " << record.representation_type << ", "
+                       << owner.alphabet_cpp_type << ", " << cpp_storage
+                       << ">(invocation, result);\n";
+            }
+            output << "}\n\n";
+        }
     }
     output << "}  // namespace bioseq::simd::"
            << coordinate.identity_namespace << "\n";
@@ -764,11 +839,11 @@ collect_minimizer_cases(
             "typed minimizer cases may not coexist with a second root-table "
             "minimizer slot registry");
     }
-    if (result.size() != 8U || alphabet_types.size() != 2U
-        || storage_types.size() != 4U) {
+    if (alphabet_types.empty() || storage_types.empty()
+        || result.size() != alphabet_types.size() * storage_types.size()) {
         throw std::runtime_error(
-            "typed minimizer registry must be the exact source-owned "
-            "two-alphabet by four-storage-width matrix");
+            "typed minimizer registry must be the closed source-owned "
+            "alphabet by storage-width matrix");
     }
     for (const auto& [alphabet_code, alphabet] : alphabet_types) {
         static_cast<void>(alphabet);
@@ -893,13 +968,116 @@ collect_alphabet_identities(
     return expression;
 }
 
+inline void render_minimap2_reference_wrapper(
+    std::ostringstream& output,
+    const std::vector<minimizer_case_binding>& cases,
+    const minimizer_registry_spec& registry,
+    const namespace_materialization::materialization_coordinate& coordinate) {
+    output
+        << "[[nodiscard]] HWY_ATTR auto "
+        << minimizer_wrapper_name("minimap2_reference") << "(\n"
+        << "    ::bioseq::minimizers::minimizer_kernel_invocation& invocation) "
+           "-> ::bioseq::minimizers::minimizer_kernel_result {\n"
+        << "    switch (invocation.sequence.alphabet_code) {\n";
+
+    std::size_t begin = 0u;
+    while (begin < cases.size()) {
+        const std::uint8_t alphabet_code = cases[begin].alphabet_code;
+        output << "        case " << static_cast<unsigned>(alphabet_code)
+               << "U:\n"
+               << "            switch (invocation.sequence.storage_unit_bytes) {\n";
+        std::size_t end = begin;
+        while (end < cases.size() && cases[end].alphabet_code == alphabet_code) {
+            const minimizer_case_binding& binding = cases[end];
+            output
+                << "                case "
+                << static_cast<unsigned>(binding.storage_unit_bytes) << "U: {\n"
+                << "                    ::bioseq::minimizers::minimizer_kernel_result result{};\n"
+                << "                    if (!::bioseq::simd::"
+                << coordinate.identity_namespace
+                << "::minimap2_reference_admit<"
+                << binding.alphabet_type << ", " << binding.storage_unit_type
+                << ">(invocation, result)) return result;\n"
+                << "                    switch (invocation.output_layout) {\n";
+
+            const std::string storage = binding.storage_unit_bytes == 4u
+                ? "u32"
+                : binding.storage_unit_bytes == 8u ? "u64" : "";
+            for (const minimizer_highway_owner_spec& owner :
+                 registry.highway_owners) {
+                if (owner.algorithm != "minimap2_reference"
+                    || owner.alphabet_cpp_type != binding.alphabet_type
+                    || storage.empty()
+                    || !std::ranges::contains(owner.storage_types, storage)) {
+                    continue;
+                }
+                const minimizer_physical_record_spec& record =
+                    minimizer_record(registry, owner.record_key);
+                output
+                    << "                        case ::bioseq::minimizers::"
+                       "k_minimizer_output_layout<"
+                    << record.representation_type << ">: {\n"
+                    << "                            const bool consistent = "
+                    << "::bioseq::simd::" << coordinate.identity_namespace
+                    << "::" << owner.export_base << "_" << storage
+                    << "(invocation, result);\n"
+                    << "                            if (!consistent && result.status == "
+                       "::bioseq::minimizers::minimizer_kernel_status::ok)\n"
+                    << "                                result.status = "
+                       "::bioseq::minimizers::minimizer_kernel_status::"
+                       "invalid_sequence_view;\n"
+                    << "                            return result;\n"
+                    << "                        }\n";
+            }
+            output
+                << "                        default:\n"
+                << "                            result.status = "
+                   "::bioseq::minimizers::minimizer_kernel_status::"
+                   "invalid_configuration;\n"
+                << "                            return result;\n"
+                << "                    }\n"
+                << "                }\n";
+            ++end;
+        }
+        output << "                default:\n"
+               << "                    break;\n"
+               << "            }\n"
+               << "            break;\n";
+        begin = end;
+    }
+    output
+        << "        default:\n"
+        << "            break;\n"
+        << "    }\n"
+        << "    ::bioseq::minimizers::minimizer_kernel_result result{};\n"
+        << "    result.stats.algorithm = "
+           "::bioseq::minimizers::minimizer_kernel_algorithm::"
+           "minimap2_reference;\n"
+        << "    result.stats.target = static_cast<::std::int64_t>(HWY_TARGET);\n"
+        << "    result.status = "
+           "::bioseq::minimizers::minimizer_kernel_status::"
+           "invalid_configuration;\n"
+        << "    return result;\n"
+        << "}\n\n";
+}
+
 /// Emits the alphabet/storage switch for one minimizer dispatch member.
 inline void render_minimizer_wrapper(
     std::ostringstream& output,
     const std::vector<minimizer_case_binding>& cases,
     const minimizer_required_member& member,
-    const namespace_materialization::materialization_coordinate& coordinate) {
+    const namespace_materialization::materialization_coordinate& coordinate,
+    const minimizer_registry_spec* registry) {
     if (cases.empty()) return;
+    if (member.slot == "minimap2_reference") {
+        if (registry == nullptr) {
+            throw std::runtime_error(
+                "minimap2-reference wrapper requires the generated minimizer registry");
+        }
+        render_minimap2_reference_wrapper(
+            output, cases, *registry, coordinate);
+        return;
+    }
 
     output
         << "[[nodiscard]] HWY_ATTR auto "
@@ -1152,8 +1330,36 @@ collect_slot_owners(const source_manifest& inventory) {
         output << "import bioseq.common.seqan_adapter;\n"
                << "import bioseq.sequences;\n";
     }
-    output << "import :" << source.partition << ";\n\n"
-           << "namespace bioseq::simd_dispatch::"
+    if (owns_typed_minimizer) {
+        output
+            << "import bioseq.sequences.kmers.highway_minimizer_contract;\n";
+    }
+    output << "import :" << source.partition << ";\n\n";
+    if (owns_typed_minimizer
+        && minimizer_member->slot == "minimap2_reference") {
+        if (!plan.source_inventory.minimizer_registry.has_value()) {
+            throw std::runtime_error(
+                "minimap2-reference owner lacks a generated minimizer registry");
+        }
+        output << "namespace bioseq::simd::"
+               << coordinate.identity_namespace << " {\n";
+        for (const minimizer_highway_owner_spec& reference_owner :
+             plan.source_inventory.minimizer_registry->highway_owners) {
+            if (reference_owner.algorithm != "minimap2_reference") continue;
+            for (const std::string& storage : reference_owner.storage_types) {
+                output
+                    << "[[nodiscard]] HWY_ATTR auto "
+                    << reference_owner.export_base << "_" << storage
+                    << "(\n"
+                    << "    ::bioseq::minimizers::minimizer_kernel_invocation&,\n"
+                    << "    ::bioseq::minimizers::minimizer_kernel_result&) "
+                       "-> bool;\n";
+            }
+        }
+        output << "}  // namespace bioseq::simd::"
+               << coordinate.identity_namespace << "\n\n";
+    }
+    output << "namespace bioseq::simd_dispatch::"
            << coordinate.identity_namespace << "::binding_detail {\n\n";
 
     if (owns_typed_minimizer) {
@@ -1161,7 +1367,10 @@ collect_slot_owners(const source_manifest& inventory) {
             output,
             collect_minimizer_cases(families),
             *minimizer_member,
-            coordinate);
+            coordinate,
+            plan.source_inventory.minimizer_registry
+                ? &*plan.source_inventory.minimizer_registry
+                : nullptr);
     }
 
     const bool has_root_slots = std::ranges::any_of(
@@ -1644,6 +1853,304 @@ inline void validate_rendered_artifact(
 
 }  // namespace detail
 
+/** Render the target-neutral generated record/profile contract. */
+[[nodiscard]] inline std::string render_minimizer_physical_records_module(
+    const minimizer_registry_spec& registry,
+    const std::string_view manifest_identity) {
+    std::vector<std::pair<std::string, std::uint16_t>> alphabets;
+    for (const auto& profile : registry.runtime_profiles) {
+        const auto known = std::ranges::find_if(
+            alphabets,
+            [&profile](const auto& alphabet) {
+                return alphabet.first == profile.alphabet_cpp_type;
+            });
+        if (known == alphabets.end()) {
+            alphabets.emplace_back(profile.alphabet_cpp_type,
+                                   profile.alphabet_id);
+        }
+    }
+    std::ostringstream output;
+    output
+        << "// Generated from the DOC0433 minimizer registry; do not edit.\n"
+        << "export module bioseq.sequences.kmers.minimizer_physical_records;\n\n"
+        << "import std;\n"
+        << "import bioseq.common.seqan_adapter;\n"
+        << "import bioseq.sequences;\n"
+        << "import bioseq.pipeline.runtime_contract;\n\n"
+        << "export namespace bioseq::minimizers {\n\n"
+        << "enum class minimizer_scalar_width : ::std::uint8_t {\n"
+        << "    u16 = 2u,\n    u32 = 4u,\n    u64 = 8u,\n};\n\n"
+        << "enum class minimizer_physical_record_id : ::std::uint16_t {\n"
+        << "    invalid = 0u,\n";
+    for (const minimizer_physical_record_spec& record : registry.records) {
+        output << "    " << record.key << " = " << record.id << "u,\n";
+    }
+    output
+        << "};\n\n"
+        << "enum class minimizer_highway_owner_id : ::std::uint16_t {\n"
+        << "    none = 0u,\n";
+    for (const minimizer_highway_owner_spec& owner : registry.highway_owners) {
+        output << "    " << owner.owner_key << " = " << owner.id << "u,\n";
+    }
+    output
+        << "};\n\n"
+        << "enum class minimizer_profile_dispatch_kind : ::std::uint8_t {\n"
+        << "    highway_export = 1u,\n"
+        << "    highway_slot = 2u,\n"
+        << "    scalar_collect_minimizers = 3u,\n"
+        << "    vulkan_minimap_integer = 4u,\n"
+        << "};\n\n"
+        << "struct minimizer_physical_record_descriptor {\n"
+        << "    minimizer_physical_record_id record_id;\n"
+        << "    ::std::string_view record_key;\n"
+        << "    ::std::uint8_t position_log2;\n"
+        << "    ::std::uint8_t physical_kmer_size;\n"
+        << "    ::std::uint8_t storage_bits;\n"
+        << "    ::std::uint8_t available_hash_bits;\n"
+        << "    ::std::uint8_t record_bytes;\n"
+        << "};\n\n"
+        << "struct minimizer_highway_owner_descriptor {\n"
+        << "    minimizer_highway_owner_id owner_id;\n"
+        << "    ::std::string_view owner_key;\n"
+        << "    ::bioseq::simd::minimizer_algorithm algorithm;\n"
+        << "    ::std::uint16_t alphabet_id;\n"
+        << "    minimizer_physical_record_id record_id;\n"
+        << "    ::std::uint8_t packed_storage_mask;\n"
+        << "    ::std::string_view export_base;\n"
+        << "};\n\n"
+        << "struct minimizer_runtime_profile_binding {\n"
+        << "    ::bioseq::simd::minimizer_algorithm requested_algorithm;\n"
+        << "    ::bioseq::simd::minimizer_algorithm effective_algorithm;\n"
+        << "    ::std::uint16_t alphabet_id;\n"
+        << "    ::std::uint16_t minimum_runtime_kmer_size;\n"
+        << "    ::std::uint16_t maximum_runtime_kmer_size;\n"
+        << "    ::std::uint16_t minimum_runtime_window_size;\n"
+        << "    ::std::uint16_t maximum_runtime_window_size;\n"
+        << "    ::std::uint8_t minimum_position_log2;\n"
+        << "    ::std::uint8_t maximum_position_log2;\n"
+        << "    ::std::uint8_t packed_storage_bits;\n"
+        << "    minimizer_physical_record_id record_id;\n"
+        << "    minimizer_scalar_width hash_width;\n"
+        << "    minimizer_profile_dispatch_kind dispatch_kind;\n"
+        << "    minimizer_highway_owner_id highway_owner_id;\n"
+        << "    ::std::string_view export_symbol;\n"
+        << "};\n\n"
+        << "inline constexpr ::std::string_view minimizer_runtime_profile_name = \""
+        << minimizer_registry_profile_name(registry.profile) << "\";\n"
+        << "inline constexpr ::std::string_view minimizer_runtime_profile_manifest_identity = \""
+        << manifest_identity << "\";\n"
+        << "inline constexpr ::std::uint16_t minimizer_profile_payload_layout_abi_revision = 1u;\n"
+        << "inline constexpr ::std::uint16_t minimizer_profile_producer_identity_revision = 1u;\n\n"
+        << "namespace minimizer_registry_detail {\n"
+        << "template <class> inline constexpr bool dependent_false = false;\n"
+        << "}\n\n"
+        << "template <sequence_alphabet p_alphabet>\n"
+        << "[[nodiscard]] constexpr bool minimizer_profile_has_alphabet() noexcept {\n";
+    for (const auto& [alphabet_cpp_type, alphabet_id] : alphabets) {
+        static_cast<void>(alphabet_id);
+        output << "    if constexpr (::std::same_as<p_alphabet, "
+               << alphabet_cpp_type << ">) return true;\n";
+    }
+    output
+        << "    return false;\n"
+        << "}\n\n"
+        << "[[nodiscard]] constexpr bool minimizer_profile_has_alphabet_id(\n"
+        << "    const ::std::uint16_t alphabet_id) noexcept {\n"
+        << "    switch (alphabet_id) {\n";
+    for (const auto& [alphabet_cpp_type, alphabet_id] : alphabets) {
+        static_cast<void>(alphabet_cpp_type);
+        output << "        case " << alphabet_id << "u: return true;\n";
+    }
+    output
+        << "        default: return false;\n"
+        << "    }\n"
+        << "}\n\n"
+        << "template <sequence_alphabet p_alphabet>\n"
+        << "[[nodiscard]] constexpr ::std::uint16_t minimizer_profile_alphabet_id() {\n"
+        << "    static_assert(minimizer_profile_has_alphabet<p_alphabet>(),\n"
+        << "        \"alphabet has no registered minimizer profile wire id\");\n";
+    for (std::size_t index = 0u; index < alphabets.size(); ++index) {
+        const auto& [alphabet_cpp_type, alphabet_id] = alphabets[index];
+        output << (index == 0u ? "    if constexpr" : "    else if constexpr")
+               << " (::std::same_as<p_alphabet, " << alphabet_cpp_type
+               << ">) return " << alphabet_id << "u;\n";
+    }
+    output
+        << "    else return 0u;\n"
+        << "}\n\n"
+        << "inline constexpr ::std::array minimizer_physical_record_descriptors{\n";
+    for (const minimizer_physical_record_spec& record : registry.records) {
+        output
+            << "    minimizer_physical_record_descriptor{"
+            << "minimizer_physical_record_id::" << record.key << ", \""
+            << record.key << "\", "
+            << static_cast<unsigned>(record.position_log2) << "u, "
+            << static_cast<unsigned>(record.physical_kmer_size) << "u, "
+            << static_cast<unsigned>(record.storage_bits) << "u, "
+            << static_cast<unsigned>(record.available_hash_bits) << "u, "
+            << static_cast<unsigned>(record.storage_bits / 8u) << "u},\n";
+    }
+    output << "};\n\ninline constexpr ::std::array minimizer_highway_owner_descriptors{\n";
+    for (const minimizer_highway_owner_spec& owner : registry.highway_owners) {
+        unsigned storage_mask = 0u;
+        for (const std::string& storage : owner.storage_types) {
+            storage_mask |= storage == "u32" ? 1u : 2u;
+        }
+        const std::string algorithm = owner.algorithm == "bounded_nthash"
+            ? "bounded_nthash_simd"
+            : "simd_minimap2_reference";
+        output
+            << "    minimizer_highway_owner_descriptor{"
+            << "minimizer_highway_owner_id::" << owner.owner_key << ", \""
+            << owner.owner_key << "\", "
+            << detail::minimizer_algorithm_cpp(algorithm) << ", "
+            << owner.alphabet_id << "u, minimizer_physical_record_id::"
+            << owner.record_key << ", " << storage_mask << "u, \""
+            << owner.export_base << "\"},\n";
+    }
+    output << "};\n\ninline constexpr ::std::array minimizer_runtime_profile_bindings{\n";
+    for (const minimizer_runtime_profile_spec& profile :
+         registry.runtime_profiles) {
+        const auto capabilities =
+            minimizer_runtime_profile_capabilities_for(registry, profile);
+        output
+            << "    minimizer_runtime_profile_binding{"
+            << detail::minimizer_algorithm_cpp(profile.requested_algorithm)
+            << ", "
+            << detail::minimizer_algorithm_cpp(profile.effective_algorithm)
+            << ", " << profile.alphabet_id << "u, "
+            << capabilities.minimum_runtime_kmer_size << "u, "
+            << capabilities.maximum_runtime_kmer_size << "u, "
+            << capabilities.minimum_runtime_window_size << "u, "
+            << capabilities.maximum_runtime_window_size << "u, "
+            << static_cast<unsigned>(profile.minimum_position_log2) << "u, "
+            << static_cast<unsigned>(profile.maximum_position_log2) << "u, "
+            << (profile.packed_storage == "u32" ? 32u : 64u)
+            << "u, minimizer_physical_record_id::" << profile.record_key
+            << ", " << detail::minimizer_scalar_width_cpp(profile.hash_width)
+            << ", " << detail::minimizer_dispatch_kind_cpp(profile.dispatch_kind)
+            << ", minimizer_highway_owner_id::"
+            << (profile.highway_owner_key.empty()
+                    ? std::string{"none"}
+                    : profile.highway_owner_key)
+            << ", \"" << profile.export_symbol << "\"},\n";
+    }
+    output
+        << "};\n\n"
+        << "[[nodiscard]] constexpr auto registered_minimizer_physical_records() noexcept\n"
+        << "    -> ::std::span<const minimizer_physical_record_descriptor> {\n"
+        << "    return minimizer_physical_record_descriptors;\n}\n\n"
+        << "[[nodiscard]] constexpr auto registered_minimizer_highway_owners() noexcept\n"
+        << "    -> ::std::span<const minimizer_highway_owner_descriptor> {\n"
+        << "    return minimizer_highway_owner_descriptors;\n}\n\n"
+        << "[[nodiscard]] constexpr auto registered_minimizer_runtime_profiles() noexcept\n"
+        << "    -> ::std::span<const minimizer_runtime_profile_binding> {\n"
+        << "    return minimizer_runtime_profile_bindings;\n}\n\n"
+        << "[[nodiscard]] constexpr bool minimizer_runtime_profile_accepts_shape(\n"
+        << "    const minimizer_runtime_profile_binding& binding,\n"
+        << "    const ::std::uint16_t runtime_k,\n"
+        << "    const ::std::uint16_t runtime_w) noexcept {\n"
+        << "    return binding.minimum_runtime_kmer_size <= runtime_k\n"
+        << "        && runtime_k <= binding.maximum_runtime_kmer_size\n"
+        << "        && binding.minimum_runtime_window_size <= runtime_w\n"
+        << "        && runtime_w <= binding.maximum_runtime_window_size;\n"
+        << "}\n\n"
+        << "[[nodiscard]] constexpr auto find_minimizer_physical_record(\n"
+        << "    const minimizer_physical_record_id record_id) noexcept\n"
+        << "    -> const minimizer_physical_record_descriptor* {\n"
+        << "    for (const auto& record : minimizer_physical_record_descriptors) {\n"
+        << "        if (record.record_id == record_id) return &record;\n"
+        << "    }\n    return nullptr;\n}\n\n"
+        << "[[nodiscard]] constexpr auto find_minimizer_runtime_profile(\n"
+        << "    const ::bioseq::simd::minimizer_algorithm requested,\n"
+        << "    const ::std::uint16_t alphabet_id,\n"
+        << "    const ::std::uint16_t runtime_k,\n"
+        << "    const ::std::uint16_t runtime_w,\n"
+        << "    const ::std::uint8_t required_position_log2,\n"
+        << "    const ::std::uint8_t packed_storage_bits) noexcept\n"
+        << "    -> const minimizer_runtime_profile_binding* {\n"
+        << "    for (const auto& binding : minimizer_runtime_profile_bindings) {\n"
+        << "        if (binding.requested_algorithm == requested\n"
+        << "            && binding.alphabet_id == alphabet_id\n"
+        << "            && minimizer_runtime_profile_accepts_shape(\n"
+        << "                binding, runtime_k, runtime_w)\n"
+        << "            && binding.minimum_position_log2 <= required_position_log2\n"
+        << "            && required_position_log2 <= binding.maximum_position_log2\n"
+        << "            && binding.packed_storage_bits == packed_storage_bits) {\n"
+        << "            return &binding;\n"
+        << "        }\n"
+        << "    }\n    return nullptr;\n}\n\n"
+        << "static_assert(static_cast<::std::uint8_t>(minimizer_scalar_width::u16) == 2u);\n"
+        << "static_assert(static_cast<::std::uint8_t>(minimizer_scalar_width::u32) == 4u);\n"
+        << "static_assert(static_cast<::std::uint8_t>(minimizer_scalar_width::u64) == 8u);\n";
+    for (const auto& [alphabet_cpp_type, alphabet_id] : alphabets) {
+        output << "static_assert(minimizer_profile_has_alphabet<"
+               << alphabet_cpp_type << ">());\n"
+               << "static_assert(minimizer_profile_alphabet_id<"
+               << alphabet_cpp_type << ">() == " << alphabet_id << "u);\n";
+    }
+    output
+        << "static_assert(minimizer_profile_payload_layout_abi_revision == 1u);\n"
+        << "static_assert(minimizer_profile_producer_identity_revision == 1u);\n\n"
+        << "} // namespace bioseq::minimizers\n";
+    return output.str();
+}
+
+/** Render the later representation-aware tag-to-concrete-type visitor. */
+[[nodiscard]] inline std::string render_minimizer_physical_registry_module(
+    const minimizer_registry_spec& registry,
+    const std::string_view manifest_identity) {
+    std::ostringstream output;
+    output
+        << "// Generated from minimizer registry " << manifest_identity
+        << "; do not edit.\n"
+        << "export module bioseq.sequences.kmers.minimizer_physical_registry;\n\n"
+        << "import std;\n"
+        << "import bioseq.sequences.kmers.minimizer_physical_records;\n"
+        << "import bioseq.sequences.kmers.highway_minimizer_contract;\n\n"
+        << "export namespace bioseq::minimizers {\n\n"
+        << "template <class p_callable>\n"
+        << "[[nodiscard]] decltype(auto) visit_minimizer_physical_layout(\n"
+        << "    const minimizer_physical_layout_selection& selection,\n"
+        << "    p_callable&& callable) {\n"
+        << "    const auto* descriptor = find_minimizer_physical_record(selection.record_id);\n"
+        << "    const auto* binding = find_minimizer_runtime_profile(\n"
+        << "        selection.requested_algorithm, selection.alphabet_id,\n"
+        << "        selection.runtime_kmer_size, selection.runtime_window_size,\n"
+        << "        selection.record_position_log2, selection.packed_storage_bits);\n"
+        << "    if (descriptor == nullptr || binding == nullptr\n"
+        << "        || descriptor->position_log2 != selection.record_position_log2\n"
+        << "        || descriptor->physical_kmer_size != selection.physical_kmer_size\n"
+        << "        || binding->requested_algorithm != selection.requested_algorithm\n"
+        << "        || binding->effective_algorithm != selection.effective_algorithm\n"
+        << "        || binding->alphabet_id != selection.alphabet_id\n"
+        << "        || !minimizer_runtime_profile_accepts_shape(\n"
+        << "            *binding, selection.runtime_kmer_size,\n"
+        << "            selection.runtime_window_size)\n"
+        << "        || binding->packed_storage_bits != selection.packed_storage_bits\n"
+        << "        || binding->record_id != selection.record_id\n"
+        << "        || binding->hash_width != selection.hash_width) {\n"
+        << "        throw ::std::invalid_argument(\"minimizer physical selection/profile mismatch\");\n"
+        << "    }\n"
+        << "    switch (selection.record_id) {\n";
+    for (const minimizer_physical_record_spec& record : registry.records) {
+        output
+            << "        case minimizer_physical_record_id::" << record.key
+            << ":\n"
+            << "            return ::std::forward<p_callable>(callable)"
+            << ".template operator()<" << record.representation_type
+            << ">();\n";
+    }
+    output
+        << "        case minimizer_physical_record_id::invalid:\n"
+        << "            break;\n"
+        << "    }\n"
+        << "    throw ::std::invalid_argument(\"unregistered minimizer physical record\");\n"
+        << "}\n\n"
+        << "} // namespace bioseq::minimizers\n";
+    return output.str();
+}
+
 [[nodiscard]] inline generation_result render_generation(
     const generation_plan& plan) {
     generation_result result;
@@ -1700,24 +2207,18 @@ inline void validate_rendered_artifact(
                     *source->second),
             });
         }
-        for (const minimizer_representation_instance_spec& instance :
-             plan.source_inventory.minimizer_representation_instances) {
-            const auto source = sources_by_key.find(instance.source_key);
-            if (source == sources_by_key.end()) {
-                throw std::runtime_error(
-                    "renderer cannot resolve minimizer representation owner '"
-                    + instance.owner_key + "' source '" + instance.source_key
-                    + "'");
-            }
+        if (plan.source_inventory.minimizer_registry) {
             result.artifacts.push_back(generated_artifact{
                 .relative_path = root / "instances"
-                    / ("minimizer_representation_" + instance.owner_key + ".cppm"),
+                    / "minimizer_physical_owners.cppm",
                 .module_name = coordinate.module_name,
                 .target_token = target.token,
-                .source_key = instance.source_key,
+                .source_key = "minimizer_registry",
                 .kind = artifact_kind::minimizer_representation_instantiation,
-                .content = detail::render_minimizer_representation_instantiation(
-                    plan, target, coordinate, instance, *source->second),
+                .content = detail::render_minimizer_representation_instantiations(
+                    plan, target, coordinate,
+                    *plan.source_inventory.minimizer_registry,
+                    sources_by_key),
             });
         }
         for (const extracted_source& source : plan.extracted_sources) {

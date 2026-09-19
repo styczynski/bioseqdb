@@ -117,7 +117,8 @@ classify_shader_cache_error(std::string_view error) noexcept {
  */
 [[nodiscard]] std::expected<void, std::string>
 publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
-    // Command-source metallib configuration remains absent until exact command capture exists.
+    // Exact command bytes are carried only by the admitted sealed seed/configuration.
+    // A pathname environment override is never authority in immutable mode.
     if (::unsetenv("BIOSEQ_MOLTENVK_COMMAND_METALLIB") != 0) {
         const int saved_errno = errno;
         return std::unexpected(
@@ -167,12 +168,32 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
     bioseq::gpu::vulkan::shader_cache_build_inputs inputs{};
     inputs.variants.max_workgroup_invocations = 256u;
     inputs.variants.max_shared_memory_bytes = 32u * 1024u;
-    inputs.variants.default_window_size =
-        static_cast<std::uint32_t>(std::max(1, bioseq::aligner::settings::minimizer::window_size));
     inputs.msl = bioseq::gpu::vulkan::msl_version{3u, 2u, 0u};
-    inputs.moltenvk_build = "conservative-no-device-probe";
+    inputs.moltenvk_build = "sealed-exact-command-source-options-v1";
     inputs.device_uuid = "conservative-no-device-probe";
     return inputs;
+}
+
+/**
+ * @brief Computes the platform cache digest before selecting a sealed-cache directory.
+ * @param[in] inputs Stable shader-cache build inputs.
+ * @return Base digest off Apple, or the digest bound to the once-qualified helper on Apple.
+ */
+[[nodiscard]] std::expected<std::string, std::string> runtime_shader_cache_digest(
+    const bioseq::gpu::vulkan::shader_cache_build_inputs& inputs) {
+#if !defined(__APPLE__)
+    return bioseq::gpu::vulkan::shader_cache_digest_hex(inputs);
+#else
+    // Sealing and receipt validation call load_once() again, but the process store
+    // returns this retained image without another qualification or filesystem hash.
+    auto helper = bioseq::gpu::vulkan::qualified_metal_archive_helper_process_store_instance()
+                      .load_once();
+    if (!helper) {
+        return std::unexpected(
+            fmt::format("qualify archive helper before cache selection: {}", helper.error()));
+    }
+    return bioseq::gpu::vulkan::shader_cache_digest_hex_with_qualified_helper(inputs, **helper);
+#endif
 }
 
 /**
@@ -258,7 +279,11 @@ process_shader_seed_snapshot() {
     return {};
 #else
     const auto inputs = conservative_shader_inputs();
-    const std::string digest = bioseq::gpu::vulkan::shader_cache_digest_hex(inputs);
+    auto selected_digest = runtime_shader_cache_digest(inputs);
+    if (!selected_digest) {
+        return std::unexpected(selected_digest.error());
+    }
+    const std::string& digest = *selected_digest;
     const std::filesystem::path cache_dir = runtime_cache_dir_from_digest(digest);
     std::error_code filesystem_error;
     std::filesystem::create_directories(cache_dir, filesystem_error);
@@ -341,6 +366,12 @@ process_shader_seed_snapshot() {
             return std::unexpected(first_error);
         }
         compile_cursor = wave_end;
+    }
+    if (auto command_library =
+            bioseq::gpu::vulkan::ensure_moltenvk_command_library_for_sealed_seed(cache_dir);
+        !command_library) {
+        return std::unexpected(
+            fmt::format("seal exact MoltenVK command library: {}", command_library.error()));
     }
     auto sealed = bioseq::gpu::vulkan::seal_shader_cache_manifest(cache_dir, digest, *keys);
     if (!sealed) {
@@ -842,7 +873,11 @@ struct pg_supervisor_compile_service {
 [[nodiscard]] std::expected<std::filesystem::path, std::string>
 prepare_backend_local_shader_cache_env() {
     const auto inputs = conservative_shader_inputs();
-    const std::string digest = bioseq::gpu::vulkan::shader_cache_digest_hex(inputs);
+    auto selected_digest = runtime_shader_cache_digest(inputs);
+    if (!selected_digest) {
+        return std::unexpected(selected_digest.error());
+    }
+    const std::string& digest = *selected_digest;
     const std::filesystem::path cache_dir = runtime_cache_dir_from_digest(digest);
     auto keys = exact_aot_shader_keys(inputs);
     if (!keys) {
@@ -881,6 +916,12 @@ prepare_backend_local_shader_cache_env() {
                                                bioseq::gpu::vulkan::cache_file_stem(key),
                                                compiled.error()));
         }
+    }
+    if (auto command_library =
+            bioseq::gpu::vulkan::ensure_moltenvk_command_library_for_sealed_seed(cache_dir);
+        !command_library) {
+        return std::unexpected(fmt::format(
+            "backend-local exact MoltenVK command library: {}", command_library.error()));
     }
     auto sealed = bioseq::gpu::vulkan::seal_shader_cache_manifest(cache_dir, digest, *keys);
     if (!sealed) {

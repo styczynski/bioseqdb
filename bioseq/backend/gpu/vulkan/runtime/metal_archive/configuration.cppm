@@ -80,15 +80,28 @@ make_runtime_metal_archive_configuration_image(
         return std::unexpected("runtime Metal archive configuration has no accepted seed image");
     }
     std::uint64_t archive_count = 0u;
-    for (const sealed_shader_cache_artifact_image& artifact : seed_image->artifacts()) {
+    std::uint64_t command_count = 0u;
+    std::uint64_t command_bundle_size = 0u;
+    std::uint32_t command_ordinal = (std::numeric_limits<std::uint32_t>::max)();
+    for (std::size_t ordinal = 0u; ordinal < seed_image->artifacts().size(); ++ordinal) {
+        const sealed_shader_cache_artifact_image& artifact = seed_image->artifacts()[ordinal];
         archive_count +=
             artifact.descriptor.kind == sealed_shader_cache_artifact_kind::metal_binary_archive
                 ? 1u
                 : 0u;
+        if (artifact.descriptor.kind ==
+            sealed_shader_cache_artifact_kind::moltenvk_command_library) {
+            ++command_count;
+            if (ordinal > (std::numeric_limits<std::uint32_t>::max)())
+                return std::unexpected("runtime command-library artifact ordinal overflow");
+            command_ordinal = static_cast<std::uint32_t>(ordinal);
+            command_bundle_size = artifact.descriptor.size;
+        }
     }
-    if (archive_count == 0u ||
+    if (archive_count == 0u || command_count != 1u || command_bundle_size == 0u ||
         archive_count > sealed_shader_cache_detail::k_maximum_seed_image_artifacts) {
-        return std::unexpected("runtime Metal archive configuration archive count is invalid");
+        return std::unexpected(
+            "runtime Metal archive/command-library configuration count is invalid");
     }
     using bioseq::common::saturating_add;
     using bioseq::common::saturating_mul;
@@ -100,7 +113,9 @@ make_runtime_metal_archive_configuration_image(
                 archive_count,
                 sizeof(runtime_metal_archive_spec) +
                     2u * (sealed_shader_cache_detail::k_maximum_manifest_filename_bytes + 1024u))),
-        2u * 1024u);
+        bioseq::common::saturating_add(
+            2u * 1024u,
+            command_bundle_size));
     const std::uint64_t peak =
         saturating_mul(retained, bioseq::parallelism::k_vector_preallocation_headroom_factor);
     if (retained == (std::numeric_limits<std::uint64_t>::max)() ||
@@ -120,6 +135,20 @@ make_runtime_metal_archive_configuration_image(
     try {
         runtime_metal_archive_configuration configuration{};
         configuration.seed_image = std::move(seed_image);
+        configuration.command_artifact_ordinal = command_ordinal;
+        const sealed_shader_cache_artifact_image* command_image =
+            configuration.seed_image->artifact(command_ordinal);
+        if (command_image == nullptr)
+            return std::unexpected("command-library image disappeared during configuration");
+        auto command_library =
+            sealed_shader_cache_detail::parse_moltenvk_command_library_bundle(
+                command_image->bytes);
+        if (!command_library || !command_library->qualification.is_production_accepted()) {
+            return std::unexpected(shader_cache_message(
+                "runtime MoltenVK command-library qualification mismatch: ",
+                command_library ? "not production-qualified" : command_library.error()));
+        }
+        configuration.command_library = std::move(*command_library);
         configuration.vulkan_device_uuid = vulkan_device_uuid;
         configuration.metal_device_registry_id = metal_device_registry_id;
         configuration.archives.reserve(static_cast<std::size_t>(archive_count));

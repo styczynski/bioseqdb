@@ -12,6 +12,128 @@ namespace {
 
 using bioseq::minimizers::minimap_sketch_data;
 using bioseq::minimizers::admitted_sketch_collector;
+using bioseq::minimizers::generated_minimizer_physical_record;
+using bioseq::minimizers::minimizer_physical_batch_owner;
+using bioseq::minimizers::minimizer_physical_batch_view;
+using bioseq::minimizers::minimizer_physical_layout_selection;
+using bioseq::minimizers::minimizer_representation;
+
+/** Deliberately satisfies every former structural check without being a record. */
+struct same_layout_minimizer_impostor {
+    using layout_type = minimap_sketch_data::layout_type;
+    minimap_sketch_data::storage_type value_ = 0u;
+};
+
+template <class p_record>
+concept physical_batch_span_source = requires(
+    std::span<const p_record> records,
+    std::vector<p_record>& owner) {
+    { minimizer_physical_batch_view::from_span(records) }
+        -> std::same_as<minimizer_physical_batch_view>;
+    minimizer_physical_batch_view{records};
+    minimizer_physical_batch_view{owner};
+};
+
+template <class p_record>
+concept physical_batch_owned_host_source = requires(
+    const minimizer_physical_layout_selection& layout,
+    std::vector<p_record> records,
+    bioseq::parallelism::memory_permit& permit) {
+    { minimizer_physical_batch_owner::from_owned_host(
+          layout, std::move(records), permit) }
+        -> std::same_as<minimizer_physical_batch_owner>;
+};
+
+template <class p_record>
+concept physical_batch_shared_host_recoverable = requires(
+    const minimizer_physical_batch_owner& owner) {
+    { owner.template shared_host<p_record>() }
+        -> std::same_as<std::shared_ptr<const std::vector<p_record>>>;
+};
+
+template <class p_record>
+[[nodiscard]] consteval bool physical_batch_entry_points_match_registry() {
+    constexpr bool registered = generated_minimizer_physical_record<p_record>;
+    constexpr bool decoded_view_supported =
+        registered &&
+        (sizeof(p_record) == 4u || sizeof(p_record) == 8u || sizeof(p_record) == 16u);
+    return physical_batch_span_source<p_record> == decoded_view_supported &&
+           physical_batch_owned_host_source<p_record> == registered &&
+           physical_batch_shared_host_recoverable<p_record> == registered;
+}
+
+TEST_CASE("physical batch type authentication follows every generated record coordinate",
+          "[component:bioseq][layer:unit][feature:minimizer]") {
+    // Baseline records.
+    STATIC_REQUIRE(generated_minimizer_physical_record<
+                   minimizer_representation<15u, 15u>>);
+    STATIC_REQUIRE(generated_minimizer_physical_record<
+                   minimizer_representation<28u, 15u>>);
+    STATIC_REQUIRE(generated_minimizer_physical_record<
+                   minimizer_representation<33u, 15u>>);
+    STATIC_REQUIRE(generated_minimizer_physical_record<
+                   minimizer_representation<63u, 15u>>);
+    STATIC_REQUIRE(generated_minimizer_physical_record<
+                   minimizer_representation<20u, 20u>>);
+    STATIC_REQUIRE(generated_minimizer_physical_record<
+                   minimizer_representation<23u, 20u>>);
+    STATIC_REQUIRE(generated_minimizer_physical_record<
+                   minimizer_representation<63u, 20u>>);
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<15u, 15u>>());
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<28u, 15u>>());
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<33u, 15u>>());
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<63u, 15u>>());
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<20u, 20u>>());
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<23u, 20u>>());
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<63u, 20u>>());
+
+    // Extended records are accepted exactly when the selected generated profile
+    // carries them.
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<7u, 7u>>());
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<17u, 7u>>());
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<49u, 7u>>());
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<63u, 7u>>());
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<27u, 27u>>());
+    STATIC_REQUIRE(physical_batch_entry_points_match_registry<
+                   minimizer_representation<63u, 27u>>());
+}
+
+TEST_CASE("same-layout impostors cannot enter or reopen physical record storage",
+          "[component:bioseq][layer:unit][feature:minimizer]") {
+    STATIC_REQUIRE(std::same_as<same_layout_minimizer_impostor::layout_type,
+                                minimap_sketch_data::layout_type>);
+    STATIC_REQUIRE(sizeof(same_layout_minimizer_impostor) ==
+                   sizeof(minimap_sketch_data));
+    STATIC_REQUIRE(alignof(same_layout_minimizer_impostor) ==
+                   alignof(minimap_sketch_data));
+    STATIC_REQUIRE(std::is_standard_layout_v<same_layout_minimizer_impostor>);
+    STATIC_REQUIRE(std::is_trivially_copyable_v<same_layout_minimizer_impostor>);
+
+    STATIC_REQUIRE(generated_minimizer_physical_record<minimap_sketch_data>);
+    STATIC_REQUIRE(physical_batch_span_source<minimap_sketch_data>);
+    STATIC_REQUIRE(physical_batch_owned_host_source<minimap_sketch_data>);
+    STATIC_REQUIRE(physical_batch_shared_host_recoverable<minimap_sketch_data>);
+
+    STATIC_REQUIRE_FALSE(
+        generated_minimizer_physical_record<same_layout_minimizer_impostor>);
+    STATIC_REQUIRE_FALSE(physical_batch_span_source<same_layout_minimizer_impostor>);
+    STATIC_REQUIRE_FALSE(
+        physical_batch_owned_host_source<same_layout_minimizer_impostor>);
+    STATIC_REQUIRE_FALSE(
+        physical_batch_shared_host_recoverable<same_layout_minimizer_impostor>);
+}
 
 TEST_CASE("admitted sketch collector reserves every geometric replacement peak",
           "[component:bioseq][layer:unit][feature:minimizer]") {

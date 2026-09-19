@@ -13,7 +13,22 @@
  * this leaf independent from the full table-access implementation.
  */
 module;
-#include <bioseq/pg_compat.h>
+
+extern "C" {
+#include "postgres.h"
+
+#include "access/relation.h"
+#include "access/tableam.h"
+#include "storage/itemptr.h"
+#include "storage/lockdefs.h"
+#include "utils/errcodes.h"
+#include "utils/rel.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
 export module bioseq.postgres.column.table_access;
 

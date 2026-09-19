@@ -1,0 +1,12 @@
+{
+  "_comment": "CI drops its bench_framework artifacts here and rewrites this list. The benchmarks page reads nothing else — no site change is needed when a new report lands. Entries may be relative (resolved against this file) or absolute URLs on the CI server.",
+  "sources": [
+    "uploads/bench_configuration.json",
+    "uploads/bench_e2e_configuration.json",
+    "uploads/io_bench_configuration.json",
+    "uploads/report_bench.json",
+    "uploads/report_e2e.json",
+    "uploads/report_154.json",
+    "uploads/io_bench.json"
+  ]
+}

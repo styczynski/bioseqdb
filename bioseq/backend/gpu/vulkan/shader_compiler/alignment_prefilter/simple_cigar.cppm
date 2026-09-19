@@ -19,6 +19,9 @@ const uint k_status_cigar_overflow = 2u;
 const uint k_cigar_match = 0u;
 const uint k_cigar_insert = 1u;
 const uint k_cigar_delete = 2u;
+const uint k_job_packed_inputs = 1u << 0u;
+const uint k_job_reverse_target = 1u << 1u;
+const uint k_job_flag_mask = k_job_packed_inputs | k_job_reverse_target;
 const uint k_maximum_simple_gap = 256u;
 const uint k_maximum_simple_gap_operations = 64u;
 const uint k_minimum_simple_gap_anchors = 8u;
@@ -36,6 +39,14 @@ struct alignment_cigar_job {
     uint cigar_capacity;
     uint traceback_tile_offset;
     uint traceback_tile_count;
+    uint query_packed_byte_count;
+    uint target_packed_byte_count;
+    uint query_leading_symbol_offset;
+    uint target_leading_symbol_offset;
+    uint query_storage_unit_width;
+    uint target_storage_unit_width;
+    uint bits_per_symbol;
+    uint problem_index;
 };
 
 struct alignment_cigar_result {
@@ -49,6 +60,8 @@ struct alignment_cigar_result {
     uint cigar_length;
     uint status;
     uint reserved;
+    uint num_matches;
+    uint block_length;
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer query_symbols_buffer { uint query_symbols[]; };
@@ -74,6 +87,7 @@ layout(push_constant) uniform push_constants {
     int end_bonus;
     uint flags;
     uint reserved;
+    uint complement_rank_words[8];
 } pc;
 
 void write_reject(uint job_index, uint status) {
@@ -87,6 +101,65 @@ void write_reject(uint job_index, uint status) {
     results[job_index].cigar_length = 0u;
     results[job_index].status = status;
     results[job_index].reserved = 0u;
+    results[job_index].num_matches = 0u;
+    results[job_index].block_length = 0u;
+}
+
+uint packed_byte(bool query_side, uint byte_index) {
+    uint word = query_side ? query_symbols[byte_index >> 2u]
+                           : target_symbols[byte_index >> 2u];
+    return (word >> ((byte_index & 3u) * 8u)) & 255u;
+}
+
+uint packed_rank(bool query_side,
+                 uint byte_offset,
+                 uint storage_unit_width,
+                 uint leading_symbol_offset,
+                 uint bits_per_symbol,
+                 uint logical_index) {
+    uint letters_per_unit = (storage_unit_width * 8u) / bits_per_symbol;
+    uint packed_index = leading_symbol_offset + logical_index;
+    uint unit_index = packed_index / letters_per_unit;
+    uint symbol_in_unit = packed_index - unit_index * letters_per_unit;
+    uint bit_offset = symbol_in_unit * bits_per_symbol;
+    uint source_byte = byte_offset + unit_index * storage_unit_width + (bit_offset >> 3u);
+    uint pair = packed_byte(query_side, source_byte);
+    if ((bit_offset & 7u) + bits_per_symbol > 8u) {
+        pair |= packed_byte(query_side, source_byte + 1u) << 8u;
+    }
+    return (pair >> (bit_offset & 7u)) & ((1u << bits_per_symbol) - 1u);
+}
+
+uint complement_rank(uint rank) {
+    uint word = pc.complement_rank_words[rank >> 2u];
+    return (word >> ((rank & 3u) * 8u)) & 255u;
+}
+
+uint query_symbol_at(alignment_cigar_job job, uint logical_index) {
+    if ((job.flags & k_job_packed_inputs) == 0u) {
+        return query_symbols[job.query_symbol_offset + logical_index];
+    }
+    return packed_rank(true,
+                       job.query_symbol_offset,
+                       job.query_storage_unit_width,
+                       job.query_leading_symbol_offset,
+                       job.bits_per_symbol,
+                       logical_index);
+}
+
+uint target_symbol_at(alignment_cigar_job job, uint logical_index) {
+    if ((job.flags & k_job_packed_inputs) == 0u) {
+        return target_symbols[job.target_symbol_offset + logical_index];
+    }
+    bool reverse = (job.flags & k_job_reverse_target) != 0u;
+    uint source_index = reverse ? job.target_len - 1u - logical_index : logical_index;
+    uint rank = packed_rank(false,
+                            job.target_symbol_offset,
+                            job.target_storage_unit_width,
+                            job.target_leading_symbol_offset,
+                            job.bits_per_symbol,
+                            source_index);
+    return reverse ? complement_rank(rank) : rank;
 }
 
 int substitution_score(uint query_symbol, uint target_symbol) {
@@ -119,6 +192,30 @@ void write_success(
     alignment_cigar_job job,
     int score,
     uint cigar_length) {
+    uint query_cursor = 0u;
+    uint target_cursor = 0u;
+    uint num_matches = 0u;
+    uint block_length = 0u;
+    for (uint cigar_index = 0u; cigar_index < cigar_length; ++cigar_index) {
+        uint entry = packed_cigar[job.cigar_offset + cigar_index];
+        uint operation = entry & 15u;
+        uint operation_length = entry >> 4u;
+        block_length += operation_length;
+        if (operation == k_cigar_match) {
+            for (uint symbol = 0u; symbol < operation_length; ++symbol) {
+                if (query_symbol_at(job, query_cursor + symbol)
+                    == target_symbol_at(job, target_cursor + symbol)) {
+                    ++num_matches;
+                }
+            }
+            query_cursor += operation_length;
+            target_cursor += operation_length;
+        } else if (operation == k_cigar_insert) {
+            query_cursor += operation_length;
+        } else if (operation == k_cigar_delete) {
+            target_cursor += operation_length;
+        }
+    }
     results[job_index].score = score;
     results[job_index].max_score = score;
     results[job_index].query_start = job.query_global_start;
@@ -129,6 +226,8 @@ void write_success(
     results[job_index].cigar_length = cigar_length;
     results[job_index].status = k_status_ok;
     results[job_index].reserved = 0u;
+    results[job_index].num_matches = num_matches;
+    results[job_index].block_length = block_length;
 }
 
 bool append_reverse_cigar(alignment_cigar_job job, inout uint cigar_length, uint op) {
@@ -163,6 +262,11 @@ int best_gap_cost_value(uint len) {
     return long_cost < short_cost ? long_cost : short_cost;
 }
 
+bool position_within_band(alignment_cigar_job job, uint query_pos, uint target_pos) {
+    uint delta = query_pos > target_pos ? query_pos - target_pos : target_pos - query_pos;
+    return delta <= job.band_width;
+}
+
 bool append_forward_cigar(
     alignment_cigar_job job,
     inout uint cigar_length,
@@ -190,8 +294,8 @@ uint common_match_run(alignment_cigar_job job, uint query_pos, uint target_pos) 
     uint run = 0u;
     while (query_pos + run < job.query_len
            && target_pos + run < job.target_len
-           && query_symbols[job.query_symbol_offset + query_pos + run]
-              == target_symbols[job.target_symbol_offset + target_pos + run]) {
+           && query_symbol_at(job, query_pos + run)
+              == target_symbol_at(job, target_pos + run)) {
         ++run;
     }
     return run;
@@ -211,7 +315,8 @@ bool try_one_gap_script(
     } else {
         target_pos += gap_len;
     }
-    if (query_pos > job.query_len || target_pos > job.target_len) {
+    if (query_pos > job.query_len || target_pos > job.target_len ||
+        !position_within_band(job, query_pos, target_pos)) {
         return false;
     }
     suffix_len = common_match_run(job, query_pos, target_pos);
@@ -236,7 +341,8 @@ bool try_two_gap_script(
     } else {
         target_pos += first_len;
     }
-    if (query_pos > job.query_len || target_pos > job.target_len) {
+    if (query_pos > job.query_len || target_pos > job.target_len ||
+        !position_within_band(job, query_pos, target_pos)) {
         return false;
     }
     mid_len = common_match_run(job, query_pos, target_pos);
@@ -247,7 +353,8 @@ bool try_two_gap_script(
     } else {
         target_pos += second_len;
     }
-    if (query_pos > job.query_len || target_pos > job.target_len) {
+    if (query_pos > job.query_len || target_pos > job.target_len ||
+        !position_within_band(job, query_pos, target_pos)) {
         return false;
     }
     suffix_len = common_match_run(job, query_pos, target_pos);
@@ -305,6 +412,9 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
             gap_cost += uint(best_gap_cost_value(gap_len));
             target_pos = job.target_len;
             ++gap_count;
+            if (!position_within_band(job, query_pos, target_pos)) {
+                return false;
+            }
             continue;
         }
         if (target_pos == job.target_len) {
@@ -316,12 +426,15 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
             gap_cost += uint(best_gap_cost_value(gap_len));
             query_pos = job.query_len;
             ++gap_count;
+            if (!position_within_band(job, query_pos, target_pos)) {
+                return false;
+            }
             continue;
         }
 
         if (target_pos + 1u < job.target_len
-            && query_symbols[job.query_symbol_offset + query_pos]
-                == target_symbols[job.target_symbol_offset + target_pos + 1u]) {
+            && query_symbol_at(job, query_pos)
+                == target_symbol_at(job, target_pos + 1u)) {
             if (!append_forward_cigar(job, cigar_length, 1u, k_cigar_delete)) {
                 write_reject(job_index, k_status_cigar_overflow);
                 return true;
@@ -329,11 +442,14 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
             gap_cost += uint(best_gap_cost_value(1u));
             ++target_pos;
             ++gap_count;
+            if (!position_within_band(job, query_pos, target_pos)) {
+                return false;
+            }
             continue;
         }
         if (query_pos + 1u < job.query_len
-            && query_symbols[job.query_symbol_offset + query_pos + 1u]
-                == target_symbols[job.target_symbol_offset + target_pos]) {
+            && query_symbol_at(job, query_pos + 1u)
+                == target_symbol_at(job, target_pos)) {
             if (!append_forward_cigar(job, cigar_length, 1u, k_cigar_insert)) {
                 write_reject(job_index, k_status_cigar_overflow);
                 return true;
@@ -341,6 +457,9 @@ bool try_emit_unit_gap_walk_cigar(uint job_index, alignment_cigar_job job) {
             gap_cost += uint(best_gap_cost_value(1u));
             ++query_pos;
             ++gap_count;
+            if (!position_within_band(job, query_pos, target_pos)) {
+                return false;
+            }
             continue;
         }
 
@@ -385,6 +504,9 @@ bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
             gap_cost += uint(best_gap_cost_value(gap_len));
             target_pos = job.target_len;
             ++gap_count;
+            if (!position_within_band(job, query_pos, target_pos)) {
+                return false;
+            }
             continue;
         }
         if (target_pos == job.target_len) {
@@ -396,6 +518,9 @@ bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
             gap_cost += uint(best_gap_cost_value(gap_len));
             query_pos = job.query_len;
             ++gap_count;
+            if (!position_within_band(job, query_pos, target_pos)) {
+                return false;
+            }
             continue;
         }
 
@@ -404,8 +529,8 @@ bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
         uint best_run = 0u;
         for (uint gap_len = 1u; gap_len <= k_maximum_simple_gap; ++gap_len) {
             if (target_pos + gap_len < job.target_len
-                && query_symbols[job.query_symbol_offset + query_pos]
-                    == target_symbols[job.target_symbol_offset + target_pos + gap_len]) {
+                && query_symbol_at(job, query_pos)
+                    == target_symbol_at(job, target_pos + gap_len)) {
                 uint candidate_run =
                     common_match_run(job, query_pos, target_pos + gap_len);
                 if (better_greedy_gap_candidate(
@@ -417,8 +542,8 @@ bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
                 }
             }
             if (query_pos + gap_len < job.query_len
-                && query_symbols[job.query_symbol_offset + query_pos + gap_len]
-                    == target_symbols[job.target_symbol_offset + target_pos]) {
+                && query_symbol_at(job, query_pos + gap_len)
+                    == target_symbol_at(job, target_pos)) {
                 uint candidate_run =
                     common_match_run(job, query_pos + gap_len, target_pos);
                 if (better_greedy_gap_candidate(
@@ -445,6 +570,9 @@ bool try_emit_greedy_gap_cigar(uint job_index, alignment_cigar_job job) {
             query_pos += best_len;
         } else {
             target_pos += best_len;
+        }
+        if (!position_within_band(job, query_pos, target_pos)) {
+            return false;
         }
     }
 
@@ -599,12 +727,37 @@ uint gridded_target_tiles(alignment_cigar_job job) {
     return ceil_div_u(job.target_len, pc.tile_target);
 }
 
+uint gridded_tile_slots(alignment_cigar_job job) {
+    uint band_cells = pc.tile_query + 2u * job.band_width;
+    return min_u(gridded_target_tiles(job),
+                 ceil_div_u(band_cells, pc.tile_target) + 1u);
+}
+
+uint gridded_min_tile_col(alignment_cigar_job job, uint tile_row) {
+    uint first_query = tile_row * pc.tile_query + 1u;
+    uint first_target = first_query > job.band_width
+        ? first_query - job.band_width
+        : 1u;
+    return (first_target - 1u) / pc.tile_target;
+}
+
+uint gridded_max_tile_col(alignment_cigar_job job, uint tile_row) {
+    uint query_end = min_u(job.query_len, (tile_row + 1u) * pc.tile_query);
+    uint target_end = min_u(job.target_len, query_end + job.band_width);
+    return (target_end - 1u) / pc.tile_target;
+}
+
+bool gridded_tile_is_active(alignment_cigar_job job, uint tile_row, uint tile_col) {
+    return tile_col >= gridded_min_tile_col(job, tile_row)
+        && tile_col <= gridded_max_tile_col(job, tile_row);
+}
+
 uint gridded_record_words() {
     return 5u * ((pc.tile_query + 1u) + (pc.tile_target + 1u));
 }
 
 uint gridded_boundary_words(alignment_cigar_job job) {
-    return gridded_query_tiles(job) * gridded_target_tiles(job)
+    return gridded_query_tiles(job) * gridded_tile_slots(job)
         * gridded_record_words();
 }
 
@@ -620,9 +773,18 @@ int decode_score(uint value) {
     return int(value) - 1073741824;
 }
 
+int add_reachable_score(int value, int delta) {
+    return value == k_negative_infinity ? k_negative_infinity : value + delta;
+}
+
+int subtract_reachable_cost(int value, int cost) {
+    return value == k_negative_infinity ? k_negative_infinity : value - cost;
+}
+
 uint tile_base(alignment_cigar_job job, uint tile_row, uint tile_col) {
+    uint slot = tile_col - gridded_min_tile_col(job, tile_row);
     return job.traceback_tile_offset
-        + (tile_row * gridded_target_tiles(job) + tile_col)
+        + (tile_row * gridded_tile_slots(job) + slot)
             * gridded_record_words();
 }
 
@@ -659,7 +821,21 @@ uint gridded_scratch_index(
     return gridded_scratch_offset(job) + local_query * scratch_cols + local_target;
 }
 
+void set_negative_state(
+    out int h,
+    out int i1,
+    out int i2,
+    out int d1,
+    out int d2) {
+    h = k_negative_infinity;
+    i1 = k_negative_infinity;
+    i2 = k_negative_infinity;
+    d1 = k_negative_infinity;
+    d2 = k_negative_infinity;
+}
+
 void init_axis_state(
+    alignment_cigar_job job,
     uint query_pos,
     uint target_pos,
     out int h,
@@ -676,6 +852,10 @@ void init_axis_state(
         return;
     }
     if (target_pos == 0u) {
+        if (query_pos > job.band_width) {
+            set_negative_state(h, i1, i2, d1, d2);
+            return;
+        }
         i1 = -gap_cost_short(query_pos);
         i2 = -gap_cost_long(query_pos);
         h = i2 > i1 ? i2 : i1;
@@ -684,6 +864,10 @@ void init_axis_state(
         return;
     }
     if (query_pos == 0u) {
+        if (target_pos > job.band_width) {
+            set_negative_state(h, i1, i2, d1, d2);
+            return;
+        }
         d1 = -gap_cost_short(target_pos);
         d2 = -gap_cost_long(target_pos);
         h = d2 > d1 ? d2 : d1;
@@ -691,11 +875,7 @@ void init_axis_state(
         i2 = k_negative_infinity;
         return;
     }
-    h = k_negative_infinity;
-    i1 = k_negative_infinity;
-    i2 = k_negative_infinity;
-    d1 = k_negative_infinity;
-    d2 = k_negative_infinity;
+    set_negative_state(h, i1, i2, d1, d2);
 }
 
 void load_top_state(
@@ -709,11 +889,15 @@ void load_top_state(
     out int d1,
     out int d2) {
     if (tile_row == 0u) {
-        init_axis_state(0u, tile_col * pc.tile_target + local_target,
+        init_axis_state(job, 0u, tile_col * pc.tile_target + local_target,
                         h, i1, i2, d1, d2);
         return;
     }
     uint above = tile_row - 1u;
+    if (!gridded_tile_is_active(job, above, tile_col)) {
+        set_negative_state(h, i1, i2, d1, d2);
+        return;
+    }
     h = decode_score(traceback[bottom_state_index(job, above, tile_col, local_target, 0u)]);
     i1 = decode_score(traceback[bottom_state_index(job, above, tile_col, local_target, 1u)]);
     i2 = decode_score(traceback[bottom_state_index(job, above, tile_col, local_target, 2u)]);
@@ -732,11 +916,15 @@ void load_left_state(
     out int d1,
     out int d2) {
     if (tile_col == 0u) {
-        init_axis_state(tile_row * pc.tile_query + local_query, 0u,
+        init_axis_state(job, tile_row * pc.tile_query + local_query, 0u,
                         h, i1, i2, d1, d2);
         return;
     }
     uint left = tile_col - 1u;
+    if (!gridded_tile_is_active(job, tile_row, left)) {
+        set_negative_state(h, i1, i2, d1, d2);
+        return;
+    }
     h = decode_score(traceback[right_state_index(job, tile_row, left, local_query, 0u)]);
     i1 = decode_score(traceback[right_state_index(job, tile_row, left, local_query, 1u)]);
     i2 = decode_score(traceback[right_state_index(job, tile_row, left, local_query, 2u)]);
@@ -825,29 +1013,55 @@ void compute_gridded_tile(
                         d1_cur[0], d2_cur[0]);
 
         for (uint local_target = 1u; local_target <= target_cols_active; ++local_target) {
-            int i1_open = h_prev[local_target] - pc.gap_open_short - pc.gap_extend_short;
-            int i1_extend = i1_prev[local_target] - pc.gap_extend_short;
+            uint global_query = query_origin + local_query;
+            uint global_target = target_origin + local_target;
+            uint coordinate_delta = global_query > global_target
+                ? global_query - global_target
+                : global_target - global_query;
+            if (coordinate_delta > job.band_width) {
+                set_negative_state(h_cur[local_target],
+                                   i1_cur[local_target],
+                                   i2_cur[local_target],
+                                   d1_cur[local_target],
+                                   d2_cur[local_target]);
+                if (store_trace) {
+                    traceback[gridded_scratch_index(
+                        job, local_query, local_target, scratch_cols)] = 7u;
+                }
+                continue;
+            }
+            int i1_open = subtract_reachable_cost(
+                h_prev[local_target], pc.gap_open_short + pc.gap_extend_short);
+            int i1_extend = subtract_reachable_cost(
+                i1_prev[local_target], pc.gap_extend_short);
             bool i1_cont = i1_extend >= i1_open;
             i1_cur[local_target] = i1_cont ? i1_extend : i1_open;
 
-            int i2_open = h_prev[local_target] - pc.gap_open_long - pc.gap_extend_long;
-            int i2_extend = i2_prev[local_target] - pc.gap_extend_long;
+            int i2_open = subtract_reachable_cost(
+                h_prev[local_target], pc.gap_open_long + pc.gap_extend_long);
+            int i2_extend = subtract_reachable_cost(
+                i2_prev[local_target], pc.gap_extend_long);
             bool i2_cont = i2_extend >= i2_open;
             i2_cur[local_target] = i2_cont ? i2_extend : i2_open;
 
-            int d1_open = h_cur[local_target - 1u] - pc.gap_open_short - pc.gap_extend_short;
-            int d1_extend = d1_cur[local_target - 1u] - pc.gap_extend_short;
+            int d1_open = subtract_reachable_cost(
+                h_cur[local_target - 1u], pc.gap_open_short + pc.gap_extend_short);
+            int d1_extend = subtract_reachable_cost(
+                d1_cur[local_target - 1u], pc.gap_extend_short);
             bool d1_cont = d1_extend >= d1_open;
             d1_cur[local_target] = d1_cont ? d1_extend : d1_open;
 
-            int d2_open = h_cur[local_target - 1u] - pc.gap_open_long - pc.gap_extend_long;
-            int d2_extend = d2_cur[local_target - 1u] - pc.gap_extend_long;
+            int d2_open = subtract_reachable_cost(
+                h_cur[local_target - 1u], pc.gap_open_long + pc.gap_extend_long);
+            int d2_extend = subtract_reachable_cost(
+                d2_cur[local_target - 1u], pc.gap_extend_long);
             bool d2_cont = d2_extend >= d2_open;
             d2_cur[local_target] = d2_cont ? d2_extend : d2_open;
 
-            uint q = query_symbols[job.query_symbol_offset + query_origin + local_query - 1u];
-            uint t = target_symbols[job.target_symbol_offset + target_origin + local_target - 1u];
-            int best_score = h_prev[local_target - 1u] + substitution_score(q, t);
+            uint q = query_symbol_at(job, query_origin + local_query - 1u);
+            uint t = target_symbol_at(job, target_origin + local_target - 1u);
+            int best_score = add_reachable_score(
+                h_prev[local_target - 1u], substitution_score(q, t));
             uint best_source = 0u;
             if (i1_cur[local_target] > best_score) {
                 best_score = i1_cur[local_target];
@@ -912,25 +1126,33 @@ bool solve_gridded_dp(uint job_index, alignment_cigar_job job) {
         write_reject(job_index, k_status_unsupported_geometry);
         return true;
     }
+    uint length_delta = job.query_len > job.target_len
+        ? job.query_len - job.target_len
+        : job.target_len - job.query_len;
     uint required_words = gridded_boundary_words(job) + gridded_scratch_words();
-    if (job.traceback_tile_count < required_words) {
+    if (length_delta > job.band_width || job.traceback_tile_count < required_words) {
         write_reject(job_index, k_status_unsupported_geometry);
         return true;
     }
 
     uint query_tiles = gridded_query_tiles(job);
-    uint target_tiles = gridded_target_tiles(job);
     for (uint tile_row = 0u; tile_row < query_tiles; ++tile_row) {
-        for (uint tile_col = 0u; tile_col < target_tiles; ++tile_col) {
+        uint first_tile_col = gridded_min_tile_col(job, tile_row);
+        uint last_tile_col = gridded_max_tile_col(job, tile_row);
+        for (uint tile_col = first_tile_col; tile_col <= last_tile_col; ++tile_col) {
             compute_gridded_tile(job, tile_row, tile_col, true, false);
         }
     }
 
     uint last_tile_row = query_tiles - 1u;
-    uint last_tile_col = target_tiles - 1u;
+    uint last_tile_col = gridded_target_tiles(job) - 1u;
     uint last_target = job.target_len - last_tile_col * pc.tile_target;
     int score = decode_score(
         traceback[bottom_state_index(job, last_tile_row, last_tile_col, last_target, 0u)]);
+    if (score == k_negative_infinity) {
+        write_reject(job_index, k_status_unsupported_geometry);
+        return true;
+    }
 
     uint global_query = job.query_len;
     uint global_target = job.target_len;
@@ -939,6 +1161,10 @@ bool solve_gridded_dp(uint job_index, alignment_cigar_job job) {
 
     while (global_query > 0u || global_target > 0u) {
         if (global_query == 0u) {
+            if (global_target > job.band_width) {
+                write_reject(job_index, k_status_unsupported_geometry);
+                return true;
+            }
             if (!append_reverse_cigar(job, cigar_length, k_cigar_delete)) {
                 write_reject(job_index, k_status_cigar_overflow);
                 return true;
@@ -947,6 +1173,10 @@ bool solve_gridded_dp(uint job_index, alignment_cigar_job job) {
             continue;
         }
         if (global_target == 0u) {
+            if (global_query > job.band_width) {
+                write_reject(job_index, k_status_unsupported_geometry);
+                return true;
+            }
             if (!append_reverse_cigar(job, cigar_length, k_cigar_insert)) {
                 write_reject(job_index, k_status_cigar_overflow);
                 return true;
@@ -957,6 +1187,10 @@ bool solve_gridded_dp(uint job_index, alignment_cigar_job job) {
 
         uint tile_row = (global_query - 1u) / pc.tile_query;
         uint tile_col = (global_target - 1u) / pc.tile_target;
+        if (!gridded_tile_is_active(job, tile_row, tile_col)) {
+            write_reject(job_index, k_status_unsupported_geometry);
+            return true;
+        }
         uint query_origin = tile_row * pc.tile_query;
         uint target_origin = tile_col * pc.tile_target;
         uint target_cols_active = min_u(pc.tile_target, job.target_len - target_origin);
@@ -1017,8 +1251,15 @@ bool solve_gridded_dp(uint job_index, alignment_cigar_job job) {
 
 void solve_bounded_dp(uint job_index) {
     alignment_cigar_job job = jobs[job_index];
+    uint length_delta = job.query_len > job.target_len
+        ? job.query_len - job.target_len
+        : job.target_len - job.query_len;
     if (pc.alphabet_size == 0u || pc.flags != 0u || pc.reserved != 0u
-        || job.flags != 0u || job.query_len == 0u || job.target_len == 0u
+        || (job.flags & ~k_job_flag_mask) != 0u
+        || ((job.flags & k_job_reverse_target) != 0u
+            && (job.flags & k_job_packed_inputs) == 0u)
+        || job.query_len == 0u || job.target_len == 0u
+        || length_delta > job.band_width
         || job.band_width > pc.max_band_width) {
         write_reject(job_index, k_status_unsupported_geometry);
         return;
@@ -1029,13 +1270,13 @@ void solve_bounded_dp(uint job_index) {
     }
 
     for (uint i = 0u; i < job.query_len; ++i) {
-        if (query_symbols[job.query_symbol_offset + i] >= pc.alphabet_size) {
+        if (query_symbol_at(job, i) >= pc.alphabet_size) {
             write_reject(job_index, k_status_unsupported_geometry);
             return;
         }
     }
     for (uint i = 0u; i < job.target_len; ++i) {
-        if (target_symbols[job.target_symbol_offset + i] >= pc.alphabet_size) {
+        if (target_symbol_at(job, i) >= pc.alphabet_size) {
             write_reject(job_index, k_status_unsupported_geometry);
             return;
         }
@@ -1115,8 +1356,8 @@ void solve_bounded_dp(uint job_index) {
             bool d2_cont = d2_extend >= d2_open;
             d2_cur[j] = d2_cont ? d2_extend : d2_open;
 
-            uint q = query_symbols[job.query_symbol_offset + i - 1u];
-            uint t = target_symbols[job.target_symbol_offset + j - 1u];
+            uint q = query_symbol_at(job, i - 1u);
+            uint t = target_symbol_at(job, j - 1u);
             int best_score = h_prev[j - 1u] + substitution_score(q, t);
             uint best_source = 0u;
             if (i1_cur[j] > best_score) {

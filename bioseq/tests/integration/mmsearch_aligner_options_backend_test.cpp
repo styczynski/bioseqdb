@@ -133,6 +133,8 @@ TEST_CASE("PostgreSQL finalizes SIMD chaining policy after the last override",
         exec_sql(ctx, "SET bioseq.aligner.vulkan.enabled = off;");
         for (const int ordinal : {2, 3}) {
             CAPTURE(ordinal);
+            guc_scope runtime_enabled(
+                ctx, "bioseq.aligner.vulkan.enabled", ordinal == 3 ? "on" : "off");
             const std::string sql = fmt::format(
                 "SELECT pk FROM {} WHERE mmsearch(seq0, {}, "
                 "aligner_options(chaining_algorithm => {})) ORDER BY pk;",
@@ -164,15 +166,17 @@ TEST_CASE("selected Vulkan minimizer reports a Postgres error when Vulkan is dis
         hoe_probe_literal());
     const auto err = sql_error(ctx, sql);
     REQUIRE(err.sqlstate == "XX000");
-    REQUIRE(err.contains("Vulkan aligner execution failed"));
+    REQUIRE(err.contains("BioseqColumnScan Begin raised a C++ exception"));
+    REQUIRE(err.contains("selected Vulkan seeding is disabled"));
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
-TEST_CASE("selected Vulkan batch rejects CIGAR projection instead of CPU fallback",
+TEST_CASE("experimental GPU CIGAR and MAPQ are unreachable for campaign routes",
           "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
     auto ctx = fresh_context({k_hoe});
     seed_hoe_fixture(ctx, k_hoe);
 
+    exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
     exec_sql(ctx, "SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
     exec_sql(ctx, "SET bioseq.aligner.chaining.algorithm = 'vulkan_tiled_dynamic_programming';");
     exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'vulkan_minimap_integer';");
@@ -181,23 +185,26 @@ TEST_CASE("selected Vulkan batch rejects CIGAR projection instead of CPU fallbac
     exec_sql(ctx, "SET bioseq.aligner.vulkan.index_cache.enabled = on;");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.fused_frontend.enabled = on;");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.index_build.enabled = on;");
-    exec_sql(ctx, "SET bioseq.aligner.vulkan.alignment_extension.enabled = off;");
+    exec_sql(ctx, "SET bioseq.aligner.vulkan.alignment_extension.enabled = on;");
+    const bool untrusted_runtime = selected_vulkan_runtime_untrusted(ctx);
 
     const std::string sql = fmt::format(
-        "SELECT pk, bioseq.cigar(pk) "
+        "SELECT pk, bioseq.cigar(pk), bioseq.mapq(pk) "
         "FROM {} "
-        "WHERE mmsearch(seq0, {}) "
+        "WHERE mmsearch(seq0, {}, aligner_options(index_read_requirement => 1)) "
         "ORDER BY pk;",
         k_hoe,
         hoe_probe_literal());
     const auto err = sql_error(ctx, sql);
     REQUIRE(err.sqlstate == "XX000");
     REQUIRE(err.contains("Vulkan aligner execution failed"));
-    REQUIRE((err.contains("GPU CIGAR/extension is not implemented")
-             || err.contains("bounded GPU CIGAR extension")
-             || err.contains("complete supported all-GPU tuple")
-             || err.contains("software/CPU Vulkan device")
-             || err.contains("usable Vulkan runtime")));
+    if (untrusted_runtime) {
+        REQUIRE((err.contains("software/CPU Vulkan device")
+                 || err.contains("usable Vulkan runtime")));
+    } else {
+        REQUIRE(err.contains("Vulkan canonical seed route"));
+        REQUIRE(err.contains("MPF Vulkan seed route has no matching statement target owner"));
+    }
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
@@ -215,9 +222,9 @@ TEST_CASE("selected Vulkan batch rejects forced chunked routing before generic b
     exec_sql(ctx, "SET bioseq.aligner.vulkan.enabled = on;");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.seed_lookup.enabled = on;");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.index_cache.enabled = on;");
-    exec_sql(ctx, "SET bioseq.aligner.vulkan.fused_frontend.enabled = on;");
+    exec_sql(ctx, "SET bioseq.aligner.vulkan.fused_frontend.enabled = off;");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.index_build.enabled = on;");
-    exec_sql(ctx, "SET bioseq.aligner.vulkan.alignment_extension.enabled = on;");
+    exec_sql(ctx, "SET bioseq.aligner.vulkan.alignment_extension.enabled = off;");
 
     const std::string sql = fmt::format(
         "SELECT pk FROM {} WHERE mmsearch(seq0, {}) ORDER BY pk;",
@@ -227,35 +234,36 @@ TEST_CASE("selected Vulkan batch rejects forced chunked routing before generic b
     REQUIRE(err.sqlstate == "XX000");
     REQUIRE(err.contains("Vulkan aligner execution failed"));
     if (!untrusted_runtime) {
-        REQUIRE(err.contains("forced chunked scanner"));
-        REQUIRE(err.contains("CPU/SIMD biological fallback is forbidden"));
+        REQUIRE(err.contains("forced chunked test scanner"));
+        REQUIRE(err.contains("host biological fallback is forbidden"));
     }
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
-TEST_CASE("selected Vulkan batch emits bounded GPU CIGAR when extension is enabled",
+TEST_CASE("selected Vulkan seed and chain use the selected host CIGAR and MAPQ suffix",
           "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
     auto ctx = fresh_context({k_hoe});
     seed_hoe_fixture(ctx, k_hoe);
 
+    exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");
     exec_sql(ctx, "SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
     exec_sql(ctx, "SET bioseq.aligner.chaining.algorithm = 'vulkan_tiled_dynamic_programming';");
     exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'vulkan_minimap_integer';");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.enabled = on;");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.seed_lookup.enabled = on;");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.index_cache.enabled = on;");
-    exec_sql(ctx, "SET bioseq.aligner.vulkan.fused_frontend.enabled = on;");
+    exec_sql(ctx, "SET bioseq.aligner.vulkan.fused_frontend.enabled = off;");
     exec_sql(ctx, "SET bioseq.aligner.vulkan.index_build.enabled = on;");
-    exec_sql(ctx, "SET bioseq.aligner.vulkan.alignment_extension.enabled = on;");
+    exec_sql(ctx, "SET bioseq.aligner.vulkan.alignment_extension.enabled = off;");
     // The canonical probe is only 29 bp. Exact minimap2 tiled-DP chaining
     // scores its overlapping k=15 seeds by newly covered distance, so its
     // legitimate maximum is below the production default threshold of 40.
     exec_sql(ctx, "SET bioseq.aligner.chaining.minimum_score = 20;");
 
     const std::string sql = fmt::format(
-        "SELECT pk, bioseq.cigar(pk), bioseq.has_cigar(pk) "
+        "SELECT pk, bioseq.cigar(pk), bioseq.has_cigar(pk), bioseq.mapq(pk) "
         "FROM {} "
-        "WHERE mmsearch(seq0, {}) "
+        "WHERE mmsearch(seq0, {}, aligner_options(index_read_requirement => 1)) "
         "ORDER BY pk;",
         k_hoe,
         hoe_probe_literal());
@@ -272,25 +280,31 @@ TEST_CASE("selected Vulkan batch emits bounded GPU CIGAR when extension is enabl
     const auto rows = query_rows(ctx, sql);
     REQUIRE_FALSE(rows.empty());
     for (const auto& row : rows) {
-        REQUIRE(row.size() == 3);
+        REQUIRE(row.size() == 4);
         REQUIRE(row[1].has_value());
         REQUIRE_FALSE(row[1].value().empty());
         REQUIRE(is_valid_cigar(row[1].value()));
         REQUIRE(row[2].has_value());
         REQUIRE(row[2].value() == "t");
+        REQUIRE(row[3].has_value());
+        const auto mapq = std::stoll(row[3].value());
+        REQUIRE(mapq >= 0);
+        REQUIRE(mapq <= 60);
     }
 
     const auto plan = explain_text<true>(ctx, sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
-    REQUIRE(plan_contains(
-        plan,
-        "* Execution statistics [requested_backend=vulkan_gpu "
-        "actual_backend=mixed_invalid"));
-    REQUIRE(plan_contains(plan, "fully_attested=0"));
+    REQUIRE(plan_contains(plan, "| chain_stage: Vulkan tiled DP"));
+    REQUIRE(plan_contains(plan, "| align_stage: Block Aligner"));
+    REQUIRE(plan_contains(plan, "| mapq_stage: Compute mapping quality (mm_set_mapq2)"));
+    REQUIRE_FALSE(plan_contains(plan, "GPU CIGAR"));
+    REQUIRE_FALSE(plan_contains(plan, "GPU MAPQ"));
     REQUIRE(plan_contains(plan, "GPU dispatch [seed="));
     REQUIRE_FALSE(plan_contains(plan, "GPU dispatch [seed=0 "));
     REQUIRE_FALSE(plan_contains(plan, " chain=0 chain_backtrack="));
-    REQUIRE_FALSE(plan_contains(plan, " chain_backtrack=0 "));
+    // The selected tiled-DP implementation computes scores/predecessors on
+    // Vulkan and uses its existing host backtracker; this is not a GPU kernel.
+    REQUIRE(plan_contains(plan, " chain_backtrack=0 "));
     const auto tiled_chain_dispatches =
         find_explain_property(plan, "GPU Chain Dispatches");
     const auto tiled_backtrack_dispatches =
@@ -300,10 +314,10 @@ TEST_CASE("selected Vulkan batch emits bounded GPU CIGAR when extension is enabl
     REQUIRE(tiled_chain_dispatches.has_value());
     REQUIRE(std::stoull(*tiled_chain_dispatches) > 0u);
     REQUIRE(tiled_backtrack_dispatches.has_value());
-    REQUIRE(std::stoull(*tiled_backtrack_dispatches) > 0u);
+    REQUIRE(std::stoull(*tiled_backtrack_dispatches) == 0u);
     REQUIRE(coordinate_vote_dispatches.has_value());
     REQUIRE(std::stoull(*coordinate_vote_dispatches) == 0u);
-    REQUIRE(plan_contains(plan, "extend=1"));
+    REQUIRE(plan_contains(plan, "extend=0"));
     REQUIRE(plan_contains(
         plan, "backend_declines=0 backend_fallbacks=0"));
 }

@@ -16,6 +16,8 @@ export module bioseq.postgres.vectorization.aggregator_node:hash_runtime;
 import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.postgres.vectorization.types;
+import :support;
+import :transitions;
 
 using bioseq::postgres::support::allocate_zeroed_array;
 using bioseq::postgres::support::allocate_zeroed_object;
@@ -24,9 +26,6 @@ using bioseq::postgres::support::pg_expression_walk_cursor;
 using bioseq::postgres::support::pg_node_view;
 using bioseq::postgres::support::pg_walk_step;
 using bioseq::postgres::support::walk_pg_expression_including_root;
-
-import :support;
-import :transitions;
 
 /**
  * Classifies OUTER_VAR references exactly once while tracking Aggref nesting.

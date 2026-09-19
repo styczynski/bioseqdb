@@ -54,46 +54,23 @@ void bioseq_external_scan_init(void);
 module bioseq.postgres.extension;
 
 import bioseq.common.logging;
-import bioseq.postgres.column;
-import bioseq.postgres.extension.alignment.sql_rows;
-import bioseq.postgres.extension.sql_rows;
 import bioseq.postgres.support;
 #if defined(BIOSEQ_TEST_INDEXES)
 import bioseq.postgres.support.row_codec_runtime_test_support;
+import bioseq.postgres.storage.indexing.metadata_age_log_test_support;
 #endif
 import bioseq.postgres.support.runtime_diagnostics;
 import bioseq.postgres.support.sql_catalog_entities;
-import bioseq.postgres.extension.cache_provider;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 import bioseq.postgres.sql.generated.core.storage_manager_sequence_storage_manager.entity_handles;
 import bioseq.postgres.sql.generated.core.storage_metadata_core.entity_handles;
-#if defined(BIOSEQ_TEST_INDEXES)
-import bioseq.postgres.sql.generated.test_indexes.guc_registry;
-#else
-import bioseq.postgres.sql.generated.production.guc_registry;
-#endif
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.vectorization.execution;
 import bioseq.postgres.vectorization.types;
 import bioseq.postgres.vectorization.types.aggregates;
-import bioseq.sequences;
 import bioseq.postgres.storage.manager;
 import bioseq.postgres.storage.scanner;
-import bioseq.storage.lazy_sequence;
-import bioseq.indexing.type;
-import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.parallelism.mode;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.table.scan_state;
 import bioseq.postgres.table;
-import bioseq.postgres.table.sql_rows;
 
 using namespace bioseq::postgres::support;
 
@@ -1075,29 +1052,8 @@ void arm_sequence_source_failure(std::string failure_point) {
 		return;
 	}
 	if (failure_point == "metadata_age_log_context_stress") {
-		const std::string index_name(1024, 'm');
-		for (std::uint32_t iteration = 0;
-			 iteration != 512;
-			 ++iteration) {
-			static_cast<void>(
-				bioseq::storage::indexing::
-					upsert_metadata_age_log_pg(
-						static_cast<Oid>(388079),
-						static_cast<Oid>(388079),
-						static_cast<std::int16_t>(1),
-						index_name));
-		}
-		const std::uint64_t deleted =
-			bioseq::storage::indexing::
-				delete_metadata_age_log_pg(
-					static_cast<Oid>(388079),
-					static_cast<Oid>(388079),
-					static_cast<std::int16_t>(1),
-					index_name);
-		if (deleted != 1) {
-			throw std::runtime_error{
-				"metadata_age_log stress row was not deleted"};
-		}
+		bioseq::storage::indexing::
+			exercise_metadata_age_log_context_stress();
 		return;
 	}
 	constexpr std::string_view k_row_codec_all_prefix{

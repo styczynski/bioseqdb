@@ -40,7 +40,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 /** Packed CIGAR and optional edit count produced by traceback. */
 struct block_traceback_result {
-    std::vector<std::uint32_t> cigar;  ///< Packed KSW2-compatible operations.
+    alignment_result_vector<std::uint32_t> cigar;  ///< Packed KSW2-compatible operations.
     std::uint64_t edit_distance = 0;  ///< Exact unit-cost edit distance.
 };
 
@@ -108,7 +108,11 @@ template <bool p_should_compute_edit_distance>
     }
     // Every traceback step consumes at least one symbol, so this is an upper
     // bound on the number of packed runs.
-    cigar.reserve(query_end_position + reference_end_position);
+    const size_t cigar_step_bound = query_end_position + reference_end_position;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    cigar.set_logical_bounds(cigar_step_bound, cigar_step_bound);
+#endif
+    cigar.reserve(cigar_step_bound);
 
     // All diagonal trace variants project to the packed match opcode. Adjacent
     // operations are coalesced before materialization.

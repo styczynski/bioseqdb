@@ -3,133 +3,75 @@
  * @brief PostgreSQL grouped-SoA generation fixture publication support.
  */
 module;
-#include "access/heapam.h"
-#include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "commands/tablespace.h"
-#include "executor/tuptable.h"
-#include "utils/inval.h"
-#include "utils/memutils.h"
-#include "utils/snapmgr.h"
 
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 extern "C" {
-#include "storage/buffile.h"
+#include "postgres.h"
+
+#include "access/relation.h"
+#include "access/xact.h"
+#include "commands/tablespace.h"
+#include "fmgr.h"
+#include "miscadmin.h"
+#include "nodes/pg_list.h"
+#include "utils/builtins.h"
+#include "utils/errcodes.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
+#include "utils/snapmgr.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <algorithm>
 #include <array>
-#include <concepts>
+#include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstring>
 #include <exception>
 #include <expected>
 #include <limits>
-#include <map>
 #include <new>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <variant>
-#include <vector>
+#include <libassert/assert.hpp>
 export module bioseq.postgres.storage.indexing.admin:generation_fixture_write;
+
+import :generation_api;
+import :grouped_soa;
+import :hash_major;
 import bioseq.common.logging;
+import bioseq.postgres.storage.indexing.admin.diagnostic_support;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support;
-import bioseq.postgres.sql_boundary;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, is_locator_stub, decode_locator_from_stub
 import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.lazy_sequence;           // make_resident_lazy_sequence
 import bioseq.storage.scanner;                 // sequence access requirements
 import bioseq.postgres.storage.scanner;        // with_postgres_lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.common.seqan_adapter;            // seqan3::char_is_valid_for
 import bioseq.indexing.type;
-import bioseq.indexing.storage;
-import bioseq.indexing.traits;
-import bioseq.indexing.registry;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.hash_major_minimizer_index;
 import bioseq.indexing.minimizer_sequence;
-import bioseq.pipeline.runtime_contract; // minimizer_algorithm
-import bioseq.sequences.kmers;           // minimizer/index APIs
 import bioseq.sequences.kmers.highway_minimizer_contract;
-import bioseq.highway.dispatch_contract;
-import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.residency;
 #ifdef BIOSEQ_TEST_INDEXES
 import bioseq.postgres.storage.indexing.sorted_runs;
 #endif
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.pool;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
 import bioseq.postgres.table.io;
-import bioseq.postgres.storage.indexing.handles;
+import bioseq.postgres.storage.indexing.fragment_handle;
+import bioseq.postgres.storage.indexing.index_relation_identity;
 import bioseq.postgres.column.table_access;
-import bioseq.postgres.storage.metadata; // column_table_row_count
+import bioseq.postgres.storage.metadata;
+import bioseq.postgres.storage.indexing.admin.ready_minimizer_fixture_kernel;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
-import :policy_catalog;
-import :hash_major;
-import :grouped_soa;
-import :rebuild;
-import :inspection_policy;
 
 export namespace bioseq::storage::indexing {
 
-/// Result type of the test path that instantiates the grouped-SoA coordinator
-/// against a real PostgreSQL-backed lazy sequence. The head and manifest are
-/// independently reopened after publication. The route receipt is the
-/// producer-originated execution result returned by the coordinator itself.
-struct ready_minimizer_generation_coordinator_fixture_result {
-    std::string table_name;
-    std::string selected_backend_name;
-    std::int16_t column_attno = 0;
-    std::uint64_t sequence_rowno = 0;
-    sequence_locator locator{};
-    std::uint8_t alphabet_code = 0;
-    std::uint8_t storage_unit_byte_width = 0;
-    std::optional<ready_minimizer_generation_publication> publication;
-    minimizer_generation_head head{};
-    minimizer_generation_manifest manifest{};
-    bool head_manifest_verified = false;
-
-    /// Return the sealed publication retained by a completed fixture.
-    [[nodiscard]] const ready_minimizer_generation_publication&
-    sealed_publication() const noexcept {
-        DEBUG_ASSERT(publication.has_value(),
-                     "READY fixture publication must be sealed before return");
-        return *publication;
-    }
-};
-
-/**
- * @brief Parse one exact fixture backend name without fallback.
- * @param name Persisted fixture spelling.
- * @return The matching minimizer producer backend.
- */
-[[nodiscard]] inline bioseq::minimizers::minimizer_sketch_backend
-ready_minimizer_fixture_backend_from_name(std::string_view name) {
-    using backend_type = bioseq::minimizers::minimizer_sketch_backend;
-    if (name == "scalar")
-        return backend_type::scalar;
-    if (name == "exact_simd")
-        return backend_type::exact_simd;
-    if (name == "bounded_nthash_simd")
-        return backend_type::bounded_nthash_simd;
-    if (name == "vulkan_segment")
-        return backend_type::vulkan_segment;
+[[noreturn]] void ready_minimizer_fixture_backend_error_as_cpp(std::string_view name) {
     bioseq::postgres::support::invoke_pg_as_cpp([name] {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -138,6 +80,13 @@ ready_minimizer_fixture_backend_from_name(std::string_view name) {
                  errhint("Use scalar, exact_simd, bounded_nthash_simd, or vulkan_segment.")));
     });
     pg_unreachable();
+}
+
+const ready_minimizer_generation_publication&
+ready_minimizer_generation_coordinator_fixture_result::sealed_publication() const noexcept {
+    DEBUG_ASSERT(publication.has_value(),
+                 "READY fixture publication must be sealed before return");
+    return *publication;
 }
 
 /// Parsed fixture backend and coordinated failure-injection request.
@@ -151,6 +100,9 @@ struct ready_minimizer_fixture_backend_request {
     sorted_run_failure_injection sorted_run_failure = sorted_run_failure_injection::none;
     std::uint64_t sorted_run_failure_operation = 1u;
     std::uint64_t sorted_run_merge_reader_budget_bytes = 0u;
+    sorted_run_reader_admission_injection sorted_run_reader_admission =
+        sorted_run_reader_admission_injection::none;
+    std::uint64_t sorted_run_reader_request_ceiling_bytes = 0u;
 #endif
 };
 
@@ -185,6 +137,37 @@ parse_ready_minimizer_fixture_backend_request(std::string_view name) {
             // budget forces two compaction outputs, so operation 2 occurs only
             // after output 1 completed and its two input handles were closed.
             .sorted_run_merge_reader_budget_bytes = std::uint64_t{64} << 10,
+        };
+    }
+    if (name == "scalar_test_sorted_reader_backoff") {
+        return {
+            .backend = bioseq::minimizers::minimizer_sketch_backend::scalar,
+            .sorted_run_merge_reader_budget_bytes = std::uint64_t{4} << 20,
+            // Three inputs cannot use minimum buffers under this request
+            // ceiling, while two inputs can. This exercises reader-size
+            // fallback, fan-in fallback, and a multi-pass merge.
+            .sorted_run_reader_admission =
+                sorted_run_reader_admission_injection::request_ceiling,
+            .sorted_run_reader_request_ceiling_bytes = std::uint64_t{160} << 10,
+        };
+    }
+    if (name == "scalar_fail_sorted_reader_minimum") {
+        return {
+            .backend = bioseq::minimizers::minimizer_sketch_backend::scalar,
+            .sorted_run_merge_reader_budget_bytes = std::uint64_t{4} << 20,
+            // One 32-KiB reader plus metadata and 2x headroom exceeds this.
+            .sorted_run_reader_admission =
+                sorted_run_reader_admission_injection::request_ceiling,
+            .sorted_run_reader_request_ceiling_bytes = std::uint64_t{64} << 10,
+        };
+    }
+    if (name == "scalar_fail_sorted_reader_system_pressure") {
+        return {
+            .backend = bioseq::minimizers::minimizer_sketch_backend::scalar,
+            // A one-shot refusal proves system pressure is not retried with a
+            // smaller buffer and is not converted into a compaction attempt.
+            .sorted_run_reader_admission =
+                sorted_run_reader_admission_injection::system_pressure_once,
         };
     }
     constexpr std::array k_sorted_run_failures{
@@ -308,6 +291,9 @@ inline void arm_ready_minimizer_fixture_failures(
     arm_sorted_run_pg_leaf_failure_on_nth(request.sorted_run_failure,
                                           request.sorted_run_failure_operation);
     set_sorted_run_merge_reader_budget_for_test(request.sorted_run_merge_reader_budget_bytes);
+    set_sorted_run_reader_admission_injection_for_test(
+        request.sorted_run_reader_admission,
+        request.sorted_run_reader_request_ceiling_bytes);
 #endif
 }
 
@@ -330,7 +316,7 @@ inline void disarm_ready_minimizer_fixture_failures() noexcept {
  *
  * This route does not update metadata_age_log; unavailable SIMD/GPU backends fail closed.
  */
-[[nodiscard]] inline ready_minimizer_generation_coordinator_fixture_result
+[[nodiscard]] ready_minimizer_generation_coordinator_fixture_result
 build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
                                                           std::string_view index_name,
                                                           std::uint64_t sequence_rowno,
@@ -365,7 +351,8 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
         parse_ready_minimizer_fixture_backend_request(backend_name);
     const backend_type backend = backend_request.backend;
     const bioseq::minimizers::minimizer_kernels* const minimizer_kernels =
-        selected_minimizer_kernels_for_operation(backend, "READY minimizer coordinator fixture");
+        bind_ready_minimizer_fixture_kernels(backend,
+                                             "READY minimizer coordinator fixture");
     Snapshot active_snapshot = GetActiveSnapshot();
     if (active_snapshot == nullptr || !IsMVCCSnapshot(active_snapshot)) {
         ready_minimizer_error_as_cpp(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -492,6 +479,21 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
             ready_minimizer_error_as_cpp(ERRCODE_DATA_CORRUPTED,
                                          "READY minimizer fixture locator is invalid");
         }
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_for_backend(
+                backend,
+                index_name == k_minimizers_per_fragment_index_name
+                    ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                    : result.locator.logical_length,
+                result.alphabet_code,
+                static_cast<std::uint8_t>(result.storage_unit_byte_width * 8u),
+                k_kmer_size,
+                k_window_size);
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "READY minimizer fixture algorithm identity is not READY");
+        }
         bioseq::postgres::support::invoke_pg_as_cpp(
             [state] { end_column_read(state->source_read); });
         state->source_read = nullptr;
@@ -522,6 +524,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
              backend,
              backend_request,
              minimizer_kernels,
+             algorithm_identity = *algorithm_identity,
              &result]<class p_sequence_config>() {
                 using source_binding =
                     bioseq::storage::postgres_lazy_sequence_binding<p_sequence_config>;
@@ -566,6 +569,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
                      backend,
                      backend_request,
                      minimizer_kernels,
+                     algorithm_identity,
                      &result,
                      bound_source](auto lazy_view) {
                         arm_ready_minimizer_fixture_failures(backend_request);
@@ -578,6 +582,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
                                 *state->storage,
                                 lazy_view,
                                 bound_source,
+                                algorithm_identity,
                                 backend,
                                 minimizer_kernels));
                         disarm_ready_minimizer_fixture_failures();
@@ -621,6 +626,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
                 backend,
+                *algorithm_identity,
                 result.alphabet_code,
                 result.storage_unit_byte_width,
                 k_kmer_size,
@@ -667,6 +673,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
             result.manifest.minimizer_scheme_revision != scheme.revision ||
             result.manifest.producer_backend_id != producer_backend.id ||
             result.manifest.producer_identity_revision != producer_backend.revision ||
+            result.manifest.algorithm_identity != *algorithm_identity ||
             manifest_storage_contract != result.publication->storage_contract_checksum()) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
@@ -713,43 +720,6 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
     state = nullptr;
     return result;
 }
-
-/// Live PostgreSQL fixture result for the grouped-SoA storage contract. This
-/// is used only by the integration SQL path. Other readers never
-/// call it, and only the current grouped-SoA layout is accepted.
-struct minimizer_generation_integration_fixture_result {
-    std::string table_name;
-    bioseq::indexing::minimizer_generation_layout layout =
-        bioseq::indexing::minimizer_generation_layout::invalid;
-    std::uint64_t generation_id = 0;
-    std::uint64_t source_identity = 0;
-    std::uint64_t source_content_checksum = 0;
-    std::uint64_t storage_contract_checksum = 0;
-    std::uint64_t source_num_fragments = 0;
-    std::uint64_t source_total_bp = 0;
-    std::uint64_t source_padding_letters = 0;
-    std::uint64_t writer_rows = 0;
-    std::uint64_t writer_batches = 0;
-    std::uint64_t published_head_bytes = 0;
-    std::uint64_t control_count = 0;
-    std::uint64_t position_count = 0;
-    std::uint64_t directory_entries = 0;
-    std::uint64_t position_segment_count = 0;
-    std::uint64_t control_encoded_bytes = 0;
-    std::uint64_t position_encoded_bytes = 0;
-    std::uint64_t control_chunks = 0;
-    std::uint64_t position_chunks = 0;
-    std::uint64_t validated_control_bytes = 0;
-    std::uint64_t validated_position_bytes = 0;
-    std::uint64_t validated_control_checksum = 0;
-    std::uint64_t validated_position_checksum = 0;
-    std::uint64_t lookup_count = 0;
-    std::uint64_t lookup_bp = 0;
-    bool lookup_reverse = false;
-    bool positions_complete = false;
-    minimizer_generation_read_stats read_stats{};
-    minimizer_generation_read_stats selective_probe_stats{};
-};
 
 /// Deterministic replayable producer used by the live PG fixture. Its declared
 /// scheme is the caller-requested backend identity. The Vulkan-labelled
@@ -815,7 +785,7 @@ static_assert(bioseq::indexing::grouped_soa_event_producer<minimizer_generation_
 /// goes through the row sink. The write path opens no read
 /// session so a later SQL statement/backend can validate an independently
 /// reopened reader without inheriting session-owned state.
-[[nodiscard]] inline minimizer_generation_integration_fixture_result
+[[nodiscard]] minimizer_generation_integration_fixture_result
 build_minimizer_generation_integration_fixture_impl(
     Oid rel_oid,
     std::string_view index_name,
@@ -961,6 +931,22 @@ build_minimizer_generation_integration_fixture_impl(
                 "bioseq minimizer generation fixture derived a zero source identity");
         }
 
+        const auto algorithm_identity =
+            bioseq::indexing::select_minimizer_generation_algorithm_identity_for_backend(
+                backend,
+                index_name == k_minimizers_per_fragment_index_name
+                    ? bioseq::indexing::k_minimizer_fragment_algorithm_position_extent_bp
+                    : target_length,
+                source.alphabet_code,
+                static_cast<std::uint8_t>(source.storage_unit_byte_width * 8u),
+                kmer_size,
+                window_size);
+        if (!algorithm_identity) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+                "bioseq minimizer generation fixture algorithm identity is not READY");
+        }
+
         state->writer.emplace(identity,
                               sequence_rowno,
                               result.generation_id,
@@ -979,6 +965,7 @@ build_minimizer_generation_integration_fixture_impl(
             .window_size = window_size,
             .minimizer_scheme_id = requested_scheme.id,
             .minimizer_scheme_revision = requested_scheme.revision,
+            .algorithm_identity = *algorithm_identity,
         };
         std::optional<minimizer_generation_encoding_error> encode_error;
         {

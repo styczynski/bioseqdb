@@ -28,32 +28,12 @@ extern "C" {
 
 export module bioseq.postgres.types.compact_sequence:packed_output_materialization_trace;
 
+export import bioseq.postgres.types.compact_sequence.materialization_contract;
+
 import :flat_abi;
 import :source_abi;
 import :tree_types;
 import bioseq.storage.lazy_sequence;
-
-/// Mechanism that produced one compact-sequence materialization.
-export enum class materialization_mechanism : std::uint8_t {
-    backing_copy = 0u,
-    packed_full,
-    packed_region,
-    text,
-    binary,
-    letter_array,
-};
-
-/// Consumer boundary that required a compact-sequence materialization.
-export enum class materialization_reason : std::uint8_t {
-    executor_copy = 0u,
-    heap_tuple,
-    index_tuple,
-    mmsearch_target,
-    mmsearch_query,
-    resident_algorithm,
-    sql_conversion,
-    client_output,
-};
 
 #ifdef BIOSEQ_TEST_INDEXES
 /* Independent allocator-side allocation evidence. These counters are not

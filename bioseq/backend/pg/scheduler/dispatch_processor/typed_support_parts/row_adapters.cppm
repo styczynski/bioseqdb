@@ -4,75 +4,31 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <bioseq/pg_compat.h>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <libassert/assert.hpp>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+extern "C" {
+#include "postgres.h"
+#include "utils/errcodes.h"
+}
 
-export module bioseq.postgres.scheduler.dispatch_processor.typed_support:row_adapters;
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
-import bioseq.postgres.scheduler.dispatch_processor;
-import :policy_stats;
-import :pg_alignment_errors;
-import bioseq.highway.dispatch_contract;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.configuration.scheduler;
+#include <new>
+
+export module bioseq.postgres.scheduler.dispatch_processor.typed_support.row_adapters;
+
+import std;
+export import bioseq.postgres.scheduler.dispatch_processor.typed_support.source_provider_adapters;
+import bioseq.postgres.scheduler.dispatch_processor.hash_major_diagnostic_identity;
+import bioseq.postgres.scheduler.dispatch_processor.checked_alignment_calls;
 import bioseq.indexing.type;
-import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.sequences;
-import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
+import bioseq.indexing.hash_major_minimizer_index;
+import bioseq.pipeline.stats;
 import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.instrumentation.clock;
-import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
-import bioseq.instrumentation.profiler_state;
-import bioseq.instrumentation.region;
-import bioseq.instrumentation.runtime;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.lazy_sequence;
-import bioseq.storage.size;
+import bioseq.pipeline.minimizer_execution_contract;
 import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
@@ -93,8 +49,9 @@ same_dispatch_target_locator(const bioseq::storage::sequence_locator& left,
 /// Validate the complete immutable hash-major reader identity before it is
 /// borrowed concurrently. No worker may observe a partially authenticated,
 /// mixed-layout or storage-profile-transcoded prepared group.
+template <class p_prepared_index_group>
 [[nodiscard]] inline bool
-hash_major_parallel_reader_identity_valid(const batch_processor::cpu_prepared_index_group& group,
+hash_major_parallel_reader_identity_valid(const p_prepared_index_group& group,
                                           const std::uint64_t target_bp_size) noexcept {
     if (!group.persisted_hash_major_reader.has_value() ||
         group.persisted_fragment_mapping_guard.has_value() ||
@@ -143,8 +100,9 @@ hash_major_parallel_reader_identity_valid(const batch_processor::cpu_prepared_in
 /// independent fragment address plans. Query routing/count reduction is
 /// transient wave state, and every persisted posting remains owned by exactly
 /// one fragment.
+template <class p_prepared_index_group>
 [[nodiscard]] inline bool
-fragment_parallel_reader_identity_valid(const batch_processor::cpu_prepared_index_group& group,
+fragment_parallel_reader_identity_valid(const p_prepared_index_group& group,
                                         const std::uint64_t target_bp_size) noexcept {
     if (!group.persisted_fragment_reader.has_value() ||
         !group.persisted_fragment_mapping_guard.has_value() ||
@@ -238,167 +196,31 @@ attach_retained_hash_major_query_stats(match_result_collection& collection,
     }
     if (stats.exact_simd_available) {
         collection.record_exact_simd_query_execution_stats(stats.exact_simd);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        collection.record_completed_minimizer_algorithm_identity(
+            minimizer_algorithm::two_stack_nthash);
+#endif
     }
     if (stats.bounded_nthash_available) {
         collection.record_bounded_nthash_query_execution_stats(stats.bounded_nthash);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        collection.record_completed_minimizer_algorithm_identity(
+            minimizer_algorithm::bounded_nthash_simd);
+#endif
     }
     if (stats.scalar_available) {
         collection.record_scalar_query_minimizer_execution_stats(stats.scalar);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+        collection.record_completed_minimizer_algorithm_identity(minimizer_algorithm::scalar);
+#endif
     }
-}
-
-/**
- * Promote one decoded sequence locator through the statement's exact source
- * provider, then expose only the canonical lazy facade to the algorithm.
- * The provider remains scan-owned. The read session owns the facade adapter
- * and is closed only after the callback has joined/drained all algorithm work.
- */
-template <class p_alphabet, class p_function>
-inline void with_source_provider_pg_locator(batch_processor::scanner_pg_context& context,
-                                            const bioseq::storage::sequence_locator& locator,
-                                            const AttrNumber column_attno,
-                                            const std::uint8_t alphabet_code,
-                                            const std::uint8_t storage_unit_byte_width,
-                                            const std::uint16_t last_padding_letters,
-                                            pg_sequence_read_session* active_read_session,
-                                            p_function&& callback) {
-    auto* provider = context.source_provider;
-    auto* registry = provider != nullptr ? provider->lease.registry : nullptr;
-    const bool exact_provider =
-        provider != nullptr && provider->open &&
-        provider->kind == bioseq::storage::pg_sequence_source_provider_kind::scan &&
-        provider->lease.owned && registry != nullptr &&
-        provider->lease.provider_generation == registry->generation &&
-        registry->accepting_lookups && !registry->provider_closed && !registry->lease_fault &&
-        !registry->xact_ended && registry->backend_thread.is_current() &&
-        registry->user_relid == context.user_relid && registry->database_oid == context.db_oid &&
-        registry->tablespace_oid == context.tablespace_oid &&
-        registry->main_relfilenode == context.main_relfilenode &&
-        registry->authoritative_snapshot == context.snapshot && context.snapshot != nullptr &&
-        IsMVCCSnapshot(context.snapshot) && context.snapshot->regd_count > 0 && column_attno > 0 &&
-        context.parent_mctx != nullptr;
-    if (!exact_provider) {
-        raise_typed_dispatch_pg_error_as_cpp(
-            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-            "locator sequence has no exact statement source-provider route");
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    // The checked bridge attests nonempty reference work before this attachment.
+    if (stats.checked_reference_simd_bridge_completed) {
+        collection.record_completed_minimizer_algorithm_identity(
+            minimizer_algorithm::simd_minimap2_reference);
     }
-
-    bioseq::pg_types::seq* locator_stub = bioseq::postgres::support::invoke_pg_as_cpp(
-        [&context, &locator, alphabet_code, storage_unit_byte_width, last_padding_letters] {
-            return bioseq::storage::alloc_locator_stub_in(context.parent_mctx,
-                                                          alphabet_code,
-                                                          storage_unit_byte_width,
-                                                          last_padding_letters,
-                                                          locator.logical_length,
-                                                          locator);
-        });
-    const Datum promoted = bioseq::storage::promote_pg_sequence_locator(
-        provider, column_attno, PointerGetDatum(locator_stub), context.parent_mctx);
-    const pg_sequence_descriptor descriptor = bioseq::postgres::support::invoke_pg_as_cpp(
-        [promoted] { return ::classify_and_describe_sequence(promoted); });
-    if (!descriptor.alphabet_bound ||
-        (descriptor.kind != pg_sequence_datum_kind::expanded_read_only &&
-         descriptor.kind != pg_sequence_datum_kind::expanded_read_write) ||
-        descriptor.alphabet_code != alphabet_code ||
-        descriptor.storage_unit_byte_width != storage_unit_byte_width ||
-        descriptor.bp_length != locator.logical_length) {
-        raise_typed_dispatch_pg_error_as_cpp(
-            ERRCODE_DATA_CORRUPTED,
-            "source-provider promotion returned mismatched sequence metadata");
-    }
-
-    if (active_read_session != nullptr) {
-        auto* sequence_owner = bioseq::postgres::support::invoke_pg_as_cpp(
-            [active_read_session, promoted, descriptor] {
-                return ::make_pg_sequence_call_owner<p_alphabet>(
-                    *active_read_session, promoted, descriptor);
-            });
-        std::forward<p_function>(callback)(sequence_owner->view(), active_read_session);
-        return;
-    }
-
-    auto* local_session =
-        bioseq::postgres::support::invoke_pg_as_cpp([parent_mctx = context.parent_mctx] {
-            return ::begin_pg_sequence_read_session(parent_mctx);
-        });
-    try {
-        auto* sequence_owner =
-            bioseq::postgres::support::invoke_pg_as_cpp([local_session, promoted, descriptor] {
-                return ::make_pg_sequence_call_owner<p_alphabet>(
-                    *local_session, promoted, descriptor);
-            });
-        std::forward<p_function>(callback)(sequence_owner->view(), local_session);
-        bioseq::postgres::support::invoke_pg_as_cpp(
-            [local_session] { ::finish_pg_sequence_read_session(local_session, true); });
-    } catch (...) {
-        ::abort_pg_sequence_read_session_noexcept(local_session);
-        throw;
-    }
-}
-
-template <class p_alphabet, class p_function>
-inline void with_pg_sequence_recipe(batch_processor::scanner_pg_context& context,
-                                    const Datum recipe,
-                                    const pg_sequence_descriptor& descriptor,
-                                    const std::uint8_t alphabet_code,
-                                    const std::uint8_t storage_unit_byte_width,
-                                    p_function&& callback) {
-    const bool expanded = recipe != Datum{0} &&
-                          VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(recipe)) &&
-                          (descriptor.kind == pg_sequence_datum_kind::expanded_read_only ||
-                           descriptor.kind == pg_sequence_datum_kind::expanded_read_write);
-    if (!expanded || !descriptor.alphabet_bound || descriptor.alphabet_code != alphabet_code ||
-        descriptor.storage_unit_byte_width != storage_unit_byte_width ||
-        context.parent_mctx == nullptr) {
-        raise_typed_dispatch_pg_error_as_cpp(ERRCODE_DATA_CORRUPTED,
-                                             "retained sequence recipe metadata is invalid");
-    }
-
-    if (context.read_session != nullptr) {
-        auto* sequence_owner = bioseq::postgres::support::invoke_pg_as_cpp(
-            [read_session = context.read_session, recipe, descriptor] {
-                return ::make_pg_sequence_call_owner<p_alphabet>(*read_session, recipe, descriptor);
-            });
-        std::forward<p_function>(callback)(sequence_owner->view(), context.read_session);
-        return;
-    }
-
-    auto* local_session =
-        bioseq::postgres::support::invoke_pg_as_cpp([parent_mctx = context.parent_mctx] {
-            return ::begin_pg_sequence_read_session(parent_mctx);
-        });
-    try {
-        auto* sequence_owner =
-            bioseq::postgres::support::invoke_pg_as_cpp([local_session, recipe, descriptor] {
-                return ::make_pg_sequence_call_owner<p_alphabet>(
-                    *local_session, recipe, descriptor);
-            });
-        std::forward<p_function>(callback)(sequence_owner->view(), local_session);
-        bioseq::postgres::support::invoke_pg_as_cpp(
-            [local_session] { ::finish_pg_sequence_read_session(local_session, true); });
-    } catch (...) {
-        ::abort_pg_sequence_read_session_noexcept(local_session);
-        throw;
-    }
-}
-
-template <class p_sequence, class p_function>
-inline void with_source_provider_pg_target(batch_processor::scanner_pg_context& context,
-                                           const bioseq::storage::sequence_locator& locator,
-                                           const std::uint8_t alphabet_code,
-                                           const std::uint8_t storage_unit_byte_width,
-                                           const std::uint16_t last_padding_letters,
-                                           pg_sequence_read_session* active_read_session,
-                                           p_function&& callback) {
-    using alphabet = typename compact_sequence_range<p_sequence>::traits::alphabet_type;
-    with_source_provider_pg_locator<alphabet>(context,
-                                              locator,
-                                              static_cast<AttrNumber>(context.mmsearch_seq_attno),
-                                              alphabet_code,
-                                              storage_unit_byte_width,
-                                              last_padding_letters,
-                                              active_read_session,
-                                              std::forward<p_function>(callback));
+#endif
 }
 
 } // namespace bioseq::simd::typed_dispatch::typed_support_detail

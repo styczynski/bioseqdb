@@ -28,6 +28,7 @@ module;
 module bioseq.indexing.minimizer_hashmap;
 
 import bioseq.common.radix_sort;
+import bioseq.common.heap_allocation;
 import bioseq.indexing.type;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.highway_minimizer_contract;
@@ -791,11 +792,15 @@ exact_simd_index_bridge_result collect_exact_simd_index_erased(
 packed_bounded_nthash_index_bridge_result
 collect_packed_bounded_nthash_index_erased(
         const packed_bounded_nthash_index_bridge_request& request) {
-    if (request.window_size != 10u || request.kmer_size != 15u) {
+    if (request.kmer_size == 0u ||
+        request.kmer_size > bioseq::minimizers::k_max_exact_two_stack_kmer ||
+        request.window_size == 0u ||
+        request.window_size > bioseq::minimizers::k_bounded_nthash_max_window) {
         return rejected_packed_bounded_nthash_index_result(
             packed_bounded_nthash_index_status::invalid_configuration);
     }
-    if (request.sequence.alphabet_code != 0u) {
+    if (request.sequence.alphabet_code ==
+        bioseq::minimizers::k_unbound_packed_alphabet_code) {
         return rejected_packed_bounded_nthash_index_result(
             packed_bounded_nthash_index_status::unsupported_alphabet);
     }
@@ -804,10 +809,21 @@ collect_packed_bounded_nthash_index_erased(
         return rejected_packed_bounded_nthash_index_result(
             packed_bounded_nthash_index_status::unsupported_storage);
     }
-    if (request.sequence.storage_unit_bytes != request.storage_unit_bytes
-        || request.sequence.bits_per_symbol != 2u
-        || request.letters_per_unit
-            != request.storage_unit_bytes * 8u / 2u) {
+    if (request.sequence.storage_unit_bytes != request.storage_unit_bytes) {
+        return rejected_packed_bounded_nthash_index_result(
+            packed_bounded_nthash_index_status::unsupported_storage);
+    }
+    // The generated typed kernel validates the alphabet identity and its exact
+    // rank width before borrowing or emitting. This erased bridge validates
+    // structural packing without a second, DNA4/DNA5-only alphabet registry.
+    const std::uint8_t bits_per_symbol = request.sequence.bits_per_symbol;
+    if (bits_per_symbol == 0u ||
+        bits_per_symbol > request.storage_unit_bytes * 8u) {
+        return rejected_packed_bounded_nthash_index_result(
+            packed_bounded_nthash_index_status::unsupported_alphabet);
+    }
+    if (request.letters_per_unit !=
+        request.storage_unit_bytes * 8u / bits_per_symbol) {
         return rejected_packed_bounded_nthash_index_result(
             packed_bounded_nthash_index_status::unsupported_storage);
     }
@@ -879,6 +895,9 @@ collect_packed_bounded_nthash_index_erased(
 minimizer_hashmap_fragment_index::minimizer_hashmap_fragment_index()
     : table_(std::make_unique<detail::minimizer_hashmap_fragment_index_table>())
 {}
+
+minimizer_hashmap_fragment_index::minimizer_hashmap_fragment_index(
+        defer_table_allocation_t) noexcept {}
 
 minimizer_hashmap_fragment_index::~minimizer_hashmap_fragment_index() = default;
 
@@ -977,6 +996,19 @@ bool minimizer_hashmap_fragment_index::table_empty() const noexcept {
 
 std::uint64_t minimizer_hashmap_fragment_index::table_allocation_bytes() const noexcept {
     return table_ == nullptr ? 0u : table_->allocation.live_bytes;
+}
+
+std::uint64_t
+minimizer_hashmap_fragment_index::table_owner_allocation_requirement_bytes() {
+    return bioseq::common::heap_allocation_detail::plan_heap_allocation(
+               sizeof(detail::minimizer_hashmap_fragment_index_table))
+        .allocation_requirement_bytes;
+}
+
+std::uint64_t
+minimizer_hashmap_fragment_index::table_owner_allocation_bytes() const noexcept {
+    return static_cast<std::uint64_t>(
+        bioseq::common::heap_allocation_detail::allocator_reported_bytes(table_.get()));
 }
 
 std::uint64_t minimizer_hashmap_fragment_index::table_peak_allocation_bytes() const noexcept {

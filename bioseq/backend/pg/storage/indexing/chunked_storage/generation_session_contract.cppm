@@ -3,85 +3,33 @@
  * @brief Declares grouped-generation read contracts, ownership, and inline sink templates.
  */
 module;
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 
 extern "C" {
-#include "access/heapam.h"
-#include "access/nbtree.h"
-#include "access/parallel.h"
-#include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "access/transam.h"
-#include "access/xact.h"
-#include "catalog/indexing.h"
-#include "catalog/namespace.h" // RelnameGetRelid
-#include "catalog/pg_am_d.h"
-#include "catalog/pg_class.h"
-#include "catalog/pg_index.h"
-#include "catalog/pg_opclass_d.h"
-#include "catalog/pg_sequence.h"
-#include "catalog/pg_type_d.h"
-#include "commands/sequence.h"
-#include "commands/tablespace.h"
-#include "executor/instrument.h"
-#include "executor/spi.h"
-#include "executor/tuptable.h"
-#include "storage/buffile.h"
-#include "storage/dsm.h"
-#include "storage/fd.h"
-#include "storage/ipc.h"
-#include "storage/procarray.h"
-#include "storage/relfilelocator.h"
-#include "storage/shm_toc.h"
-#include "utils/builtins.h"
-#include "utils/inval.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/resowner.h"
-#include "utils/snapmgr.h"
-#include "utils/syscache.h"
-#include "utils/timestamp.h"
-#include "utils/xid8.h"
+#include "postgres.h"
 
-#include "common/relpath.h"
-#include "miscadmin.h"
-#include "port.h"
-#include "port/atomics.h"
+#include "access/genam.h"
+#include "access/htup.h"
+#include "access/sdir.h"
+#include "access/skey.h"
+#include "access/stratnum.h"
+#include "executor/instrument.h"
+#include "executor/tuptable.h"
+#include "storage/itemptr.h"
+#include "utils/fmgroids.h"
+#include "utils/relcache.h"
+#include "utils/snapshot.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <tuple>
-#include <type_traits>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_session_contract;
+import std;
+export import bioseq.postgres.storage.indexing.minimizer_read_stats;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
@@ -98,7 +46,6 @@ import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimi
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
 import bioseq.storage.lazy_sequence;           // lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
@@ -117,8 +64,27 @@ import bioseq.postgres.storage.indexing.sql_row_codecs;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 import :catalog;
+import :catalog_row_io;
 import :fragment_image;
 export namespace bioseq::storage::indexing {
+/** Setup identity carried across restart inspection of one ready generation. */
+struct ready_minimizer_generation_identity {
+    std::uint64_t generation_id = 0;
+    std::uint64_t source_identity = 0;
+    std::uint64_t source_content_checksum = 0;
+    std::uint64_t storage_contract_checksum = 0;
+
+    /** Compares every authenticated generation identity field. */
+    [[nodiscard]] bool operator==(const ready_minimizer_generation_identity&) const = default;
+};
+
+/** Inspects the authenticated identity of one ready generation. */
+[[nodiscard]] ready_minimizer_generation_identity inspect_ready_minimizer_generation_identity_pg(
+    const minimizer_generation_administration_identity& identity,
+    std::uint64_t sequence_rowno,
+    Snapshot executor_snapshot,
+    expected_minimizer_generation_identity expected);
+
 /// Authenticated head, manifest, and directory returned by metadata discovery.
 struct minimizer_generation_read_metadata {
     minimizer_generation_head head{};
@@ -132,115 +98,6 @@ struct minimizer_generation_read_metadata {
 struct minimizer_generation_payload_read_group {
     index_sub_key_range range{};
     std::vector<index_sub_key_request> requests;
-};
-
-/// Physical and logical counters for one control or position read stage.
-struct minimizer_generation_payload_stage_read_stats {
-    std::uint64_t plan_calls = 0;
-    std::uint64_t planned_request_groups = 0;
-    std::uint64_t executed_request_groups = 0;
-    std::uint64_t range_scan_calls = 0;
-    std::uint64_t physical_heap_rows_read = 0;
-    std::uint64_t physical_bytes_read = 0;
-    std::uint64_t control_authorization_checks = 0;
-    index_chunk_read_stats read{};
-};
-
-/// Authorization counters for the full-generation relation-scan route.  Unlike the
-/// selected-range reader, this route consumes every payload row through one
-/// ordered primary-index scan after metadata/source authorization has completed.
-struct minimizer_generation_full_payload_read_stats {
-    std::uint64_t scan_calls = 0;
-    std::uint64_t planned_extents = 0;
-    std::uint64_t completed_extents = 0;
-    std::uint64_t control_chunks = 0;
-    std::uint64_t position_chunks = 0;
-    std::uint64_t control_bytes = 0;
-    std::uint64_t position_bytes = 0;
-    std::uint64_t payload_row_checksum = 0;
-};
-
-/// Compact hash-major-specific stats nested under the existing generation
-/// read receipt. It carries only correctness/performance gates that cannot be
-/// reconstructed from the control/position extent fields.
-struct hash_major_minimizer_cold_read_stats {
-    std::uint64_t layout_revision = 0;
-    std::uint64_t sessions = 0;
-    std::uint64_t generation_id = 0;
-    std::array<std::byte, 16> source_identity{};
-    std::uint64_t source_content_crc64 = 0;
-    std::array<std::byte, 32> storage_contract_digest{};
-    std::uint64_t directory_rows = 0;
-    std::uint64_t directory_bytes = 0;
-    std::uint64_t control_rows = 0;
-    std::uint64_t control_bytes = 0;
-    std::uint64_t posting_rows = 0;
-    std::uint64_t posting_bytes = 0;
-    std::uint64_t directory_row_crc_receipts = 0;
-    std::uint64_t directory_stream_crc_receipts = 0;
-    std::uint64_t control_row_crc_receipts = 0;
-    std::uint64_t control_block_crc_receipts = 0;
-    std::uint64_t control_semantic_receipts = 0;
-    std::uint64_t posting_row_crc_receipts = 0;
-    std::uint64_t posting_ranges_delivered = 0;
-    std::uint64_t posting_range_crc_receipts = 0;
-    std::uint64_t posting_semantic_receipts = 0;
-    std::uint64_t authorized_posting_bytes = 0;
-    std::uint64_t generic_source_fallback_calls = 0;
-    std::uint64_t query_count = 0;
-    std::uint64_t selected_block_count = 0;
-    std::uint64_t accepted_hash_count = 0;
-    std::uint64_t retained_position_count = 0;
-    std::uint64_t directory_stage_peak_bytes = 0;
-    std::uint64_t control_stage_peak_bytes = 0;
-    std::uint64_t posting_stage_peak_bytes = 0;
-    std::uint64_t peak_admitted_bytes = 0;
-    std::uint64_t retained_owner_bytes = 0;
-    std::uint64_t admitted_bytes = 0;
-    std::uint64_t failures = 0;
-    bool saturated = false;
-};
-
-/// Aggregate receipt for one current-generation relation read session.
-struct minimizer_generation_read_stats {
-    cold_index_preparation_stats cold{};
-    std::uint64_t relation_opens = 0;
-    std::uint64_t index_scans = 0;
-    std::uint64_t head_scans = 0;
-    std::uint64_t head_rows_read = 0;
-    std::uint64_t head_bytes_read = 0;
-    std::uint64_t manifest_directory_scans = 0;
-    std::uint64_t manifest_rows_read = 0;
-    std::uint64_t manifest_bytes_read = 0;
-    std::uint64_t directory_chunks_read = 0;
-    std::uint64_t directory_bytes_read = 0;
-    std::uint64_t metadata_repeated_reads = 0;
-    std::uint64_t metadata_heap_rows_read = 0;
-    std::uint64_t metadata_bytes_read = 0;
-    std::uint64_t payload_heap_rows_read = 0;
-    std::uint64_t payload_bytes_read = 0;
-    std::uint64_t total_heap_rows_read = 0;
-    std::uint64_t total_bytes_read = 0;
-    std::uint64_t toast_values_read = 0;
-    std::uint64_t detoast_bytes = 0;
-    std::uint64_t explicit_copy_bytes = 0;
-    std::uint64_t bulk_read_calls = 0;
-    std::uint64_t planned_request_groups = 0;
-    std::uint64_t executed_request_groups = 0;
-    std::uint64_t range_scan_calls = 0;
-    std::uint64_t cache_lookups = 0;
-    std::uint64_t cache_populations = 0;
-    std::uint64_t source_parent_rows_read = 0;
-    std::uint64_t source_catalog_rows_read = 0;
-    std::uint64_t source_catalog_index_scans = 0;
-    std::uint64_t source_fragment_rows_read = 0;
-    std::uint64_t source_decoded_bp = 0;
-    std::uint64_t source_storage_incarnations_checked = 0;
-    index_chunk_read_stats payload{};
-    minimizer_generation_payload_stage_read_stats controls{};
-    minimizer_generation_payload_stage_read_stats positions{};
-    minimizer_generation_full_payload_read_stats full_generation{};
-    hash_major_minimizer_cold_read_stats hash_major{};
 };
 
 namespace minimizer_generation_full_crc_detail {
@@ -1229,6 +1086,50 @@ class index_storage_fragment_generation_read_session {
     /// Validate stage equations, close every PG resource, and return the receipt.
     [[nodiscard]] minimizer_generation_read_stats finish();
 };
+
+/// Normal open outcome with either an owned session or a classified relation failure.
+struct minimizer_generation_read_session_open_result {
+    std::optional<index_storage_fragment_generation_read_session> session{};
+    minimizer_generation_relation_inspection failure{
+        .kind = minimizer_generation_relation_kind::malformed,
+        .schema_error = minimizer_generation_schema_error::none,
+    };
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return session.has_value();
+    }
+};
+
+/// Bind classification and reading to one heap descriptor and its primary
+/// index. Unrelated secondary indexes are deliberately neither opened nor
+/// counted.
+/// A successful result owns both AccessShareLock references until finish(). An
+/// unsuccessful normal result owns neither.  PostgreSQL ERROR remains an
+/// exception so the transaction ResourceOwner retains its ordinary authority.
+[[nodiscard]] inline minimizer_generation_read_session_open_result
+open_exact_minimizer_generation_read_session_pg(std::string_view table_name,
+                                                std::string_view index_name,
+                                                std::uint64_t query_key,
+                                                const borrowed_executor_read_context& executor_read,
+                                                expected_minimizer_generation_identity expected) {
+    if (!executor_read.valid()) {
+        minimizer_generation_storage_error_as_cpp(
+            "generation read requires a valid borrowed executor context");
+    }
+    minimizer_generation_read_session_open_result result{};
+    try {
+        result.session.emplace(table_name,
+                               query_key,
+                               executor_read.snapshot(),
+                               expected,
+                               executor_read.tablespace_oid(),
+                               minimizer_generation_snapshot_registration::borrow_registered,
+                               index_name);
+    } catch (const minimizer_generation_relation_open_failure& failure) {
+        result.failure = failure.inspection;
+    }
+    return result;
+}
 
 static_assert(!std::is_default_constructible_v<index_storage_fragment_generation_read_session>);
 static_assert(!std::is_copy_constructible_v<index_storage_fragment_generation_read_session>);

@@ -21,13 +21,16 @@
  */
 module;
 
+#include <bioseq/pg_compat.h>
+
+extern "C" {
 #include "commands/extension.h"
 #include "parser/parse_func.h"
 #include "utils/syscache.h"
+}
 
 #include <algorithm>
 #include <array>
-#include <bioseq/pg_compat.h>
 #include <cstdint>
 #include <optional>
 #include <ranges>

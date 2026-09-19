@@ -11,6 +11,7 @@ module;
 
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -20,8 +21,75 @@ module;
 export module bioseq.chaining.simd;
 
 import bioseq.chaining.core;
+import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::chaining {
+
+/// Three coordinate arrays, checked before the target-local SoA allocation.
+[[nodiscard]] constexpr std::optional<std::size_t>
+simd_chaining_soa_elements(std::size_t count) noexcept {
+    return bioseq::common::checked_mul(count, std::size_t{3u});
+}
+
+/// The existing backtracker stores one N-element path per selected SIMD lane.
+[[nodiscard]] constexpr std::optional<std::size_t>
+simd_chaining_path_elements(std::size_t count, std::size_t lanes) noexcept {
+    if (lanes < 2u || count > static_cast<std::size_t>((std::numeric_limits<std::int32_t>::max)())) {
+        return std::nullopt;
+    }
+    const auto elements = bioseq::common::checked_mul(count, lanes);
+    if (!elements ||
+        *elements > static_cast<std::size_t>((std::numeric_limits<std::int32_t>::max)()) ||
+        !bioseq::common::checked_mul(*elements, sizeof(std::int32_t))) {
+        return std::nullopt;
+    }
+    return elements;
+}
+
+/// Logical SIMD workspace; physical context blocks are admitted separately.
+struct simd_chaining_storage_plan {
+    chaining_output_storage_plan output;
+    std::size_t soa_u32_elements;
+    std::size_t forward_visited_elements;
+    std::size_t logical_bytes_before_lane_paths;
+
+    /// Bind the selected target's real lane count, never an assumed NEON width.
+    [[nodiscard]] constexpr std::optional<std::size_t>
+    path_elements(std::size_t lanes) const noexcept {
+        return simd_chaining_path_elements(output.anchor_count, lanes);
+    }
+
+    [[nodiscard]] constexpr std::optional<std::size_t>
+    logical_scratch_bytes(std::size_t lanes) const noexcept {
+        const auto elements = path_elements(lanes);
+        if (!elements) {
+            return std::nullopt;
+        }
+        const auto bytes = bioseq::common::checked_mul(*elements, sizeof(std::int32_t));
+        return bytes ? bioseq::common::checked_add(logical_bytes_before_lane_paths, *bytes)
+                     : std::nullopt;
+    }
+};
+
+[[nodiscard]] constexpr std::optional<simd_chaining_storage_plan>
+derive_simd_chaining_storage_plan(std::size_t count, const chaining_parameters& params) noexcept {
+    if (count > static_cast<std::size_t>((std::numeric_limits<std::int32_t>::max)()) ||
+        (params.simd_policy != simd_chaining_policy::exact_visited &&
+         params.simd_policy != simd_chaining_policy::bounded_batch_approximate)) {
+        return std::nullopt;
+    }
+    const auto output = derive_chaining_output_storage_plan(count, params.min_seed_count);
+    const auto soa = simd_chaining_soa_elements(count);
+    const bool exact = params.simd_policy == simd_chaining_policy::exact_visited;
+    // SoA 3*u32, forward 3*i32, scored backtracking 2*i32,
+    // backtracking visited i32, and exact-policy forward visited i32.
+    const auto bytes = bioseq::common::checked_mul(count,
+        (9u + static_cast<std::size_t>(exact)) * sizeof(std::int32_t));
+    if (!output || !soa || !bytes) {
+        return std::nullopt;
+    }
+    return simd_chaining_storage_plan{*output, *soa, exact ? count : 0u, *bytes};
+}
 
 /// Terminal status reported when SIMD chaining cannot complete authentically.
 enum class simd_chaining_status : std::uint8_t {

@@ -5,6 +5,7 @@
 module;
 
 #include <cstdint>
+#include <fmt/format.h>
 #include <libassert/assert.hpp>
 
 #define VK_NO_PROTOTYPES 1
@@ -183,6 +184,8 @@ bool gpu_arena::ensure_capacity(std::uint64_t device_bytes,
             // creates an unadmitted overlap between prior and replacement
             // allocations or a geometric 2x tail.
             device_.reset();
+            device_permit_.release();
+            device_admission_established_ = false;
             device_capacity_ = 0u;
             device_ = runtime_->create_device_buffer(device_bytes, k_gpu_arena_usage);
             if (device_.mapped == nullptr)
@@ -192,6 +195,8 @@ bool gpu_arena::ensure_capacity(std::uint64_t device_bytes,
         }
         if (upload_bytes > upload_capacity_) {
             upload_.reset();
+            upload_permit_.release();
+            upload_admission_established_ = false;
             upload_capacity_ = 0u;
             upload_ = runtime_->create_host_buffer(upload_bytes,
                                                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
@@ -201,6 +206,8 @@ bool gpu_arena::ensure_capacity(std::uint64_t device_bytes,
         }
         if (download_bytes > download_capacity_) {
             download_.reset();
+            download_permit_.release();
+            download_admission_established_ = false;
             download_capacity_ = 0u;
             download_ = runtime_->create_host_buffer(download_bytes,
                                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT |
@@ -208,6 +215,127 @@ bool gpu_arena::ensure_capacity(std::uint64_t device_bytes,
             download_capacity_ = download_.bytes;
             download_cursor_ = 0;
         }
+    } catch (const vulkan_runtime_error&) {
+        return false;
+    }
+    return true;
+}
+
+/// @brief Establishes exact physical admission for MPS arena backing allocations.
+bool gpu_arena::ensure_admitted_capacity(std::uint64_t device_bytes,
+                                         std::uint64_t upload_bytes,
+                                         std::uint64_t download_bytes) {
+    const auto establish = [this](buffer& current,
+                                  bioseq::parallelism::memory_permit& current_permit,
+                                  bool& admission_established,
+                                  std::uint64_t& capacity,
+                                  std::uint64_t& cursor,
+                                  std::uint64_t requested_bytes,
+                                  VkBufferUsageFlags usage,
+                                  bool host_buffer,
+                                  const char* label) {
+        if (requested_bytes == 0u ||
+            (admission_established && current.is_valid() && capacity >= requested_bytes)) {
+            return;
+        }
+        // A legacy arena backing has no adjacent physical receipt. It is idle at
+        // this boundary, so remove it before reserving a replacement rather than
+        // pretending its unaccounted overlap is covered by the fresh permit.
+        if (!admission_established && current.is_valid()) {
+            current.reset();
+            current_permit.release();
+            capacity = 0u;
+            cursor = 0u;
+        }
+
+        const std::uint64_t requirement =
+            runtime_->buffer_memory_requirement_locked(requested_bytes, usage);
+        bioseq::parallelism::memory_admission_failure failure{};
+        auto candidate_permit =
+            bioseq::parallelism::memory_admission_controller::instance().try_reserve(
+                requirement, &failure);
+        if (!candidate_permit) {
+            throw vulkan_runtime_error(fmt::format(
+                "gpu arena {} backing admission denied: reason={} requested={}",
+                label,
+                bioseq::parallelism::memory_admission_failure_reason_name(failure.reason),
+                failure.requested_bytes));
+        }
+
+        buffer replacement{};
+        const auto materialization =
+            bioseq::parallelism::memory_admission_controller::instance().materialize(
+                *candidate_permit,
+                [this, &replacement, requested_bytes, usage, host_buffer, label]() {
+                    replacement = host_buffer
+                        ? runtime_->create_host_buffer(requested_bytes, usage)
+                        : runtime_->create_device_buffer(requested_bytes, usage);
+                    if (replacement.mapped == nullptr ||
+                        replacement.allocation_bytes >
+                            (std::numeric_limits<std::size_t>::max)()) {
+                        throw vulkan_runtime_error(
+                            fmt::format("gpu arena {} backing is not completely host-mapped", label));
+                    }
+                    std::memset(replacement.mapped,
+                                0,
+                                static_cast<std::size_t>(replacement.allocation_bytes));
+                    return bioseq::parallelism::memory_materialization_snapshot{
+                        .actual_allocation_bytes = replacement.allocation_bytes,
+                        .fully_touched_bytes = replacement.allocation_bytes,
+                        .is_host_visible = replacement.is_host_visible_coherent(),
+                        .is_host_coherent = replacement.is_host_visible_coherent(),
+                        .is_process_footprint_reflected =
+                            replacement.process_footprint_reflected,
+                    };
+                });
+        if (replacement.allocation_bytes != requirement ||
+            materialization.allocation_snapshot.actual_allocation_bytes != requirement ||
+            materialization.admitted_bytes != requirement ||
+            materialization.allocation_snapshot.fully_touched_bytes < requirement ||
+            materialization.is_permit_released == static_cast<bool>(*candidate_permit)) {
+            throw vulkan_runtime_error(
+                fmt::format("gpu arena {} backing materialization proof is inconsistent", label));
+        }
+
+        // Keep the prior admitted storage and permit alive until the fresh block
+        // has completed allocation and full touch. Release storage before permit.
+        current.reset();
+        current_permit.release();
+        current = std::move(replacement);
+        current_permit = std::move(*candidate_permit);
+        admission_established = true;
+        capacity = current.bytes;
+        cursor = 0u;
+    };
+
+    try {
+        establish(device_,
+                  device_permit_,
+                  device_admission_established_,
+                  device_capacity_,
+                  device_cursor_,
+                  device_bytes,
+                  k_gpu_arena_usage,
+                  false,
+                  "device");
+        establish(upload_,
+                  upload_permit_,
+                  upload_admission_established_,
+                  upload_capacity_,
+                  upload_cursor_,
+                  upload_bytes,
+                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                  true,
+                  "upload");
+        establish(download_,
+                  download_permit_,
+                  download_admission_established_,
+                  download_capacity_,
+                  download_cursor_,
+                  download_bytes,
+                  VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                  true,
+                  "download");
     } catch (const vulkan_runtime_error&) {
         return false;
     }
@@ -222,9 +350,15 @@ bool gpu_arena::release_idle_capacity() noexcept {
     device_.reset();
     upload_.reset();
     download_.reset();
+    device_permit_.release();
+    upload_permit_.release();
+    download_permit_.release();
     device_capacity_ = 0u;
     upload_capacity_ = 0u;
     download_capacity_ = 0u;
+    device_admission_established_ = false;
+    upload_admission_established_ = false;
+    download_admission_established_ = false;
     return true;
 }
 
@@ -283,10 +417,10 @@ void runtime::ensure_dispatch_descriptor_pool_locked() {
         return;
     VkDescriptorPoolSize size{};
     size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    size.descriptorCount = 4096u * 9u;
+    size.descriptorCount = k_gpu_dispatch_storage_descriptor_capacity;
     VkDescriptorPoolCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    info.maxSets = 4096u;
+    info.maxSets = k_gpu_dispatch_descriptor_set_capacity;
     info.poolSizeCount = 1;
     info.pPoolSizes = &size;
     check_vk(vkCreateDescriptorPool(device_, &info, nullptr, &dispatch_descriptor_pool_),

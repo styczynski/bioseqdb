@@ -379,7 +379,7 @@ if(TARGET bioseq_external_api_integration_tests)
     "${_bioseq_external_source_root}/backend/sequences/rank_pack_core.cppm"
     "${_bioseq_external_source_root}/backend/sequences/rank_pack.cppm"
     "${_bioseq_external_source_root}/backend/storage/lazy_sequence.cppm"
-    "${_bioseq_external_source_root}/backend/storage/lazy_sequence_parts/view_contract.cppm"
+    "${_bioseq_external_source_root}/backend/storage/lazy_sequence_view.cppm"
     "${_bioseq_external_source_root}/backend/storage/lazy_sequence_parts/owners.cppm"
     "${_bioseq_external_source_root}/backend/storage/lazy_sequence_parts/adapters.cppm"
     "${_bioseq_external_source_root}/backend/storage/lazy_sequence_parts/transforms.cppm"

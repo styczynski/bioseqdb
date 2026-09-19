@@ -51,37 +51,13 @@ extern "C" {
 #include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
 #include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <tuple>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
-export module bioseq.postgres.storage.indexing.chunked_storage:hash_major_session_admin;
+export module bioseq.postgres.storage.indexing.hash_major_session_admin;
+import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
@@ -116,64 +92,10 @@ import bioseq.postgres.storage.physical;
 import bioseq.postgres.storage.indexing.sql_row_codecs;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
-import :catalog;
-import :hash_major_writer;
-import :hash_major_parallel_probe;
-import :hash_major_session_reader;
+import bioseq.postgres.storage.indexing.chunked_storage;
+import bioseq.postgres.storage.indexing.hash_major_parallel_probe;
+export import bioseq.postgres.storage.indexing.hash_major_session_reader;
 export namespace bioseq::storage::indexing {
-/// Normal open outcome with either an owned reader or classified absence.
-struct hash_major_minimizer_read_session_open_result {
-    std::optional<index_storage_hash_major_minimizer_read_session> session{};
-    minimizer_generation_relation_inspection relation_failure{
-        .kind = minimizer_generation_relation_kind::malformed,
-        .schema_error = minimizer_generation_schema_error::none,
-    };
-    bool head_absent = false;
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return session.has_value();
-    }
-};
-
-/// Open the exact current-generation reader or return a classified absence
-/// without weakening schema validation.
-[[nodiscard]] inline hash_major_minimizer_read_session_open_result
-open_exact_hash_major_minimizer_read_session_pg(
-    std::string_view table_name,
-    std::string_view index_name,
-    std::uint64_t query_key,
-    const borrowed_executor_read_context& executor_read) {
-    if (!executor_read.valid()) {
-        minimizer_generation_storage_error_as_cpp(
-            "hash-major read requires a valid executor context");
-    }
-    hash_major_minimizer_read_session_open_result result{};
-    try {
-        result.session.emplace(table_name,
-                               index_name,
-                               query_key,
-                               executor_read.snapshot(),
-                               executor_read.tablespace_oid());
-        if (!result.session->read_active_head_manifest_once()) {
-            result.session->close_head_absent();
-            result.session.reset();
-            result.head_absent = true;
-            result.relation_failure = {
-                .kind = minimizer_generation_relation_kind::current_exact,
-                .schema_error = minimizer_generation_schema_error::none,
-            };
-        } else {
-            result.relation_failure = {
-                .kind = minimizer_generation_relation_kind::current_exact,
-                .schema_error = minimizer_generation_schema_error::none,
-            };
-        }
-    } catch (const minimizer_generation_relation_open_failure& failure) {
-        result.relation_failure = failure.inspection;
-    }
-    return result;
-}
-
 /// Read-only restart/audit receipt for the complete fixed hash-major metadata
 /// surface. parallel_scan_stream descriptors carry the directory/control/posting counts,
 /// byte lengths and CRCs. The manifest carries the generation CRC.
@@ -318,92 +240,6 @@ inline void hash_major_minimizer_parallel_scan_probe_worker_main_pg(dsm_segment*
     Relation relation = table_open(header->relation_oid, NoLock);
     parallel_scan_pg_leaf(relation, parallel_scan, header, seen_words);
     table_close(relation, NoLock);
-}
-
-/// Result of one current-generation logical-index clear.
-struct minimizer_generation_clear_result {
-    std::uint64_t dropped_relation_count = 0;
-    std::uint64_t deleted_metadata_age_rows = 0;
-};
-
-/// Parsed bucket and shard from one canonical generation sidecar name.
-struct canonical_generation_sidecar_name {
-    bool valid = false;
-    std::uint8_t bucket_idx = 0;
-    std::uint32_t shard_idx = 0;
-};
-
-/// Parse only the exact spelling emitted by `format_seqidx_name`: unsigned
-/// canonical decimal bucket, one underscore, unsigned canonical decimal shard.
-/// Leading zeroes, signs, trailing decorations, overflow, and extra separators
-/// are rejected without allocation.
-[[nodiscard]] inline canonical_generation_sidecar_name
-parse_canonical_generation_sidecar_name(std::string_view relation_name,
-                                        std::string_view prefix) noexcept {
-    if (!relation_name.starts_with(prefix))
-        return {};
-    const std::string_view suffix = relation_name.substr(prefix.size());
-    const std::size_t separator = suffix.find('_');
-    if (separator == std::string_view::npos || separator == 0 || separator + 1 >= suffix.size() ||
-        suffix.find('_', separator + 1) != std::string_view::npos) {
-        return {};
-    }
-    const std::string_view bucket_text = suffix.substr(0, separator);
-    const std::string_view shard_text = suffix.substr(separator + 1);
-    if ((bucket_text.size() > 1 && bucket_text.front() == '0') ||
-        (shard_text.size() > 1 && shard_text.front() == '0')) {
-        return {};
-    }
-    const auto parse_decimal =
-        [](std::string_view text, std::uint64_t maximum, std::uint64_t& result) noexcept {
-            result = 0;
-            for (const char character : text) {
-                if (character < '0' || character > '9')
-                    return false;
-                const std::uint64_t digit = static_cast<std::uint64_t>(character - '0');
-                if (result > (maximum - digit) / 10u)
-                    return false;
-                result = result * 10u + digit;
-            }
-            return true;
-        };
-    std::uint64_t bucket = 0;
-    std::uint64_t shard = 0;
-    if (!parse_decimal(bucket_text, (std::numeric_limits<std::uint8_t>::max)(), bucket) ||
-        !parse_decimal(shard_text, (std::numeric_limits<std::uint32_t>::max)(), shard)) {
-        return {};
-    }
-    return canonical_generation_sidecar_name{
-        .valid = true,
-        .bucket_idx = static_cast<std::uint8_t>(bucket),
-        .shard_idx = static_cast<std::uint32_t>(shard),
-    };
-}
-
-/// Clear-only DDL executor. Every SPI transition is checked and the caller-owned
-/// activity bit remains set if PostgreSQL jumps
-/// out of SPI_execute so the enclosing PG_CATCH can finish the connection.
-inline void run_checked_generation_clear_ddl(const char* ddl, bool& spi_active) {
-    if (ddl == nullptr || *ddl == '\0' || spi_active) {
-        minimizer_generation_storage_error("generation clear DDL state is invalid");
-    }
-    const int connect_rc = SPI_connect();
-    if (connect_rc != SPI_OK_CONNECT) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("bioseq current-generation index: generation clear DDL SPI_connect failed"),
-                 errdetail("SPI rc=%d", connect_rc)));
-    }
-    spi_active = true;
-    const int execute_rc = SPI_execute(ddl, /*read_only=*/false, /*tcount=*/0);
-    const int finish_rc = SPI_finish();
-    spi_active = finish_rc != SPI_OK_FINISH;
-    if (execute_rc != SPI_OK_UTILITY || finish_rc != SPI_OK_FINISH) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("bioseq current-generation index: generation clear DDL failed"),
-                 errdetail("execute_rc=%d finish_rc=%d", execute_rc, finish_rc)));
-    }
 }
 
 } // namespace bioseq::storage::indexing

@@ -68,6 +68,10 @@ namespace {
         return std::string{k_chain_range_build_body};
     case shader_kind::coordinate_reduce:
         return std::string{k_coordinate_reduce_body};
+    case shader_kind::chain_candidate_reduce:
+        return std::string{k_chain_candidate_reduce_body};
+    case shader_kind::mapping_quality_reduce:
+        return std::string{k_mapping_quality_reduce_body};
     case shader_kind::coordinate_vote_reduce:
         return std::string{k_coordinate_vote_reduce_body};
     case shader_kind::coordinate_vote_reduce_batch:

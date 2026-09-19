@@ -3,8 +3,9 @@
  * @brief Verifies Vulkan chaining, CIGAR, coordinate, and shader-layout contracts.
  */
 
-#include <hwy/highway.h>
 #include <catch2/catch_test_macros.hpp>
+#include <hwy/highway.h>
+#include <vulkan/vulkan.h>
 
 import std;
 import bioseq.common.logging;
@@ -20,6 +21,7 @@ import bioseq.chaining.vulkan;       // chain_anchors_vulkan / is_vulkan_chainin
 import bioseq.gpu.vulkan.runtime;    // runtime / scan_spirv_layout / pipeline key
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.storage.lazy_sequence; // make_resident_lazy_sequence
+import bioseq.parallelism.memory_admission;
 
 using namespace seq::literals;
 
@@ -232,8 +234,10 @@ TEST_CASE("vulkan_tiled_dp with vulkan_enabled=false fails",
         for (std::size_t index = 0; index < query_sequence.size(); ++index) {
             target_sequence[300 + index] = query_sequence[index];
         }
+        // The immutable statement plan rejects a disabled selected backend
+        // before allocation or entry into the Vulkan runtime.
         REQUIRE_THROWS_AS(run_pipeline(query_sequence, target_sequence, vulkan_params),
-                          gv::vulkan_runtime_error);
+                          std::invalid_argument);
     }
 }
 
@@ -259,6 +263,114 @@ TEST_CASE("software Vulkan chaining fails loudly",
 // ===========================================================================
 // GPU chaining invariants (chain_anchors_vulkan directly)
 // ===========================================================================
+
+TEST_CASE("admitted Vulkan chaining requires its hooked ordinary context",
+          "[component:bioseq][layer:unit][feature:chaining]") {
+    auto params = default_chain_params();
+    SECTION("an ordinary context cannot claim attempt admission") {
+        bioseq::parallelism::operation_memory_retention retention;
+        context::context ordinary;
+        context::installed_context_scope installed{ordinary};
+        auto chains = ch::make_arena_slab<ch::chain>();
+        auto reordered = ch::make_arena_slab<ch::anchor>();
+        REQUIRE_FALSE(ordinary.has_backing_allocation_hook());
+        REQUIRE_THROWS_AS(
+            ch::chain_anchors_vulkan({}, params, chains, reordered, &retention),
+            gv::vulkan_runtime_error);
+    }
+    SECTION("the experimental coordinate tail is not an admitted campaign route") {
+        bioseq::parallelism::memory_admission_controller admission;
+        bioseq::simd::pipe::route_attempt_memory attempt{admission, {}, nullptr};
+        context::installed_context_scope installed{attempt.fresh_context};
+        auto chains = ch::make_arena_slab<ch::chain>();
+        auto reordered = ch::make_arena_slab<ch::anchor>();
+        params.coordinate_only = true;
+        REQUIRE(attempt.fresh_context.has_backing_allocation_hook());
+        REQUIRE_THROWS_AS(
+            ch::chain_anchors_vulkan({}, params, chains, reordered, &attempt.retention),
+            gv::vulkan_runtime_error);
+    }
+}
+
+TEST_CASE("admitted Vulkan chaining keeps only context storage after device completion",
+          "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
+    if (skip_untrusted_vulkan_chaining()) return;
+    auto& runtime = gv::runtime::instance();
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const auto baseline = admission.reserved_bytes();
+    const auto cache_baseline = runtime.pipeline_cache_metadata_reserved_bytes();
+    const auto dispatches_before = runtime.chaining_dispatch_count();
+    const auto params = default_chain_params();
+    std::array<ch::anchor, 12> anchors{};
+    for (std::size_t i = 0u; i < anchors.size(); ++i) {
+        anchors[i] = make_anchor(1000u + i * 12u, 500u + i * 12u, 0u, 15u);
+    }
+    {
+        bioseq::simd::pipe::route_attempt_memory attempt{admission, {}, nullptr};
+        context::installed_context_scope installed{attempt.fresh_context};
+        const auto initial_retained = attempt.retention.retained_bytes();
+        {
+            auto chain_scope = context::current().push<context::arena::chain>();
+            auto chains = ch::make_arena_slab<ch::chain>();
+            auto reordered = ch::make_arena_slab<ch::anchor>();
+            chains.reserve(anchors.size() + 1u);
+            reordered.reserve(anchors.size());
+            REQUIRE(ch::chain_anchors_vulkan(
+                anchors, params, chains, reordered, &attempt.retention));
+            REQUIRE(chains.size() != 0u);
+            REQUIRE(reordered.size() != 0u);
+            REQUIRE(runtime.chaining_dispatch_count() > dispatches_before);
+            REQUIRE(admission.reserved_bytes() == baseline + attempt.retention.retained_bytes() +
+                runtime.pipeline_cache_metadata_reserved_bytes() - cache_baseline);
+        }
+        // Rewinding/destroying slabs never releases a still-retained context block.
+        REQUIRE(attempt.retention.retained_bytes() >= initial_retained);
+        REQUIRE(admission.reserved_bytes() == baseline + attempt.retention.retained_bytes() +
+            runtime.pipeline_cache_metadata_reserved_bytes() - cache_baseline);
+    }
+    REQUIRE(admission.reserved_bytes() == baseline +
+        runtime.pipeline_cache_metadata_reserved_bytes() - cache_baseline);
+}
+
+TEST_CASE("admitted Vulkan chaining buffer denies one byte short before materialization",
+          "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
+    if (skip_untrusted_vulkan_chaining()) return;
+    auto& runtime = gv::runtime::instance();
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
+    const auto baseline = admission.reserved_bytes();
+    const auto previous_cap = admission.index_memory_cap_bytes();
+    struct restore_cap {
+        bioseq::parallelism::memory_admission_controller& admission;
+        std::uint64_t value;
+        ~restore_cap() { admission.set_index_memory_cap_bytes(value); }
+    } restore{admission, previous_cap};
+    constexpr auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    constexpr std::uint64_t logical_bytes = 12u * sizeof(ch::anchor);
+    const auto requirement = runtime.buffer_allocation_requirement(logical_bytes, usage);
+    REQUIRE(requirement >= logical_bytes);
+    const auto memory_plan = ch::make_vulkan_chaining_memory_plan(12u, 1u);
+    bioseq::parallelism::memory_permit permit;
+    admission.set_index_memory_cap_bytes(baseline + requirement - 1u);
+    REQUIRE_THROWS_AS(ch::vulkan_chaining_detail::make_chaining_device_buffer(
+        runtime, logical_bytes, usage, requirement, memory_plan, &permit),
+        ch::vulkan_chaining_admission_error);
+    REQUIRE_FALSE(permit);
+    REQUIRE(admission.reserved_bytes() == baseline);
+
+    admission.set_index_memory_cap_bytes(baseline + requirement);
+    {
+        auto allocation = ch::vulkan_chaining_detail::make_chaining_device_buffer(
+            runtime, logical_bytes, usage, requirement, memory_plan, &permit);
+        REQUIRE(allocation.allocation_bytes == requirement);
+        REQUIRE((permit.bytes() == 0u || permit.bytes() == requirement));
+        REQUIRE(admission.reserved_bytes() == baseline + permit.bytes());
+        const auto* bytes = static_cast<const std::byte*>(allocation.mapped);
+        REQUIRE(std::all_of(bytes, bytes + requirement,
+                            [](std::byte value) { return value == std::byte{}; }));
+    }
+    permit.release();
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
 
 TEST_CASE("Vulkan chaining output invariants",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
@@ -460,14 +572,14 @@ TEST_CASE("Vulkan simple extension emits CIGAR",
     CHECK(result.packed_cigar[0] == ((k_length << 4) | 0u));
 }
 
-TEST_CASE("Vulkan long exact CIGAR avoids bounded traceback",
+TEST_CASE("Vulkan 20kb exact CIGAR has no legacy span ceiling",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
     auto& runtime = gv::runtime::instance();
     INFO("Vulkan runtime error: " << runtime.initialization_error());
     if (skip_untrusted_vulkan_chaining())
         return;
 
-    constexpr std::uint32_t k_length = 2048u;
+    constexpr std::uint32_t k_length = 20'000u;
     std::vector<std::uint32_t> query_symbols(k_length);
     std::vector<std::uint32_t> target_symbols(k_length);
     for (std::uint32_t i = 0; i < k_length; ++i) {
@@ -527,6 +639,222 @@ TEST_CASE("Vulkan long exact CIGAR avoids bounded traceback",
     CHECK(r.target_end == 3001u + k_length);
     CHECK(r.cigar_length == 1u);
     CHECK(result.packed_cigar[0] == ((k_length << 4) | 0u));
+}
+
+TEST_CASE("Vulkan 20kb banded CIGAR traceback remains q1024 representable",
+          "[component:bioseq][layer:unit][feature:chaining]") {
+    constexpr std::uint64_t words = gv::gpu_alignment_cigar_gridded_traceback_words(
+        20'000u,
+        20'000u,
+        gv::k_gpu_alignment_cigar_traceback_tile_len,
+        gv::k_gpu_alignment_cigar_traceback_tile_len,
+        gv::k_gpu_alignment_extension_max_band_width);
+    STATIC_REQUIRE(words == 2'041'941u);
+    STATIC_REQUIRE(words <= (std::numeric_limits<std::uint32_t>::max)());
+    STATIC_REQUIRE(words * 1'024u <= (std::numeric_limits<std::uint32_t>::max)());
+    STATIC_REQUIRE(words * 2'103u <= (std::numeric_limits<std::uint32_t>::max)());
+    STATIC_REQUIRE(words * 2'104u > (std::numeric_limits<std::uint32_t>::max)());
+}
+
+#ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE("Vulkan packed reverse 20kb mutations preserve compact CIGAR across forced waves",
+          "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
+    auto& runtime = gv::runtime::instance();
+    INFO("Vulkan runtime error: " << runtime.initialization_error());
+    if (skip_untrusted_vulkan_chaining())
+        return;
+
+    constexpr std::uint32_t k_length = 20'000u;
+    constexpr std::uint32_t k_job_count = 3u;
+    constexpr std::uint32_t k_band_width = 8u;
+    constexpr std::uint32_t k_cigar_capacity = 8u;
+    constexpr std::uint64_t k_test_wave_bytes = std::uint64_t{32} << 20u;
+    std::vector<std::uint32_t> logical_target(k_length);
+    std::uint32_t state = 0x13579bdfu;
+    for (std::uint32_t index = 0u; index < k_length; ++index) {
+        state = state * 1664525u + 1013904223u;
+        logical_target[index] = (state >> 30u) & 3u;
+    }
+    constexpr std::array mutation_positions{1'024u, 2'048u};
+    for (const std::uint32_t position : mutation_positions) {
+        logical_target[position] = 0u;
+        std::fill_n(logical_target.begin() + position + 1u, 256u, 2u);
+    }
+    std::vector<std::uint32_t> query = logical_target;
+    for (const std::uint32_t position : mutation_positions) {
+        query[position] = 1u;
+    }
+    std::vector<std::uint32_t> stored_reverse_target(k_length);
+    for (std::uint32_t index = 0u; index < k_length; ++index) {
+        stored_reverse_target[index] = 3u - logical_target[k_length - 1u - index];
+    }
+    const auto pack_dna4 = [](const std::span<const std::uint32_t> ranks) {
+        std::vector<std::uint64_t> packed((ranks.size() + 31u) / 32u, 0u);
+        for (std::size_t index = 0u; index < ranks.size(); ++index) {
+            packed[index / 32u] |= static_cast<std::uint64_t>(ranks[index]) << (2u * (index % 32u));
+        }
+        return packed;
+    };
+    const std::vector<std::uint64_t> query_packed = pack_dna4(std::span{query});
+    const std::vector<std::uint64_t> target_packed = pack_dna4(std::span{stored_reverse_target});
+    const std::uint32_t packed_byte_count =
+        static_cast<std::uint32_t>(query_packed.size() * sizeof(std::uint64_t));
+    const std::uint64_t traceback_words =
+        gv::gpu_alignment_cigar_gridded_traceback_words(k_length, k_length, 1u, 1u, k_band_width);
+    REQUIRE(traceback_words == 7'200'004u);
+    REQUIRE(traceback_words * sizeof(std::uint32_t) < k_test_wave_bytes);
+    REQUIRE(traceback_words * 2u * sizeof(std::uint32_t) > k_test_wave_bytes);
+
+    std::vector<gv::gpu_alignment_cigar_job_wire> jobs;
+    jobs.reserve(k_job_count);
+    for (std::uint32_t index = 0u; index < k_job_count; ++index) {
+        jobs.push_back(gv::gpu_alignment_cigar_job_wire{
+            .query_symbol_offset = 0u,
+            .target_symbol_offset = 0u,
+            .query_len = k_length,
+            .target_len = k_length,
+            .query_global_start = 100u + index * k_length,
+            .target_global_start = 200u + index * k_length,
+            .band_width = k_band_width,
+            .flags = gv::k_gpu_alignment_cigar_job_flag_packed_inputs |
+                     gv::k_gpu_alignment_cigar_job_flag_reverse_target,
+            .cigar_offset = index * k_cigar_capacity,
+            .cigar_capacity = k_cigar_capacity,
+            .traceback_tile_offset = 0u,
+            .traceback_tile_count = static_cast<std::uint32_t>(traceback_words),
+            .query_packed_byte_count = packed_byte_count,
+            .target_packed_byte_count = packed_byte_count,
+            .query_leading_symbol_offset = 0u,
+            .target_leading_symbol_offset = 0u,
+            .query_storage_unit_width = static_cast<std::uint32_t>(sizeof(std::uint64_t)),
+            .target_storage_unit_width = static_cast<std::uint32_t>(sizeof(std::uint64_t)),
+            .bits_per_symbol = 2u,
+            .problem_index = index,
+        });
+    }
+    const gv::gpu_alignment_cigar_params params{
+        .alphabet_size = 4u,
+        .max_band_width = k_band_width,
+        .tile_query = 1u,
+        .tile_target = 1u,
+        .match_score = 2,
+        .mismatch_penalty = 4,
+        .gap_open_short = 4,
+        .gap_extend_short = 2,
+        .gap_open_long = 24,
+        .gap_extend_long = 1,
+        .z_drop = 400,
+        .end_bonus = 0,
+        .flags = 0u,
+        .reserved = 0u,
+        .complement_rank_words = {0x00010203u},
+    };
+
+    const std::uint64_t before = runtime.alignment_extension_dispatch_count();
+    const gv::alignment_cigar_batch_result result =
+        runtime.run_alignment_packed_cigar_roundtrip_for_test(
+            std::as_bytes(std::span{query_packed}),
+            std::as_bytes(std::span{target_packed}),
+            jobs,
+            params,
+            k_job_count * k_cigar_capacity,
+            k_test_wave_bytes);
+    const std::uint64_t after = runtime.alignment_extension_dispatch_count();
+
+    REQUIRE(result.committed_submission_count == 4u);
+    REQUIRE(after == before + result.committed_submission_count);
+    REQUIRE(result.results.size() == k_job_count);
+    REQUIRE(result.packed_cigar.size() == k_job_count);
+    const std::int32_t expected_score =
+        static_cast<std::int32_t>((k_length - mutation_positions.size()) * params.match_score -
+                                  mutation_positions.size() * params.mismatch_penalty);
+    for (std::uint32_t index = 0u; index < k_job_count; ++index) {
+        const auto& alignment = result.results[index];
+        CHECK(alignment.status == gv::k_gpu_alignment_extension_status_ok);
+        CHECK(alignment.score == expected_score);
+        CHECK(alignment.max_score == expected_score);
+        CHECK(alignment.cigar_offset == index);
+        CHECK(alignment.cigar_length == 1u);
+        CHECK(alignment.num_matches == k_length - mutation_positions.size());
+        CHECK(alignment.block_length == k_length);
+        CHECK(result.packed_cigar[index] == ((k_length << 4u) | 0u));
+    }
+}
+#endif
+
+TEST_CASE("Vulkan oversized exact CIGAR batch uses trace-free GPU screening",
+          "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
+    auto& runtime = gv::runtime::instance();
+    INFO("Vulkan runtime error: " << runtime.initialization_error());
+    if (skip_untrusted_vulkan_chaining())
+        return;
+
+    constexpr std::uint32_t k_length = 20'000u;
+    constexpr std::uint32_t k_job_count = 5u;
+    std::vector<std::uint32_t> query_symbols(k_length);
+    std::vector<std::uint32_t> target_symbols(k_length);
+    for (std::uint32_t i = 0u; i < k_length; ++i) {
+        const std::uint32_t symbol = (i * 5u + 1u) & 3u;
+        query_symbols[i] = symbol;
+        target_symbols[i] = symbol;
+    }
+
+    std::vector<gv::gpu_alignment_cigar_job_wire> jobs;
+    jobs.reserve(k_job_count);
+    for (std::uint32_t i = 0u; i < k_job_count; ++i) {
+        jobs.push_back(gv::gpu_alignment_cigar_job_wire{
+            .query_symbol_offset = 0u,
+            .target_symbol_offset = 0u,
+            .query_len = k_length,
+            .target_len = k_length,
+            .query_global_start = 100u + i * k_length,
+            .target_global_start = 200u + i * k_length,
+            .band_width = gv::k_gpu_alignment_extension_max_band_width,
+            .flags = 0u,
+            .cigar_offset = i,
+            .cigar_capacity = 1u,
+            .traceback_tile_offset = 0u,
+            .traceback_tile_count = 0u,
+        });
+    }
+    const gv::gpu_alignment_cigar_params params{
+        .alphabet_size = 4u,
+        .max_band_width = gv::k_gpu_alignment_extension_max_band_width,
+        .tile_query = 128u,
+        .tile_target = 128u,
+        .match_score = 2,
+        .mismatch_penalty = 4,
+        .gap_open_short = 4,
+        .gap_extend_short = 2,
+        .gap_open_long = 24,
+        .gap_extend_long = 1,
+        .z_drop = 400,
+        .end_bonus = 0,
+        .flags = 0u,
+        .reserved = 0u,
+    };
+
+    const std::uint64_t before = runtime.alignment_extension_dispatch_count();
+    const gv::alignment_cigar_batch_result result = runtime.run_alignment_simple_cigar_roundtrip(
+        query_symbols, target_symbols, jobs, params, k_job_count);
+    const std::uint64_t after = runtime.alignment_extension_dispatch_count();
+
+    REQUIRE(after == before + 1u);
+    REQUIRE(result.committed_submission_count == 1u);
+    REQUIRE(result.results.size() == k_job_count);
+    REQUIRE(result.packed_cigar.size() == k_job_count);
+    for (std::uint32_t i = 0u; i < k_job_count; ++i) {
+        const auto& alignment = result.results[i];
+        CHECK(alignment.status == gv::k_gpu_alignment_extension_status_ok);
+        CHECK(alignment.score == static_cast<std::int32_t>(k_length * params.match_score));
+        CHECK(alignment.query_start == 100u + i * k_length);
+        CHECK(alignment.query_end == 100u + (i + 1u) * k_length);
+        CHECK(alignment.target_start == 200u + i * k_length);
+        CHECK(alignment.target_end == 200u + (i + 1u) * k_length);
+        CHECK(alignment.cigar_offset == i);
+        CHECK(alignment.cigar_length == 1u);
+        CHECK(result.packed_cigar[i] == ((k_length << 4) | 0u));
+    }
 }
 
 TEST_CASE("Vulkan simple CIGAR scores mismatches",
@@ -911,9 +1239,9 @@ TEST_CASE("Vulkan gridded CIGAR handles long many-gap traceback",
         static_cast<std::uint32_t>(query_symbols.size()),
         k_target_length,
         gv::k_gpu_alignment_cigar_traceback_tile_len,
-        gv::k_gpu_alignment_cigar_traceback_tile_len);
+        gv::k_gpu_alignment_cigar_traceback_tile_len,
+        gv::k_gpu_alignment_extension_max_band_width);
     REQUIRE(traceback_words_u64 <= std::numeric_limits<std::uint32_t>::max());
-    const std::uint32_t traceback_words = static_cast<std::uint32_t>(traceback_words_u64);
 
     const std::vector<gv::gpu_alignment_cigar_job_wire> jobs{
         gv::gpu_alignment_cigar_job_wire{
@@ -928,7 +1256,7 @@ TEST_CASE("Vulkan gridded CIGAR handles long many-gap traceback",
             .cigar_offset = 0,
             .cigar_capacity = 256,
             .traceback_tile_offset = 0,
-            .traceback_tile_count = traceback_words,
+            .traceback_tile_count = 0u,
         },
     };
     const gv::gpu_alignment_cigar_params params{
@@ -948,16 +1276,20 @@ TEST_CASE("Vulkan gridded CIGAR handles long many-gap traceback",
         .reserved = 0,
     };
 
+    const std::uint64_t before = runtime.alignment_extension_dispatch_count();
     const gv::alignment_cigar_batch_result result =
         runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
                                                      target_symbols,
                                                      jobs,
                                                      params,
                                                      /*packed_cigar_capacity=*/256u);
+    const std::uint64_t after = runtime.alignment_extension_dispatch_count();
 
+    REQUIRE(after == before + 2u);
+    REQUIRE(result.committed_submission_count == 2u);
     REQUIRE(result.results.size() == 1);
-    REQUIRE(result.packed_cigar.size() == 256);
     const gv::gpu_alignment_cigar_result_wire& r = result.results.front();
+    REQUIRE(result.packed_cigar.size() == r.cigar_length);
     CHECK(r.status == gv::k_gpu_alignment_extension_status_ok);
     CHECK(r.score == static_cast<std::int32_t>(
                          query_symbols.size() * params.match_score -

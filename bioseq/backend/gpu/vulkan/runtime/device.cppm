@@ -132,8 +132,8 @@ void prepare_shader_provider_runtime() {
 /// @brief Selects a physical device and creates the synchronous Vulkan runtime.
 void runtime::init() {
     // --- Instance ---
-    ensure_vulkan_loader_loaded_for_runtime();
     ensure_homebrew_moltenvk_icd_visible();
+    ensure_vulkan_loader_loaded_for_runtime();
     prepare_shader_provider_runtime();
 #if defined(__APPLE__)
     // MoltenVK can compile its internal command shaders while enumerating or
@@ -315,6 +315,16 @@ void runtime::init() {
     features_.vendor_id = selected_device_identity.vendor_id;
     features_.device_id = selected_device_identity.device_id;
     features_.pipeline_cache_uuid = selected_device_identity.pipeline_cache_uuid;
+#if defined(__APPLE__)
+    if (is_runtime_metal_archive_configuration_installed() &&
+        !bind_moltenvk_command_library_provenance(
+            selected_device_identity,
+            reinterpret_cast<const void*>(vkCreateInstance),
+            reinterpret_cast<const void*>(set_workgroup_size_mvk_))) {
+        throw vulkan_runtime_error(
+            "immutable MoltenVK command-library provenance did not match the selected device");
+    }
+#endif
     install_metal_pipeline_archive_interpose(selected_device_identity);
     const VkResult create_device_result =
         vkCreateDevice(physical_, &device_info, nullptr, &device_);

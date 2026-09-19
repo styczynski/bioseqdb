@@ -56,9 +56,10 @@ void write_fasta(const std::string& path, std::string_view header,
     }
     std::string process_output;
     std::array<char, 1 << 16> buffer;
-    while (const std::size_t bytes_read =
-               std::fread(buffer.data(), 1, buffer.size(), process_stream);
-           bytes_read > 0) {
+    for (std::size_t bytes_read =
+             std::fread(buffer.data(), 1, buffer.size(), process_stream);
+         bytes_read > 0;
+         bytes_read = std::fread(buffer.data(), 1, buffer.size(), process_stream)) {
         process_output.append(buffer.data(), bytes_read);
     }
     ::pclose(process_stream);

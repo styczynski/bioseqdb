@@ -148,7 +148,78 @@ class runtime {
                                          std::int32_t max_iter,
                                          float gap_penalty,
                                          float skip_penalty,
-                                         std::int32_t max_chain_skip = 0);
+                                         std::int32_t max_chain_skip = 0
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                         , runtime_pipeline_operation_token* completed_operation = nullptr
+#endif
+                                         );
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    /// Borrowed, nonallocating pre-commit validation. The callback may throw;
+    /// it must not call runtime methods while the queue/cache mutex is held.
+    using selected_pipeline_publication_validator = void (*)(
+        void*, const runtime_gpu_execution_environment_snapshot&,
+        const runtime_gpu_cache_metrics_audit&);
+
+#if defined(BIOSEQ_TEST_INDEXES)
+    /// @brief Exercises the shared selected-operation finalizer transaction.
+    /// @return `true` when callback/gate rejection preserves claims and retry commits once.
+    [[nodiscard]] static bool self_test_selected_pipeline_finalizer_transaction_contract(
+        runtime_metal_archive_pipeline_audit base_audit);
+#endif
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    /**
+     * @brief Consume a completed query, seed-only, or ordinary chaining token.
+     * @return Existing immutable environment snapshot and one-shot cache delta.
+     *
+     * The caller validates its staged job/operation fields against the actual
+     * environment and pending cache delta before the final nonallocating commit.
+     * A callback exception leaves both the token and report-once claims intact.
+     * Additional completed operations share the same immutable environment;
+     * their distinct cached receipts form one fixed, nonallocating claim set.
+     * All are consumed together, after validation of the complete publication.
+     * Coordinate, GPU alignment, and GPU MAPQ tokens are
+     * not accepted by this selected-host-suffix evidence boundary.
+     */
+    [[nodiscard]] std::pair<runtime_gpu_execution_environment_snapshot,
+                            runtime_gpu_cache_metrics_delta>
+    finalize_selected_pipeline_operation(
+        runtime_pipeline_operation_token&& token,
+        selected_pipeline_publication_validator validate_publication = nullptr,
+        void* publication_context = nullptr,
+        std::span<runtime_pipeline_operation_token> additional_operations = {});
+
+    /**
+     * @brief Finalize a shared query only after its last borrowing MPF consumer.
+     * @return Existing environment and report-once cache delta, consuming authority.
+     * MPS instead transfers this token in its completed seed result, because that
+     * runtime entry already consumes the query authorization by value.
+     */
+    [[nodiscard]] std::pair<runtime_gpu_execution_environment_snapshot,
+                            runtime_gpu_cache_metrics_delta>
+    finalize_selected_query_sketch(
+        device_query_sketch_authorization&& authorization,
+        selected_pipeline_publication_validator validate_publication = nullptr,
+        void* publication_context = nullptr,
+        std::span<runtime_pipeline_operation_token> additional_operations = {});
+
+    /**
+     * @brief Atomically finalize a bounded set of independently issued MPF queries.
+     *
+     * Every authorization and additional operation is validated before either
+     * the publication callback or the report-once claim.  A failed gate leaves
+     * the complete span live; success consumes the span as one transaction.
+     */
+    [[nodiscard]] std::pair<runtime_gpu_execution_environment_snapshot,
+                            runtime_gpu_cache_metrics_delta>
+    finalize_selected_query_sketches(
+        std::span<device_query_sketch_authorization> authorizations,
+        selected_pipeline_publication_validator validate_publication = nullptr,
+        void* publication_context = nullptr,
+        std::span<runtime_pipeline_operation_token> additional_operations = {});
+#endif
+#endif
 
     /// @brief Runs tiled chaining and returns the selected coordinate trace.
     /// @return Coordinate chain result and predecessor trace.
@@ -197,7 +268,12 @@ class runtime {
                                                  std::uint32_t kmer_size,
                                                  std::uint64_t exact_anchor_count,
                                                  const seed_anchor_sort_plan& sort_plan,
-                                                 std::uint64_t expected_vulkan_allocation_bytes);
+                                                 std::uint64_t expected_vulkan_allocation_bytes
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                                 , const device_query_sketch_authorization* query_authorization = nullptr,
+                                                 std::uint32_t query_index = 0u
+#endif
+                                                 );
 
     /// @brief Returns the per-runtime reusable GPU arena.
     /// @return Runtime-owned reusable arena.
@@ -222,6 +298,26 @@ class runtime {
                                     std::span<const gpu_sketch_query_layout_wire> query_layouts,
                                     std::uint64_t max_minimizers,
                                     vulkan_sketch_host_materialization materialization);
+
+    /// @brief Copies an authorized device-only query sketch without consuming its
+    /// one-shot seed authority. The destination must already have the exact typed
+    /// extent; this operation emits no public pipeline receipt.
+    void readback_authorized_query_minimizers(
+        const device_query_sketch_authorization& authorization,
+        const buffer& device_words,
+        std::uint64_t expected_minimizer_count,
+        std::uint32_t expected_word_kind,
+        std::uint32_t expected_words32_per_record,
+        std::uint32_t expected_hash_shift,
+        std::uint32_t expected_pos_bits,
+        std::span<const gpu_seed_query_record_wire> expected_query_records,
+        std::span<std::byte> destination);
+
+#if defined(BIOSEQ_TEST_INDEXES)
+    /// @brief Exercises exact/short/long runtime-local authorized readback receipts.
+    /// @return `true` when only the exact completed receipt is accepted.
+    [[nodiscard]] static bool self_test_authorized_readback_receipt_contract();
+#endif
 
     /// @brief Resolves the finite target-index pipeline set before transient admission.
     /// @param[in] params Immutable sketch kernel parameters.
@@ -297,6 +393,41 @@ class runtime {
                                          const gpu_alignment_cigar_params& params,
                                          std::uint32_t packed_cigar_capacity);
 
+    /// @brief Runs persisted packed-window alignment and binds its causal receipt.
+    /// @return Per-job GPU alignment results and the final packed CIGAR readback.
+    [[nodiscard]] alignment_cigar_batch_result run_persisted_alignment_cigar_roundtrip(
+        std::span<const std::byte> query_packed,
+        std::span<const std::byte> target_packed,
+        std::span<const gpu_alignment_cigar_job_wire> jobs,
+        std::span<const gpu_alignment_candidate_binding_wire> candidate_bindings,
+        std::span<const gpu_chain_candidate_header_wire> candidate_headers,
+        std::span<const gpu_chain_candidate_wire> candidates,
+        const gpu_alignment_cigar_params& params,
+        std::uint32_t packed_cigar_capacity,
+        persisted_grouped_soa_coordinate_operation_receipt& coordinate_receipt);
+
+    /// @brief Executes physical post-alignment primary/secondary classification and Vulkan MAPQ.
+    [[nodiscard]] gpu_mapq_batch_result run_persisted_mapq_roundtrip(
+        std::span<const gpu_chain_candidate_header_wire> headers,
+        std::span<const gpu_chain_candidate_wire> candidates,
+        std::span<const gpu_alignment_candidate_binding_wire> candidate_bindings,
+        std::span<const gpu_alignment_cigar_result_wire> alignment_results,
+        const gpu_persisted_mapq_config& config,
+        std::int32_t min_chain_score,
+        persisted_grouped_soa_coordinate_operation_receipt& coordinate_receipt);
+
+#ifdef BIOSEQ_TEST_INDEXES
+    /// @brief Test-only packed-input path without persisted receipt authority.
+    /// @return Per-job compact CIGAR results and exact physical submission count.
+    [[nodiscard]] alignment_cigar_batch_result run_alignment_packed_cigar_roundtrip_for_test(
+        std::span<const std::byte> query_packed,
+        std::span<const std::byte> target_packed,
+        std::span<const gpu_alignment_cigar_job_wire> jobs,
+        const gpu_alignment_cigar_params& params,
+        std::uint32_t packed_cigar_capacity,
+        std::uint64_t preferred_traceback_wave_bytes);
+#endif
+
     /// @brief Returns committed sequence-sort dispatches.
     /// @return Committed sequence-sort dispatch count.
     [[nodiscard]] std::uint64_t seq_sort_dispatch_count() const noexcept {
@@ -338,7 +469,12 @@ class runtime {
     seed_lookup_result run_seed_anchor_roundtrip(const gpu_seed_inputs& inputs,
                                                  std::uint64_t query_len,
                                                  std::uint32_t kmer_size,
-                                                 std::int32_t max_occ);
+                                                 std::int32_t max_occ
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                                                 , const device_query_sketch_authorization* query_authorization = nullptr,
+                                                 std::uint32_t query_index = 0u
+#endif
+                                                 );
     /// @brief Runs seed lookup and tiled chaining for one coordinate result.
     /// @return Coordinate-only result wire.
     gpu_coordinate_result_wire
@@ -378,7 +514,17 @@ class runtime {
                                            std::int32_t min_chain_score,
                                            std::int32_t min_seed_count,
                                            std::uint32_t probe_limit,
-                                           device_query_sketch_authorization query_authority = {});
+                                           device_query_sketch_authorization query_authority = {},
+                                           gpu_persisted_mapq_config mapq_config = {});
+
+    /// @brief Runs grouped-SoA count, scan, emit, and canonical radix sort only.
+    /// @return Completed per-query MPS anchor wires and seed-only causal receipt.
+    [[nodiscard]] grouped_soa_seed_anchor_result run_grouped_soa_seed_anchor_roundtrip(
+        const gpu_grouped_soa_resident_view& target,
+        const gpu_seed_query_inputs& query_inputs,
+        std::int32_t max_occ,
+        std::uint32_t kmer_size,
+        device_query_sketch_authorization query_authorization);
 
     /// @brief Runs batched seed-to-coordinate jobs and returns only result wires.
     /// @return Coordinate result wires in input-job order.
@@ -410,6 +556,25 @@ class runtime {
     }
 
   private:
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    using selected_pipeline_live_validator = void (*)(void*);
+
+    /// @brief Runs the allocation-free selected-operation validation and claim transaction.
+    /// @return Immutable environment and one-shot cache delta after both gates accept.
+    [[nodiscard]] static std::pair<runtime_gpu_execution_environment_snapshot,
+                                   runtime_gpu_cache_metrics_delta>
+    finalize_selected_pipeline_operation_transaction(
+        runtime_pipeline_operation_token&& token,
+        selected_pipeline_publication_validator validate_publication,
+        void* publication_context,
+        std::span<runtime_pipeline_operation_token> additional_operations,
+        std::span<device_query_sketch_authorization> additional_query_authorizations,
+        const vulkan_feature_set& live_features,
+        bool& seed_metrics_claimed,
+        selected_pipeline_live_validator validate_live,
+        void* live_context);
+#endif
+
     /// @brief Validates a completed receipt and prepares side-effect-free finalization state.
     /// @return Valid finalization plan, or an invalid plan when any identity check fails.
     [[nodiscard]] static runtime_detail::persisted_grouped_soa_coordinate_finalization_plan
@@ -608,6 +773,26 @@ class runtime {
                                         std::uint32_t group_count,
                                         runtime_pipeline_use_collector* collector = nullptr,
                                         std::size_t collector_job_index = 0u);
+    /// @brief Shared locked upload/dispatch/readback body for rank and packed CIGAR inputs.
+    [[nodiscard]] alignment_cigar_batch_result run_alignment_cigar_payload_roundtrip_locked(
+        std::span<const std::byte> query_payload,
+        std::span<const std::byte> target_payload,
+        std::span<const gpu_alignment_cigar_job_wire> jobs,
+        const gpu_alignment_cigar_params& params,
+        std::uint32_t packed_cigar_capacity,
+        std::span<const std::size_t> collector_job_indices,
+        bool allow_unsupported_geometry,
+        bioseq::parallelism::memory_permit transient_permit,
+        runtime_pipeline_use_collector* collector);
+    /// @brief Executes one logical CIGAR batch as a normal single submission or bounded waves.
+    [[nodiscard]] alignment_cigar_batch_result
+    run_alignment_cigar_payload_waved_locked(std::span<const std::byte> query_payload,
+                                             std::span<const std::byte> target_payload,
+                                             std::span<const gpu_alignment_cigar_job_wire> jobs,
+                                             const gpu_alignment_cigar_params& params,
+                                             std::uint32_t packed_cigar_capacity,
+                                             std::uint64_t preferred_traceback_wave_bytes,
+                                             runtime_pipeline_use_collector* collector);
     // record one full device radix sort (all passes) into an open command
     // buffer. Sorts the key/value arena slices in place via ping-pong scratch.
     /// @brief Records all passes of one device radix sort.
@@ -651,6 +836,30 @@ class runtime {
     /// @return Required Vulkan allocation size.
     [[nodiscard]] std::uint64_t buffer_memory_requirement_locked(std::uint64_t bytes,
                                                                  VkBufferUsageFlags usage) const;
+    /// @brief Authenticates a non-consuming query-sketch use and returns exact typed bytes.
+    [[nodiscard]] std::uint64_t validate_query_sketch_authorization_locked(
+        const device_query_sketch_authorization& authorization,
+        const buffer& device_words,
+        std::uint64_t expected_minimizer_count,
+        std::uint32_t expected_word_kind,
+        std::uint32_t expected_words32_per_record,
+        std::uint32_t expected_hash_shift,
+        std::uint32_t expected_pos_bits,
+        std::span<const gpu_seed_query_record_wire> expected_query_records) const;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+    /// @brief Binds one actual MPF device slice to its immutable query-sketch owner.
+    /// @return The existing query authority identity, without consuming its token.
+    [[nodiscard]] std::uint64_t validate_seed_query_authorization_locked(
+        const device_query_sketch_authorization& authorization,
+        const buffer* device_words,
+        const gpu_seed_query_record_wire& submitted_record,
+        std::uint32_t query_index,
+        std::uint32_t kmer_size,
+        std::uint32_t word_kind,
+        std::uint32_t words32_per_record,
+        std::uint32_t hash_shift,
+        std::uint32_t pos_bits) const;
+#endif
     /// @brief Computes retained allocation bytes for all rank-prefilter workspaces.
     [[nodiscard]] std::uint64_t prefilter_workspace_allocation_bytes_locked() const noexcept;
     /// @brief Ensures one reusable prefilter buffer satisfies a logical request.
@@ -779,6 +988,8 @@ class runtime {
     std::atomic<std::uint64_t> gatekeeper_dispatch_count_{0};
     std::atomic<std::uint64_t> operation_token_identity_{1};
     std::mutex mu_;
+
+    friend class gpu_arena;
 };
 
 /// @brief Reports whether runtime initialization selected a hardware Vulkan device.

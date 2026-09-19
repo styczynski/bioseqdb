@@ -9,124 +9,60 @@
  * `(bucket, shard)`. The table layout shards via `index_table_shard`.
  */
 module;
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 
 extern "C" {
-#include "access/heapam.h"
-#include "access/nbtree.h"
-#include "access/parallel.h"
-#include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "access/transam.h"
-#include "access/xact.h"
-#include "catalog/indexing.h"
-#include "catalog/namespace.h" // RelnameGetRelid
-#include "catalog/pg_am_d.h"
-#include "catalog/pg_class.h"
-#include "catalog/pg_index.h"
-#include "catalog/pg_opclass_d.h"
-#include "catalog/pg_sequence.h"
-#include "catalog/pg_type_d.h"
-#include "commands/sequence.h"
-#include "commands/tablespace.h"
-#include "executor/instrument.h"
-#include "executor/spi.h"
-#include "executor/tuptable.h"
-#include "storage/buffile.h"
-#include "storage/dsm.h"
-#include "storage/fd.h"
-#include "storage/ipc.h"
-#include "storage/procarray.h"
-#include "storage/relfilelocator.h"
-#include "storage/shm_toc.h"
-#include "utils/builtins.h"
-#include "utils/inval.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/resowner.h"
-#include "utils/snapmgr.h"
-#include "utils/syscache.h"
-#include "utils/timestamp.h"
-#include "utils/xid8.h"
+#include "postgres.h"
 
-#include "common/relpath.h"
 #include "miscadmin.h"
 #include "port.h"
-#include "port/atomics.h"
+#include "storage/fd.h"
+#include "utils/memutils.h"
+#include "utils/resowner.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <tuple>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
+
+#include <cerrno>
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:fragment_image;
+
+import std;
+export import bioseq.postgres.storage.indexing.minimizer_fragment_mapping_lease;
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.memory_budget;
-import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
-import bioseq.postgres.support.datums;
-import bioseq.postgres.sql_boundary;
-import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
-import bioseq.storage.layout;           // sequence_locator
-import bioseq.storage.size;             // sequence_size_t
-import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
+import bioseq.postgres.support;
 import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
-import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
-import bioseq.storage.lazy_sequence;           // lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.instrumentation.clock;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.storage.physical;
-import bioseq.postgres.storage.indexing.sql_row_codecs;
-import bioseq.postgres.storage.manager.sql_row_codecs;
-import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 import :catalog;
+import :catalog_source_authorization;
+import :catalog_storage_descriptors;
 import :file_actions;
 export namespace bioseq::storage::indexing {
 
 namespace minimizer_fragment_image_pg_detail {
+
+/// Avoid the allocating PostgreSQL error bridge on the ordinary no-interrupt path.
+/// A pending query-cancel ERROR crosses the bridge; backend-termination/FATAL
+/// retains PostgreSQL's native terminal semantics. The callback shape also binds
+/// directly to the portable compact-H32 adapter.
+inline void check_fragment_image_interrupts_as_cpp(void*) {
+    if (!INTERRUPTS_PENDING_CONDITION()) {
+        return;
+    }
+    bioseq::postgres::support::invoke_pg_as_cpp([] {
+        CHECK_FOR_INTERRUPTS();
+    });
+}
 
 [[nodiscard]] inline minimizer_generation_file_identity
 generation_file_identity(const minimizer_generation_administration_identity& identity,
@@ -166,13 +102,16 @@ pwrite_all(const int fd, const std::span<const std::byte> bytes, const std::uint
                                          bytes.data() + static_cast<std::ptrdiff_t>(written),
                                          bytes.size() - written,
                                          static_cast<off_t>(current));
-        if (result < 0 && errno == EINTR)
+        if (result < 0 && errno == EINTR) {
+            check_fragment_image_interrupts_as_cpp(nullptr);
             continue;
+        }
         if (result <= 0) {
             minimizer_generation_storage_error_as_cpp(
                 fmt::format("minimizer fragment image write failed: errno={}", errno));
         }
         written += static_cast<std::size_t>(result);
+        check_fragment_image_interrupts_as_cpp(nullptr);
     }
 }
 
@@ -196,11 +135,14 @@ inline void resize_temporary_image(const int fd, const std::uint64_t image_bytes
             "minimizer fragment image image length is not mmap/off_t representable");
     }
     while (::ftruncate(fd, static_cast<off_t>(image_bytes)) != 0) {
-        if (errno == EINTR)
+        if (errno == EINTR) {
+            check_fragment_image_interrupts_as_cpp(nullptr);
             continue;
+        }
         minimizer_generation_storage_error_as_cpp(
             fmt::format("minimizer fragment image image resize failed: errno={}", errno));
     }
+    check_fragment_image_interrupts_as_cpp(nullptr);
 }
 
 /// Scope-bound offset-zero shared mapping. Offset zero is page-aligned on
@@ -246,12 +188,16 @@ class scoped_mapped_region {
 
     /// Persist every dirty page before the outer header can authorize it.
     void sync() const {
+        check_fragment_image_interrupts_as_cpp(nullptr);
         while (msync(mapping_, bytes_, MS_SYNC) != 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) {
+                check_fragment_image_interrupts_as_cpp(nullptr);
                 continue;
+            }
             minimizer_generation_storage_error_as_cpp(
                 fmt::format("minimizer fragment image mapped image sync failed: errno={}", errno));
         }
+        check_fragment_image_interrupts_as_cpp(nullptr);
     }
 };
 
@@ -311,46 +257,6 @@ inline void validate_generation_metadata(const minimizer_generation_file_identit
     }
 }
 
-struct mapping_lease {
-    ResourceOwner owner = nullptr;
-    int fd = -1;
-    void* mapping = MAP_FAILED;
-    std::size_t mapping_bytes = 0u;
-    dev_t device{};
-    ino_t inode{};
-    bool remembered = false;
-};
-
-inline void release_mapping_lease_raw(mapping_lease& lease) noexcept {
-    if (lease.mapping != MAP_FAILED) {
-        (void)munmap(lease.mapping, lease.mapping_bytes);
-        lease.mapping = MAP_FAILED;
-        lease.mapping_bytes = 0u;
-    }
-    if (lease.fd >= 0) {
-        (void)::close(lease.fd);
-        lease.fd = -1;
-    }
-}
-
-inline void release_mapping_lease_resource(const Datum value) noexcept {
-    auto* const lease = reinterpret_cast<mapping_lease*>(DatumGetPointer(value));
-    if (lease == nullptr)
-        return;
-    lease->remembered = false;
-    release_mapping_lease_raw(*lease);
-}
-
-inline constexpr ResourceReleasePriority k_mapping_lease_release_priority = 10u;
-static_assert(k_mapping_lease_release_priority >= RELEASE_PRIO_FIRST);
-inline const ResourceOwnerDesc k_mapping_lease_resource_owner_descriptor{
-    .name = "bioseq minimizer fragment image mapping lease",
-    .release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
-    .release_priority = k_mapping_lease_release_priority,
-    .ReleaseResource = release_mapping_lease_resource,
-    .DebugPrint = nullptr,
-};
-
 [[nodiscard]] inline mapping_lease* allocate_mapping_lease() {
     if (CurrentResourceOwner == nullptr || TopTransactionContext == nullptr) {
         minimizer_generation_storage_error_as_cpp(
@@ -360,34 +266,6 @@ inline const ResourceOwnerDesc k_mapping_lease_resource_owner_descriptor{
     return ::new (storage) mapping_lease{
         .owner = CurrentResourceOwner,
     };
-}
-
-inline void destroy_mapping_lease(mapping_lease*& lease) noexcept {
-    if (lease == nullptr)
-        return;
-    if (lease->remembered) {
-        ResourceOwnerForget(
-            lease->owner, PointerGetDatum(lease), &k_mapping_lease_resource_owner_descriptor);
-        lease->remembered = false;
-    }
-    release_mapping_lease_raw(*lease);
-    lease->~mapping_lease();
-    pfree(lease);
-    lease = nullptr;
-}
-
-/// Form the lifetime token expected by PostgreSQL-free mapped-index
-/// readers without transferring or extending the lease lifetime.  The token
-/// deliberately has no control block: callers must retain the backend-thread
-/// lease guard which supplied it until every borrowed span has been destroyed.
-[[nodiscard]] inline std::shared_ptr<const void>
-borrow_mapping_token(mapping_lease* const lease) noexcept {
-    if (lease == nullptr || lease->owner == nullptr || !lease->remembered || lease->fd < 0 ||
-        lease->mapping == MAP_FAILED || lease->mapping == nullptr || lease->mapping_bytes == 0u) {
-        return {};
-    }
-    std::shared_ptr<const void> no_owner;
-    return std::shared_ptr<const void>{no_owner, lease->mapping};
 }
 
 struct page_aligned_mapping_range {
@@ -599,37 +477,97 @@ class minimizer_fragment_image_writer {
         const std::span<const std::byte> mapped_payload = payload_mapping.bytes().subspan(
             static_cast<std::size_t>(k_minimizer_fragment_image_header_bytes),
             static_cast<std::size_t>(payload_bytes_));
-        auto opened_adapter = minimizer_fragment_compact_hash32_adapter::open(
-            opened_minimizer_fragment_generation_view{
-                .head = &head,
-                .manifest = &manifest,
-                .directory = &authenticated_directory,
-                .mapped_payload = mapped_payload,
-            });
-        if (!opened_adapter) {
-            minimizer_generation_storage_error_as_cpp(
-                "minimizer fragment image compact-H32 source adapter rejected grouped-SoA");
-        }
-        minimizer_fragment_compact_hash32_adapter compact_adapter = std::move(*opened_adapter);
         const auto profile = derive_grouped_soa_minimizer_profile(manifest);
-        if (!profile || profile->max_occ_cap == 0u ||
+        if (!profile || head.layout != manifest.layout || head.generation_id == 0u ||
+            head.source_identity == 0u || head.storage_contract_checksum == 0u ||
+            authenticated_directory.profile() != *profile ||
+            mapped_payload.size() != manifest.payload_bytes) {
+            minimizer_generation_storage_error_as_cpp(
+                "minimizer fragment image persisted grouped-SoA source contract is invalid");
+        }
+        if (profile->max_occ_cap == 0u ||
             profile->max_occ_cap > (std::numeric_limits<std::uint32_t>::max)()) {
             minimizer_generation_storage_error_as_cpp(
                 "minimizer fragment image persisted grouped-SoA cap is invalid");
         }
-        const std::uint32_t persisted_max_occ_cap =
-            static_cast<std::uint32_t>(profile->max_occ_cap);
-        const auto compact_options = compact_adapter.compact_build_options(persisted_max_occ_cap);
-        if (!compact_options) {
+        if (profile->max_hash == 0u) {
             minimizer_generation_storage_error_as_cpp(
-                "minimizer fragment image compact-H32 build options are incompatible");
+                "minimizer fragment image persisted grouped-SoA hash geometry is invalid");
         }
-        const compact_hash32_sorted_run_source compact_source = compact_adapter.sorted_run_source();
-        const auto compact_plan =
-            plan_compact_hash32_direct_index(compact_source, *compact_options);
-        if (!compact_plan) {
+        const std::uint32_t profile_hash_bits = std::bit_width(profile->max_hash);
+        const std::uint64_t expected_max_hash =
+            profile_hash_bits == 64u
+                ? (std::numeric_limits<std::uint64_t>::max)()
+                : (std::uint64_t{1u} << profile_hash_bits) - 1u;
+        if (profile->max_hash != expected_max_hash) {
             minimizer_generation_storage_error_as_cpp(
-                "minimizer fragment image compact-H32 image planning failed");
+                "minimizer fragment image persisted grouped-SoA hash geometry is invalid");
+        }
+
+        bool compact_hash32_supported = false;
+        if (profile->max_hash <= (std::numeric_limits<std::uint32_t>::max)()) {
+            const compact_hash32_geometry geometry{
+                .hash_domain_bits = static_cast<std::uint8_t>(profile_hash_bits),
+                .max_hash = static_cast<std::uint32_t>(profile->max_hash),
+            };
+            compact_hash32_supported =
+                resolve_compact_hash32_address(0u, geometry).has_value();
+        }
+
+        std::optional<minimizer_fragment_compact_hash32_adapter> compact_adapter{};
+        std::optional<compact_hash32_build_options> compact_options{};
+        std::optional<compact_hash32_sorted_run_source> compact_source{};
+        std::optional<compact_hash32_image_plan> compact_plan{};
+        std::optional<minimizer_fragment_compact_hash32_section_spec> compact_section_spec{};
+        if (compact_hash32_supported) {
+            const minimizer_fragment_compact_hash32_options adapter_options{
+                .cancellation_checkpoint = cooperative_cancellation_checkpoint{
+                    .context = nullptr,
+                    .invoke_fn = &minimizer_fragment_image_pg_detail::
+                        check_fragment_image_interrupts_as_cpp,
+                },
+            };
+            auto opened_adapter = minimizer_fragment_compact_hash32_adapter::open(
+                opened_minimizer_fragment_generation_view{
+                    .head = &head,
+                    .manifest = &manifest,
+                    .directory = &authenticated_directory,
+                    .mapped_payload = mapped_payload,
+                },
+                adapter_options);
+            if (!opened_adapter) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer fragment image compact-H32 source adapter rejected grouped-SoA");
+            }
+            // Establish the move-only adapter's final address before issuing the
+            // replay source which borrows its move-stable source token.
+            compact_adapter.emplace(std::move(*opened_adapter));
+            const std::uint32_t persisted_max_occ_cap =
+                static_cast<std::uint32_t>(profile->max_occ_cap);
+            auto opened_options =
+                compact_adapter->compact_build_options(persisted_max_occ_cap);
+            if (!opened_options) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer fragment image compact-H32 build options are incompatible");
+            }
+            compact_options.emplace(std::move(*opened_options));
+            compact_source.emplace(compact_adapter->sorted_run_source());
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
+            auto planned_compact =
+                plan_compact_hash32_direct_index(*compact_source, *compact_options);
+            if (!planned_compact) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer fragment image compact-H32 image planning failed");
+            }
+            compact_plan.emplace(std::move(*planned_compact));
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
+            compact_section_spec.emplace(
+                minimizer_fragment_compact_hash32_section_spec{
+                    .bytes = compact_plan->image_bytes,
+                    .direct_header_crc64 = 0u,
+                });
         }
 
         const auto provisional_layout =
@@ -639,15 +577,24 @@ class minimizer_fragment_image_writer {
                                                  payload_crc64,
                                                  manifest.directory_checksum,
                                                  head.manifest_checksum,
-                                                 minimizer_fragment_compact_hash32_section_spec{
-                                                     .bytes = compact_plan->image_bytes,
-                                                     .direct_header_crc64 = 0u,
-                                                 });
-        if (!provisional_layout ||
-            provisional_layout->feature_bitmap != k_minimizer_fragment_compact_hash32_feature ||
-            provisional_layout->compact_hash32_direct.bytes != compact_plan->image_bytes) {
+                                                 compact_section_spec);
+        if (!provisional_layout) {
             minimizer_generation_storage_error_as_cpp(
                 "minimizer fragment image direct-section layout planning failed");
+        }
+        if (compact_section_spec) {
+            if (provisional_layout->feature_bitmap !=
+                    k_minimizer_fragment_compact_hash32_feature ||
+                provisional_layout->compact_hash32_direct.bytes != compact_plan->image_bytes) {
+                minimizer_generation_storage_error_as_cpp(
+                    "minimizer fragment image direct-section layout planning failed");
+            }
+        } else if (provisional_layout->feature_bitmap != 0u ||
+                   provisional_layout->compact_hash32_direct.offset != 0u ||
+                   provisional_layout->compact_hash32_direct.bytes != 0u ||
+                   provisional_layout->compact_hash32_direct.direct_header_crc64 != 0u) {
+            minimizer_generation_storage_error_as_cpp(
+                "minimizer fragment image native-section layout planning failed");
         }
         const std::uint64_t payload_end =
             provisional_layout->payload.offset + provisional_layout->payload.bytes;
@@ -663,13 +610,15 @@ class minimizer_fragment_image_writer {
             publication_.fd, encoded_manifest, provisional_layout->manifest.offset);
         const std::uint64_t manifest_end =
             provisional_layout->manifest.offset + provisional_layout->manifest.bytes;
-        minimizer_fragment_image_pg_detail::write_zero_padding(
-            publication_.fd, manifest_end, provisional_layout->compact_hash32_direct.offset);
+        if (compact_section_spec) {
+            minimizer_fragment_image_pg_detail::write_zero_padding(
+                publication_.fd, manifest_end, provisional_layout->compact_hash32_direct.offset);
+        }
         minimizer_fragment_image_pg_detail::resize_temporary_image(publication_.fd,
                                                                    provisional_layout->file_bytes);
 
         std::uint64_t direct_header_crc64 = 0u;
-        {
+        if (compact_section_spec) {
             minimizer_fragment_image_pg_detail::scoped_mapped_region destination_mapping{
                 publication_.fd, provisional_layout->file_bytes, PROT_READ | PROT_WRITE};
             const auto direct_offset =
@@ -678,12 +627,16 @@ class minimizer_fragment_image_writer {
                 static_cast<std::size_t>(provisional_layout->compact_hash32_direct.bytes);
             std::span<std::byte> direct_image =
                 destination_mapping.writable_bytes().subspan(direct_offset, direct_bytes);
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
             if (auto built = build_compact_hash32_direct_index_into(
-                    compact_source, *compact_options, *compact_plan, direct_image);
+                    *compact_source, *compact_options, *compact_plan, direct_image);
                 !built) {
                 minimizer_generation_storage_error_as_cpp(
                     "minimizer fragment image compact-H32 image replay/build failed");
             }
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
             const auto validated_direct =
                 validate_compact_hash32_direct_index(std::span<const std::byte>{direct_image},
                                                      compact_options->identity,
@@ -693,6 +646,8 @@ class minimizer_fragment_image_writer {
                 minimizer_generation_storage_error_as_cpp(
                     "minimizer fragment image compact-H32 nested image validation failed");
             }
+            minimizer_fragment_image_pg_detail::
+                check_fragment_image_interrupts_as_cpp(nullptr);
             const compact_hash32_image_plan& validated_direct_plan = validated_direct->header;
             if (validated_direct_plan != *compact_plan) {
                 minimizer_generation_storage_error_as_cpp(
@@ -701,6 +656,7 @@ class minimizer_fragment_image_writer {
             direct_header_crc64 = crc64_ecma182(std::span<const std::byte>{direct_image}.first(
                 k_compact_hash32_direct_index_header_bytes));
             destination_mapping.sync();
+            compact_section_spec->direct_header_crc64 = direct_header_crc64;
         }
 
         const auto layout =
@@ -710,10 +666,7 @@ class minimizer_fragment_image_writer {
                                                  payload_crc64,
                                                  manifest.directory_checksum,
                                                  head.manifest_checksum,
-                                                 minimizer_fragment_compact_hash32_section_spec{
-                                                     .bytes = compact_plan->image_bytes,
-                                                     .direct_header_crc64 = direct_header_crc64,
-                                                 });
+                                                 compact_section_spec);
         if (!layout || layout->payload != provisional_layout->payload ||
             layout->directory != provisional_layout->directory ||
             layout->manifest != provisional_layout->manifest ||
@@ -765,6 +718,8 @@ class minimizer_fragment_image_writer {
             minimizer_generation_storage_error_as_cpp(
                 "minimizer fragment image header self-decode failed");
         }
+        minimizer_fragment_image_pg_detail::
+            check_fragment_image_interrupts_as_cpp(nullptr);
         minimizer_fragment_image_pg_detail::pwrite_all(publication_.fd, *encoded_header, 0u);
 
         struct stat observed{};
@@ -798,6 +753,8 @@ class minimizer_fragment_image_writer {
             .device = publication_.expected_device,
             .inode = publication_.expected_inode,
         };
+        minimizer_fragment_image_pg_detail::
+            check_fragment_image_interrupts_as_cpp(nullptr);
         publish_generation_file(publication_);
         sealed_ = true;
         return receipt;
@@ -813,62 +770,6 @@ enum class minimizer_fragment_image_mapped_open_validation : std::uint8_t {
     /// validation.
     full_metadata = 1u,
 };
-
-/// Backend-thread RAII authority for one registered minimizer fragment image mmap/fd lease.
-///
-/// Borrowed reader tokens do not own or prolong this guard.  On the normal
-/// executor path the guard must therefore be declared/stored before every
-/// reader which borrows it, so reverse destruction releases the reader first
-/// and then promptly forgets, unmaps, closes and frees the lease.  PostgreSQL's
-/// ResourceOwner registration remains armed while the guard is live and is the
-/// ERROR/longjmp fallback when ordinary C++ destruction cannot run.
-class mapped_minimizer_fragment_lease_guard {
-  private:
-    minimizer_fragment_image_pg_detail::mapping_lease* lease_ = nullptr;
-
-    explicit mapped_minimizer_fragment_lease_guard(
-        minimizer_fragment_image_pg_detail::mapping_lease* lease) noexcept
-        : lease_(lease) {}
-
-    friend class mapped_minimizer_fragment_image;
-
-  public:
-    mapped_minimizer_fragment_lease_guard() = default;
-    mapped_minimizer_fragment_lease_guard(const mapped_minimizer_fragment_lease_guard&) = delete;
-    mapped_minimizer_fragment_lease_guard&
-    operator=(const mapped_minimizer_fragment_lease_guard&) = delete;
-
-    mapped_minimizer_fragment_lease_guard(mapped_minimizer_fragment_lease_guard&& other) noexcept
-        : lease_(std::exchange(other.lease_, nullptr)) {}
-
-    mapped_minimizer_fragment_lease_guard&
-    operator=(mapped_minimizer_fragment_lease_guard&& other) noexcept {
-        if (this != &other) {
-            minimizer_fragment_image_pg_detail::destroy_mapping_lease(lease_);
-            lease_ = std::exchange(other.lease_, nullptr);
-        }
-        return *this;
-    }
-
-    ~mapped_minimizer_fragment_lease_guard() {
-        minimizer_fragment_image_pg_detail::destroy_mapping_lease(lease_);
-    }
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return static_cast<bool>(borrow_mapping_token());
-    }
-
-    /// Non-owning lifetime token. Every copy becomes invalid as soon as
-    /// this guard is destroyed or replaced.
-    [[nodiscard]] std::shared_ptr<const void> borrow_mapping_token() const noexcept {
-        return minimizer_fragment_image_pg_detail::borrow_mapping_token(lease_);
-    }
-};
-
-static_assert(!std::is_copy_constructible_v<mapped_minimizer_fragment_lease_guard>);
-static_assert(!std::is_copy_assignable_v<mapped_minimizer_fragment_lease_guard>);
-static_assert(std::is_nothrow_move_constructible_v<mapped_minimizer_fragment_lease_guard>);
-static_assert(std::is_nothrow_move_assignable_v<mapped_minimizer_fragment_lease_guard>);
 
 /// Validated mapped image with borrowed section views and an explicit lease transfer.
 class mapped_minimizer_fragment_image {
@@ -1069,7 +970,7 @@ class mapped_minimizer_fragment_image {
     [[nodiscard]] mapped_minimizer_fragment_lease_guard release_mapping_lease_guard() && noexcept {
         auto* const lease = std::exchange(lease_, nullptr);
         clear_views_();
-        return mapped_minimizer_fragment_lease_guard{lease};
+        return mapped_minimizer_fragment_lease_guard::adopt(lease);
     }
 
     friend mapped_minimizer_fragment_image

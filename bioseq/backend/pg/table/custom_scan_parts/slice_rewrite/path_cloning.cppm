@@ -3,10 +3,7 @@
  * @brief Clones and tags the mutable path spine and source routes.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,71 +24,19 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_slice_rewrite_path_cloning;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
 
-import :custom_scan_support;
-
-import :custom_scan_slice_path;
-import :custom_scan_slice_execution;
+export import :custom_scan_slice_rewrite_path_tree;
+export import :custom_scan_slice_rewrite_path_tagging_contracts;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_slice_path_codec_contract;
+import :custom_scan_slice_path_expression_detection_contracts;
 
 using namespace bioseq::postgres::support;
 
 export {
-
-    /** Returns true when @p path is a CustomPath whose CustomName is BioseqScan. */
-    [[nodiscard]] bool slice_project_is_bioseq_scan_path(Path* path) {
-        if (path == nullptr || !IsA(path, CustomPath))
-            return false;
-        auto* custom = reinterpret_cast<CustomPath*>(path);
-        return custom->methods != nullptr && custom->methods->CustomName != nullptr &&
-               strcmp(custom->methods->CustomName, "BioseqScan") == 0;
-    }
 
     /** Returns true when @p path is a CustomPath using slice-project owner methods. */
     [[nodiscard]] bool slice_project_is_owner_path(Path* path) {
@@ -199,134 +144,6 @@ export {
             return false;
         }
         return false;
-    }
-
-    /* Planner Path nodes are deliberately marked `no_copy_equal` by PostgreSQL.
-     * `copyObject(path)` therefore reaches copyObjectImpl's "unrecognized node
-     * type" branch for every Path-family tag.  Clone exactly the mutable path
-     * spine that slice_project_tag_owned_path_tree() descends, while sharing
-     * immutable leaf paths and expression metadata.  This keeps Path traversal
-     * structural and reserves PostgreSQL expression walkers/copying for actual
-     * Expr/List nodes. */
-    /* Genuine recursion cycle: the path clone delegates Append/MergeAppend lists,
-     * whose elements recurse back through the path clone. */
-    [[nodiscard]] Path* slice_project_clone_mutable_path_spine(Path* path);
-
-    /** Clones every Path in @p paths through slice_project_clone_mutable_path_spine. */
-    [[nodiscard]] List* slice_project_clone_path_list(List* paths) {
-        List* clones = NIL;
-        for (Path* child : postgres_list<Path>(paths)) {
-            clones = lappend(clones, slice_project_clone_mutable_path_spine(child));
-        }
-        return clones;
-    }
-
-    [[nodiscard]] Path* slice_project_clone_mutable_path_spine(Path* path) {
-        if (path == nullptr)
-            return nullptr;
-        if (IsA(path, NestPath)) {
-            auto* clone = makeNode(NestPath);
-            *clone = *reinterpret_cast<NestPath*>(path);
-            clone->jpath.outerjoinpath =
-                slice_project_clone_mutable_path_spine(clone->jpath.outerjoinpath);
-            clone->jpath.innerjoinpath =
-                slice_project_clone_mutable_path_spine(clone->jpath.innerjoinpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, MergePath)) {
-            auto* clone = makeNode(MergePath);
-            *clone = *reinterpret_cast<MergePath*>(path);
-            clone->jpath.outerjoinpath =
-                slice_project_clone_mutable_path_spine(clone->jpath.outerjoinpath);
-            clone->jpath.innerjoinpath =
-                slice_project_clone_mutable_path_spine(clone->jpath.innerjoinpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, HashPath)) {
-            auto* clone = makeNode(HashPath);
-            *clone = *reinterpret_cast<HashPath*>(path);
-            clone->jpath.outerjoinpath =
-                slice_project_clone_mutable_path_spine(clone->jpath.outerjoinpath);
-            clone->jpath.innerjoinpath =
-                slice_project_clone_mutable_path_spine(clone->jpath.innerjoinpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, CustomPath)) {
-            auto* clone = makeNode(CustomPath);
-            *clone = *reinterpret_cast<CustomPath*>(path);
-            clone->custom_paths = slice_project_clone_path_list(clone->custom_paths);
-            clone->custom_restrictinfo = list_copy(clone->custom_restrictinfo);
-            clone->custom_private = list_copy(clone->custom_private);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, ProjectionPath)) {
-            auto* clone = makeNode(ProjectionPath);
-            *clone = *reinterpret_cast<ProjectionPath*>(path);
-            clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, ProjectSetPath)) {
-            auto* clone = makeNode(ProjectSetPath);
-            *clone = *reinterpret_cast<ProjectSetPath*>(path);
-            clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, IncrementalSortPath)) {
-            auto* clone = makeNode(IncrementalSortPath);
-            *clone = *reinterpret_cast<IncrementalSortPath*>(path);
-            clone->spath.subpath = slice_project_clone_mutable_path_spine(clone->spath.subpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, SortPath)) {
-            auto* clone = makeNode(SortPath);
-            *clone = *reinterpret_cast<SortPath*>(path);
-            clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, MaterialPath)) {
-            auto* clone = makeNode(MaterialPath);
-            *clone = *reinterpret_cast<MaterialPath*>(path);
-            clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, MemoizePath)) {
-            auto* clone = makeNode(MemoizePath);
-            *clone = *reinterpret_cast<MemoizePath*>(path);
-            clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, UniquePath)) {
-            auto* clone = makeNode(UniquePath);
-            *clone = *reinterpret_cast<UniquePath*>(path);
-            clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, GatherPath)) {
-            auto* clone = makeNode(GatherPath);
-            *clone = *reinterpret_cast<GatherPath*>(path);
-            clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, GatherMergePath)) {
-            auto* clone = makeNode(GatherMergePath);
-            *clone = *reinterpret_cast<GatherMergePath*>(path);
-            clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, AppendPath)) {
-            auto* clone = makeNode(AppendPath);
-            *clone = *reinterpret_cast<AppendPath*>(path);
-            clone->subpaths = slice_project_clone_path_list(clone->subpaths);
-            return reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, MergeAppendPath)) {
-            auto* clone = makeNode(MergeAppendPath);
-            *clone = *reinterpret_cast<MergeAppendPath*>(path);
-            clone->subpaths = slice_project_clone_path_list(clone->subpaths);
-            return reinterpret_cast<Path*>(clone);
-        }
-        /* The tagger never mutates an unrecognised leaf/container. */
-        return path;
     }
 
     /** Copies a BioseqScan @p path, rebuilds BSS3 source tags from @p target, and returns the tagged leaf. */
@@ -524,74 +341,6 @@ export {
         return path;
     }
 
-    /* Match the exact public Path containers understood by the tagger above.
-     * Transformed per-row owners may not choose an IndexPath merely because it is
-     * the cheapest mmsearch-free replacement: at least the target side must keep
-     * a BioseqScan provider from which BSS3 can borrow the lazy source. */
-    [[nodiscard]] bool slice_project_path_tree_has_bioseq_scan(Path* path) noexcept {
-        if (path == nullptr)
-            return false;
-        if (slice_project_is_bioseq_scan_path(path))
-            return true;
-        if (IsA(path, NestPath)) {
-            auto* join = &reinterpret_cast<NestPath*>(path)->jpath;
-            return slice_project_path_tree_has_bioseq_scan(join->outerjoinpath) ||
-                   slice_project_path_tree_has_bioseq_scan(join->innerjoinpath);
-        }
-        if (IsA(path, MergePath)) {
-            auto* join = &reinterpret_cast<MergePath*>(path)->jpath;
-            return slice_project_path_tree_has_bioseq_scan(join->outerjoinpath) ||
-                   slice_project_path_tree_has_bioseq_scan(join->innerjoinpath);
-        }
-        if (IsA(path, HashPath)) {
-            auto* join = &reinterpret_cast<HashPath*>(path)->jpath;
-            return slice_project_path_tree_has_bioseq_scan(join->outerjoinpath) ||
-                   slice_project_path_tree_has_bioseq_scan(join->innerjoinpath);
-        }
-        if (IsA(path, CustomPath)) {
-            for (Path* child :
-                 postgres_list<Path>(reinterpret_cast<CustomPath*>(path)->custom_paths)) {
-                if (slice_project_path_tree_has_bioseq_scan(child))
-                    return true;
-            }
-            return false;
-        }
-        Path* unary = nullptr;
-        if (IsA(path, ProjectionPath)) {
-            unary = reinterpret_cast<ProjectionPath*>(path)->subpath;
-        } else if (IsA(path, ProjectSetPath)) {
-            unary = reinterpret_cast<ProjectSetPath*>(path)->subpath;
-        } else if (IsA(path, SortPath)) {
-            unary = reinterpret_cast<SortPath*>(path)->subpath;
-        } else if (IsA(path, IncrementalSortPath)) {
-            unary = reinterpret_cast<IncrementalSortPath*>(path)->spath.subpath;
-        } else if (IsA(path, MaterialPath)) {
-            unary = reinterpret_cast<MaterialPath*>(path)->subpath;
-        } else if (IsA(path, MemoizePath)) {
-            unary = reinterpret_cast<MemoizePath*>(path)->subpath;
-        } else if (IsA(path, UniquePath)) {
-            unary = reinterpret_cast<UniquePath*>(path)->subpath;
-        } else if (IsA(path, GatherPath)) {
-            unary = reinterpret_cast<GatherPath*>(path)->subpath;
-        } else if (IsA(path, GatherMergePath)) {
-            unary = reinterpret_cast<GatherMergePath*>(path)->subpath;
-        }
-        if (unary != nullptr) {
-            return slice_project_path_tree_has_bioseq_scan(unary);
-        }
-        List* children = NIL;
-        if (IsA(path, AppendPath)) {
-            children = reinterpret_cast<AppendPath*>(path)->subpaths;
-        } else if (IsA(path, MergeAppendPath)) {
-            children = reinterpret_cast<MergeAppendPath*>(path)->subpaths;
-        }
-        for (Path* child : postgres_list<Path>(children)) {
-            if (slice_project_path_tree_has_bioseq_scan(child))
-                return true;
-        }
-        return false;
-    }
-
     /* BatchSort is an upper owner rather than a SliceProject node, but it needs
      * the same exact base-scan source contract: copy the owned input tree, attach
      * BSS3 only to BioseqScan leaves, and leave unknown providers untouched. */
@@ -619,66 +368,6 @@ export {
         private_path = slice_project_tag_owned_path_tree(private_path, builder, tagged);
         *tagged_out = tagged;
         return tagged ? private_path : path;
-    }
-
-    /** Walks @p plan for lazy BioseqScan providers and adds each source route to @p routes. */
-    void batch_sort_collect_source_routes(PlanState* plan,
-                                          bioseq::storage::pg_sequence_source_route_set& routes,
-                                          std::uint32_t& provider_count) {
-        if (plan == nullptr)
-            return;
-        if (IsA(plan, CustomScanState)) {
-            auto* custom = reinterpret_cast<CustomScanState*>(plan);
-            if (custom->methods == bioseq_column_scan_execute_methods()) {
-                auto* scan = scan_state::from_custom_scan_state(custom);
-                bioseq_scan_runtime& runtime = bioseq_runtime(scan);
-                if (!runtime.lazy_source_projection)
-                    return;
-                if (runtime.lazy_source_provider == nullptr ||
-                    !bioseq::storage::add_pg_sequence_source_route(routes,
-                                                                   runtime.lazy_source_provider)) {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                             errmsg("BioseqBatchSort source route is unavailable")));
-                }
-                provider_count = bioseq::common::saturating_add(provider_count, 1u);
-                return;
-            }
-            for (PlanState* child : postgres_list<PlanState>(custom->custom_ps)) {
-                batch_sort_collect_source_routes(child, routes, provider_count);
-            }
-            return;
-        }
-        if (IsA(plan, AppendState)) {
-            auto* append = reinterpret_cast<AppendState*>(plan);
-            for (int index = 0; index < append->as_nplans; ++index) {
-                batch_sort_collect_source_routes(
-                    append->appendplans[index], routes, provider_count);
-            }
-            return;
-        }
-        if (IsA(plan, MergeAppendState)) {
-            auto* append = reinterpret_cast<MergeAppendState*>(plan);
-            for (int index = 0; index < append->ms_nplans; ++index) {
-                batch_sort_collect_source_routes(append->mergeplans[index], routes, provider_count);
-            }
-            return;
-        }
-        PlanState* outer = outerPlanState(plan);
-        PlanState* inner = innerPlanState(plan);
-        batch_sort_collect_source_routes(outer, routes, provider_count);
-        if (inner != outer) {
-            batch_sort_collect_source_routes(inner, routes, provider_count);
-        }
-    }
-
-    /** Collects BioseqScan source routes from @p child into @p routes and returns true when any provider is found. */
-    [[nodiscard]] bool
-    batch_sort_attach_source_routes(PlanState* child,
-                                    bioseq::storage::pg_sequence_source_route_set& routes) {
-        std::uint32_t provider_count = 0u;
-        batch_sort_collect_source_routes(child, routes, provider_count);
-        return provider_count != 0u;
     }
 
 } // export custom-scan partition declarations

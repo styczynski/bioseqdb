@@ -14,11 +14,10 @@ export module bioseq.postgres.vectorization.aggregator_node:transitions;
 import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.postgres.vectorization.types;
+import :support;
 
 using bioseq::postgres::support::memory_context_scope;
 using bioseq::postgres::support::postgres_list;
-
-import :support;
 
 /**
  * Select the current grouping set. Affects current_set and

@@ -41,6 +41,7 @@ import bioseq.common.hashing; //  shared SHA-256
 import bioseq.tests.support.indexing_storage_fakes;
 
 import bioseq.tests.unit.indexing.minimizer_hashmap_support;
+import bioseq.tests.unit.indexing.minimizer_hashmap.compact_direct_support;
 
 using namespace seq::literals;
 
@@ -214,6 +215,10 @@ TEST_CASE("scalar matcher differential covers counter mapping and dynamic leaves
     constexpr bioseq::storage::sequence_size_t query_length = 128u;
     constexpr std::int32_t kmer_size = 15;
     constexpr std::int32_t max_occ = 2;
+    const std::array mixed_query_records{
+        std::span<const minimap_sketch_data>{query0},
+        std::span<const minimap_sketch_data>{query1},
+    };
     const std::array mixed_queries{
         fragment_seed_query{
             .minimizers = query0,
@@ -245,7 +250,8 @@ TEST_CASE("scalar matcher differential covers counter mapping and dynamic leaves
         std::uint64_t admitted_bytes = 0u;
     };
 
-    const auto verify_fixture = [&pairs, &mixed_queries, &all_heavy_queries](
+    const auto verify_fixture = [&pairs, &mixed_queries, &all_heavy_queries,
+                                 &mixed_query_records, max_occ](
                                     std::uint64_t target_length,
                                     std::uint64_t segment_span,
                                     minimizer_scalar_width position_width) {
@@ -271,7 +277,7 @@ TEST_CASE("scalar matcher differential covers counter mapping and dynamic leaves
         auto scratch = query_wave_scratch::create(admission);
         REQUIRE(scratch.has_value());
 
-        const auto run = [&reader, &admission, &scratch](
+        const auto run = [&reader, &admission, &scratch, max_occ](
                              std::span<const fragment_seed_query> queries, bool oracle) {
             differential_run result;
             auto batch = reader->prepare_fragment_anchor_batch(
@@ -321,7 +327,7 @@ TEST_CASE("scalar matcher differential covers counter mapping and dynamic leaves
             const fragment_seed_query& query = mixed_queries[query_ordinal];
             const auto ordinary = ordinary_seed_anchors(pairs,
                                                         target_length,
-                                                        query.minimizers,
+                                                        mixed_query_records[query_ordinal],
                                                         query.query_length,
                                                         max_occ,
                                                         query.kmer_size);

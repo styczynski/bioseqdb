@@ -3,100 +3,40 @@
  * @brief PostgreSQL generation storage residency and transaction fixtures.
  */
 module;
+#include <bioseq/pg_compat.h>
+#include <new>
+
+extern "C" {
 #include "access/heapam.h"
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "commands/tablespace.h"
 #include "executor/tuptable.h"
+#include "storage/buffile.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
-
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
-extern "C" {
-#include "storage/buffile.h"
 }
-#include <algorithm>
-#include <array>
-#include <concepts>
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <limits>
-#include <map>
-#include <new>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <variant>
-#include <vector>
 export module bioseq.postgres.storage.indexing.admin:generation_storage;
+import std;
+import :generation_api;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.postgres.support;
 import bioseq.postgres.sql_boundary;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, is_locator_stub, decode_locator_from_stub
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.lazy_sequence;           // make_resident_lazy_sequence
-import bioseq.storage.scanner;                 // sequence access requirements
-import bioseq.postgres.storage.scanner;        // with_postgres_lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.common.seqan_adapter;            // seqan3::char_is_valid_for
+import bioseq.postgres.support;
 import bioseq.indexing.type;
-import bioseq.indexing.storage;
-import bioseq.indexing.traits;
-import bioseq.indexing.registry;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.hash_major_minimizer_index;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.pipeline.runtime_contract; // minimizer_algorithm
-import bioseq.sequences.kmers;           // minimizer/index APIs
 import bioseq.sequences.kmers.highway_minimizer_contract;
-import bioseq.highway.dispatch_contract;
-import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.residency;
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.pool;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.postgres.table.io;
 import bioseq.postgres.storage.indexing.handles;
 import bioseq.postgres.column.table_access;
-import bioseq.postgres.storage.metadata; // column_table_row_count
+import bioseq.postgres.storage.indexing.admin.diagnostic_support;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
-import :policy_catalog;
-import :hash_major;
-import :grouped_soa;
-import :rebuild;
-import :inspection_policy;
 
 export namespace bioseq::storage::indexing {
 
-/// Integration-only observations for the generation-storage lifecycle. Optional
-/// fields are emitted as SQL NULL by the fmgr wrapper when an operation does not
-/// exercise that part of the contract.
-struct minimizer_generation_storage_state_fixture_result {
-    Oid before_oid = InvalidOid;
-    Oid operation_oid = InvalidOid;
-    Oid after_oid = InvalidOid;
-    std::optional<bool> same_handle_rebound;
-    std::optional<bool> generation_schema_after;
-    std::optional<bool> chunk_cache_hit;
-    std::optional<bool> assembled_cache_hit;
-};
 namespace minimizer_generation_storage_test_detail {
 
 /// Chunk and assembled-cache keys addressing one fixture generation.
@@ -180,7 +120,7 @@ struct cache_keys {
  * Clear/create rollback must rebind handles; committed changes must evict both residency forms;
  * ensure fails on noncanonical relations; generation clear invalidates its initiating OID.
  */
-[[nodiscard]] inline minimizer_generation_storage_state_fixture_result
+[[nodiscard]] minimizer_generation_storage_state_fixture_result
 exercise_minimizer_generation_storage_state_impl(Oid rel_oid,
                                                  std::string_view index_name,
                                                  std::uint64_t sequence_rowno,

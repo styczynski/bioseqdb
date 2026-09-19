@@ -21,6 +21,27 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
+/// Maximum immutable descriptor sets retained by one frontend submission.
+inline constexpr std::uint32_t k_gpu_dispatch_descriptor_set_capacity = 4096u;
+/// Maximum storage-buffer descriptors retained by that pool.
+inline constexpr std::uint32_t k_gpu_dispatch_storage_descriptor_capacity =
+    k_gpu_dispatch_descriptor_set_capacity * 9u;
+
+/// @brief Maximum whole jobs fitting both descriptor-set and descriptor budgets.
+/// @param[in] descriptor_sets_per_job Fresh descriptor sets recorded for one job.
+/// @param[in] storage_descriptors_per_job Storage descriptors recorded for one job.
+/// @return Zero for an invalid zero-cost shape; otherwise the smaller pool quotient.
+[[nodiscard]] inline constexpr std::uint32_t gpu_dispatch_job_capacity(
+    std::uint32_t descriptor_sets_per_job,
+    std::uint32_t storage_descriptors_per_job) noexcept {
+    if (descriptor_sets_per_job == 0u || storage_descriptors_per_job == 0u) {
+        return 0u;
+    }
+    return std::min(
+        k_gpu_dispatch_descriptor_set_capacity / descriptor_sets_per_job,
+        k_gpu_dispatch_storage_descriptor_capacity / storage_descriptors_per_job);
+}
+
 // ===========================================================================
 // Runtime-owned GPU arena
 // ===========================================================================
@@ -81,6 +102,15 @@ class gpu_arena {
     [[nodiscard]] bool ensure_capacity(std::uint64_t device_bytes,
                                        std::uint64_t upload_bytes,
                                        std::uint64_t download_bytes);
+
+    /// @brief Establishes allocator-reported physical admission for every requested
+    /// backing buffer before MPS seed/readback slices are created. Existing admitted
+    /// storage and its permit stay live until a replacement has fully materialized.
+    /// No reservation is charged for later bump suballocations.
+    /// @return `true` when all requested physical backings are live and admitted.
+    [[nodiscard]] bool ensure_admitted_capacity(std::uint64_t device_bytes,
+                                                std::uint64_t upload_bytes,
+                                                std::uint64_t download_bytes);
 
     /// @brief Bump-allocates an aligned slice from device-local storage.
     /// @param[in] bytes Logical byte size to reserve.
@@ -146,16 +176,23 @@ class gpu_arena {
             .value_or((std::numeric_limits<std::uint64_t>::max)());
     }
 
-    runtime* runtime_ = nullptr;              ///< Owning runtime that allocates backing buffers.
-    buffer device_;                         ///< Device-local arena backing buffer.
-    buffer upload_;                         ///< Host-visible upload arena backing buffer.
-    buffer download_;                       ///< Host-visible download arena backing buffer.
+    runtime* runtime_ = nullptr;             ///< Owning runtime that allocates backing buffers.
+    // Every permit precedes its allocation so reverse destruction frees storage first.
+    bioseq::parallelism::memory_permit device_permit_{};
+    buffer device_;                          ///< Device-local arena backing buffer.
+    bioseq::parallelism::memory_permit upload_permit_{};
+    buffer upload_;                          ///< Host-visible upload arena backing buffer.
+    bioseq::parallelism::memory_permit download_permit_{};
+    buffer download_;                        ///< Host-visible download arena backing buffer.
     std::uint64_t device_cursor_ = 0;       ///< Current device-local bump offset.
     std::uint64_t upload_cursor_ = 0;       ///< Current upload bump offset.
     std::uint64_t download_cursor_ = 0;     ///< Current download bump offset.
     std::uint64_t device_capacity_ = 0;     ///< Reserved device-local capacity in bytes.
     std::uint64_t upload_capacity_ = 0;     ///< Reserved upload capacity in bytes.
     std::uint64_t download_capacity_ = 0;   ///< Reserved download capacity in bytes.
+    bool device_admission_established_ = false;   ///< Physical device backing was transacted.
+    bool upload_admission_established_ = false;   ///< Physical upload backing was transacted.
+    bool download_admission_established_ = false; ///< Physical download backing was transacted.
 };
 
 /// @brief RAII arena reservation: holds the admission permit, marks the arena on

@@ -122,7 +122,7 @@ struct minimizer_hashmap_fragment_index {
     /// Sort minimizers by the narrowest exact radix key.
     /// @tparam p_minimizer_type Minimizer representation exposing `kmer()`.
     template <class p_minimizer_type>
-    static void sort_minimizers_in_place_(std::vector<p_minimizer_type>& sorted_minimizers) {
+    static void sort_minimizers_in_place_(std::span<p_minimizer_type> sorted_minimizers) {
         if (sorted_minimizers.empty())
             return;
         // `MinimizerRepr::kmer()` deliberately exposes a uint64_t ABI even
@@ -161,14 +161,39 @@ struct minimizer_hashmap_fragment_index {
                                     kmer_key{});
     }
 
-    /// Build lookup storage from an already sorted caller-owned vector.
+    /// Preserve the established vector sorting entry point through the span implementation.
+    template <class p_minimizer_type>
+    static void sort_minimizers_in_place_(std::vector<p_minimizer_type>& sorted_minimizers) {
+        sort_minimizers_in_place_(std::span<p_minimizer_type>{sorted_minimizers});
+    }
+
+    /// Build lookup storage from an already sorted caller-owned span.
     /// @tparam p_minimizer_type Minimizer representation exposing hash and encoded position.
     template <class p_minimizer_type>
-    void build_presorted_in_place_(std::vector<p_minimizer_type>& sorted_minimizers,
-                                   sequence_size_t target_length,
-                                   bool reserve_full_table_once) {
+    void build_presorted_(std::span<const p_minimizer_type> sorted_minimizers,
+                          sequence_size_t target_length,
+                          bool reserve_full_table_once) {
         target_len = target_length;
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        try {
+            clear_table();
+        } catch (const std::bad_alloc&) {
+            try {
+                bioseq_log_progress<logging_level::warning, logging_target::file>(
+                    "[bioseq.transient_mpf_index.failure] site=table_owner_allocation "
+                    "total={} target_length={} positions_capacity={} full_table={}",
+                    static_cast<unsigned long long>(sorted_minimizers.size()),
+                    static_cast<unsigned long long>(target_length),
+                    static_cast<unsigned long long>(positions.capacity()),
+                    reserve_full_table_once);
+            } catch (...) {
+                // Diagnostics must not replace the table-owner allocation exception.
+            }
+            throw;
+        }
+#else
         clear_table();
+#endif
         positions.clear();
 
         const std::size_t total = sorted_minimizers.size();
@@ -176,7 +201,32 @@ struct minimizer_hashmap_fragment_index {
             return;
         }
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        try {
+            positions.resize(total);
+        } catch (const std::bad_alloc&) {
+            try {
+                bioseq_log_progress<logging_level::warning, logging_target::file>(
+                    "[bioseq.transient_mpf_index.failure] site=positions_resize total={} "
+                    "target_length={} positions_capacity={} requested_bytes={} full_table={}",
+                    static_cast<unsigned long long>(total),
+                    static_cast<unsigned long long>(target_length),
+                    static_cast<unsigned long long>(positions.capacity()),
+                    static_cast<unsigned long long>(bioseq::common::saturating_mul(
+                        static_cast<std::uint64_t>(total),
+                        static_cast<std::uint64_t>(sizeof(std::uint64_t)))),
+                    reserve_full_table_once);
+            } catch (...) {
+                // Diagnostics must not replace the position allocation exception.
+            }
+            throw;
+        }
+#else
         positions.resize(total);
+#endif
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        try {
+#endif
         if (reserve_full_table_once) {
             // The admitted Vulkan route reserves for the worst-case D=N once.
             // A single allocation avoids half-size allocation/rehash overlap.
@@ -185,6 +235,30 @@ struct minimizer_hashmap_fragment_index {
             // Apply the CPU allocation policy for every non-Vulkan caller.
             reserve_table(total / 2u + 16u);
         }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+        } catch (const std::bad_alloc&) {
+            const std::uint64_t planned_table_bytes =
+                reserve_full_table_once
+                    ? plan_minimizer_hashmap_table_allocation(
+                          static_cast<std::uint64_t>(total))
+                          .allocation_bytes
+                    : 0u;
+            try {
+                bioseq_log_progress<logging_level::warning, logging_target::file>(
+                    "[bioseq.transient_mpf_index.failure] site={} total={} target_length={} "
+                    "positions_capacity={} planned_table_bytes={} full_table={}",
+                    reserve_full_table_once ? "table_rehash_full" : "table_reserve_incremental",
+                    static_cast<unsigned long long>(total),
+                    static_cast<unsigned long long>(target_length),
+                    static_cast<unsigned long long>(positions.capacity()),
+                    static_cast<unsigned long long>(planned_table_bytes),
+                    reserve_full_table_once);
+            } catch (...) {
+                // Diagnostics must not replace the hash-table allocation exception.
+            }
+            throw;
+        }
+#endif
         std::size_t i = 0;
         while (i < total) {
             const std::uint64_t kmer = sorted_minimizers[i].kmer();
@@ -210,10 +284,16 @@ struct minimizer_hashmap_fragment_index {
             bioseq::instrumentation::register_static_region("target_index_build");
         auto _scope = bioseq::instrumentation::region(_desc);
         sort_minimizers_in_place_(sorted_minimizers);
-        build_presorted_in_place_(sorted_minimizers, target_length, reserve_full_table_once);
+        build_presorted_(std::span<const p_minimizer_type>{sorted_minimizers},
+                         target_length,
+                         reserve_full_table_once);
     }
 
   public:
+    /** Tag for callers that pre-admit the private table-owner allocation. */
+    struct defer_table_allocation_t final {};
+    static inline constexpr defer_table_allocation_t defer_table_allocation{};
+
     /// Global `(position << 1) | strand` values in hash-bucket order.
     std::vector<std::uint64_t> positions; // (last_pos<<1)|strand, full uint64
     /// Full target length represented by this lookup.
@@ -221,6 +301,8 @@ struct minimizer_hashmap_fragment_index {
 
     /// Construct an empty lookup.
     minimizer_hashmap_fragment_index();
+    /// Construct without allocating the private table owner.
+    explicit minimizer_hashmap_fragment_index(defer_table_allocation_t) noexcept;
     /// Release the transient table and position storage.
     ~minimizer_hashmap_fragment_index();
     /// Copy lookup contents into independent storage.
@@ -270,6 +352,10 @@ struct minimizer_hashmap_fragment_index {
     [[nodiscard]] bool table_empty() const noexcept;
     /// Return bytes currently retained by the hash table.
     [[nodiscard]] std::uint64_t table_allocation_bytes() const noexcept;
+    /// Return the pre-allocation requirement for the private table owner.
+    [[nodiscard]] static std::uint64_t table_owner_allocation_requirement_bytes();
+    /// Return the allocator-reported private table-owner extent.
+    [[nodiscard]] std::uint64_t table_owner_allocation_bytes() const noexcept;
     /// Return the peak hash-table bytes retained during this lifetime.
     [[nodiscard]] std::uint64_t table_peak_allocation_bytes() const noexcept;
     /// Visit every hash bucket through an erased callback.
@@ -307,6 +393,13 @@ struct minimizer_hashmap_fragment_index {
         sort_minimizers_in_place_(source);
     }
 
+    /// Sort one caller-owned contiguous minimizer source without allocating another container.
+    /// @tparam p_minimizer_type Minimizer representation exposing `kmer()`.
+    template <class p_minimizer_type>
+    static void sort_source_by_hash_in_place(std::span<p_minimizer_type> source) {
+        sort_minimizers_in_place_(source);
+    }
+
     /// Build a transient lookup index by consuming caller-owned minimizers.
     /// Sorting happens in the caller's allocation and the vector is
     /// deterministically deallocated before this function returns.
@@ -329,6 +422,23 @@ struct minimizer_hashmap_fragment_index {
                               target_length,
                               /*reserve_full_table_once=*/true);
         std::vector<p_minimizer_type>{}.swap(target_minimizers);
+    }
+
+    /// Build the one-shot table from an already authenticated hash-major source.
+    /// The caller retains the source allocation and may release it after return.
+    template <class p_minimizer_type>
+    void build_presorted_full_table(std::span<const p_minimizer_type> target_minimizers,
+                                    sequence_size_t target_length) {
+        if (table_ != nullptr || !positions.empty() || positions.capacity() != 0u) {
+            throw std::logic_error{
+                "pre-admitted presorted minimizer table requires a fresh deferred owner"};
+        }
+        static const auto* _desc =
+            bioseq::instrumentation::register_static_region("target_index_build");
+        auto _scope = bioseq::instrumentation::region(_desc);
+        build_presorted_(target_minimizers,
+                         target_length,
+                         /*reserve_full_table_once=*/true);
     }
 
     /// Deallocate lookup storage after the final seed consumer.  This is for

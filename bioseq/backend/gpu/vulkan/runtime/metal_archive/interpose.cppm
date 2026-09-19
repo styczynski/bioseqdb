@@ -41,11 +41,11 @@ class metal_archive_pipeline_create_scope {
   public:
     /// @brief Opens one immutable Metal audit scope for a Vulkan pipeline creation.
     /// @param[in] required Whether a provider-backed archive receipt is mandatory.
-    /// @param[in] runtime_device_uuid Selected Vulkan device UUID.
+    /// @param[in] runtime_identity Selected Vulkan device and pipeline-cache identity.
     /// @param[in] shader_key Shader variant entering pipeline creation.
     /// @param[in] expected_entry_name Expected Metal entry-point name.
     metal_archive_pipeline_create_scope(bool required,
-                                        std::array<std::uint8_t, VK_UUID_SIZE> runtime_device_uuid,
+                                        const runtime_vulkan_device_identity& runtime_identity,
                                         shader_variant_key shader_key,
                                         std::string expected_entry_name)
         : required_(required) {
@@ -94,7 +94,12 @@ class metal_archive_pipeline_create_scope {
         audit_.metal_source_fallback_calls =
             command_state.source_fallback_calls.load(std::memory_order_relaxed);
         audit_.configured_vulkan_device_uuid = state.runtime_vulkan_device_uuid;
-        audit_.runtime_vulkan_device_uuid = runtime_device_uuid;
+        audit_.runtime_vulkan_device_uuid = runtime_identity.device_uuid;
+        audit_.api_version = runtime_identity.api_version;
+        audit_.driver_version = runtime_identity.driver_version;
+        audit_.vendor_id = runtime_identity.vendor_id;
+        audit_.device_id = runtime_identity.device_id;
+        audit_.pipeline_cache_uuid = runtime_identity.pipeline_cache_uuid;
         audit_.expected_metal_registry_id = state.runtime_metal_registry_id;
         audit_.loader_metal_registry_id = state.loader_registry_id;
         audit_.scope_identity = next_nonzero_identity(state.next_scope_identity);
@@ -194,9 +199,10 @@ class metal_archive_pipeline_create_scope {
 
     /// @brief Closes the scope and validates the complete immutable archive audit.
     /// @param[in] outer_result Vulkan pipeline-creation result.
+    /// @param[in] pipeline_create_ns Measured Vulkan pipeline-creation duration in nanoseconds.
     /// @return Optional accepted audit, or the exact fail-closed diagnostic.
     [[nodiscard]] std::expected<std::optional<runtime_metal_archive_pipeline_audit>, std::string>
-    finish(VkResult outer_result) {
+    finish(VkResult outer_result, std::uint64_t pipeline_create_ns) {
         if (finished_) {
             return std::unexpected("Metal archive pipeline-create scope verdict consumed twice");
         }
@@ -255,6 +261,7 @@ class metal_archive_pipeline_create_scope {
         audit_.sticky_failure =
             audit_.sticky_failure || command_state.sticky_failure.load(std::memory_order_acquire);
         audit_.outer_vulkan_pipeline_succeeded = outer_result == VK_SUCCESS;
+        audit_.pipeline_create_ns = pipeline_create_ns;
         audit_.receipt_identity = next_nonzero_identity(state.next_receipt_identity);
         if (!audit_.is_internally_consistent()) {
             return std::unexpected(
@@ -293,7 +300,7 @@ class metal_archive_pipeline_create_scope {
     /// The remaining arguments preserve the cross-platform constructor contract
     /// but are intentionally unnamed and ignored on this platform.
     metal_archive_pipeline_create_scope(bool required,
-                                        std::array<std::uint8_t, VK_UUID_SIZE>,
+                                        const runtime_vulkan_device_identity&,
                                         shader_variant_key,
                                         std::string) noexcept
         : required_(required || is_runtime_metal_archive_configuration_installed()) {}
@@ -307,9 +314,10 @@ class metal_archive_pipeline_create_scope {
     /// @brief Produces the non-Apple fail-closed verdict.
     /// The Vulkan result is intentionally unnamed because the platform verdict
     /// depends only on whether immutable Metal proof was required.
+    /// The measured creation duration is likewise irrelevant without Metal.
     /// @return Empty audit when optional, otherwise the platform diagnostic.
     [[nodiscard]] std::expected<std::optional<runtime_metal_archive_pipeline_audit>, std::string>
-    finish(VkResult) const {
+    finish(VkResult, std::uint64_t) const {
         if (required_) {
             return std::unexpected(
                 "immutable Metal archive receipt requested on a non-Apple runtime");

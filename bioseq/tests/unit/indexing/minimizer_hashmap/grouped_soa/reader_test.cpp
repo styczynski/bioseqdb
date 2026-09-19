@@ -23,6 +23,7 @@ import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.minimap2_sketch_baseline;
 import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.runtime_contract;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy_sequence;
@@ -77,6 +78,7 @@ TEST_CASE("grouped-SoA cold reader admits retained positions once",
         minimizers.emplace_back(hash, retained_bp(index) << 1u);
         queries.push_back(hash);
     }
+    std::ranges::sort(queries);
 
     vector_replay_minimizer_producer producer{minimizers};
     collecting_minimizer_row_sink sink;
@@ -150,9 +152,15 @@ TEST_CASE("grouped-SoA cold reader admits retained positions once",
     constexpr std::uint64_t expected_barrier_audits = 4u;
     REQUIRE(evidence.capacity_accounting_passes == expected_barrier_audits);
     REQUIRE_FALSE(evidence.saturated);
-    REQUIRE(reader->lookup(queries.front()).positions.front() == retained_bp(0u) << 1u);
-    REQUIRE(reader->lookup(queries.back()).positions.front() == retained_bp(query_count - 1u)
-                                                                    << 1u);
+    // Hash order differs from source-position order in this permuted fixture.
+    const auto first_query = std::ranges::find_if(
+        minimizers, [&queries](const auto& entry) { return entry.first == queries.front(); });
+    const auto last_query = std::ranges::find_if(
+        minimizers, [&queries](const auto& entry) { return entry.first == queries.back(); });
+    REQUIRE(first_query != minimizers.end());
+    REQUIRE(last_query != minimizers.end());
+    REQUIRE(reader->lookup(queries.front()).positions.front() == first_query->second);
+    REQUIRE(reader->lookup(queries.back()).positions.front() == last_query->second);
 
     // Exercise the statement-level aggregate equation with a second reader
     // that selects only the first of the three control extents. Production
@@ -246,6 +254,77 @@ TEST_CASE("grouped-SoA cold reader admits retained positions once",
     const std::uint64_t aggregate_passes =
         evidence.capacity_accounting_passes + sparse_evidence.capacity_accounting_passes;
     REQUIRE(aggregate_passes == aggregate_sessions * expected_barrier_audits);
+}
+
+TEST_CASE("grouped-SoA persisted reader accepts a generated K20 u64 query image",
+          "[component:bioseq][layer:unit][feature:storage]") {
+    using namespace bioseq::indexing;
+    constexpr std::uint64_t selected_hash = (std::uint64_t{1u} << 39u) | 0x35u;
+    constexpr std::uint64_t other_hash = selected_hash + 9u;
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers{
+        {selected_hash, (25u << 1u) | 1u},
+        {other_hash, 41u << 1u},
+    };
+    vector_replay_minimizer_producer producer{
+        minimizers,
+        k_minimap_scheme_identity,
+        minimizer_producer_backend_identity_for_backend(minimizer_sketch_backend::exact_simd)};
+    collecting_minimizer_row_sink sink;
+    constexpr auto options = test_grouped_soa_generation_options<seq::dna4, std::uint64_t>(
+        100u,
+        10u,
+        minimizer_algorithm::simd_minimap2_reference,
+        100u,
+        20u,
+        15u);
+    const auto generation = encode_minimizer_generation(producer, sink, options);
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->manifest.algorithm_identity == options.algorithm_identity);
+    REQUIRE(generation->manifest.kmer_size == 20u);
+    REQUIRE(generation->manifest.window_size == 15u);
+    const auto expected = expected_grouped_soa_generation_identity_for_backend(
+        minimizer_generation_layout::grouped_soa_segment_local,
+        minimizer_sketch_backend::exact_simd,
+        options.algorithm_identity,
+        k_minimizer_persisted_dna4_alphabet_code,
+        sizeof(std::uint64_t),
+        20u,
+        15u,
+        10u);
+    REQUIRE(expected.has_value());
+
+    const std::array<std::uint64_t, 1> queries{selected_hash};
+    bioseq::parallelism::memory_admission_controller admission;
+    auto reader = prepared_grouped_soa_query_reader::begin(admission,
+                                                           generation->head,
+                                                           generation->manifest,
+                                                           *expected,
+                                                           generation->directory.encoded_bytes(),
+                                                           queries,
+                                                           10u);
+    REQUIRE(reader.has_value());
+    for (const auto& row : sink.rows) {
+        if (row.address.position_segment >= 0) {
+            REQUIRE(reader->accept(row_view(row)).has_value());
+        }
+    }
+    REQUIRE(reader->finish().has_value());
+    const auto selected = reader->lookup(selected_hash);
+    REQUIRE(selected.positions.size() == 1u);
+    REQUIRE(selected.positions.front() == minimizers.front().second);
+    REQUIRE(reader->lookup(other_hash).positions.empty());
+
+    const std::array<std::uint32_t, 1> narrow_queries{0x35u};
+    auto rejected = prepared_grouped_soa_query_reader::begin(
+        admission,
+        generation->head,
+        generation->manifest,
+        *expected,
+        generation->directory.encoded_bytes(),
+        narrow_queries,
+        10u);
+    REQUIRE_FALSE(rejected.has_value());
+    REQUIRE(rejected.error() == minimizer_generation_encoding_error::storage_contract_mismatch);
 }
 
 TEST_CASE("grouped-SoA admission failures name the exact owner substage",
@@ -467,7 +546,7 @@ TEST_CASE("grouped-SoA selects its exact immutable row quantum",
     const auto generation = encode_minimizer_generation(
         producer, sink, test_grouped_soa_generation_options(position_count + 1u, 65'534u));
     REQUIRE(generation.has_value());
-    REQUIRE(generation->manifest_row.byte_count == 160u);
+    REQUIRE(generation->manifest_row.byte_count == 176u);
     REQUIRE(generation->manifest.position_segment_span_bp == k_minimizer_preferred_segment_span_bp);
     REQUIRE(generation->manifest.position_width == minimizer_scalar_width::u32);
     REQUIRE(generation->directory.entries().size() == 1u);

@@ -41,6 +41,7 @@ import bioseq.common.hashing; //  shared SHA-256
 import bioseq.tests.support.indexing_storage_fakes;
 
 import bioseq.tests.unit.indexing.minimizer_hashmap_support;
+import bioseq.tests.unit.indexing.minimizer_hashmap.compact_direct_support;
 
 using namespace seq::literals;
 
@@ -58,6 +59,8 @@ TEST_CASE("packed query occurrence layout is boundary exact",
 
     STATIC_REQUIRE(sizeof(packed_query_occurrence) == 8u);
     STATIC_REQUIRE(sizeof(wide_query_occurrence) == 12u);
+    STATIC_REQUIRE(sizeof(packed_query_occurrence_h64) == 16u);
+    STATIC_REQUIRE(sizeof(wide_query_occurrence_h64) == 16u);
 
     constexpr auto empty = plan_query_occurrence_packing(0u, 0u, 0u);
     STATIC_REQUIRE(empty.has_value());

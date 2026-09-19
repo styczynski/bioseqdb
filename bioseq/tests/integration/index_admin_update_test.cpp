@@ -78,21 +78,18 @@ TEST_CASE("two-stack ntHash update_index accepts DNA5 without scalar fallback",
         table)) == 1);
 }
 
-TEST_CASE("bounded ntHash update_index maps checked DNA5 rejection to 0A000",
+TEST_CASE("bounded ntHash update_index publishes DNA5 for both minimizer layouts",
           "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
-    struct failure_route {
+    struct publication_route {
         std::string_view table;
         std::string_view index_name;
-        std::string_view operation;
     };
-    constexpr std::array<failure_route, 2> routes{{
-        {"index_admin_bounded_nthash_grouped_fragment", "minimizers_per_fragment",
-         "grouped minimizer generation preflight"},
-        {"index_admin_bounded_nthash_grouped_sequence", "minimizers_per_sequence",
-         "grouped minimizer generation preflight"},
+    constexpr std::array<publication_route, 2> routes{{
+        {"index_admin_bounded_nthash_grouped_fragment", "minimizers_per_fragment"},
+        {"index_admin_bounded_nthash_grouped_sequence", "minimizers_per_sequence"},
     }};
 
-    for (const failure_route& route : routes) {
+    for (const publication_route& route : routes) {
         DYNAMIC_SECTION("grouped " << route.index_name) {
             auto ctx = fresh_context({route.table});
             exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
@@ -112,20 +109,15 @@ TEST_CASE("bounded ntHash update_index maps checked DNA5 rejection to 0A000",
                 "bioseq.seq('dna5', 64));",
                 route.table);
 
-            // This source is locator-backed and long enough to enter the
-            // selected bounded ntHash producer. The grouped sequence publisher
-            // must preserve unsupported_alphabet rather than mapping it to
-            // storage_contract_mismatch or XX001 in the publication encoder.
+            // DNA5 is now supported by the selected bounded producer. Retain
+            // the locator-backed fixture and check real index publication;
+            // do not require minimizer equality with another algorithm.
             REQUIRE(only_column_row_number(ctx, route.table) > 0);
-            const auto rejected = sql_error(ctx, fmt::format(
+            REQUIRE(query_scalar_int(ctx, fmt::format(
                 "SELECT bioseq.update_index('{}'::regclass, '{}');",
-                route.table, route.index_name));
-            REQUIRE(rejected.sqlstate == "0A000");
-            REQUIRE(rejected.contains("bounded ntHash SIMD"));
-            REQUIRE(rejected.contains("status=unsupported_alphabet"));
-            REQUIRE(rejected.contains(route.operation));
+                route.table, route.index_name)) == 1);
             REQUIRE(index_table_row_count(
-                ctx, route.index_name, route.table) == 0);
+                ctx, route.index_name, route.table) > 0);
             REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
         }
     }

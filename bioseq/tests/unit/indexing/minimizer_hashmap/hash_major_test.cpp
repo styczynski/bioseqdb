@@ -24,6 +24,7 @@ import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.minimap2_sketch_baseline;
 import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.runtime_contract;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy_sequence;
@@ -299,6 +300,19 @@ hash_major_expected(const bioseq::indexing::hash_major_minimizer_generation_opti
     };
 }
 
+/// Describe a canonical 64-bit hash query for one storage profile.
+[[nodiscard]] bioseq::indexing::canonical_query_hash_view hash_major_query_view(
+    std::span<const std::uint64_t> hashes,
+    const bioseq::indexing::hash_major_minimizer_storage_profile& storage_profile) {
+    return {
+        .values64 = hashes,
+        .width_bytes = 8u,
+        .storage_width_bytes = 8u,
+        .storage_profile_digest =
+            bioseq::indexing::hash_major_minimizer_storage_profile_digest(storage_profile),
+    };
+}
+
 /// Encode a byte range as lowercase hexadecimal text.
 [[nodiscard]] std::string hash_major_hex(std::span<const std::byte> bytes) {
     constexpr std::string_view digits{"0123456789abcdef"};
@@ -360,7 +374,7 @@ TEST_CASE("hash-major exact wire codecs preserve the grouped-SoA layout",
           "[component:bioseq][layer:unit][feature:storage]") {
     using namespace bioseq::indexing;
     STATIC_REQUIRE(minimizer_generation_head::encoded_bytes == 64u);
-    STATIC_REQUIRE(minimizer_generation_manifest::encoded_bytes == 160u);
+    STATIC_REQUIRE(minimizer_generation_manifest::encoded_bytes == 176u);
     STATIC_REQUIRE(k_hash_major_minimizer_head_bytes == 224u);
     STATIC_REQUIRE(k_hash_major_minimizer_manifest_bytes == 336u);
     STATIC_REQUIRE(k_hash_major_minimizer_directory_entry_bytes == 80u);
@@ -731,6 +745,73 @@ TEST_CASE("hash-major selective reader requests only authorized postings and mat
         REQUIRE(std::ranges::equal(scalar_reader->lookup_spans(30u).contiguous_positions32(),
                                    std::array<std::uint32_t, 2>{20u, 21u}));
     }
+}
+
+TEST_CASE("hash-major reader preserves a generated K20 u64 query profile",
+          "[component:bioseq][layer:unit][feature:index]") {
+    using namespace bioseq::indexing;
+    constexpr std::uint64_t selected_hash = (std::uint64_t{1u} << 39u) | 0x35u;
+    constexpr std::uint64_t other_hash = selected_hash + 9u;
+    auto options = hash_major_test_options(100u);
+    constexpr auto algorithm_identity =
+        test_generation_algorithm_identity<seq::dna4, std::uint64_t>(
+            minimizer_algorithm::simd_minimap2_reference,
+            100u,
+            20u,
+            15u);
+    const auto profile = hash_major_minimizer_profile_for_backend(
+        minimizer_sketch_backend::exact_simd,
+        algorithm_identity,
+        k_minimizer_persisted_dna4_alphabet_code,
+        options.target_length);
+    REQUIRE(profile.has_value());
+    REQUIRE(profile->hash_width_bytes == sizeof(std::uint64_t));
+    REQUIRE(profile->kmer_size == 20u);
+    REQUIRE(profile->window_size == 15u);
+    options.storage_profile = *profile;
+
+    hash_major_memory_image image;
+    hash_major_minimizer_logical_encoder encoder{options, image.sink()};
+    const std::array<std::uint64_t, 1> selected_positions{12u};
+    const std::array<std::uint64_t, 1> other_positions{18u};
+    REQUIRE(encoder.append_hash(selected_hash, selected_positions).has_value());
+    REQUIRE(encoder.append_hash(other_hash, other_positions).has_value());
+    const auto metadata = encoder.finish();
+    REQUIRE(metadata.has_value());
+
+    const std::array<std::uint32_t, 1> narrow_queries{0x35u};
+    const auto rejected = hash_major_minimizer_selective_reader::open(
+        bioseq::parallelism::memory_admission_controller::instance(),
+        metadata->encoded_head,
+        metadata->encoded_manifest,
+        hash_major_expected(options),
+        image.source(),
+        hash_major_query_view(narrow_queries, options.storage_profile),
+        10u);
+    REQUIRE_FALSE(rejected.has_value());
+    REQUIRE(rejected.error() == hash_major_minimizer_error::storage_contract_mismatch);
+    REQUIRE(image.reads.empty());
+
+    const std::array<std::uint64_t, 1> queries{selected_hash};
+    auto reader = hash_major_minimizer_selective_reader::open(
+        bioseq::parallelism::memory_admission_controller::instance(),
+        metadata->encoded_head,
+        metadata->encoded_manifest,
+        hash_major_expected(options),
+        image.source(),
+        hash_major_query_view(queries, options.storage_profile),
+        10u);
+    REQUIRE(reader.has_value());
+    const auto selected = reader->lookup_spans(selected_hash);
+    REQUIRE(selected.positions_complete());
+    REQUIRE(selected.contiguous_positions32().size() == 1u);
+    REQUIRE(selected.contiguous_positions32().front() == selected_positions.front());
+    REQUIRE_THROWS_AS(reader->lookup_spans(other_hash), persisted_minimizer_lookup_error);
+
+    auto invalid_profile = options.storage_profile;
+    invalid_profile.hash_width_bytes = sizeof(std::uint32_t);
+    REQUIRE_FALSE(is_valid_hash_major_minimizer_storage_profile(invalid_profile,
+                                                                 options.target_length));
 }
 
 TEST_CASE("hash-major applies max_occ before posting IO with exact heavy count",

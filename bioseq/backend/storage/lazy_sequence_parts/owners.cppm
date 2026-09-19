@@ -5,9 +5,10 @@
 export module bioseq.storage.lazy_sequence:owners;
 
 import std;
-import :view_contract;
+import bioseq.storage.lazy_sequence_view;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.fragment_cache;
+import bioseq.common.seqan_adapter;
 import bioseq.storage.scanner;
 import bioseq.storage.size;
 import bioseq.sequences;

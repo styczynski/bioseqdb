@@ -182,8 +182,12 @@ hash_major_minimizer_selective_reader::open(
     }
     reader.permit_.shrink_to(current_owner_bytes);
     for (std::size_t ordinal = 0u; ordinal < query_count; ++ordinal) {
-        ++reader.canonical_radix_prefix_[static_cast<std::size_t>(query_hashes.at(ordinal) >> 16u) +
-                                         1u];
+        const std::uint64_t hash = query_hashes.at(ordinal);
+        const std::size_t radix = reader.canonical_high16_bucket_(hash);
+        if (hash > maximum_hash || radix + 1u >= reader.canonical_radix_prefix_.size()) {
+            return std::unexpected(hash_major_minimizer_error::storage_contract_mismatch);
+        }
+        ++reader.canonical_radix_prefix_[radix + 1u];
     }
     for (std::size_t radix = 1u; radix < reader.canonical_radix_prefix_.size(); ++radix) {
         reader.canonical_radix_prefix_[radix] += reader.canonical_radix_prefix_[radix - 1u];

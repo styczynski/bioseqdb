@@ -4137,7 +4137,7 @@ def _run_live(args: argparse.Namespace) -> Path:
         args.output_root, "external acceptance output root", create=True
     )
     raw_paths = {
-        "python": (sys.executable, True),
+        "python": (Path(sys.executable).resolve(strict=True), True),
         "cmake": (args.cmake, True),
         "git": (args.git, True),
         "pg_config": (args.pg_config, True),
