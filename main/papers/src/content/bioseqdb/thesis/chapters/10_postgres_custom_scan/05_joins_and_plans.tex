@@ -24,8 +24,9 @@ There are several possible plans for searches:
 \end{itemize}
 
 Interesting thing happens if we want to make two searches for the same row. Consider the example below:
-\noindent\begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-search-sql,caption={Two searches with one ambiguous target binding.}]
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Two searches with one ambiguous target binding.},label={lst:ambiguous-target-binding}]
 -- Unsupported: this will cause an error
 SELECT t.id, bioseq.dp_score(t.seq)
 FROM targets AS t
@@ -36,7 +37,8 @@ WHERE mmsearch(t.seq, $1::bioseq.seq('dna5', 64))
 
 In this case due to my choise of SQL API, we don't know which score \path{bioseq.dp_score(t.seq)} refers to as we have two potential results with different scores.
 To resolve this issue we can do a self-join on the same table:
-\noindent\begin{minipage}{\linewidth}
+
+\begin{minipage}{\linewidth}
 \begin{lstlisting}[style=bioseq-search-sql,caption={Give each independent search its own target binding.}]
 -- Supported: this is valid use-case within BioseqDB
 SELECT a.id,
@@ -53,7 +55,20 @@ Now, let $a_i$ be hit $i$ of the search bound to alias \texttt{a}, and let $b_j$
 be hit $j$ of the search bound to alias \texttt{b}. Figure~\ref{fig:scan-alias-pairs}
 shows their combinations for one target row. We can see that natural extension of the used syntax would be to generate cross-product of hits.
 It's worth noting that currently we are not able to express search-specific limits~\ref{sec:filter-placement} meaning that there's no optimisation for example if we wanted to have only best-hit per each sequence (only tuple with best score on both searches). In that case all tuples needs to be evaluated and user can construct a query manually
-to select the highest-scoring hits.
+to select the highest-scoring hits:
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Keep one highest score from each of the two searches, per stored row.}]
+SELECT a.id,
+       MAX(bioseq.dp_score(a.seq)) AS score_a,
+       MAX(bioseq.dp_score(b.seq)) AS score_b
+FROM targets AS a
+JOIN targets AS b ON a.id = b.id
+WHERE mmsearch(a.seq, $1::bioseq.seq('dna5', 64))
+  AND mmsearch(b.seq, $2::bioseq.seq('dna5', 64))
+GROUP BY a.id;
+\end{lstlisting}
+\end{minipage}
 
 \begin{figure}[htbp]
 \centering
@@ -77,61 +92,29 @@ to select the highest-scoring hits.
       \node[scan output,minimum width=1.05cm,minimum height=.8cm]
         at (\x,\y) {$(a_{\i},b_{\j})$};
   \node[anchor=west,text=black!65] at (.1,.2)
-    {Source identity may be shared. Current hits and result fields stay separate.};
+    {Self-join searches the same row twice};
 \end{tikzpicture}
-\caption{The aliases bind independent searches even when their input is the
-same stored row. Two hits from the first search and three from the second
-produce six combinations under the identifier join. Additional hit conditions
-could select a subset of this matrix.}
+\caption{Two hits from the first search and three from the second
+produce six combinations. Additional hit conditions may select subset of this cross-product matrix, but this is responsibility of the user as I don't provide any specialised optimisation for example to extract only one best-hit for each search.}
 \label{fig:scan-alias-pairs}
 \end{figure}
 
-This can also be stated using tuple relational calculus. Let $T$ be the target
-relation and let $\mathcal{H}(s,q)$ be the relation of hit occurrences for sequence $s$ and query
-$q$. Ignoring SQL nulls in this small model, the self-join requests
-\[
-  \{(r.id,h_a,h_b)\mid r\in T\ \land\
-       h_a\in \mathcal{H}(r.seq,q_1)\ \land\ h_b\in \mathcal{H}(r.seq,q_2)\}.
-\]
-Two independent hit variables are needed even though both refer to one stored
-sequence. Ordinary SQL self-joins are already useful for comparing different
-rows and expressing several roles. BioSeqDB adds this particular reason to
-use them: naming separate alignment results. The expression above also
-explains the $2\times3$ row count in Figure~\ref{fig:scan-alias-pairs}.
+The intereesting part is that self-joins in relational databases are commonly used for hierarchical structures (trees), detect duplicates, extract consecutive elements (and other comparison operations). In this case it's used to create new alias for the column without any additional operations.
 
-Logical aliases do not require two private copies of every sequence byte.
-The lazy source and storage reuse mechanisms in the previous chapter can
-reuse eligible underlying regions when both aliases refer to the same stored
-value. That reuse depends on the source, configuration, and lifetime. It is
-not a promise that every self-join reads storage only once. Each owner must
-still keep its own query, current hit, and projected fields.
+There is however one interesting exception that is a bug in the BioseqDB code (initially I supported conflicting calls under one alias and there is leftover branch of the code that still supports it).
+Users should be aware that there still can be some undiscovered edge cases that are not correctly detected.
+I initially planned to support same-alias searches if no feature is used (we don't specify CIGAR, score etc.), but this results in usability issue that adding these properties suddently requires user to rewrite the query completely.
+For this reason I later decided to disable any conflicting alias searches even if we don't specify any properties in the \texttt{SELECT} list.
 
-The hooks use target bindings to detect unsupported stacked searches and
-ambiguous helpers. The current implementation also has a narrow exception:
-an extra constant search beside a parameterized primary search can act as an
-existence filter. It only decides whether primary hit rows survive and does
-not expose a second score or CIGAR. It therefore does not replace independent
-bindings when both searches' hits are required.
-
-\subsection{Understanding the selected plan}
-\label{sec:customscan-explain}
-
-\texttt{EXPLAIN} shows where the search sits in the plan. A
-\texttt{BioseqScan} receives its target from one relation, while a
-\texttt{BioseqBatchJoin} receives both sides of a supported search join.
-Adding \texttt{ANALYZE} executes the statement and reports its row counts:
-
-\noindent\begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-search-sql,caption={Show the search node and its output row count.}]
-EXPLAIN (ANALYZE, VERBOSE)
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Low priority bug that still exists in the code},label={lst:constant-extra-mmsearch}]
+-- This shouldn't be possible, but currently works (bug)
 SELECT t.id, bioseq.dp_score(t.seq) AS score
-FROM targets AS t
-WHERE t.id > 20
-  AND mmsearch(t.seq, $1::bioseq.seq('dna5', 64));
+FROM queries AS q, targets AS t
+-- index_read_requirement is a special debug parameter to disable BioseqDB from loading index
+-- for some reason enabling it allows you to trigger specific BioseqJoin path that doesn't correctly detect the conficting calls
+-- The queries table needs to be normal table, not defined using "USING bioseq"
+WHERE mmsearch(t.seq, q.seq, aligner_options(index_read_requirement => 1))
+  AND mmsearch(t.seq, 'ACGTACGTACGTACGT'::bioseq.seq('dna5', 64));
 \end{lstlisting}
 \end{minipage}
-
-The custom scan's output count is the number of emitted hits. It can exceed
-the count of stored input rows because one target can produce several hits.
-Without \texttt{ANALYZE}, \texttt{EXPLAIN} describes the selected plan without
-running alignment.
