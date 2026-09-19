@@ -1,36 +1,42 @@
 \clearpage
-\section{Sharing completed query results}
+\section{Caching results}
 \label{sec:bioseq-result-cache}
+
+As mentioned before I provide layers of caching:
+\begin{itemize}
+  \item Chunk (strip) cache that stores rows of columnar stored (compressed blobs that can potentially store multiple sequences)~\ref{fig:execcustomscan-dispatch}. Described more in detail in next chapters~\ref{sec:pg-storage-role}
+  \item Lazy interface cache implemented by scanner slots~\ref{fig:execcustomscan-dispatch}
+  \item I also provide long-term experimental cache layer for alignments results described here.
+\end{itemize}
 
 An alignment query may run for hours while returning a small result. If two
 sessions submit the same request, running the alignment twice wastes work.
-The separate \texttt{bioseq\_cache} extension coordinates these requests and
-stores completed results. This differs from the two caches used when reading
-sequences: a lazy read session can reuse fetched fragments, and the column
-cache reuses decompressed storage chunks within a backend. The result cache
-can serve another execution without repeating alignment.
+I created separate small \texttt{bioseq\_cache} extension that is provided along with BioseqDB.
 
+\warn{Experimental support}{
+  This chapter doesn't go into details of chache implementation, because it's still experimental. I didn't perform enough testing to be confident enough about all edge cases correctness 
+  as I needed to be very careful how to lock queries and split work (it needs comparing expression trees to detect query identity or overlap, serializing them to store them, parallel-safe coordination of locking).
+  The subextension isn't loaded by default and user need to execute \path{CREATE} \path{EXTENSION} \path{bioseq_cache} manually and restard Postgres server.
+  There are some problems with this approach as the MVCC Postgres visiblity can change during execution (there could be insert when alignment is running). 
+  This problem wasn't addressed so the user would see old version of the data. That's why I decided to disable caching now.
+  Moreover the "excact results" setting is fully supported now and can be enabled if user loads extension, while "reusable fragments" have most of the code ready except that it was only tested on scalar 
+  types (INTs, FLOATs etc.) and sequence support will require some alterations (planner will fallback to "exact results" anyway)
+}
+
+The cache subextension coordinates requests and stores completed results.
 The extension provides two forms of reuse:
 \begin{itemize}
-  \item \textbf{Exact results.} An identical eligible request can wait for a
-    running producer or read its completed result, including repeated rows
-    and their stored order.
-  \item \textbf{Reusable fragments.} A provider can describe which input
-    rows a completed computation covers. A later request can read suitable
-    results and compute only the missing part.
+  \item \textbf{Exact results:} If user executes two identical queries at the same time, we provide special custom scan in plan that waits for currently running job and loads results from it. It needs to happen during planning stage - planner needs to detect that alignment pipeline is running 
+  and then during execution stage block execution until results are available.
+  \item \textbf{Reusable fragments:} This is more complicated part of the code that doesn't completely block execution of the query. If similar query is currently running, planner will try to alter current query to still execute it, but try to cover region that is not covered by running jobs.
 \end{itemize}
-The generic cache implements both forms. The current BioSeqDB adapter
-provides exact result reuse; it does not yet provide the coverage and row
-identity callbacks needed for reusable fragments. The range example below
-explains the generic mechanism and the contract such an adapter must meet.
 
-\subsection{One producer, waiting readers}
-
-An entry is one attempt to compute a request over compatible data versions.
-The \emph{producer} owns that attempt. Other executions either wait for it
-or read a completed entry. To \emph{seal} the result is to finish writing it
-and close it to further rows. Figure~\ref{fig:cache-lifecycle} shows the
-successful path and the two ways in which an attempt stops being reusable.
+\emph{producer} is the query runner that currently executes alignment job. 
+In that timeframe another Postgres-spawned process with other user query waits for results.
+Submission of partial results would be possible, although very complicated to implement correctly.
+\emph{sealing} here means that we store last tuple, collect some metadata like tuple counts and create new UUID for the result.
+Figure~\ref{fig:cache-lifecycle} shows what happens during the execution of two queries. 
+The cache has expiration TTL time after which the results cannot be reused anymore.
 
 \begin{figure}[htbp]
 \centering
@@ -51,7 +57,7 @@ successful path and the two ways in which an attempt stops being reusable.
   \draw[scan arrow] (seal) -- (complete);
   \node[scan box,minimum width=1.25cm] (lookup) at (2.25,.85) {lookup};
   \draw[thick,dashed,scanBlue] (lookup.east) -- (7.65,.85)
-    node[midway,above=3pt]{wait; no partial rows};
+    node[midway,above=3pt]{wait until everything is completed};
   \node[scan output,minimum width=1.5cm] (recheck) at (9.2,.85)
     {check again};
   \node[scan output,minimum width=1.25cm] (read) at (11.2,.85) {read};
@@ -76,77 +82,40 @@ successful path and the two ways in which an attempt stops being reusable.
   \draw[scan arrow,black!60] (failed.south) |- (removed.west);
   \draw[scan arrow,black!60] (invalid.south) |- (removed.east);
 \end{tikzpicture}
-\caption{Two executions share one computation. The producer can return
-its own rows while building the entry. A waiter reads only after completion
-and validation. Failed, expired, or invalidated entries are removed after
-their users release them.}
+\caption{Consumer just waits for all results from producer and then reads them.}
 \label{fig:cache-lifecycle}
 \end{figure}
 
-The lifecycle has four main rules:
-\begin{itemize}
-  \item \textbf{Claim briefly, compute without the metadata lock.}
-    A short shared-state update chooses one producer for a matching request
-    and data version. The producer does not hold this lock throughout the
-    alignment. Waiters sleep and periodically check cancellation, producer
-    liveness, and data validity.
-  \item \textbf{Publish only complete work.} Reaching the child's end of
-    output allows the producer to seal the stored result, check dependencies,
-    and mark the entry complete. An early cursor close cannot publish the
-    rows collected so far as a complete result.
-  \item \textbf{Validate before reading.} A wake-up means that the entry
-    changed. The reader checks it again and keeps a reference that prevents
-    removal while it reads. The retention time starts at completion.
-  \item \textbf{Release on every exit.} Canceling a waiter releases that
-    waiter's reference and leaves the producer running. A failed or canceled
-    producer wakes its waiters, which can run the retained ordinary plan.
-    A later request can start a new attempt. Waiting is declined when
-    executions could end up waiting for one another.
-\end{itemize}
+There's one lock that is taken by any consumer during execution just to access shared state.
+The consumer sleeps and preiodically acquires and releases the lock to check if it can continue execution (polling).
+If the producer fails or is cancelled I wake all consumers that registered for this job and then each of them will try manually run the query (so the consumer won't fail due to producer error or cancellation).
 
-Matching SQL text alone is insufficient. Exact identity includes the
+The interesting problem is that matching SQL text alone is insufficient. I needed to include
 analyzed query, parameter values, result types, relevant execution settings,
-and the database and security context. Data validity is checked separately
-against the query's snapshot and recorded dependency versions. For example,
-an identical query after a committed change to its dependencies must not
-return an invalidated result.
-Permissions still undergo normal PostgreSQL checks. Unsupported or invalid
-cache entries leave the ordinary query plan available.
-Section~\ref{sec:pg-storage-request-coordination} describes result storage
-and its memory and file limits.
+and the database context objects to make sure we reliably detect identical queries.
+Additionally I keep track of query dependencies (all relations) and if the relation changes (row insert) during processing, then cache will be invalidated.
+This means that insert during consumer's wait time will cause the consumer to execute query by themselves (although this require more testing to confirm correctness)
 
-\subsection{Describe coverage, then compute the difference}
+\subsection{Reusing fragments of queries}
 
-Suppose the expensive operation and its settings remain fixed, while the
-user changes a metadata filter. A reusable entry stores both its results
-and the predicate describing the input rows it processed. A \emph{cached
-source} is a completed entry selected for reuse. This is the idea
-of \emph{semantic caching}: describe the cached region, read the useful
-part, and compute a remainder.\footnote{Dar, Franklin, J\'onsson,
+Suppose that table is kept unchanged, but user slightly changes some metadata condition (for example instead of aligning all sequences with dates between some range, we extend the range to include few more dates).
+For indentiy comparison I store the analyzed query plan as well so we can say what filter conditions were used for that cache entry. 
+
+The general idea of describing what is cached, reading useful part and computing remainer was very loosely inspired by semantic caching paper\footnote{Dar, Franklin, J\'onsson,
 Srivastava, and Tan, \href{https://www.vldb.org/conf/1996/P330.PDF}
 {\emph{Semantic Data Caching and Replacement}}, VLDB 1996, pp.~330--341.}
-Coverage records completed work even when some input rows produced no hits.
-The absence of a saved hit alone cannot prove that its input was searched.
 
 For example, select input rows with $40\leq id<100$. Completed sources cover
 $0\leq id<60$ and $50\leq id<80$. We read $[40,60)$ from the first source,
-$[60,80)$ from the second, and compute $[80,100)$. These ranges select
-metadata row identifiers, not positions within a biological sequence.
-
-We can state the rule in tuple relational calculus. Fix one compatible
-database snapshot, search query, alignment settings, and requested match
-fields that affect which hits are emitted. Define:
+$[60,80)$ from the second, and compute $[80,100)$.
+Let's define it formally via predicates:
 \begin{itemize}
-  \item $T(t)$: $t$ is an input row whose identity is retained;
-  \item $A(t,h)$: the operation emits hit occurrence $h$ for row $t$;
-    $h$ includes a distinct identity even when two hits have equal displayed
-    values;
-  \item $p(t)$: the new SQL predicate $P$ evaluates to \texttt{TRUE} on $t$;
-  \item $c_i(t)$: cached source $i$ passed validation and its recorded
-    predicate $P_i$ evaluates to \texttt{TRUE} on $t$.
+  \item $T(t)$: $t$ is an input tuple
+  \item $A(t,h)$: $h$ is tuple with alignment of tuple $t$
+  \item $p(t)$: the new SQL predicate $P$ evaluates to \texttt{TRUE} on $t$
+  \item $c_i(t)$: cached source $i$ has tuple with alginment for which the original predicate$P_i$ evaluates to \texttt{TRUE} on $t$.
 \end{itemize}
-Order the selected sources from $1$ to $m$. Source $i$ supplies branch $B_i$;
-the relation $D$ contains the input rows that still need computation:
+Order the selected cached sources from $1$ to $m$, source $i$ supplies part $B_i$, while the reminder we have to compute is $D$:
 \begin{align}
  B_i &= \{(t,h)\mid T(t)\land A(t,h)\land p(t)\land c_i(t)
                      \land \forall j<i:\neg c_j(t)\},
@@ -155,24 +124,14 @@ the relation $D$ contains the input rows that still need computation:
                      \label{eq:cache-difference}
 \end{align}
 Each requested hit is returned from the first valid source covering its
-input, or computed from $D$. Thus
+input, or computed from $D$:
 \begin{equation}
  \{(t,h)\mid T(t)\land A(t,h)\land p(t)\}
    = B_1\uplus\cdots\uplus B_m
      \uplus\{(t,h)\mid t\in D\land A(t,h)\}.
  \label{eq:cache-result}
 \end{equation}
-Here $\uplus$ joins disjoint sets of occurrences. The operation is evaluated
-only on missing inputs $D$; $A$ is a description of the result, not an
-instruction to compute every possible hit first. Removing the hidden
-identities afterwards preserves repeated SQL rows. SQL \texttt{UNION ALL}
-has the required concatenation behavior; \texttt{UNION} could remove
-legitimate repeated rows.\footnote{PostgreSQL 17,
-\href{https://www.postgresql.org/docs/17/queries-union.html}
-{Combining Queries}.}
-
-\subsection{An overlapping range example}
-
+Here $\uplus$ joins disjoint sets of occurrences. This simple formal description can be implemented as large \texttt{UNION ALL} operation of the entries in cache.
 Figure~\ref{fig:cache-ranges} shows the same example, including the overlap
 between the two sources.
 
@@ -200,9 +159,9 @@ between the two sources.
   \draw[scan arrow,black!55] (0,-.65) -- (103,-.65)
     node[right]{row $id$};
 \end{tikzpicture}
-\caption{The new request uses source 1 for $[40,60)$, source 2 for
+\caption{Example of resuable query with one predicate on the primary ID column.The new request uses source 1 for $[40,60)$, source 2 for
 $[60,80)$, and computes $[80,100)$. The gray overlap in source 2 is omitted
-because source 1 already supplies those occurrences. Cached rows outside
+because source 1 already contains those occurrences. Cached rows outside
 the new request are also omitted.}
 \label{fig:cache-ranges}
 \end{figure}
@@ -214,39 +173,19 @@ description:
   label={lst:cache-missing-inputs}]
 SELECT id, seq
 FROM sequences
-WHERE id >= 40 AND id < 100
-  AND (id >=  0 AND id < 60) IS NOT TRUE
-  AND (id >= 50 AND id < 80) IS NOT TRUE;
+WHERE id >= 40 AND id < 100 -- New query we want to compute
+  AND (id >=  0 AND id < 60) IS NOT TRUE -- Minus source 1 results 
+  AND (id >= 50 AND id < 80) IS NOT TRUE; -- Minus source 2 results
 \end{lstlisting}
-The cache builds PostgreSQL expression nodes for this condition; it does
-not construct and parse a new SQL string. A provider must place the
-condition before the expensive operation. The listing describes the input
-selection and does not introduce a new public search function.
 
-Three details make this transformation correct:
+There are few important details about the implementation:
 \begin{itemize}
-  \item \textbf{Handle SQL NULLs.} A \texttt{WHERE} clause accepts only
-    \texttt{TRUE}. For a nullable predicate, \texttt{NOT P} also becomes
+  \item \textbf{I need to correctly handle NULLs} For a nullable predicate, \texttt{NOT P} also becomes
     unknown when $P$ is unknown. \texttt{P IS NOT TRUE} includes both false
     and unknown, so it keeps every input excluded from the earlier
     cache.\footnote{PostgreSQL 17,
     \href{https://www.postgresql.org/docs/17/functions-comparison.html}
     {Comparison Functions and Operators}, Table~9.2.}
-  \item \textbf{Restore invalid coverage.} All source checks finish before
-    output begins. If source 1 fails validation, $c_1$ is false: source 2
-    supplies $[50,80)$ and $D$ becomes $[40,50)\cup[80,100)$. An internal
-    Boolean parameter enables each exclusion only for an accepted source.
-  \item \textbf{Require enough information.} A reusable provider must keep
-    input and hit identities, prove that results have compatible meaning,
-    and supply columns needed to test the new predicate. Missing metadata
-    may be fetched from the original rows under the validated snapshot.
-    A result containing coordinates alone cannot supply an uncomputed CIGAR.
+  \item \textbf{Handle source failures} If source 1 fails, $c_1$ is falsethen $D$ should become $[40,50)\cup[80,100)$ so on error we don't abort execution and just adjust computed region (currently this is realised by adding barrier for each query and computing $D$ at the end)
+  \item \textbf{Column differences} There could be a case in which source supplies only subset of columns. I don't optimise this scenario as computing new columns still requires running entire pipeline again, so we assume here that the column list is always the same.
 \end{itemize}
-
-Coverage is taken at a complete expensive-operation boundary. Joins,
-aggregation, and ordering above that boundary run again on the reconstructed
-rows. If an upper \texttt{LIMIT} stops the boundary early, its partial rows
-cannot become a complete coverage entry, even when the final limited query
-has a complete exact result. These rules allow reuse to save computation
-while keeping PostgreSQL responsible for the surrounding query.
-\label{sec:bioseq-result-cache-end}
