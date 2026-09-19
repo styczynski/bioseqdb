@@ -154,7 +154,7 @@ Support for joins:
 \endgroup
 
 The code in \texttt{ExecCustomScan} pulls one TAM row, runs filtering conditions (these can reject the row based on metdata) and on success calls \texttt{submit\_scan} to let buffer copy the tuple.
-When the copies in buffer reach the set capacity \texttt{dispatch\_batch\_capacity} (\8192 = 2^{13}\), \texttt{ready\_to\_dispatch} flag changes to true so the scan calls \texttt{run\_batch\_and\_build\_cursors}.
+When the copies in buffer reach the set capacity \texttt{dispatch\_batch\_capacity} \(8192 = 2^{13}\), \texttt{ready\_to\_dispatch} flag changes to true so the scan calls \texttt{run\_batch\_and\_build\_cursors}.
 This method is also invoked when there are no more tuples in TAM source.
 
 \texttt{run\_batch\_and\_build\_cursors} is where the batch starts and scanners and workers from Figure~\ref{fig:execcustomscan-dispatch} run.
@@ -254,6 +254,7 @@ Let's see if this is compatible with the BisoeqDB model:
 I use existing Postgres mechanisms to support MVCC so it didn't require any additional custom code.
 
 \subsection{Filter placement}
+\label{sec:filter-placement}
 
 As this mentioned here, before saving tuple into the buffer, scan checks if the filter predicate on non-alignment dependent values evaluates to true. This is done to avoid aligning rows that will be discarded anyway.
 In BioseqDB there are two types of filter conditions:
