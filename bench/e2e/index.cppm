@@ -1037,6 +1037,7 @@ namespace {
 
 using bioseq::bench::e2e::detail::cold_no_index_policy_absence_stats;
 using bioseq::bench::e2e::detail::e2e_input;
+using bioseq::bench::e2e::detail::e2e_matrix_attestation_rejection;
 using bioseq::bench::e2e::detail::e2e_just_index_setup_requirements;
 using bioseq::bench::e2e::detail::e2e_output;
 using bioseq::bench::e2e::detail::e2e_query_oracle_observation;
