@@ -1,0 +1,163 @@
+\subsection{End-to-end results and their interpretation}
+\label{sec:benchmark-results}
+
+The following tables present the approved results available while the benchmark
+campaign is still running. They compare the BioseqDB mapping pipeline with
+minimap2 on one local Apple Silicon machine and four AWS machines. Each timing
+covers a batch of 1,024 queries. A missing measurement remains visibly missing,
+so the tables describe completed observations rather than an estimated full
+matrix. The machine inventory precedes the result tables.
+
+\begin{itemize}
+  \item \textbf{Index.} A persisted index is constructed before measurement.
+  Each repeat starts a fresh process and measures reading the index and mapping
+  the queries. Construction of the persisted index is excluded from the current
+  mapping interval. The index is available on disk, but is not retained in the
+  previous process's memory. Operating-system page caches are not purged, so
+  this is process-cold execution rather than a guaranteed cold disk read.
+  \item \textbf{No index.} No pre-existing user index is available. The current
+  measured interval includes transient target-index construction and mapping.
+  The transient index can be reused within the batch, including by the remaining
+  1,023 queries after its initial construction. Fixture generation and process
+  restart setup lie outside the current measured interval.
+  \item \textbf{Timing scopes.} The local authority preserves both historical
+  outer-E2E timings and the current framework mapping-iteration timings. The
+  historical interval is retained as recorded, without interpreting it as the
+  narrower current interval. Separate local tables prevent comparisons across
+  these boundaries. All published AWS observations use the current interval.
+  In particular, ``mapping interval'' still includes transient construction in
+  no-index mode.
+  \item \textbf{Two measurements per cell.} The first duration, A, is the
+  nearest-rank P50 of the complete measured interval. The second, B, is the
+  nearest-rank P50 after subtracting the physical union of instrumented CIGAR
+  and MAPQ intervals separately in each repeat. With five repeats the P50 is the
+  third sorted observation. If $U_i$ is that interval union, the definitions are
+  \[
+    A_{50}=\operatorname{P50}(A_i),\qquad
+    B_{50}=\operatorname{P50}(A_i-|U_i|).
+  \]
+  Overlapping intervals are subtracted only once. The published medians are
+  used directly, without subtracting independently aggregated medians. On both
+  BioseqDB KSW2 and Block Aligner paths, the CIGAR interval contains fused base
+  alignment, trace storage, traceback and result construction. B therefore does
+  not universally represent seeding and chaining alone. Likewise,
+  $A_{50}-B_{50}$ is not a measured median CIGAR/MAPQ cost.
+\end{itemize}
+
+\paragraph{Input sequences and repetitions.}
+The campaign configuration defines eight deterministic target fixtures, covering
+both target sizes, both alphabets and both minimizer parameter pairs. Each
+fixture contains one reference sequence and 1,024 derived queries. The same
+fixture is reused across the relevant algorithm configurations and repeats.
+The configured parameters are as follows.
+\begin{itemize}
+  \item \textbf{Target sizes and minimizers.} References contain exactly
+  $2\times10^9$ or $4\times10^9$ base pairs, denoted 2 and 4 decimal Gbp.
+  The parameter pairs are $(k,w)=(15,10)$ and $(20,15)$, where $k$ is the
+  k-mer length and $w$ is the number of k-mers in a minimizer window.
+  \item \textbf{Alphabets.} DNA4 uses equiprobable canonical bases. The DNA5
+  generator assigns probability 1\% to N and 24.75\% to each canonical base.
+  \item \textbf{Query lengths and strand.} The sampled pre-edit length has
+  Gaussian mean 20,000 bp and standard deviation 500 bp, with rounding and
+  clamping in the generator. Insertions and deletions can change the final
+  length. A query is reverse complemented with probability 0.5.
+  \item \textbf{Divergence parameters.} Substitution probability is 0.001.
+  Insertion-event and deletion-event probabilities are each 0.0005. Their
+  nominal sum is 0.002, or 0.2\%, rather than a measured edit-distance rate.
+  Indel lengths have a configured mean parameter of 1 bp and the generator's
+  default standard-deviation parameter of 1 bp, followed by rounding and
+  clamping. They are not fixed single-base edits.
+  \item \textbf{Occurrences.} Each query originates from one known sampled
+  reference interval. The fixture does not specify an occurrence-count
+  distribution or an occurrence standard deviation. This provenance does not
+  imply that an aligner returns exactly one hit. The approved summaries certify
+  exact baseline match-count equality but intentionally omit the actual counts.
+  \item \textbf{Repetitions and variability.} Each published configuration and
+  timing scope has five accepted repeats. A repeat measures the complete query
+  batch, not a single query. The summaries contain medians and repeat counts,
+  but no raw timing samples, so timing standard deviations and confidence
+  intervals cannot be recovered from these files.
+\end{itemize}
+
+\paragraph{Execution rows.}
+BioseqDB uses task-parallel execution with prefiltering disabled and both CIGAR
+and MAPQ projection enabled. MPF and MPS denote minimizers per fragment and per
+sequence. Each row identifies the requested minimizer, chaining algorithm and
+base aligner in addition to this index representation. Scalar-DP and SIMD-DP
+refer to the scalar and literal SIMD minimap2 chaining routes. RMQ denotes the
+separate range-minimum-query algorithm. SIMD-ref is the reference minimizer,
+Two-stack is the two-stack ntHash minimizer, and Bounded is bounded ntHash SIMD.
+Block denotes Block Aligner. Vulkan rows can include CPU index handling,
+backtracking and base alignment, and do not imply an entirely GPU pipeline.
+Historical SIMD-ref requests that actually observed scalar minimizers carry
+an \textsuperscript{f} marker. Their timings describe that effective scalar
+path and provide no evidence of requested SIMD-minimizer performance.
+
+\paragraph{Reading comparisons and highlights.}
+Each cell places the A duration above its comparison, followed by the B duration
+and its own comparison. Durations are rounded to tenths of a second for display.
+All comparisons and minima use the original integer nanoseconds.
+\begin{itemize}
+  \item A BioseqDB value is compared with minimap2 on the same machine, fixture,
+  index mode and timing scope. The minimap2 row compares with the fastest
+  measured eligible BioseqDB effective path in that same column, independently
+  for A and B. Thus its two reference algorithms can differ. Baselines are
+  repeated on continuation pages solely to assist reading.
+  \item A green upward triangle means less elapsed time. A red downward
+  triangle means more elapsed time. A gray rightward triangle indicates a tie
+  when the ratio of the larger to the smaller duration is at most 1.05.
+  This is a display convention, not a statistical significance test.
+  \item For current duration $t$ and reference $r$, the percentage is
+  $100|t-r|/r$, describing relative elapsed-time reduction or increase.
+  Differences above 30\% use ratio notation instead: the larger duration divided
+  by the smaller, rounded to one decimal place. A green $2.5\times$ therefore
+  means the reference takes 2.5 times as long, while a red $2.5\times$ means
+  the displayed execution takes 2.5 times as long. Differences through 30\%
+  retain percentage notation. Direction is always conveyed by the triangle.
+  \item In the local tables, a blue background marks the smallest measured
+  duration in the column, separately for A and B and within one timing scope.
+  In the AWS tables, blue marks each machine's minimum across configuration
+  columns within the same execution row, across all panels. Each logical cell
+  has four machine subcolumns separated by vertical rules. The latter highlights
+  compare different input sizes and parameters, and must not be interpreted as
+  evidence that one algorithm is universally preferable.
+  \item A dot means there is no approved observation in the snapshot.
+  A horizontal dash with \textsuperscript{g} identifies an explicitly recorded
+  unavailable GPU configuration, which was not executed. Neither marker is a
+  zero duration. The comparison reads n/a when no measured counterpart exists.
+  Only execution rows with an approved observation or an explicit unavailable
+  cell in a panel are printed. Entirely unmeasured row families remain omitted.
+\end{itemize}
+
+\paragraph{Limits of the comparison.}
+These observations were accumulated across builds. Some retain an older sealed
+minimap2 correctness control, which is not a new contemporaneous performance
+run. A correctness-only index control is never substituted for a no-index
+performance baseline. Comments in the source authorities also disclose missing process-priority
+attestation, recovery after post-measurement wrapper failures and historical
+callback-lifetime caveats. The \textsuperscript{p} marker identifies the local
+observation retained by an explicit preservation decision without a run receipt.
+Approval of its measurement does not certify the safety of its historical build.
+No uniform elevated-priority or noise-free execution claim is made.
+
+The remote C7G observations include severe paging, and other observations also
+report resource pressure. Cross-machine differences therefore combine hardware,
+resource availability and execution conditions. They are not an isolated test
+of instruction-set performance. The table records physical RAM and provisioned
+storage capacity. Selected row comments contain sampled available memory, but
+there is no uniform per-repeat series of free-memory and free-disk measurements.
+Missing C7G BioseqDB timings cannot establish either a win or a loss.
+
+\paragraph{Reproducible table generation.}
+The standalone Python generator reads only the normative
+\texttt{approved\_results} rows and the remote
+\texttt{hardware\_unavailable\_cells}, with their embedded machine metadata.
+It validates identities and timing scopes, rejects duplicate display cells, and
+records the SHA-256 of each input in the generated LaTeX source. Coverage totals
+are recomputed from approved rows rather than copied from historical progress
+summaries. Regeneration is manual and is not part of CMake. The fixture description
+was checked against the campaign JSON and its sequence generator, together with
+DOC0432 and DOC0433. The full row-specific qualifications remain in the five
+source YAML authorities.
+
+\include{chapters/16_benchmarking/generated_results}
