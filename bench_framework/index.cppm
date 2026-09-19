@@ -10487,9 +10487,10 @@ classify_raw_timing_disposition(const nlohmann::json& record) noexcept {
     constexpr std::array<std::string_view, 3> accepted_dispositions{
         "accepted", "accepted_fallback", "accepted_behavior_difference",
     };
-    constexpr std::array<std::string_view, 5> rejected_dispositions{
+    constexpr std::array<std::string_view, 6> rejected_dispositions{
         "rejected_setup", "rejected_sql", "invalid",
         "rejected_attestation", "rejected_correctness",
+        "skipped_after_prior_attestation_rejection",
     };
     const std::string_view disposition_text =
         disposition->get_ref<const std::string&>();

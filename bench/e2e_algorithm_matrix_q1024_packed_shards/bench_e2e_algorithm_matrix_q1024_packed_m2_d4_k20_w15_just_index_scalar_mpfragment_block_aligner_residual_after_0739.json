@@ -224,6 +224,104 @@
             "bioseq_algorithm_matrix_just_index"
           ],
           "rules": []
+        },
+        "measured_region_ns_manual": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "cigar_or_mapq_interval_union_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "outer_e2e_minus_cigar_or_mapq_union_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_interval_schema_revision": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_interval_available": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_interval_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_cigar_interval_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_mapq_interval_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_interval_finalization_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "downstream_active_wall_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "downstream_active_wall_available": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "downstream_work_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "mapq_execution_available": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "mapq_executed": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
         }
       }
     }

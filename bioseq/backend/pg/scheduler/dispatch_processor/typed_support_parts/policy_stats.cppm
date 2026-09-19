@@ -1265,6 +1265,10 @@ record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
         // SQL bounds and stage acceptance were checked before the report-once
         // commit. Only nonthrowing aggregation/consumption follows it.
         stats.merge_operational(publication.cache_delta);
+        add_operational_counter(
+            stats,
+            stats.operational.gpu_chain_dispatches,
+            execution_stats->partial_vulkan_stats.chain_score_dispatches);
         completed.second.consume();
     }
 #endif

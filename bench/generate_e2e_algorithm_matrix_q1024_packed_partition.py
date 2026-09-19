@@ -211,7 +211,24 @@ def _read_parent_config(parent: dict[str, Any]) -> tuple[dict, bytes]:
     return config, raw
 
 
-def _residual_config(parent: dict[str, Any]) -> dict[str, Any]:
+def _use_mixed_persisted_metrics(
+        config: dict[str, Any], canonical_source: dict[str, Any]
+) -> None:
+    """Give a generated persisted residual the existing accepted-row metrics."""
+    source_metrics = canonical_source["bench_e2e"]["matrix"]["metrics"]
+    if tuple(source_metrics) != canonical.FULL_DECLARED_METRIC_NAMES:
+        raise GenerationError("canonical full metric definitions changed")
+    config["bench_e2e"]["matrix"]["metrics"] = {
+        name: copy.deepcopy(source_metrics[name])
+        for name in canonical.MIXED_PERSISTED_METRIC_NAMES
+    }
+    config["bench_e2e"]["matrix"]["metrics"]["match_count"]["rules"] = []
+    canonical._restrict_metric_applicability(config)
+
+
+def _residual_config(
+        parent: dict[str, Any], canonical_source: dict[str, Any]
+) -> dict[str, Any]:
     config, _ = _read_parent_config(parent)
     result = copy.deepcopy(config)
     algorithm = "bioseq_algorithm_matrix_just_index"
@@ -229,10 +246,13 @@ def _residual_config(parent: dict[str, Any]) -> dict[str, Any]:
         f"{parent['cells'][0]['test_case']} / "
         f"{identity['requested_minimizer_algorithm']} / "
         f"{identity['bioseq_index_name']}; scalar_minimap2 is separately owned.")
+    _use_mixed_persisted_metrics(result, canonical_source)
     return result
 
 
-def _block_aligner_residual_config(parent: dict[str, Any]) -> dict[str, Any]:
+def _block_aligner_residual_config(
+        parent: dict[str, Any], canonical_source: dict[str, Any]
+) -> dict[str, Any]:
     """Retain every chainer while leaving the KSW2 half singleton-owned."""
     config, _ = _read_parent_config(parent)
     result = copy.deepcopy(config)
@@ -254,6 +274,7 @@ def _block_aligner_residual_config(parent: dict[str, Any]) -> dict[str, Any]:
         f"{identity['requested_minimizer_algorithm']} / "
         f"{identity['bioseq_index_name']}; the four KSW2 tuples remain "
         "owned by their completed singleton evidence.")
+    _use_mixed_persisted_metrics(result, canonical_source)
     return result
 
 
@@ -300,9 +321,6 @@ def _member(
         canonical_cells = [copy.deepcopy(canonical_by_key[key]) for key in keys]
     except KeyError as exc:
         raise GenerationError(f"packed member owns a noncanonical cell: {exc}") from exc
-    metrics = list(config["bench_e2e"]["matrix"]["metrics"])
-    rules = canonical._nonblocking_rule_names(config)
-    expected_disposition = canonical._expected_all_records_disposition(config)
     supported = sum(
         cell["identity"]["engine"] == "minimap2"
         or (cell["identity"]["requested_minimizer_algorithm"]
@@ -311,6 +329,14 @@ def _member(
                 != "vulkan_tiled_dynamic_programming")
         for cell in canonical_cells)
     selector_rejections = len(canonical_cells) - supported
+    metrics = list(config["bench_e2e"]["matrix"]["metrics"])
+    rules = canonical._nonblocking_rule_names(config)
+    expected_disposition = canonical._expected_all_records_disposition(config)
+    if kind == "generated_persisted_residual" and supported > 0:
+        if metrics != list(canonical.MIXED_PERSISTED_METRIC_NAMES):
+            raise GenerationError(
+                "supported generated persisted residual lacks exact mixed metrics")
+        expected_disposition = None
     return {
         "ordinal": ordinal,
         "id": member_id,
@@ -425,6 +451,11 @@ def _generate() -> tuple[dict[Path, bytes], bytes]:
     if len(monoliths) != 1 or len(monoliths[0].get("cells", [])) != 1296:
         raise GenerationError("canonical monolith membership changed")
     canonical_cells = monoliths[0]["cells"]
+    canonical_source, _ = _read_exact(
+        canonical.SOURCE_CONFIG, monoliths[0]["config_sha256"],
+        "canonical full campaign config")
+    if canonical._config_cells(canonical_source) != canonical_cells:
+        raise GenerationError("canonical full campaign descriptors changed")
     canonical_by_key = {cell["stable_key"]: cell for cell in canonical_cells}
     if (len(canonical_by_key) != 1296
             or _stable_keys_sha256(set(canonical_by_key))
@@ -478,7 +509,7 @@ def _generate() -> tuple[dict[Path, bytes], bytes]:
         f"{PACKED_FILENAME_PREFIX}m2_d4_k15_w10_just_index_"
         "scalar_mpfragment_residual_after_s058.json",
         scalar_mpf,
-        _residual_config(scalar_mpf),
+        _residual_config(scalar_mpf, canonical_source),
     )
     for minimizer in SUPPORTED_MINIMIZERS[1:]:
         parent = _canonical_parent(
@@ -506,7 +537,7 @@ def _generate() -> tuple[dict[Path, bytes], bytes]:
         f"{PACKED_FILENAME_PREFIX}m2_d4_k15_w10_just_index_"
         "scalar_mpsequence_residual_after_0664.json",
         scalar_mps,
-        _residual_config(scalar_mps),
+        _residual_config(scalar_mps, canonical_source),
     )
     for minimizer in SUPPORTED_MINIMIZERS[1:]:
         parent = _canonical_parent(
@@ -533,7 +564,7 @@ def _generate() -> tuple[dict[Path, bytes], bytes]:
         f"{PACKED_FILENAME_PREFIX}m2_d4_k20_w15_just_index_"
         "scalar_mpfragment_block_aligner_residual_after_0739.json",
         scalar_k20_mpf,
-        _block_aligner_residual_config(scalar_k20_mpf),
+        _block_aligner_residual_config(scalar_k20_mpf, canonical_source),
     )
     scalar_k20_mps = _canonical_parent(
         entries, test_case="M2_D4_K20_W15", shard_kind="persisted_index",

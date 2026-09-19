@@ -16,18 +16,18 @@ authority:
   profile: aws_cpu_only_v1
   sealed_verification_manifest_required_for_append: true
 projection_provenance:
-  approved_result_count: 9
-  approved_results_projection_sha256: f2717f7538404b7b9109d741020dbdeee0a4258f686484d32cc04637bb0e8e39
-  approved_run_count: 45
+  approved_result_count: 16
+  approved_results_projection_sha256: 8be1097e6d5dc79fbb8ffdfff65aa9505dbac099a875ed15ce0955613545f172
+  approved_run_count: 80
   classification: derived_non_authoritative
-  eligible_stable_keys_projection_sha256: af1e74297b3e059bc52e3f4a8a5ac039a0487eb20fa987148997bf81e177a30b
+  eligible_stable_keys_projection_sha256: c12c8b2f235cb357864994aeb26e4c7a89849548694b69501c13888c0272b327
   generator: bioseq-approved-results-projection
   generator_version: 1
-  hardware_unavailable_cells_projection_sha256: fc1661857a6e33dfdbb90aa6ba2f58a2f0f489f19f93d4bd2282f253c0b5ad5b
-  hardware_unavailable_count: 10
-  remaining_eligible_count: 65
-  source_local_approved_results_projection_sha256: 5bb17915d825bec25917066c67377d40edf379333f93687a04e725aeebe7df06
-  source_local_authority_sha256: 1c3d2cd8de6a6e1ac4f7bef120353f994bc1f595eba393bc451495d223ef57fc
+  hardware_unavailable_cells_projection_sha256: e67fa96a6473c859649a2a0f98d155b94d764cc3bbd0246bb4fed055fc0f4aa7
+  hardware_unavailable_count: 15
+  remaining_eligible_count: 66
+  source_local_approved_results_projection_sha256: 08f97dabed86cbaaefe5d188f5506ee460442b91a3e280329c38b36cc58180f6
+  source_local_authority_sha256: bdb96805fb801bdfca53f93cb0754611b4baeda6cf98d4961a1fa3c1e7e15218
 campaign_identity:
   campaign_digest: 011fbb1ef33a214ab80d3568c2341e8d0f8311f82e21a5955bdcb93b3c63b979
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -201,6 +201,9 @@ eligible_stable_keys:
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","minimap2",null,null,null,null]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","minimap2",null,null,null,null]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
@@ -210,10 +213,13 @@ eligible_stable_keys:
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","minimap2",null,null,null,null]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","minimap2",null,null,null,null]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"no_index","minimap2",null,null,null,null]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","ksw2"]'
@@ -241,18 +247,25 @@ eligible_stable_keys:
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","simd_minimap2","ksw2"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","minimap2",null,null,null,null]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"no_index","minimap2",null,null,null,null]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"no_index","minimap2",null,null,null,null]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","minimap2",null,null,null,null]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+- 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
 - 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"no_index","minimap2",null,null,null,null]'
 hardware_unavailable_cells:
 - stable_key_schema: bioseq-e2e-cell-v2
@@ -411,6 +424,37 @@ hardware_unavailable_cells:
     p50_a:
     p50_b:
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
   dataset: matrix_2gbp_dna5_k20_w15
@@ -442,6 +486,37 @@ hardware_unavailable_cells:
     p50_a:
     p50_b:
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
   dataset: matrix_4gbp_dna4_k15_w10
@@ -451,6 +526,37 @@ hardware_unavailable_cells:
   window_size: 10
   query_count: 1024
   mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
   pipeline: bioseq
   pipeline_mode: task_parallel
   index_type: minimizers_per_fragment
@@ -535,6 +641,37 @@ hardware_unavailable_cells:
     p50_a:
     p50_b:
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
   dataset: matrix_4gbp_dna5_k20_w15
@@ -544,6 +681,37 @@ hardware_unavailable_cells:
   window_size: 15
   query_count: 1024
   mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  execution_attempted: false
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path:
+  prefilter: false
+  status: hardware_unavailable
+  reason: vulkan_device_unavailable
+  run_count: 0
+  metrics:
+    unit: ns
+    p50_a:
+    p50_b:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
   pipeline: bioseq
   pipeline_mode: task_parallel
   index_type: minimizers_per_fragment
@@ -627,6 +795,43 @@ approved_results:
     p50_a: 73062707481
     p50_b: 65685743181
   comments:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 361308193569
+    p50_b: 355158509840
+  comments: External minimap2 no-index control on native ARM64 Clang 22. Every sealed repeat passed the locally approved count, strand, CIGAR replay, and MAPQ-presence contract; each observed the required single index part, and physical CIGAR/MAPQ interval unions reproduce B as A minus union. No GPU/Vulkan path, prefilter, bioseq algorithm, or PostgreSQL alignment route executed. Framework memory reserve was 35%, and the bounded whole-run timeout was 21,600 seconds. Severe swap pressure was directly sampled during timed no-index helper execution. No complete resource series was frozen for every repeat, so no causal timing adjustment is claimed; the accepted measurements were neither invalidated nor rebaselined.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","minimap2",null,null,null,null]'
   timing_scope: query_only_framework_iteration_v1
@@ -887,6 +1092,43 @@ approved_results:
     p50_b: 386327922862
   comments: Valid same-host C7G timing. Severe swap pressure was observed in both untimed external minimap2 index setup (helper VmHWM 5,983,412 KiB, VmSwap 13,925,508 KiB, host swap 17,045,596 KiB) and the timed prebuilt-index query (helper VmHWM 7,235,888 KiB, VmSwap 7,757,092 KiB, with active host swap and 54% I/O wait). A receipt-pinned read-only diagnostic dump finished writing about 16 seconds before the repeat-1 query helper started, but the MCP inspection server exit timestamp was not retained. Overlap with the earlier repeat-0/framework interval is therefore indeterminate. Timing is retained without noise invalidation or rebaseline.
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 2660486906163
+    p50_b: 2655553598616
+  comments: 'C7G invocation-level resource caveat: outside the timed regions, health samples during this 223-minute run showed severe paging while all five raw measurements were retained unchanged. At 2026-09-14T21:44:56Z, MemAvailable was 83944 KiB and host swap use was 21729400 KiB; the active fifth minimap2 helper later remained under paging before normal completion. These samples are not assigned to any individual repetition, and no timing was adjusted. Exact q1024 correctness, all five physical interval receipts, NI-20, and terminal PostgreSQL cleanup passed; no GPU or Vulkan execution occurred.'
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","minimap2",null,null,null,null]'
   timing_scope: query_only_framework_iteration_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -923,3 +1165,188 @@ approved_results:
     p50_a: 1505471456372
     p50_b: 1500747211558
   comments: 'External minimap2 prebuilt-index control on native ARM64 Clang 22. All five repeats returned the exact locally sealed 1,024-query count, strand, CIGAR replay, and MAPQ presence contract with maximum position offset 3 bp; each used one prebuilt index part, and physical CIGAR/MAPQ interval unions reproduce B as A minus union. No GPU/Vulkan path, prefilter, bioseq algorithm, or target-index build executed in the timed query phase. Severe host memory pressure and swapping were observed during timed prebuilt-query execution: the first timed helper reached MemAvailable 98,748 KiB and SwapFree 88,333,476 KiB of 108,605,212 KiB (20,271,736 KiB used), with helper VmHWM 7,238,280 KiB and VmSwap 14,595,324 KiB. This resource-pressure caveat is retained without invalidating, rerunning, or rebaselining the accepted measurements.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"no_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 3081987330060
+    p50_b: 3077231905183
+  comments: 'Resource caveat: a read-only host sample during this contracted invocation (2026-09-14T16:12:31Z; outside benchmark timing) observed MemAvailable=99072 KiB and vmstat swpd=18149324, si=9780, so=0, bi=10402, bo=0, wa=24, evidencing severe swap/I/O pressure. This invocation-level observation cannot be attributed to any individual accepted repeat; all five timings are retained unchanged and unadjusted.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 180983960542
+    p50_b: 171490133208
+  comments: External minimap2 prebuilt-index control on native ARM64 Clang 22. All five repeats returned the exact locally sealed 1,024-query count, strand, CIGAR replay, and MAPQ presence contract with maximum position offset 4 bp; each used one prebuilt index part, and physical CIGAR/MAPQ interval unions reproduce B as A minus union. No GPU/Vulkan path, prefilter, bioseq algorithm, or target-index build executed in the timed query phase. Framework memory reserve was 30% for this invocation. Severe host memory pressure and swapping were directly observed during untimed one-part index setup. This observation is outside the timed repeats; no complete per-repeat resource sample was frozen, so no per-repeat pressure attribution is claimed. The caveat is retained without invalidating, rerunning, or rebaselining the accepted measurements.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"no_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 1783366964979
+    p50_b: 1778460719075
+  comments: 'C7G invocation-level resource caveat: outside the timed regions, health samples during this 149-minute run showed severe paging while all five raw measurements were retained unchanged. At 2026-09-15T01:05:37Z, MemAvailable was 119062528 B and swap use was 14420541440 B; at 2026-09-15T01:08:37Z, vmstat showed active swap-in and swap-out with 12657220 KiB allocated swap. These samples are not assigned to an individual repetition, and no timing was adjusted. The run used the approved 30% memory-buffer cap; exact q1024 correctness, all five physical interval receipts, NI-20, and terminal PostgreSQL cleanup passed. No GPU or Vulkan execution occurred.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 189782589810
+    p50_b: 183690609744
+  comments: 'C7G invocation-level resource caveat: during untimed minimap2 index setup at 2026-09-15T01:56:30Z, MemAvailable was 93433856 B and host swap use was 12558647296 B. The index-setup helper and runner were NI-20. This sample is not assigned to a timed repetition and no timing was adjusted. Exact q1024 correctness, all five physical query receipts, NI-20, and terminal PostgreSQL cleanup passed; no GPU or Vulkan execution occurred.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"no_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 956782833658
+    p50_b: 951946641487
+  comments: A read-only C7G sample at 2026-09-15T03:20:59Z, during timed query repeat 1, observed host MemAvailable=118796288 bytes and SwapUsed=11074072576 bytes; the active NI-20 minimap2 helper PID 1331380 had VmHWM=7326136 KiB and VmSwap=9741368 KiB. This severe paging observation is retained as ordinary resource context; timings were neither adjusted nor invalidated.

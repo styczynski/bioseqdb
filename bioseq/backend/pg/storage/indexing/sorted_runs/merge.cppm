@@ -37,56 +37,46 @@ import :sorted_runs_storage;
 namespace bioseq::storage::indexing {
 
 /**
- * @brief Merges sorted file runs into an arbitrary pair writer.
+ * @brief Admit and allocate every reader and heap needed by one compaction group.
  *
- * Reader buffers and the merge heap are memory-admitted before use. Every
- * input `BufFile` is rewound and remains owned by its run after the merge.
- *
- * @tparam p_writer Callable accepting one `sorted_pair_wire` value.
- * @param[in,out] runs File runs to read in canonical pair order.
- * @param[in,out] resources Checked readers and admission state for this merge.
- * @param[in] writer Destination invoked once for each merged pair.
+ * No output file exists until this succeeds, so a retryable budget refusal can
+ * select a smaller fan-in without leaving partial output or advancing inputs.
  */
-template <class p_writer>
-void sorted_pair_run_store::merge_sorted_file_runs_to_writer_(std::span<buffer_file_run> runs,
-                                                              merge_resources& resources,
-                                                              p_writer&& writer) {
-    resources.finish_success();
+std::unique_ptr<admitted_file_merge> sorted_pair_run_store::try_prepare_compaction_merge_(
+    std::span<buffer_file_run> runs,
+    bioseq::parallelism::memory_admission_failure& terminal_failure,
+    sorted_run_merge_admission_site& terminal_site) {
+    terminal_failure = {};
+
+    // Hold the mandatory heap while choosing the reader geometry. Otherwise a
+    // preferred reader reservation can succeed and leave no room for the heap,
+    // even though a smaller reader geometry would make the same fan-in viable.
+    terminal_site = sorted_run_merge_admission_site::merge_head_queue;
+    auto heap_admission = try_make_admitted_merge_head_queue(runs.size());
+    if (!heap_admission.admitted.has_value()) {
+        terminal_failure = heap_admission.failure;
+        return nullptr;
+    }
+
+    auto prepared = std::make_unique<admitted_file_merge>();
+    prepared->heap.emplace(std::move(*heap_admission.admitted));
+    merge_resources& resources = prepared->resources;
+
+    terminal_site = sorted_run_merge_admission_site::compaction_readers;
     const std::uint64_t reader_budget = merge_reader_budget_bytes_();
-    const std::uint64_t per_reader_bytes =
+    const std::uint64_t preferred_per_reader_bytes =
         std::clamp<std::uint64_t>(reader_budget / std::max<std::size_t>(1u, runs.size()),
-                                  std::uint64_t{32} << 10,
-                                  std::uint64_t{4} << 20);
-    const std::uint64_t logical_reader_bytes = bioseq::common::saturating_add(
-        bioseq::common::saturating_mul(static_cast<std::uint64_t>(runs.size()), per_reader_bytes),
-        bioseq::common::saturating_mul(static_cast<std::uint64_t>(runs.size()),
-                                       static_cast<std::uint64_t>(sizeof(file_reader))));
-    const std::uint64_t reader_headroom = bioseq::common::saturating_mul(
-        logical_reader_bytes, bioseq::parallelism::k_vector_preallocation_headroom_factor);
-    if (logical_reader_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
-        reader_headroom == (std::numeric_limits<std::uint64_t>::max)()) {
-        report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+                                  minimum_merge_reader_buffer_bytes,
+                                  maximum_merge_reader_buffer_bytes);
+    auto reader_budget_admission = try_admit_file_reader_budget(
+        runs.size(), preferred_per_reader_bytes, &terminal_failure);
+    if (!reader_budget_admission) {
+        return nullptr;
     }
-    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
-#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-    bioseq::parallelism::memory_admission_failure admission_failure{};
-    auto reader_permit = admission.try_reserve(reader_headroom, &admission_failure);
-#else
-    auto reader_permit = admission.try_reserve(reader_headroom);
-#endif
-    if (!reader_permit) {
-#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
-        emit_terminal_merge_admission_failure(
-            sorted_run_merge_admission_site::compaction_readers, admission_failure);
-#endif
-        report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
-    }
-    resources.reader_budget_permit = std::move(*reader_permit);
+    const std::uint64_t per_reader_bytes = reader_budget_admission->per_reader_bytes;
+    resources.reader_budget_permit = std::move(reader_budget_admission->permit);
     resources.readers.reserve(runs.size());
     for (buffer_file_run& run : runs) {
-        if (seek_buffile_as_cpp(run.file, 0, 0, SEEK_SET) != 0) {
-            report_sorted_run_error(sorted_run_error::compacted_run_rewind_failed);
-        }
         file_reader reader{};
         reader.file = run.file;
         reader.remaining = run.pair_count;
@@ -97,12 +87,26 @@ void sorted_pair_run_store::merge_sorted_file_runs_to_writer_(std::span<buffer_f
     const std::uint64_t exact_reader_bytes = file_reader_owned_capacity_bytes(resources.readers);
     if (exact_reader_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
         exact_reader_bytes > resources.reader_budget_permit.bytes()) {
+        resources.finish_success();
         report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
     }
     resources.reader_budget_permit.shrink_to(exact_reader_bytes);
-    stats_.merge_reader_buffer_bytes += exact_reader_bytes;
 
-    auto admitted_heap = make_admitted_merge_head_queue(runs.size());
+    for (buffer_file_run& run : runs) {
+        if (seek_buffile_as_cpp(run.file, 0, 0, SEEK_SET) != 0) {
+            report_sorted_run_error(sorted_run_error::compacted_run_rewind_failed);
+        }
+    }
+    stats_.merge_reader_buffer_bytes += exact_reader_bytes;
+    return prepared;
+}
+
+/** Merge already-admitted and rewound file readers into an arbitrary writer. */
+template <class p_writer>
+void sorted_pair_run_store::merge_sorted_file_runs_to_writer_(
+    merge_resources& resources,
+    admitted_merge_head_queue& admitted_heap,
+    p_writer&& writer) {
     merge_head_queue& heap = admitted_heap.queue;
     for (std::size_t idx = 0; idx < resources.readers.size(); ++idx) {
         file_reader& reader = resources.readers[idx];
@@ -133,12 +137,11 @@ void sorted_pair_run_store::merge_sorted_file_runs_to_writer_(std::span<buffer_f
 
 /**
  * @brief Compacts a half-open group of file runs into one PostgreSQL temporary file.
- * @param[in] lo First input run index.
- * @param[in] hi One-past-last input run index.
+ * @param[in,out] admitted Readers and heap admitted before output creation.
  * @return New rewindable file run containing the merged pair stream.
  */
-buffer_file_run sorted_pair_run_store::merge_file_run_group_to_new_buffile_(std::size_t lo,
-                                                                            std::size_t hi) {
+buffer_file_run sorted_pair_run_store::merge_file_run_group_to_new_buffile_(
+    admitted_file_merge& admitted) {
 #ifdef BIOSEQ_TEST_INDEXES
     bioseq::postgres::support::invoke_pg_as_cpp([] {
         inject_sorted_run_pg_leaf_failure(sorted_run_failure_injection::compact_create_before);
@@ -148,12 +151,12 @@ buffer_file_run sorted_pair_run_store::merge_file_run_group_to_new_buffile_(std:
     if (out_file == nullptr) {
         report_sorted_run_error(sorted_run_error::compact_temp_file_create_failed);
     }
-    auto resources = std::make_unique<merge_resources>();
+    merge_resources& resources = admitted.resources;
     buffer_file_run out{.file = out_file};
     try {
         merge_sorted_file_runs_to_writer_(
-            std::span<buffer_file_run>(file_runs_.data() + lo, hi - lo),
-            *resources,
+            resources,
+            *admitted.heap,
             [out_file, &out](sorted_pair_wire pair) {
                 write_buffile_as_cpp(out_file, &pair, sizeof(pair));
                 ++out.pair_count;
@@ -164,17 +167,17 @@ buffer_file_run sorted_pair_run_store::merge_file_run_group_to_new_buffile_(std:
         if (size > 0) {
             stats_.postgres_temp_file_bytes += static_cast<std::uint64_t>(size);
         }
-        resources->finish_success();
+        resources.finish_success();
         out_file = nullptr;
     } catch (const bioseq::postgres::support::postgres_error&) {
-        resources->abandon_pg_resources_noexcept();
+        resources.abandon_pg_resources_noexcept();
         // out_file remains registered with the current ResourceOwner.
         out_file = nullptr;
         throw;
     } catch (...) {
         // The caller will turn the C++ failure into a PostgreSQL ERROR.  Do
         // not call BufFileClose while preserving that original exception.
-        resources->abandon_pg_resources_noexcept();
+        resources.abandon_pg_resources_noexcept();
         abandon_buffile_noexcept(out_file);
         throw;
     }
@@ -188,20 +191,72 @@ buffer_file_run sorted_pair_run_store::merge_file_run_group_to_new_buffile_(std:
 void sorted_pair_run_store::compact_file_runs_to_output_count_(std::size_t target_output_runs) {
     target_output_runs = std::max<std::size_t>(1, target_output_runs);
     while (file_runs_.size() > target_output_runs) {
-        const std::size_t group_size = std::max<std::size_t>(
-            2, (file_runs_.size() + target_output_runs - 1) / target_output_runs);
+        const std::size_t input_run_count = file_runs_.size();
+        std::size_t group_size = std::max<std::size_t>(
+            2, bioseq::common::ceil_div(input_run_count, target_output_runs));
         admitted_owned_vector<buffer_file_run> admitted_next;
-        if (!try_ensure_admitted_vector_capacity(admitted_next, target_output_runs)) {
-            report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+        std::unique_ptr<admitted_file_merge> first_group;
+        bioseq::parallelism::memory_admission_failure admission_failure{};
+        sorted_run_merge_admission_site admission_site =
+            sorted_run_merge_admission_site::compaction_readers;
+        for (;;) {
+            const std::size_t next_output_runs =
+                bioseq::common::ceil_div(input_run_count, group_size);
+            if (!try_ensure_admitted_vector_capacity(admitted_next, next_output_runs)) {
+                report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+            }
+            const std::size_t first_hi = std::min(input_run_count, group_size);
+            first_group = try_prepare_compaction_merge_(
+                std::span<buffer_file_run>(file_runs_.data(), first_hi),
+                admission_failure,
+                admission_site);
+            if (first_group) {
+                break;
+            }
+            const bool can_reduce_fan_in =
+                admission_failure.reason ==
+                    bioseq::parallelism::memory_admission_failure_reason::budget_exhausted &&
+                group_size > 2u;
+            if (!can_reduce_fan_in) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+                if (admission_failure.has_failure()) {
+                    emit_terminal_merge_admission_failure(admission_site, admission_failure);
+                }
+#endif
+                report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+            }
+            group_size = std::max<std::size_t>(
+                2, bioseq::common::ceil_div(group_size, std::size_t{2}));
         }
         std::vector<buffer_file_run>& next = admitted_next.values;
         try {
-            for (std::size_t lo = 0; lo < file_runs_.size(); lo += group_size) {
-                const std::size_t hi = std::min(file_runs_.size(), lo + group_size);
-                next.push_back(merge_file_run_group_to_new_buffile_(lo, hi));
+            for (std::size_t lo = 0; lo < input_run_count;) {
+                const std::size_t remaining = input_run_count - lo;
+                const std::size_t hi = remaining <= group_size
+                    ? input_run_count
+                    : lo + group_size;
+                std::unique_ptr<admitted_file_merge> prepared;
+                if (lo == 0u) {
+                    prepared = std::move(first_group);
+                } else {
+                    prepared = try_prepare_compaction_merge_(
+                        std::span<buffer_file_run>(file_runs_.data() + lo, hi - lo),
+                        admission_failure,
+                        admission_site);
+                }
+                if (!prepared) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+                    if (admission_failure.has_failure()) {
+                        emit_terminal_merge_admission_failure(admission_site, admission_failure);
+                    }
+#endif
+                    report_sorted_run_error(sorted_run_error::merge_reader_admission_failed);
+                }
+                next.push_back(merge_file_run_group_to_new_buffile_(*prepared));
                 for (std::size_t i = lo; i < hi; ++i) {
                     close_buffile_checked_as_cpp(file_runs_[i].file);
                 }
+                lo = hi;
             }
             bioseq::parallelism::release_admitted_vector_capacity_before_permit(
                 file_runs_, file_runs_metadata_permit_);
@@ -239,10 +294,9 @@ void sorted_pair_run_store::compact_file_runs_until_bounded_() {
     if (file_runs_.empty()) {
         return;
     }
-    constexpr std::uint64_t k_minimum_reader_bytes = std::uint64_t{32} << 10;
     const std::uint64_t reader_budget = merge_reader_budget_bytes_();
     const std::size_t max_output_runs =
-        std::max<std::size_t>(1, reader_budget / k_minimum_reader_bytes);
+        std::max<std::size_t>(1, reader_budget / minimum_merge_reader_buffer_bytes);
     compact_file_runs_to_output_count_(max_output_runs);
 }
 
@@ -254,10 +308,7 @@ void sorted_pair_run_store::compact_file_runs_until_bounded_() {
 void sorted_pair_run_store::merge_runs_erased_impl_(sorted_pair_kmer_sink sink,
                                                     merge_resources& resources) {
     compact_file_runs_until_bounded_();
-    open_file_readers_(resources);
-
-    auto admitted_heap =
-        make_admitted_merge_head_queue(memory_runs_.size() + resources.readers.size());
+    auto admitted_heap = open_file_readers_(resources);
     merge_head_queue& heap = admitted_heap.queue;
     for (std::size_t run_index = 0; run_index < memory_runs_.size(); ++run_index) {
         const auto& pairs = memory_runs_[run_index].pairs;

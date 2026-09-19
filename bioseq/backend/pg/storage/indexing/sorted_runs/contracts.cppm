@@ -126,6 +126,13 @@ enum class sorted_run_failure_injection : std::uint8_t {
     compact_create_before,
 };
 
+/// Deterministic merge-reader admission outcomes for resource-path tests.
+enum class sorted_run_reader_admission_injection : std::uint8_t {
+    none,
+    request_ceiling,
+    system_pressure_once,
+};
+
 /// Arm one failure at the next matching PostgreSQL leaf call.
 /// @param point One-shot PostgreSQL leaf failure site.
 void arm_sorted_run_pg_leaf_failure(sorted_run_failure_injection point) noexcept;
@@ -138,6 +145,12 @@ void arm_sorted_run_pg_leaf_failure_on_nth(sorted_run_failure_injection point,
 /// Override the merge-reader memory budget for one backend test.
 /// @param bytes Budget in bytes, or zero to use the production value.
 void set_sorted_run_merge_reader_budget_for_test(std::uint64_t bytes) noexcept;
+/// Override merge-reader reservation outcomes for one backend test.
+/// @param injection Synthetic predicate applied before the real controller.
+/// @param request_ceiling_bytes Largest request accepted by `request_ceiling`.
+void set_sorted_run_reader_admission_injection_for_test(
+    sorted_run_reader_admission_injection injection,
+    std::uint64_t request_ceiling_bytes = 0u) noexcept;
 /// Clear every sorted-run failure and budget override.
 void disarm_sorted_run_pg_leaf_failure() noexcept;
 

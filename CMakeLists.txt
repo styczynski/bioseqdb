@@ -520,19 +520,46 @@ if(BIOSEQ_PACKAGE_BUILD)
       "BIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64 in both the environment "
       "and CMake cache")
   endif()
+endif()
 
+# A PostgreSQL process can load a GNU C++ runtime (for example, through ICU)
+# before shared-preload extensions. Keep Clang/libc++ compilation, but bind each
+# native Linux production extension to one private, non-exported libc++ runtime.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+    AND (CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
+      OR CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_LINUX_CLANG22")
+    AND (BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE))
   set(BIOSEQ_PACKAGE_LIBCXX_ARCHIVE "" CACHE FILEPATH
-    "Pinned static libc++ archive used by package DSOs")
+    "Pinned static libc++ archive used by PostgreSQL DSOs")
   set(BIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE "" CACHE FILEPATH
-    "Pinned static libc++abi archive used by package DSOs")
+    "Pinned static libc++abi archive used by PostgreSQL DSOs")
   set(BIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE "" CACHE FILEPATH
-    "Pinned static libunwind archive used by package DSOs")
+    "Pinned static libunwind archive used by PostgreSQL DSOs")
   foreach(_bioseq_runtime_pair IN ITEMS
       "BIOSEQ_PACKAGE_LIBCXX_ARCHIVE;libc++.a"
       "BIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE;libc++abi.a"
       "BIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE;libunwind.a")
     list(GET _bioseq_runtime_pair 0 _bioseq_runtime_variable)
     list(GET _bioseq_runtime_pair 1 _bioseq_runtime_basename)
+    if(NOT BIOSEQ_PACKAGE_BUILD
+        AND "${${_bioseq_runtime_variable}}" STREQUAL "")
+      execute_process(
+        COMMAND "${CMAKE_CXX_COMPILER}" -stdlib=libc++
+          "-print-file-name=${_bioseq_runtime_basename}"
+        RESULT_VARIABLE _bioseq_runtime_discovery_result
+        OUTPUT_VARIABLE _bioseq_runtime_discovery_output
+        ERROR_VARIABLE _bioseq_runtime_discovery_error
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_STRIP_TRAILING_WHITESPACE)
+      if(NOT "${_bioseq_runtime_discovery_result}" STREQUAL "0")
+        message(FATAL_ERROR
+          "selected Clang could not locate ${_bioseq_runtime_basename}: "
+          "${_bioseq_runtime_discovery_error}")
+      endif()
+      set(${_bioseq_runtime_variable}
+        "${_bioseq_runtime_discovery_output}" CACHE FILEPATH
+        "Pinned PostgreSQL DSO compiler runtime archive" FORCE)
+    endif()
     if(NOT IS_ABSOLUTE "${${_bioseq_runtime_variable}}"
         OR NOT EXISTS "${${_bioseq_runtime_variable}}")
       message(FATAL_ERROR
@@ -553,7 +580,7 @@ if(BIOSEQ_PACKAGE_BUILD)
         "${_bioseq_runtime_variable} must reside under pinned BIOSEQ_LLVM_ROOT")
     endif()
     set(${_bioseq_runtime_variable} "${_bioseq_runtime_real}" CACHE FILEPATH
-      "Pinned package compiler runtime archive" FORCE)
+      "Pinned PostgreSQL DSO compiler runtime archive" FORCE)
   endforeach()
   unset(_bioseq_runtime_pair)
   unset(_bioseq_runtime_variable)
@@ -562,6 +589,9 @@ if(BIOSEQ_PACKAGE_BUILD)
   unset(_bioseq_runtime_name)
   unset(_bioseq_runtime_under_llvm)
   unset(_bioseq_package_llvm_root_real)
+  unset(_bioseq_runtime_discovery_result)
+  unset(_bioseq_runtime_discovery_output)
+  unset(_bioseq_runtime_discovery_error)
 
   # Suppress Clang's implicit shared C++ runtime and link the three pinned PIC
   # archives after target objects/libraries. The rescan group handles the
@@ -1026,6 +1056,20 @@ if(BIOSEQ_BUILD_CORE)
   add_subdirectory(vendor)
 endif()
 
+# Link only the production PostgreSQL modules. Test executables and support
+# DSOs keep their existing link contracts, and package-only RPATH/IPO policy
+# remains confined to BIOSEQ_PACKAGE_BUILD below.
+if(TARGET bioseq_package_static_cxx_runtime)
+  foreach(_bioseq_private_runtime_target IN ITEMS
+      postgresql_bioseq postgresql_bioseq_cache)
+    if(TARGET ${_bioseq_private_runtime_target})
+      target_link_libraries(${_bioseq_private_runtime_target} PRIVATE
+        bioseq_package_static_cxx_runtime)
+    endif()
+  endforeach()
+  unset(_bioseq_private_runtime_target)
+endif()
+
 if(BIOSEQ_PACKAGE_BUILD)
   foreach(_bioseq_package_target IN ITEMS
       postgresql_bioseq postgresql_bioseq_cache)
@@ -1033,8 +1077,6 @@ if(BIOSEQ_PACKAGE_BUILD)
       message(FATAL_ERROR
         "package build did not create required target ${_bioseq_package_target}")
     endif()
-    target_link_libraries(${_bioseq_package_target} PRIVATE
-      bioseq_package_static_cxx_runtime)
     set_target_properties(${_bioseq_package_target} PROPERTIES
       BUILD_RPATH ""
       INSTALL_RPATH ""

@@ -100,6 +100,9 @@ struct ready_minimizer_fixture_backend_request {
     sorted_run_failure_injection sorted_run_failure = sorted_run_failure_injection::none;
     std::uint64_t sorted_run_failure_operation = 1u;
     std::uint64_t sorted_run_merge_reader_budget_bytes = 0u;
+    sorted_run_reader_admission_injection sorted_run_reader_admission =
+        sorted_run_reader_admission_injection::none;
+    std::uint64_t sorted_run_reader_request_ceiling_bytes = 0u;
 #endif
 };
 
@@ -134,6 +137,37 @@ parse_ready_minimizer_fixture_backend_request(std::string_view name) {
             // budget forces two compaction outputs, so operation 2 occurs only
             // after output 1 completed and its two input handles were closed.
             .sorted_run_merge_reader_budget_bytes = std::uint64_t{64} << 10,
+        };
+    }
+    if (name == "scalar_test_sorted_reader_backoff") {
+        return {
+            .backend = bioseq::minimizers::minimizer_sketch_backend::scalar,
+            .sorted_run_merge_reader_budget_bytes = std::uint64_t{4} << 20,
+            // Three inputs cannot use minimum buffers under this request
+            // ceiling, while two inputs can. This exercises reader-size
+            // fallback, fan-in fallback, and a multi-pass merge.
+            .sorted_run_reader_admission =
+                sorted_run_reader_admission_injection::request_ceiling,
+            .sorted_run_reader_request_ceiling_bytes = std::uint64_t{160} << 10,
+        };
+    }
+    if (name == "scalar_fail_sorted_reader_minimum") {
+        return {
+            .backend = bioseq::minimizers::minimizer_sketch_backend::scalar,
+            .sorted_run_merge_reader_budget_bytes = std::uint64_t{4} << 20,
+            // One 32-KiB reader plus metadata and 2x headroom exceeds this.
+            .sorted_run_reader_admission =
+                sorted_run_reader_admission_injection::request_ceiling,
+            .sorted_run_reader_request_ceiling_bytes = std::uint64_t{64} << 10,
+        };
+    }
+    if (name == "scalar_fail_sorted_reader_system_pressure") {
+        return {
+            .backend = bioseq::minimizers::minimizer_sketch_backend::scalar,
+            // A one-shot refusal proves system pressure is not retried with a
+            // smaller buffer and is not converted into a compaction attempt.
+            .sorted_run_reader_admission =
+                sorted_run_reader_admission_injection::system_pressure_once,
         };
     }
     constexpr std::array k_sorted_run_failures{
@@ -257,6 +291,9 @@ inline void arm_ready_minimizer_fixture_failures(
     arm_sorted_run_pg_leaf_failure_on_nth(request.sorted_run_failure,
                                           request.sorted_run_failure_operation);
     set_sorted_run_merge_reader_budget_for_test(request.sorted_run_merge_reader_budget_bytes);
+    set_sorted_run_reader_admission_injection_for_test(
+        request.sorted_run_reader_admission,
+        request.sorted_run_reader_request_ceiling_bytes);
 #endif
 }
 

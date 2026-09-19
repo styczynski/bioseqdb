@@ -337,7 +337,7 @@ Q1024_PACKED_PARTITION_PATH = (
     REPOSITORY_ROOT
     / "bench/bench_e2e_algorithm_matrix_q1024_packed_partition_manifest.json")
 Q1024_PACKED_PARTITION_SHA256 = (
-    "65d31b8b3aa49400598d80d50641b2a9a4b1f78c08c85c8a33afbef761fd891b")
+    "5351e563a269c013a4a6674c6bea8bce0ef24016d1c4965582d9df670c7252ae")
 Q1024_PACKED_PATH_PATTERN = re.compile(
     r"bench/e2e_algorithm_matrix_q1024_packed_shards/"
     r"bench_e2e_algorithm_matrix_q1024_packed_[a-z0-9_]+\.json")
@@ -474,7 +474,12 @@ ACCEPTED_DISPOSITIONS = {
     "accepted_behavior_difference",
 }
 EXPECTED_REJECTION_DISPOSITIONS = {"rejected_setup", "rejected_sql"}
-INVALID_DISPOSITIONS = {"invalid", "rejected_attestation", "rejected_correctness"}
+INVALID_DISPOSITIONS = {
+    "invalid",
+    "rejected_attestation",
+    "rejected_correctness",
+    "skipped_after_prior_attestation_rejection",
+}
 MEASURED_QUERY_CONNECTION_FAILURE_SCHEMA = (
     "bioseq.e2e.measured-query-connection-failure")
 MEASURED_QUERY_CONNECTION_FAILURE_REASON = (
@@ -2889,6 +2894,11 @@ def _load_q1024_packed_partition(
                     != "vulkan_tiled_dynamic_programming")
             for cell in expected_canonical_cells)
         selector_rejections = expected_count - supported
+        if kind == "generated_persisted_residual" and supported > 0:
+            if metrics != list(MIXED_PERSISTED_METRIC_NAMES):
+                raise ContractError(
+                    "supported generated persisted residual lacks exact mixed metrics")
+            expected_disposition = None
         if (member.get("expected_result_cells") != expected_count
                 or member.get("expected_raw_records") != expected_count * 5
                 or member.get("repetitions_per_cell") != 5
@@ -3532,6 +3542,7 @@ def _load_campaign_contract() -> dict[str, Any]:
         raise ContractError("observed rung names a noncanonical generator")
     projected_config: dict[str, Any] | None = None
     predecessor_execution_contract_id: str | None = None
+    canonical_fixture_projection_sha256: str | None = None
     if observed_rung:
         full_config_path = _canonical_repository_file(
             full_config_rel, "observed rung full config")
@@ -3541,6 +3552,16 @@ def _load_campaign_contract() -> dict[str, Any]:
             raise ContractError("observed rung full-config digest changed")
         predecessor_execution_contract_id = _validate_observed_rung_contract(
             observed_rung_contract, projected_config)
+    elif ACTIVE_CAMPAIGN_PROFILE == "q1024":
+        full_config_path = _canonical_repository_file(
+            full_config_rel, "q1024 full config")
+        canonical_config, canonical_config_raw = _read_json_file(
+            full_config_path, "q1024 full config")
+        if _sha256(canonical_config_raw) != full_config_digest:
+            raise ContractError("q1024 full-config digest changed")
+        canonical_fixture_projection_sha256 = (
+            _rung_fixture_projection_sha256(
+                canonical_config, EXPECTED_QUERY_COUNT))
 
     entries = _require_list(contract.get("configs"), "campaign configs")
     if len(entries) != required_shard_configs + 1:
@@ -3843,7 +3864,8 @@ def _load_campaign_contract() -> dict[str, Any]:
             if ACTIVE_CAMPAIGN_PROFILE == "q1024" else None),
         "fixture_projection_sha256": (
             observed_rung_contract["fixture_projection_sha256"]
-            if observed_rung_contract is not None else None),
+            if observed_rung_contract is not None
+            else canonical_fixture_projection_sha256),
         "prefilter_enabled": False,
         "cigar_projection": True,
         "mapq_projection": True,
@@ -4824,6 +4846,7 @@ def _validate_expected_rejection(
     )
     for key in diagnostics:
         _require_text(diagnostics.get(key), f"SQL diagnostics.{key}")
+
     if diagnostics.get("result_status") != "PGRES_FATAL_ERROR":
         raise ContractError("expected rejection lacks exact PostgreSQL error authority")
 
@@ -7063,6 +7086,51 @@ def _validate_record(
     for key in diagnostics:
         _require_text(diagnostics.get(key), f"SQL diagnostics.{key}")
 
+    skipped_after_prior_attestation_rejection = (
+        disposition == "skipped_after_prior_attestation_rejection")
+    prior_attestation_rejection = record.get("prior_attestation_rejection")
+    if skipped_after_prior_attestation_rejection:
+        if payload_schema_version != RAW_PAYLOAD_SCHEMA_VERSION:
+            raise ContractError(
+                "prior-attestation skip requires the current raw schema")
+        provenance = _require_dict(
+            prior_attestation_rejection,
+            "prior attestation rejection provenance")
+        _require_exact_keys(provenance, {
+            "schema", "version", "source_repeat", "source_disposition",
+            "source_rejection_reason",
+        }, "prior attestation rejection provenance")
+        source_repeat = _require_int(
+            provenance.get("source_repeat"),
+            "prior attestation rejection source repeat")
+        source_reason = _require_string(
+            provenance.get("source_rejection_reason"),
+            "prior attestation rejection source reason")
+        if (provenance.get("schema")
+                != "bioseq.e2e.prior-attestation-rejection"
+                or provenance.get("version") != 1
+                or provenance.get("source_disposition")
+                    != "rejected_attestation"
+                or source_repeat < 0 or source_repeat >= repeat
+                or not source_reason or source_reason != rejection_reason
+                or status_evaluated != 0
+                or any(diagnostics.get(key) for key in diagnostics)):
+            raise ContractError(
+                "prior-attestation skip provenance/chronology is contradictory")
+        for field in (
+                "alignment_snapshot", "attestation", "correctness",
+                "gate8_sql", "interval_receipt", "logical_execution",
+                "mapq_diagnostic", "ordered_query_oracle", "postgres",
+                "persisted_gpu_operation_stats",
+                "process_priority_attestation"):
+            if record.get(field) is not None:
+                raise ContractError(
+                    "prior-attestation skip retained execution evidence "
+                    f"in {field}")
+    elif prior_attestation_rejection is not None:
+        raise ContractError(
+            "prior-attestation rejection provenance escaped its skip disposition")
+
     requested_values = (
         status.get("requested_minimizer_algorithm"),
         status.get("requested_chaining_algorithm"),
@@ -7120,6 +7188,7 @@ def _validate_record(
                 "invalid": "correctness",
                 "rejected_correctness": "correctness",
                 "rejected_attestation": "attestation",
+                "skipped_after_prior_attestation_rejection": "not_executed",
             }[disposition]
         )
         if phase != expected_phase or not rejection_reason or behavior_comment:
@@ -7237,7 +7306,26 @@ def _validate_record(
         union_ns = None
         adjusted = None
 
-    correctness = _require_dict(record.get("correctness"), "correctness")
+    if skipped_after_prior_attestation_rejection:
+        # Local sentinels let the existing invalid-cell aggregation remain
+        # closed without inventing any raw observed-count evidence.
+        correctness = {
+            "evaluated": 0,
+            "found": False,
+            "match_count": 0,
+            "expected_match_count": expected_query_count,
+            "correct_match_count": 0,
+            "exact_primary_count_accepted": 0,
+            "strand_result_count": 0,
+            "correct_strand_count": 0,
+            "cigar_result_count": 0,
+            "correct_cigar_count": 0,
+            "cigar_replay_count": 0,
+            "mapq_result_count": 0,
+            "max_abs_offset_bp": None,
+        }
+    else:
+        correctness = _require_dict(record.get("correctness"), "correctness")
     _require_exact_keys(correctness, {
         "evaluated",
         "found",
@@ -7337,11 +7425,12 @@ def _validate_record(
         value = shape.get(key)
         if value is not None:
             _require_int(value, f"benchmark {key}")
-    if measured_query_connection_failure_invalid and any(
+    if (measured_query_connection_failure_invalid
+            or skipped_after_prior_attestation_rejection) and any(
             shape.get(key) is not None
             for key in ("actual_target_rows", "actual_alignment_jobs")):
         raise ContractError(
-            "measured connection failure retained executed benchmark shape")
+            "unexecuted record retained executed benchmark shape")
 
     if accepted:
         observed, transitions = _validate_accepted_attestation(
@@ -7355,6 +7444,17 @@ def _validate_record(
             prefilter_enabled,
             payload_schema_version,
         )
+    elif skipped_after_prior_attestation_rejection:
+        observed = {
+            "observed_minimizer_algorithm": None,
+            "observed_chaining_algorithm": None,
+            "observed_base_alignment_algorithm": None,
+        }
+        transitions = {
+            "minimizer": "not_accepted",
+            "chaining": "not_accepted",
+            "base_alignment": "not_accepted",
+        }
     else:
         attestation = _require_dict(record.get("attestation"), "attestation")
         _validate_attestation_shape(
@@ -8222,7 +8322,12 @@ def _load_report(
     }
     if seen != expected:
         raise ContractError("report stable-key/repeat membership is not the exact config set")
-    _validate_gate8_cell_qualifications(validated, source, validated_build)
+    gate8_source = source
+    if ACTIVE_CAMPAIGN_PROFILE == "q1024":
+        gate8_source = dict(source)
+        gate8_source["fixture_projection_sha256"] = campaign_contract[
+            "fixture_projection_sha256"]
+    _validate_gate8_cell_qualifications(validated, gate8_source, validated_build)
     _validate_paired_repeat_oracles(validated, paired_cases)
     _validate_config_disposition_records(validated, config_entry)
     return validated, source
@@ -9734,6 +9839,73 @@ def _refresh_q1024_partition_binding(
         return
     expected_wiring = _expected_wiring()
     wiring = _require_dict(document.get("wiring"), "ALL_RESULTS.yaml wiring")
+
+    previous_metadata_manifest_sha256 = (
+        "65d31b8b3aa49400598d80d50641b2a9a4b1f78c08c85c8a33afbef761fd891b")
+    current_metadata_expected = _current_all_results_contract_for_document(
+        campaign_contract, document)
+    previous_metadata_expected = copy.deepcopy(current_metadata_expected)
+    previous_metadata_expected["execution_partition"]["manifest_sha256"] = (
+        previous_metadata_manifest_sha256)
+    previous_metadata_legacy = _legacy_all_results_contract(
+        previous_metadata_expected)
+    if contract in (previous_metadata_expected, previous_metadata_legacy):
+        if wiring != expected_wiring:
+            raise ContractError(
+                "previous metadata partition contract has noncanonical wiring")
+        authority_names = {
+            "q1024_singleton": "q1024_singleton_fallback",
+            "q1024_packed": "q1024_packed_partition",
+            "q1024_deadline_v2_adoption": "q1024_deadline_v2_adoption",
+        }
+        state = _require_dict(
+            document.get("aggregation_state"), "aggregation_state")
+        entries_to_rebind: list[dict[str, Any]] = []
+        for raw_entry in _require_list(
+                state.get("processed_reports"), "processed_reports"):
+            entry = _require_dict(raw_entry, "processed report")
+            if (entry.get("partition_manifest")
+                    != campaign_contract["execution_authority"]
+                    or entry.get("partition_manifest_sha256")
+                        != previous_metadata_manifest_sha256):
+                raise ContractError(
+                    "previous metadata report binding is not uniformly sealed")
+            config_path = _canonical_repository_file(
+                _require_string(entry.get("config"), "processed config path"),
+                "processed config path")
+            current_owner = campaign_contract["configs_by_path"].get(config_path)
+            if (current_owner is None
+                    or authority_names.get(
+                        current_owner.get("execution_authority"))
+                        != entry.get("execution_authority")):
+                raise ContractError(
+                    "previous metadata report is not preserved by current ownership")
+            canonical_parent = _require_dict(
+                current_owner.get("canonical_parent"),
+                "current q1024 owner canonical parent")
+            if (entry.get("config_sha256")
+                        != current_owner.get("config_sha256")
+                    or entry.get("config_role") != current_owner.get("role")
+                    or entry.get("expected_stable_keys_sha256")
+                        != current_owner.get("expected_stable_keys_sha256")
+                    or entry.get("canonical_config")
+                        != canonical_parent.get("path")
+                    or entry.get("canonical_config_sha256")
+                        != canonical_parent.get("config_sha256")
+                    or entry.get("canonical_stable_keys_sha256")
+                        != current_owner.get("expected_stable_keys_sha256")):
+                raise ContractError(
+                    "previous metadata report configuration identity changed")
+            entries_to_rebind.append(entry)
+        for entry in entries_to_rebind:
+            entry["partition_manifest_sha256"] = campaign_contract[
+                "execution_authority_sha256"]
+        document["contract"] = (
+            _legacy_all_results_contract(current_metadata_expected)
+            if contract == previous_metadata_legacy
+            else current_metadata_expected)
+        document["wiring"] = expected_wiring
+        return
 
     previous_manifest_sha256 = (
         "adc97dcc133c2fb568745a91af023faa47ab3a636c915358d12f1395a35e984e")

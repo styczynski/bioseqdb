@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -29,6 +30,121 @@ def _load_aggregator():
     return module
 
 
+def _contract_modules():
+    return (_load_aggregator(),)
+
+
+PREVIOUS_METADATA_MANIFEST_SHA256 = (
+    "65d31b8b3aa49400598d80d50641b2a9a4b1f78c08c85c8a33afbef761fd891b")
+UNCHANGED_OWNER_IDENTITIES = {
+    (
+        "bench/e2e_algorithm_matrix_deadline_v2_shards/"
+        "bench_e2e_algorithm_matrix_deadline_v2_s056_q1024_q1024_anchor_"
+        "m2_d4_k15_w10_no_index_minimap2.json"
+    ): {
+        "config_sha256":
+            "4e1d86c1aba8bbafb8c8a5d203cb7b19f6a402fc9d732c990d50d298ca4e5434",
+        "config_role": "shard",
+        "expected_stable_keys_sha256":
+            "423ec685980909f514b861a6440901f927a978430cbf4458fef3d227f727ae5d",
+        "execution_authority": "q1024_deadline_v2_adoption",
+        "canonical_config": (
+            "bench/e2e_algorithm_matrix_shards/"
+            "bench_e2e_algorithm_matrix_campaign_shard_"
+            "m2_d4_k15_w10_no_index_baselines.json"),
+        "canonical_config_sha256":
+            "74e066c4d66c2abdf5b6bb23213d6c96117c3f3f07dd0887712d0a50a5bbb90f",
+        "canonical_stable_keys_sha256":
+            "423ec685980909f514b861a6440901f927a978430cbf4458fef3d227f727ae5d",
+    },
+    (
+        "bench/e2e_algorithm_matrix_deadline_v2_shards/"
+        "bench_e2e_algorithm_matrix_deadline_v2_s057_q1024_q1024_anchor_"
+        "m2_d4_k15_w10_just_index_minimap2.json"
+    ): {
+        "config_sha256":
+            "038cf71ab49ddc7f52ad9594009e77aed8171e6fab3567838eaf362e5d8bfa78",
+        "config_role": "shard",
+        "expected_stable_keys_sha256":
+            "e2662dcb9020741ce1ddef01f8142744cb8bfb109737e1437609552efbf635ba",
+        "execution_authority": "q1024_deadline_v2_adoption",
+        "canonical_config": (
+            "bench/e2e_algorithm_matrix_shards/"
+            "bench_e2e_algorithm_matrix_campaign_shard_"
+            "m2_d4_k15_w10_no_index_baselines.json"),
+        "canonical_config_sha256":
+            "74e066c4d66c2abdf5b6bb23213d6c96117c3f3f07dd0887712d0a50a5bbb90f",
+        "canonical_stable_keys_sha256":
+            "e2662dcb9020741ce1ddef01f8142744cb8bfb109737e1437609552efbf635ba",
+    },
+}
+MEMBER23_PATH = (
+    "bench/e2e_algorithm_matrix_q1024_packed_shards/"
+    "bench_e2e_algorithm_matrix_q1024_packed_m2_d4_k20_w15_"
+    "just_index_scalar_mpfragment_block_aligner_residual_after_0739.json")
+MEMBER23_PREVIOUS_CONFIG_SHA256 = (
+    "72be93f76248c5a7e8160a9540ce1bebe087d2c7725bcc6e79ec96a1e71bb741")
+
+
+def _synthetic_processed_report(
+        authority: dict, config_path: str, report_ordinal: int) -> dict:
+    """Build one minimal legacy binding from an unchanged canonical owner."""
+    owner = authority["configs_by_path"][REPOSITORY_ROOT / config_path]
+    parent = owner["canonical_parent"]
+    processed_authority = {
+        "q1024_singleton": "q1024_singleton_fallback",
+        "q1024_packed": "q1024_packed_partition",
+        "q1024_deadline_v2_adoption": "q1024_deadline_v2_adoption",
+    }[owner["execution_authority"]]
+    identity = {
+        "config_sha256": owner["config_sha256"],
+        "config_role": owner["role"],
+        "expected_stable_keys_sha256": owner["expected_stable_keys_sha256"],
+        "execution_authority": processed_authority,
+        "canonical_config": parent["path"],
+        "canonical_config_sha256": parent["config_sha256"],
+        "canonical_stable_keys_sha256": owner["expected_stable_keys_sha256"],
+    }
+    expected_identity = UNCHANGED_OWNER_IDENTITIES.get(config_path)
+    if expected_identity is not None and identity != expected_identity:
+        raise AssertionError("fixed synthetic owner identity changed")
+    return {
+        "report": f"synthetic/report_{report_ordinal}.json",
+        "report_sha256": f"{report_ordinal:064x}",
+        "config": config_path,
+        **identity,
+        "partition_manifest": authority["execution_authority"],
+        "partition_manifest_sha256": PREVIOUS_METADATA_MANIFEST_SHA256,
+        "synthetic_entry_sentinel": f"entry-{report_ordinal}",
+    }
+
+
+def _synthetic_legacy_document(module, authority: dict) -> dict:
+    """Return a small immutable-data fixture for the previous metadata seal."""
+    probe: dict = {}
+    previous_contract = copy.deepcopy(
+        module._current_all_results_contract_for_document(authority, probe))
+    previous_contract["execution_partition"]["manifest_sha256"] = (
+        PREVIOUS_METADATA_MANIFEST_SHA256)
+    return {
+        "contract": previous_contract,
+        "wiring": module._expected_wiring(),
+        "aggregation_state": {
+            "processed_reports": [
+                _synthetic_processed_report(authority, config_path, ordinal)
+                for ordinal, config_path in enumerate(
+                    UNCHANGED_OWNER_IDENTITIES, start=1)
+            ],
+            "synthetic_state_sentinel": {"retained": True},
+        },
+        "results": [
+            {"stable_key": "synthetic-result-a", "sentinel": [1, 2, 3]},
+            {"stable_key": "synthetic-result-b", "sentinel": {"kept": True}},
+        ],
+        "synthetic_top_level_sentinel": "unchanged",
+    }
+
+
 class Q1024PackedPartitionContractTests(unittest.TestCase):
     def test_generator_reproduces_every_output_byte_for_byte(self):
         outputs, manifest_raw = generator._generate()
@@ -42,7 +158,7 @@ class Q1024PackedPartitionContractTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), raw)
         self.assertEqual(
             hashlib.sha256(manifest_raw).hexdigest(),
-            "65d31b8b3aa49400598d80d50641b2a9a4b1f78c08c85c8a33afbef761fd891b",
+            "5351e563a269c013a4a6674c6bea8bce0ef24016d1c4965582d9df670c7252ae",
         )
 
     def test_manifest_coverage_and_adoption_policy_are_exact(self):
@@ -208,6 +324,57 @@ class Q1024PackedPartitionContractTests(unittest.TestCase):
             authority["deterministic_first_ingestion"],
             manifest_first_ingestion(),
         )
+
+    def test_previous_metadata_migration_changes_only_manifest_bindings(self):
+        for module in _contract_modules():
+            with self.subTest(module=module.__name__):
+                module._activate_campaign_profile("ALL_RESULTS.yaml")
+                authority = module._load_campaign_contract()
+                document = _synthetic_legacy_document(module, authority)
+                expected = copy.deepcopy(document)
+                expected["contract"] = (
+                    module._current_all_results_contract_for_document(
+                        authority, expected))
+                for entry in expected["aggregation_state"]["processed_reports"]:
+                    self.assertEqual(
+                        entry["partition_manifest_sha256"],
+                        PREVIOUS_METADATA_MANIFEST_SHA256)
+                    entry["partition_manifest_sha256"] = authority[
+                        "execution_authority_sha256"]
+                module._refresh_q1024_partition_binding(document, authority)
+                self.assertEqual(document, expected)
+
+    def test_previous_metadata_migration_rejects_wrong_config_atomically(self):
+        for module in _contract_modules():
+            with self.subTest(module=module.__name__):
+                module._activate_campaign_profile("ALL_RESULTS.yaml")
+                authority = module._load_campaign_contract()
+                document = _synthetic_legacy_document(module, authority)
+                document["aggregation_state"]["processed_reports"][-1][
+                    "config_sha256"] = "0" * 64
+                original = copy.deepcopy(document)
+                with self.assertRaisesRegex(
+                        module.ContractError,
+                        "previous metadata report configuration identity changed"):
+                    module._refresh_q1024_partition_binding(document, authority)
+                self.assertEqual(document, original)
+
+    def test_previous_metadata_migration_rejects_changed_member23_atomically(self):
+        for module in _contract_modules():
+            with self.subTest(module=module.__name__):
+                module._activate_campaign_profile("ALL_RESULTS.yaml")
+                authority = module._load_campaign_contract()
+                document = _synthetic_legacy_document(module, authority)
+                entry = _synthetic_processed_report(
+                    authority, MEMBER23_PATH, report_ordinal=23)
+                entry["config_sha256"] = MEMBER23_PREVIOUS_CONFIG_SHA256
+                document["aggregation_state"]["processed_reports"][-1] = entry
+                original = copy.deepcopy(document)
+                with self.assertRaisesRegex(
+                        module.ContractError,
+                        "previous metadata report configuration identity changed"):
+                    module._refresh_q1024_partition_binding(document, authority)
+                self.assertEqual(document, original)
 
 
 def manifest_first_ingestion() -> str:

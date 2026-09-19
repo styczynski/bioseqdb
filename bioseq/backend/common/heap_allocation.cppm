@@ -34,11 +34,13 @@ struct heap_allocation_plan {
  * Return the allocator request and a pre-admission bound for its reported
  * retained extent. Darwin uses malloc_good_size for the allocator request;
  * Apple libmalloc-715.140.5 magazine_large.c:562 permits a cached large extent
- * strictly below twice that request. The supported GNU/Linux x86-64 LP64 build
- * uses native glibc ptmalloc. Other C runtimes and replacement allocators expose
- * no matching pre-allocation retained-extent contract and are rejected.
+ * strictly below twice that request. The supported GNU/Linux x86-64 and AArch64
+ * LP64 builds use native glibc ptmalloc. Other C runtimes and replacement
+ * allocators expose no matching pre-allocation retained-extent contract and are
+ * rejected.
  */
-#if defined(__GLIBC__) && defined(__x86_64__) && defined(__LP64__)
+#if defined(__GLIBC__) && defined(__LP64__) && \
+    (defined(__x86_64__) || defined(__aarch64__))
 [[nodiscard]] inline const void* shared_object_base(const void* symbol) noexcept {
     Dl_info info{};
     return symbol != nullptr && ::dladdr(symbol, std::addressof(info)) != 0
@@ -76,7 +78,8 @@ struct heap_allocation_plan {
         .allocator_request_bytes = allocation_bytes,
         .allocation_requirement_bytes = *requirement,
     };
-#elif defined(__GLIBC__) && defined(__x86_64__) && defined(__LP64__)
+#elif defined(__GLIBC__) && defined(__LP64__) && \
+    (defined(__x86_64__) || defined(__aarch64__))
     // Symbol bindings and the host base-page size are process invariants; do
     // not repeat loader lookup or sysconf for every admitted map node.
     static const bool supported_allocator = has_supported_glibc_allocator();
@@ -168,7 +171,8 @@ struct heap_allocation_plan {
     }
 #if defined(__APPLE__)
     return ::malloc_size(allocation);
-#elif defined(__GLIBC__) && defined(__x86_64__) && defined(__LP64__)
+#elif defined(__GLIBC__) && defined(__LP64__) && \
+    (defined(__x86_64__) || defined(__aarch64__))
     return ::malloc_usable_size(allocation);
 #else
     return 0u;

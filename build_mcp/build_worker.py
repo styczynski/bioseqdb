@@ -2858,6 +2858,37 @@ _ALGORITHM_MATRIX_STABLE_KEY_FIELDS = [
     "requested_chaining_algorithm",
     "requested_base_alignment_algorithm",
 ]
+_ALGORITHM_MATRIX_MIXED_PERSISTED_METRIC_NAMES = [
+    "wall_clock_ns",
+    "region_total_ns",
+    "tuple_accepted",
+    "match_count",
+    "expected_match_count",
+    "correct_match_count",
+    "exact_primary_count_accepted",
+    "correct_cigar_count",
+    "cigar_replay_count",
+    "mapq_result_count",
+    "pipeline_validation_accepted",
+    "stage_engine_matrix_valid",
+    "backend_declines",
+    "backend_fallbacks",
+    "prefilter_activity_count",
+    "measured_region_ns_manual",
+    "cigar_or_mapq_interval_union_ns",
+    "outer_e2e_minus_cigar_or_mapq_union_ns",
+    "benchmark_e2e_interval_schema_revision",
+    "benchmark_e2e_interval_available",
+    "benchmark_e2e_interval_count",
+    "benchmark_e2e_cigar_interval_count",
+    "benchmark_e2e_mapq_interval_count",
+    "benchmark_e2e_interval_finalization_count",
+    "downstream_active_wall_ns",
+    "downstream_active_wall_available",
+    "downstream_work_ns",
+    "mapq_execution_available",
+    "mapq_executed",
+]
 _ALGORITHM_MATRIX_EXACT_BENCH_FILTER = {"benchmarks": ["bench_e2e"]}
 _ALGORITHM_MATRIX_EXACT_BENCH_FLAGS = ["--filter", "benchmark=bench_e2e"]
 _ALGORITHM_MATRIX_RUNTIME_ENVIRONMENT = {
@@ -2886,7 +2917,7 @@ _ALGORITHM_MATRIX_CAMPAIGN_PROFILES = (
         "packed_partition_manifest": (
             "bench/bench_e2e_algorithm_matrix_q1024_packed_partition_manifest.json"),
         "packed_partition_manifest_sha256": (
-            "65d31b8b3aa49400598d80d50641b2a9a4b1f78c08c85c8a33afbef761fd891b"),
+            "5351e563a269c013a4a6674c6bea8bce0ef24016d1c4965582d9df670c7252ae"),
         "packed_pattern": (
             r"bench/e2e_algorithm_matrix_q1024_packed_shards/"
             r"bench_e2e_algorithm_matrix_q1024_packed_[a-z0-9_]+\.json"),
@@ -3778,6 +3809,27 @@ def _q1024_packed_partition_authority(
                         "\n".join(sorted(member["stable_keys"])).encode("utf-8")
                     ).hexdigest() != member.get("expected_stable_keys_sha256")):
                 return None, "q1024 packed member proof is malformed"
+            planned_supported = member.get("planned_supported_cells")
+            planned_rejections = member.get(
+                "planned_selector_rejection_cells")
+            if (isinstance(planned_supported, bool)
+                    or not isinstance(planned_supported, int)
+                    or planned_supported < 0
+                    or isinstance(planned_rejections, bool)
+                    or not isinstance(planned_rejections, int)
+                    or planned_rejections < 0
+                    or planned_supported + planned_rejections
+                        != member["expected_result_cells"]):
+                return None, "q1024 packed member support plan is malformed"
+            if (member["kind"] == "generated_persisted_residual"
+                    and planned_supported > 0
+                    and (member.get("expected_all_records_disposition")
+                            is not None
+                        or member.get("declared_metric_names")
+                            != _ALGORITHM_MATRIX_MIXED_PERSISTED_METRIC_NAMES)):
+                return None, (
+                    "supported generated persisted residual retains "
+                    "all-rejected metadata")
             packed_ids.add(member["id"])
             packed_paths.add(member["path"])
             packed_keys.extend(member["stable_keys"])

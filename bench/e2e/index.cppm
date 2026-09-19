@@ -446,6 +446,12 @@ struct logical_query_chunk {
     return chunks;
 }
 
+/** @brief Provenance retained after one genuinely measured matrix rejection. */
+struct e2e_matrix_attestation_rejection {
+    std::size_t source_repeat = 0;
+    std::string rejection_reason;
+};
+
 /** @brief Immutable setup artifacts consumed by each measured execution. */
 struct e2e_input {
     // Connection is shared (const-usable; SQL mutates the DB, not this struct).
@@ -479,6 +485,12 @@ struct e2e_input {
     // identity rather than claiming to describe a later cold repeat.
     mutable std::map<std::string, nlohmann::json>
         matrix_gate8_cell_qualifications;
+    // A measured attestation failure makes later repeats of only that exact
+    // resolved cell timing-ineligible.  This process-local cache is never
+    // populated by setup/SQL/correctness failures and cannot cross Inputs,
+    // runs, or binaries.
+    mutable std::map<std::string, e2e_matrix_attestation_rejection>
+        matrix_measured_attestation_rejections;
     // Durable, non-index-maintained query relation used only by non-paired
     // Bioseq algorithm-matrix rows.  Keeping it outside the per-repeat
     // measurement boundary makes A exactly the one mmsearch statement while
@@ -868,6 +880,8 @@ struct e2e_output {
     std::string cell_disposition = "accepted";
     std::string phase = "completed";
     std::string tuple_rejection_reason;
+    std::int64_t prior_attestation_rejection_source_repeat = -1;
+    std::string prior_attestation_rejection_reason;
     std::string behavior_difference_comment;
     std::string sql_result_status;
     std::string sqlstate;
@@ -13700,6 +13714,95 @@ void execute_paired_chunked_bioseq(
     return out;
 }
 
+/** @brief Canonical resolved parameter identity for a matrix cell cache key. */
+[[nodiscard]] nlohmann::json matrix_resolved_parameter_identity(
+        const parameter_map& params) {
+    nlohmann::json result = nlohmann::json::object();
+    for (const auto& [name, value] : params) {
+        if (value.is_string()) {
+            result[name] = std::string{value.as_string()};
+        } else if (value.is_integer()) {
+            result[name] = value.as_integer();
+        } else if (value.is_double()) {
+            result[name] = value.as_double();
+        } else if (value.is_boolean()) {
+            result[name] = value.as_boolean();
+        } else {
+            abort_gate8_sql_proof(
+                "matrix attestation rejection identity has a non-scalar parameter");
+        }
+    }
+    return result;
+}
+
+/** @brief Exact process-local identity for measured-rejection suppression. */
+[[nodiscard]] std::string matrix_attestation_rejection_cell_key(
+        const std::string_view algorithm,
+        const parameter_map& params,
+        const e2e_input& in,
+        const std::string_view minimizer_index,
+        const e2e_output& out) {
+    const bool persisted = algorithm ==
+        bioseq::bench::e2e::detail::algorithm_matrix_just_index;
+    if (!persisted && algorithm !=
+            bioseq::bench::e2e::detail::algorithm_matrix_no_index) {
+        abort_gate8_sql_proof(
+            "attestation rejection cache key requested outside matrix scope");
+    }
+    const std::string target_table = persisted
+        ? in.matrix_just_index_tables.at(algorithm_matrix_identity(
+            out.requested_minimizer_algorithm, minimizer_index))
+        : in.no_index_table;
+    return nlohmann::json{
+        {"schema", "bioseq.e2e.matrix-attestation-rejection-cell"},
+        {"version", 1},
+        {"algorithm", std::string{algorithm}},
+        {"dataset", nlohmann::json{
+            {"key", in.size_label},
+            {"alphabet", in.alphabet},
+            {"sequence_type", in.seq_type},
+            {"target_size_bp", in.target_bp},
+            {"kmer_size", in.kmer_size},
+            {"window_size", in.window_size},
+            {"query_count", in.queries.size()},
+        }},
+        {"execution", nlohmann::json{
+            {"mode", persisted ? "just_index" : "no_index"},
+            {"minimizer_index", std::string{minimizer_index}},
+            {"requested_algorithms", nlohmann::json{
+                {"minimizer", out.requested_minimizer_algorithm},
+                {"chaining", out.requested_chaining_algorithm},
+                {"base_alignment",
+                    out.requested_base_alignment_algorithm},
+            }},
+            {"pipeline_mode",
+                param_string(params, "pipeline_mode", "single_thread")},
+            {"target_table", target_table},
+            {"query_table", in.matrix_query_table},
+            {"statement_timeout_ms", in.statement_timeout_ms},
+            {"logical_query_chunk_size", in.logical_query_chunk_size},
+            {"algorithm_matrix_measurement_scope",
+                in.algorithm_matrix_measurement_scope},
+            {"paired_minimap2_oracle", in.paired_minimap2_oracle},
+            {"require_nice_attestation", in.require_nice_attestation},
+            {"priority_target_nice", in.priority_target_nice},
+            {"projections", nlohmann::json{
+                {"cigar", in.cigar_projection},
+                {"mapq", in.mapq_projection},
+                {"prefilter", in.prefilter_enabled},
+            }},
+            {"correctness", nlohmann::json{
+                {"designed_indel_cigar", in.designed_indel_cigar},
+                {"designed_many_gap_cigar", in.designed_many_gap_cigar},
+                {"require_cigar_indel", in.require_cigar_indel},
+                {"min_cigar_deletion_ops", in.min_cigar_deletion_ops},
+                {"min_cigar_insertion_ops", in.min_cigar_insertion_ops},
+            }},
+        }},
+        {"resolved_parameters", matrix_resolved_parameter_identity(params)},
+    }.dump();
+}
+
 [[nodiscard]] bool record_algorithm_matrix_setup_rejection(
         const std::string_view algorithm,
         const e2e_input& in,
@@ -14224,6 +14327,33 @@ prepare_e2e_matrix_iteration(
             algorithm, in, prep.minimizer_index, prep.output)) {
         return prep;
     }
+    const std::string rejection_cell_key =
+        matrix_attestation_rejection_cell_key(
+            algorithm, params, in, prep.minimizer_index, prep.output);
+    const auto prior_rejection =
+        in.matrix_measured_attestation_rejections.find(rejection_cell_key);
+    if (prior_rejection != in.matrix_measured_attestation_rejections.end()) {
+        if (prior_rejection->second.source_repeat >= repeat
+            || prior_rejection->second.rejection_reason.empty()) {
+            abort_gate8_sql_proof(
+                "matrix attestation rejection cache has invalid chronology");
+        }
+        prep.output.tuple_accepted = 0;
+        prep.output.cell_disposition =
+            "skipped_after_prior_attestation_rejection";
+        prep.output.phase = "not_executed";
+        prep.output.correctness_evaluated = 0;
+        prep.output.expected_match_count =
+            static_cast<std::int64_t>(in.queries.size());
+        prep.output.prior_attestation_rejection_source_repeat =
+            static_cast<std::int64_t>(
+                prior_rejection->second.source_repeat);
+        prep.output.prior_attestation_rejection_reason =
+            prior_rejection->second.rejection_reason;
+        prep.output.tuple_rejection_reason =
+            prior_rejection->second.rejection_reason;
+        return prep;
+    }
     if (in.matrix_query_table.empty()) {
         abort_gate8_sql_proof(
             "accepted non-paired matrix row has no durable query fixture");
@@ -14390,6 +14520,9 @@ prepare_e2e_minimap2_iteration(
     } else {
         abort_gate8_sql_proof("unknown Gate-8 control identity");
     }
+    std::fprintf(stderr, "[bench_e2e] GATE8-PHASE-BEGIN control=%.*s queries=%zu\n",
+                 static_cast<int>(name.size()), name.data(), in.queries.size());
+    std::fflush(stderr);
     const auto restore_control_state = [&]() {
         configure_bioseq_algorithm_matrix_session(
             connection, in, params, pipeline_mode, minimizer_index,
@@ -14421,6 +14554,12 @@ prepare_e2e_minimap2_iteration(
         const gate8_guc_snapshot restored =
             capture_gate8_guc_snapshot(connection, accepted_expected);
         if (captured.status != captured_query_status::tuples_ok) {
+            std::fprintf(stderr,
+                         "[bench_e2e] GATE8-CONTROL-SQL-FAIL control=%.*s status=%s sqlstate=%s primary=%s\n",
+                         static_cast<int>(name.size()), name.data(),
+                         captured.result_status.c_str(), captured.sqlstate.c_str(),
+                         captured.primary.c_str());
+            std::fflush(stderr);
             abort_gate8_sql_proof(
                 "negative control did not complete the unchanged mapping SQL");
         }
@@ -14433,9 +14572,20 @@ prepare_e2e_minimap2_iteration(
             || counts != accepted_counts
             || cache_evidence != accepted_cache_evidence
             || control_output.prefilter_activity_count != 0) {
+            std::fprintf(stderr,
+                         "[bench_e2e] GATE8-CONTROL-CONTRACT-FAIL control=%.*s found=%d route_equal=%d counts_equal=%d cache_equal=%d prefilter_activity=%llu\n",
+                         static_cast<int>(name.size()), name.data(),
+                         control_output.found ? 1 : 0, route == accepted_route ? 1 : 0,
+                         counts == accepted_counts ? 1 : 0,
+                         cache_evidence == accepted_cache_evidence ? 1 : 0,
+                         static_cast<unsigned long long>(control_output.prefilter_activity_count));
+            std::fflush(stderr);
             abort_gate8_sql_proof(
                 "negative control changed route, ordered output, or prefilter activity");
         }
+        std::fprintf(stderr, "[bench_e2e] GATE8-PHASE-PASS control=%.*s\n",
+                     static_cast<int>(name.size()), name.data());
+        std::fflush(stderr);
         nlohmann::json changed = nlohmann::json::array();
         if (name == "cache_off") {
             changed.push_back("bioseq.aligner.vulkan.index_cache.enabled=off");
@@ -14652,6 +14802,9 @@ void collect_gate8_explain_contract(
         capture_prior_alignment_identity(proof_connection);
     const std::string explain_sql =
         "EXPLAIN (ANALYZE, FORMAT JSON) " + prep.measured_sql;
+    std::fprintf(stderr, "[bench_e2e] GATE8-PHASE-BEGIN control=explain_analyze queries=%zu\n",
+                 in.queries.size());
+    std::fflush(stderr);
     const it::rowset_t explain_rows =
         it::query_rows(proof_connection, explain_sql);
     if (explain_rows.size() != 1u || explain_rows.front().size() != 1u
@@ -14693,6 +14846,8 @@ void collect_gate8_explain_contract(
         abort_gate8_sql_proof(
             "literal EXPLAIN ANALYZE changed the selected route");
     }
+    std::fprintf(stderr, "[bench_e2e] GATE8-PHASE-PASS control=explain_analyze\n");
+    std::fflush(stderr);
     const nlohmann::json measured_counts =
         ordered_primary_match_counts(measured);
     const nlohmann::json measured_cache_evidence =
@@ -14970,6 +15125,27 @@ void finalize_e2e_matrix_iteration(
         prep.minimizer_index);
     finalize_e2e_priority_attestation(algorithm, in, out);
     annotate_accepted_behavior_differences(in, out);
+    if (out.cell_disposition == "rejected_attestation") {
+        if (out.tuple_accepted != 0 || out.phase != "attestation"
+            || out.tuple_rejection_reason.empty()) {
+            abort_gate8_sql_proof(
+                "measured matrix attestation rejection is malformed");
+        }
+        const std::string rejection_cell_key =
+            matrix_attestation_rejection_cell_key(
+                algorithm, params, in, prep.minimizer_index, out);
+        const bool inserted =
+            in.matrix_measured_attestation_rejections.emplace(
+                rejection_cell_key,
+                e2e_matrix_attestation_rejection{
+                    .source_repeat = prep.repeat,
+                    .rejection_reason = out.tuple_rejection_reason,
+                }).second;
+        if (!inserted) {
+            abort_gate8_sql_proof(
+                "matrix attestation rejection cache has duplicate source");
+        }
+    }
 }
 
 void finalize_e2e_minimap2_iteration(
@@ -16699,6 +16875,12 @@ void sanitize_e2e_raw_numbers(
             || out.requested_chaining_algorithm
                 == "vulkan_tiled_dynamic_programming");
     const bool accepted_sample = out.tuple_accepted == 1;
+    const bool skipped_after_prior_attestation_rejection =
+        out.cell_disposition ==
+            "skipped_after_prior_attestation_rejection";
+    const bool has_prior_attestation_rejection_provenance =
+        out.prior_attestation_rejection_source_repeat >= 0
+        && !out.prior_attestation_rejection_reason.empty();
     const bool gate8_sql_required = matrix_sample && accepted_sample
         && !in.paired_minimap2_oracle;
     const bool accepted_timing_available =
@@ -16716,6 +16898,36 @@ void sanitize_e2e_raw_numbers(
         && out.phase == "measured_statement";
     const bool has_measured_query_connection_failure_proof =
         !out.measured_query_connection_failure_proof.is_null();
+    if (skipped_after_prior_attestation_rejection
+            != has_prior_attestation_rejection_provenance
+        || (skipped_after_prior_attestation_rejection
+            && (!matrix_sample || out.tuple_accepted != 0
+                || out.phase != "not_executed"
+                || out.correctness_evaluated != 0
+                || out.tuple_rejection_reason
+                    != out.prior_attestation_rejection_reason
+                || out.measured_region_available
+                || !out.alignment_snapshot_rows.empty()
+                || out.ordered_query_oracle_available != 0
+                || out.pipeline_stats_available != 0
+                || out.alignment_execution_id != -1
+                || out.target_rows != -1
+                || out.attempted_alignment_jobs != -1
+                || out.benchmark_e2e_interval_available != -1
+                || !out.benchmark_e2e_interval_origins.is_null()
+                || out.minimap2_receipt_available != -1
+                || !out.persisted_gpu_operation_stats.is_null()
+                || !out.gate8_sql_proof.is_null()
+                || !out.sql_result_status.empty()
+                || !out.sqlstate.empty()
+                || !out.sql_primary.empty()
+                || !out.sql_detail.empty()
+                || !out.sql_hint.empty()
+                || !out.sql_connection_diagnostic.empty()
+                || has_measured_query_connection_failure_proof))) {
+        abort_raw_stats_serialization(
+            "prior-attestation skip retained execution evidence or lacks provenance");
+    }
     if (measured_query_connection_failure_invalid
             != has_measured_query_connection_failure_proof
         || (has_measured_query_connection_failure_proof
@@ -16897,6 +17109,17 @@ void sanitize_e2e_raw_numbers(
     payload["payload_schema_version"] =
         bioseq::bench::framework::e2e_raw_payload_schema_version;
     payload["gate8_sql"] = out.gate8_sql_proof;
+    if (skipped_after_prior_attestation_rejection) {
+        payload["prior_attestation_rejection"] = nlohmann::json{
+            {"schema", "bioseq.e2e.prior-attestation-rejection"},
+            {"version", 1},
+            {"source_repeat",
+                out.prior_attestation_rejection_source_repeat},
+            {"source_disposition", "rejected_attestation"},
+            {"source_rejection_reason",
+                out.prior_attestation_rejection_reason},
+        };
+    }
     const std::string pairing_mode = algorithm.ends_with("_just_index")
         ? std::string{"just_index"}
         : algorithm.ends_with("_no_index")
@@ -17072,7 +17295,8 @@ void sanitize_e2e_raw_numbers(
         }
         : nlohmann::json(nullptr);
     payload["process_priority_attestation"] =
-        in.require_nice_attestation
+        !skipped_after_prior_attestation_rejection
+            && in.require_nice_attestation
             ? nlohmann::json{
                 {"schema", "bioseq.e2e.process-priority"},
                 {"version", 1},
@@ -17258,7 +17482,9 @@ void sanitize_e2e_raw_numbers(
             ? nlohmann::json(out.attempted_alignment_jobs)
             : nlohmann::json(nullptr)},
     };
-    payload["correctness"] = nlohmann::json{
+    payload["correctness"] = skipped_after_prior_attestation_rejection
+        ? nlohmann::json(nullptr)
+        : nlohmann::json{
         {"evaluated", out.correctness_evaluated},
         {"found", out.found},
         {"match_count", out.match_count},
@@ -17483,7 +17709,9 @@ void sanitize_e2e_raw_numbers(
         payload["alignment_snapshot"] = nullptr;
         payload["persisted_gpu_operation_stats"] = nullptr;
     }
-    payload["attestation"] = nlohmann::json{
+    payload["attestation"] = skipped_after_prior_attestation_rejection
+        ? nlohmann::json(nullptr)
+        : nlohmann::json{
         {"validation_present", out.pipeline_stats_available},
         {"validation_attached_to_measurement", out.pipeline_stats_attached_to_measurement},
         {"validation_accepted", out.pipeline_stats_consistent},
@@ -18375,7 +18603,7 @@ struct sealed_e2e_config_identity {
     std::string_view sha256;
 };
 
-constexpr std::array<sealed_e2e_config_identity, 18>
+constexpr std::array<sealed_e2e_config_identity, 19>
     k_post_s059_seven_day_queue_configs{{
         {
             "bench/e2e_algorithm_matrix_q1024_packed_shards/"
@@ -18484,6 +18712,12 @@ constexpr std::array<sealed_e2e_config_identity, 18>
             "bench_e2e_algorithm_matrix_campaign_shard_singleton_0068_"
             "2496323c88e8add2.json",
             "7cbedf6a5ccc42f304e37b6a1faffbc4c3e19d6fb592c237ecdc3a141ad14b44",
+        },
+        {
+            "bench/e2e_algorithm_matrix_q1024_packed_shards/"
+            "bench_e2e_algorithm_matrix_q1024_packed_m2_d4_k20_w15_"
+            "just_index_scalar_mpfragment_block_aligner_residual_after_0739.json",
+            "37765d4a16781ac9e54571ce9f8d55ea5113fa742192f25a3e243f3b21ba325f",
         },
     }};
 

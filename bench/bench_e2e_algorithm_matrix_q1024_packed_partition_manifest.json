@@ -66,7 +66,7 @@
     "generated_filename_prefix": "bench_e2e_algorithm_matrix_q1024_packed_",
     "deterministic_first_ingestion": "bench/e2e_algorithm_matrix_deadline_v2_shards/bench_e2e_algorithm_matrix_deadline_v2_s056_q1024_q1024_anchor_m2_d4_k15_w10_no_index_minimap2.json",
     "partition_digest_algorithm": "sha256-canonical-json-without-partition_digest",
-    "partition_digest": "d18ad573e311354a27d5ed0054340c55e63b98b3b190bd6c50b8fb5c872af4ba"
+    "partition_digest": "d06dedb097b115af4c915ba78c876c71863d5a6a45685caa4ad66ebbce7dacfc"
   },
   "packed_members": [
     {
@@ -10324,7 +10324,7 @@
       "id": "m2_d4_k20_w15_scalar_mpfragment_block_residual_after_0739",
       "kind": "generated_persisted_residual",
       "path": "bench/e2e_algorithm_matrix_q1024_packed_shards/bench_e2e_algorithm_matrix_q1024_packed_m2_d4_k20_w15_just_index_scalar_mpfragment_block_aligner_residual_after_0739.json",
-      "config_sha256": "72be93f76248c5a7e8160a9540ce1bebe087d2c7725bcc6e79ec96a1e71bb741",
+      "config_sha256": "37765d4a16781ac9e54571ce9f8d55ea5113fa742192f25a3e243f3b21ba325f",
       "source_parent_path": "bench/e2e_algorithm_matrix_shards/bench_e2e_algorithm_matrix_campaign_shard_m2_d4_k20_w15_just_index_scalar_mpfragment.json",
       "source_parent_config_sha256": "6a7f5cf1224a6ded2d2fcc10d87fad1c96014c10b0e1822f6b7de925f49794f7",
       "expected_result_cells": 4,
@@ -10353,9 +10353,23 @@
         "stage_engine_matrix_valid",
         "backend_declines",
         "backend_fallbacks",
-        "prefilter_activity_count"
+        "prefilter_activity_count",
+        "measured_region_ns_manual",
+        "cigar_or_mapq_interval_union_ns",
+        "outer_e2e_minus_cigar_or_mapq_union_ns",
+        "benchmark_e2e_interval_schema_revision",
+        "benchmark_e2e_interval_available",
+        "benchmark_e2e_interval_count",
+        "benchmark_e2e_cigar_interval_count",
+        "benchmark_e2e_mapq_interval_count",
+        "benchmark_e2e_interval_finalization_count",
+        "downstream_active_wall_ns",
+        "downstream_active_wall_available",
+        "downstream_work_ns",
+        "mapq_execution_available",
+        "mapq_executed"
       ],
-      "expected_all_records_disposition": "rejected_setup",
+      "expected_all_records_disposition": null,
       "planned_supported_cells": 3,
       "planned_selector_rejection_cells": 1,
       "canonical_cells": [
