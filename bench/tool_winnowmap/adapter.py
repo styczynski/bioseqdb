@@ -9,6 +9,7 @@ COMMENTS=('Winnowmap weighted minimizers with native minimal confidently alignab
           'Native SV-aware second stage retains its bandwidth 2000 and maximum gap 16000; these additional stages have no baseline counterpart. '
           'Seed occurrence fraction 0.0002 and minimum occurrence floor 10 match the baseline. The default index batch limit is 8 Gbp, with the memory bounds below. '
           'Meryl count and high-frequency k-mer selection are index setup, included in no_index. '
+          'For 4 Gbp k20 inputs on hosts below 10 GiB RAM, Meryl uses native memory=4 batching after a demonstrated OOM; reference layout and k-mer counts are unchanged. '
           'The native -d output path is re-enabled; loaded indices reconstruct the identical native weighting Bloom filter from the saved k-mer list. '
           'A remote fresh-reference versus persisted-index output parity test is required after building. '
           'The native MCAS outer repeat length is initialized to zero to remove undefined MAPQ/output behavior. '
@@ -42,10 +43,11 @@ def setup(root,config,fixture,index,run):
     binary=str(root/'bench/tool_winnowmap/bin/winnowmap')
     meryl=str(root/'bench/tool_winnowmap/bin/meryl')
     k=str(config['data']['kmer_size']); w=str(config['data']['window_size'])
-    run([meryl,'count','k='+k,'threads='+str(config['threads']),'output',str(index/'meryl'),str(fixture/'target.fasta')])
-    run([meryl,'print','greater-than','distinct=0.9998',str(index/'meryl')],stdout=index/'repetitive.txt')
     memory_kib=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemTotal:')))
     low_memory=memory_kib<10*1024*1024
+    meryl_memory=['memory=4'] if low_memory and config['data']['reference_length']==4_000_000_000 and config['data']['kmer_size']==20 else []
+    run([meryl,'count','k='+k,'threads='+str(config['threads']),*meryl_memory,'output',str(index/'meryl'),str(fixture/'target.fasta')])
+    run([meryl,'print','greater-than','distinct=0.9998',str(index/'meryl')],stdout=index/'repetitive.txt')
     two_input_records=config['data']['reference_length']>2000000352
     demonstrated_oom=config['data']['kmer_size']==15 and (config['data']['alphabet']=='dna4' or
         (config['data']['alphabet']=='dna5' and config['data']['reference_length']==2_000_000_000))
