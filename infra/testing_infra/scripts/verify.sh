@@ -2,11 +2,9 @@
 # ---------------------------------------------------------------------------
 # verify.sh — prove the box is correctly provisioned.
 #
-# Success criterion (from the task): `cmake` configures, ALL third-party
-# dependencies build (vcpkg + vendored libs), and the ONLY compile failures are
-# in our own code — specifically the Highway ::NEON SIMD that does not exist on
-# x86_64. A failure in the toolchain or any third-party library is a real
-# failure.
+# Success requires both configuration and the selected target build to succeed.
+# Source-path classification is diagnostic only: project compiler errors must
+# never be reported as successful provisioning.
 #
 # Steps:
 #   1) cmake --preset aws-x64-linux   (configure => vcpkg builds every dep)
@@ -50,7 +48,7 @@ if ! cmake --preset "$PRESET" 2>&1 | tee "$CFG_LOG"; then
 fi
 echo "[verify] configure OK (all dependencies resolved)"
 
-# ---- 2. Build a core target (errors expected ONLY in our code) --------------
+# ---- 2. Build a core target ------------------------------------------------
 echo "[verify] building target '$TARGET' (keep-going) ..."
 timeout 5400 cmake --build "$BUILD_DIR" --target "$TARGET" -j "$(nproc)" -- -k 0 2>&1 | tee "$BLD_LOG"
 build_rc=${PIPESTATUS[0]}
@@ -69,7 +67,7 @@ echo "[verify] 3rd-party error lines: $n_third"
 echo "============================================================"
 
 if [ "$build_rc" -eq 0 ]; then
-  echo "[verify] NOTE: build SUCCEEDED — the ::NEON gap may already be fixed on this branch."
+  echo "[verify] selected core target built successfully; this is not E2E qualification."
   status "VERIFY_BUILD_SUCCEEDED"; exit 0
 fi
 if [ "$n_third" -gt 0 ]; then
@@ -77,9 +75,9 @@ if [ "$n_third" -gt 0 ]; then
   status "VERIFY_3RD_PARTY_FAILURE"; exit 1
 fi
 if [ "$n_our" -gt 0 ]; then
-  echo "[verify] PASS: configure + all deps OK; build fails ONLY in our code (expected ::NEON gap). Sample:"
+  echo "[verify] FAIL: project compilation failed. Source location does not make this a provisioning pass. Sample:"
   printf '%s\n' "$ourcode" | head -20
-  status "VERIFY_OK_FAILS_ON_OUR_CODE"; exit 0
+  status "VERIFY_PROJECT_BUILD_FAILED"; exit 1
 fi
 echo "[verify] build failed but no 'error:' lines were classified — inspect $BLD_LOG"
 tail -n 40 "$BLD_LOG"
