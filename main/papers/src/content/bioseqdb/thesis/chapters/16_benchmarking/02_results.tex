@@ -20,11 +20,11 @@ matrix. The machine inventory precedes the result tables.
   The transient index can be reused within the batch, including by the remaining
   1,023 queries after its initial construction. Fixture generation and process
   restart setup lie outside the current measured interval.
-  \item \textbf{Timing scopes.} The local authority preserves both historical
-  outer-E2E timings and the current framework mapping-iteration timings. The
-  historical interval is retained as recorded, without interpreting it as the
-  narrower current interval. Separate local tables prevent comparisons across
-  these boundaries. All published AWS observations use the current interval.
+  \item \textbf{Timing scopes.} Historical outer-E2E timings are treated as
+  mismeasurements and excluded from the tables, coverage counts and comparisons.
+  All observations in the BioseqDB algorithm tables use the current framework
+  mapping-iteration interval.
+  The final external-aligner table identifies its separate timing boundary explicitly.
   In particular, ``mapping interval'' still includes transient construction in
   no-index mode.
   \item \textbf{Two measurements per cell.} The first duration, A, is the
@@ -70,11 +70,11 @@ The configured parameters are as follows.
   \item \textbf{Occurrences.} Each query originates from one known sampled
   reference interval. The fixture does not specify an occurrence-count
   distribution or an occurrence standard deviation. This provenance does not
-  imply that an aligner returns exactly one hit. The approved summaries certify
+  imply that an aligner returns exactly one hit. The original five summaries certify
   exact baseline match-count equality but intentionally omit the actual counts.
   \item \textbf{Repetitions and variability.} Each published configuration and
   timing scope has five accepted repeats. A repeat measures the complete query
-  batch, not a single query. The summaries contain medians and repeat counts,
+  batch, not a single query. The original five summaries contain medians and repeat counts,
   but no raw timing samples, so timing standard deviations and confidence
   intervals cannot be recovered from these files.
 \end{itemize}
@@ -89,9 +89,10 @@ separate range-minimum-query algorithm. SIMD-ref is the reference minimizer,
 Two-stack is the two-stack ntHash minimizer, and Bounded is bounded ntHash SIMD.
 Block denotes Block Aligner. Vulkan rows can include CPU index handling,
 backtracking and base alignment, and do not imply an entirely GPU pipeline.
-Historical SIMD-ref requests that actually observed scalar minimizers carry
-an \textsuperscript{f} marker. Their timings describe that effective scalar
-path and provide no evidence of requested SIMD-minimizer performance.
+If none of the Vulkan configurations has a measurement for the workloads and
+machines in a table, those configurations share one ``Vulkan (all modes)'' row.
+Recorded GPU unavailability is marked explicitly. A missing timing alone is
+not taken as evidence of unavailable hardware.
 
 \paragraph{Reading comparisons and highlights.}
 Each cell places the A duration above its comparison, followed by the B duration
@@ -114,13 +115,19 @@ All comparisons and minima use the original integer nanoseconds.
   means the reference takes 2.5 times as long, while a red $2.5\times$ means
   the displayed execution takes 2.5 times as long. Differences through 30\%
   retain percentage notation. Direction is always conveyed by the triangle.
-  \item In the local tables, a blue background marks the smallest measured
-  duration in the column, separately for A and B and within one timing scope.
-  In the AWS tables, blue marks each machine's minimum across configuration
-  columns within the same execution row, across all panels. Each logical cell
-  has four machine subcolumns separated by vertical rules. The latter highlights
-  compare different input sizes and parameters, and must not be interpreted as
-  evidence that one algorithm is universally preferable.
+  \item A blue background marks one smallest A and one smallest B down each
+  machine/workload column, including minimap2 and all measured BioseqDB rows
+  across continuation pages. Exact ties select the first displayed row.
+  Repeated minimap2 baselines receive blue marks only on the first page, so
+  each column has two winner marks across the complete table when measurements
+  are available. Each AWS workload has four machine subcolumns separated by
+  vertical rules.
+  \item Light gray identifies every minimap2 baseline row. Pale yellow
+  identifies the preferred BioseqDB configuration: MPF / Bounded / SIMD-DP /
+  Block. This is the author's selected configuration for comparison with the
+  external aligners. The yellow tint does not assert that it wins every
+  workload. Blue timing highlights identify the measured column winners and
+  remain visible within either row tint.
   \item A dot means there is no approved observation in the snapshot.
   A horizontal dash with \textsuperscript{g} identifies an explicitly recorded
   unavailable GPU configuration, which was not executed. Neither marker is a
@@ -158,6 +165,7 @@ are recomputed from approved rows rather than copied from historical progress
 summaries. Regeneration is manual and is not part of CMake. The fixture description
 was checked against the campaign JSON and its sequence generator, together with
 DOC0432 and DOC0433. The full row-specific qualifications remain in the five
-source YAML authorities.
+source YAML authorities. The final table additionally reads the four external-aligner
+authorities and explains their separate timing and validation rules.
 
 \include{chapters/16_benchmarking/generated_results}
