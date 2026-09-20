@@ -13,7 +13,7 @@ COMMENTS=('Winnowmap weighted minimizers with native minimal confidently alignab
           'The native -d output path is re-enabled; loaded indices reconstruct the identical native weighting Bloom filter from the saved k-mer list. '
           'A remote fresh-reference versus persisted-index output parity test is required after building. '
           'The native MCAS outer repeat length is initialized to zero to remove undefined MAPQ/output behavior. '
-          'For dna4 k15 and 2 Gbp dna5 k15 on hosts below 10 GiB RAM, demonstrated single-record indexing OOMs require last-resort 250 Mb FASTA records '
+          'For dna4 k15, 2 Gbp dna5 k15, and 4 Gbp dna4 k20 on hosts below 10 GiB RAM, demonstrated index-load OOMs require last-resort 250 Mb FASTA records '
           'overlapping by longest query plus 64 bases, native -I 499M index batches and --split-prefix global result merging. '
           'Meryl weights still come from the original reference. Partition preparation is included in no_index; '
           'native per-part frequency estimation and overlapping records can affect MAPQ. Other profiles retain the original FASTA layout; '
@@ -49,8 +49,12 @@ def setup(root,config,fixture,index,run):
     run([meryl,'count','k='+k,'threads='+str(config['threads']),*meryl_memory,'output',str(index/'meryl'),str(fixture/'target.fasta')])
     run([meryl,'print','greater-than','distinct=0.9998',str(index/'meryl')],stdout=index/'repetitive.txt')
     two_input_records=config['data']['reference_length']>2000000352
-    demonstrated_oom=config['data']['kmer_size']==15 and (config['data']['alphabet']=='dna4' or
-        (config['data']['alphabet']=='dna5' and config['data']['reference_length']==2_000_000_000))
+    demonstrated_oom=(
+        (config['data']['kmer_size']==15 and (config['data']['alphabet']=='dna4' or
+         (config['data']['alphabet']=='dna5' and config['data']['reference_length']==2_000_000_000))) or
+        (config['data']['kmer_size']==20 and config['data']['alphabet']=='dna4' and
+         config['data']['reference_length']==4_000_000_000)
+    )
     partitioned=low_memory and demonstrated_oom
     layout={'partitioned':partitioned,'index_batch':'1999M' if low_memory or two_input_records else '8G','memory_kib':memory_kib,
             'multipart':partitioned or two_input_records}

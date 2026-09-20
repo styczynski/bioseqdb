@@ -336,34 +336,28 @@ To support deletion, the chunk group stores \texttt{deleted\_rows}, along with s
 \texttt{DELETE} only sets the matching mask bit in the chunk group's mask and increments \texttt{deleted\_rows}. This allows BioseqDB to offer fast deletion without the need 
 to rewrite the columns themselves. The wasted storage can be however reclaimed:
 \begin{itemize}
-  \item \texttt{VACUUM (TRUNCATE)} may rewrite a tail of stripes whose undeleted rows still fit in
+  \item \texttt{VACUUM (TRUNCATE)} may rewrite last stripes in table whose undeleted rows still fit in
     one stripe and whose decompressed size is below $1\,\mathrm{GB}$. A single
     last stripe is rewritten only when more than $20\%$ of its rows are
-    deleted. The rewrite copies undeleted rows into a new stripe and drops the old
-    tail.
-  \item Stripes that are not in that tail keep their tombstones.
-  \item Sequence fragment relations skip this rewrite, because locators store
-    physical row numbers.
-  \item \texttt{VACUUM FULL} rewrites the whole parent table and copies only
-    visible rows. That is what removes deleted values from storage.
+    deleted. The rewrite copies undeleted rows into a new stripe and drops the old ones.
+  \item The internal tables storing sequence fragments cannot be rewritten as each locator needs to store the row number. Supporting VACUUM for sequence fragments would need to be dispatched to all tables including user table. Currently VACUUM is only supported on the user table.
+  \item \texttt{VACUUM FULL} can rewrite the whole table to reclaim wasted space.
 \end{itemize}
-Section~\ref{sec:pg-storage-versions} returns to versions and fragment cleanup.
 
 \subsection{Smart reads}
 
-\emph{Projection} selects the columns required by the query. The sample
-query needs \texttt{id} for its output and \texttt{sample\_id} for its
-condition. It does not need \texttt{seq}.
+In BioseqDB it's unnecessary to read all chunks all the time. The two optimisations are:
+\begin{enumerate}
+  \item \emph{Projection} means that only selected columns from \texttt{SELECT} query are red. This is trivial optimisation.
+  \item \emph{Min/max pruning} is more interesting one. For an ordered column,
+    the writer records the smallest and largest non-NULL values in each chunk (in aggregates fields seen in figure~\ref{fig:storage-heap-to-stripe}).
+    The BioseqDB TAM presented in figure~\ref{fig:bioseqscan-hook-lifecycle} can determine if none of the values in the chunk group satisfy the filter.
+    If that happens, entire chunk group is skipped.
+    For example, a group with sample identifiers from 1 to 100 cannot satisfy \texttt{BETWEEN 500 AND 600}.
+\end{enumerate}
 
-\emph{Min/max pruning} selects chunk groups. For an ordinary ordered column,
-the writer records the smallest and largest non-NULL values in each chunk.
-A condition can reject a group if none of its values could satisfy the
-condition. For example, a group with sample identifiers from 1 to 100 cannot
-satisfy \texttt{BETWEEN 500 AND 600}.
-
-Figure~\ref{fig:column-store-layout} shows both decisions. A retained group
-still needs filtering. Each retained row must be tested against the condition:
-bounds of 450 and 700 do not say which rows fall between 500 and 600.
+Figure~\ref{fig:column-store-layout} shows both optimisations. Group that satisfies both of these conditions still needs to apply filters to each row individually, but I save time but not touching groups that are not revelant to the search.
+The figure assumes query \texttt{SELECT id FROM table WHERE sample_id BETWEEN 500 AND 600} is executed.
 
 \begin{figure}[H]
 \centering
@@ -397,25 +391,22 @@ bounds of 450 and 700 do not say which rows fall between 500 and 600.
     (7.6,.22)--(10.25,.22);
   \node[align=center] at (8.93,-.37) {no sequence\\fragment reads};
 \end{tikzpicture}
-\caption{Column selection and group pruning for the metadata query.
-Blue cells are read. Orange crosses mark groups whose scalar bounds exclude
-every row. Unrequested sequence locators remain unread. The drawing shows
-logical chunks, not their byte order on disk.}
+\caption{Column selection and group pruning for simple query \texttt{SELECT id FROM table WHERE sample_id BETWEEN 500 AND 600}.
+Blue cells are read, orange crosses mark groups whose aggregates exclude all the rows. Unrequested sequence locators remain unread, because they were not specified in the \texttt{SELECT} clause. 
+The drawing shows only logical representation of chunks, not actual disk layout.}
 \label{fig:column-store-layout}
 \end{figure}
 
-Sequence columns are excluded from this min/max test. A locator's byte order
-does not describe sequence similarity. A separate scalar length, date, or
-sample identifier can supply useful bounds. When a supported comparison or
-usable bound is missing, the reader keeps the group.
+\info{Prunning for sequence columns}{
+  Sequence columns with locators are excluded for min/max pruning, but it's possible to implement that feature theoretically. 
+  I decided not to do it, because storing min/max values would be simple as locator isn't big object, however computing these values for very large sequences
+  will be computionally expensive and would negatively impact table inserts.
+}
 
-\subsection{A column chunk separates missing values from values}
+\subsection{Compression}
 
-Figure~\ref{fig:storage-column-streams} uses six rows to show the two
-buffers in one column chunk. The presence bitmap has one bit per row.
-Only present values enter the value buffer, with the byte alignment required by
-their PostgreSQL types. The reader uses the bitmap to put values back into
-their row positions.
+Figure~\ref{fig:storage-column-streams} shows in detail how presence bitmap is computed.
+If the NULLs are very frequent, I will save the space by not storing them.
 
 \begin{figure}[H]
 \centering
@@ -440,32 +431,23 @@ their row positions.
   \node[anchor=west,text=black!65] at (2.15,-.5)
     {Only four values are stored; the bitmap keeps their six row positions.};
 \end{tikzpicture}
-\caption{Presence and values have different jobs. Generic column compression
-acts on the serialized value buffer. Sequence rank packing, introduced
-earlier, is a separate encoding step.}
+\caption{Presence bitmap is useful to enable better NULL compression}
 \label{fig:storage-column-streams}
 \end{figure}
 
-The value buffer can use PostgreSQL PGLZ, LZ4, or Zstandard, depending on the
-build and table options. Metadata records the compression method used and the
-decoded length. Successful LZ4 and Zstandard output is not always smaller
-than its input, so compression does not guarantee a space saving for every
-chunk. No particular compression ratio is assumed here.
-
+The Hydra code that BioseqDB columnar TAM was based on supported PGLZ, LZ4, or Zstandard, depending on the
+build and table options. In BioseqDB all compression is disabled by default as I would like to benchmark in the future best (and more modern) compression algorithms decicated for example to sequence storage.
 Abadi et al. show that the choice of compression method depends on both
-the data and the query workload~\autocite{abadi2006compression}.
-For compressed columns, BioSeqDB reconstructs SQL values from decoded
-buffers, obtained by decompression or cache reuse, so both stored size
-and decoding work matter.
+the data and the query workload~\autocite{abadi2006compression}, so I leave it as future extension.
+
+\section{Store byte streams in PostgreSQL relation pages}
+\label{sec:pg-storage-pages}
 
 The physical order differs from the logical grid. Within a stripe, one
 column's presence buffers are written first, followed by that column's value
 buffers. The next column follows. Stored offsets locate each buffer without
 requiring the reader to decode earlier columns. A column added after a stripe
 was written can be supplied from its constant PostgreSQL default or as NULL.
-
-\section{Store byte streams in PostgreSQL relation pages}
-\label{sec:pg-storage-pages}
 
 A compressed buffer need not fit in one database page. BioSeqDB gives column
 writers a continuous logical byte space and maps it onto page payloads.
