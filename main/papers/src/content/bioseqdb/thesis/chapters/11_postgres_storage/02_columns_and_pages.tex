@@ -1,52 +1,8 @@
-\section{Read the needed columns and row groups}
+\section{Columnar storage}
 \label{sec:pg-storage-columnar}
 
-The parent table uses a columnar layout because sequence workflows often
-scan many rows while using only a few metadata columns. Keeping sequence
-symbols outside the parent row already avoids fetching them for a metadata
-query. Columnar storage adds further ways to save work:
-
-\begin{itemize}
-  \item \textbf{Read fewer columns.} Values from the same column are stored
-    together. A scan of identifiers and sample numbers can leave unrelated
-    metadata and sequence locators unread.
-  \item \textbf{Compress similar values together.} A buffer containing one
-    column's values uses a common byte encoding and often contains repeated
-    patterns. This is ordinary column compression, separate from packing
-    biological symbols into a few bits each.
-  \item \textbf{Process values in batches.} In \emph{vectorized SQL
-    execution}, a supported operator works on an array of column values.
-    A supported comparison can produce a mask of rows that pass the condition.
-    This reduces repeated
-    per-row operator calls and allows a loop over many values of one type.
-    A batch does not imply that every operation uses hardware SIMD.
-  \item \textbf{Reuse decompressed buffers.} A column cache can keep the
-    output of decompression for later reads. This avoids decompressing the
-    same bytes again, although reconstructing SQL values can still require
-    work. BioSeqDB's optional cache and its lifetime are described in
-    Section~\ref{sec:pg-storage-caches}.
-\end{itemize}
-
-Hydra's batch execution and column cache were important reasons to use its
-extension of the Citus design. Its public reader checks the decompressed
-column cache before decompressing a buffer.\coderef
-{hydrastorage/columnar/src/backend/columnar/columnar_reader.c}
-{Hydra column-cache lookup and decompression}{columnar_reader.c}{1916}
-These SQL operations are separate from BioSeqDB's SIMD minimizer, chaining,
-and alignment algorithms. The two layers can reduce different parts of a
-query's cost. Column storage also favors bulk appends and analytical scans;
-it is not a universal improvement for frequent small updates.
-
-\subsection{What analytical benchmarks motivate}
-
-ClickBench supplies a useful example of the potential benefit on a large
-table. Figure~\ref{fig:storage-clickbench-motivation} uses historical
-PostgreSQL, Citus, and Hydra Columnar submissions on the same named machine
-configuration~\autocite{clickbench_2023_columnar}. All contain results for
-the same 43 queries over the roughly 100-million-row web-analytics dataset.
-For each query, take the shorter of its second and third runs, then sum
-those 43 times. We call this the \emph{sum of hot-query times}. Loading time
-is excluded. The figure also shows the submissions' reported storage sizes.
+ClickBench is a benchmark for analytical DBMS and it also reported results for both Hydra and Citus. Figure~\ref{fig:storage-clickbench-motivation} uses historical benchmark submissions on AWS machines~\autocite{clickbench_2023_columnar}. 
+The benchmark consisted of around 43 queries over a dataset of around 100 million rows (3 runs with minum of second two taken as a result).
 
 \begin{figure}[htbp]
 \centering
@@ -82,30 +38,26 @@ is excluded. The figure also shows the submissions' reported storage sizes.
   \node at (5.2,-.65) {Sum over all 43 queries};
   \node at (11.2,-.65) {$1\ \mathrm{GB}=10^9$ bytes};
 \end{tikzpicture}
-\caption{Historical ClickBench workload comparison, calculated from the
-repository snapshot of 20 September 2023. Each submission uses one
+\caption{Historical ClickBench \comparison, calculated from the
+repository snapshot of 20 September 2023. Each submission uses
 \texttt{c6a.4xlarge} machine with 16 vCPUs, 32~GiB RAM, and 500~GB of GP2
 storage. PostgreSQL and Citus
 results are dated 1 July 2022, and Hydra results 19 September 2023.
-The times use the shorter of runs two and three for every query.
-Versions, settings, and execution paths differ. These are external SQL
-workload results, not BioSeqDB alignment measurements.}
+The times use the shorter of runs two and three for every query. Note that these are "best-fit" results so the configuration was different. It's good however for quick comparison of performance.}
 \label{fig:storage-clickbench-motivation}
 \end{figure}
 
 Both columnar submissions store about 19~GB, compared with PostgreSQL's
-77.8~GB. Hydra has a much shorter sum of query times than Citus despite
-their similar stored sizes. This motivates considering execution and reuse
-as well as compression. It does not measure how much of the difference
-comes from vectorization: parallelism, caching, and PostgreSQL settings also
-differ. Hydra itself attributes its performance to these mechanisms
-together~\autocite{hydra_columnar_source}.
+77.8~GB. This was due to support of compression on stored columns. Hydra~\autocite{hydra_columnar_source} had much better performance due to introduction of vectorized SQL execution for aggregates and column cache that wasn't present in Citus~\autocite{citus_distributed_2021}.
+These results do not translate directly to BioseqDB as the benchmarks tests some arbitrarily-built queries, however it motivated me to put big effort into modernizing Hydra codebase and incorporating it into BioseqDB as mentioned in previous section~\ref{sec:pg-storage-role}.
 
-Hydra's benchmark notes likewise separate SELECT execution time from data
-loading. They distinguish release tests on \texttt{c6a.4xlarge} from
-continuous tests on four-core runners~\autocite{hydra_columnar_benchmarks}.
+\subsection{Columnar layout}
 
-\subsection{Group rows into stripes and chunks}
+
+% %Stripe size is not configurable and is set to size of disk block minus page header so it can exactly fit into one disk block (around $8KB$, but depends on compile-time value Postgres version provides).
+% \item A \textbf{stripe} is a batch of appended values, where values can be anything. In case of the user table these are grouped metadata values (native Postgres types) and for sequence columns - sequence locators. For internal sharded storage tables these are sequence fragments itself.
+%     It's important to note that TOAST can have a limit up to $1GB$ per row, so large values (not only long sequence but also if user stores large BLOB) can span multiple stripes.
+  
 
 The columnar layout has three levels:
 
