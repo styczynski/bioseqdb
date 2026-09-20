@@ -62,38 +62,35 @@ These results do not translate directly to BioseqDB as the benchmarks tests some
 The columnar layout has three levels:
 
 \begin{itemize}
-  \item A \textbf{stripe} is a batch of appended rows. The default maximum
-    is 150,000 rows.
-  \item A \textbf{chunk group} is a smaller row interval within a stripe.
-    The default maximum is 10,000 rows. Every column uses the same group
-    boundaries.
-  \item A \textbf{column chunk} contains one column's values for one chunk
-    group. It has a presence bitmap and a value buffer. A presence bit says
-    whether that row contains a non-NULL value.
+  \item A \textbf{stripe} is a batch of chunks coresponding to set of rows. Normally one stripe holds maximum is 150,000 rows.
+  \item A \textbf{chunk group} is a group of chunks for the same rows inside a stripe. By default one chunk group holds maximum of 10,000 rows.
+  \item A \textbf{column chunk} is the most basic entity that just holds values for one group as a one column. It also stores aggregated values (count, min, max, sum) to enable 
+  faster aggregate operations (vectorization) and the bitmask (marking which values are NULLs).
 \end{itemize}
 
-Stripe and chunk-group sizes are table options. Smaller groups give finer
-read selection, while larger groups give the compressor more values to work
-with. This is the grouping model described by Citus
-Columnar~\autocite{citus_columnar_compression_2021}.
+Stripe and chunk-group sizes are options per table, where larger ones allows more efficient compression and smaller ones allows more fine-grained read access~\autocite{citus_columnar_compression_2021}.
 
-Figure~\ref{fig:storage-heap-to-stripe} shows the same six rows in both
-layouts. A heap tuple stores \texttt{id}, \texttt{sample\_id}, and the
-sequence locator together. The stripe keeps all three columns of those rows.
-Each column occupies its own sequence of chunks. A chunk group is only a
-shared row interval: group 0 holds rows 1--3 of every column, and group 1
-holds rows 4--6. The drawing uses three rows per group. The table defaults
-are 10,000 rows per group and 150,000 rows per stripe. The last group of a
-stripe may be shorter if fewer rows remain.
+Figure~\ref{fig:storage-heap-to-stripe} shows this model for the six rows.
+By default Postgres row-based storage (heap tuple) stores \texttt{id}, \texttt{sample\_id}, and the
+sequence locator together. The stripe is columnar representation of these rows.
+Each column occupies its own sequence of chunks. A chunk group is only an abstract concept for chunks that are related to the same rows.
+The last group of a stripe can be shorter if total row count isn't a multiple of chunk group size.
 
-The writer fills one in-memory group for every column, serializes each
-column chunk when the group is full, and flushes the stripe when the stripe
-row limit is reached. Mapping those concatenated buffers onto PostgreSQL
-pages is a later step in Section~\ref{sec:pg-storage-pages}. A stripe is
-therefore not one disk page.
+When I want to store row, each time the writer fills one group for every column (kept in memory).
+After sufficient number of row is reached (max chunk group size) it serializes each column chunk.
+If the number of rows per stripe is reached (max stripe size) then stripe is "flushed", which means writing the stripe.
+Commonly the maximums of stripe row counts are not reached, instead there's additional check if the current chunk group for specific columnin buffer exceeds $1GB$ limit, then it forces flush of the entire stripe.
+This means that if we store large BLOB along very small column, the BLOB will force the stripe to end i.e stripes always need to account for the same number of rows in each column (this also implies that the decision to store sequences via locators increases efficiency of that storage model as more tuples with non-sequence fields can be packed into single stripe).
 
-The callout in the figure is the stored form of one chunk, here \texttt{id}
-of group 0. The presence bitmap has one bit per row in the group. The value
+\warn{Storing large BLOBs}{
+  Users should avoid storing large BLOBs along small columns - either store BLOBs of similar sizes together or only store smaller payloads in the same table.
+  This is potential optimisation to be implemented in the future, although it's very low priority.
+}
+
+Each column chunk must store aggregates (max, min, sum, count) along with the presence bitmap has one bit per row in the group.
+It's important to note that we also store deletion bitmask which is d
+
+
 buffer holds only the present values. The skip record stores the smallest
 and largest non-NULL values and the row count, which later pruning uses.
 Offsets of the two buffers are also stored so a reader can open this chunk
@@ -106,8 +103,8 @@ case with explicit NULL slots.
 \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
   \node[anchor=west,font=\bfseries] at (0,6.10)
     {Heap tuples become a stripe of column chunks};
-  \node[anchor=west,text width=4.4cm,align=left] at (0,5.55)
-    {Heap: one tuple stores every column};
+  \node[anchor=north west,align=left] at (0,5.75)
+    {Heap: one tuple stores\\every column};
   \foreach \y/\id/\sid/\rn in {
     4.45/1/12/1,
     3.80/2/18/2,
@@ -125,54 +122,53 @@ case with explicit NULL slots.
   }
   \draw[storage arrow] (3.90,2.85)--(4.70,2.85);
   \node[align=center] at (4.30,3.35) {same\\rows};
-  \draw[draw=black!45] (4.85,0.42) rectangle (12.35,5.48);
-  \node[anchor=north west,font=\bfseries] at (5.05,5.20)
-    {One stripe: every column of these rows};
-  \node at (7.55,4.55) {\texttt{id}};
-  \node at (9.65,4.55) {\texttt{sample\_id}};
-  \node at (11.40,4.55) {\texttt{seq}};
+  \draw[draw=black!45] (4.85,0.48) rectangle (12.15,5.48);
+  \node[anchor=north,align=center,font=\bfseries] at (8.50,5.32)
+    {One stripe\\every column of these rows};
+  \node at (7.40,4.12) {\texttt{id}};
+  \node at (9.20,4.12) {\texttt{sample\_id}};
+  \node at (11.00,4.12) {\texttt{seq}};
   \node[anchor=west] at (5.05,3.25) {group 0};
-  \node[anchor=west] at (5.05,1.175) {group 1};
-  \node[storage cell,minimum width=1.70cm,minimum height=.95cm,
+  \node[anchor=west] at (5.05,1.23) {group 1};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,
     fill=storageBlue!15,draw=storageBlue,line width=1.1pt]
-    (idchunk) at (7.55,3.25) {1, 2, 3};
-  \node[storage cell,minimum width=1.70cm,minimum height=.95cm,
-    fill=storageOrange!15]
-    at (9.65,3.25) {12, 18, 7};
-  \node[storage cell,minimum width=1.70cm,minimum height=.95cm,
-    fill=storageGreen!15]
-    at (11.40,3.25) {loc, loc, loc};
-  \node[storage cell,minimum width=1.70cm,minimum height=.95cm,
-    fill=storageBlue!15]
-    at (7.55,1.175) {4, 5, 6};
-  \node[storage cell,minimum width=1.70cm,minimum height=.95cm,
-    fill=storageOrange!15]
-    at (9.65,1.175) {41, 9, 22};
-  \node[storage cell,minimum width=1.70cm,minimum height=.95cm,
-    fill=storageGreen!15]
-    at (11.40,1.175) {loc, loc, loc};
-  \node[draw=storageBlue,fill=storageBlue!6,minimum width=12.20cm,
-    minimum height=1.48cm,inner sep=0pt,anchor=north west]
-    (chunkdetail) at (0.15,0.08) {};
-  \node[anchor=west,font=\bfseries,text=storageBlue] at (0.35,-0.12)
+    (idchunk) at (7.40,3.25) {1, 2, 3};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,fill=storageOrange!15]
+    at (9.20,3.25) {12, 18, 7};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,fill=storageGreen!15]
+    at (11.00,3.25) {\scriptsize loc, loc, loc};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,fill=storageBlue!15]
+    at (7.40,1.23) {4, 5, 6};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,fill=storageOrange!15]
+    at (9.20,1.23) {41, 9, 22};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,fill=storageGreen!15]
+    at (11.00,1.23) {\scriptsize loc, loc, loc};
+  \node[draw=storageBlue,fill=storageBlue!6,minimum width=12.00cm,
+    minimum height=1.62cm,inner sep=0pt,anchor=north west]
+    (chunkdetail) at (0.15,0.10) {};
+  \node[anchor=west,font=\bfseries,text=storageBlue] at (0.35,-0.08)
     {One column chunk};
-  \node[anchor=west,text=black!65] at (4.55,-0.12)
-    {\texttt{id} of group 0, stored};
-  \node[anchor=east] at (2.15,-0.72) {presence bits};
+  \node at (2.25,-0.48) {presence bits};
   \foreach \i/\b in {0/1,1/1,2/1}
-    \node[storage cell,minimum width=.55cm,fill=storageBlue!12]
-      at (2.65+0.70*\i,-0.72) {\b};
-  \node[anchor=east] at (6.35,-0.72) {value buffer};
+    \node[storage cell,minimum width=.50cm,inner sep=2pt,fill=storageBlue!12]
+      at (1.55+0.70*\i,-1.08) {\b};
+  \node at (5.70,-0.48) {value buffer};
   \foreach \i/\v in {0/1,1/2,2/3}
-    \node[storage cell,minimum width=.55cm,fill=storageGreen!13]
-      at (6.85+0.70*\i,-0.72) {\v};
-  \node[anchor=east] at (9.55,-0.72) {aggregates};
-  \node[storage cell,minimum width=2.15cm,fill=storageOrange!12]
-    at (10.80,-0.72) {min $1$, max $3$};
+    \node[storage cell,minimum width=.50cm,inner sep=2pt,fill=storageGreen!13]
+      at (5.00+0.70*\i,-1.08) {\v};
+  \node at (9.70,-0.48) {aggregates};
+  \node[storage cell,minimum width=2.20cm,inner sep=2pt,fill=storageOrange!12]
+    at (9.70,-1.08) {min $1$, max $3$};
   \draw[storage arrow,storageBlue]
-    (idchunk.south) -- (7.55,2.20) -- (12.80,2.20) -- (12.80,-0.66)
+    (idchunk.south) -- (7.40,2.18) -- (12.60,2.18) -- (12.60,-0.71)
     -- (chunkdetail.east);
-  \node[fill=white,inner sep=2pt,text=storageBlue] at (10.05,2.20)
+  \node[fill=white,inner sep=2pt,text=storageBlue] at (9.90,2.18)
     {One column chunk};
 \end{tikzpicture}
 \caption{The same six rows as heap tuples and as one stripe. Matching
