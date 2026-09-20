@@ -64,7 +64,7 @@ The columnar layout has three levels:
 \begin{itemize}
   \item A \textbf{stripe} is a batch of chunks coresponding to set of rows. Normally one stripe holds maximum is 150,000 rows.
   \item A \textbf{chunk group} is a group of chunks for the same rows inside a stripe. By default one chunk group holds maximum of 10,000 rows.
-  \item A \textbf{column chunk} is the most basic entity that just holds values for one group as a one column. It also stores aggregated values (count, min, max,) to enable 
+  \item A \textbf{column chunk} is the most basic entity that just holds values for one group as a one column. It also stores aggregated values (count, min, max) to enable 
   faster aggregate operations (vectorization) and the bitmask (marking which values are NULLs).
 \end{itemize}
 
@@ -146,7 +146,7 @@ The last group of a stripe can be shorter if total row count isn't a multiple of
   \foreach \i/\v in {0/1,1/2,2/3}
     \node[storage cell,minimum width=.50cm,inner sep=2pt,fill=storageGreen!13]
       at (5.00+0.70*\i,-1.08) {\v};
-  \node at (9.70,-0.48) {skip stats};
+  \node at (9.70,-0.48) {aggregated values};
   \node[storage cell,minimum width=2.35cm,inner sep=1pt,align=center,
     fill=storageOrange!12] at (9.70,-1.08)
     {min $1$, max $3$\\count $3$};
@@ -260,84 +260,96 @@ Algorithm~\ref{alg:storage-flush-stripe} presents pseudocode for that process as
 \label{alg:storage-flush-stripe}
 \small
 \begin{algorithmic}[1]
-  \Require group limit $G$ (default $10{,}000$), stripe limit $S$
+  \Require columns $C$, group limit $G$ (default $10{,}000$), stripe limit $S$
     (default $150{,}000$)
-  \State $s\gets NULL$ \Comment{currently written stripe}
-    
+  \State $s\gets\mathrm{NULL}$,\quad $n\gets 0$ \Comment{open stripe and its row count}
   \Procedure{WriteRow}{$v$, $\mathit{nulls}$}
-    \If{$\mathrm{IsOpen}(s) \land \mathrm{Size}(s \Vert v) > 1GB$} \Comment{if current stripe is open and new value would make it exceed $1GB$}
-      \State \Call{FlushStripe}{s}
+    \If{$\mathrm{IsOpen}(s) \land \mathrm{Size}(s \Vert v) > 1\,\mathrm{GB}$}
+      \Comment{open stripe and $v$ would exceed $1\,\mathrm{GB}$}
+      \State \Call{FlushStripe}{$s$}
     \EndIf
     \If{$\neg\mathrm{IsOpen}(s)$}
-      \State $s\gets\mathrm{AllocateNewStripe}()$
+      \State $s\gets\mathrm{AllocateNewStripe}()$,\quad $n\gets 0$
     \EndIf
     \State $g\gets\lfloor n/G\rfloor$,\quad $r\gets n\bmod G$
-      \Comment{$n$ is rows already in this stripe}
-    \For{each column $c$}
+    \ForAll{$c\in C$}
       \If{$\mathit{nulls}_c$}
-        \State $\mathrm{presence}[c][r]\gets 0$ \Comment{write presence bitmask for NULL value}
+        \State $P[c][r]\gets 0$
       \Else
-        \If{aligned size of $v_c$ is at least $256\,\mathrm{MiB}$}
-          \State error
+        \If{$\mathrm{Align}(v_c)\ge 256\,\mathrm{MiB}$}
+          \State \textbf{error}
         \EndIf
-        \State $\mathrm{presence}[c][r]\gets 1$
-        \State append serialized $v_c$ to the current value buffer of $c$
-        \State update min and max of chunk $(c,g)$ when the type is comparable
+        \State $P[c][r]\gets 1$
+        \State $B_c\gets B_c\Vert\mathrm{Serialize}(v_c)$
+        \If{$\mathrm{cmp}_{\tau_c}\neq\mathrm{NULL}$}
+          \State $K_{c,g}.\min\gets\min(K_{c,g}.\min,v_c)$
+          \State $K_{c,g}.\max\gets\max(K_{c,g}.\max,v_c)$
+        \EndIf
       \EndIf
-      \State increment the skip row count of chunk $(c,g)$
+      \State $K_{c,g}.\mathit{cnt}\gets K_{c,g}.\mathit{cnt}+1$
     \EndFor
     \If{$r=G-1$}
       \State \Call{SerializeGroup}{$g$, $G$}
     \EndIf
     \State $n\gets n+1$
     \If{$n\ge S$}
-      \State \Call{FlushStripe}{}
+      \State \Call{FlushStripe}{$s$}
     \EndIf
   \EndProcedure
   \Statex
   \Procedure{SerializeGroup}{$g$, $k$}
-    \State record $k$ as the row count of chunk group $g$
-    \For{each column $c$}
-      \State pack the $k$ presence bits of $c$ into stripe chunk $(c,g)$
+    \State $N_g\gets k$
+    \ForAll{$c\in C$}
+      \State $\mathit{chunk}_{c,g}.P\gets\mathrm{PackBits}(P[c][0\ldots k))$
     \EndFor
-    \For{each column $c$}
-      \State optionally compress the current value buffer of $c$
-      \State copy it into stripe chunk $(c,g)$
-      \State reset the current value buffer of $c$
-        \Comment{still in memory, not a disk write}
+    \ForAll{$c\in C$}
+      \State $\mathit{chunk}_{c,g}.V\gets\mathrm{Compress}(B_c)$
+        \Comment{identity if incompressible}
+      \State $B_c\gets\varepsilon$ \Comment{RAM only}
     \EndFor
   \EndProcedure
   \Statex
-  \Procedure{FlushStripe}{}
-    \If{the last group has $k>0$ rows and was not already serialized}
-      \State \Call{SerializeGroup}{$g_{\mathrm{last}}$, $k$}
+  \Procedure{FlushStripe}{$s$}
+    \State $k\gets n\bmod G$
+    \If{$k>0$}
+      \State \Call{SerializeGroup}{$\lfloor n/G\rfloor$, $k$}
     \EndIf
-    \For{each column $c$}
-      \State write every group's presence stream of $c$, then every group's
-        value stream of $c$
+    \State $m\gets\lceil n/G\rceil$
+    \ForAll{$c\in C$}
+      \State $\mathrm{Write}(\langle\mathit{chunk}_{c,g}.P\rangle_{g=0}^{m-1})$
+      \State $\mathrm{Write}(\langle\mathit{chunk}_{c,g}.V\rangle_{g=0}^{m-1})$
     \EndFor
-    \State save chunk-group catalog rows, skip statistics, and an empty row mask
+    \State $\mathrm{Catalog}(s)\gets(N,K,M_\emptyset)$
+    \State $s\gets\mathrm{NULL}$
   \EndProcedure
 \end{algorithmic}
 \end{algorithm}
 
-Closing the writer also flushes any leftover stripe.
+In's important that closing the writer also flushes any leftover stripe, so all in-memory buffers are saved to disk when transaction is committed.
 
-A column chunk stores a presence bitmap, a value buffer of only the
-present values, and skip statistics used later for pruning: the smallest
-and largest non-NULL values when the type has a comparison function, and a
-row count (\texttt{value\_count}). That count is the number of row slots in
-the chunk, including NULLs. There is no stored sum.
+As presented on figure~\ref{fig:storage-heap-to-stripe} column chunk stores a presence bitmap, a value buffer of only the
+present values, and aggregated values used later for delettion and vectorized aggregation: the smallest
+and largest non-NULL values (when the type has a comparison function), and a
+row count (\texttt{value\_count}) counting all values in the chunk including NULLs.
 
-Deletion is not written into the column chunk. The chunk group stores
-\texttt{deleted\_rows}, and a separate row mask holds one deletion bit per
-internal row number. Figure~\ref{fig:storage-heap-to-stripe} shows the
-column-chunk skip fields and the group-level deletion count. A zero
-presence bit omits that row from the value buffer.
-Figure~\ref{fig:storage-column-streams} shows that case with explicit NULL
-slots.
+To support deletion, the chunk group stores \texttt{deleted\_rows}, along with separate row mask representing which rows were deleted.
+\texttt{DELETE} only sets the matching mask bit in the chunk group's mask and increments \texttt{deleted\_rows}. This allows BioseqDB to offer fast deletion without the need 
+to rewrite the columns themselves. The wasted storage can be however reclaimed:
+\begin{itemize}
+  \item \texttt{VACUUM (TRUNCATE)} may rewrite a tail of stripes whose undeleted rows still fit in
+    one stripe and whose decompressed size is below $1\,\mathrm{GB}$. A single
+    last stripe is rewritten only when more than $20\%$ of its rows are
+    deleted. The rewrite copies undeleted rows into a new stripe and drops the old
+    tail.
+  \item Stripes that are not in that tail keep their tombstones.
+  \item Sequence fragment relations skip this rewrite, because locators store
+    physical row numbers.
+  \item \texttt{VACUUM FULL} rewrites the whole parent table and copies only
+    visible rows. That is what removes deleted values from storage.
+\end{itemize}
+Section~\ref{sec:pg-storage-versions} returns to versions and fragment cleanup.
 
-\subsection{Two independent ways to avoid reads}
+\subsection{Smart reads}
 
 \emph{Projection} selects the columns required by the query. The sample
 query needs \texttt{id} for its output and \texttt{sample\_id} for its
