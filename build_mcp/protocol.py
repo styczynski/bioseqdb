@@ -96,6 +96,15 @@ SERVER_INFO = {"name": "bioseq-build-mcp", "version": "1.1.0"}
 
 TOOL_DEFINITIONS = [
     {
+        "name": "external_aligners",
+        "description": "Build or run only the isolated external-aligner benchmark on its provisioned AWS host.",
+        "inputSchema": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["status", "build", "run", "publish", "cancel", "recover"]},
+            "tool": {"type": "string", "enum": ["blastn", "mmseqs2", "winnowmap", "lexicmap", "harness"]},
+            "config": {"type": "string"}
+        }, "additionalProperties": False},
+    },
+    {
         "name": "start_build",
         "description": (
             "Schedule a build/test/benchmark run. The build runs detached so "
@@ -1772,6 +1781,9 @@ def _handle_tools_call(params: dict) -> dict:
     # validation failures into transport-level JSON-RPC errors.
     if name != "subagent":
         _reject_unknown_tool_arguments(name, args)
+    if name == "external_aligners":
+        from external_aligners import tool_external_aligners
+        return {"content": [{"type": "text", "text": tool_external_aligners(**args)}]}
     if name == "start_build":
         mode = args.get("mode", "")
         build_only: bool = parse_bool("build_only", args.get("build_only", False))

@@ -1,0 +1,4 @@
+source/
+build/
+bin/
+*.tar.gz
