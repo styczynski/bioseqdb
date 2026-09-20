@@ -1986,10 +1986,10 @@ struct match_result_collection {
             case chaining_algorithm::scalar_minimap2:
                 return scalar_chain_observed && simd_chain_absent;
             case chaining_algorithm::range_minimum_query:
+                return scalar_chain_observed && simd_chain_absent;
             case chaining_algorithm::vulkan_tiled_dynamic_programming:
                 // The existing Vulkan kernel performs its own host backtracking.
-                // These counters identify the separate scalar-minimap2 trait,
-                // not that intentionally selected host suffix.
+                // Its chain work is not a scalar RMQ receipt.
                 return scalar_minimap2_chain_absent && simd_chain_absent;
             case chaining_algorithm::simd_minimap2:
                 return scalar_minimap2_chain_absent &&

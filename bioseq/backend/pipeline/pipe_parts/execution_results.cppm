@@ -133,7 +133,7 @@ export {
         match_result_collection* chaining_stats_dst = nullptr;
         if constexpr (p_chaining_algorithm == ::bioseq::simd::chaining_algorithm::scalar_minimap2 ||
                       p_chaining_algorithm == ::bioseq::simd::chaining_algorithm::simd_minimap2 ||
-#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
                       p_chaining_algorithm ==
                           ::bioseq::simd::chaining_algorithm::range_minimum_query ||
 #endif

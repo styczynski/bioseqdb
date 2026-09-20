@@ -68,7 +68,8 @@ TEST_CASE("selected component validation preserves GPU seeding and the chosen ho
     const auto make_fixture = [](chaining_algorithm chaining) {
         match_result_collection collection;
         scalar_pipeline_execution_stats scalar{};
-        if (chaining == chaining_algorithm::scalar_minimap2) {
+        if (chaining == chaining_algorithm::scalar_minimap2 ||
+            chaining == chaining_algorithm::range_minimum_query) {
             scalar.record_scalar_chain(128u);
             scalar.record_scalar_chain_stage_completion(128u);
         }
@@ -117,6 +118,16 @@ TEST_CASE("selected component validation preserves GPU seeding and the chosen ho
         auto valid = make_fixture(chaining);
         const auto valid_seed = make_seed_proof();
         REQUIRE(accepts(valid, chaining, valid_seed));
+        if (chaining == chaining_algorithm::range_minimum_query) {
+            auto missing_rmq_stage_receipt = make_fixture(chaining);
+            missing_rmq_stage_receipt.scalar_pipeline_stats.chain_stage_completion_calls = 0u;
+            missing_rmq_stage_receipt.scalar_pipeline_stats.chain_stage_completed_anchor_inputs =
+                0u;
+            REQUIRE_FALSE(accepts(missing_rmq_stage_receipt, chaining, valid_seed));
+            auto mismatched_rmq_receipt = make_fixture(chaining);
+            mismatched_rmq_receipt.scalar_pipeline_stats.chain_backtrack_calls = 0u;
+            REQUIRE_FALSE(accepts(mismatched_rmq_receipt, chaining, valid_seed));
+        }
         auto missing_seed = make_fixture(chaining);
         auto missing_seed_proof = make_seed_proof();
         missing_seed_proof.seed_stats.seed_lookup_dispatches = 0u;

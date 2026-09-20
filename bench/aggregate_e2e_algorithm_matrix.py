@@ -275,7 +275,202 @@ APPROVED_TUPLES_REMOTE_MACHINE_POLICIES = {
         "provisioned_throughput_mib_per_s": 500,
         "build_preset": "native-x64-clang22-linux-e2e",
     },
+    "TEST3_C7G": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST3_C7G.yaml",
+        "account_id": "918106144232",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-07404edee9cd5e10f",
+        "instance_type": "c7g.xlarge",
+        "ec2_architecture": "arm64",
+        "architecture": "aarch64",
+        "hostname": "ip-172-31-69-150",
+        "vcpu_count": 4,
+        "core_count": 4,
+        "threads_per_core": 1,
+        "physical_memory_mib": 8192,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-0d4993baebd040336",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-arm64-clang22-linux-e2e",
+    },
+    "TEST3_M4": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST3_M4.yaml",
+        "account_id": "918106144232",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-09295b2ebfeb60ab3",
+        "instance_type": "m4.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-74-99",
+        "vcpu_count": 4,
+        "core_count": 2,
+        "threads_per_core": 2,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-07e5de9485e8db5d7",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e",
+    },
+    "TEST3_M7A": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST3_M7A.yaml",
+        "account_id": "918106144232",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-0a0d7fd853ae150bb",
+        "instance_type": "m7a.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-72-149",
+        "vcpu_count": 4,
+        "core_count": 4,
+        "threads_per_core": 1,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-05e0dae7beb4b4d65",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e",
+    },
+    "TEST3_M7I": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST3_M7I.yaml",
+        "account_id": "918106144232",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-044628f5bf4ec153e",
+        "instance_type": "m7i.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-76-75",
+        "vcpu_count": 4,
+        "core_count": 2,
+        "threads_per_core": 2,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-06077dc0041ec7464",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e",
+    },
+    "TEST4_C7G": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST4_C7G.yaml",
+        "account_id": "665651551858",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-04ba9fa8bcc210350",
+        "instance_type": "c7g.xlarge",
+        "ec2_architecture": "arm64",
+        "architecture": "aarch64",
+        "hostname": "ip-172-31-77-174",
+        "vcpu_count": 4,
+        "core_count": 4,
+        "threads_per_core": 1,
+        "physical_memory_mib": 8192,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-0bcedb878c8f3a84e",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-arm64-clang22-linux-e2e",
+    },
+    "TEST4_M4": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST4_M4.yaml",
+        "account_id": "665651551858",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-006a2d87202c3fdee",
+        "instance_type": "m4.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-66-178",
+        "vcpu_count": 4,
+        "core_count": 2,
+        "threads_per_core": 2,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-049805b6283ef42e4",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e",
+    },
+    "TEST4_M7A": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST4_M7A.yaml",
+        "account_id": "665651551858",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-029644d5d0b0c629f",
+        "instance_type": "m7a.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-73-52",
+        "vcpu_count": 4,
+        "core_count": 4,
+        "threads_per_core": 1,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-0b48d2ddea493ca85",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e",
+    },
+    "TEST4_M7I": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST4_M7I.yaml",
+        "account_id": "665651551858",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-0c2570972b289f94a",
+        "instance_type": "m7i.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-71-179",
+        "vcpu_count": 4,
+        "core_count": 2,
+        "threads_per_core": 2,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-0cfbd8232b6ec9223",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e",
+    },
 }
+APPROVED_TUPLES_NEW_FLEET_MACHINE_IDS = frozenset({
+    "TEST3_C7G", "TEST3_M4", "TEST3_M7A", "TEST3_M7I",
+    "TEST4_C7G", "TEST4_M4", "TEST4_M7A", "TEST4_M7I",
+})
+APPROVED_TUPLES_NEW_FLEET_CAMPAIGN_CONTRACT_SHA256 = (
+    "e80407ca3a515ca04ac7ad616f0c7f5e0ef477f3e09884ec8ab93370e8c55933")
+APPROVED_TUPLES_NEW_FLEET_ELIGIBLE_KEY_COUNT = 1296
+APPROVED_TUPLES_NEW_FLEET_ELIGIBLE_KEYS_SHA256 = (
+    "5aad579ff70013c20835e561350803653c2cb5e0323cd878ff1e40e8501f9a96")
+APPROVED_TUPLES_NEW_FLEET_PURPOSE = (
+    "Host-local approved E2E timings for one sealed AWS CPU machine. "
+    "The authority embeds its exact EC2, CPU, RAM, root-volume, and "
+    "no-GPU inventory. Eligibility is the exact sealed 1,296-cell q1024 "
+    "campaign stable-key set, independent of locally measured rows; the "
+    "source-local hashes record structural bootstrap provenance only and "
+    "contribute no result or timing. Linux E2E intervals use "
+    "CLOCK_MONOTONIC under the existing strong same-kernel nanosecond-rate "
+    "contract; unavailable Vulkan cells are non-executed dispositions, "
+    "never zero-time results.")
 APPROVED_TUPLES_V2_ROW_FIELDS = (
     "stable_key_schema", "stable_key", "campaign_id", "dataset",
     "target_size_gbp", "alphabet", "kmer_size", "window_size",
@@ -11155,25 +11350,30 @@ def _load_remote_host_descriptor(path: Path) -> dict[str, Any]:
         value, "remote host descriptor", require_field_order=False)
 
 
-def _remote_hardware_disposition_from_row(
-        row: dict[str, Any]) -> dict[str, Any]:
-    if not _remote_identity_requires_vulkan(_approved_row_identity(row)):
+def _remote_hardware_disposition_from_identity(
+        identity: dict[str, Any], *, query_count: int) -> dict[str, Any]:
+    if not _remote_identity_requires_vulkan(identity):
         raise ContractError("hardware-unavailable disposition is not a Vulkan cell")
     return {
         "stable_key_schema": "bioseq-e2e-cell-v2",
-        "stable_key": row["stable_key"],
-        "campaign_id": row["campaign_id"],
-        "dataset": row["dataset"],
-        "target_size_gbp": row["target_size_gbp"],
-        "alphabet": row["alphabet"],
-        "kmer_size": row["kmer_size"],
-        "window_size": row["window_size"],
-        "query_count": row["query_count"],
-        "mode": row["mode"],
-        "pipeline": row["pipeline"],
-        "pipeline_mode": row["pipeline_mode"],
-        "index_type": row["index_type"],
-        "requested_algorithms": copy.deepcopy(row["requested_algorithms"]),
+        "stable_key": _stable_key_for_identity(identity),
+        "campaign_id": identity["campaign_id"],
+        "dataset": identity["dataset"],
+        "target_size_gbp": identity["target_size_gbp"],
+        "alphabet": identity["alphabet"],
+        "kmer_size": identity["kmer_size"],
+        "window_size": identity["window_size"],
+        "query_count": query_count,
+        "mode": identity["index_mode"],
+        "pipeline": identity["engine"],
+        "pipeline_mode": "task_parallel",
+        "index_type": identity["bioseq_index_name"],
+        "requested_algorithms": {
+            "minimizer": identity["requested_minimizer_algorithm"],
+            "chaining": identity["requested_chaining_algorithm"],
+            "base_alignment": identity[
+                "requested_base_alignment_algorithm"],
+        },
         "execution_attempted": False,
         "observed_algorithms": {
             "minimizer": None,
@@ -11187,6 +11387,12 @@ def _remote_hardware_disposition_from_row(
         "run_count": 0,
         "metrics": {"unit": "ns", "p50_a": None, "p50_b": None},
     }
+
+
+def _remote_hardware_disposition_from_row(
+        row: dict[str, Any]) -> dict[str, Any]:
+    return _remote_hardware_disposition_from_identity(
+        _approved_row_identity(row), query_count=row["query_count"])
 
 
 def _validate_remote_hardware_disposition(
@@ -11254,6 +11460,29 @@ def _remote_eligible_rows_from_local_authority(
                   key=lambda row: row["stable_key"])
 
 
+def _remote_new_fleet_eligible_identities() -> list[dict[str, Any]]:
+    if (ACTIVE_CAMPAIGN_PROFILE != "q1024"
+            or CAMPAIGN_CONTRACT_PATH != Q1024_CONTRACT_PATH
+            or EXPECTED_QUERY_COUNT != 1024):
+        raise ContractError(
+            "new-fleet bootstrap requires the canonical q1024 campaign profile")
+    campaign = _load_campaign_contract()
+    canonical_cells = campaign["canonical_cells"]
+    eligible_keys = sorted(canonical_cells)
+    if (campaign["campaign_id"] != Q1024_CAMPAIGN_ID
+            or campaign["campaign_digest"] != Q1024_CAMPAIGN_DIGEST
+            or campaign["contract_sha256"]
+                != APPROVED_TUPLES_NEW_FLEET_CAMPAIGN_CONTRACT_SHA256
+            or len(eligible_keys)
+                != APPROVED_TUPLES_NEW_FLEET_ELIGIBLE_KEY_COUNT
+            or _sha256(_canonical_bytes(eligible_keys))
+                != APPROVED_TUPLES_NEW_FLEET_ELIGIBLE_KEYS_SHA256):
+        raise ContractError(
+            "new-fleet eligibility differs from the sealed q1024 campaign")
+    return [copy.deepcopy(canonical_cells[key]["identity"])
+            for key in eligible_keys]
+
+
 def _remote_authority_complete(
         eligible_keys: list[str], unavailable_keys: set[str],
         approved_rows: list[dict[str, Any]]) -> bool:
@@ -11298,25 +11527,38 @@ def _new_remote_approved_tuple_authority(
         raise ContractError("remote bootstrap requires a validated local v3 authority")
     local_rows = _require_list(
         local_authority.get("approved_results"), "local approved_results")
-    eligible_rows = _remote_eligible_rows_from_local_authority(local_rows)
-    eligible_keys = [row["stable_key"] for row in eligible_rows]
-    dispositions = [
-        _remote_hardware_disposition_from_row(row) for row in eligible_rows
-        if _remote_identity_requires_vulkan(_approved_row_identity(row))]
     descriptor = _validate_remote_host_descriptor(
         host_descriptor, "remote host binding", require_field_order=False)
-    local_projection = _approved_projection_sha256(local_rows)
-    document = {
-        "schema": APPROVED_TUPLES_REMOTE_SCHEMA,
-        "version": APPROVED_TUPLES_REMOTE_VERSION,
-        "status": "approved_remote_partial",
-        "purpose": (
+    if descriptor["machine_id"] in APPROVED_TUPLES_NEW_FLEET_MACHINE_IDS:
+        eligible_identities = _remote_new_fleet_eligible_identities()
+        eligible_keys = [
+            _stable_key_for_identity(identity)
+            for identity in eligible_identities]
+        dispositions = [
+            _remote_hardware_disposition_from_identity(
+                identity, query_count=1024)
+            for identity in eligible_identities
+            if _remote_identity_requires_vulkan(identity)]
+        purpose = APPROVED_TUPLES_NEW_FLEET_PURPOSE
+    else:
+        eligible_rows = _remote_eligible_rows_from_local_authority(local_rows)
+        eligible_keys = [row["stable_key"] for row in eligible_rows]
+        dispositions = [
+            _remote_hardware_disposition_from_row(row) for row in eligible_rows
+            if _remote_identity_requires_vulkan(_approved_row_identity(row))]
+        purpose = (
             "Host-local approved E2E timings for one sealed AWS CPU machine. "
             "The authority embeds its exact EC2, CPU, RAM, root-volume, and "
             "no-GPU inventory. "
             "Linux E2E intervals use CLOCK_MONOTONIC under the existing strong "
             "same-kernel nanosecond-rate contract; unavailable Vulkan cells are "
-            "non-executed dispositions, never zero-time results."),
+            "non-executed dispositions, never zero-time results.")
+    local_projection = _approved_projection_sha256(local_rows)
+    document = {
+        "schema": APPROVED_TUPLES_REMOTE_SCHEMA,
+        "version": APPROVED_TUPLES_REMOTE_VERSION,
+        "status": "approved_remote_partial",
+        "purpose": purpose,
         "authority": {
             "profile": APPROVED_TUPLES_REMOTE_PROFILE,
             "normative_datasets": [
@@ -11451,6 +11693,15 @@ def _validate_remote_approved_tuple_authority_document(
     if (not eligible_keys or eligible_keys != sorted(eligible_keys)
             or len(eligible_keys) != len(set(eligible_keys))):
         raise ContractError("eligible_stable_keys must be one sorted unique allowlist")
+    if host["machine_id"] in APPROVED_TUPLES_NEW_FLEET_MACHINE_IDS:
+        if (document.get("purpose") != APPROVED_TUPLES_NEW_FLEET_PURPOSE
+                or len(eligible_keys)
+                    != APPROVED_TUPLES_NEW_FLEET_ELIGIBLE_KEY_COUNT
+                or _sha256(_canonical_bytes(eligible_keys))
+                    != APPROVED_TUPLES_NEW_FLEET_ELIGIBLE_KEYS_SHA256):
+            raise ContractError(
+                "new-fleet eligibility/provenance differs from the sealed "
+                "q1024 campaign")
     identities: dict[str, dict[str, Any]] = {}
     matrix_pairs = {
         (item.get("kmer_size"), item.get("window_size"))

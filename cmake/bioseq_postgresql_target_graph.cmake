@@ -120,6 +120,61 @@ set_source_files_properties(
   ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_ORDINARY_IMPLEMENTATIONS}
   "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY}"
   PROPERTIES COMPILE_OPTIONS "-x;c++")
+# Highway target headers expose target-attributed APIs, but their x86 intrinsic
+# definitions are parsed before renderer-emitted HWY_ATTR call sites. Keep that
+# capability boundary source-local: generated target artifacts get precisely the
+# feature closure represented by their directory, while common objects stay
+# generic for runtime dispatch.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang")
+  set(_bioseq_hwy_sse2 "-msse2")
+  set(_bioseq_hwy_ssse3 "${_bioseq_hwy_sse2};-mssse3")
+  set(_bioseq_hwy_sse4 "${_bioseq_hwy_ssse3};-msse4.1;-msse4.2;-mpclmul;-maes")
+  set(_bioseq_hwy_avx2 "${_bioseq_hwy_sse4};-mavx;-mavx2;-mbmi;-mbmi2;-mfma;-mf16c")
+  set(_bioseq_hwy_avx3 "${_bioseq_hwy_avx2};-mavx512f;-mavx512cd;-mavx512vl;-mavx512dq;-mavx512bw")
+  set(_bioseq_hwy_avx3_dl "${_bioseq_hwy_avx3};-mvpclmulqdq;-mavx512vbmi;-mavx512vbmi2;-mvaes;-mavx512vnni;-mavx512bitalg;-mavx512vpopcntdq;-mgfni")
+  set(_bioseq_hwy_avx3_zen4 "${_bioseq_hwy_avx3_dl};-mavx512bf16")
+  set(_bioseq_hwy_avx3_spr "${_bioseq_hwy_avx3_zen4};-mavx512fp16")
+  # Pinned Clang 22.1 maps Highway's avx10.2-512 capability to -mavx10.2.
+  # Its driver rejects -mavx10.2-512, but the accepted option enables the
+  # corresponding AVX10.2 and AVX-512 feature macros.
+  set(_bioseq_hwy_avx10_2 "${_bioseq_hwy_avx3_spr};-mavx10.2")
+  # Only private fixed-target implementations may carry target ISA options.
+  # Exported primaries and dispatch/test support are target-neutral PCMs.
+  set(_bioseq_highway_target_specific_sources
+    ${BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS}
+    ${BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS})
+  list(REMOVE_DUPLICATES _bioseq_highway_target_specific_sources)
+  foreach(_bioseq_highway_source IN LISTS _bioseq_highway_target_specific_sources)
+    if(NOT _bioseq_highway_source MATCHES "/x86_64/([^/]+)/")
+      continue()
+    endif()
+    set(_bioseq_highway_target "${CMAKE_MATCH_1}")
+    if(_bioseq_highway_target STREQUAL "emu128")
+      set(_bioseq_highway_target_options "")
+    elseif(DEFINED _bioseq_hwy_${_bioseq_highway_target})
+      set(_bioseq_highway_target_options "${_bioseq_hwy_${_bioseq_highway_target}}")
+    else()
+      message(FATAL_ERROR "No x86 Highway compile-option closure for generated target ${_bioseq_highway_target}: ${_bioseq_highway_source}")
+    endif()
+    if(_bioseq_highway_target_options)
+      set_property(SOURCE "${_bioseq_highway_source}" APPEND PROPERTY COMPILE_OPTIONS "${_bioseq_highway_target_options}")
+    endif()
+  endforeach()
+endif()
+unset(_bioseq_hwy_sse2)
+unset(_bioseq_hwy_ssse3)
+unset(_bioseq_hwy_sse4)
+unset(_bioseq_hwy_avx2)
+unset(_bioseq_hwy_avx3)
+unset(_bioseq_hwy_avx3_dl)
+unset(_bioseq_hwy_avx3_zen4)
+unset(_bioseq_hwy_avx3_spr)
+unset(_bioseq_hwy_avx10_2)
+unset(_bioseq_highway_source)
+unset(_bioseq_highway_target)
+unset(_bioseq_highway_target_options)
+unset(_bioseq_highway_target_specific_sources)
+
 target_sources(postgresql_bioseq
   PRIVATE
     ${BIOSEQ_HIGHWAY_GENERATED_PRODUCTION_ORDINARY_IMPLEMENTATIONS}

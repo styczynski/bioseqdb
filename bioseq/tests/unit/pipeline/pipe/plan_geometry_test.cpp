@@ -437,6 +437,49 @@ TEST_CASE("scalar chaining trait keeps an empty negative free of score work",
     REQUIRE(stats.chain_anchor_inputs == 0u);
     REQUIRE(stats.chain_stage_completion_calls == 0u);
     REQUIRE(stats.chain_stage_completed_anchor_inputs == 0u);
+
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+    using rmq_kernel_type =
+        algorithm_traits<chaining_algorithm::range_minimum_query>::kernel_type;
+    static_assert(rmq_kernel_type::emits_scalar_chaining_execution_stats);
+    static_assert(rmq_kernel_type::completed_chaining_algorithm_identity() ==
+                  chaining_algorithm::range_minimum_query);
+
+    chaining_parameters rmq_params{};
+    rmq_params.prepare();
+    scalar_pipeline_execution_stats rmq_empty_stats{};
+    auto rmq_empty_chains = ::bioseq::chaining::make_arena_slab<chain>();
+    auto rmq_empty_reordered = ::bioseq::chaining::make_arena_slab<anchor>();
+    rmq_kernel_type::call(std::span<const anchor>{}, rmq_params, rmq_empty_chains,
+                          rmq_empty_reordered, &rmq_empty_stats);
+    rmq_empty_stats.record_scalar_chain_stage_completion(0u);
+    REQUIRE(rmq_empty_stats.chain_score_calls == 0u);
+    REQUIRE(rmq_empty_stats.chain_backtrack_calls == 0u);
+    REQUIRE(rmq_empty_stats.chain_anchor_inputs == 0u);
+    REQUIRE(rmq_empty_stats.chain_stage_completion_calls == 1u);
+    REQUIRE(rmq_empty_stats.chain_stage_completed_anchor_inputs == 0u);
+
+    const std::array<anchor, 1> rmq_anchors{anchor{
+        .ref_position = 100u,
+        .query_position = 40u,
+        .is_reverse = 0u,
+        .query_span = 15u,
+        .flags = 0u,
+        .segment_id = 0u,
+    }};
+    scalar_pipeline_execution_stats rmq_nonempty_stats{};
+    auto rmq_nonempty_chains = ::bioseq::chaining::make_arena_slab<chain>();
+    auto rmq_nonempty_reordered = ::bioseq::chaining::make_arena_slab<anchor>();
+    rmq_kernel_type::call(
+        std::span<const anchor>{rmq_anchors.data(), rmq_anchors.size()}, rmq_params,
+        rmq_nonempty_chains, rmq_nonempty_reordered, &rmq_nonempty_stats);
+    rmq_nonempty_stats.record_scalar_chain_stage_completion(rmq_anchors.size());
+    REQUIRE(rmq_nonempty_stats.chain_score_calls == 1u);
+    REQUIRE(rmq_nonempty_stats.chain_backtrack_calls == 1u);
+    REQUIRE(rmq_nonempty_stats.chain_anchor_inputs == rmq_anchors.size());
+    REQUIRE(rmq_nonempty_stats.chain_stage_completion_calls == 1u);
+    REQUIRE(rmq_nonempty_stats.chain_stage_completed_anchor_inputs == rmq_anchors.size());
+#endif
 }
 
 TEST_CASE("SIMD chaining policy is exact by default and explicit in stats metadata",

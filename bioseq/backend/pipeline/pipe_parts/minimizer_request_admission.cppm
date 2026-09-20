@@ -121,6 +121,10 @@ export {
                     stats->record_scalar_chain(static_cast<std::uint64_t>(anchors.size()));
                 }
             }
+            [[nodiscard]] static constexpr chaining_algorithm
+            completed_chaining_algorithm_identity() noexcept {
+                return chaining_algorithm::scalar_minimap2;
+            }
             [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
                 return ::bioseq::simd::chaining_algorithm_name(
                     ::bioseq::simd::chaining_algorithm::scalar_minimap2);
@@ -202,16 +206,35 @@ export {
                 std::size_t anchor_count, const chaining_parameters& params) noexcept {
                 return ::bioseq::chaining::derive_rmq_chaining_storage_plan(anchor_count, params);
             }
+            // RMQ receipts are deliberately compiled only into the dedicated
+            // E2E and test trees: ordinary route construction supplies no stats sink.
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+            static constexpr bool emits_scalar_chaining_execution_stats = true;
+#else
             static constexpr bool emits_scalar_chaining_execution_stats = false;
+#endif
             static constexpr bool emits_simd_chaining_execution_stats = false;
             static constexpr bool emits_partial_vulkan_execution_stats = false;
             [[gnu::always_inline]] inline static void
             call(std::span<const anchor> anchors,
                  const chaining_parameters& params,
                  arena_slab<chain>& chains_out,
-                 arena_slab<anchor>& reordered_anchors_out) {
+                 arena_slab<anchor>& reordered_anchors_out
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+                 , scalar_pipeline_execution_stats* stats
+#endif
+                 ) {
                 ::bioseq::chaining::chain_anchors_rmq(
                     anchors, params, chains_out, reordered_anchors_out);
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS) || defined(BIOSEQ_TEST_INDEXES)
+                if (stats != nullptr && !anchors.empty()) {
+                    stats->record_scalar_chain(static_cast<std::uint64_t>(anchors.size()));
+                }
+#endif
+            }
+            [[nodiscard]] static constexpr chaining_algorithm
+            completed_chaining_algorithm_identity() noexcept {
+                return chaining_algorithm::range_minimum_query;
             }
             [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
                 return ::bioseq::simd::chaining_algorithm_name(

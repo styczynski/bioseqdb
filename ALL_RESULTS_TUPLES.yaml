@@ -20,21 +20,21 @@ authority:
   standalone_forensic_evidence_archive: false
 projection_provenance:
   approved_results_projection_encoding: UTF-8 bytes of compact JSON for the complete approved_results sequence; rows are sorted by (stable_key, timing_scope), list order is retained, mapping keys are recursively lexicographically sorted, ensure_ascii=true, separators are comma and colon without spaces, YAML empty plain scalars normalize to JSON null, booleans use lowercase JSON literals, integers use shortest decimal notation, non-finite numbers are forbidden, and no terminal LF or other byte is appended.
-  approved_results_projection_sha256: 2f067e4385f5870530c2a0889a9fa390e9955993383b7c88c591158289a89262
+  approved_results_projection_sha256: bf8f533e10a97e925a902ae93af4830df673274e01f59ceb2780cd5460ea0ba1
   classification: derived_non_authoritative
   current_p50_audit:
     by_timing_scope:
     - approved_rows: 66
       contributing_runs: 330
       timing_scope: historical_outer_e2e_v1
-    - approved_rows: 54
-      contributing_runs: 270
+    - approved_rows: 74
+      contributing_runs: 370
       timing_scope: query_only_framework_iteration_v1
     independent_recomputation_completed: true
     interpretation_or_comparison_dependency: false
     median_partition_rule: Each published row P50 is computed only from repeats carrying that row's timing_scope; observations from different scopes are never pooled.
     raw_repeat_observations_embedded: false
-    scope: All 120 timing observations and 600 actual contributing runs were checked without combining P50 inputs across timing_scope values.
+    scope: All 140 timing observations and 700 actual contributing runs were checked without combining P50 inputs across timing_scope values.
   generator: bioseq-approved-results-projection
   generator_inputs:
     base_alignment_label_renderer: bioseq::simd::base_alignment_algorithm_name
@@ -342,11 +342,11 @@ run_count_expectations:
   campaign_target_per_cell: 5
   classification: derived_non_authoritative
   current_approved_rows_all_have_exactly_five: true
-  current_approved_run_total: 600
-  current_logical_tuple_count: 101
-  current_query_only_observation_count: 54
-  current_query_only_run_total: 270
-  current_timing_observation_count: 120
+  current_approved_run_total: 700
+  current_logical_tuple_count: 121
+  current_query_only_observation_count: 74
+  current_query_only_run_total: 370
+  current_timing_observation_count: 140
   minimum_for_approval: 5
   projection_description: Generated run-count summary over approved_results.
   recorded_attempts_are_not_synonymous_with_valid_runs: true
@@ -400,29 +400,29 @@ benchmark_host_profile:
 corrected_summaries:
   accepted_marginals:
     by_alphabet:
-    - approved_logical_cells: 77
+    - approved_logical_cells: 97
       key: dna4
     - approved_logical_cells: 24
       key: dna5
     by_index_type:
-    - approved_logical_cells: 85
+    - approved_logical_cells: 103
       key: minimizers_per_fragment
-    - approved_logical_cells: 0
+    - approved_logical_cells: 2
       key: minimizers_per_sequence
     - approved_logical_cells: 16
       key: minimap2_internal
     by_mode:
-    - approved_logical_cells: 76
+    - approved_logical_cells: 96
       key: just_index
     - approved_logical_cells: 25
       key: no_index
     by_pipeline:
-    - approved_logical_cells: 85
+    - approved_logical_cells: 105
       key: bioseq
     - approved_logical_cells: 16
       key: minimap2
     by_target_size_gbp:
-    - approved_logical_cells: 54
+    - approved_logical_cells: 74
       key: 2
     - approved_logical_cells: 47
       key: 4
@@ -430,14 +430,14 @@ corrected_summaries:
     - approved_logical_cells: 71
       kmer_size: 15
       window_size: 10
-    - approved_logical_cells: 30
+    - approved_logical_cells: 50
       kmer_size: 20
       window_size: 15
   approved_execution_classes:
-  - approved_rows: 76
+  - approved_rows: 96
     class: exact_requested_path_bioseq
     user_preserved_subset_rows: 1
-    valid_runs: 380
+    valid_runs: 480
   - approved_rows: 12
     class: documented_scalar_minimizer_fallback
     requested_simd_performance_eligible: false
@@ -447,37 +447,37 @@ corrected_summaries:
     valid_runs: 160
   classification: derived_non_authoritative
   overall:
-    approved_logical_cells: 101
+    approved_logical_cells: 121
     approved_observations_by_timing_scope:
     - approved_rows: 66
       contributing_runs: 330
       timing_scope: historical_outer_e2e_v1
-    - approved_rows: 54
-      contributing_runs: 270
+    - approved_rows: 74
+      contributing_runs: 370
       timing_scope: query_only_framework_iteration_v1
-    approved_rows: 120
-    approved_valid_runs: 600
+    approved_rows: 140
+    approved_valid_runs: 700
     historical_invalid_cells: 1
     historical_rejected_cells: 47
     historically_nonvalid_now_approved_cells: 4
     invalid_attempts_excluded: 5
     invalid_cells_excluded: 1
-    materialized_cells: 145
-    missing_cells: 1151
-    planned_valid_runs_still_needed: 6210
-    query_only_approved_cells: 54
-    query_only_contributing_runs: 270
-    query_only_missing_cells: 1242
-    recorded_attempts: 840
+    materialized_cells: 165
+    missing_cells: 1131
+    planned_valid_runs_still_needed: 6110
+    query_only_approved_cells: 74
+    query_only_contributing_runs: 370
+    query_only_missing_cells: 1222
+    recorded_attempts: 940
     rejected_attempts_excluded: 235
     rejected_cells_excluded: 43
     total_matrix_cells: 1296
     total_planned_runs: 6480
-    unrecorded_planned_runs: 5755
+    unrecorded_planned_runs: 5655
   projection_description: Logical coverage uses unique stable_key values; approved_rows and approved_valid_runs count actual timing observations and their contributing runs. Query-only completion and each timing scope are reported separately from frozen historical observations.
   requested_path_performance_eligible:
-    approved_rows: 108
-    valid_runs: 540
+    approved_rows: 128
+    valid_runs: 640
 high_priority_families:
   classification: derived_non_authoritative
   corrected_user_intended:
@@ -806,9 +806,9 @@ excluded_and_nonvalid_summary:
     recorded_attempts: 5
     summary: One bounded_nthash_simd + range_minimum_query + block_aligner MPF no-index cell had mixed repeat dispositions. Partial timings are not salvageable.
   missing:
-    cells: 1151
+    cells: 1131
     p50_published: false
-    planned_runs_not_recorded: 5755
+    planned_runs_not_recorded: 5655
   projection_description: Rejected and invalid summaries describe the frozen historical attempts, including cells that may now be approved. Missing describes current unrecorded cell coverage. corrected_summaries separates those historical attempts from logical cell coverage and separately reports query-only campaign progress and actual observation runs.
   rejected:
     cells: 47
@@ -914,14 +914,14 @@ invariants:
   - Canonical stable keys remain unchanged logical identities; observation pairs (stable_key, timing_scope) are unique and approved_results is in ascending pair order.
   - Every run_count is exactly five.
   - Every metrics.unit is ns and every p50_a and p50_b is a non-null positive integer with p50_b <= p50_a.
-  - Every P50, run_count, requested identity, and observed identity retains the approved value. The 51 non-null comments are publication annotations; 12 qualify scalar fallback and 1 qualify legacy user preservation, including zero ksw2_batched activity.
+  - Every P50, run_count, requested identity, and observed identity retains the approved value. The 71 non-null comments are publication annotations; 12 qualify scalar fallback and 1 qualify legacy user preservation, including zero ksw2_batched activity.
   - Every exact_baseline_match_count_equal is true; no returned-count value is stored.
   - Every row has prefilter=false.
   - No approved row uses an excluded runtime-only base-alignment algorithm.
   - A documented_scalar_minimizer_fallback row requests simd_minimap2_reference, observes scalar, exposes the scalar effective path, and has requested_path=false.
   - No other Bioseq row may have a requested/observed algorithm mismatch.
   - External minimap2 rows have null Bioseq requested and observed algorithm fields and index_type=minimap2_internal.
-  - The current snapshot has exactly 120 timing observations, 101 logical cells, 54 query-only observations, and 600 actual contributing runs, including exactly 12 documented scalar-minimizer fallback observations.
+  - The current snapshot has exactly 140 timing observations, 121 logical cells, 74 query-only observations, and 700 actual contributing runs, including exactly 12 documented scalar-minimizer fallback observations.
   - Approved plus currently unapproved historical rejected and invalid plus missing cell counts reconcile to 1296. Five planned valid runs per cell reconcile to 6480; historical failed attempts are additional and are never counted as approved runs or as additional distinct cells.
   - The corrected user-intended valid-run vector is 50/40/45/40/80/80 and the historical RMQ-mislabeled vector is 15/40/0/40/80/80.
   - No approved row stores receipt identity, proof, raw-repeat, path, URI, or log-location fields; historical_outer_e2e_v1 remains exactly the pinned 66-row v2 projection and new observations use only query_only_framework_iteration_v1.
@@ -2261,6 +2261,43 @@ approved_results:
     p50_b: 1903467875
   comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: bounded_nthash_simd performed query sketching with positive CPU SIMD vector work and zero scalar backend/tail activity; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; scalar_minimap2 performed the requested scalar CPU chain scoring and backtracking; Block Aligner extensions ran on CPU SIMD. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, KSW2, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B subtracts only the statement-owned CIGAR/MAPQ interval union. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_533.json, run receipt rr_342f09419902cf25014daedda69614bf, and build receipt br_88737a50e6ae939369071f426db2f604. Per-repeat priority attestation was unavailable, so no nice -20 claim is made. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were all verified.'
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 2380370375
+    p50_b: 1145727792
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: bounded_nthash_simd performed query sketching with 2,611,664 ntHash SIMD vector batches per repeat and zero scalar backend or tail activity; persisted minimizers_per_fragment grouped-SoA decode was host I/O, partition selection and seed lookup were scalar CPU support, scalar_minimap2 performed exact scalar CPU chain scoring and backtracking, and KSW2 extensions used the scalar CPU stage route. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, Block Aligner, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B is computed per repeat as A minus only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. The disposable benchmark database OID was stable within these five accepted repeats; equality to any historical database OID is neither required nor claimed. Evidence is report report_559.json, run receipt rr_113a32bf6946c24cd642e1a45157f7c3, and build receipt br_57fb86555b14b85157599357454c9981. Every process-priority attestation was null, so no nice -20 or noise-free claim is made; OS-cache state is unspecified. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -2297,6 +2334,43 @@ approved_results:
     p50_a: 1959935833
     p50_b: 1287511416
   comments: Five accepted query-only repeats physically executed bounded ntHash SIMD query sketching, persisted MPF lookup, bounded-batch SIMD-DP chaining, and host SIMD Block alignment. Persisted-index decode and partition/seed-lookup support remained host-I/O/scalar CPU as instrumented and are not fallbacks. Revision-6 CIGAR/MAPQ interval origins were complete with one finalization per repeat; no GPU algorithm stage, scalar algorithm replacement, exact-RMQ, KSW2, biological fallback, decline, index build/recompute, missing-index path, prefilter, compact-direct fallback, or saturation occurred.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 2506107166
+    p50_b: 1160841834
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: bounded_nthash_simd performed query sketching with 2,611,664 ntHash SIMD vector batches per repeat and zero scalar backend or tail activity; persisted minimizers_per_fragment grouped-SoA decode was host I/O, partition selection and seed lookup were scalar CPU support, simd_minimap2 performed literal CPU SIMD-DP chain scoring with 19,563,845 vector batches and backtracking with 1,024 vector batches per repeat, with zero scalar branches; KSW2 extensions used the scalar CPU stage route. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, Block Aligner, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B is computed per repeat as A minus only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. The disposable benchmark database OID was stable within these five accepted repeats; equality to any historical database OID is neither required nor claimed. Evidence is report report_560.json, run receipt rr_1715482e4abf5d7e041157abac7b0dca, and build receipt br_57fb86555b14b85157599357454c9981. Every process-priority attestation was null, so no nice -20 or noise-free claim is made; OS-cache state is unspecified. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were verified.'
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
@@ -2446,6 +2520,561 @@ approved_results:
     p50_b: 746532831739
   comments: 'Exact requested hybrid CPU/Vulkan persisted-index execution: scalar CPU performed query sketching; persisted MPF decode ran as host I/O; scalar CPU performed partition selection, seed lookup, and chain backtracking; Vulkan performed tiled-DP chain scoring; Block Aligner extensions ran on CPU SIMD. These required support stages are parts of the selected route, not fallbacks, and this is not an all-GPU claim. Every repeat restarted PostgreSQL and read the same prebuilt grouped-SoA persisted generation 1 with source identity 0000000000000001 and 548395 MPF rows. No target-index build/recompute or missing-index path, GPU seed lookup, GPU extension, KSW2, biological fallback, prefilter, backend decline, backend fallback, or saturation occurred. The complete native 20-row/151-column evidence records 1024 Vulkan chain dispatches per repeat; the empty legacy persisted-GPU operation ledger is expected and is not used to deny native Vulkan execution. Metric A is the process-cold persisted-index read plus mapping query phase. Metric B subtracts only the same-statement CIGAR/MAPQ interval union. Exact counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence passed. All five ordered primary-count vectors matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control is correctness-only; its published timing remains preserved and it was not rerun. Its older build provenance differs and is disclosed; numeric minimap2 MAPQ equality and minimizer parity are not validity gates. Per-repeat priority attestation was unavailable. This ordinary local measurement makes no elevated-priority or noise-free claim; normal system noise is possible. The measured run is sealed by run receipt rr_d8a0cc7d8a0255feec04d202a1e2c3ba, build receipt br_88737a50e6ae939369071f426db2f604, config SHA 52778e9d28f8e77a1c83698ee2980711229df76eb3ffadbe959f58d7bec4216c, and source graph 789e6c9079de16a4f26b3f9fadca16889faffc032f32823bf9ae9ef1cdd8e652.'
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","range_minimum_query","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: simd_minimap2_reference -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 100377979666
+    p50_b: 99987191177
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: simd_minimap2_reference performed the reference/minimap2 query-sketch route with executed_simd_cpu_jobs=1024 and no bounded-ntHash activity; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; range_minimum_query performed exact scalar-CPU RMQ chain scoring and backtracking; RMQ is not literal SIMD-DP chaining; Block Aligner extensions ran on CPU SIMD. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, KSW2, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B subtracts only the statement-owned CIGAR/MAPQ interval union. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_537.json, run receipt rr_47ccf3fd2b687417a95c712b66e79312, and build receipt br_88737a50e6ae939369071f426db2f604. Per-repeat priority attestation was unavailable, so no nice -20 claim is made. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were all verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","scalar_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: simd_minimap2_reference -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 94247366083
+    p50_b: 93986331758
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: simd_minimap2_reference performed the reference/minimap2 query-sketch route with executed_simd_cpu_jobs=1024 and no bounded-ntHash activity; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; scalar_minimap2 performed exact scalar-CPU chain scoring and backtracking; Block Aligner extensions ran on CPU SIMD. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, KSW2, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B subtracts only the statement-owned CIGAR/MAPQ interval union. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_535.json, run receipt rr_3c06e3491458069658a99a371a02ab52, and build receipt br_88737a50e6ae939369071f426db2f604. Per-repeat priority attestation was unavailable, so no nice -20 claim is made. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were all verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: simd_minimap2_reference -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 102946339750
+    p50_b: 102601374258
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: simd_minimap2_reference performed the reference/minimap2 query-sketch route with executed_simd_cpu_jobs=1024 and no bounded-ntHash activity; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; simd_minimap2 performed literal CPU SIMD-DP chain scoring and backtracking with positive vector-batch evidence; Block Aligner extensions ran on CPU SIMD. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, KSW2, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B subtracts only the statement-owned CIGAR/MAPQ interval union. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_536.json, run receipt rr_786b0101098f79bf664f9d55a1e3b8b4, and build receipt br_88737a50e6ae939369071f426db2f604. Per-repeat priority attestation was unavailable, so no nice -20 claim is made. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were all verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","range_minimum_query","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: two_stack_nthash -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 95161940125
+    p50_b: 94520956116
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: two_stack_nthash performed the query-sketch route with executed_simd_cpu_jobs=1024, 10,233,536 ntHash vector batches, and zero scalar backend branches, scalar tail symbols, or masked tail lanes; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; range_minimum_query performed exact scalar-CPU RMQ chain scoring and backtracking; RMQ is not literal SIMD-DP chaining; Block Aligner extensions ran on CPU SIMD. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, KSW2, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B subtracts only the statement-owned CIGAR/MAPQ interval union. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_553.json, run receipt rr_6542b490da4bc1a1f4a6b7309d35d080, and build receipt br_d5104a19575a29104fe579e15f27dc54. The database OID was stable within these five new repeats; no historical OID-equality claim is made. Per-repeat priority attestation was unavailable, so no nice -20 or noise-free claim is made; OS-cache state is unspecified. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were all verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","range_minimum_query","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: two_stack_nthash -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 72223467750
+    p50_b: 70532328670
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: two_stack_nthash performed query sketching with positive ntHash SIMD vector work and zero scalar backend/tail activity; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; range_minimum_query performed exact scalar-CPU RMQ chain scoring and backtracking; RMQ is not literal SIMD-DP chaining; KSW2 extensions used the scalar CPU stage route. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, Block Aligner, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B subtracts only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_542.json, run receipt rr_a61795319ecb86d68f124a5f3badfcfb, and build receipt br_bf02ea217e950a9ed34577bfb2ee3f7a. Per-repeat priority attestation was unavailable, so no nice -20 claim is made. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were all verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","scalar_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: two_stack_nthash -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 80973811583
+    p50_b: 80555544292
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: two_stack_nthash performed query sketching with positive ntHash SIMD vector work and zero scalar backend/tail activity; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; scalar_minimap2 performed the requested scalar CPU chain scoring and backtracking; Block Aligner extensions ran on CPU SIMD. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, KSW2, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B subtracts only the statement-owned CIGAR/MAPQ interval union. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. Numeric MAPQ equality and minimizer parity are not validity gates. Per-repeat priority attestation was unavailable, so no nice -20 claim is made. RECOVERED_UNSEALED: run_receipt_id=null; no run receipt was fabricated and no measurement was rerun. The benchmark wrote complete report_539/raw n=5 evidence, then the MCP worker refused the final receipt solely because repository HEAD changed from db2d20e86f to 4170e2c11 after launch. Exact report/raw/config, sealed build receipt br_88737a50e6ae939369071f426db2f604, source graph, actual runtime/service boundary, native stages, correctness, intervals, and saved minimap2 control were independently audited. PostgreSQL cleanup proved zero matching backends; the controller nevertheless ended aborted and watchdog/process cleanup remained unverified after the worker failure.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","scalar_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: two_stack_nthash -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 81118562125
+    p50_b: 79264477242
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: two_stack_nthash performed query sketching with positive ntHash SIMD vector work and zero scalar backend/tail activity; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; scalar_minimap2 performed exact scalar-CPU chain scoring and backtracking; KSW2 extensions used the scalar CPU stage route. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, Block Aligner, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B subtracts only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_540.json, run receipt rr_a8729205db38c2c9607f992a4d41c905, and build receipt br_bf02ea217e950a9ed34577bfb2ee3f7a. Per-repeat priority attestation was unavailable, so no nice -20 claim is made. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were all verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: two_stack_nthash -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 105044202125
+    p50_b: 104398372179
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: two_stack_nthash performed query sketching with positive ntHash SIMD vector work and zero scalar backend/tail activity; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; simd_minimap2 performed literal CPU SIMD-DP chain scoring and backtracking with positive vector-batch evidence; Block Aligner extensions ran on CPU SIMD. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, KSW2, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B is computed per repeat as A minus only the statement-owned Block Aligner CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_544.json, run receipt rr_12b9a035befa6d6455818f5bb364495a, and build receipt br_bf02ea217e950a9ed34577bfb2ee3f7a. Per-repeat priority attestation was unavailable, so no nice -20 claim is made. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were all verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: two_stack_nthash -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 81261552708
+    p50_b: 79526492299
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: two_stack_nthash performed query sketching with positive ntHash SIMD vector work and zero scalar backend/tail activity; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; simd_minimap2 performed literal CPU SIMD-DP chain scoring and backtracking with positive vector-batch evidence; KSW2 extensions used the scalar CPU stage route. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, Block Aligner, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B subtracts only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_541.json, run receipt rr_6b74c4815a52330123406062551e23ae, and build receipt br_bf02ea217e950a9ed34577bfb2ee3f7a. Per-repeat priority attestation was unavailable, so no nice -20 claim is made. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were all verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","vulkan_tiled_dynamic_programming","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  effective_path: two_stack_nthash -> vulkan_tiled_dynamic_programming -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 773543433375
+    p50_b: 745326817711
+  comments: 'Exact requested LOCAL observed-singleton hybrid CPU/Vulkan persisted-index execution: two_stack_nthash performed query sketching with positive ntHash SIMD vector work and zero scalar backend/tail activity; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; vulkan_tiled_dynamic_programming executed chain scoring as exactly 1024 Vulkan GPU jobs on the attested local device while chain backtracking remained scalar CPU; Block Aligner extensions ran on CPU SIMD. These hybrid support stages are selected work, not fallbacks, and this is not an all-GPU claim. The separate persisted-GPU-operation ledger is empty because it does not own chaining. No target-index build/recompute or missing-index path, GPU backtracking or extension, KSW2 call, scalar biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B is computed per repeat as A minus only the statement-owned Block Aligner CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_546.json, run receipt rr_9a3a8104745bf7e1e00951649af4f447, and build receipt br_bf02ea217e950a9ed34577bfb2ee3f7a. Per-repeat priority attestation was unavailable, so no nice -20 claim is made. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were all verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","vulkan_tiled_dynamic_programming","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  effective_path: two_stack_nthash -> vulkan_tiled_dynamic_programming -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 836852817208
+    p50_b: 805140347155
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: two_stack_nthash performed query sketching with positive ntHash SIMD vector work and zero scalar backend/tail activity; persisted MPF decode, partition selection, and seed lookup were host-I/O/scalar CPU support stages; vulkan_tiled_dynamic_programming executed the chain-score stage as exactly 1024 Vulkan GPU jobs on the attested local device, while chain backtracking remained scalar CPU; KSW2 extensions used the scalar CPU stage route. These hybrid support stages are selected work, not fallbacks, and this is not an all-GPU claim. The separate persisted-GPU-operation ledger is empty because it does not own chaining. No target-index build/recompute or missing-index path, Block Aligner, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B subtracts only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_543.json, run receipt rr_c1f455d2517d3738567113a244363549, and build receipt br_bf02ea217e950a9ed34577bfb2ee3f7a. Per-repeat priority attestation was unavailable, so no nice -20 claim is made. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were all verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","scalar_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: vulkan_minimap_integer -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 221941887042
+    p50_b: 211799012621
+  comments: 'Exact requested LOCAL observed-singleton hybrid CPU/Vulkan persisted-index execution: vulkan_minimap_integer executed query sketch, statement-resident device-index upload, and seed lookup as 1024 Vulkan GPU jobs each on the attested local device; each process-cold repeat performed one persisted-resident upload and recorded zero resident cache hits. Persisted MPF decode was host I/O and partition selection was scalar CPU support. scalar_minimap2 performed exact scalar-CPU chain scoring and backtracking; Block Aligner extensions used the CPU SIMD route with exact positive Block counters. These hybrid support stages are selected work, not fallbacks, and this is not an all-GPU claim. The separate persisted-GPU-operation ledger is empty because it does not own this seed route. No target-index build/recompute or missing-index path, GPU chaining or extension, KSW2 call, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B is computed per repeat as A minus only the statement-owned Block CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_556.json, run receipt rr_b4297f4cf38fcc92b9884e3ce14ccb45, and build receipt br_d5104a19575a29104fe579e15f27dc54. Every process-priority attestation was null, so no nice -20 or noise-free claim is made; OS-cache state is unspecified. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","scalar_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: vulkan_minimap_integer -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 205819930958
+    p50_b: 194374059228
+  comments: 'Exact requested LOCAL observed-singleton hybrid CPU/Vulkan persisted-index execution: vulkan_minimap_integer executed query sketch, statement-resident device-index upload, and seed lookup as 1024 Vulkan GPU jobs each on the attested local device; each process-cold repeat performed one persisted-resident upload and recorded zero resident cache hits. Persisted MPF decode was host I/O and partition selection was scalar CPU support. scalar_minimap2 performed exact scalar-CPU chain scoring and backtracking; KSW2 extensions used the scalar CPU stage route. These hybrid support stages are selected work, not fallbacks, and this is not an all-GPU claim. The separate persisted-GPU-operation ledger is empty because it does not own this seed route. No target-index build/recompute or missing-index path, GPU chaining or extension, Block Aligner, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B is computed per repeat as A minus only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_552.json, run receipt rr_1fa33f887abd6d60087826a11fb3045d, and build receipt br_d5104a19575a29104fe579e15f27dc54. Every process-priority attestation was null, so no nice -20 or noise-free claim is made; OS-cache state is unspecified. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: vulkan_minimap_integer -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 282208080875
+    p50_b: 270502349439
+  comments: 'Exact requested LOCAL observed-singleton hybrid CPU/Vulkan persisted-index execution: vulkan_minimap_integer executed query sketch, statement-resident device-index upload, and seed lookup as 1024 Vulkan GPU jobs each on the attested local device; each process-cold repeat performed one persisted-resident upload and recorded zero resident cache hits. Persisted MPF decode was host I/O and partition selection was scalar CPU support. simd_minimap2 performed literal CPU SIMD-DP chain scoring and backtracking with positive vector-batch evidence; Block Aligner extensions used the CPU SIMD route with exact positive Block counters. These hybrid support stages are selected work, not fallbacks, and this is not an all-GPU claim. The separate persisted-GPU-operation ledger is empty because it does not own this seed route. No target-index build/recompute or missing-index path, GPU chaining or extension, KSW2 call, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B is computed per repeat as A minus only the statement-owned Block CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_557.json, run receipt rr_f41d258c70a55870c86cae35c4f1506f, and build receipt br_d5104a19575a29104fe579e15f27dc54. Every process-priority attestation was null, so no nice -20 or noise-free claim is made; OS-cache state is unspecified. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: vulkan_minimap_integer -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 213418032500
+    p50_b: 199027378044
+  comments: 'Exact requested LOCAL observed-singleton hybrid CPU/Vulkan persisted-index execution: vulkan_minimap_integer executed query sketch, statement-resident device-index upload, and seed lookup as 1024 Vulkan GPU jobs each on the attested local device; each process-cold repeat performed one persisted-resident upload and recorded zero resident cache hits. Persisted MPF decode was host I/O and partition selection was scalar CPU support. simd_minimap2 performed literal CPU SIMD-DP chain scoring and backtracking with positive vector-batch evidence; KSW2 extensions used the scalar CPU stage route. These hybrid support stages are selected work, not fallbacks, and this is not an all-GPU claim. The separate persisted-GPU-operation ledger is empty because it does not own this seed route. No target-index build/recompute or missing-index path, GPU chaining or extension, Block Aligner, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B is computed per repeat as A minus only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_551.json, run receipt rr_d63132eda10fbb24a8926f423bf9c152, and build receipt br_be90e4f74a4a6a74da0e76ea06a6342a. Every process-priority attestation was null, so no nice -20 or noise-free claim is made; OS-cache state is unspecified. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -2482,6 +3111,117 @@ approved_results:
     p50_a: 191498871000
     p50_b: 182171367727
   comments: 'Hybrid CPU/Vulkan persisted-index execution: GPU performs query sketching, persisted-index seed lookup, and Vulkan tiled-DP chain scoring; scalar CPU performs persisted MPF decode/partition traversal, chain backtracking, and MAPQ; Block Aligner extensions run on CPU SIMD. These host stages are required parts of the hybrid route, not fallbacks. The empty legacy all-GPU ledger is expected for this route and does not imply absent GPU execution. The target index was prebuilt; the measured query phase covers mapping against it and excludes fixture/preseed/restart setup and target-index construction. No index rebuild/recompute, prefilter, decline, saturation, KSW2, or scalar biological fallback occurred.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 226293959125
+    p50_b: 213094767643
+  comments: 'Exact requested LOCAL observed-singleton hybrid CPU/Vulkan persisted-index execution: vulkan_minimap_integer executed query sketch, statement-resident device-index upload, and seed lookup as 1024 Vulkan GPU jobs each on the attested local device; each process-cold repeat performed one persisted-resident upload and recorded zero resident cache hits. Persisted MPF decode was host I/O and partition selection was scalar CPU support. vulkan_tiled_dynamic_programming executed chain scoring as exactly 1024 Vulkan GPU jobs on the attested local device while chain backtracking remained scalar CPU; KSW2 extensions used the scalar CPU stage route. These hybrid support stages are selected work, not fallbacks, and this is not an all-GPU claim. The separate persisted-GPU-operation ledger is empty because it does not own this seed route. No target-index build/recompute or missing-index path, GPU backtracking or extension, Block Aligner, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B is computed per repeat as A minus only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. Evidence is report report_555.json, run receipt rr_41c21726547bc83b39faadc95c94bc4b, and build receipt br_d5104a19575a29104fe579e15f27dc54. Every process-priority attestation was null, so no nice -20 or noise-free claim is made; OS-cache state is unspecified. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","scalar_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 5495561958
+    p50_b: 3935617626
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: bounded_nthash_simd performed query sketching with 2,611,664 ntHash SIMD vector batches per repeat and zero scalar backend or tail activity; persisted minimizers_per_sequence hash-major decode was host I/O, partition selection and seed lookup were scalar CPU support, scalar_minimap2 performed exact scalar CPU chain scoring and backtracking, and KSW2 extensions used the scalar CPU stage route. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, Block Aligner, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B is computed per repeat as A minus only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. The disposable benchmark database OID was stable within these five accepted repeats; equality to any historical database OID is neither required nor claimed. Evidence is report report_562.json, run receipt rr_1ed2bbe9c715332853a5b4eb83ef4c66, and build receipt br_57fb86555b14b85157599357454c9981. Every process-priority attestation was null, so no nice -20 or noise-free claim is made; OS-cache state is unspecified. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were verified.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_sequence","two_stack_nthash","scalar_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: two_stack_nthash -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 21813039625
+    p50_b: 4803677105
+  comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: two_stack_nthash performed query sketching with 10,233,536 ntHash SIMD vector batches per repeat and zero scalar backend/tail activity; persisted minimizers_per_sequence hash-major decode was host I/O, partition selection and seed lookup were scalar CPU support, scalar_minimap2 performed scalar CPU chain scoring and backtracking, and KSW2 extensions used scalar CPU. These are selected stages, not fallbacks; no GPU algorithm stage or persisted GPU operation, target-index build/recompute, missing-index path, Block Aligner, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold PostgreSQL persisted-index read plus mapping query phase under the explicit process-cold-os-cache-unspecified policy; metric B subtracts only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. The control supplies correctness evidence only; its timings and older provenance remain separate. Numeric MAPQ equality and minimizer parity are not validity gates. The disposable benchmark database was recreated after an earlier ENOSPC failed attempt; database OID 8738932 was stable throughout these five accepted repeats, while equality to any historical database OID is neither required nor claimed. The five accepted repeats each used a distinct postmaster epoch. Evidence is report report_549.json, run receipt rr_df8b4c035bc9acb1f91ca581c782a9a4, and build receipt br_be90e4f74a4a6a74da0e76ea06a6342a. Every process-priority attestation was null, so no nice -20 or noise-free claim is made; OS-cache state is unspecified. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were verified.'
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","minimap2",null,null,null,null]'
   timing_scope: historical_outer_e2e_v1

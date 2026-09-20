@@ -586,25 +586,33 @@ export class batch_processor {
             return *this;
         }
 
+        /** @return True when immutable statement and persisted-source identities are complete. */
+        [[nodiscard]] bool identity_ready() const noexcept {
+            if (!execution_plan || target_rowno < 0 || target_bp_size == 0u ||
+                query_count == 0u || operation_identity == 0u || resident_cache == nullptr) {
+                return false;
+            }
+            return persisted
+                ? persisted_generation_id != 0u && persisted_source_identity != 0u
+                : persisted_generation_id == 0u && persisted_source_identity == 0u;
+        }
+
         /** @return True when the statement may materialize this source once. */
         [[nodiscard]] bool source_ready() const noexcept {
-            const bool common = execution_plan && target_rowno >= 0 && target_bp_size != 0u &&
-                                query_count != 0u && operation_identity != 0u &&
-                                resident_cache != nullptr;
-            if (!common)
+            if (!identity_ready())
                 return false;
             if (!persisted) {
-                return !persisted_fragment_mapping_guard && !persisted_fragment_reader &&
-                       persisted_generation_id == 0u && persisted_source_identity == 0u;
+                return !persisted_fragment_mapping_guard && !persisted_fragment_reader;
             }
-            return persisted_generation_id != 0u && persisted_source_identity != 0u &&
-                   persisted_fragment_mapping_guard.has_value() &&
+            return persisted_fragment_mapping_guard.has_value() &&
                    persisted_fragment_reader.has_value() &&
                    persisted_fragment_reader->gpu_source_ready();
         }
 
-        /** @return True after exactly one resident or authenticated empty result exists. */
-        [[nodiscard]] bool ready() const noexcept {
+        /** @return True after one complete resident or authenticated empty proof was committed. */
+        [[nodiscard]] bool completed_resident_ready() const noexcept {
+            if (!identity_ready())
+                return false;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
             const bool has_spill = transient_target_spill_receipt.has_value();
             const bool has_replay = transient_target_replay_receipt.has_value();
@@ -647,12 +655,11 @@ export class batch_processor {
                                                 ->replay_failed_scan_count == 0u &&
                                         transient_target_replay_receipt
                                                 ->replay_illegal_span_transition_count == 0u));
-            if (!source_ready() || !transient_proof ||
-                (canonical_empty == (resident != nullptr)) ||
+            if (!transient_proof || (canonical_empty == (resident != nullptr)) ||
                 (resident != nullptr) != has_materialization)
                 return false;
 #else
-            if (!source_ready() || (canonical_empty == (resident != nullptr)))
+            if (canonical_empty == (resident != nullptr))
                 return false;
 #endif
             const auto& params = execution_plan->frozen_parameters;
@@ -695,6 +702,29 @@ export class batch_processor {
             return resident->target_len == target_bp_size && resident->key == resident_key &&
                    resident_key.operation_identity == operation_identity;
 #endif
+        }
+
+        /** @return True only after committed proof no longer borrows the persisted mmap. */
+        [[nodiscard]] bool sealed_resident_ready() const noexcept {
+            return completed_resident_ready() && !persisted_fragment_reader &&
+                   !persisted_fragment_mapping_guard;
+        }
+
+        /**
+         * Seal a completed persisted target and release its source in borrowing order.
+         * A failed precondition leaves both reader and mapping guard live for unwinding.
+         */
+        [[nodiscard]] bool seal_persisted_resident_and_release_source() noexcept {
+            if (!persisted || !source_ready() || !completed_resident_ready())
+                return false;
+            persisted_fragment_reader.reset();
+            persisted_fragment_mapping_guard.reset();
+            return sealed_resident_ready();
+        }
+
+        /** @return True after exactly one sealed resident or authenticated empty result exists. */
+        [[nodiscard]] bool ready() const noexcept {
+            return sealed_resident_ready();
         }
     };
 

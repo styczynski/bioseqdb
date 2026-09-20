@@ -6150,11 +6150,17 @@ def _ensure_algorithm_matrix_launch_nice(
         config_path: str | None,
         log_handle,
 ) -> None:
-    """Establish ordinary-worker NI=0 before an attested E2E launch.
+    """Preserve campaign inheritance or establish explicitly attested NI=0.
 
-    This is intentionally narrower than the build-worker scheduling guard. It
-    never requests negative niceness and never runs for an ordinary E2E/product
-    path unless its data explicitly requires E2E priority attestation.
+    Canonical campaigns without an explicit priority-attestation request keep
+    the worker's inherited nice value.  This lets an already-authorized parent
+    establish negative niceness before worker creation without a post-launch
+    race, while an ordinary NI=0 or positive inherited value remains honest in
+    the log.  The build-worker scheduling guard independently enforces only
+    SCHED_OTHER/0 and does not change niceness.
+
+    An explicit ``require_nice_attestation`` request retains the fail-closed
+    NI=0 contract.  This function never requests negative niceness itself.
     """
     if mode != "benchmark-e2e" or config_path is None:
         return
@@ -6164,8 +6170,8 @@ def _ensure_algorithm_matrix_launch_nice(
         raise RuntimeError(authority_error)
     canonical_priority_launch = authority is not None and authority.get(
         "name") in {"deadline", "observed_rung", "q1", "q8", "q1024"}
-    explicit_attestation_launch = authority is None and (
-        _e2e_config_requests_nice_attestation(config_path))
+    explicit_attestation_launch = _e2e_config_requests_nice_attestation(
+        config_path)
     if not canonical_priority_launch and not explicit_attestation_launch:
         return
     platform_name = host_platform.system()
@@ -6174,19 +6180,41 @@ def _ensure_algorithm_matrix_launch_nice(
             "algorithm-matrix launch priority supports Darwin/Linux only")
     try:
         process_selector = os.PRIO_PROCESS
-        os.setpriority(process_selector, 0, 0)
+        if explicit_attestation_launch:
+            os.setpriority(process_selector, 0, 0)
         nice_value = os.getpriority(process_selector, 0)
     except (AttributeError, OSError) as exc:
+        action = (
+            "establish worker NI=0"
+            if explicit_attestation_launch
+            else "observe inherited worker nice")
         raise RuntimeError(
-            "algorithm-matrix launch could not establish worker NI=0") from exc
-    if type(nice_value) is not int or nice_value != 0:
+            f"algorithm-matrix launch could not {action}") from exc
+    if (type(nice_value) is not int
+            or not -20 <= nice_value <= 19):
+        raise RuntimeError(
+            "algorithm-matrix launch returned invalid worker nice; "
+            f"observed={nice_value!r}")
+    if explicit_attestation_launch and nice_value != 0:
         raise RuntimeError(
             "algorithm-matrix launch requires verified worker NI=0; "
             f"observed={nice_value!r}")
+    if explicit_attestation_launch:
+        priority_disposition = "worker_NI=0 verified"
+        authority_label = (
+            "canonical_explicit_e2e_attestation"
+            if canonical_priority_launch else "explicit_e2e_attestation")
+        mutation_disposition = "setpriority_requested=true"
+    else:
+        priority_disposition = (
+            f"worker_NI={nice_value} inherited_preserved")
+        authority_label = "canonical"
+        mutation_disposition = "setpriority_requested=false"
     log_handle.write(
-        "# algorithm-matrix launch priority worker_NI=0 verified; "
+        f"# algorithm-matrix launch priority {priority_disposition}; "
         f"platform={platform_name}; "
-        f"authority={'canonical' if canonical_priority_launch else 'explicit_e2e_attestation'}; "
+        f"authority={authority_label}; "
+        f"{mutation_disposition}; "
         "exec_children_inherit_worker_nice=true; "
         "postgres_backend_priority_requires_exact_e2e_observation=true\n")
     log_handle.flush()
@@ -8644,7 +8672,7 @@ def _format_minutes(minutes: float, *, plural_int: bool = False) -> str:
 
 def _revalidate_legacy_q1024_postgresql_cleanup_before_admission(
         *, request_deadline: float | None = None) -> bool:
-    """Clear only terminal legacy PG uncertainty proven by a global zero.
+    """Clear terminal PG uncertainty only when a complete global zero is proven.
 
     This path is deliberately outside ordinary run receipt acceptance.  It
     validates the historical build authority without requiring today's Python
@@ -8671,7 +8699,6 @@ def _revalidate_legacy_q1024_postgresql_cleanup_before_admission(
         or application_name != f"bioseq-q1024-{run_token}"
         or entry.get("postgres_backend_owner_started") is not True
         or entry.get("postgres_cleanup_unverified") is not True
-        or entry.get("postgres_service_boundary") is not None
         or not isinstance(backend_identity, dict)
         or backend_identity.get("application_name") != application_name
         or not isinstance(backend_identity.get("database"), str)
@@ -8736,8 +8763,10 @@ def _revalidate_legacy_q1024_postgresql_cleanup_before_admission(
         if any(
             claimed_entry.get(field) != entry.get(field)
             for field in (
-                "status", "exit_code", "q1024_run_token",
+                "mode", "status", "exit_code", "q1024_run_token",
                 "postgres_application_name", "postgres_backend_identity",
+                "postgres_service_boundary",
+                "active_guard_marker", "bench_e2e_config",
                 "build_dir", "preset", "preset_family",
                 "reuse_build_receipt", "worker_process_identity",
                 "active_process_identity",

@@ -781,13 +781,28 @@ def _legacy_q1024_global_postgresql_zero_evidence(
         )
         cached_postgres = _cmake_cache_value(
             active_build_dir, "PostgreSQL_EXECUTABLE")
-        if not isinstance(cached_postgres, str) or not cached_postgres:
-            raise RuntimeError(
-                "legacy build has no configured PostgreSQL executable")
-        cached_identity = _seal_postgresql_file_identity(
-            cached_postgres,
-            "legacy cleanup configured PostgreSQL executable",
-        )
+        if isinstance(cached_postgres, str) and cached_postgres:
+            cached_identity = _seal_postgresql_file_identity(
+                cached_postgres,
+                "legacy cleanup configured PostgreSQL executable",
+            )
+        else:
+            # FindPostgreSQL caches the server executable only on Apple (for
+            # bundle_loader). Other platforms bind pg_config's selection to
+            # the runtime identity already validated by the recovery claim.
+            boundary = entry.get("postgres_service_boundary")
+            recorded = (boundary.get("postgres_executable_identity")
+                        if isinstance(boundary, dict) else None)
+            if (not isinstance(boundary, dict)
+                    or boundary.get("runtime_identity_verified") is not True
+                    or not isinstance(recorded, dict)):
+                raise RuntimeError(
+                    "legacy build has no configured or verified PostgreSQL executable")
+            try:
+                cached_identity = _PostgreSQLFileIdentity(**recorded)
+            except TypeError as exc:
+                raise RuntimeError(
+                    "invalid recorded PostgreSQL executable identity") from exc
         if not _same_postgresql_file_identity(
                 selected_identity, cached_identity):
             raise RuntimeError(

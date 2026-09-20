@@ -631,7 +631,7 @@ def _claim_q1024_postgresql_revalidation(
         *,
         deadline: float,
 ) -> tuple[str, dict[str, object]] | None:
-    """Claim terminal legacy cleanup without impersonating worker/watchdog."""
+    """Claim terminal global-zero cleanup without impersonating an old owner."""
     if (
         mode != "benchmark-e2e"
         or re.fullmatch(r"[0-9a-f]{32}", run_token) is None
@@ -654,9 +654,21 @@ def _claim_q1024_postgresql_revalidation(
                 != f"bioseq-q1024-{run_token}"
             or entry.get("postgres_backend_owner_started") is not True
             or entry.get("postgres_cleanup_unverified") is not True
-            or entry.get("postgres_service_boundary") is not None
         ):
             return None
+        # A recorded service boundary is evidence to preserve, not a reason
+        # to prevent a stronger complete-global-zero proof after termination.
+        boundary = entry.get("postgres_service_boundary")
+        if boundary is not None:
+            provider = _persisted_guarded_service_boundary_provider(entry)
+            try:
+                client = _ProcessIdentity(**entry["active_process_identity"])
+                proof = (provider(snapshot, client, entry.get("active_guard_marker"),
+                                  deadline, set()) if provider is not None else None)
+            except (TypeError, ValueError, KeyError, OSError, RuntimeError):
+                return None
+            if proof is None or proof.evidence.get("bindings_valid") is not True:
+                return None
         for field_name in (
                 "worker_process_identity",
                 "active_process_identity",

@@ -1672,15 +1672,24 @@ void process_vulkan_mpf_seed_route(
                 "query-selected MPF resident requires the statement-complete first wave");
         }
         if (prepared_target.persisted) {
-            const auto& reader = *prepared_target.persisted_fragment_reader;
-            prepare_persisted_mpf_query_union_resident(
-                runtime,
-                alphabet_code,
-                physical_layout,
-                execution_plan,
-                reader,
-                prepared_target,
-                state);
+            {
+                const auto& reader = *prepared_target.persisted_fragment_reader;
+                prepare_persisted_mpf_query_union_resident(
+                    runtime,
+                    alphabet_code,
+                    physical_layout,
+                    execution_plan,
+                    reader,
+                    prepared_target,
+                    state);
+            }
+            // Both complete mapped traversals and every copy into the independent,
+            // host-coherent resident have returned synchronously. End the borrowing
+            // reader reference before releasing its reader and then its mmap lease.
+            if (!prepared_target.seal_persisted_resident_and_release_source()) {
+                throw bioseq::gpu::vulkan::vulkan_runtime_error(
+                    "persisted MPF resident could not seal its completed source proof");
+            }
         } else {
             prepare_transient_mpf_query_union_resident(
                 runtime,

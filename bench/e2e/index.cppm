@@ -8196,9 +8196,8 @@ static_assert(expected_algorithm_matrix_storage_engine(
     const bool cpu_prepared_identity_gate =
         !expect_gpu_seed && (matrix_tuple || expect_persisted)
         ? out.cpu_prepared_unique_keys > 0
-            && (!expect_compact_h32_direct
-                || out.cpu_prepared_unique_keys
-                    == out.fragment_native_unique_query_plans)
+            // Compact-direct query plans are occurrence groups, whereas CPU
+            // preparation records canonical unique query keys.
             && fixed_lower_hex(out.cpu_prepared_key_set_checksum, 16)
             && fixed_lower_hex(out.cpu_prepared_build_set_checksum, 16)
             && out.cpu_prepared_key_set_checksum

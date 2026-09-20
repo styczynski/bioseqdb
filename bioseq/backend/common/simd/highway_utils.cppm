@@ -373,11 +373,11 @@ private:
      *
      * @param[in] simd_tag Active Highway descriptor.
      * @param[in,out] matrix_storage Borrowed matrix storage.
-     * @warning Terminates when the lane type cannot be widened twice.
+     * @warning Terminates when the lane type exceeds 32 bits.
      */
     static constexpr auto transpose_eight_lanes(p_simd_tag& simd_tag,
                                                 p_matrix_storage& matrix_storage) -> void {
-        if constexpr (!simd_lane_widenable_twice<p_simd_tag>) {
+        if constexpr (sizeof(hn::TFromD<p_simd_tag>) > 4u) {
             std::abort();
         } else {
             const hn::RepartitionToWide<p_simd_tag> wide_simd_tag;
@@ -457,56 +457,93 @@ private:
                     hn::BitCast(wide_simd_tag, upper_pair_two),
                     hn::BitCast(wide_simd_tag, upper_pair_three)));
 
-            const hn::RepartitionToWideX2<p_simd_tag> double_wide_simd_tag;
+            if constexpr (simd_lane_widenable_twice<p_simd_tag>) {
+                const hn::RepartitionToWideX2<p_simd_tag> double_wide_simd_tag;
 
-            matrix_storage[0] = hn::BitCast(
-                simd_tag,
-                hn::InterleaveLower(
-                    double_wide_simd_tag,
-                    hn::BitCast(double_wide_simd_tag, lower_block_zero),
-                    hn::BitCast(double_wide_simd_tag, lower_block_two)));
-            matrix_storage[1] = hn::BitCast(
-                simd_tag,
-                hn::InterleaveUpper(
-                    double_wide_simd_tag,
-                    hn::BitCast(double_wide_simd_tag, lower_block_zero),
-                    hn::BitCast(double_wide_simd_tag, lower_block_two)));
-            matrix_storage[2] = hn::BitCast(
-                simd_tag,
-                hn::InterleaveLower(
-                    double_wide_simd_tag,
-                    hn::BitCast(double_wide_simd_tag, lower_block_one),
-                    hn::BitCast(double_wide_simd_tag, lower_block_three)));
-            matrix_storage[3] = hn::BitCast(
-                simd_tag,
-                hn::InterleaveUpper(
-                    double_wide_simd_tag,
-                    hn::BitCast(double_wide_simd_tag, lower_block_one),
-                    hn::BitCast(double_wide_simd_tag, lower_block_three)));
-            matrix_storage[4] = hn::BitCast(
-                simd_tag,
-                hn::InterleaveLower(
-                    double_wide_simd_tag,
-                    hn::BitCast(double_wide_simd_tag, upper_block_zero),
-                    hn::BitCast(double_wide_simd_tag, upper_block_two)));
-            matrix_storage[5] = hn::BitCast(
-                simd_tag,
-                hn::InterleaveUpper(
-                    double_wide_simd_tag,
-                    hn::BitCast(double_wide_simd_tag, upper_block_zero),
-                    hn::BitCast(double_wide_simd_tag, upper_block_two)));
-            matrix_storage[6] = hn::BitCast(
-                simd_tag,
-                hn::InterleaveLower(
-                    double_wide_simd_tag,
-                    hn::BitCast(double_wide_simd_tag, upper_block_one),
-                    hn::BitCast(double_wide_simd_tag, upper_block_three)));
-            matrix_storage[7] = hn::BitCast(
-                simd_tag,
-                hn::InterleaveUpper(
-                    double_wide_simd_tag,
-                    hn::BitCast(double_wide_simd_tag, upper_block_one),
-                    hn::BitCast(double_wide_simd_tag, upper_block_three)));
+                matrix_storage[0] = hn::BitCast(
+                    simd_tag,
+                    hn::InterleaveLower(
+                        double_wide_simd_tag,
+                        hn::BitCast(double_wide_simd_tag, lower_block_zero),
+                        hn::BitCast(double_wide_simd_tag, lower_block_two)));
+                matrix_storage[1] = hn::BitCast(
+                    simd_tag,
+                    hn::InterleaveUpper(
+                        double_wide_simd_tag,
+                        hn::BitCast(double_wide_simd_tag, lower_block_zero),
+                        hn::BitCast(double_wide_simd_tag, lower_block_two)));
+                matrix_storage[2] = hn::BitCast(
+                    simd_tag,
+                    hn::InterleaveLower(
+                        double_wide_simd_tag,
+                        hn::BitCast(double_wide_simd_tag, lower_block_one),
+                        hn::BitCast(double_wide_simd_tag, lower_block_three)));
+                matrix_storage[3] = hn::BitCast(
+                    simd_tag,
+                    hn::InterleaveUpper(
+                        double_wide_simd_tag,
+                        hn::BitCast(double_wide_simd_tag, lower_block_one),
+                        hn::BitCast(double_wide_simd_tag, lower_block_three)));
+                matrix_storage[4] = hn::BitCast(
+                    simd_tag,
+                    hn::InterleaveLower(
+                        double_wide_simd_tag,
+                        hn::BitCast(double_wide_simd_tag, upper_block_zero),
+                        hn::BitCast(double_wide_simd_tag, upper_block_two)));
+                matrix_storage[5] = hn::BitCast(
+                    simd_tag,
+                    hn::InterleaveUpper(
+                        double_wide_simd_tag,
+                        hn::BitCast(double_wide_simd_tag, upper_block_zero),
+                        hn::BitCast(double_wide_simd_tag, upper_block_two)));
+                matrix_storage[6] = hn::BitCast(
+                    simd_tag,
+                    hn::InterleaveLower(
+                        double_wide_simd_tag,
+                        hn::BitCast(double_wide_simd_tag, upper_block_one),
+                        hn::BitCast(double_wide_simd_tag, upper_block_three)));
+                matrix_storage[7] = hn::BitCast(
+                    simd_tag,
+                    hn::InterleaveUpper(
+                        double_wide_simd_tag,
+                        hn::BitCast(double_wide_simd_tag, upper_block_one),
+                        hn::BitCast(double_wide_simd_tag, upper_block_three)));
+            } else {
+                const hn::Half<p_simd_tag> half_simd_tag;
+
+                matrix_storage[0] = hn::Combine(
+                    simd_tag,
+                    hn::LowerHalf(half_simd_tag, lower_block_two),
+                    hn::LowerHalf(half_simd_tag, lower_block_zero));
+                matrix_storage[1] = hn::Combine(
+                    simd_tag,
+                    hn::LowerHalf(half_simd_tag, lower_block_three),
+                    hn::LowerHalf(half_simd_tag, lower_block_one));
+                matrix_storage[2] = hn::Combine(
+                    simd_tag,
+                    hn::LowerHalf(half_simd_tag, upper_block_two),
+                    hn::LowerHalf(half_simd_tag, upper_block_zero));
+                matrix_storage[3] = hn::Combine(
+                    simd_tag,
+                    hn::LowerHalf(half_simd_tag, upper_block_three),
+                    hn::LowerHalf(half_simd_tag, upper_block_one));
+                matrix_storage[4] = hn::Combine(
+                    simd_tag,
+                    hn::UpperHalf(half_simd_tag, lower_block_two),
+                    hn::UpperHalf(half_simd_tag, lower_block_zero));
+                matrix_storage[5] = hn::Combine(
+                    simd_tag,
+                    hn::UpperHalf(half_simd_tag, lower_block_three),
+                    hn::UpperHalf(half_simd_tag, lower_block_one));
+                matrix_storage[6] = hn::Combine(
+                    simd_tag,
+                    hn::UpperHalf(half_simd_tag, upper_block_two),
+                    hn::UpperHalf(half_simd_tag, upper_block_zero));
+                matrix_storage[7] = hn::Combine(
+                    simd_tag,
+                    hn::UpperHalf(half_simd_tag, upper_block_three),
+                    hn::UpperHalf(half_simd_tag, upper_block_one));
+            }
         }
     }
 

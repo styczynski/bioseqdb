@@ -1452,36 +1452,45 @@ class AlgorithmMatrixLaunchNiceTests(unittest.TestCase):
                     build_worker._e2e_config_requests_nice_attestation(
                         "future.json"))
 
-    def test_darwin_and_linux_campaign_launches_establish_ni_zero(self):
-        for platform_name, authority_name in (
-            ("Darwin", "q1024"),
-            ("Linux", "observed_rung"),
+    def test_campaign_launches_preserve_inherited_nice(self):
+        for platform_name, authority_name, inherited_nice in (
+            ("Linux", "q1024", -20),
+            ("Darwin", "observed_rung", 0),
+            ("Linux", "q8", 7),
         ):
             with self.subTest(
-                    platform=platform_name, authority=authority_name):
-                self._assert_campaign_launch_establishes_ni_zero(
-                    platform_name, authority_name)
+                    platform=platform_name, authority=authority_name,
+                    inherited_nice=inherited_nice):
+                self._assert_campaign_launch_preserves_inherited_nice(
+                    platform_name, authority_name, inherited_nice)
 
-    def _assert_campaign_launch_establishes_ni_zero(
-            self, platform_name, authority_name):
+    def _assert_campaign_launch_preserves_inherited_nice(
+            self, platform_name, authority_name, inherited_nice):
         log = io.StringIO()
         with mock.patch.object(
             build_worker, "_algorithm_matrix_campaign_authority_status",
             return_value=({"name": authority_name}, None),
         ), mock.patch.object(
+            build_worker, "_e2e_config_requests_nice_attestation",
+            return_value=False,
+        ), mock.patch.object(
             build_worker.host_platform, "system", return_value=platform_name,
         ), mock.patch.object(
             build_worker.os, "setpriority",
         ) as setpriority, mock.patch.object(
-            build_worker.os, "getpriority", return_value=0,
+            build_worker.os, "getpriority", return_value=inherited_nice,
         ) as getpriority:
             build_worker._ensure_algorithm_matrix_launch_nice(
                 "benchmark-e2e", self.CONFIG, log)
 
-        setpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0, 0)
+        setpriority.assert_not_called()
         getpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0)
-        self.assertIn("worker_NI=0 verified", log.getvalue())
+        self.assertIn(
+            f"worker_NI={inherited_nice} inherited_preserved",
+            log.getvalue())
         self.assertIn(f"platform={platform_name}", log.getvalue())
+        self.assertIn("authority=canonical", log.getvalue())
+        self.assertIn("setpriority_requested=false", log.getvalue())
         self.assertIn(
             "postgres_backend_priority_requires_exact_e2e_observation=true",
             log.getvalue(),
@@ -1508,11 +1517,38 @@ class AlgorithmMatrixLaunchNiceTests(unittest.TestCase):
         setpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0, 0)
         getpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0)
         self.assertIn("authority=explicit_e2e_attestation", log.getvalue())
+        self.assertIn("setpriority_requested=true", log.getvalue())
 
-    def test_darwin_campaign_launch_rejects_nonzero_nice(self):
+    def test_canonical_explicit_attestation_still_establishes_ni_zero(self):
+        log = io.StringIO()
         with mock.patch.object(
             build_worker, "_algorithm_matrix_campaign_authority_status",
-            return_value=({"name": "q8"}, None),
+            return_value=({"name": "q1024"}, None),
+        ), mock.patch.object(
+            build_worker, "_e2e_config_requests_nice_attestation",
+            return_value=True,
+        ), mock.patch.object(
+            build_worker.host_platform, "system", return_value="Linux",
+        ), mock.patch.object(
+            build_worker.os, "setpriority",
+        ) as setpriority, mock.patch.object(
+            build_worker.os, "getpriority", return_value=0,
+        ) as getpriority:
+            build_worker._ensure_algorithm_matrix_launch_nice(
+                "benchmark-e2e", self.CONFIG, log)
+
+        setpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0, 0)
+        getpriority.assert_called_once_with(build_worker.os.PRIO_PROCESS, 0)
+        self.assertIn(
+            "authority=canonical_explicit_e2e_attestation", log.getvalue())
+
+    def test_explicit_attestation_rejects_nonzero_nice(self):
+        with mock.patch.object(
+            build_worker, "_algorithm_matrix_campaign_authority_status",
+            return_value=(None, None),
+        ), mock.patch.object(
+            build_worker, "_e2e_config_requests_nice_attestation",
+            return_value=True,
         ), mock.patch.object(
             build_worker.host_platform, "system", return_value="Darwin",
         ), mock.patch.object(
@@ -1524,11 +1560,14 @@ class AlgorithmMatrixLaunchNiceTests(unittest.TestCase):
                 build_worker._ensure_algorithm_matrix_launch_nice(
                     "benchmark-e2e", self.CONFIG, io.StringIO())
 
-    def test_darwin_campaign_launch_rejects_priority_api_errors(self):
+    def test_explicit_attestation_rejects_priority_api_errors(self):
         for api_name in ("setpriority", "getpriority"):
             with self.subTest(api=api_name), mock.patch.object(
                 build_worker, "_algorithm_matrix_campaign_authority_status",
-                return_value=({"name": "q1024"}, None),
+                return_value=(None, None),
+            ), mock.patch.object(
+                build_worker, "_e2e_config_requests_nice_attestation",
+                return_value=True,
             ), mock.patch.object(
                 build_worker.host_platform, "system", return_value="Darwin",
             ), mock.patch.object(
@@ -1542,6 +1581,26 @@ class AlgorithmMatrixLaunchNiceTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "could not establish"):
                     build_worker._ensure_algorithm_matrix_launch_nice(
                         "benchmark-e2e", self.CONFIG, io.StringIO())
+
+    def test_campaign_launch_rejects_unobservable_inherited_nice(self):
+        with mock.patch.object(
+            build_worker, "_algorithm_matrix_campaign_authority_status",
+            return_value=({"name": "q1024"}, None),
+        ), mock.patch.object(
+            build_worker, "_e2e_config_requests_nice_attestation",
+            return_value=False,
+        ), mock.patch.object(
+            build_worker.host_platform, "system", return_value="Linux",
+        ), mock.patch.object(
+            build_worker.os, "setpriority",
+        ) as setpriority, mock.patch.object(
+            build_worker.os, "getpriority", side_effect=OSError("unavailable"),
+        ):
+            with self.assertRaisesRegex(
+                    RuntimeError, "could not observe inherited worker nice"):
+                build_worker._ensure_algorithm_matrix_launch_nice(
+                    "benchmark-e2e", self.CONFIG, io.StringIO())
+        setpriority.assert_not_called()
 
     def test_priority_gate_does_not_touch_non_campaign_paths(self):
         for mode, authority, system_name in (

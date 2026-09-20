@@ -442,7 +442,7 @@ export {
                 stats_dst->record_scalar_pipeline_execution_stats(stats);
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
                 stats_dst->record_completed_chaining_algorithm_identity(
-                    chaining_algorithm::scalar_minimap2);
+                    p_kernel::completed_chaining_algorithm_identity());
 #endif
             } else if constexpr (p_kernel::emits_simd_chaining_execution_stats) {
                 if (stats_dst == nullptr) {
@@ -927,6 +927,8 @@ export {
                                     parameters(), block_alignment_stage::gap_extension));
                         const auto align_bandwidth = static_cast<std::int32_t>(
                             parameters().bandwidth * 1.5 + 1.0);
+                        const auto workspace_admission =
+                            attempt_memory->alignment_workspace_diagnostic_snapshot();
                         if constexpr (p_kernel::emits_scalar_ksw2_execution_stats) {
                             worker_count = admitted_alignment_worker_concurrency<
                                 base_alignment_algorithm::ksw2>(
@@ -942,7 +944,7 @@ export {
                                     /*task_parallelism_enabled=*/true,
                                     /*sequences_worker_shareable=*/true,
                                     static_cast<std::size_t>(pool.maximum_concurrency()),
-                                    attempt_memory->alignment_workspace_headroom_bytes(),
+                                    workspace_admission.allocatable_after_reservations_bytes,
                                     workspace_scratch);
                         } else if constexpr (p_kernel::emits_block_execution_stats) {
                             worker_count = admitted_alignment_worker_concurrency<
@@ -959,11 +961,27 @@ export {
                                     /*task_parallelism_enabled=*/true,
                                     /*sequences_worker_shareable=*/true,
                                     static_cast<std::size_t>(pool.maximum_concurrency()),
-                                    attempt_memory->alignment_workspace_headroom_bytes(),
+                                    workspace_admission.allocatable_after_reservations_bytes,
                                     workspace_scratch);
                         }
                         if (worker_count == 0u) {
-                            throw std::bad_alloc{};
+                            const std::uint64_t largest_workspace_bytes =
+                                workspace_scratch.empty() ? 0u : workspace_scratch.front();
+                            throw std::runtime_error{fmt::format(
+                                "E2E alignment workspace admission refused: "
+                                "largest_workspace_bytes={} reserved_bytes={} "
+                                "budget_ceiling_bytes={} "
+                                "allocatable_after_reservations_bytes={} "
+                                "process_footprint_bytes={} system_available_bytes={} "
+                                "system_total_bytes={} process_soft_cap_bytes={}",
+                                largest_workspace_bytes,
+                                workspace_admission.reserved_bytes,
+                                workspace_admission.budget_ceiling_bytes,
+                                workspace_admission.allocatable_after_reservations_bytes,
+                                workspace_admission.process_footprint_bytes,
+                                workspace_admission.system_available_bytes,
+                                workspace_admission.system_total_bytes,
+                                workspace_admission.process_soft_cap_bytes)};
                         }
                     }
 #endif

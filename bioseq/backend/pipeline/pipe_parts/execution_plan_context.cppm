@@ -55,6 +55,33 @@ import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+namespace bioseq::simd::pipe::detail {
+
+/** Format one exact admission-predicate snapshot only after an E2E refusal. */
+[[nodiscard]] inline std::string format_e2e_memory_admission_refusal(
+    std::string_view site,
+    const bioseq::parallelism::memory_admission_failure& failure) {
+    return fmt::format(
+        "E2E memory admission refused: site={} reason={} requested_bytes={} "
+        "reserved_bytes={} budget_ceiling_bytes={} "
+        "allocatable_after_reservations_bytes={} process_footprint_bytes={} "
+        "system_available_bytes={} system_total_bytes={} process_soft_cap_bytes={}",
+        site,
+        bioseq::parallelism::memory_admission_failure_reason_name(failure.reason),
+        failure.requested_bytes,
+        failure.reserved_bytes,
+        failure.budget_ceiling_bytes,
+        failure.allocatable_after_reservations_bytes,
+        failure.process_footprint_bytes,
+        failure.system_available_bytes,
+        failure.system_total_bytes,
+        failure.process_soft_cap_bytes);
+}
+
+} // namespace bioseq::simd::pipe::detail
+#endif
+
 export {
 
     namespace bioseq::simd::pipe {
@@ -230,9 +257,20 @@ export {
                     "context allocation hook received an invalid transaction"};
             }
 
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            bioseq::parallelism::memory_admission_failure admission_failure{};
+            auto permit = attempt.admission_->try_reserve(
+                requested_bytes, std::addressof(admission_failure));
+#else
             auto permit = attempt.admission_->try_reserve(requested_bytes);
+#endif
             if (!permit.has_value()) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                throw std::runtime_error{detail::format_e2e_memory_admission_refusal(
+                    "context_backing", admission_failure)};
+#else
                 throw std::bad_alloc{};
+#endif
             }
 
             try {
@@ -343,14 +381,13 @@ export {
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         /**
-         * @brief Return current controller headroom for a logical concurrency bound.
-         *
-         * This is deliberately read-only: selected alignment workspace remains
-         * context-backed and is charged only when the allocator materializes an
-         * actual block through this attempt's installed hook.
+         * Capture one controller snapshot for the logical concurrency bound and
+         * any resulting refusal detail. Workspace is still charged only when its
+         * context allocator materializes a physical block through this attempt.
          */
-        [[nodiscard]] std::uint64_t alignment_workspace_headroom_bytes() const noexcept {
-            return admission_->allocatable_after_reservations();
+        [[nodiscard]] bioseq::parallelism::memory_admission_snapshot
+        alignment_workspace_diagnostic_snapshot() const noexcept {
+            return admission_->diagnostic_snapshot();
         }
 #endif
 
@@ -377,9 +414,20 @@ export {
             if (!preallocation_bound) {
                 throw std::length_error{"canonical seed job preallocation bound overflowed"};
             }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            bioseq::parallelism::memory_admission_failure admission_failure{};
+            auto pending_permit = admission_->try_reserve(
+                *preallocation_bound, std::addressof(admission_failure));
+#else
             auto pending_permit = admission_->try_reserve(*preallocation_bound);
+#endif
             if (!pending_permit) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                throw std::runtime_error{detail::format_e2e_memory_admission_refusal(
+                    "canonical_seed_job_storage", admission_failure)};
+#else
                 throw std::bad_alloc{};
+#endif
             }
             // This declaration order also covers allocation/reconciliation exceptions.
             std::vector<canonical_seed_job_span> pending_storage;
@@ -498,9 +546,20 @@ export {
             if (!bound) {
                 throw std::length_error{"worker-context storage bound overflowed"};
             }
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+            bioseq::parallelism::memory_admission_failure admission_failure{};
+            auto pending_permit = admission.try_reserve(
+                *bound, std::addressof(admission_failure));
+#else
             auto pending_permit = admission.try_reserve(*bound);
+#endif
             if (!pending_permit) {
+#if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
+                throw std::runtime_error{detail::format_e2e_memory_admission_refusal(
+                    "route_worker_context_storage", admission_failure)};
+#else
                 throw std::bad_alloc{};
+#endif
             }
             std::vector<slot_storage> pending_slots;
             const auto materialization = admission.materialize(*pending_permit,
