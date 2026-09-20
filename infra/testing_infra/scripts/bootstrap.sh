@@ -312,10 +312,15 @@ if [ "$RUN_VERIFY" = "1" ]; then
   if [ -f "$VERIFY" ]; then
     echo "[bootstrap] running verify.sh as $TARGET_USER"
     chmod +x "$VERIFY" 2>/dev/null || true
-    sudo -u "$TARGET_USER" -H bash -lc "'$VERIFY'"
+    if ! sudo -u "$TARGET_USER" -H bash -lc "'$VERIFY'"; then
+      # Preserve verify.sh's specific failure status; propagate failure to the
+      # caller instead of ending bootstrap successfully after a failed build.
+      echo "[bootstrap] FATAL: verification failed; status=$(cat /opt/bioseq/PROVISION_STATUS 2>/dev/null)" >&2
+      exit 1
+    fi
     echo "[bootstrap] verify.sh finished; status=$(cat /opt/bioseq/PROVISION_STATUS 2>/dev/null)"
   else
-    echo "[bootstrap] verify.sh missing at $VERIFY"; status "VERIFY_SCRIPT_MISSING"
+    echo "[bootstrap] verify.sh missing at $VERIFY"; status "VERIFY_SCRIPT_MISSING"; exit 1
   fi
 else
   echo "[bootstrap] RUN_VERIFY=0; skipping verify"
