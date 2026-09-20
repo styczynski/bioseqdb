@@ -16,16 +16,16 @@ authority:
   profile: aws_cpu_only_v1
   sealed_verification_manifest_required_for_append: true
 projection_provenance:
-  approved_result_count: 4
-  approved_results_projection_sha256: a01533a3785262a2157a3ee029d01329a280f22965806d682d45ec45d0e734ea
-  approved_run_count: 20
+  approved_result_count: 6
+  approved_results_projection_sha256: 929bdaa85975024cba21d105ace3f93387ea5788b6353ea222854c040a891187
+  approved_run_count: 30
   classification: derived_non_authoritative
   eligible_stable_keys_projection_sha256: 5aad579ff70013c20835e561350803653c2cb5e0323cd878ff1e40e8501f9a96
   generator: bioseq-approved-results-projection
   generator_version: 1
   hardware_unavailable_cells_projection_sha256: bcd2f938f405b0ab0d406cbc318b07e89baa48a089849b872dfbeef51aba31cd
   hardware_unavailable_count: 512
-  remaining_eligible_count: 780
+  remaining_eligible_count: 778
   source_local_approved_results_projection_sha256: 04c6af57c226aae465d177f89b7d4499503c7ebe8c216bab2d0d4dfde0a57928
   source_local_authority_sha256: 755ccaaf575dbe1d45999aa711b3db4f144b5aafbf7480ce91e85520dc3b33a6
 campaign_identity:
@@ -17364,6 +17364,80 @@ append_update_protocol:
     name: bioseq-approved-results-aggregator
     version: 3
 approved_results:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","scalar_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: two_stack_nthash -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 276042528589
+    p50_b: 275511733253
+  comments: 'Exact requested TEST3_M7A q1024/n5 persisted-index execution: two_stack_nthash performed query sketching with positive ntHash SIMD work; persisted minimizers_per_fragment decode, partition selection, and seed lookup were selected host-I/O/scalar support stages; scalar CPU scalar_minimap2 scoring/backtracking; Block Aligner CPU-SIMD extensions. No target-index rebuild, GPU route, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query; metric B is computed per repeat as A minus only the same-statement CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary-count digest, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence agree with the approved same-host minimap2 JUST-INDEX baseline; numeric MAPQ equality and minimizer parity are not validity gates. The run is sealed by rr_05c59937e5952fd67c29a6d2a476056b and br_763f6b3459d6c0db44d2bf5793cb112c. Per-repeat priority attestation was unavailable, so no nice -20 claim is made; OS cache state was not controlled. Controller, PostgreSQL application, process, service-boundary, and watchdog cleanup all closed successfully.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: two_stack_nthash -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 276065023445
+    p50_b: 275508173090
+  comments: 'Exact requested TEST3_M7A q1024/n5 persisted-index execution: two_stack_nthash performed query sketching with positive ntHash SIMD work; persisted minimizers_per_fragment decode, partition selection, and seed lookup were selected host-I/O/scalar support stages; literal CPU SIMD-DP simd_minimap2 scoring/backtracking; Block Aligner CPU-SIMD extensions. No target-index rebuild, GPU route, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query; metric B is computed per repeat as A minus only the same-statement CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary-count digest, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence agree with the approved same-host minimap2 JUST-INDEX baseline; numeric MAPQ equality and minimizer parity are not validity gates. The run is sealed by rr_7bb4a654b9b8ba1c936103486266e47e and br_763f6b3459d6c0db44d2bf5793cb112c. Per-repeat priority attestation was unavailable, so no nice -20 claim is made; OS cache state was not controlled. Controller, PostgreSQL application, process, service-boundary, and watchdog cleanup all closed successfully.'
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_sequence","two_stack_nthash","scalar_minimap2","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1

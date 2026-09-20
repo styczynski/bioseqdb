@@ -16,16 +16,16 @@ authority:
   profile: aws_cpu_only_v1
   sealed_verification_manifest_required_for_append: true
 projection_provenance:
-  approved_result_count: 87
-  approved_results_projection_sha256: f3536570abff4f0af3c77cf997c0790d690947bc2c9a8eabfc5e60913408d1bd
-  approved_run_count: 435
+  approved_result_count: 88
+  approved_results_projection_sha256: 660621a46c7c874045532b7f5f7a237efc8d1c07e39f3dcd6e1d47611742ce0e
+  approved_run_count: 440
   classification: derived_non_authoritative
   eligible_stable_keys_projection_sha256: 5aad579ff70013c20835e561350803653c2cb5e0323cd878ff1e40e8501f9a96
   generator: bioseq-approved-results-projection
   generator_version: 1
   hardware_unavailable_cells_projection_sha256: bcd2f938f405b0ab0d406cbc318b07e89baa48a089849b872dfbeef51aba31cd
   hardware_unavailable_count: 512
-  remaining_eligible_count: 697
+  remaining_eligible_count: 696
   source_local_approved_results_projection_sha256: 775dfd6bdbbe5bce7bdf8a5e689fe561254671c6df5d0ea0a480e05ca5fe0a31
   source_local_authority_sha256: 7f0308902db5a28f6fb2f7d63f115775e78f92b17abf2b8179345bab33e4f55b
 campaign_identity:
@@ -20287,6 +20287,43 @@ approved_results:
     p50_a: 674337533236
     p50_b: 308051431428
   comments: 'CPU no-index execution: scalar CPU performs cold transient query/target sketching, target-index construction, simd_minimap2 chaining/backtracking, and selected KSW2 scalar extension. Every timed repeat proves a PostgreSQL restart, a distinct postmaster/backend identity, pre/post/post-measure persisted-index absence, GUCs off, and null persisted policy/layout. There is no persisted index, GPU route, prefilter, decline, fallback, Block Aligner call, or saturation. Metric A includes transient index construction and mapping; fixture and restart setup are excluded. Metric B subtracts only the same-statement CIGAR/MAPQ interval union. OS page cache was not purged or specified. The selected transient index representation is minimizers_per_fragment (MPF). Exact counts, positions (maximum absolute offset 4 bp), strands, CIGAR replay, and MAPQ-result presence passed; no numeric MAPQ-parity claim is made. The saved same-host minimap2 no-index q1024/n5 control uses the same fixture, ordered-count contract, and the same sealed build br_2ccda6963b0066ff0804a60c9c62b716; it was reused without rerun. Every raw repeat carries an accepted process-priority attestation binding runner and PostgreSQL backend at inherited nice -20. These rows make no noise-free claim; ordinary system noise may remain. Run receipt rr_6cd4448b3a164f245a55d8e6aa7a7fba, config SHA e53b389a2bb44d5fb7afb94436b75410f4cf903bcee9297dfac7ed8d25d78ecb, source graph e21847a76c67057507b606331e5a5fd6610395ae2da01101c2433c2cdbace87b.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"no_index","bioseq","minimizers_per_fragment","two_stack_nthash","scalar_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: two_stack_nthash
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: two_stack_nthash
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: two_stack_nthash -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 601665456332
+    p50_b: 233072878308
+  comments: 'CPU no-index execution: two_stack_nthash performs SIMD query and target sketching; scalar CPU performs transient index assembly, seed lookup and scalar_minimap2 chaining; KSW2 performs extensions. Positive selected-stage work and zero recorded declines/fallbacks were verified in every repeat. Prefilter and persistence were off; no persisted index existed before restart, after restart or after measurement. Five distinct PostgreSQL restart epochs were verified. Metric A includes cold transient-index construction plus mapping, excluding fixture generation and restart setup. Metric B is the median of per-repeat A minus the same-statement CIGAR/MAPQ interval union. All ordered primary-count vectors matched the saved same-host minimap2 no-index control; positions (maximum absolute offset 4 bp), strands, CIGAR replay and MAPQ presence passed. Minimizer and numeric MAPQ parity were not required. Per-repeat priority attestation was unavailable; controller priority was corrected after launch, so no claim of nice -20 throughout measurement is made. OS caches were not controlled. Run rr_d5ce9a7c47425b1d3796b59b69b2b592; build br_2ccda6963b0066ff0804a60c9c62b716.'
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"no_index","bioseq","minimizers_per_sequence","scalar","scalar_minimap2","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1

@@ -4670,16 +4670,57 @@ template<std::size_t p_key_count>
     return value;
 }
 
+/** Render a bounded JSON-style diagnostic excerpt without emitting raw controls. */
+[[nodiscard]] std::string escaped_json_capture_excerpt(
+        std::string_view text,
+        const std::size_t maximum_input_bytes) {
+    constexpr char hexadecimal[] = "0123456789abcdef";
+    const std::size_t input_bytes = std::min(text.size(), maximum_input_bytes);
+    std::string escaped;
+    escaped.reserve(input_bytes * 6u + (text.size() > input_bytes ? 3u : 0u));
+    for (std::size_t index = 0u; index < input_bytes; ++index) {
+        const unsigned char byte = static_cast<unsigned char>(text[index]);
+        switch (byte) {
+            case '\\': escaped += "\\\\"; break;
+            case '"': escaped += "\\\""; break;
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\t': escaped += "\\t"; break;
+            default:
+                if (byte >= 0x20u && byte <= 0x7eu) {
+                    escaped.push_back(static_cast<char>(byte));
+                } else {
+                    escaped += "\\u00";
+                    escaped.push_back(hexadecimal[byte >> 4u]);
+                    escaped.push_back(hexadecimal[byte & 0x0fu]);
+                }
+                break;
+        }
+    }
+    if (text.size() > input_bytes) escaped += "...";
+    return escaped;
+}
+
 [[nodiscard]] nlohmann::json parse_exact_json_cell(
         const std::optional<std::string>& cell,
         std::string_view diagnostic) {
     if (!cell.has_value()) {
-        abort_pipeline_stats_capture(diagnostic);
+        abort_pipeline_stats_capture(fmt::format("{}: SQL NULL JSON cell", diagnostic));
     }
     try {
         return nlohmann::json::parse(*cell);
-    } catch (const nlohmann::json::exception&) {
-        abort_pipeline_stats_capture(diagnostic);
+    } catch (const nlohmann::json::exception& error) {
+        constexpr std::size_t maximum_cell_excerpt_bytes = 256u;
+        constexpr std::size_t maximum_exception_excerpt_bytes = 160u;
+        const char* const exception_text = error.what();
+        abort_pipeline_stats_capture(fmt::format(
+            "{}: JSON parse failure (cell_bytes={}, cell_excerpt=\"{}\", exception=\"{}\")",
+            diagnostic,
+            cell->size(),
+            escaped_json_capture_excerpt(*cell, maximum_cell_excerpt_bytes),
+            escaped_json_capture_excerpt(
+                exception_text == nullptr ? std::string_view{} : std::string_view{exception_text},
+                maximum_exception_excerpt_bytes)));
     }
 }
 
