@@ -87,16 +87,21 @@ This means that if we store large BLOB along very small column, the BLOB will fo
   This is potential optimisation to be implemented in the future, although it's very low priority.
 }
 
-Each column chunk must store aggregates (max, min, sum, count) along with the presence bitmap has one bit per row in the group.
-It's important to note that we also store deletion bitmask which is d
+%HERE
 
+A column chunk stores a presence bitmap, a value buffer of only the
+present values, and skip statistics used later for pruning: the smallest
+and largest non-NULL values when the type has a comparison function, and a
+row count (\texttt{value\_count}). That count is the number of row slots in
+the chunk, including NULLs. There is no stored sum.
 
-buffer holds only the present values. The skip record stores the smallest
-and largest non-NULL values and the row count, which later pruning uses.
-Offsets of the two buffers are also stored so a reader can open this chunk
-without decoding the previous one. A zero presence bit would omit that row
-from the value buffer. Figure~\ref{fig:storage-column-streams} shows that
-case with explicit NULL slots.
+Deletion is not written into the column chunk. The chunk group stores
+\texttt{deleted\_rows}, and a separate row mask holds one deletion bit per
+internal row number. Figure~\ref{fig:storage-heap-to-stripe} shows the
+column-chunk skip fields and the group-level deletion count. A zero
+presence bit omits that row from the value buffer.
+Figure~\ref{fig:storage-column-streams} shows that case with explicit NULL
+slots.
 
 \begin{figure}[H]
 \centering
@@ -128,8 +133,12 @@ case with explicit NULL slots.
   \node at (7.40,4.12) {\texttt{id}};
   \node at (9.20,4.12) {\texttt{sample\_id}};
   \node at (11.00,4.12) {\texttt{seq}};
-  \node[anchor=west] at (5.05,3.25) {group 0};
-  \node[anchor=west] at (5.05,1.23) {group 1};
+  \node[anchor=west] at (5.05,3.40) {group 0};
+  \node[anchor=west,text=storageOrange,font=\scriptsize] at (5.05,3.08)
+    {deleted $0$};
+  \node[anchor=west] at (5.05,1.38) {group 1};
+  \node[anchor=west,text=storageOrange,font=\scriptsize] at (5.05,1.06)
+    {deleted $0$};
   \node[storage cell,text width=1.45cm,inner sep=2pt,
     minimum height=.90cm,align=center,
     fill=storageBlue!15,draw=storageBlue,line width=1.1pt]
@@ -154,6 +163,8 @@ case with explicit NULL slots.
     (chunkdetail) at (0.15,0.10) {};
   \node[anchor=west,font=\bfseries,text=storageBlue] at (0.35,-0.08)
     {One column chunk};
+  \node[anchor=west,text=black!65] at (4.55,-0.08)
+    {\texttt{id} of group 0};
   \node at (2.25,-0.48) {presence bits};
   \foreach \i/\b in {0/1,1/1,2/1}
     \node[storage cell,minimum width=.50cm,inner sep=2pt,fill=storageBlue!12]
@@ -162,9 +173,24 @@ case with explicit NULL slots.
   \foreach \i/\v in {0/1,1/2,2/3}
     \node[storage cell,minimum width=.50cm,inner sep=2pt,fill=storageGreen!13]
       at (5.00+0.70*\i,-1.08) {\v};
-  \node at (9.70,-0.48) {aggregates};
-  \node[storage cell,minimum width=2.20cm,inner sep=2pt,fill=storageOrange!12]
-    at (9.70,-1.08) {min $1$, max $3$};
+  \node at (9.70,-0.48) {skip stats};
+  \node[storage cell,minimum width=2.35cm,inner sep=1pt,align=center,
+    fill=storageOrange!12] at (9.70,-1.08)
+    {min $1$, max $3$\\count $3$};
+  \node[draw=storageOrange,fill=storageOrange!8,minimum width=12.00cm,
+    minimum height=1.28cm,inner sep=0pt,anchor=north west]
+    (groupdetail) at (0.15,-1.68) {};
+  \node[anchor=west,font=\bfseries,text=storageOrange] at (0.35,-1.88)
+    {One chunk group};
+  \node[anchor=west,text=black!65] at (4.55,-1.88)
+    {shared by every column};
+  \node at (2.25,-2.28) {delete bits};
+  \foreach \i/\b in {0/0,1/0,2/0}
+    \node[storage cell,minimum width=.50cm,inner sep=2pt,fill=storageOrange!12]
+      at (1.55+0.70*\i,-2.68) {\b};
+  \node at (7.20,-2.28) {deleted rows};
+  \node[storage cell,minimum width=1.20cm,inner sep=2pt,fill=storageOrange!12]
+    at (7.20,-2.68) {$0$};
   \draw[storage arrow,storageBlue]
     (idchunk.south) -- (7.40,2.18) -- (12.60,2.18) -- (12.60,-0.71)
     -- (chunkdetail.east);
@@ -172,9 +198,10 @@ case with explicit NULL slots.
     {One column chunk};
 \end{tikzpicture}
 \caption{The same six rows as heap tuples and as one stripe. Matching
-colours mark the same column. The stripe holds every column. The callout
-is the stored \texttt{id} chunk of group 0: presence bits, present values,
-and aggregates. Logical layout is shown, not the later byte order on disk.}
+colours mark the same column. The blue callout is one column chunk: presence
+bits, present values, min/max, and slot count. The orange callout is the
+chunk group: a deletion mask and \texttt{deleted\_rows}. There is no stored
+sum. Logical layout is shown, not the later byte order on disk.}
 \label{fig:storage-heap-to-stripe}
 \end{figure}
 
