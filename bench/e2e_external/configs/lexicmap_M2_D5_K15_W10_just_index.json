@@ -1,0 +1,34 @@
+{
+  "benchmark": "e2e_external",
+  "tool": "lexicmap",
+  "mode": "just_index",
+  "dataset": "matrix_2gbp_dna5_k15_w10",
+  "data": {
+    "alphabet": "dna5",
+    "size_label": "matrix_2gbp_dna5_k15_w10",
+    "reference_length": 2000000000,
+    "fragment_count": 1024,
+    "fragment_length_mean": 20000,
+    "fragment_length_stddev": 500,
+    "substitution_rate": 0.001,
+    "insertion_rate": 0.0005,
+    "deletion_rate": 0.0005,
+    "insertion_length_mean": 1.0,
+    "deletion_length_mean": 1.0,
+    "reverse_complement_rate": 0.5,
+    "kmer_size": 15,
+    "window_size": 10,
+    "cigar_projection": true,
+    "mapq_projection": true,
+    "minimap2_split_bp": 2000000352,
+    "seed": 33325010
+  },
+  "query_ladder": [
+    2,
+    32,
+    1024
+  ],
+  "repetitions": 5,
+  "threads": 4,
+  "invocation_timeout_seconds": 43200
+}
