@@ -12,58 +12,60 @@ store sequence directly in the user table. This would require storing it's paddi
   caption={The 40-byte locator stored after the 16-byte sequence header.},
   label={lst:storage-sequence-locator}]
 struct sequence_locator {
-  std::uint8_t  payload_version;   // currently 3
-  std::uint8_t  bucket_index;
-  std::uint16_t reserved_16;
-  std::uint32_t shard_index;
-  std::uint32_t fragment_count;
-  std::uint32_t reserved_32;
-  std::uint64_t logical_length;
-  std::uint64_t first_fragment_row;
-  std::uint64_t source_epoch;
+  std::uint8_t  payload_version;   // format version used by me to change the locator format (currently it's just set to 3)
+  std::uint8_t  bucket_index;      // length bucket 0..34
+  std::uint16_t reserved_16;       // pad so shard_index is 4-byte aligned, must be 0
+  std::uint32_t shard_index;       // fragment relation inside the bucket
+  std::uint32_t fragment_count;    // consecutive fragment rows
+  std::uint32_t reserved_32;       // pad so logical_length is 8-byte aligned, must be 0
+  std::uint64_t logical_length;    // sequence length in symbols
+  std::uint64_t first_fragment_row;// row of fragment 0
+  std::uint64_t source_epoch;      // immutable source version, must be > 0
 };
 \end{lstlisting}
 \end{minipage}
 
-
 \begin{itemize}
-  \item the length bucket and shard that hold the sequence,
-  \item its first fragment row and number of fragments,
-  \item its logical length in symbols, and
-  \item its \textbf{source epoch}, an identifier for this immutable
-    stored sequence version.
+  \item the internal tables are divided into groups by sequence length and these groups are divided into shards (so I record both of these value to identify sequence)
+  \item the number of row for sequence first fragment and number of fragments (i.e number of rows occupied by sequence)
+  \item sequence length in symbols (logical length)
+  \item version of the sequence in case it's changed (source epoch)
+  \item version of locator format (not relevant for users)
 \end{itemize}
 
-The current locator format is version 3. Readers check the version, non-zero
-epoch, fragment count, and final padding before accepting it. They also check
-the full registered source identity, which includes the parent table and
-column. A matching fragment row number by itself is insufficient: another
-relation or source version could use the same number.
+\info{Locator format optimisation}{
+  Currently locators size could be reduces as I don't need to store version (it was used for developent) and I waste too much space for padding. It's potential oppornunity to optimsie in the future (it wasn't a priority as locators occupy overall small space in comparison to sequences themselves).
+}
 
-\subsection{Symbols, packed units, fragments, and pages}
+Each sequence as mentioned in section desribing sequence interfaces~\ref{sec:compact-sequence-range} has it's alphabet type and base storage unit.
+Base store unit is configurable from SQL. User can declare any power of 2 that is width of supported machine integer:
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Examples of different base storage units},label={lst:sql-storage-widths}]
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 64);
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 32);
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 16);
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 8);
+-- Example for DNA5 (floor(64/3) = 21 symbols per unit)
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna5', 64);
+-- This is illegal as there's no uint128_t. 128-bit unit is just equivalent to two 64-bit units.
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 128);
+\end{lstlisting}
+\end{minipage}
 
-The units have different meanings. A packed storage unit of $B$ bytes holds
-$L$ symbols according to the alphabet encoding from
-Section~\ref{sec:compact-sequence-range}. A fragment reserves 1,024 of these
-units. Thus a full fragment has
-\[
-  \text{payload bytes}=1024B,
-  \qquad
-  \text{symbol capacity}=1024L.
-\]
-For DNA4 and 32-bit units, $B=4$ and $L=16$: one fragment has 4,096
-payload bytes and room for 16,384 symbols. With 64-bit units, it has 8,192
-payload bytes and room for 32,768 symbols. A fragment is consequently not a
-synonym for a PostgreSQL page, even when their sizes happen to be similar.
+Sequences are divided into fragments to enable lazy loading.
+A fragment is $1024$ packed storage units, so actual bytes occupied depend by the width of storage supplied by the user.
+The maximum possible fragment size is for 64-bit storage unit and it's $1024*8B = 8192B$ (note that this goes beyond default postgres page size of $8192B$, because page needs to include the page header as well)
 
-Consider a 40,000-symbol DNA4 sequence stored with 32-bit units. It needs
-three fragment rows. The last row uses only 7,232 of its symbol positions,
-but its packed payload allocation still has the full fragment size.
-The locator's length prevents a read from returning that unused capacity.
-This is separate from unused symbol positions in the final packed unit.
-If the first fragment row number is $r_0$, fragment $i$ is at $r_0+i$.
-Consecutive row numbers avoid a separate stored address for every fragment.
-The locator needs only the first row number and the fragment count.
+Fragment abstraction is a separate layer above columnar storage.
+Shards for fragments are internally held as \texttt{CREATE TABLE ... (seq bioseq.seq(...)) USING bioseq}, so each fragment is one TAM row in that single sequence column.
+
+\warn{Storage considerations}{
+  Fragments always storing 1024 storage units which works well for long sequences, however if the sequence is short then only small number of storage units will be occupied, while the rest is filled with zeros.
+  Compression (default is pglz, but zstd is avialable as well and others for manual building) will take care of this problem and shrink the fragment.
+  However it still has measureable effects on processing in the pipeline as BioseqDB will waste space in memory for very short sequences.
+  This along with locator format optimisation is a task for future work.
+  If we assume occupancy rate of 50\% then minimal sequence size for 32-bit storageshould be $1024 * \frac{32}{2} * 0.5 = 8192$ symbols and for smallest possible storage: $1024 * \frac{8}{2} * 0.5 = 2048$ symbols.
+}
 
 \begin{figure}[htbp]
 \centering
@@ -98,11 +100,9 @@ The locator needs only the first row number and the fragment count.
   \node[anchor=west,text=black!65] at (.5,.15)
     {The request uses fragments 1 and 2; it does not ask for fragment 0.};
 \end{tikzpicture}
-\caption{A symbol interval becomes fragment-row requests. Equal-width
-fragments reserve equal packed space. Only the used prefix of the final
-fragment belongs to the sequence. Underlying column chunks and database
-pages can contain additional data, so two requested fragments do not imply
-exactly two physical reads.}
+\caption{Assuming 32-bit storage unit for sequence of length 40000, we will have $1024 * \frac{32}{2} = 16384$ symbols per 
+fragment givind us 2 full fragments and one partially filled. If the pipeline requests some read $[30\,000,34\,000)$, it will read only two fragments.
+The rows visible here are compressed and stored as stripes and then as actual pages.}
 \label{fig:sequence-fragment-flow}
 \end{figure}
 
