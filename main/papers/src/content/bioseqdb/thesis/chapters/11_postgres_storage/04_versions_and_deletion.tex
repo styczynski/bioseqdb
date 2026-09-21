@@ -12,16 +12,52 @@ Deleting sequence require doing two operations:
   \item As fragment is separate abstraction layer than columnar storage, I also store versions of rows in locators, so deletion just needs to invalidate that version (epoch)
 \end{itemize}
 
-This similarily to 
-Both catalog changes follow the transaction's visibility. They do not
-overwrite the old fragment bytes. An older registered snapshot can still
-see the earlier source catalog entry and the earlier deletion mask.
-Its later lazy read therefore reaches the same immutable source.
+Each epoch has stored separate row in the catalog table (so it's one entry per sequence version):
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-storage-sql,
+  basicstyle=\footnotesize\ttfamily,
+  breaklines=true,breakatwhitespace=true,
+  caption={Heap catalog for one immutable sequence version. Invalidation updates \texttt{state}.},
+  label={lst:storage-source-version}]
+CREATE TABLE bioseq_internal.sequence_source_version (
+  source_epoch bigint PRIMARY KEY, -- immutable version id, must be > 0
+  user_relid oid,                  -- parent user table
+  database_oid oid,                -- parent database
+  tablespace_oid oid,              -- parent tablespace
+  main_relfilenode oid,            -- parent file node
+  main_storage_id bigint,          -- parent TAM storage generation
+  column_attno smallint,           -- 1-based sequence column
+  locator_version smallint,        -- locator format, currently 3
+  bucket_idx smallint,             -- length bucket 0..34
+  shard_idx integer,               -- shard inside the bucket
+  fragment_relid oid,              -- fragment table, NULL if empty
+  fragment_storage_id bigint,      -- fragment TAM storage generation
+  first_sub_row_no bigint,         -- row of fragment 0
+  num_fragments bigint,            -- consecutive fragment rows
+  total_bp_size bigint,            -- sequence length in symbols
+  alphabet_code smallint,          -- packed alphabet
+  storage_unit_byte_width smallint,-- unit width in bytes
+  padding_letters integer,         -- unused letters in last packed unit
+  source_content_checksum bigint,  -- CRC-64 of decoded symbols
+  state smallint                   -- 0 unpublished, 1 ready, 2 invalid
+);
+\end{lstlisting}
+\end{minipage}
 
-An update uses this removal step and then appends a replacement row. The
-replacement has new sequence storage and a new source epoch. Its SQL primary
-key can remain unchanged even though its internal row number changes.
-Figure~\ref{fig:storage-update-snapshots} shows the distinction.
+The specific epoch's \texttt{state} follows very simple linear transitions:
+\begin{itemize}
+  \item \textbf{Unpublished} ($0$). An insert has allocated an epoch (sequence version) and written fragments.
+   Locator is then filled with state $0$ which is default one. It means that the locator in the user table is not yet written
+   (so the fragment is there, but there's no saved locator that points to it)
+  \item \textbf{Ready} ($1$). Locator was written to a table, so I update the epoch state to mark that this sequence version is used somewhere
+   (not doing that might lead to dangling fragments that occupy storage but have no existing locator). This state is crucial to prevent a situation in which locator write fails or is rolled back, but fragment was written.
+  \item \textbf{Invalid} ($2$). Locator cannot read this row version anymore, the underlying fragment shouldn't be accessed.
+    This happens when user either calls \texttt{DELETE} or \texttt{UPDATE}.
+\end{itemize}
+
+Note that the catalog contains far more information that is neccessary. I decided to save CRC hashes to make sure the fragment is not malformed during operations
+or shard coordinates shared by the locator itself. As each row version requires separate entry this limits the maximum number of sequences stored in the BioseqDB, however
+entries are cheap so I didn't incorporate it into estimate calculations~\ref{eq:storage-human-genome-table-cap}.
 
 \begin{figure}[htbp]
 \centering
@@ -48,15 +84,15 @@ Figure~\ref{fig:storage-update-snapshots} shows the distinction.
   \node[anchor=west] at (1.85,-.2)
     {After commit, both sets of fragment bytes remain stored.};
 \end{tikzpicture}
-\caption{Two snapshots can read different versions of one logical row.
-The identifiers are illustrative. Reader A keeps its earlier snapshot
-throughout its read session. A plain command started later can use reader B's
-newer view. The old bytes are retained, not modified into the new sequence.}
+\caption{Postgres snaphot mechanism allows to check visivility of rows in MVCC model, but it's not sufficient on its own.
+Let's assume that reader A and reader B are reading the same sequence before and after other process commited update.
+Using fragments epochs versioning system means that read A will see older locator via snapshot, while reader B will
+get newer locator row with changed epoch. Both of them can complete reads as both epochs are still valid. 
+}
 \label{fig:storage-update-snapshots}
 \end{figure}
 
-Listing~\ref{lst:storage-repeatable-read} gives a two-session example of
-this visible behavior.
+Listing~\ref{lst:storage-repeatable-read} gives SQL code for this example:
 
 \begin{lstlisting}[style=bioseq-storage-sql,float=htbp,
   label={lst:storage-repeatable-read},
@@ -81,60 +117,3 @@ COMMIT;
 SELECT bioseq.to_text(seq[0:8]) FROM reads WHERE id = 1;
 -- TGCATGCA
 \end{lstlisting}
-
-The sequence reader registers the scan snapshot. Keeping its C++ handle
-alive does not permit reads after the owning transaction ends. This is the
-same read-session rule described in
-Section~\ref{sec:sequence-author-contract}.
-
-\subsection{Locks protect different parts of the operation}
-
-PostgreSQL distinguishes relation locks, advisory locks, and short locks
-inside its buffer manager~\autocite{postgresql17_explicit_locking}. BioSeqDB
-uses them for different purposes:
-
-\begin{itemize}
-  \item \textbf{Relation locks keep storage available.} Ordinary readers
-    and deferred source readers use \texttt{ACCESS SHARE}. It conflicts
-    with operations that require \texttt{ACCESS EXCLUSIVE}, such as
-    dropping the relation. It permits ordinary concurrent updates and
-    deletes.
-  \item \textbf{Writer locks coordinate mutations.} Parent update and
-    delete operations take a transaction advisory lock for the parent table's
-    storage identity. Fragment allocation and writing use their own
-    advisory-lock keys.
-  \item \textbf{Buffer locks protect a page copy or change.} These short
-    locks are released after the page operation. They are not held for
-    the duration of an alignment.
-\end{itemize}
-
-The combination supports stable snapshot reads without locking every row
-returned by a search. It is a description of the implemented read and write
-paths, not a claim that every PostgreSQL row-locking feature has identical
-behavior in the custom table access method.
-
-\subsection{Removing bytes is a separate maintenance operation}
-
-Deleting one parent row does not immediately erase its fragment rows or its
-persistent index payload. This preserves old readers, but also means that
-logical deletion alone does not reclaim all occupied space. A reader using
-a newer snapshot must reject a source epoch invalidated in that snapshot,
-even while its bytes remain present.
-
-Registered fragment relations reject direct update, delete, and truncate
-operations. Ordinary vacuum does not compact their live rows into new
-positions, because a locator depends on consecutive internal row numbers.
-An unused physical tail can be truncated when the required lock is available.
-
-Parent-table maintenance owns the larger cleanup boundary. Dropping or
-truncating the parent removes its registered fragment relations.
-A full table rewrite reconstructs visible sequence
-values in a new storage family and then removes the old family. The current
-full-rewrite path can assemble a complete sequence while copying it, so the
-bounded fragment-read guarantee must not be extended to that maintenance
-operation.
-
-Cleanup can also find orphaned fragment relations or stale registry rows.
-This is relation-level cleanup, not a background collector that packs
-individual deleted sequences together. Derived index generations have
-separate validity and cleanup rules, discussed in the next chapter.

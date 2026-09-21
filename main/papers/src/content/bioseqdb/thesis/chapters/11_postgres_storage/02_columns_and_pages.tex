@@ -379,6 +379,7 @@ In BioseqDB it's unnecessary to read all chunks all the time. The two optimisati
     The BioseqDB TAM presented in figure~\ref{fig:bioseqscan-hook-lifecycle} can determine if none of the values in the chunk group satisfy the filter.
     If that happens, entire chunk group is skipped.
     For example, a group with sample identifiers from 1 to 100 cannot satisfy \texttt{BETWEEN 500 AND 600}.
+\label{lst:storage-minmax-pruning}
 \end{enumerate}
 
 Figure~\ref{fig:column-store-layout} shows both optimisations. Group that satisfies both of these conditions still needs to apply filters to each row individually, but I save time but not touching groups that are not revelant to the search.

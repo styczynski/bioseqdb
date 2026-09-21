@@ -52,7 +52,8 @@ own C++ system of templates with different specializations driven by C++ concept
   Because the architecture of BioseqDB pipeline is very custom, I decided to only use SeqAn's alphabet layer~\autocite{seqan3AlphabetsDocs} and utilities exposed by its public API. This means that libraries using SeqAn code as base, could be slightly adjusted to be able to work with BioseqDB pipelines.
 }
 
-Table~\ref{tab:sequence-representation-specializations} lists every specialization of all BioseqDB sequence representations, to showcase how they are used in different scenarios. SeqAn offers abstractions over lazy sequences as well~\cite{seqanSequencesInDepth}, but they're not as sophisticates as in my case.
+Table~\ref{tab:sequence-representation-specializations} lists every specialization of all BioseqDB sequence representations, to showcase how they are used in different scenarios. SeqAn offers abstractions over lazy sequences as well~\cite{seqanSequencesInDepth}, but they're not as sophisticated as in my case.
+The lazy interface is really important for BioseqDB to improve it's performance utilising late-materialization strategies similar to those described in literature~\autocite{Chernishev2022ACS}
 
 \begingroup\footnotesize\setlength{\tabcolsep}{4pt}
 \renewcommand{\arraystretch}{1.08}

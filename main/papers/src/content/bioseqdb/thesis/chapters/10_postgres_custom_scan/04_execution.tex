@@ -261,7 +261,8 @@ In BioseqDB there are two types of filter conditions:
 
 \begin{itemize}
   \item \textbf{A row condition} such as \texttt{t.id > 20} depends only on
-    stored columns, so is evaluated before alignment.
+    stored columns, so is evaluated before alignment. Sometimes columns that are comparable (like Postgres primitive types) can allow min/max chunk prunning to be used.
+    This is special strategy to skip entire columnar chunks with data~\ref{lst:storage-minmax-pruning}
   \item \textbf{A hit condition} This is special case of alignment prefilter. I have a separate stage in the pipeline that can be invoked to run cheaper estimation of edit distance for each sequence.
   If I detect special predicate of form   
   \texttt{bioseq.edit(t.seq) < 10} I run pipeline with prefilter enabled. This is different to the case above, because it still requires batching tuples and running pipeline, but it allows for faster termination.
