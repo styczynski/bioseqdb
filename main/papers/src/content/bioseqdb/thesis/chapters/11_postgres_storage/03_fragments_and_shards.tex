@@ -177,7 +177,7 @@ With that size, each genome occupies $96{,}719$ pages, so the same limit allows 
 The internal sharding allows fragments to spill over into multiple tables. If the underlying table achieves $1TB$ limit (which is lower than theoretical $32$ Postgres limit), fragements are stored in newly created columnar relations.
 The sharding is two-level:
 \begin{itemize}
-  \item length bucket: groups sequences by their logical number of symbols - precisely $max(0, min(\left\floor log_2(|s|)\right\rfloor - 8, 34))$ is the bucket index.
+  \item length bucket: groups sequences by their logical number of symbols - precisely $max(0, min(\left\lfloor log_2(|s|)\right\rfloor - 8, 34))$ is the bucket index.
   \item shard: inside one length bucket BioseqDB can create multiple tables when existing tables reach $1TB$ limit (potentially to store extremally large datasets)
 \end{itemize}
 
