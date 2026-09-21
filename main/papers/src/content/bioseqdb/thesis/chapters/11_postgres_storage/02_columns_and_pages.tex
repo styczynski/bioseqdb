@@ -263,7 +263,11 @@ Algorithm~\ref{alg:storage-flush-stripe} presents pseudocode for that process as
   \Require columns $C$, group limit $G$ (default $10{,}000$), stripe limit $S$
     (default $150{,}000$)
   \State $s\gets\mathrm{NULL}$,\quad $n\gets 0$ \Comment{open stripe and its row count}
-  \Procedure{WriteRow}{$v$, $\mathit{nulls}$}
+  \State $K\gets \{\mathrm{min}: 0, \mathrm{max}: 0, \mathrm{cnt}: 0\}^{|C| \times \left\lfloor \frac{S}{G} \right\rfloor}$ \Comment{Aggregates for each chunk}
+  \State $P\gets 0^{|C| \times G}$ \Comment{Presence bitmap}
+  \State $B\gets \varepsilon$ \Comment{Serialization buffer for chunks column}
+  \State $\mathrm{chunk}\gets \{\mathrm{P}: 0, \mathrm{V}: 0\}^{|C| \times \left\lfloor \frac{S}{G} \right\rfloor}$ \Comment{Serialized groups for stripes}
+  \Procedure{WriteRow}{$v$}
     \If{$\mathrm{IsOpen}(s) \land \mathrm{Size}(s \Vert v) > 1\,\mathrm{GB}$}
       \Comment{open stripe and $v$ would exceed $1\,\mathrm{GB}$}
       \State \Call{FlushStripe}{$s$}
@@ -273,17 +277,17 @@ Algorithm~\ref{alg:storage-flush-stripe} presents pseudocode for that process as
     \EndIf
     \State $g\gets\lfloor n/G\rfloor$,\quad $r\gets n\bmod G$
     \ForAll{$c\in C$}
-      \If{$\mathit{nulls}_c$}
-        \State $P[c][r]\gets 0$
+      \If{$\mathrm{IsNull}(v_c)$}
+        \State $P_{c,r}\gets 0$
       \Else
         \If{$\mathrm{Align}(v_c)\ge 256\,\mathrm{MiB}$}
           \State \textbf{error}
         \EndIf
-        \State $P[c][r]\gets 1$
+        \State $P_{c,r}\gets 1$
         \State $B_c\gets B_c\Vert\mathrm{Serialize}(v_c)$
-        \If{$\mathrm{cmp}_{\tau_c}\neq\mathrm{NULL}$}
-          \State $K_{c,g}.\min\gets\min(K_{c,g}.\min,v_c)$
-          \State $K_{c,g}.\max\gets\max(K_{c,g}.\max,v_c)$
+        \If{$\mathrm{Compare}_{c}\neq\mathrm{NULL}$} \Comment{Only if there's defined comparator for this column type}
+          \State $K_{c,g}.\min\gets\min_{\mathrm{Compare}_{c}}(K_{c,g}.\min,v_c)$
+          \State $K_{c,g}.\max\gets\max_{\mathrm{Compare}_{c}}(K_{c,g}.\max,v_c)$
         \EndIf
       \EndIf
       \State $K_{c,g}.\mathit{cnt}\gets K_{c,g}.\mathit{cnt}+1$
@@ -357,7 +361,7 @@ In BioseqDB it's unnecessary to read all chunks all the time. The two optimisati
 \end{enumerate}
 
 Figure~\ref{fig:column-store-layout} shows both optimisations. Group that satisfies both of these conditions still needs to apply filters to each row individually, but I save time but not touching groups that are not revelant to the search.
-The figure assumes query \texttt{SELECT id FROM table WHERE sample_id BETWEEN 500 AND 600} is executed.
+The figure assumes query \texttt{SELECT id FROM table WHERE sample\_id BETWEEN 500 AND 600} is executed.
 
 \begin{figure}[H]
 \centering
@@ -391,8 +395,9 @@ The figure assumes query \texttt{SELECT id FROM table WHERE sample_id BETWEEN 50
     (7.6,.22)--(10.25,.22);
   \node[align=center] at (8.93,-.37) {no sequence\\fragment reads};
 \end{tikzpicture}
-\caption{Column selection and group pruning for simple query \texttt{SELECT id FROM table WHERE sample_id BETWEEN 500 AND 600}.
-Blue cells are read, orange crosses mark groups whose aggregates exclude all the rows. Unrequested sequence locators remain unread, because they were not specified in the \texttt{SELECT} clause. 
+\caption{Column selection and group pruning for simple query \texttt{SELECT id FROM table WHERE sample\_id BETWEEN 500 AND 600}.
+Blue cells are read, orange crosses mark groups whose aggregates exclude all the rows. Unrequested sequence locators remain unread, 
+because they were not specified in the \texttt{SELECT} clause. 
 The drawing shows only logical representation of chunks, not actual disk layout.}
 \label{fig:column-store-layout}
 \end{figure}
@@ -440,8 +445,11 @@ build and table options. In BioseqDB all compression is disabled by default as I
 Abadi et al. show that the choice of compression method depends on both
 the data and the query workload~\autocite{abadi2006compression}, so I leave it as future extension.
 
-\section{Store byte streams in PostgreSQL relation pages}
+\section{Raw byte storage}
 \label{sec:pg-storage-pages}
+
+After stripe is serialized it needs to be written to disk by flush operation:
+
 
 The physical order differs from the logical grid. Within a stripe, one
 column's presence buffers are written first, followed by that column's value
