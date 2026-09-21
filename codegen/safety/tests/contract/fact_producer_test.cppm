@@ -391,6 +391,8 @@ struct runtime_error : exception {
     std::vector<std::string> implementation_arguments{
         "-I" + standard_root.string(),
         "-I" + header_root.string(),
+        "-Xclang",
+        "-fbuiltin-headers-in-system-modules",
         "-x",
         "c++",
     };

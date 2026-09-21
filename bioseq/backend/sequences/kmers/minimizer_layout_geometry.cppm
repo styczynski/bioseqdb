@@ -2,9 +2,14 @@
  * @file minimizer_layout_geometry.cppm
  * @brief Target-neutral physical-record geometry shared by dispatch and codegen.
  */
-export module bioseq.sequences.kmers.minimizer_layout_geometry;
+module;
 
-import std;
+#include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <stdexcept>
+
+export module bioseq.sequences.kmers.minimizer_layout_geometry;
 
 export namespace bioseq::minimizers {
 

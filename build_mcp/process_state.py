@@ -660,15 +660,47 @@ def _claim_q1024_postgresql_revalidation(
         # to prevent a stronger complete-global-zero proof after termination.
         boundary = entry.get("postgres_service_boundary")
         if boundary is not None:
-            provider = _persisted_guarded_service_boundary_provider(entry)
+            # A restarted PostgreSQL service necessarily invalidates the old
+            # postmaster process identity.  That dead historical boundary must
+            # not prevent the stronger global-zero proof below.  Retain the
+            # strict binding check whenever the recorded postmaster is still
+            # live, because in that case it remains the service being swept.
             try:
-                client = _ProcessIdentity(**entry["active_process_identity"])
-                proof = (provider(snapshot, client, entry.get("active_guard_marker"),
-                                  deadline, set()) if provider is not None else None)
-            except (TypeError, ValueError, KeyError, OSError, RuntimeError):
+                recorded_postmaster_value = boundary.get(
+                    "postmaster_process_identity")
+                recorded_postmaster = (
+                    _ProcessIdentity(**recorded_postmaster_value)
+                    if isinstance(recorded_postmaster_value, dict) else None)
+            except (TypeError, ValueError):
                 return None
-            if proof is None or proof.evidence.get("bindings_valid") is not True:
-                return None
+            recorded_postmaster_live = (
+                recorded_postmaster is not None
+                and _same_process(
+                    snapshot.get(recorded_postmaster.pid),
+                    recorded_postmaster,
+                )
+            )
+            if recorded_postmaster_live:
+                provider = _persisted_guarded_service_boundary_provider(entry)
+                try:
+                    client = _ProcessIdentity(**entry["active_process_identity"])
+                    proof = (
+                        provider(
+                            snapshot,
+                            client,
+                            entry.get("active_guard_marker"),
+                            deadline,
+                            set(),
+                        )
+                        if provider is not None else None
+                    )
+                except (TypeError, ValueError, KeyError, OSError, RuntimeError):
+                    return None
+                if (
+                    proof is None
+                    or proof.evidence.get("bindings_valid") is not True
+                ):
+                    return None
         for field_name in (
                 "worker_process_identity",
                 "active_process_identity",

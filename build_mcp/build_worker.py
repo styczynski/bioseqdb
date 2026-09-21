@@ -267,6 +267,17 @@ def _safe_parallel_jobs() -> int:
     build edges in the historical 35-min hard-timeout window). Budgeting ~3 GB per
     concurrent heavy compile keeps cold builds making forward progress without
     paging. On this 8-core / 16 GB machine this yields -j 5."""
+    override = os.environ.get("BIOSEQ_BUILD_PARALLEL_JOBS")
+    if override:
+        try:
+            requested = int(override)
+        except ValueError as exc:
+            raise RuntimeError(
+                "BIOSEQ_BUILD_PARALLEL_JOBS must be a positive integer") from exc
+        if requested <= 0:
+            raise RuntimeError(
+                "BIOSEQ_BUILD_PARALLEL_JOBS must be a positive integer")
+        return requested
     cpus = os.cpu_count() or 4
     try:
         mem_gb = (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")) / (1024 ** 3)
@@ -1402,6 +1413,19 @@ _BUILD_SOURCE_OUTPUT_COMPONENTS = frozenset({
     "reporting",
 })
 
+# Operational Python is not an input to any compiled C++ target. Its runtime
+# behavior is recorded separately by the controller and run configuration.
+# In particular, collecting/auditing results while a build finishes must not
+# invalidate the completed executable. Keep compiled sources, code generators,
+# build definitions and toolchain configuration in the source fingerprint.
+_BUILD_OPERATIONAL_PATHS = frozenset({
+    "build_mcp/build_worker.py",
+    "bench/aggregate_e2e_algorithm_matrix.py",
+    "bench/manage_e2e_fleet.py",
+    "bench/monitor_e2e_fleet.py",
+    "bench/recover_e2e_measurements.py",
+})
+
 _PAPERS_EXCLUDED_PATHSPECS = (
     ":(top,exclude,literal)main/papers",
     ":(top,exclude,glob)main/papers/**",
@@ -1483,6 +1507,7 @@ def _source_graph_fingerprint(
             any(part in _BUILD_SOURCE_OUTPUT_COMPONENTS
                 for part in relative_parts)
             or relative.endswith(".pyc")
+            or relative in _BUILD_OPERATIONAL_PATHS
         ):
             continue
         path = repository_root / relative
@@ -2392,13 +2417,22 @@ def _validate_build_receipt(
             return None, f"cannot validate build receipt source graph: {exc}"
         if observed_source != receipt.get("source_graph_fingerprint"):
             return None, "build receipt source graph no longer matches"
-    try:
-        observed_commit = _git_commit(
-            source_repository_root, deadline=deadline)
-    except RuntimeError as exc:
-        return None, f"cannot validate build receipt commit: {exc}"
-    if observed_commit != receipt.get("source_commit"):
-        return None, "build receipt source commit no longer matches"
+    frozen_e2e_artifacts = (
+        not verify_source
+        and receipt.get("mode") == "benchmark-e2e"
+        and os.environ.get("BIOSEQ_E2E_REUSE_FROZEN_BINARY") == "1"
+    )
+    if not frozen_e2e_artifacts:
+        try:
+            observed_commit = _git_commit(
+                source_repository_root, deadline=deadline)
+        except RuntimeError as exc:
+            return None, f"cannot validate build receipt commit: {exc}"
+        if observed_commit != receipt.get("source_commit"):
+            return None, "build receipt source commit no longer matches"
+    # A frozen E2E run measures the receipt's recorded source, not current HEAD.
+    # Keep that identity unchanged. Moving HEAD alone must not force a build;
+    # all artifact, compiler/configuration and host checks below still apply.
     mode = receipt.get("mode")
     if not isinstance(mode, str) or mode not in MODES:
         return None, "build receipt names an unknown mode"
@@ -7072,6 +7106,8 @@ def _run_only_from_build_receipt(
             str(receipt["build_receipt_id"]),
             expected_mode=mode,
             expected_debug=bool(receipt["debug"]),
+            verify_source=not (mode == "benchmark-e2e" and os.environ.get(
+                "BIOSEQ_E2E_REUSE_FROZEN_BINARY") == "1"),
             deadline=deadline,
         )
         if install_receipt_error is not None or install_receipt is None:
@@ -7216,6 +7252,8 @@ def _run_only_from_build_receipt(
             str(receipt["build_receipt_id"]),
             expected_mode=mode,
             expected_debug=bool(receipt["debug"]),
+            verify_source=not (mode == "benchmark-e2e" and os.environ.get(
+                "BIOSEQ_E2E_REUSE_FROZEN_BINARY") == "1"),
             deadline=deadline,
         )
         if receipt_error is not None or revalidated_receipt is None:
@@ -7815,6 +7853,12 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 reuse_build_receipt,
                 expected_mode=mode,
                 expected_debug=debug,
+                # Opt-in frozen E2E campaign: retain the receipt's original
+                # source identity, but still verify every binary, installed
+                # artifact, compiler configuration, and receipt content seal.
+                # Reporting/controller edits must not force recompilation.
+                verify_source=not (mode == "benchmark-e2e" and os.environ.get(
+                    "BIOSEQ_E2E_REUSE_FROZEN_BINARY") == "1"),
                 deadline=deadline,
             )
             if receipt_error is not None or receipt is None:
@@ -9401,6 +9445,8 @@ def tool_start_build(mode: str, build_only: bool = False,
                 str(reuse_build_receipt),
                 expected_mode=mode,
                 expected_debug=(debug if debug_supplied else None),
+                verify_source=not (mode == "benchmark-e2e" and os.environ.get(
+                    "BIOSEQ_E2E_REUSE_FROZEN_BINARY") == "1"),
             )
             if receipt_error is not None or selected_receipt is None:
                 return f"Build receipt validation error: {receipt_error}"

@@ -120,7 +120,7 @@ set(BIOSEQ_BENCHMARK_FRAMEWORK_EXECUTABLE_LINKS
   # these targets aligned with bioseq_benchmark so importing production
   # parallelism modules cannot leave glslang symbols unresolved.
   Vulkan::Vulkan
-  Vulkan::glslang
+  ${BIOSEQ_GLSLANG_STATIC_LIBS}
   spirv-cross-msl
   Vulkan::LayerSettings
   bioseq_bench_framework)

@@ -249,7 +249,10 @@ def run_watchdog(mode: str, run_token: str) -> int:
                         expected_worker, deadline=whole_deadline))
                 should_intervene = (
                     should_intervene or worker_zombie or worker_replaced)
-            if (entry.get("status") == "completed"
+            # A rejected report is a terminal worker failure, not a runaway
+            # process. If the worker already proved client/PG cleanup, preserve
+            # that result instead of replacing it with a watchdog timeout.
+            if (worker_terminal
                     and (not pid_still_alive or worker_zombie or worker_replaced)
                     and entry.get("postgres_backend_owner_started") is not True
                     and entry.get("postgres_cleanup_unverified") is not True
@@ -262,7 +265,8 @@ def run_watchdog(mode: str, run_token: str) -> int:
                     q1024_watchdog_status="completed",
                     q1024_watchdog_evidence={
                         "cleanup_verified": True,
-                        "phase": "worker_completed",
+                        "phase": "worker_terminal_clean",
+                        "worker_status": entry.get("status"),
                         "worker_exit_observation": (
                             "exact_zombie" if worker_zombie else
                             "pid_reused" if worker_replaced else "absent"),
@@ -383,10 +387,12 @@ def run_watchdog(mode: str, run_token: str) -> int:
                     "completed_at": finished_at,
                 },
                 notes=(
-                    "q1024 whole-invocation watchdog enforced the deadline"
+                    ("q1024 whole-invocation watchdog enforced the deadline"
+                     if now >= work_deadline else
+                     str(entry.get("notes") or "q1024 worker exited"))
                     if cleanup_verified else
-                    "q1024 watchdog cleanup could not be verified within "
-                    "the whole-invocation deadline"),
+                    str(entry.get("notes") or "q1024 worker exited")
+                    + "; watchdog could not verify process/backend cleanup"),
             )
             return 0 if cleanup_verified else 1
     except Exception as exc:

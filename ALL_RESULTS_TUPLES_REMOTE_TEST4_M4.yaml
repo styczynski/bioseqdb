@@ -2,7 +2,7 @@
 schema: bioseq.remote-approved-e2e-result-tuples
 version: 2
 status: approved_remote_partial
-purpose: Host-local approved E2E timings for one sealed AWS CPU machine. The authority embeds its exact EC2, CPU, RAM, root-volume, and no-GPU inventory. Eligibility is the exact sealed 1,296-cell q1024 campaign stable-key set, independent of locally measured rows; the source-local hashes record structural bootstrap provenance only and contribute no result or timing. Linux E2E intervals use CLOCK_MONOTONIC under the existing strong same-kernel nanosecond-rate contract; unavailable Vulkan cells are non-executed dispositions, never zero-time results.
+purpose: 'Host-local approved E2E timings for one sealed AWS CPU machine. The authority embeds its exact EC2, CPU, RAM, root-volume, and no-GPU inventory. Eligibility is the exact sealed 1,296-cell q1024 campaign stable-key set, independent of locally measured rows; the source-local hashes record structural bootstrap provenance only and contribute no result or timing. Linux E2E intervals use CLOCK_MONOTONIC under the existing strong same-kernel nanosecond-rate contract; unavailable Vulkan cells are non-executed dispositions, never zero-time results. Recovery policy authorized 2026-09-21: complete saved raw measurements may be accepted without ephemeral build/run receipts or a sealed append manifest. Recovered rows are explicitly annotated; this does not attest their exact source/binary provenance. Existing checks for five repeats, correctness, observed stages, disabled prefilter, timing intervals and minimap2 match counts remain required. No minimizer bit-parity is required.'
 authority:
   contains_only_approved_rows: true
   external_lookup_required_to_interpret: false
@@ -14,18 +14,18 @@ authority:
   - approved_results
   - hardware_unavailable_cells
   profile: aws_cpu_only_v1
-  sealed_verification_manifest_required_for_append: true
+  sealed_verification_manifest_required_for_append: false
 projection_provenance:
-  approved_result_count: 1
-  approved_results_projection_sha256: 2894240dda1575817999cb87c07762200b6c2ab4fbd7f7db7fe856db3e1a2085
-  approved_run_count: 5
+  approved_result_count: 2
+  approved_results_projection_sha256: a562e05ff083f402effd7ce29beb589a92b3d50f5cba5add7a1e597fc87ca358
+  approved_run_count: 10
   classification: derived_non_authoritative
   eligible_stable_keys_projection_sha256: 5aad579ff70013c20835e561350803653c2cb5e0323cd878ff1e40e8501f9a96
   generator: bioseq-approved-results-projection
   generator_version: 1
   hardware_unavailable_cells_projection_sha256: bcd2f938f405b0ab0d406cbc318b07e89baa48a089849b872dfbeef51aba31cd
   hardware_unavailable_count: 512
-  remaining_eligible_count: 783
+  remaining_eligible_count: 782
   source_local_approved_results_projection_sha256: 04c6af57c226aae465d177f89b7d4499503c7ebe8c216bab2d0d4dfde0a57928
   source_local_authority_sha256: 755ccaaf575dbe1d45999aa711b3db4f144b5aafbf7480ce91e85520dc3b33a6
 campaign_identity:
@@ -17401,3 +17401,40 @@ approved_results:
     p50_a: 92374023188
     p50_b: 88525599825
   comments: Per-repeat process-priority attestation was unavailable; no claim of nice -20 throughout measurement. OS cache state was not controlled.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","minimap2",null,null,null,null]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: minimap2
+  pipeline_mode:
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  observed_algorithms:
+    minimizer:
+    chaining:
+    base_alignment:
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 335741301840
+    p50_b: 331900045780
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.

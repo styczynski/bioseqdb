@@ -63,6 +63,20 @@ target_compile_definitions(
   bioseq_minimap2_e2e_phase_receipt
   PRIVATE BIOSEQ_MINIMAP2_E2E_PHASE_RECEIPT=1)
 
+# bioseq_modules_nopg is an OBJECT library and contains the shared Vulkan
+# shader compiler implementation.  Keep its static-library closure after the
+# object files on the final link line: single-pass ELF linkers (notably LLD)
+# cannot resolve those references when the archives appear only before the
+# object library.  This changes benchmark executable linkage only; the helper
+# still executes the unmodified bundled minimap2 algorithms.
+target_link_libraries(
+  bioseq_minimap2_e2e_phase_receipt
+  PRIVATE
+    Vulkan::Vulkan
+    ${BIOSEQ_GLSLANG_STATIC_LIBS}
+    spirv-cross-msl
+    Vulkan::LayerSettings)
+
 # Fail closed if the shared target helper ever stops preserving the compilation
 # semantics used by bioseq_benchmark for this same committed source inventory.
 foreach(_bioseq_minimap2_e2e_source IN LISTS

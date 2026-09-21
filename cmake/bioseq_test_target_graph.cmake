@@ -30,7 +30,7 @@ set(BIOSEQ_TEST_TARGET_ARGUMENTS
     foonathan_memory
     TBB::tbb
     Vulkan::Vulkan
-    Vulkan::glslang
+    ${BIOSEQ_GLSLANG_STATIC_LIBS}
     spirv-cross-msl
     Vulkan::LayerSettings
     bioseq_pg_support

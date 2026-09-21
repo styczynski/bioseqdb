@@ -457,9 +457,13 @@ function(bioseq_add_codegen)
   if(NOT BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON)
     foreach(_clang_modules_json IN ITEMS
         "${_llvm_library_dir}/c++/libc++.modules.json"
+        "${_llvm_library_dir}/x86_64-unknown-linux-gnu/libc++.modules.json"
+        "${_llvm_library_dir}/aarch64-unknown-linux-gnu/libc++.modules.json"
         "${_llvm_library_dir}/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
         "${_llvm_library_dir}/aarch64-unknown-linux-gnu/c++/libc++.modules.json"
         "${_llvm_prefix}/lib/c++/libc++.modules.json"
+        "${_llvm_prefix}/lib/x86_64-unknown-linux-gnu/libc++.modules.json"
+        "${_llvm_prefix}/lib/aarch64-unknown-linux-gnu/libc++.modules.json"
         "${_llvm_prefix}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
         "${_llvm_prefix}/lib/aarch64-unknown-linux-gnu/c++/libc++.modules.json"
         "${_llvm_prefix}/lib/libc++.modules.json")
@@ -523,6 +527,25 @@ function(bioseq_add_codegen)
     NO_CACHE
     REQUIRED)
 
+  # The official Linux LLVM archives build libclang against libstdc++, even
+  # when the extension consuming the generator is built against libc++.  The
+  # host-only generator must follow libclang's ABI.  Detect the dependency
+  # instead of keying this contract to an architecture or benchmark preset.
+  set(_bioseq_codegen_clang_libstdcxx_abi OFF)
+  if(UNIX AND NOT APPLE)
+    execute_process(
+      COMMAND ldd "${_bioseq_codegen_libclang}"
+      OUTPUT_VARIABLE _bioseq_codegen_libclang_dependencies
+      ERROR_VARIABLE _bioseq_codegen_libclang_dependencies_error
+      RESULT_VARIABLE _bioseq_codegen_libclang_dependencies_status)
+    string(FIND "${_bioseq_codegen_libclang_dependencies}"
+      "libstdc++.so" _bioseq_codegen_libstdcxx_dependency_index)
+    if(_bioseq_codegen_libclang_dependencies_status EQUAL 0
+        AND NOT _bioseq_codegen_libstdcxx_dependency_index EQUAL -1)
+      set(_bioseq_codegen_clang_libstdcxx_abi ON)
+    endif()
+  endif()
+
   set(BIOSEQ_CODEGEN_STDLIB_MODULES_JSON "" CACHE FILEPATH
     "standard-library module metadata used by the isolated generator")
   set(_bioseq_codegen_configured_stdlib_modules
@@ -543,9 +566,9 @@ function(bioseq_add_codegen)
   set(_bioseq_codegen_host_stdlib_modules "")
   set(_bioseq_codegen_use_module_std ON)
   if(_bioseq_codegen_cxx_version_identity MATCHES "clang")
-    if(BIOSEQ_PACKAGE_BUILD)
+    if(BIOSEQ_PACKAGE_BUILD OR _bioseq_codegen_clang_libstdcxx_abi)
       # The official LLVM release archives ship libclang-cpp with the host
-      # libstdc++ ABI. Keep the package-only host generator on that ABI while
+      # libstdc++ ABI. Keep the host generator on that ABI while
       # the extension itself remains Clang/libc++. The generator sources do
       # not import std, so disabling CMake's synthetic standard-library module
       # avoids depending on a distro-specific GCC module inventory.
@@ -741,6 +764,30 @@ function(bioseq_add_codegen)
       "-DCMAKE_CXX_FLAGS_RELEASE:STRING=-O3 -DNDEBUG -fno-omit-frame-pointer")
   endif()
 
+  set(_bioseq_codegen_libclang_abi_cmake_args)
+  if(_bioseq_codegen_clang_libstdcxx_abi AND NOT BIOSEQ_PACKAGE_BUILD)
+    list(APPEND _bioseq_codegen_libclang_abi_cmake_args
+      "-DCMAKE_CXX_FLAGS:STRING=-stdlib=libstdc++ -fno-rtti")
+  endif()
+
+  # A nested Clang generator that consumes libc++.modules.json must compile
+  # both the std module and ordinary translation units against libc++.  Linux
+  # Clang otherwise defaults those ordinary units to libstdc++, producing a
+  # mixed standard-library header graph (and failures such as a missing
+  # <print> or stdlib.h importing names from the wrong namespace).  Derive the
+  # choice from the authenticated module inventory rather than architecture or
+  # a benchmark-specific preset.
+  set(_bioseq_codegen_stdlib_cmake_args)
+  if(NOT BIOSEQ_PACKAGE_BUILD
+      AND BIOSEQ_CODEGEN_STDLIB_MODULES_JSON MATCHES
+        "(^|/)libc\\+\\+\\.modules\\.json$")
+    list(APPEND _bioseq_codegen_stdlib_cmake_args
+      "-DCMAKE_CXX_FLAGS:STRING=-stdlib=libc++"
+      "-DCMAKE_EXE_LINKER_FLAGS:STRING=-stdlib=libc++"
+      "-DCMAKE_SHARED_LINKER_FLAGS:STRING=-stdlib=libc++"
+      "-DCMAKE_MODULE_LINKER_FLAGS:STRING=-stdlib=libc++")
+  endif()
+
   # Reuse the parent dependency graph for the isolated generator. The nested
   # project has its own CMake cache, so package discovery inputs must be passed
   # explicitly even though the artifacts already live in the parent build's
@@ -806,6 +853,8 @@ function(bioseq_add_codegen)
       ${_bioseq_codegen_dependency_cmake_args}
       ${_bioseq_codegen_gcc_cmake_args}
       ${_bioseq_codegen_package_cmake_args}
+      ${_bioseq_codegen_libclang_abi_cmake_args}
+      ${_bioseq_codegen_stdlib_cmake_args}
     BUILD_COMMAND
       "${CMAKE_COMMAND}" --build <BINARY_DIR> --target bioseq_codegen
     INSTALL_COMMAND ""
