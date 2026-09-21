@@ -255,79 +255,100 @@ Algorithm~\ref{alg:storage-flush-stripe} presents pseudocode for that process as
 \label{fig:storage-write-path}
 \end{figure}
 
-\begin{algorithm}[H]
-\caption{Appending rows}
+\begingroup
+\captionsetup{type=algorithm}
+\captionof{algorithm}{Appending rows}
 \label{alg:storage-flush-stripe}
 \small
 \begin{algorithmic}[1]
   \Require columns $C$, group limit $G$ (default $10{,}000$), stripe limit $S$
-    (default $150{,}000$)
-  \State $s\gets\mathrm{NULL}$,\quad $n\gets 0$ \Comment{open stripe and its row count}
-  \State $K\gets \{\mathrm{min}: 0, \mathrm{max}: 0, \mathrm{cnt}: 0\}^{|C| \times \left\lfloor \frac{S}{G} \right\rfloor}$ \Comment{Aggregates for each chunk}
-  \State $P\gets 0^{|C| \times G}$ \Comment{Presence bitmap}
-  \State $B\gets \varepsilon$ \Comment{Serialization buffer for chunks column}
-  \State $\mathrm{chunk}\gets \{\mathrm{P}: 0, \mathrm{V}: 0\}^{|C| \times \left\lfloor \frac{S}{G} \right\rfloor}$ \Comment{Serialized groups for stripes}
+    (default $150{,}000$), comparators $\mathrm{Compare}_c$ (possibly
+    $\mathrm{NULL}$)
+  \State $G_{\max}\gets\lceil S/G\rceil$
+  \State $s\gets\mathrm{NULL}$ \Comment{open stripe, or none}
+  \Statex
+  \Procedure{AllocateNewStripe}{}
+    \State $s.n\gets 0$ \Comment{rows already in this stripe}
+    \State $s.P\gets 0^{|C|\times G}$
+      \Comment{presence bits of the current group}
+    \State $s.B\gets\varepsilon^{|C|}$
+      \Comment{serialized present values of the current group}
+    \State $s.K\gets\{\min:\bot,\max:\bot,\mathit{cnt}:0\}^{|C|\times G_{\max}}$
+      \Comment{skip min, max, and slot count of every column chunk}
+    \State $s.\mathrm{chunk}\gets\{P:\varepsilon,V:\varepsilon\}^{|C|\times G_{\max}}$
+      \Comment{packed streams of every serialized group}
+    \State $s.N\gets 0^{G_{\max}}$
+      \Comment{row count of each serialized group}
+    \State \Return $s$
+  \EndProcedure
+  \Statex
   \Procedure{WriteRow}{$v$}
-    \If{$\mathrm{IsOpen}(s) \land \mathrm{Size}(s \Vert v) > 1\,\mathrm{GB}$}
-      \Comment{open stripe and $v$ would exceed $1\,\mathrm{GB}$}
+    \If{$\mathrm{IsOpen}(s)\land\exists c\in C:\mathrm{Size}(s.B_c\Vert v_c)>1\,\mathrm{GB}$}
       \State \Call{FlushStripe}{$s$}
     \EndIf
     \If{$\neg\mathrm{IsOpen}(s)$}
-      \State $s\gets\mathrm{AllocateNewStripe}()$,\quad $n\gets 0$
+      \State $s\gets\Call{AllocateNewStripe}{}$
     \EndIf
-    \State $g\gets\lfloor n/G\rfloor$,\quad $r\gets n\bmod G$
+    \State $g\gets\lfloor s.n/G\rfloor$,\quad $r\gets s.n\bmod G$
     \ForAll{$c\in C$}
       \If{$\mathrm{IsNull}(v_c)$}
-        \State $P_{c,r}\gets 0$
+        \State $s.P_{c,r}\gets 0$
       \Else
         \If{$\mathrm{Align}(v_c)\ge 256\,\mathrm{MiB}$}
           \State \textbf{error}
         \EndIf
-        \State $P_{c,r}\gets 1$
-        \State $B_c\gets B_c\Vert\mathrm{Serialize}(v_c)$
-        \If{$\mathrm{Compare}_{c}\neq\mathrm{NULL}$} \Comment{Only if there's defined comparator for this column type}
-          \State $K_{c,g}.\min\gets\min_{\mathrm{Compare}_{c}}(K_{c,g}.\min,v_c)$
-          \State $K_{c,g}.\max\gets\max_{\mathrm{Compare}_{c}}(K_{c,g}.\max,v_c)$
+        \State $s.P_{c,r}\gets 1$
+        \State $s.B_c\gets s.B_c\Vert\mathrm{Serialize}(v_c)$
+        \If{$\mathrm{Compare}_c\neq\mathrm{NULL}$}
+          \State $s.K_{c,g}.\min\gets\min_{\mathrm{Compare}_c}(s.K_{c,g}.\min,v_c)$
+          \State $s.K_{c,g}.\max\gets\max_{\mathrm{Compare}_c}(s.K_{c,g}.\max,v_c)$
+            \Comment{$\bot$ is the identity}
         \EndIf
       \EndIf
-      \State $K_{c,g}.\mathit{cnt}\gets K_{c,g}.\mathit{cnt}+1$
+      \State $s.K_{c,g}.\mathit{cnt}\gets s.K_{c,g}.\mathit{cnt}+1$
     \EndFor
     \If{$r=G-1$}
-      \State \Call{SerializeGroup}{$g$, $G$}
+      \State \Call{SerializeGroup}{$s$, $g$, $G$}
     \EndIf
-    \State $n\gets n+1$
-    \If{$n\ge S$}
+    \State $s.n\gets s.n+1$
+    \If{$s.n\ge S$}
       \State \Call{FlushStripe}{$s$}
     \EndIf
   \EndProcedure
   \Statex
-  \Procedure{SerializeGroup}{$g$, $k$}
-    \State $N_g\gets k$
+  \Procedure{SerializeGroup}{$s$, $g$, $k$}
+    \State $s.N_g\gets k$
     \ForAll{$c\in C$}
-      \State $\mathit{chunk}_{c,g}.P\gets\mathrm{PackBits}(P[c][0\ldots k))$
+      \State $s.\mathrm{chunk}_{c,g}.P\gets
+        \mathrm{PackBits}(\langle s.P_{c,r}\rangle_{r=0}^{k-1})$
     \EndFor
     \ForAll{$c\in C$}
-      \State $\mathit{chunk}_{c,g}.V\gets\mathrm{Compress}(B_c)$
+      \State $s.\mathrm{chunk}_{c,g}.V\gets\mathrm{Compress}(s.B_c)$
         \Comment{identity if incompressible}
-      \State $B_c\gets\varepsilon$ \Comment{RAM only}
+      \State $s.B_c\gets\varepsilon$
     \EndFor
   \EndProcedure
   \Statex
   \Procedure{FlushStripe}{$s$}
-    \State $k\gets n\bmod G$
+    \State $k\gets s.n\bmod G$
     \If{$k>0$}
-      \State \Call{SerializeGroup}{$\lfloor n/G\rfloor$, $k$}
+      \State \Call{SerializeGroup}{$s$, $\lfloor s.n/G\rfloor$, $k$}
     \EndIf
-    \State $m\gets\lceil n/G\rceil$
+    \State $m\gets\lceil s.n/G\rceil$
     \ForAll{$c\in C$}
-      \State $\mathrm{Write}(\langle\mathit{chunk}_{c,g}.P\rangle_{g=0}^{m-1})$
-      \State $\mathrm{Write}(\langle\mathit{chunk}_{c,g}.V\rangle_{g=0}^{m-1})$
+      \State $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.P\rangle_{g=0}^{m-1})$
+      \State $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.V\rangle_{g=0}^{m-1})$
     \EndFor
-    \State $\mathrm{Catalog}(s)\gets(N,K,M_\emptyset)$
+    \State \Call{WriteCatalog}{$s$}
     \State $s\gets\mathrm{NULL}$
   \EndProcedure
+  \Statex
+  \Procedure{WriteCatalog}{$s$}
+    \State $\mathrm{Write}(\langle s.N, s.K, 0^{s.n} \rangle)$
+      \Comment{Saves row count for group, aggegate stats and deletion mask}
+  \EndProcedure
 \end{algorithmic}
-\end{algorithm}
+\endgroup
 
 In's important that closing the writer also flushes any leftover stripe, so all in-memory buffers are saved to disk when transaction is committed.
 
@@ -448,32 +469,75 @@ the data and the query workload~\autocite{abadi2006compression}, so I leave it a
 \section{Raw byte storage}
 \label{sec:pg-storage-pages}
 
-After stripe is serialized it needs to be written to disk by flush operation:
+After stripe is serialized and flushed it needs to be written to disk - function $Write$ and $WriteCatalog$ in the pseudocode~\ref{alg:storage-flush-stripe}
+\begin{itemize}
+  \item Physically first written is the presence bitmap, then the value buffer for a column, then each column follow. These are placed in the user relation database pages.
+  \item Catalog (row counts, aggregates and deletion mask) is written separately from the stripe data and it's placed in usual heap rows i.e BioseqDB introduces separate relations for storing chunks information.
+\end{itemize}
 
+Catalog is represented by four relations inside the BioseqDB:
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-storage-sql,caption={Metadata catalogs for flushed stripes.},label={lst:storage-metadata-catalogs}]
+CREATE TABLE bioseq_internal.stripe (
+  storage_id bigint,
+  stripe_num bigint,
+  file_offset bigint,
+  data_length bigint,
+  column_count integer,
+  chunk_row_count integer,
+  row_count bigint,
+  chunk_group_count integer,
+  first_row_number bigint
+);
 
-The physical order differs from the logical grid. Within a stripe, one
-column's presence buffers are written first, followed by that column's value
-buffers. The next column follows. Stored offsets locate each buffer without
-requiring the reader to decode earlier columns. A column added after a stripe
-was written can be supplied from its constant PostgreSQL default or as NULL.
+CREATE TABLE bioseq_internal.chunk_group (
+  storage_id bigint,
+  stripe_num bigint,
+  chunk_group_num integer,
+  row_count bigint,
+  deleted_rows bigint
+);
 
-A compressed buffer need not fit in one database page. BioSeqDB gives column
-writers a continuous logical byte space and maps it onto page payloads.
-Block 0 contains the metapage, block 1 is reserved, and stream data begin in
-block 2. Each data page keeps its PostgreSQL page header.
+CREATE TABLE bioseq_internal.chunk (
+  storage_id bigint,
+  stripe_num bigint,
+  attr_num integer,
+  chunk_group_num integer,
+  minimum_value bytea,
+  maximum_value bytea,
+  value_stream_offset bigint,
+  value_stream_length bigint,
+  exists_stream_offset bigint,
+  exists_stream_length bigint,
+  value_compression_type integer,
+  value_compression_level integer,
+  value_decompressed_length bigint,
+  value_count bigint
+);
 
-Let $\mathrm{BLCKSZ}$ be the PostgreSQL page size in bytes, $H$ the
-page-header size, and $P=\mathrm{BLCKSZ}-H$ the remaining payload capacity.
-Measure $x\geq0$ from the first stream byte in block 2.
-Then
+CREATE TABLE bioseq_internal.row_mask (
+  id bigint,
+  storage_id bigint,
+  stripe_id bigint,
+  chunk_id integer,
+  start_row_number bigint,
+  end_row_number bigint,
+  deleted_rows integer,
+  mask bytea
+);
+\end{lstlisting}
+\end{minipage}
+
+When writing stripe data I need to take care about page boundaries.
+Let $\mathrm{BLCKSZ}$ be the PostgreSQL page size in bytes (this is compile-time constant provided by Postgres), $H$ the
+page-header size (technically $\mathrm{sizeof(PageHeaderData)}$)~\autocite{postgresql17_storage_page_layout}, and $P=\mathrm{BLCKSZ}-H$ the remaining page capacity.
+If $x\geq0$ is the total offset of the $x$-th byte, then page coordinates are defined as:
 \[
   \operatorname{block}(x)=2+\left\lfloor x/P\right\rfloor,
   \qquad
   \operatorname{position}(x)=H+(x\bmod P).
 \]
-This choice of origin makes the stream's first byte $x=0$. Page headers do
-not consume positions in the logical byte stream. Figure~\ref{fig:storage-pages}
-shows a request that crosses a page boundary.
+BioseqDB will write multiple pages for each stripe, so I need to take additional care about buffers going through multiple page boundaries as seen on figure~\ref{fig:storage-pages}.
 
 \begin{figure}[htbp]
 \centering
@@ -485,7 +549,7 @@ shows a request that crosses a page boundary.
   \draw[storageBlue,fill=storageBlue!20] (5.75,2.5) rectangle (9.25,3.2);
   \foreach \x/\v in {1.75/0,5.75/8,6.75/10,9.25/15,11.75/20}
     \node[above=2pt] at (\x,3.2) {$\v$};
-  \node at (7.5,2.85) {request $[8,15)$};
+  \node at (7.5,2.85) {next buffer fragment $[8,15)$ coming from $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.P\rangle_{g=0}^{m-1}$};
   \node[anchor=east] at (1.45,1.15) {stored pages};
   \draw[fill=black!20,draw=black!60] (1.75,.8) rectangle (2.55,1.5);
   \draw[fill=black!5,draw=black!60] (2.55,.8) rectangle (6.55,1.5);
@@ -504,58 +568,18 @@ shows a request that crosses a page boundary.
   \node[anchor=west,text=black!65] at (1.75,-.3)
     {Copy two bytes, skip the next page header, then copy five bytes.};
 \end{tikzpicture}
-\caption{Logical offsets hide page boundaries. The example uses deliberately
-small pages to make the split visible. Actual page sizes and header sizes
-come from the PostgreSQL build.}
+\caption{I use logical offsets $\operatorname{block}(x)$ and $\operatorname{position}(x)$ to hide page boundaries. Diagram shows that we want to write some fragment
+of in-memory buffer $[8,15)$ to the disk, but it needs to be split across multiple pages. In reality the dimensions are larger than just 20 bytes, but it illustrates the idea.}
 \label{fig:storage-pages}
 \end{figure}
 
-This mapping follows the Citus column-store design. The public source gives
-the corresponding page and logical-offset operations.\coderef
+The original idea comes from Citus page writer that it's avaialble in their public repository\coderef
 {citusstorage/src/backend/columnar/columnar_storage.c}
 {Citus columnar page mapping}{columnar_storage.c}{118}
-PostgreSQL documents the common page header separately from the layout an
-access method puts after it~\autocite{postgresql17_storage_page_layout}.
 
-\subsection{Reserve space, write bytes, publish metadata}
-
-Concurrent writers must not allocate the same row numbers or byte interval.
-The metapage records the next stripe number, row number, and free byte offset.
-The write path separates allocation from visibility. It has three
-responsibilities:
-
+To allow concurrent access (queries during inserts) I need to note that the writer does the following things:
 \begin{itemize}
-  \item \textbf{Reserve.} Under the relation extension lock, reserve
-    non-overlapping identifiers and byte space.
-  \item \textbf{Write.} Copy the stream bytes into relation pages. Page
-    changes use PostgreSQL buffer locks and generic write-ahead logging
-    (WAL).
-  \item \textbf{Record completed data.} Store rows, offsets, lengths, and
-    chunk metadata in the catalogs. The bytes and catalog changes belong
-    to the same transaction. Other transactions can read a completed stripe
-    when its committed metadata is visible under their snapshots.
+  \item \textbf{Reservation:} Identifiers for chunks and groups is done under the relation extension lock.
+  \item \textbf{Write:} Writes to pages are done using PostgreSQL buffer locks and generic write-ahead logging (WAL)~\autocite{postgresql17_generic_wal}.
+  \item \textbf{Record completed data:} The logic uses Postgres' Snapshots so data will be visible only after the transaction is committed.
 \end{itemize}
-
-A reserved byte range alone is not a readable stripe. If a write does not
-complete, the range does not authorize readers to interpret unfinished
-bytes as table rows. Generic WAL supplies page-change recovery for logged
-relations~\autocite{postgresql17_generic_wal}; the storage code still has to
-publish the right catalog state and release its locks correctly.
-
-\subsection{Why use relations instead of private payload files?}
-
-The primary column and fragment data use PostgreSQL relations. A read obtains
-a shared database buffer. A \textbf{page pin} keeps that buffer assigned to
-the page while it is in use; a buffer lock protects its contents during the
-copy. After copying the requested bytes, the reader releases the pin and
-lock. The copied column buffer belongs to the reader. A sequence view
-therefore does not keep every database page it has touched pinned for the
-rest of the query.
-
-This choice reuses PostgreSQL's shared buffer manager, relation identity,
-locking, and WAL path. A private-file implementation would need separate
-rules connecting its writes, deletion, and recovery to database transactions.
-These benefits do not establish every transaction property of a custom
-access method automatically. They identify the machinery used for these
-particular bytes. Derived index images can use a different read mechanism,
-described in the next chapter.

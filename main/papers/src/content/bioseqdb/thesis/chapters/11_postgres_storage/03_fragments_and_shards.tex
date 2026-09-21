@@ -1,10 +1,30 @@
-\section{A locator addresses packed sequence fragments}
+\section{Locator implementation}
 \label{sec:pg-storage-sequence-indirection}
 
-When sequence symbols are stored outside the parent row, the row keeps a
-56-byte sequence value: a 16-byte sequence header followed by a 40-byte locator.
-The header retains the alphabet and packed storage width. The locator
-supplies the information needed to find and validate the source:
+Sequence locator are implemented as 40-byte struct in C++. The struct must also include the Postgres header so it's effectively 56 bytes in total.
+The Postgres header stores alphabet code and base storage unit as \texttt{TYPMOD} field (custom field for storing type modifier).
+I don't provide small-sequence optimisation in BioseqDB, because that would complicate the implementation (instead of storing locator for small sequences we can potentially 
+store sequence directly in the user table. This would require storing it's padding so potential maximum sequence length that could be stored inline would be $(40B - 1B)*8/2 = 156$ symbols for DNA4).
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-cpp26,numbers=none,
+  basicstyle=\footnotesize\ttfamily,
+  caption={The 40-byte locator stored after the 16-byte sequence header.},
+  label={lst:storage-sequence-locator}]
+struct sequence_locator {
+  std::uint8_t  payload_version;   // currently 3
+  std::uint8_t  bucket_index;
+  std::uint16_t reserved_16;
+  std::uint32_t shard_index;
+  std::uint32_t fragment_count;
+  std::uint32_t reserved_32;
+  std::uint64_t logical_length;
+  std::uint64_t first_fragment_row;
+  std::uint64_t source_epoch;
+};
+\end{lstlisting}
+\end{minipage}
+
 
 \begin{itemize}
   \item the length bucket and shard that hold the sequence,
