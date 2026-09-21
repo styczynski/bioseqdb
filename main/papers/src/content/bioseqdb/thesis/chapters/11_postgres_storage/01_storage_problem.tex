@@ -28,6 +28,7 @@ That's why I decided to implement custom TOAST-like mechanism in BioseqDB and us
   \item \textbf{User table} holds all the data in columnar format, where the sequence column itself is replaced with small locator object that points to sequence fragment.
   \item \textbf{Sequence fragments} are stored in multiple sharded tables that are normally invisible to the user. All of these tables also use columnar storage, so short sequences are treated the same way as metadata in columnar context - they will be merged into one batch. I call these batches of rows "strips" in the code.
   \item \textbf{Persistent indexes} are separate entities stored as tables that are normally not visible to the user as well. They are responsible for providing pre-computed objects for sequences. There's small abstraction layer in BioseqDB which allows to extend it by adding different types of indexes that provide different information.
+\label{lst:types-of-storage-entities-in-bioseqdb}
 \end{itemize}
 
 \warn{Adapted from Citus and Hydra Columnar}{

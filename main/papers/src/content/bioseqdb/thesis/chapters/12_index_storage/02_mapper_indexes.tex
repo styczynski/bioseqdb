@@ -1,15 +1,155 @@
 \section{What existing sequence indexes store}
 \label{sec:index-minimap2-comparison}
 
-\subsection{Minimap2: buckets, singletons, and position lists}
+\subsection{Indexing: minimap2}
 
-Minimap2 selects minimizers from the reference and groups their occurrences
-by hash\autocite{minimap2_paper,minimap2_software}. Its index construction
-first uses the lowest $b$ hash bits to choose one of $2^b$ buckets. Within
-each bucket, sorting places equal hashes together. A bucket-local hash table
-then records where their positions can be found. The construction issue and
-the accompanying format explanation give a useful view of this
-layout\autocite{minimap2_issue_820,minimap2_mmi_gist}.
+After computing minimizers they need to be grouped by their hash, minimap2 choose to use the lowest $b$ hash bits to choose one of $2^b$ buckets~\autocite{minimap2_paper,minimap2_software}.
+Each bucket is then sorted, so equal hashes are grouped together.
+
+The sorted bucket is not stored as a list of (hash, position) pairs for every
+occurrence. After sorting, minimap2 builds a bucket-local hash table whose
+keys are the remaining hash bits. The on-disk index is a \path{.mmi} file.
+Public notes describe that layout~\autocite{minimap2_issue_820,minimap2_mmi_gist}.
+The writer \texttt{mm\_idx\_dump} and the loader \texttt{mm\_idx\_load} are the
+format used here.
+
+One file stores one index part. It is a concatenation of the following
+blocks, shown with their widths in Figure~\ref{fig:index-mmi-layout}.
+
+\begin{itemize}
+  \item \textbf{Magic, 4 bytes.} The bytes are \texttt{MMI} followed by
+    \texttt{0x02} (\texttt{MM\_IDX\_MAGIC}).
+  \item \textbf{Five 32-bit integers.} These are the window $w$, the $k$-mer
+    length $k$, the bucket-bit count $b$, the number of sequences
+    $n_{\mathrm{seq}}$ in this part, and a flag word.
+  \item \textbf{Sequence table.} For each of the $n_{\mathrm{seq}}$ sequences
+    the file stores a 1-byte name length $\ell$, $\ell$ ASCII name bytes, and
+    a 32-bit sequence length. The concatenated-base offset is not stored.
+    The loader rebuilds it as a running sum. The in-memory \texttt{is\_alt}
+    field is set to zero on load.
+  \item \textbf{Buckets.} There are $2^{b}$ buckets in index order. Each
+    bucket stores a 32-bit count $n$, then $n$ 64-bit occurrence words, then
+    a 32-bit count $s$, then $s$ pairs of a 64-bit key and a 64-bit value.
+    An empty bucket still writes $n=0$ and $s=0$.
+  \item \textbf{Packed bases, optional.} If the \texttt{MM\_I\_NO\_SEQ} flag
+    is unset, four-bit packed reference bases follow the buckets. The payload
+    is $\lceil L/8\rceil$ 32-bit words, where $L$ is the sum of sequence
+    lengths. That is eight bases per 32-bit word.
+\end{itemize}
+
+The default construction uses $b=14$. The file stores $b$, and
+\texttt{mm\_idx\_init} reduces $b$ when $b>2k$. It is not a fixed format
+constant.
+
+The $s$ hash-table records are (key, value) pairs. They are not one pair per
+occurrence. The key holds $(\mathit{hash}\gg b)$ shifted up by one bit, so
+the lowest bit can mark a singleton. The value is then either one occurrence
+word, or an offset and a count into the bucket's position array $p$.
+An occurrence word packs the sequence identifier, the zero-based last-base
+position, and the strand.
+
+The loader allocates new bucket arrays and inserts every saved key and value
+into a new in-memory hash table. It does not keep a memory-mapped table on
+disk. A large reference can be split across several parts. One
+\texttt{mm\_idx\_load} call reconstructs one part.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\footnotesize,
+  bitfill/.style={draw=black!60,line width=0.4pt},
+  lab/.style={align=center,font=\scriptsize,inner sep=0pt}
+]
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0,9.80)
+    {(a) Byte order of one \texttt{.mmi} part};
+  \fill[indexBlue!14] (0,8.80) rectangle (1.70,9.55);
+  \draw[black!55] (0,8.80) rectangle (1.70,9.55);
+  \node[lab] at (0.85,9.175) {magic\\4\,B};
+  \fill[indexBlue!14] (1.70,8.80) rectangle (5.20,9.55);
+  \draw[black!55] (1.70,8.80) rectangle (5.20,9.55);
+  \node[lab] at (3.45,9.175) {$w$, $k$, $b$, $n_{\mathrm{seq}}$, flag\\$5\times 4$\,B};
+  \fill[indexOrange!16] (5.20,8.80) rectangle (7.80,9.55);
+  \draw[black!55] (5.20,8.80) rectangle (7.80,9.55);
+  \node[lab] at (6.50,9.175) {sequence table\\$n_{\mathrm{seq}}$ records};
+  \fill[indexGreen!16] (7.80,8.80) rectangle (10.90,9.55);
+  \draw[black!55] (7.80,8.80) rectangle (10.90,9.55);
+  \node[lab] at (9.35,9.175) {buckets\\$2^{b}$ in order};
+  \fill[black!8] (10.90,8.80) rectangle (12.80,9.55);
+  \draw[black!55] (10.90,8.80) rectangle (12.80,9.55);
+  \node[lab] at (11.85,9.175) {packed $S$\\if stored};
+
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0,7.95)
+    {(b) One sequence record};
+  \fill[indexOrange!16] (0,6.95) rectangle (2.50,7.70);
+  \draw[black!55] (0,6.95) rectangle (2.50,7.70);
+  \node[lab] at (1.25,7.325) {name length $\ell$\\1\,B};
+  \fill[indexOrange!16] (2.50,6.95) rectangle (9.70,7.70);
+  \draw[black!55] (2.50,6.95) rectangle (9.70,7.70);
+  \node[lab] at (6.10,7.325) {name (ASCII)\\$\ell$\,B};
+  \fill[indexOrange!16] (9.70,6.95) rectangle (12.80,7.70);
+  \draw[black!55] (9.70,6.95) rectangle (12.80,7.70);
+  \node[lab] at (11.25,7.325) {seq.\ length\\4\,B};
+
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0,6.10)
+    {(c) One bucket};
+  \fill[indexGreen!16] (0,5.10) rectangle (1.80,5.85);
+  \draw[black!55] (0,5.10) rectangle (1.80,5.85);
+  \node[lab] at (0.90,5.475) {$n$\\4\,B};
+  \fill[indexOrange!16] (1.80,5.10) rectangle (5.50,5.85);
+  \draw[black!55] (1.80,5.10) rectangle (5.50,5.85);
+  \node[lab] at (3.65,5.475) {position array $p$\\$n\times 8$\,B};
+  \fill[indexGreen!16] (5.50,5.10) rectangle (7.30,5.85);
+  \draw[black!55] (5.50,5.10) rectangle (7.30,5.85);
+  \node[lab] at (6.40,5.475) {$s$\\4\,B};
+  \fill[indexBlue!14] (7.30,5.10) rectangle (12.80,5.85);
+  \draw[black!55] (7.30,5.10) rectangle (12.80,5.85);
+  \node[lab] at (10.05,5.475) {$s$ key/value pairs\\$s\times(8{+}8)$\,B};
+
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0,4.25)
+    {(d) 64-bit words, high bits on the left ($b{=}14$)};
+
+  \node[anchor=south west,font=\scriptsize] at (0,3.85) {Hash-table key};
+  \fill[black!10] (0,3.05) rectangle (4.20,3.65);
+  \draw[bitfill] (0,3.05) rectangle (4.20,3.65);
+  \node[lab] at (2.10,3.35) {unused, 21 bits};
+  \fill[indexBlue!18] (4.20,3.05) rectangle (12.60,3.65);
+  \draw[indexBlue] (4.20,3.05) rectangle (12.60,3.65);
+  \node[lab] at (8.40,3.35) {remaining hash $(\mathit{hash}\gg b)$, 42 bits};
+  \fill[indexGreen!35] (12.60,3.05) rectangle (12.80,3.65);
+  \draw[indexGreen,very thick] (12.60,3.05) rectangle (12.80,3.65);
+  \node[font=\scriptsize,text=indexGreen!80!black,anchor=west]
+    at (12.95,3.35) {singleton};
+
+  \node[anchor=south west,font=\scriptsize] at (0,2.50)
+    {Occurrence word (singleton value or $p[i]$)};
+  \fill[indexBlue!18] (0,1.70) rectangle (6.40,2.30);
+  \draw[indexBlue] (0,1.70) rectangle (6.40,2.30);
+  \node[lab] at (3.20,2.00) {sequence id, 32 bits};
+  \fill[indexOrange!20] (6.40,1.70) rectangle (12.60,2.30);
+  \draw[indexOrange] (6.40,1.70) rectangle (12.60,2.30);
+  \node[lab] at (9.50,2.00) {last-base position, 31 bits};
+  \fill[indexGreen!35] (12.60,1.70) rectangle (12.80,2.30);
+  \draw[indexGreen,very thick] (12.60,1.70) rectangle (12.80,2.30);
+  \node[font=\scriptsize,text=indexGreen!80!black,anchor=west]
+    at (12.95,2.00) {strand};
+
+  \node[anchor=south west,font=\scriptsize] at (0,1.15)
+    {Hash-table value for a repeated key};
+  \fill[indexOrange!20] (0,0.35) rectangle (6.40,0.95);
+  \draw[indexOrange] (0,0.35) rectangle (6.40,0.95);
+  \node[lab] at (3.20,0.65) {offset into $p$, 32 bits};
+  \fill[indexBlue!18] (6.40,0.35) rectangle (12.80,0.95);
+  \draw[indexBlue] (6.40,0.35) rectangle (12.80,0.95);
+  \node[lab] at (9.60,0.65) {count, 32 bits};
+\end{tikzpicture}
+\caption{Stored widths in one minimap2 \texttt{.mmi} part. Panel (a) is the
+file concatenation. Panels (b) and (c) expand one sequence record and one
+bucket. Panel (d) shows the 64-bit encodings for $b=14$. The two 1-bit
+fields are drawn at true width, with their names to the right. The public
+parser notes are useful, but this figure follows \texttt{mm\_idx\_dump} and
+\texttt{mm\_idx\_load}.}
+\label{fig:index-mmi-layout}
+\end{figure}
 
 There are two cases:
 \begin{itemize}
@@ -21,7 +161,8 @@ There are two cases:
 Each position record includes the reference sequence identifier, position,
 and strand. A marker bit in the stored key distinguishes the two cases.
 Figure~\ref{fig:index-mmi-construction} uses small integer hashes to show the
-partition and lookup; it omits the marker's bit encoding. Its positions are
+partition and lookup. It omits the marker's bit encoding, which is drawn in
+Figure~\ref{fig:index-mmi-layout}. Its positions are
 zero-based last-symbol coordinates.
 
 \begin{figure}[htbp]
