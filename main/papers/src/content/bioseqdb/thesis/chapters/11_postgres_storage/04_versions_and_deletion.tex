@@ -1,30 +1,18 @@
-\section{Keep old readers stable when a row changes}
+\section{MVCC and deletion for sequence fragments}
 \label{sec:pg-storage-versions}
 
-A lazy reader may fetch symbols long after it first receives a parent row.
-If another transaction changes the sequence meanwhile, that later fetch
-must still return the version belonging to the reader's database snapshot.
-PostgreSQL's multiversion concurrency control (MVCC) lets snapshots select
-different committed row versions~\autocite{postgresql17_mvcc}. BioSeqDB connects
-its source epochs and deletion masks to that visibility decision.
+I discussed MVCC support when talking about Postgres Snapshots in chapter about BioseqDB custom scans~\ref{sec:scan-row-stability}.
+In custom scan case support is rather simple and provided by the Postgres engine itself. It only required me to correctly use it.
+Storing fragments is entirely separate problem to visibility in columnar storage, because multiple queries can operate on locators, while some other process can 
+modify sequence data in the same time. 
 
-\subsection{Deletion changes visibility before it changes storage}
-
-Compressed column streams and stored sequence fragments are not edited
-in place to remove one row. A \textbf{deletion mask} records which internal
-row numbers are deleted. A mask bit is separate from a column's presence bit:
-the first removes a row from a scan, while the second describes a NULL value
-in a row that exists.
-
-For a parent row with sequence data, deletion performs two related changes:
-
+Deleting sequence require doing two operations:
 \begin{itemize}
-  \item It invalidates the source epoch for the old row version in the
-    source catalog.
-  \item It marks that internal row number as deleted in the row-mask
-    metadata.
+  \item Deleting row for fragment, which under the hood will mark the row as deleted in the row-mask metadata. 
+  \item As fragment is separate abstraction layer than columnar storage, I also store versions of rows in locators, so deletion just needs to invalidate that version (epoch)
 \end{itemize}
 
+This similarily to 
 Both catalog changes follow the transaction's visibility. They do not
 overwrite the old fragment bytes. An older registered snapshot can still
 see the earlier source catalog entry and the earlier deletion mask.

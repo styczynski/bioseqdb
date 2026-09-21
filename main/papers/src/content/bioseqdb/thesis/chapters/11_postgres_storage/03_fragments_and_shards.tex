@@ -6,7 +6,7 @@ The Postgres header stores alphabet code and base storage unit as \texttt{TYPMOD
 I don't provide small-sequence optimisation in BioseqDB, because that would complicate the implementation (instead of storing locator for small sequences we can potentially 
 store sequence directly in the user table. This would require storing it's padding so potential maximum sequence length that could be stored inline would be $(40B - 1B)*8/2 = 156$ symbols for DNA4).
 
-\noindent\begin{minipage}{\linewidth}
+\begin{minipage}{\linewidth}
 \begin{lstlisting}[style=bioseq-cpp26,numbers=none,
   basicstyle=\footnotesize\ttfamily,
   caption={The 40-byte locator stored after the 16-byte sequence header.},
@@ -39,6 +39,7 @@ struct sequence_locator {
 
 Each sequence as mentioned in section desribing sequence interfaces~\ref{sec:compact-sequence-range} has it's alphabet type and base storage unit.
 Base store unit is configurable from SQL. User can declare any power of 2 that is width of supported machine integer:
+
 \begin{minipage}{\linewidth}
 \begin{lstlisting}[style=bioseq-search-sql,caption={Examples of different base storage units},label={lst:sql-storage-widths}]
 SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 64);
@@ -60,6 +61,7 @@ Fragment abstraction is a separate layer above columnar storage.
 Shards for fragments are internally held as \texttt{CREATE TABLE ... (seq bioseq.seq(...)) USING bioseq}, so each fragment is one TAM row in that single sequence column.
 
 \warn{Storage considerations}{
+  \label{warn:storage-considerations}
   Fragments always storing 1024 storage units which works well for long sequences, however if the sequence is short then only small number of storage units will be occupied, while the rest is filled with zeros.
   Compression (default is pglz, but zstd is avialable as well and others for manual building) will take care of this problem and shrink the fragment.
   However it still has measureable effects on processing in the pipeline as BioseqDB will waste space in memory for very short sequences.
@@ -164,20 +166,34 @@ bound is a result of internal Postgres $32$-bit page index.
 
 Without compression, one fragment table can therefore hold about $43{,}680$
 human-genome sequences before it runs out of pages. Practically compression rates for human genomes were already measured~\cite{kryukov_comparison_of_fasta_hg_compression}
-and zstd is capable of compressing human genome to effectively $790MB$ 
+and zstd is capable of compressing a human genome to effectively $790$ MB ($7.9\times 10^{8}$ bytes).
+With that size, each genome occupies $96{,}719$ pages, so the same limit allows $44{,}406$ genomes in one table.
 
-A \textbf{length bucket} groups sequences by their logical number of
-symbols. A \textbf{shard} is an internal fragment relation within one bucket.
-Both belong to a particular sequence column. Length buckets are local
-storage groups, not partitions sent to different database servers.
-For known-length input, a long reference sequence does not fill the active
-shard used for short reads.
+\info{Table limits}{
+  I present this calculation to present that hitting the table limit isn't very improbable. There exist datasets bigger than this limit.
+  To prvent users from hitting limit and requiring them to manually spli tables, I decided to provide internal sharding.
+}
 
-The current layout has 35 buckets. The first covers lengths through 256,
-the next through 512, and the next through 1,024. The doubling ranges
-continue through $2^{41}$. The final bucket covers larger lengths.
-Relations are created when needed. A table does not eagerly create every
-possible bucket and shard.
+The internal sharding allows fragments to spill over into multiple tables. If the underlying table achieves $1TB$ limit (which is lower than theoretical $32$ Postgres limit), fragements are stored in newly created columnar relations.
+The sharding is two-level:
+\begin{itemize}
+  \item length bucket: groups sequences by their logical number of symbols - precisely $max(0, min(\left\floor log_2(|s|)\right\rfloor - 8, 34))$ is the bucket index.
+  \item shard: inside one length bucket BioseqDB can create multiple tables when existing tables reach $1TB$ limit (potentially to store extremally large datasets)
+\end{itemize}
+
+The current layout has 35 buckets. The first covers lengths $[0, 2^8)$ and each next bucket covers $[2^i, 2^{i+1})$ for $i=8..40$.
+The largest bucket is designated to store sequences longer than $2^{41}$ symbols.
+
+\warn{Sharding limitations}{
+  It's very important to note that current during stream access policy~\ref{fig:sequence-scan-lifecycle} the sequence size is not known until its end is reached, thus my
+  code in BioseqDB decides to store the sequence in the largest bucket (34) even when the sequence is short.
+  This code path is utilised by IO submodule that loads sequences from FASTA file.
+  This means that each sequence loaded from FASTA currently will be stored in the largest bucket.
+  I plan to resolve this problem in the future - solution could be adding ability to IO submodule to search for first sequence end and assume all sequences are similar sizes. Alternatively I could write one sequence and then adjust the bucket after size is known.
+  Both of these solutions however add additional overhead and complexity to the FASTA loader module.
+  Additionally length-based sharding can allow better utilisation of fragments memory (so fragments are smaller even without compression~\ref{warn:storage-considerations} 
+  and they require fewer bytes when allocated in RAM)
+}
 
 \begin{figure}[htbp]
 \centering
@@ -203,39 +219,13 @@ possible bucket and shard.
   \node[anchor=west,text=storageBlue] at (.4,.22)
     {Blue: final length known before writing};
   \node[anchor=west,text=storageOrange] at (.4,-.4)
-    {Orange: streaming input; final length was unknown at placement};
+    {Orange: streaming input - final length was unknown};
   \node[anchor=west,align=left] at (.4,-1.25)
     {Middle buckets are omitted. Every bucket can acquire more shards.\\
      All fragments of one sequence stay together in one shard.};
 \end{tikzpicture}
-\caption{Length-based placement and its streaming exception. Known-length
-inputs choose their length range. Streaming inputs currently use bucket 34,
-even when the completed sequence is short.}
+\caption{Length-based buckets are choosen based on the sequence length log 2, however sequences coming from FASTA/FASTQ have no known length and are streamed,
+thus internal code always store them in the largest bucket (34). There are multiple tables (called shards) per one bucket depending if we reach $1TB$ limit.}
 \label{fig:storage-length-buckets}
 \end{figure}
 
-Known-length insertion can choose a shard before writing:
-\begin{enumerate}
-  \item Choose the length bucket and calculate the space for its full
-    fragment rows, including padding and row headers.
-  \item Check the active shard's recorded and pending use against its
-    configured size limit.
-  \item If the sequence fits but the active shard lacks space, open a
-    new shard. If the sequence alone exceeds the limit, reject it.
-  \item Reserve consecutive fragment rows in the selected shard, write
-    them, and retain their first row number in the parent locator.
-\end{enumerate}
-
-The default configured shard size is 1~TiB. This is an allocation limit based
-on fragment-row sizes, not a promise about compressed disk size. Streaming
-input currently has a narrower check: it verifies the growing sequence's
-size, but does not first reserve space for its unknown total size in the
-active shard. It also remains in the highest bucket after the final length
-becomes known. Thus the limit is not a strict total-size guarantee for a
-shard receiving streaming inputs.
-
-Transaction-scoped advisory locks coordinate allocation within a parent
-column and bucket, and writes within a selected shard. The compact lock key
-only coordinates writers. Locator validation uses the complete registered
-identity, so a lock-key collision can cause extra waiting without making
-unrelated sequence addresses interchangeable.
