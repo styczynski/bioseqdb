@@ -97,6 +97,7 @@ Additionally I keep track of query dependencies (all relations) and if the relat
 This means that insert during consumer's wait time will cause the consumer to execute query by themselves (although this require more testing to confirm correctness)
 
 \subsection{Reusing fragments of queries}
+\label{sec:seq-results-cache}
 
 Suppose that table is kept unchanged, but user slightly changes some metadata condition (for example instead of aligning all sequences with dates between some range, we extend the range to include few more dates).
 For indentiy comparison I store the analyzed query plan as well so we can say what filter conditions were used for that cache entry. 

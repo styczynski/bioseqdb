@@ -1,62 +1,16 @@
-\section{Load fragments when a consumer needs them}
-\label{sec:pg-storage-reading}
-
-Reading a parent table and reading sequence symbols are separate steps:
-
-\begin{enumerate}
-  \item Read visible stripe and chunk metadata under the scan snapshot.
-  \item Select the required columns and reject chunk groups contradicted
-    by supported scalar bounds.
-  \item Read the selected presence and stored value buffers, decode a
-    group, and apply row masks and remaining conditions.
-  \item Bind the surviving row's locator to its source, validating the
-    source identity, epoch, and fragment geometry under the scan snapshot.
-  \item When symbols are requested, fetch the fragment rows covering
-    that interval and check their packed representation.
-\end{enumerate}
-
-Chernishev et al. study \emph{late materialization}, which uses row
-positions to postpone tuple reconstruction~\autocite{Chernishev2022ACS}.
-In BioSeqDB's lazy read path, a tuple carries a sequence locator, and
-fragments are fetched when an operation needs their symbols. Sequence
-contents can therefore remain unread after PostgreSQL has formed a tuple
-containing the locator.
-
-The column reader loads stored buffers for all selected groups of a stripe
-before decoding groups in turn. Thus avoiding a whole-sequence allocation
-does not mean that the complete scan retains only one compressed chunk.
-Likewise, a fragment request can cause its containing column chunk to be
-read and decoded. The logical request and the physical I/O unit differ.
-
-The table reader can return ordinary tuple slots or column batches containing
-projected values, NULL masks, a mask of surviving rows, and internal row
-numbers. Supported scalar conditions can update a column batch's mask.
-Surviving rows can then be extracted into ordinary tuple slots. Alignment
-separately collects its input rows into the batches described in
-Section~\ref{sec:customscan-batch-state-machine}. These are different work
-units. Paths that pass source locators through or evaluate sequence
-expressions retain scalar fetch where the vector conditions are disabled.
-Batching itself does not imply a hardware SIMD instruction for every
-expression.
-
-How a scanner copies a fragment into its own slots, how long those slots
-live, and how that copy sits next to the column chunk cache is described
-in Section~\ref{sec:lazy-sequence-facade}.
-
-\subsection{Decoded column chunks have a different cache}
+\subsection{BioseqDB all cache layers}
 \label{sec:pg-storage-caches}
 
-The optional column decompression cache stores decoded compressed chunks
-inside one PostgreSQL backend. Its key contains relation, stripe, chunk
-group, and column identifiers. It is disabled by default; the configured
-capacity when enabled defaults to 200~MiB.
+As presented in previous figures as "chunk cache"~\ref{fig:sequence-scan-lifecycle}~\ref{lst:sequence-scan-lifecycle-steps} and as "column cache"~\ref{fig:execcustomscan-dispatch}, there's 
+cache for column decompression.
 
-The cache counts reads when selecting entries to remove. It protects one
-current chunk group per relation from removal. A cache hit returns a borrowed
-buffer, which must not outlive its cache entry. Uncompressed chunks do not
-need this decompression cache. Reuse can save repeated decoding during a scan
-or rescan before scan cleanup clears the cache. It does not share a decoded
-buffer between sessions.
+The cache is disabled by default, but can be enabled by setting \path{bioseq.column_cache.enabled} to \path{true}.
+It stores decoded compressed chunks inside one PostgreSQL backend process. Its key contains relation, stripe, chunk
+group, and column identifiers (the configured
+capacity when enabled defaults to 200~MiB)
+
+The cache can return borrowed pointer to a decompression buffer for a chunk, which allows to prevent additional chunk loads wasting time on decompression multiple times.
+As I discussed all methods of caching within BisoeqDB already, I present table with comparison of all cache layers:
 
 \begin{table}[htbp]
 \centering
@@ -65,57 +19,12 @@ buffer between sessions.
 \label{tab:storage-cache-scopes}
 \begin{tabularx}{\linewidth}{@{}p{.23\linewidth}XX@{}}
 \toprule
-\textbf{Object} & \textbf{Retained data} & \textbf{Scope}\\
+\textbf{Object} & \textbf{Retained data} & \textbf{Scope} \\
 \midrule
-PostgreSQL buffer & Relation page bytes & Shared database buffer manager;
-short pins protect each page operation\\
-Fragment slot & Copy of one packed fragment & Sequence scanner and its
-read-session owner\\
-Column cache & Decoded column value buffer & One backend, subject to its
-configured byte limit\\
-Query-result cache & Completed SQL result rows & Separate extension shared
-across backends\\
+PostgreSQL buffer & Relation page bytes & Internal buffer manager in Postgres pins each page and loads/unloads pages on demand so multiple accesses to the same page are efficient \\
+Column cache~\ref{sec:pg-storage-caches} & Decoded column value buffer & Can cache decompressed chunks, so loading and decompression of the same chunks can be efficient \\
+Fragment slots~\ref{fig:sequence-scan-lifecycle} & Copy of one packed fragment & When pipeline runs sequence scanners collect fragments in available slots and loads/unloads fragments on demand so multiple accesses to the same fragment are efficient (disabled by default)\\
+Query-result cache~\ref{sec:seq-results-cache} & Completed SQL result rows & Separate \path{bioseq_cache} subextension can store and share results after pipeline execution is finished so same or similar queries can be efficient (experimental and disabled by default) \\
 \bottomrule
 \end{tabularx}
 \end{table}
-
-\section{Physical storage of shared query results}
-\label{sec:pg-storage-request-coordination}
-
-The separate \texttt{bioseq\_cache} extension stores completed SQL results,
-not source fragments. Its producer and waiter lifecycle, exact matching,
-and generic range-reuse contract are described in
-Section~\ref{sec:bioseq-result-cache}. The physical store groups result rows
-into columnar blocks with a schema description, NULL information, value
-offsets, and checksums. Variable-length values are flattened before storage;
-process-local pointers cannot become reusable result bytes.
-
-Completed blocks can live in shared memory or cache-owned private files.
-Before storing a block, the cache reserves capacity. For shared memory, it
-checks the configured byte ceiling and the minimum amount of system memory
-that must be left free. Before writing a file block, it also checks the file
-capacity limit and the minimum amount of disk space that must be left free.
-If neither tier can
-accept another block, the original query continues without publishing a
-reusable result. Active readers keep references that prevent their blocks
-from being removed.
-
-This file tier is derived data with its own cleanup rules. Cached results
-are cleared across a server restart. It should not be confused with the
-PostgreSQL relations holding authoritative sequence data or with persistent
-sequence indexes.
-
-\section{From stable sources to persistent indexes}
-\label{sec:pg-storage-summary}
-
-The storage layer lets two queries use the same table in different ways.
-A metadata query reads selected column chunks and can avoid sequence access
-entirely. An alignment query keeps a validated locator and asks for packed
-fragments under the same snapshot as its input row. Updating or deleting the
-row changes what newer snapshots may read while preserving the old source
-for an existing reader.
-
-The next chapter builds reusable lookup structures on these sources. It
-uses the same distinction between a location, a source version, and its
-lifetime. An index can still occupy bytes after its source is invalidated;
-being present in storage is not sufficient permission to use it.

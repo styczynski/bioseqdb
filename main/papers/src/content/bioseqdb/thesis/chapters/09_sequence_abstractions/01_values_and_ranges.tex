@@ -27,6 +27,13 @@ framexrightmargin=.5em,aboveskip=8pt,belowskip=8pt}
 
 Suppose user stores large genome sequence in one row, but only wants to align specific small part of it (let's say we know location of one protein-coding human gene and are interested only in finding occurences of that gene).
 It would be very wasteful if I didn't provide built-in functionality to load only that small region. This region could be stored on disk, so we only have it's locator poiting to a specific chunk in the table.
+
+\info{Physical storage}{
+  "Locator" refers to a small structure holding sequence metadata and pointer to its actal location in the storage system.
+  More on is explained in physcial storage chapter~\ref{sec:pg-storage-role}.
+  For now, I assume it's only an opaque pointer to sequence and use term "hydration" describing the process of converting it into a sequence itself or its fragment (as continous byte array in RAM).
+}
+
 On the other hand, we can load sequences from fasta file, where parser can be writing to RAM, so our sequence could refer to location in memory, where all sequences are pooled into one memory region to avoid constant allocation/reallocation.
 In yet another case, in tests we would like to use standard library containers to prepare and examine sequences (potentially even somebody could directly call some internal BioseqDB functions as standalone alignment library).
 This created a design challenge: same sequence can arrive as relationship locator, region in memory pool in RAM, can be provided as a whole as standrad container or as only a fragment (if user wants to operate only on specific slice or if it does not fit in RAM or RAM is limited, so we cannot fit entire sequence directly there), while
@@ -45,7 +52,8 @@ own C++ system of templates with different specializations driven by C++ concept
   Because the architecture of BioseqDB pipeline is very custom, I decided to only use SeqAn's alphabet layer~\autocite{seqan3AlphabetsDocs} and utilities exposed by its public API. This means that libraries using SeqAn code as base, could be slightly adjusted to be able to work with BioseqDB pipelines.
 }
 
-Table~\ref{tab:sequence-representation-specializations} lists every specialization of all BioseqDB sequence representations, to showcase how they are used in different scenarios. SeqAn offers abstractions over lazy sequences as well~\cite{seqanSequencesInDepth}, but they're not as sophisticates as in my case.
+Table~\ref{tab:sequence-representation-specializations} lists every specialization of all BioseqDB sequence representations, to showcase how they are used in different scenarios. SeqAn offers abstractions over lazy sequences as well~\cite{seqanSequencesInDepth}, but they're not as sophisticated as in my case.
+The lazy interface is really important for BioseqDB to improve it's performance utilising late-materialization strategies similar to those described in literature~\autocite{Chernishev2022ACS}
 
 \begingroup\footnotesize\setlength{\tabcolsep}{4pt}
 \renewcommand{\arraystretch}{1.08}

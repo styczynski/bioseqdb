@@ -1,74 +1,48 @@
+% Existing systems show why these relationships matter. BioWorkbench imports
+% variant and gene annotations into SQLite and joins them with
+% SQL~\autocite{Mondelli_2018}. The IBM Functional Genomics Platform uses a DB2
+% column store and mapping tables to connect genomes, genes, proteins, and
+% annotations~\autocite{seabolt2020ibmfunctionalgenomicsplatform}. Database-backed
+% sequence search has also been studied with DynamoDB records that pair each
+% sequence with an organism name~\autocite{flach2020nosql}. These examples motivate
+% keeping biological data queryable. Here the engineering question is how to
+% store the sequence itself so that database execution can request its symbols
+% as needed.
+
 \section{Store sequences together with their metadata}
 \label{sec:pg-storage-role}
 
-A sequence search usually needs more than sequence symbols. A researcher may
-search samples collected on a particular date, return their identifiers, and
-join the hits to gene annotations. The database must keep these relationships
-while allowing a search to read a small part of a long sequence.
+I already mentioned before for example when discussing sequence abstractions~\ref{sec:sequence-abstractions} that I usually operate on locators, that just point to location where actual sequence is stored.
 
-Existing systems show why these relationships matter. BioWorkbench imports
-variant and gene annotations into SQLite and joins them with
-SQL~\autocite{Mondelli_2018}. The IBM Functional Genomics Platform uses a DB2
-column store and mapping tables to connect genomes, genes, proteins, and
-annotations~\autocite{seabolt2020ibmfunctionalgenomicsplatform}. Database-backed
-sequence search has also been studied with DynamoDB records that pair each
-sequence with an organism name~\autocite{flach2020nosql}. These examples motivate
-keeping biological data queryable. Here the engineering question is how to
-store the sequence itself so that database execution can request its symbols
-as needed.
+PostgreSQL already has mechanism for that: it stores large values out of line (outside actual row) through TOAST~\autocite{postgresql17_toast}. 
+This mechanism however, has it's limitations - it's storage is limited to 1GB per row, which is an effect of maximum width of integer storing row's OID (object indentifier is internal numbering scheme in Postgres).
+If we assume that DNA4 sequence is bit-packed and it's entire human genome (lengths of around 3.1 - 3.2 Gbps) this gives us conservatively $3 * 10^{9} * \frac{2}{8}B = 750MB$ of storage per row.
+If we want to store both pairs of chromosomes we can pesimisitcally require $1.6GB$ of storage per row. 
+In most cases researchers split the sequence into smaller chunks, but this is manual process requiring additional tools.
 
-Consider a table \texttt{reads(id, sample\_id, seq)}. The following query
-returns identifiers and does not need sequence symbols:
+Moreover, most of the workflows are OLAP-type.: user is expected to do bulk inserts, do not perform frequent updates and deletes when running alignment.
+Usual TOAST wouldn't take advantage of that specific workflow assumption as we cannot read TOAST in bulk.
 
-\begin{lstlisting}[style=bioseq-storage-sql,
-  caption={A metadata query should not read sequence payloads.}]
-SELECT id
-FROM reads
-WHERE sample_id BETWEEN 500 AND 600;
-\end{lstlisting}
-
-An alignment query on the same rows does need symbols, but it may request
-several short intervals rather than the complete sequence. The sequence
-interfaces in Section~\ref{sec:lazy-sequence-facade} already express those
-requests. Storage must support them without first copying a whole chromosome
-into one value.
-
-PostgreSQL already stores large values out of line through TOAST. For some
-uncompressed external values, a substring can fetch only the relevant
-pieces~\autocite{postgresql17_toast}. BioSeqDB additionally needs packed
-biological alphabets and a fragment reader usable by the alignment
-algorithms. A sequence's packed payload can also exceed the ordinary
-one-gigabyte limit for a PostgreSQL variable-length value. BioSeqDB therefore
-separates three objects:
-
+That's why I decided to implement custom TOAST-like mechanism in BioseqDB and use columnar storage appropiate for OLAP workflows:
 \begin{itemize}
-  \item \textbf{The parent row} holds ordinary metadata and a small sequence
-    locator. A locator identifies where the packed sequence is stored.
-  \item \textbf{Fragment rows} hold fixed-size pieces of packed sequence
-    data in internal PostgreSQL relations. A reader fetches fragment symbols
-    only when they are needed.
-  \item \textbf{Persistent indexes} keep lookup information derived from
-    those symbols. Their identity and storage are described in the next
-    chapter.
+  \item \textbf{User table} holds all the data in columnar format, where the sequence column itself is replaced with small locator object that points to sequence fragment.
+  \item \textbf{Sequence fragments} are stored in multiple sharded tables that are normally invisible to the user. All of these tables also use columnar storage, so short sequences are treated the same way as metadata in columnar context - they will be merged into one batch. I call these batches of rows "strips" in the code.
+  \item \textbf{Persistent indexes} are separate entities stored as tables that are normally not visible to the user as well. They are responsible for providing pre-computed objects for sequences. There's small abstraction layer in BioseqDB which allows to extend it by adding different types of indexes that provide different information.
+\label{lst:types-of-storage-entities-in-bioseqdb}
 \end{itemize}
 
 \warn{Adapted from Citus and Hydra Columnar}{
 BioSeqDB's columnar layer adapts code from both Citus Columnar and Hydra
 Columnar~\autocite{citus_columnar_storage,hydra_columnar_source}.
-Hydra extended the Citus code with features including vectorized SQL
-execution and a cache of decompressed column buffers. BioSeqDB modernized
-the adapted C code into C++26 modules and substantially changed the storage,
-reads, and updates. Sequence locators, fragment readers, and sequence
-indexes are BioSeqDB-specific additions.}
+Hydra extended the Citus code with features including very primitive vectorized SQL
+execution and a cache of stripes. In BioSeqDB I modernized the adapted C code by rewriting it completely into C++26 modules with automatic code generation and added support for newer PostgreSQL 19.0 (which in case of Hydra original codebase was not supported).
+Only small of the original code was left untouched. This code was used as a low-level storagebase, where concepts like sequence locators, fragment readers, and sequence indexes are purely my innovations.
+}
 
-The linked Hydra columnar documentation was unavailable when consulted for
-this work. Understanding the chunk operations therefore required tracing
-the available source code to reconstruct their write, read, and cache
-lifetimes. The repository remains a public reference for the original
-implementation~\autocite{hydra_columnar_source}.
+The linked Hydra columnar documentation was unavailable as the theam building it moved to create a different database system. 
+Although I was basing my implementation in the Hydra codebase, understanding the chunk operations required multiple manual investigations to understand it completely~\autocite{hydra_columnar_source}.
+Current BioseqDB storage design is an effect of this process.
 
-The table access method connects this layout to PostgreSQL's table
-operations~\autocite{postgresql17_tableam}. Citus illustrates the broader value of
-building database features through PostgreSQL's extension interfaces,
-including hooks and transaction callbacks~\autocite{citus_distributed_2021}.
-The following sections explain the particular choices made in BioSeqDB.
+It's worth noting that I mention both Citus~\autocite{citus_distributed_2021} and Hydra sources here as Hydra was fork of Citus that diverged at some point to later be abandoned. Citus columnar is still actively maintained but it lacks features like row deletion, vectorization and it's very simple columnar interface.
+Meanwhile Hydra offered these features, but due to being abandoned didn't correctly build for newer Postgres version and lacked bugfixes done by Citus team since the forking moment.
+Modernizing the Hydra codebase thus involved not only manually inspecting the code, but also tracking commits between Hydra and Citus. This work thus was complicated and very time-consuming involving also detection of new bugs in Hydra code that were undected after retirement of the project.

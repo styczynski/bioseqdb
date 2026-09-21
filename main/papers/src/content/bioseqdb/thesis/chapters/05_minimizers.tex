@@ -2240,6 +2240,7 @@ struct MinimapSketchFields {
   std::uint64_t last_pos  : 31; (*@\BioseqCodeNote{zero-based final-base position}@*)
   std::uint64_t rid       : 32; (*@\BioseqCodeNote{reference/query-segment ID}@*)
 };
+\label{lst:minimap-minimizer-cpp-decl}
 \end{BioseqCppSnippet}
 
 Minimap2's C code construction is done via:

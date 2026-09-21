@@ -1,52 +1,8 @@
-\section{Read the needed columns and row groups}
+\section{Columnar storage}
 \label{sec:pg-storage-columnar}
 
-The parent table uses a columnar layout because sequence workflows often
-scan many rows while using only a few metadata columns. Keeping sequence
-symbols outside the parent row already avoids fetching them for a metadata
-query. Columnar storage adds further ways to save work:
-
-\begin{itemize}
-  \item \textbf{Read fewer columns.} Values from the same column are stored
-    together. A scan of identifiers and sample numbers can leave unrelated
-    metadata and sequence locators unread.
-  \item \textbf{Compress similar values together.} A buffer containing one
-    column's values uses a common byte encoding and often contains repeated
-    patterns. This is ordinary column compression, separate from packing
-    biological symbols into a few bits each.
-  \item \textbf{Process values in batches.} In \emph{vectorized SQL
-    execution}, a supported operator works on an array of column values.
-    A supported comparison can produce a mask of rows that pass the condition.
-    This reduces repeated
-    per-row operator calls and allows a loop over many values of one type.
-    A batch does not imply that every operation uses hardware SIMD.
-  \item \textbf{Reuse decompressed buffers.} A column cache can keep the
-    output of decompression for later reads. This avoids decompressing the
-    same bytes again, although reconstructing SQL values can still require
-    work. BioSeqDB's optional cache and its lifetime are described in
-    Section~\ref{sec:pg-storage-caches}.
-\end{itemize}
-
-Hydra's batch execution and column cache were important reasons to use its
-extension of the Citus design. Its public reader checks the decompressed
-column cache before decompressing a buffer.\coderef
-{hydrastorage/columnar/src/backend/columnar/columnar_reader.c}
-{Hydra column-cache lookup and decompression}{columnar_reader.c}{1916}
-These SQL operations are separate from BioSeqDB's SIMD minimizer, chaining,
-and alignment algorithms. The two layers can reduce different parts of a
-query's cost. Column storage also favors bulk appends and analytical scans;
-it is not a universal improvement for frequent small updates.
-
-\subsection{What analytical benchmarks motivate}
-
-ClickBench supplies a useful example of the potential benefit on a large
-table. Figure~\ref{fig:storage-clickbench-motivation} uses historical
-PostgreSQL, Citus, and Hydra Columnar submissions on the same named machine
-configuration~\autocite{clickbench_2023_columnar}. All contain results for
-the same 43 queries over the roughly 100-million-row web-analytics dataset.
-For each query, take the shorter of its second and third runs, then sum
-those 43 times. We call this the \emph{sum of hot-query times}. Loading time
-is excluded. The figure also shows the submissions' reported storage sizes.
+ClickBench is a benchmark for analytical DBMS and it also reported results for both Hydra and Citus. Figure~\ref{fig:storage-clickbench-motivation} uses historical benchmark submissions on AWS machines~\autocite{clickbench_2023_columnar}. 
+The benchmark consisted of around 43 queries over a dataset of around 100 million rows (3 runs with minum of second two taken as into the sum).
 
 \begin{figure}[htbp]
 \centering
@@ -82,64 +38,352 @@ is excluded. The figure also shows the submissions' reported storage sizes.
   \node at (5.2,-.65) {Sum over all 43 queries};
   \node at (11.2,-.65) {$1\ \mathrm{GB}=10^9$ bytes};
 \end{tikzpicture}
-\caption{Historical ClickBench workload comparison, calculated from the
-repository snapshot of 20 September 2023. Each submission uses one
+\caption{Historical ClickBench, calculated from the
+repository snapshot of 20 September 2023. Each submission uses
 \texttt{c6a.4xlarge} machine with 16 vCPUs, 32~GiB RAM, and 500~GB of GP2
 storage. PostgreSQL and Citus
 results are dated 1 July 2022, and Hydra results 19 September 2023.
-The times use the shorter of runs two and three for every query.
-Versions, settings, and execution paths differ. These are external SQL
-workload results, not BioSeqDB alignment measurements.}
+The times use the sum of shorter of runs two and three for every query. Note that these are "best-fit" results so the configuration was different. It's good however for quick comparison of performance.}
 \label{fig:storage-clickbench-motivation}
 \end{figure}
 
 Both columnar submissions store about 19~GB, compared with PostgreSQL's
-77.8~GB. Hydra has a much shorter sum of query times than Citus despite
-their similar stored sizes. This motivates considering execution and reuse
-as well as compression. It does not measure how much of the difference
-comes from vectorization: parallelism, caching, and PostgreSQL settings also
-differ. Hydra itself attributes its performance to these mechanisms
-together~\autocite{hydra_columnar_source}.
+77.8~GB. This was due to support of compression on stored columns. Hydra~\autocite{hydra_columnar_source} had much better performance due to introduction of vectorized SQL execution for aggregates and column cache that wasn't present in Citus~\autocite{citus_distributed_2021}.
+These results do not translate directly to BioseqDB as the benchmarks tests some arbitrarily-built queries, however it motivated me to put big effort into modernizing Hydra codebase and incorporating it into BioseqDB as mentioned in previous section~\ref{sec:pg-storage-role}.
 
-Hydra's benchmark notes likewise separate SELECT execution time from data
-loading. They distinguish release tests on \texttt{c6a.4xlarge} from
-continuous tests on four-core runners~\autocite{hydra_columnar_benchmarks}.
+\subsection{Columnar layout}
 
-\subsection{Group rows into stripes and chunks}
+
+% %Stripe size is not configurable and is set to size of disk block minus page header so it can exactly fit into one disk block (around $8KB$, but depends on compile-time value Postgres version provides).
+% \item A \textbf{stripe} is a batch of appended values, where values can be anything. In case of the user table these are grouped metadata values (native Postgres types) and for sequence columns - sequence locators. For internal sharded storage tables these are sequence fragments itself.
+%     It's important to note that TOAST can have a limit up to $1GB$ per row, so large values (not only long sequence but also if user stores large BLOB) can span multiple stripes.
+  
 
 The columnar layout has three levels:
 
 \begin{itemize}
-  \item A \textbf{stripe} is a batch of appended rows. The default maximum
-    is 150,000 rows.
-  \item A \textbf{chunk group} is a smaller row interval within a stripe.
-    The default maximum is 10,000 rows. Every column uses the same group
-    boundaries.
-  \item A \textbf{column chunk} contains one column's values for one chunk
-    group. It has a presence bitmap and a value buffer. A presence bit says
-    whether that row contains a non-NULL value.
+  \item A \textbf{stripe} is a batch of chunks coresponding to set of rows. Normally one stripe holds maximum is 150,000 rows.
+  \item A \textbf{chunk group} is a group of chunks for the same rows inside a stripe. By default one chunk group holds maximum of 10,000 rows.
+  \item A \textbf{column chunk} is the most basic entity that just holds values for one group as a one column. It also stores aggregated values (count, min, max) to enable 
+  faster aggregate operations (vectorization) and the bitmask (marking which values are NULLs).
 \end{itemize}
 
-Stripe and chunk-group sizes are table options. Smaller groups give finer
-read selection, while larger groups give the compressor more values to work
-with. This is the grouping model described by Citus
-Columnar~\autocite{citus_columnar_compression_2021}.
+Stripe and chunk-group sizes are options per table, where larger ones allows more efficient compression and smaller ones allows more fine-grained read access~\autocite{citus_columnar_compression_2021}.
 
-\subsection{Two independent ways to avoid reads}
+Figure~\ref{fig:storage-heap-to-stripe} shows this model for the six rows.
+By default Postgres row-based storage (heap tuple) stores \texttt{id}, \texttt{sample\_id}, and the
+sequence locator together. The stripe is columnar representation of these rows.
+Each column occupies its own sequence of chunks. A chunk group is only an abstract concept for chunks that are related to the same rows.
+The last group of a stripe can be shorter if total row count isn't a multiple of chunk group size.
 
-\emph{Projection} selects the columns required by the query. The sample
-query needs \texttt{id} for its output and \texttt{sample\_id} for its
-condition. It does not need \texttt{seq}.
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,6.10)
+    {Heap tuples become a stripe of column chunks};
+  \node[anchor=north west,align=left] at (0,5.75)
+    {Heap: one tuple stores\\every column};
+  \foreach \y/\id/\sid/\rn in {
+    4.45/1/12/1,
+    3.80/2/18/2,
+    3.15/3/7/3,
+    2.50/4/41/4,
+    1.85/5/9/5,
+    1.20/6/22/6} {
+    \node[anchor=east] at (1.05,\y) {row \rn};
+    \node[storage cell,minimum width=.62cm,fill=storageBlue!15]
+      at (1.55,\y) {\id};
+    \node[storage cell,minimum width=.62cm,fill=storageOrange!15]
+      at (2.28,\y) {\sid};
+    \node[storage cell,minimum width=.78cm,fill=storageGreen!15]
+      at (3.15,\y) {loc};
+  }
+  \draw[storage arrow] (3.90,2.85)--(4.70,2.85);
+  \node[align=center] at (4.30,3.35) {same\\rows};
+  \draw[draw=black!45] (4.85,0.48) rectangle (12.15,5.48);
+  \node[anchor=north,align=center,font=\bfseries] at (8.50,5.32)
+    {One stripe\\every column of these rows};
+  \node at (7.40,4.12) {\texttt{id}};
+  \node at (9.20,4.12) {\texttt{sample\_id}};
+  \node at (11.00,4.12) {\texttt{seq}};
+  \node[anchor=west] at (5.05,3.40) {group 0};
+  \node[anchor=west,text=storageOrange,font=\scriptsize] at (5.05,3.08)
+    {deleted $0$};
+  \node[anchor=west] at (5.05,1.38) {group 1};
+  \node[anchor=west,text=storageOrange,font=\scriptsize] at (5.05,1.06)
+    {deleted $0$};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,
+    fill=storageBlue!15,draw=storageBlue,line width=1.1pt]
+    (idchunk) at (7.40,3.25) {1, 2, 3};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,fill=storageOrange!15]
+    at (9.20,3.25) {12, 18, 7};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,fill=storageGreen!15]
+    at (11.00,3.25) {\scriptsize loc, loc, loc};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,fill=storageBlue!15]
+    at (7.40,1.23) {4, 5, 6};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,fill=storageOrange!15]
+    at (9.20,1.23) {41, 9, 22};
+  \node[storage cell,text width=1.45cm,inner sep=2pt,
+    minimum height=.90cm,align=center,fill=storageGreen!15]
+    at (11.00,1.23) {\scriptsize loc, loc, loc};
+  \node[draw=storageBlue,fill=storageBlue!6,minimum width=12.00cm,
+    minimum height=1.62cm,inner sep=0pt,anchor=north west]
+    (chunkdetail) at (0.15,0.10) {};
+  \node[anchor=west,font=\bfseries,text=storageBlue] at (0.35,-0.08)
+    {One column chunk};
+  \node[anchor=west,text=black!65] at (4.55,-0.08)
+    {\texttt{id} of group 0};
+  \node at (2.25,-0.48) {presence bits};
+  \foreach \i/\b in {0/1,1/1,2/1}
+    \node[storage cell,minimum width=.50cm,inner sep=2pt,fill=storageBlue!12]
+      at (1.55+0.70*\i,-1.08) {\b};
+  \node at (5.70,-0.48) {value buffer};
+  \foreach \i/\v in {0/1,1/2,2/3}
+    \node[storage cell,minimum width=.50cm,inner sep=2pt,fill=storageGreen!13]
+      at (5.00+0.70*\i,-1.08) {\v};
+  \node at (9.70,-0.48) {aggregated values};
+  \node[storage cell,minimum width=2.35cm,inner sep=1pt,align=center,
+    fill=storageOrange!12] at (9.70,-1.08)
+    {min $1$, max $3$\\count $3$};
+  \node[draw=storageOrange,fill=storageOrange!8,minimum width=12.00cm,
+    minimum height=1.28cm,inner sep=0pt,anchor=north west]
+    (groupdetail) at (0.15,-1.68) {};
+  \node[anchor=west,font=\bfseries,text=storageOrange] at (0.35,-1.88)
+    {One chunk group};
+  \node[anchor=west,text=black!65] at (4.55,-1.88)
+    {shared by every column};
+  \node at (2.25,-2.28) {delete bits};
+  \foreach \i/\b in {0/0,1/0,2/0}
+    \node[storage cell,minimum width=.50cm,inner sep=2pt,fill=storageOrange!12]
+      at (1.55+0.70*\i,-2.68) {\b};
+  \node at (7.20,-2.28) {deleted rows};
+  \node[storage cell,minimum width=1.20cm,inner sep=2pt,fill=storageOrange!12]
+    at (7.20,-2.68) {$0$};
+  \draw[storage arrow,storageBlue]
+    (idchunk.south) -- (7.40,2.18) -- (12.60,2.18) -- (12.60,-0.71)
+    -- (chunkdetail.east);
+  \node[fill=white,inner sep=2pt,text=storageBlue] at (9.90,2.18)
+    {One column chunk};
+\end{tikzpicture}
+\caption{The same six rows as heap tuples and as one stripe. Matching
+colours mark the same column. The blue callout is one column chunk: presence
+bits, present values, min/max, and slot count. The orange callout is the
+chunk group: a deletion mask and \texttt{deleted\_rows}}
+\label{fig:storage-heap-to-stripe}
+\end{figure}
 
-\emph{Min/max pruning} selects chunk groups. For an ordinary ordered column,
-the writer records the smallest and largest non-NULL values in each chunk.
-A condition can reject a group if none of its values could satisfy the
-condition. For example, a group with sample identifiers from 1 to 100 cannot
-satisfy \texttt{BETWEEN 500 AND 600}.
 
-Figure~\ref{fig:column-store-layout} shows both decisions. A retained group
-still needs filtering. Each retained row must be tested against the condition:
-bounds of 450 and 700 do not say which rows fall between 500 and 600.
+When I want to store row, each time the writer append this row to the current chunk group (in memory).
+After sufficient number of row is reached (max chunk group size) the code serializes each column chunk to a stripe buffer that still is in memory
+If the number of rows per stripe is reached (max stripe size) then stripe is "flushed", which means writing the stripe.
+Commonly the maximums of stripe row counts will be hit, but there's additional check if the current chunk group for specific column buffer exceeds $1GB$ limit, then it forces flush of the entire stripe.
+This means that if we store large BLOB along very small column, the BLOB will force the stripe to end i.e stripes always need to account for the same number of rows in each column (this also implies that the decision to store sequences via locators increases efficiency of that storage model as more tuples with non-sequence fields can be packed into single stripe).
+Additionally there's hard limit on maximum size of $256MiB$ for a single value in row.
+
+\warn{Storing large BLOBs}{
+  Users should avoid storing large BLOBs along small columns - either store BLOBs of similar sizes together or only store smaller payloads in the same table.
+  This is potential optimisation to be implemented in the future, although it's very low priority.
+}
+
+The figure~\ref{fig:storage-write-path} shows 3 main stages: we save tuples first to accumulate enough of them, then serialize them to a buffer and when stripe's buffer eaches $1GB$ or the strip max row count, only then it's flushed.
+Algorithm~\ref{alg:storage-flush-stripe} presents pseudocode for that process as well.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,3.05)
+    {Write path: row, then group, then stripe};
+  \node[draw=black!45,fill=storageBlue!6,minimum width=3.55cm,
+    minimum height=2.42cm,inner sep=0pt,anchor=north west]
+    (stage1) at (0,2.70) {};
+  \node[anchor=north,align=center,font=\bfseries,text=storageBlue]
+    at (1.78,2.55) {1. Current group};
+  \node[anchor=north,font=\scriptsize,text=black!60] at (1.78,2.22) {RAM};
+  \node[storage cell,minimum width=.62cm,inner sep=1pt,fill=storageBlue!15]
+    at (0.68,1.45) {id};
+  \node[storage cell,minimum width=.70cm,inner sep=1pt,fill=storageOrange!15]
+    at (1.78,1.45) {sid};
+  \node[storage cell,minimum width=.62cm,inner sep=1pt,fill=storageGreen!15]
+    at (2.88,1.45) {loc};
+  \node[align=center,font=\scriptsize] at (1.78,0.72)
+    {one INSERT writes\\one slot in every column};
+  \draw[storage arrow] (3.70,1.45)--(4.35,1.45);
+  \node[align=center,font=\scriptsize] at (4.02,1.95) {group\\full};
+  \node[draw=black!45,fill=storageOrange!6,minimum width=3.70cm,
+    minimum height=2.42cm,inner sep=0pt,anchor=north west]
+    (stage2) at (4.50,2.70) {};
+  \node[anchor=north,align=center,font=\bfseries,text=storageOrange]
+    at (6.35,2.55) {2. Stripe buffers};
+  \node[anchor=north,font=\scriptsize,text=black!60] at (6.35,2.22) {still RAM};
+  \foreach \x/\fill/\lab in {
+    5.45/storageBlue!15/id,
+    6.50/storageOrange!15/sid,
+    7.55/storageGreen!15/loc} {
+    \node[storage cell,minimum width=.72cm,minimum height=.42cm,
+      inner sep=1pt,fill=\fill] at (\x,1.68) {\scriptsize\lab};
+    \node[storage cell,minimum width=.72cm,minimum height=.42cm,
+      inner sep=1pt,fill=\fill] at (\x,1.12) {};
+  }
+  \node[font=\scriptsize,anchor=west] at (4.62,1.68) {g0};
+  \node[font=\scriptsize,anchor=west] at (4.62,1.12) {g1};
+  \node[align=center,font=\scriptsize] at (6.35,0.62)
+    {pack each column,\\then compress};
+  \draw[storage arrow] (8.35,1.45)--(9.00,1.45);
+  \node[align=center,font=\scriptsize] at (8.68,2.05)
+    {$S$ rows,\\$1$\,GB,\\or close};
+  \node[draw=black!45,fill=storageGreen!6,minimum width=3.20cm,
+    minimum height=2.42cm,inner sep=0pt,anchor=north west]
+    (stage3) at (9.15,2.70) {};
+  \node[anchor=north,align=center,font=\bfseries,text=storageGreen]
+    at (10.75,2.55) {3. Flush};
+  \node[anchor=north,font=\scriptsize,text=black!60] at (10.75,2.22) {disk};
+  \node[draw=black!50,fill=white,minimum width=1.55cm,minimum height=.42cm,
+    inner sep=0pt] at (10.20,1.68) {};
+  \node[draw=black!50,fill=white,minimum width=1.55cm,minimum height=.42cm,
+    inner sep=0pt] at (10.20,1.18) {};
+  \node[font=\scriptsize] at (10.20,1.68) {pages};
+  \node[font=\scriptsize] at (10.20,1.18) {catalogs};
+  \node[align=center,font=\scriptsize] at (10.75,0.62)
+    {all groups of\\this stripe};
+\end{tikzpicture}
+\caption{How we pack chunks groups into stripe buffers, then to flush them if necessary.}
+\label{fig:storage-write-path}
+\end{figure}
+
+\begingroup
+\captionsetup{type=algorithm}
+\captionof{algorithm}{Appending rows}
+\label{alg:storage-flush-stripe}
+\small
+\begin{algorithmic}[1]
+  \Require columns $C$, group limit $G$ (default $10{,}000$), stripe limit $S$
+    (default $150{,}000$), comparators $\mathrm{Compare}_c$ (possibly
+    $\mathrm{NULL}$)
+  \State $G_{\max}\gets\lceil S/G\rceil$
+  \State $s\gets\mathrm{NULL}$ \Comment{open stripe, or none}
+  \Statex
+  \Procedure{AllocateNewStripe}{}
+    \State $s.n\gets 0$ \Comment{rows already in this stripe}
+    \State $s.P\gets 0^{|C|\times G}$
+      \Comment{presence bits of the current group}
+    \State $s.B\gets\varepsilon^{|C|}$
+      \Comment{serialized present values of the current group}
+    \State $s.K\gets\{\min:\bot,\max:\bot,\mathit{cnt}:0\}^{|C|\times G_{\max}}$
+      \Comment{skip min, max, and slot count of every column chunk}
+    \State $s.\mathrm{chunk}\gets\{P:\varepsilon,V:\varepsilon\}^{|C|\times G_{\max}}$
+      \Comment{packed streams of every serialized group}
+    \State $s.N\gets 0^{G_{\max}}$
+      \Comment{row count of each serialized group}
+    \State \Return $s$
+  \EndProcedure
+  \Statex
+  \Procedure{WriteRow}{$v$}
+    \If{$\mathrm{IsOpen}(s)\land\exists c\in C:\mathrm{Size}(s.B_c\Vert v_c)>1\,\mathrm{GB}$}
+      \State \Call{FlushStripe}{$s$}
+    \EndIf
+    \If{$\neg\mathrm{IsOpen}(s)$}
+      \State $s\gets\Call{AllocateNewStripe}{}$
+    \EndIf
+    \State $g\gets\lfloor s.n/G\rfloor$,\quad $r\gets s.n\bmod G$
+    \ForAll{$c\in C$}
+      \If{$\mathrm{IsNull}(v_c)$}
+        \State $s.P_{c,r}\gets 0$
+      \Else
+        \If{$\mathrm{Align}(v_c)\ge 256\,\mathrm{MiB}$}
+          \State \textbf{error}
+        \EndIf
+        \State $s.P_{c,r}\gets 1$
+        \State $s.B_c\gets s.B_c\Vert\mathrm{Serialize}(v_c)$
+        \If{$\mathrm{Compare}_c\neq\mathrm{NULL}$}
+          \State $s.K_{c,g}.\min\gets\min_{\mathrm{Compare}_c}(s.K_{c,g}.\min,v_c)$
+          \State $s.K_{c,g}.\max\gets\max_{\mathrm{Compare}_c}(s.K_{c,g}.\max,v_c)$
+            \Comment{$\bot$ is the identity}
+        \EndIf
+      \EndIf
+      \State $s.K_{c,g}.\mathit{cnt}\gets s.K_{c,g}.\mathit{cnt}+1$
+    \EndFor
+    \If{$r=G-1$}
+      \State \Call{SerializeGroup}{$s$, $g$, $G$}
+    \EndIf
+    \State $s.n\gets s.n+1$
+    \If{$s.n\ge S$}
+      \State \Call{FlushStripe}{$s$}
+    \EndIf
+  \EndProcedure
+  \Statex
+  \Procedure{SerializeGroup}{$s$, $g$, $k$}
+    \State $s.N_g\gets k$
+    \ForAll{$c\in C$}
+      \State $s.\mathrm{chunk}_{c,g}.P\gets
+        \mathrm{PackBits}(\langle s.P_{c,r}\rangle_{r=0}^{k-1})$
+    \EndFor
+    \ForAll{$c\in C$}
+      \State $s.\mathrm{chunk}_{c,g}.V\gets\mathrm{Compress}(s.B_c)$
+        \Comment{identity if incompressible}
+      \State $s.B_c\gets\varepsilon$
+    \EndFor
+  \EndProcedure
+  \Statex
+  \Procedure{FlushStripe}{$s$}
+    \State $k\gets s.n\bmod G$
+    \If{$k>0$}
+      \State \Call{SerializeGroup}{$s$, $\lfloor s.n/G\rfloor$, $k$}
+    \EndIf
+    \State $m\gets\lceil s.n/G\rceil$
+    \ForAll{$c\in C$}
+      \State $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.P\rangle_{g=0}^{m-1})$
+      \State $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.V\rangle_{g=0}^{m-1})$
+    \EndFor
+    \State \Call{WriteCatalog}{$s$}
+    \State $s\gets\mathrm{NULL}$
+  \EndProcedure
+  \Statex
+  \Procedure{WriteCatalog}{$s$}
+    \State $\mathrm{Write}(\langle s.N, s.K, 0^{s.n} \rangle)$
+      \Comment{Saves row count for group, aggegate stats and deletion mask}
+  \EndProcedure
+\end{algorithmic}
+\endgroup
+
+In's important that closing the writer also flushes any leftover stripe, so all in-memory buffers are saved to disk when transaction is committed.
+
+As presented on figure~\ref{fig:storage-heap-to-stripe} column chunk stores a presence bitmap, a value buffer of only the
+present values, and aggregated values used later for delettion and vectorized aggregation: the smallest
+and largest non-NULL values (when the type has a comparison function), and a
+row count (\texttt{value\_count}) counting all values in the chunk including NULLs.
+
+To support deletion, the chunk group stores \texttt{deleted\_rows}, along with separate row mask representing which rows were deleted.
+\texttt{DELETE} only sets the matching mask bit in the chunk group's mask and increments \texttt{deleted\_rows}. This allows BioseqDB to offer fast deletion without the need 
+to rewrite the columns themselves. The wasted storage can be however reclaimed:
+\begin{itemize}
+  \item \texttt{VACUUM (TRUNCATE)} may rewrite last stripes in table whose undeleted rows still fit in
+    one stripe and whose decompressed size is below $1\,\mathrm{GB}$. A single
+    last stripe is rewritten only when more than $20\%$ of its rows are
+    deleted. The rewrite copies undeleted rows into a new stripe and drops the old ones.
+  \item The internal tables storing sequence fragments cannot be rewritten as each locator needs to store the row number. Supporting VACUUM for sequence fragments would need to be dispatched to all tables including user table. Currently VACUUM is only supported on the user table.
+  \item \texttt{VACUUM FULL} can rewrite the whole table to reclaim wasted space.
+\end{itemize}
+
+\subsection{Smart reads}
+
+In BioseqDB it's unnecessary to read all chunks all the time. The two optimisations are:
+\begin{enumerate}
+  \item \emph{Projection} means that only selected columns from \texttt{SELECT} query are red. This is trivial optimisation.
+  \item \emph{Min/max pruning} is more interesting one. For an ordered column,
+    the writer records the smallest and largest non-NULL values in each chunk (in aggregates fields seen in figure~\ref{fig:storage-heap-to-stripe}).
+    The BioseqDB TAM presented in figure~\ref{fig:bioseqscan-hook-lifecycle} can determine if none of the values in the chunk group satisfy the filter.
+    If that happens, entire chunk group is skipped.
+    For example, a group with sample identifiers from 1 to 100 cannot satisfy \texttt{BETWEEN 500 AND 600}.
+\label{lst:storage-minmax-pruning}
+\end{enumerate}
+
+Figure~\ref{fig:column-store-layout} shows both optimisations. Group that satisfies both of these conditions still needs to apply filters to each row individually, but I save time but not touching groups that are not revelant to the search.
+The figure assumes query \texttt{SELECT id FROM table WHERE sample\_id BETWEEN 500 AND 600} is executed.
 
 \begin{figure}[H]
 \centering
@@ -173,25 +417,23 @@ bounds of 450 and 700 do not say which rows fall between 500 and 600.
     (7.6,.22)--(10.25,.22);
   \node[align=center] at (8.93,-.37) {no sequence\\fragment reads};
 \end{tikzpicture}
-\caption{Column selection and group pruning for the metadata query.
-Blue cells are read. Orange crosses mark groups whose scalar bounds exclude
-every row. Unrequested sequence locators remain unread. The drawing shows
-logical chunks, not their byte order on disk.}
+\caption{Column selection and group pruning for simple query \texttt{SELECT id FROM table WHERE sample\_id BETWEEN 500 AND 600}.
+Blue cells are read, orange crosses mark groups whose aggregates exclude all the rows. Unrequested sequence locators remain unread, 
+because they were not specified in the \texttt{SELECT} clause. 
+The drawing shows only logical representation of chunks, not actual disk layout.}
 \label{fig:column-store-layout}
 \end{figure}
 
-Sequence columns are excluded from this min/max test. A locator's byte order
-does not describe sequence similarity. A separate scalar length, date, or
-sample identifier can supply useful bounds. When a supported comparison or
-usable bound is missing, the reader keeps the group.
+\info{Prunning for sequence columns}{
+  Sequence columns with locators are excluded for min/max pruning, but it's possible to implement that feature theoretically. 
+  I decided not to do it, because storing min/max values would be simple as locator isn't big object, however computing these values for very large sequences
+  will be computionally expensive and would negatively impact table inserts.
+}
 
-\subsection{A column chunk separates missing values from values}
+\subsection{Compression}
 
-Figure~\ref{fig:storage-column-streams} uses six rows to show the two
-buffers in one column chunk. The presence bitmap has one bit per row.
-Only present values enter the value buffer, with the byte alignment required by
-their PostgreSQL types. The reader uses the bitmap to put values back into
-their row positions.
+Figure~\ref{fig:storage-column-streams} shows in detail how presence bitmap is computed.
+If the NULLs are very frequent, I will save the space by not storing them.
 
 \begin{figure}[H]
 \centering
@@ -216,50 +458,88 @@ their row positions.
   \node[anchor=west,text=black!65] at (2.15,-.5)
     {Only four values are stored; the bitmap keeps their six row positions.};
 \end{tikzpicture}
-\caption{Presence and values have different jobs. Generic column compression
-acts on the serialized value buffer. Sequence rank packing, introduced
-earlier, is a separate encoding step.}
+\caption{Presence bitmap is useful to enable better NULL compression}
 \label{fig:storage-column-streams}
 \end{figure}
 
-The value buffer can use PostgreSQL PGLZ, LZ4, or Zstandard, depending on the
-build and table options. Metadata records the compression method used and the
-decoded length. Successful LZ4 and Zstandard output is not always smaller
-than its input, so compression does not guarantee a space saving for every
-chunk. No particular compression ratio is assumed here.
-
+The Hydra code that BioseqDB columnar TAM was based on supported PGLZ, LZ4, or Zstandard, depending on the
+build and table options. In BioseqDB all compression is disabled by default as I would like to benchmark in the future best (and more modern) compression algorithms decicated for example to sequence storage.
 Abadi et al. show that the choice of compression method depends on both
-the data and the query workload~\autocite{abadi2006compression}.
-For compressed columns, BioSeqDB reconstructs SQL values from decoded
-buffers, obtained by decompression or cache reuse, so both stored size
-and decoding work matter.
+the data and the query workload~\autocite{abadi2006compression}, so I leave it as future extension.
 
-The physical order differs from the logical grid. Within a stripe, one
-column's presence buffers are written first, followed by that column's value
-buffers. The next column follows. Stored offsets locate each buffer without
-requiring the reader to decode earlier columns. A column added after a stripe
-was written can be supplied from its constant PostgreSQL default or as NULL.
-
-\section{Store byte streams in PostgreSQL relation pages}
+\section{Raw byte storage}
 \label{sec:pg-storage-pages}
 
-A compressed buffer need not fit in one database page. BioSeqDB gives column
-writers a continuous logical byte space and maps it onto page payloads.
-Block 0 contains the metapage, block 1 is reserved, and stream data begin in
-block 2. Each data page keeps its PostgreSQL page header.
+After stripe is serialized and flushed it needs to be written to disk - function $Write$ and $WriteCatalog$ in the pseudocode~\ref{alg:storage-flush-stripe}
+\begin{itemize}
+  \item Physically first written is the presence bitmap, then the value buffer for a column, then each column follow. These are placed in the user relation database pages.
+  \item Catalog (row counts, aggregates and deletion mask) is written separately from the stripe data and it's placed in usual heap rows i.e BioseqDB introduces separate relations for storing chunks information.
+\end{itemize}
 
-Let $\mathrm{BLCKSZ}$ be the PostgreSQL page size in bytes, $H$ the
-page-header size, and $P=\mathrm{BLCKSZ}-H$ the remaining payload capacity.
-Measure $x\geq0$ from the first stream byte in block 2.
-Then
+Catalog is represented by four relations inside the BioseqDB:
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-storage-sql,caption={Metadata catalogs for flushed stripes.},label={lst:storage-metadata-catalogs}]
+CREATE TABLE bioseq_internal.stripe (
+  storage_id bigint,
+  stripe_num bigint,
+  file_offset bigint,
+  data_length bigint,
+  column_count integer,
+  chunk_row_count integer,
+  row_count bigint,
+  chunk_group_count integer,
+  first_row_number bigint
+);
+
+CREATE TABLE bioseq_internal.chunk_group (
+  storage_id bigint,
+  stripe_num bigint,
+  chunk_group_num integer,
+  row_count bigint,
+  deleted_rows bigint
+);
+
+CREATE TABLE bioseq_internal.chunk (
+  storage_id bigint,
+  stripe_num bigint,
+  attr_num integer,
+  chunk_group_num integer,
+  minimum_value bytea,
+  maximum_value bytea,
+  value_stream_offset bigint,
+  value_stream_length bigint,
+  exists_stream_offset bigint,
+  exists_stream_length bigint,
+  value_compression_type integer,
+  value_compression_level integer,
+  value_decompressed_length bigint,
+  value_count bigint
+);
+
+CREATE TABLE bioseq_internal.row_mask (
+  id bigint,
+  storage_id bigint,
+  stripe_id bigint,
+  chunk_id integer,
+  start_row_number bigint,
+  end_row_number bigint,
+  deleted_rows integer,
+  mask bytea
+);
+\end{lstlisting}
+\end{minipage}
+
+When writing stripe data I need to take care about page boundaries.
+Let $\mathrm{BLCKSZ}$ be the PostgreSQL page size in bytes (this is compile-time constant provided by Postgres), $H$ the
+page-header size (technically $\mathrm{sizeof(PageHeaderData)}$)~\autocite{postgresql17_storage_page_layout}, and $P=\mathrm{BLCKSZ}-H$ the remaining page capacity.
+If $x\geq0$ is the total offset of the $x$-th byte, then page coordinates are defined as:
 \[
   \operatorname{block}(x)=2+\left\lfloor x/P\right\rfloor,
   \qquad
   \operatorname{position}(x)=H+(x\bmod P).
 \]
-This choice of origin makes the stream's first byte $x=0$. Page headers do
-not consume positions in the logical byte stream. Figure~\ref{fig:storage-pages}
-shows a request that crosses a page boundary.
+BioseqDB will write multiple pages for each stripe, so I need to take additional care about buffers going through multiple page boundaries as seen on figure~\ref{fig:storage-pages}.
 
 \begin{figure}[htbp]
 \centering
@@ -271,7 +551,7 @@ shows a request that crosses a page boundary.
   \draw[storageBlue,fill=storageBlue!20] (5.75,2.5) rectangle (9.25,3.2);
   \foreach \x/\v in {1.75/0,5.75/8,6.75/10,9.25/15,11.75/20}
     \node[above=2pt] at (\x,3.2) {$\v$};
-  \node at (7.5,2.85) {request $[8,15)$};
+  \node at (7.5,2.85) {next buffer fragment $[8,15)$ coming from $\mathrm{Write}(\langle s.\mathrm{chunk}_{c,g}.P\rangle_{g=0}^{m-1}$};
   \node[anchor=east] at (1.45,1.15) {stored pages};
   \draw[fill=black!20,draw=black!60] (1.75,.8) rectangle (2.55,1.5);
   \draw[fill=black!5,draw=black!60] (2.55,.8) rectangle (6.55,1.5);
@@ -290,58 +570,18 @@ shows a request that crosses a page boundary.
   \node[anchor=west,text=black!65] at (1.75,-.3)
     {Copy two bytes, skip the next page header, then copy five bytes.};
 \end{tikzpicture}
-\caption{Logical offsets hide page boundaries. The example uses deliberately
-small pages to make the split visible. Actual page sizes and header sizes
-come from the PostgreSQL build.}
+\caption{I use logical offsets $\operatorname{block}(x)$ and $\operatorname{position}(x)$ to hide page boundaries. Diagram shows that we want to write some fragment
+of in-memory buffer $[8,15)$ to the disk, but it needs to be split across multiple pages. In reality the dimensions are larger than just 20 bytes, but it illustrates the idea.}
 \label{fig:storage-pages}
 \end{figure}
 
-This mapping follows the Citus column-store design. The public source gives
-the corresponding page and logical-offset operations.\coderef
+The original idea comes from Citus page writer that it's avaialble in their public repository\coderef
 {citusstorage/src/backend/columnar/columnar_storage.c}
 {Citus columnar page mapping}{columnar_storage.c}{118}
-PostgreSQL documents the common page header separately from the layout an
-access method puts after it~\autocite{postgresql17_storage_page_layout}.
 
-\subsection{Reserve space, write bytes, publish metadata}
-
-Concurrent writers must not allocate the same row numbers or byte interval.
-The metapage records the next stripe number, row number, and free byte offset.
-The write path separates allocation from visibility. It has three
-responsibilities:
-
+To allow concurrent access (queries during inserts) I need to note that the writer does the following things:
 \begin{itemize}
-  \item \textbf{Reserve.} Under the relation extension lock, reserve
-    non-overlapping identifiers and byte space.
-  \item \textbf{Write.} Copy the stream bytes into relation pages. Page
-    changes use PostgreSQL buffer locks and generic write-ahead logging
-    (WAL).
-  \item \textbf{Record completed data.} Store rows, offsets, lengths, and
-    chunk metadata in the catalogs. The bytes and catalog changes belong
-    to the same transaction. Other transactions can read a completed stripe
-    when its committed metadata is visible under their snapshots.
+  \item \textbf{Reservation:} Identifiers for chunks and groups is done under the relation extension lock.
+  \item \textbf{Write:} Writes to pages are done using PostgreSQL buffer locks and generic write-ahead logging (WAL)~\autocite{postgresql17_generic_wal}.
+  \item \textbf{Record completed data:} The logic uses Postgres' Snapshots so data will be visible only after the transaction is committed.
 \end{itemize}
-
-A reserved byte range alone is not a readable stripe. If a write does not
-complete, the range does not authorize readers to interpret unfinished
-bytes as table rows. Generic WAL supplies page-change recovery for logged
-relations~\autocite{postgresql17_generic_wal}; the storage code still has to
-publish the right catalog state and release its locks correctly.
-
-\subsection{Why use relations instead of private payload files?}
-
-The primary column and fragment data use PostgreSQL relations. A read obtains
-a shared database buffer. A \textbf{page pin} keeps that buffer assigned to
-the page while it is in use; a buffer lock protects its contents during the
-copy. After copying the requested bytes, the reader releases the pin and
-lock. The copied column buffer belongs to the reader. A sequence view
-therefore does not keep every database page it has touched pinned for the
-rest of the query.
-
-This choice reuses PostgreSQL's shared buffer manager, relation identity,
-locking, and WAL path. A private-file implementation would need separate
-rules connecting its writes, deletion, and recovery to database transactions.
-These benefits do not establish every transaction property of a custom
-access method automatically. They identify the machinery used for these
-particular bytes. Derived index images can use a different read mechanism,
-described in the next chapter.

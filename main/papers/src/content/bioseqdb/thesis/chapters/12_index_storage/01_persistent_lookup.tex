@@ -1,41 +1,48 @@
+% TODO: remebr to write here about types of indexes (abstractions)
 \section{Keep the lookup work between queries}
 \label{sec:index-storage-role}
+{lst:types-of-storage-entities-in-bioseqdb}
 
-The sequence store can fetch a small interval without decoding a whole
-chromosome. Seed lookup has a different question: at which positions does a
-query minimizer occur in the target? Reading every target symbol and rebuilding
-its minimizer table for each query would repeat much of the same work.
-A persistent index saves that table between executions.
+In previous chapter~\ref{sec:pg-storage-role} I describe how columnar and sequence storage layers are implemented in BioseqDB. There's however also aspect for storing indexes for sequences.
+We would like to be able to store computed minimizers (seeds/sketches)~\ref{lst:minimap-minimizer-cpp-decl} in a way that enables performant computations of alignments.
+They should be computed once when sequence is loaded from file or updated and then reused for subsequent select queries.
 
-The useful object is a mapping from a seed key to its occurrences. A
-\emph{posting} is one stored occurrence, including a position and any source or
-strand information needed to interpret it. A \emph{posting list} contains all
-stored occurrences for one key. The key may be a minimizer hash, as in
-BioSeqDB and minimap2, or a spaced word, as in the CPU MMseqs2 prefilter.
-The seed-selection rule determines which occurrences the index stores.
 
-Reuse of reference indexes already appears in biological workflows. For
-example, BioWorkbench's RASflow workflow checks for an existing Bowtie2 index
-before preparing it again\autocite{Mondelli_2018}. MMseqs2's interactive
-search system also saves precomputed search structures to reduce setup for
-repeated requests\autocite{mmseqs2_desktop_2019}. BioSeqDB has to connect this
-reuse to the database's changing rows and to the search operators from the
-previous chapters.
+% The sequence store can fetch a small interval without decoding a whole
+% chromosome. Seed lookup has a different question: at which positions does a
+% query minimizer occur in the target? Reading every target symbol and rebuilding
+% its minimizer table for each query would repeat much of the same work.
+% A persistent index saves that table between executions.
 
-Four questions guide the design:
-\begin{itemize}
-  \item \textbf{What is stored?} Minimizer positions answer seed lookups;
-    symbol counts answer a different question about sequence composition.
-  \item \textbf{How is it grouped?} Grouping by target interval makes
-    construction local. Grouping by hash makes later reads selective.
-  \item \textbf{When is it usable?} The index must describe the same source
-    version and minimizer rules as the query expects.
-  \item \textbf{Who keeps its bytes alive?} A reader needs valid storage and
-    buffers until its last lookup, including when another transaction changes
-    the source.
-\end{itemize}
+% The useful object is a mapping from a seed key to its occurrences. A
+% \emph{posting} is one stored occurrence, including a position and any source or
+% strand information needed to interpret it. A \emph{posting list} contains all
+% stored occurrences for one key. The key may be a minimizer hash, as in
+% BioSeqDB and minimap2, or a spaced word, as in the CPU MMseqs2 prefilter.
+% The seed-selection rule determines which occurrences the index stores.
 
-An index is derived data: removing it does not remove the sequence. This also
-distinguishes it from the completed-query cache in
-Section~\ref{sec:bioseq-result-cache}. A minimizer index can serve many
-different query sequences; a cached result describes completed executions.
+% Reuse of reference indexes already appears in biological workflows. For
+% example, BioWorkbench's RASflow workflow checks for an existing Bowtie2 index
+% before preparing it again\autocite{Mondelli_2018}. MMseqs2's interactive
+% search system also saves precomputed search structures to reduce setup for
+% repeated requests\autocite{mmseqs2_desktop_2019}. BioSeqDB has to connect this
+% reuse to the database's changing rows and to the search operators from the
+% previous chapters.
+
+% Four questions guide the design:
+% \begin{itemize}
+%   \item \textbf{What is stored?} Minimizer positions answer seed lookups;
+%     symbol counts answer a different question about sequence composition.
+%   \item \textbf{How is it grouped?} Grouping by target interval makes
+%     construction local. Grouping by hash makes later reads selective.
+%   \item \textbf{When is it usable?} The index must describe the same source
+%     version and minimizer rules as the query expects.
+%   \item \textbf{Who keeps its bytes alive?} A reader needs valid storage and
+%     buffers until its last lookup, including when another transaction changes
+%     the source.
+% \end{itemize}
+
+% An index is derived data: removing it does not remove the sequence. This also
+% distinguishes it from the completed-query cache in
+% Section~\ref{sec:bioseq-result-cache}. A minimizer index can serve many
+% different query sequences; a cached result describes completed executions.
