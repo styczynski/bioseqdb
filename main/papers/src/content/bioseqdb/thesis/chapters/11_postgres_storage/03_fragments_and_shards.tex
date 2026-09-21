@@ -137,7 +137,34 @@ after the next header. The compression will shrink the last fragment as it's mos
 
 \subsection{Two levels of sharding}
 
-Postgres tables have limits on number of stored row so in most extreme cases amount of sequences loaded can be more than one table can hold especially 
+Postgres tables have limits on the number of stored rows, so in the most
+extreme cases the amount of sequence data can be more than one table can hold,
+especially if we store many full human genomes.
+A (single copy i.e haploid) human genome is about $3.1$ to $3.2$ billion bases ($3.2\times 10^{9}$ symbols and the $32$-bit DNA4 unit from the figure above).
+PostgreSQL documents a maximum table size of $32$ TB at $8192B$ default page size~\autocite{postgresql17_limits}. That
+bound is a result of internal Postgres $32$-bit page index.
+
+\begin{equation}
+\begin{aligned}
+  F &= 1024 \times \frac{32}{2} = 16\,384
+    && \text{symbols per fragment}\\
+  n_{\mathrm{frag}} &= \Bigl\lceil \frac{3.2\times 10^{9}}{F} \Bigr\rceil = 195\,313
+    && \text{fragment rows per genome}\\
+  B &= 16 + 1024 \times 4 = 4\,112
+    && \text{bytes per fragment row}\\
+  P &= 8192 - 24 = 8\,168
+    && \text{usable bytes per page}\\
+  n_{\mathrm{page}} &= \Bigl\lceil \frac{n_{\mathrm{frag}} B}{P} \Bigr\rceil = 98\,327
+    && \text{pages per genome}\\
+  n_{\mathrm{seq}} &= \Bigl\lfloor \frac{4\,294{,}967{,}294}{n_{\mathrm{page}}} \Bigr\rfloor = 43\,680
+    && \text{genomes in one table}
+\end{aligned}
+\label{eq:storage-human-genome-table-cap}
+\end{equation}
+
+Without compression, one fragment table can therefore hold about $43{,}680$
+human-genome sequences before it runs out of pages. Practically compression rates for human genomes were already measured~\cite{kryukov_comparison_of_fasta_hg_compression}
+and zstd is capable of compressing human genome to effectively $790MB$ 
 
 A \textbf{length bucket} groups sequences by their logical number of
 symbols. A \textbf{shard} is an internal fragment relation within one bucket.

@@ -1,3 +1,19 @@
+@article{kryukov_comparison_of_fasta_hg_compression,
+    author = {Kryukov, Kirill and Ueda, Mahoko Takahashi and Nakagawa, So and Imanishi, Tadashi},
+    title = {Nucleotide Archival Format (NAF) enables efficient lossless reference-free compression of DNA sequences},
+    journal = {Bioinformatics},
+    volume = {35},
+    number = {19},
+    pages = {3826-3828},
+    year = {2019},
+    month = {10},
+    abstract = {DNA sequence databases use compression such as gzip to reduce the required storage space and network transmission time. We describe Nucleotide Archival Format (NAF)—a new file format for lossless reference-free compression of FASTA and FASTQ-formatted nucleotide sequences. Nucleotide Archival Format compression ratio is comparable to the best DNA compressors, while providing dramatically faster decompression. We compared our format with DNA compressors: DELIMINATE and MFCompress, and with general purpose compressors: gzip, bzip2, xz, brotli and zstd.NAF compressor and decompressor, as well as format specification are available at https://github.com/KirillKryukov/naf. Format specification is in public domain. Compressor and decompressor are open source under the zlib/libpng license, free for nearly any use.Supplementary data are available at Bioinformatics online.},
+    issn = {1367-4803},
+    doi = {10.1093/bioinformatics/btz144},
+    url = {https://doi.org/10.1093/bioinformatics/btz144},
+    eprint = {https://academic.oup.com/bioinformatics/article-pdf/35/19/3826/48977341/bioinformatics_35_19_3826.pdf},
+}
+
 @online{cppreference_standard_layout_type,
   author  = {{cppreference.com contributors}},
   title   = {{C++} named requirements: {StandardLayoutType}},
@@ -1037,6 +1053,14 @@ doi = {10.1186/s13059-020-02168-z}
   version = {17},
   url     = {https://www.postgresql.org/docs/17/storage-page-layout.html},
   urldate = {2026-09-08},
+}
+
+@online{postgresql17_limits,
+  author  = {{PostgreSQL Global Development Group}},
+  title   = {{PostgreSQL 17 Documentation}: Appendix~K. {PostgreSQL} Limits},
+  version = {17},
+  url     = {https://www.postgresql.org/docs/17/limits.html},
+  urldate = {2026-09-21},
 }
 
 @online{postgresql17_generic_wal,
