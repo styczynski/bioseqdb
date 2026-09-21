@@ -97,12 +97,50 @@ Shards for fragments are internally held as \texttt{CREATE TABLE ... (seq bioseq
   \draw[storage arrow] (locator.east)--(f0.west);
   \draw[storage arrow,storageOrange] (8.1,2.65)--(f1.north);
   \draw[storage arrow,storageOrange] (8.65,2.65)--(f2.north);
-  \node[anchor=west,text=black!65] at (.5,.15)
-    {The request uses fragments 1 and 2; it does not ask for fragment 0.};
+  \node[anchor=west,text=black!65] at (.5,.45)
+    {The request uses fragments 1 and 2. It does not ask for fragment 0.};
+
+  \node[anchor=east] at (1.4,-0.55) {pages};
+  % Two 8192-byte pages. Header 24 B is drawn wider than scale.
+  % Usable payload is 8168 B. Each fragment varlena is 4112 B
+  % (4096 payload + 16-byte sequence header), 8-byte aligned.
+  % Page 0: 4112 + 4056. Page 1: remaining 56 + 4112 + free.
+  \draw[fill=black!20,draw=black!60] (1.70,-0.95) rectangle (2.25,-0.15);
+  \draw[fill=storageGreen!12,draw=black!55] (2.25,-0.95) rectangle (4.39,-0.15);
+  \draw[fill=storageBlue!16,draw=black!55] (4.39,-0.95) rectangle (6.50,-0.15);
+  \node[font=\tiny,align=center] at (1.975,-0.55) {24 B};
+  \node[font=\scriptsize,align=center] at (3.32,-0.55) {$4112$ B\\row $r_0$};
+  \node[font=\scriptsize,align=center] at (5.445,-0.55) {$4056$ B\\row $r_0{+}1$};
+  \node[below,font=\scriptsize] at (4.10,-0.95) {$8192$ B page};
+
+  \draw[fill=black!20,draw=black!60] (7.00,-0.95) rectangle (7.55,-0.15);
+  \draw[fill=storageBlue!16,draw=black!55] (7.55,-0.95) rectangle (7.95,-0.15);
+  \draw[fill=storageGreen!12,draw=black!55] (7.95,-0.95) rectangle (10.09,-0.15);
+  \draw[fill=black!4,draw=black!55] (10.09,-0.95) rectangle (11.80,-0.15);
+  \node[font=\tiny,align=center] at (7.275,-0.55) {24 B};
+  \node[font=\tiny,align=center,rotate=90] at (7.75,-0.55) {$56$ B};
+  \node[font=\scriptsize,align=center] at (9.02,-0.55) {$4112$ B\\row $r_0{+}2$};
+  \node[font=\scriptsize] at (10.945,-0.55) {free};
+  \node[below,font=\scriptsize] at (9.40,-0.95) {$8192$ B page};
+
+  \draw[storage arrow,densely dotted] (f0.south)--(3.32,-0.15);
+  \draw[storage arrow,densely dotted] (f1.south)--(5.445,-0.15);
+  \draw[storage arrow,densely dotted] (f1.south)--(7.75,-0.15);
+  \draw[storage arrow,densely dotted] (f2.south)--(9.02,-0.15);
+  \node[anchor=west,text=black!65,align=left] at (.5,-1.45)
+    {Fragment rows are concatenated. A value may split across the next page header.\\
+     The $56$ B remainder is drawn wider than scale.};
 \end{tikzpicture}
-\caption{Assuming 32-bit storage unit for sequence of length 40000, we will have $1024 * \frac{32}{2} = 16384$ symbols per 
-fragment givind us 2 full fragments and one partially filled. If the pipeline requests some read $[30\,000,34\,000)$, it will read only two fragments.
-The rows visible here are compressed and stored as stripes and then as actual pages.}
+\caption{A $40\,000$-symbol DNA4 value with $32$-bit units uses
+$1024 \times 32/2 = 16\,384$ symbols per fragment, so two full fragments and
+one partial fragment. Request $[30\,000,34\,000)$ reads fragments 1 and 2.
+Each stored row is $4112$ bytes ($4096$ payload plus the $16$-byte sequence
+header). The TAM concatenates those varlenas in the column value stream and
+writes them on $8192$-byte pages, skipping the $24$-byte
+\texttt{PageHeaderData} ($8168$ usable bytes). One fragment fits in a page.
+Two concatenated fragments do not ($8224>8168$), so fragment 1 continues
+after the next header. Compression may shrink the stream first. It does not
+align a fragment to a page.}
 \label{fig:sequence-fragment-flow}
 \end{figure}
 
