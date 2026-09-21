@@ -2417,13 +2417,22 @@ def _validate_build_receipt(
             return None, f"cannot validate build receipt source graph: {exc}"
         if observed_source != receipt.get("source_graph_fingerprint"):
             return None, "build receipt source graph no longer matches"
-    try:
-        observed_commit = _git_commit(
-            source_repository_root, deadline=deadline)
-    except RuntimeError as exc:
-        return None, f"cannot validate build receipt commit: {exc}"
-    if observed_commit != receipt.get("source_commit"):
-        return None, "build receipt source commit no longer matches"
+    frozen_e2e_artifacts = (
+        not verify_source
+        and receipt.get("mode") == "benchmark-e2e"
+        and os.environ.get("BIOSEQ_E2E_REUSE_FROZEN_BINARY") == "1"
+    )
+    if not frozen_e2e_artifacts:
+        try:
+            observed_commit = _git_commit(
+                source_repository_root, deadline=deadline)
+        except RuntimeError as exc:
+            return None, f"cannot validate build receipt commit: {exc}"
+        if observed_commit != receipt.get("source_commit"):
+            return None, "build receipt source commit no longer matches"
+    # A frozen E2E run measures the receipt's recorded source, not current HEAD.
+    # Keep that identity unchanged. Moving HEAD alone must not force a build;
+    # all artifact, compiler/configuration and host checks below still apply.
     mode = receipt.get("mode")
     if not isinstance(mode, str) or mode not in MODES:
         return None, "build receipt names an unknown mode"

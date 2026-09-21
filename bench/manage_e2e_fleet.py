@@ -123,6 +123,15 @@ def priority(child: dict) -> tuple:
 
 
 def collect(name: str, token: str) -> bool:
+    """Serialize automatic and explicit collection for each worker."""
+    dest = COLLECTED / name
+    dest.mkdir(parents=True, exist_ok=True)
+    with (dest / ".collection.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _collect_reports(name, token)
+
+
+def _collect_reports(name: str, token: str) -> bool:
     """Stream a compressed, bounded report bundle; never rsync the whole report tree."""
     dest = COLLECTED / name
     dest.mkdir(parents=True, exist_ok=True)
@@ -131,7 +140,7 @@ def collect(name: str, token: str) -> bool:
     # Include receipt/state backups when present, but their absence is not fatal.
     base = ROOT if name == "local" else Path("/home/ubuntu/bioseqdb")
     program = (
-        "import pathlib,tarfile,sys,json,io; known=json.load(sys.stdin); "
+        "import pathlib,tarfile,sys,json,io,hashlib; known=json.load(sys.stdin); "
         f"p=pathlib.Path({str(base / 'reporting/bioseq_benchmark_e2e')!r}); "
         "all_reports=sorted(p.glob('report_*.json'),key=lambda x:int(x.stem.split('_')[1])); "
         "fs=all_reports[-24:]; baselines={};\n"
@@ -143,15 +152,23 @@ def collect(name: str, token: str) -> bool:
         "  if r.get('algorithm','').startswith('minimap2') and r.get('benchmark_shape',{}).get('expected_query_rows')==1024:\n"
         "   baselines[(r['test_case'],r['algorithm'])]=f\n"
         " except (OSError,ValueError,StopIteration): pass\n"
+        "frozen=p.parents[2]/'bioseq-frozen'\n"
+        "if frozen.is_dir():\n"
+        " for f in frozen.rglob('report_*.json'):\n"
+        "  try:\n"
+        "   with f.with_suffix('.raw.jsonl').open() as raw:\n"
+        "    next(raw); r=json.loads(next(raw))\n"
+        "   if r.get('algorithm','').startswith('minimap2') and r.get('benchmark_shape',{}).get('expected_query_rows')==1024: fs.append(f)\n"
+        "  except (OSError,ValueError,StopIteration): pass\n"
         "fs=list(dict.fromkeys([*baselines.values(),*fs])); selected=[]; inventory=dict(known);\n"
         "for f in fs:\n"
         " raw=f.with_suffix('.raw.jsonl')\n"
         " if not raw.exists(): continue\n"
+        " name=f.name if f.parent==p else 'saved/'+hashlib.sha256(str(f.parent).encode()).hexdigest()[:16]+'/'+f.name\n"
         " signature=[f.stat().st_size,f.stat().st_mtime_ns,raw.stat().st_size,raw.stat().st_mtime_ns]\n"
-        " if known.get(f.name)!=signature: selected.append(f); inventory[f.name]=signature\n"
+        " if known.get(name)!=signature: selected.append((f,name)); inventory[name]=signature\n"
         "t=tarfile.open(fileobj=sys.stdout.buffer,mode='w|gz'); "
-        "[(t.add(f,arcname=f.name),t.add(f.with_suffix('.raw.jsonl'),arcname=f.with_suffix('.raw.jsonl').name) "
-        "if f.with_suffix('.raw.jsonl').exists() else None) for f in selected]; "
+        "[(t.add(f,arcname=name),t.add(f.with_suffix('.raw.jsonl'),arcname=name[:-5]+'.raw.jsonl')) for f,name in selected]; "
         "body=json.dumps(inventory).encode(); info=tarfile.TarInfo('_collection_inventory.json'); "
         "info.size=len(body); t.addfile(info,io.BytesIO(body)); "
         "[t.add(f,arcname='control/'+f.name) for f in map(pathlib.Path,"
@@ -350,10 +367,11 @@ def main() -> None:
                     reclaim_idle_local_indexes()
                 # A failed build has no reusable receipt. Repair classified
                 # infrastructure failures once; never submit its pending ID.
-                if s.get("status") == "failed" and not s.get("bench_e2e_config"):
+                preferred_receipt = state.get("preferred_build_receipts", {}).get(name)
+                if s.get("status") == "failed" and not s.get("bench_e2e_config") and not preferred_receipt:
                     repair_build(name, s, state, args.dry_run)
                     continue
-                receipt = s.get("build_receipt_id")
+                receipt = preferred_receipt or s.get("build_receipt_id")
                 token = "v3_" + (s.get("run_receipt_id") or Path(s.get("log_file") or "unknown").stem)
                 if state["collected"].get(name) != token and not args.dry_run:
                     if shutil.disk_usage(ROOT).free < 4 * 1024**3:

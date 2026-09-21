@@ -68,6 +68,11 @@ def parse_report(report_bytes: bytes, raw_bytes: bytes, name: str, children: dic
     # membership, schedule, checksums and summaries, not just the five medians.
     with tempfile.TemporaryDirectory(prefix=".bioseq-numeric-audit-", dir=ROOT) as temporary:
         report_path = Path(temporary) / name
+        if report_path.is_absolute() and not report_path.is_relative_to(Path(temporary)):
+            raise ValueError("archive report escapes audit directory")
+        if ".." in Path(name).parts:
+            raise ValueError("archive report contains parent traversal")
+        report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_bytes(report_bytes)
         report_path.with_suffix(".raw.jsonl").write_bytes(raw_bytes)
         records, manifest, _, _ = audit._validate_raw_sidecar(report_path, report, config, entry)
@@ -114,14 +119,60 @@ def approved_row(row: dict) -> dict:
     return audit._approved_row_in_fixed_order(result)
 
 
+def family_baselines(host_dir: Path) -> tuple[dict, list[dict]]:
+    """Reuse checked correctness evidence, never another host's timings.
+
+    All records were validated against the same canonical q1024 singleton
+    fixture/configuration. Require every available baseline for an identity
+    to agree on the ordered per-query counts in each repeat; disagreements
+    are not resolved by selecting whichever baseline makes Bioseq pass.
+    """
+    family = host_dir.name.rsplit("-", 1)[-1]
+    grouped = {}
+    for peer in sorted(COLLECTED.iterdir()):
+        if not peer.is_dir() or peer.name.rsplit("-", 1)[-1] != family:
+            continue
+        path = peer / "numeric_recovery_cache.json"
+        if not path.exists():
+            continue
+        cache = json.loads(path.read_bytes())
+        if cache.get("validator_version") != 2:
+            continue
+        for item in cache.get("reports", {}).values():
+            records = item.get("records", [])
+            if (len(records) != 5 or records[0]["identity"]["engine"] != "minimap2"
+                    or not all(r["accepted"] and r["correctness_evaluated"]
+                               and r["match_count"] == r["correct_match_count"] == r["expected_match_count"]
+                               and r["ordered_oracle"] is not None for r in records)):
+                continue
+            records = sorted(records, key=lambda r: r["repeat"])
+            if [r["repeat"] for r in records] != list(range(5)):
+                continue
+            signature = tuple(tuple(r["ordered_oracle"]["counts"]) for r in records)
+            grouped.setdefault(records[0]["stable_key"], []).append((peer.name, records, signature))
+    baselines, conflicts = {}, []
+    for key, options in grouped.items():
+        if len({option[2] for option in options}) != 1:
+            conflicts.append({"stable_key": key, "error": "same-family saved minimap2 correctness baselines disagree; no peer baseline reused"})
+        else:
+            baselines[key] = options[0][:2]
+    return baselines, conflicts
+
+
 def recover(host_dir: Path, children: dict, publish: bool) -> dict:
     cache_path = host_dir / "numeric_recovery_cache.json"
     cache = json.loads(cache_path.read_bytes()) if cache_path.exists() else {}
     if cache.get("validator_version") != 2:
         cache = {"validator_version": 2, "reports": {}}
+    previous_inventory = dict(cache.get("archive_inventory", {}))
     # Content-addressing avoids repeating a large audit every scheduler tick.
     for archive in sorted(host_dir.glob("*.tar.gz")):
+        stamp = [archive.stat().st_size, archive.stat().st_mtime_ns]
+        previous = cache.setdefault("archive_inventory", {}).get(archive.name)
+        if previous and previous["stamp"] == stamp and previous["sha256"] in cache.get("archives", []):
+            continue
         archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+        cache["archive_inventory"][archive.name] = {"stamp": stamp, "sha256": archive_hash}
         if archive_hash in cache.get("archives", []):
             continue
         with tarfile.open(archive) as tar:
@@ -143,6 +194,8 @@ def recover(host_dir: Path, children: dict, publish: bool) -> dict:
                 cache["reports"][digest] = item
         cache.setdefault("archives", []).append(archive_hash)
         atomic(cache_path, (json.dumps(cache) + "\n").encode())
+    if previous_inventory != cache.get("archive_inventory", {}):
+        atomic(cache_path, (json.dumps(cache) + "\n").encode())
     # Select an entire independently accepted report, never cherry-pick repeats
     # across reports. Preserve the first valid numerical observation per tuple.
     cells = {}
@@ -157,7 +210,36 @@ def recover(host_dir: Path, children: dict, publish: bool) -> dict:
         key = records[0]["stable_key"]
         if key not in cells or not all(r["accepted"] for r in cells[key]):
             cells[key] = records
-    aggregated = audit._aggregate([r for records in cells.values() for r in records])
+    owned_keys = set(cells)
+    shared, baseline_conflicts = family_baselines(host_dir)
+    errors.extend(baseline_conflicts)
+    reused = {}
+    for key, records in list(cells.items()):
+        identity = records[0]["identity"]
+        if identity["engine"] != "bioseq":
+            continue
+        baseline_identity = dict(identity, engine="minimap2", bioseq_index_name=None,
+                                 requested_minimizer_algorithm=None,
+                                 requested_chaining_algorithm=None,
+                                 requested_base_alignment_algorithm=None)
+        baseline_key = audit._stable_key_for_identity(baseline_identity)
+        if baseline_key not in cells and baseline_key in shared:
+            donor, baseline_records = shared[baseline_key]
+            cells[baseline_key] = baseline_records
+            reused[baseline_key] = donor
+    aggregated = [row for row in audit._aggregate([r for records in cells.values() for r in records])
+                  if row["stable_key"] in owned_keys]
+    for row in aggregated:
+        identity = dict(children[row["stable_key"]]["execution_cell"]["identity"],
+                        engine="minimap2", bioseq_index_name=None,
+                        requested_minimizer_algorithm=None, requested_chaining_algorithm=None,
+                        requested_base_alignment_algorithm=None)
+        donor = reused.get(audit._stable_key_for_identity(identity))
+        if donor:
+            note = (f"Correctness-only minimap2 baseline reused from {donor} in the same machine family, "
+                    "with the same canonical q1024 dataset/configuration and repeat ordinals. "
+                    "Saved baseline ordered counts agree; no donor timings were used or published for this host.")
+            row["COMMENTS"] = ((row["COMMENTS"] + "; ") if row["COMMENTS"] else "") + note
     candidates = []
     for row in aggregated:
         if row["status"] == "accepted":
