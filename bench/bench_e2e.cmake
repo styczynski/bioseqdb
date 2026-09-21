@@ -64,7 +64,7 @@ bioseq_add_postgresql_extension(
     sqlgen::sqlgen                             # sqlgen PostgresV2Connection (find_package imported target)
     bioseq_integration_test_support
     Vulkan::Vulkan                             # Vulkan loader (bioseq_modules_nopg uses vulkan/shader_compiler)
-    Vulkan::glslang                            # GLSL→SPIR-V compiler (shader_compiler.cppm)
+    ${BIOSEQ_GLSLANG_STATIC_LIBS}               # GLSL→SPIR-V compiler (shader_compiler.cppm)
     spirv-cross-msl                            # SPIR-V → MSL cross-compiler (MoltenVK path)
     Vulkan::LayerSettings                      # validation-layer settings (Vulkan::Vulkan companion)
     bioseq_bench_framework
@@ -114,7 +114,7 @@ bioseq_add_postgresql_extension(
     Catch2::Catch2WithMain
     bioseq_integration_test_support
     Vulkan::Vulkan
-    Vulkan::glslang
+    ${BIOSEQ_GLSLANG_STATIC_LIBS}
     spirv-cross-msl
     Vulkan::LayerSettings
     bioseq_bench_framework

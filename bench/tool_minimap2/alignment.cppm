@@ -4,7 +4,7 @@ module;
 #include <cstdint>
 #include <string.h>
 
-#ifdef __ARM_NEON__
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #undef KSW2_BUILD_SSE_4_1
 #include "sse_neon.h"
 #endif
@@ -163,7 +163,7 @@ constexpr int KSW_SPSC_OFFSET  = 64;
 
 #include "defs.hpp"
 
-#ifdef __ARM_NEON__
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #undef KSW2_BUILD_SSE_4_1
 namespace ksw2_sse_neon {
 	#include "ksw2_extd2_sse.hpp"

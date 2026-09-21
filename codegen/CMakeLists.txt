@@ -531,6 +531,8 @@ add_executable(bioseq_codegen
   "${_codegen_src}/main.cppm"
   ${_codegen_implementation_files}
   "$<$<BOOL:${BIOSEQ_CODEGEN_ENABLE_SQL}>:${_codegen_src}/sql/tests/contract/fixtures/annotation_probe.cpp>")
+target_include_directories(bioseq_codegen PRIVATE
+  "${_codegen_src}/compat")
 target_sources(bioseq_codegen
   PRIVATE FILE_SET CXX_MODULES
     BASE_DIRS ${_codegen_base_dirs}

@@ -165,7 +165,11 @@ elseif(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
           OR EXISTS
             "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
           OR EXISTS
+            "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/x86_64-unknown-linux-gnu/libc++.modules.json"
+          OR EXISTS
             "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/aarch64-unknown-linux-gnu/c++/libc++.modules.json"
+          OR EXISTS
+            "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/aarch64-unknown-linux-gnu/libc++.modules.json"
           OR EXISTS
             "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/c++/libc++.modules.json"
           OR EXISTS
@@ -206,6 +210,8 @@ elseif(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
     # AWS-named configuration can run on a macOS worker, so discover every
     # supported layout from the validated selected LLVM root.
     set(_BIOSEQ_LIBCXX_MODULES_JSON_CANDIDATES
+      "${BIOSEQ_LLVM_ROOT}/lib/x86_64-unknown-linux-gnu/libc++.modules.json"
+      "${BIOSEQ_LLVM_ROOT}/lib/aarch64-unknown-linux-gnu/libc++.modules.json"
       "${BIOSEQ_LLVM_ROOT}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
       "${BIOSEQ_LLVM_ROOT}/lib/aarch64-unknown-linux-gnu/c++/libc++.modules.json"
       "${BIOSEQ_LLVM_ROOT}/lib/c++/libc++.modules.json"

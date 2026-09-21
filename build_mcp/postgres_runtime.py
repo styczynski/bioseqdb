@@ -868,9 +868,130 @@ def _legacy_q1024_global_postgresql_zero_evidence(
         "completed_at": time.time(),
     })
     if candidates:
-        evidence["error"] = (
-            "complete global snapshot contains PostgreSQL candidates")
-        return evidence
+        # A successful cluster restart is also a complete ownership boundary:
+        # no backend process can survive its postmaster.  Legacy recovery used
+        # to reject the healthy replacement postmaster merely because *some*
+        # PostgreSQL processes existed.  Accept that boundary only when the
+        # replacement service is tied to the recorded data directory and an
+        # exact, read-only pg_stat_activity lookup proves the reserved owner is
+        # absent.  Unrelated PostgreSQL roots and ambiguous process ancestry
+        # remain fail-closed.
+        boundary = entry.get("postgres_service_boundary")
+        recorded_postmaster_value = (
+            boundary.get("postmaster_process_identity")
+            if isinstance(boundary, dict) else None)
+        recorded_data_dir_value = (
+            boundary.get("data_directory")
+            if isinstance(boundary, dict) else None)
+        backend_identity = entry.get("postgres_backend_identity")
+        try:
+            if (not isinstance(recorded_postmaster_value, dict)
+                    or not isinstance(recorded_data_dir_value, dict)
+                    or not isinstance(backend_identity, dict)):
+                raise RuntimeError(
+                    "legacy state lacks the recorded PostgreSQL boundary")
+            recorded_postmaster = _ProcessIdentity(
+                **recorded_postmaster_value)
+            recorded_data_dir = Path(str(
+                recorded_data_dir_value["path"])).resolve(strict=True)
+            recorded_data_stat = recorded_data_dir.stat()
+            if (recorded_data_stat.st_dev
+                    != int(recorded_data_dir_value["device"])
+                    or recorded_data_stat.st_ino
+                    != int(recorded_data_dir_value["inode"])):
+                raise RuntimeError(
+                    "recorded PostgreSQL data directory identity changed")
+            current_data_dir = Path(_query_postgresql_data_directory(
+                str((pg_bindir / "psql").resolve(strict=True)),
+                active_preset, deadline)).resolve(strict=True)
+            if current_data_dir != recorded_data_dir:
+                raise RuntimeError(
+                    "replacement PostgreSQL data directory differs")
+            current_postmaster_pid = _postgresql_postmaster_pid(
+                str(current_data_dir), active_preset, deadline)
+            current_postmaster = _capture_process_identity(
+                current_postmaster_pid, deadline=deadline)
+            if current_postmaster is None:
+                raise RuntimeError(
+                    "cannot capture replacement postmaster identity")
+            if _same_process(current_postmaster, recorded_postmaster):
+                raise RuntimeError(
+                    "recorded postmaster was not replaced")
+            if not _same_process(
+                    snapshot.get(current_postmaster.pid), current_postmaster):
+                raise RuntimeError(
+                    "replacement postmaster is absent from global snapshot")
+            candidate_pids = {
+                int(candidate["process_identity"]["pid"])
+                for candidate in candidates
+            }
+            allowed_pids = {current_postmaster.pid}
+            allowed_pids.update(
+                process.pid for process in snapshot.values()
+                if process.ppid == current_postmaster.pid)
+            if not candidate_pids.issubset(allowed_pids):
+                raise RuntimeError(
+                    "global snapshot contains PostgreSQL candidates outside "
+                    "the replacement cluster")
+
+            application_name = backend_identity.get("application_name")
+            database_name = backend_identity.get("database")
+            database_user = backend_identity.get("user")
+            if (application_name != entry.get("postgres_application_name")
+                    or re.fullmatch(
+                        r"bioseq-q1024-[0-9a-f]{32}",
+                        str(application_name)) is None
+                    or not isinstance(database_name, str)
+                    or not isinstance(database_user, str)):
+                raise RuntimeError(
+                    "legacy PostgreSQL backend identity is malformed")
+            psql = (pg_bindir / "psql").resolve(strict=True)
+            if sys.platform.startswith("linux") and _is_aws_preset(
+                    active_preset):
+                psql = Path(_trusted_root_owned_executable(str(psql)))
+            selector = (
+                "backend_type = 'client backend' "
+                "AND pid <> pg_backend_pid() "
+                "AND application_name = :'owner_application' "
+                "AND datname = :'owner_database' "
+                "AND usename = :'owner_user'"
+            )
+            argv = _postgresql_admin_psql_argv(
+                str(psql), active_preset,
+                "-X", "-Atq", "-v", "ON_ERROR_STOP=1",
+                "--dbname", "postgres",
+                "--set", f"owner_application={application_name}",
+                "--set", f"owner_database={database_name}",
+                "--set", f"owner_user={database_user}",
+                "--file", "-",
+            )
+            remaining = deadline - time.time()
+            if remaining <= 0.0:
+                raise TimeoutError(
+                    "legacy replacement-boundary verification expired")
+            result = subprocess.run(
+                argv,
+                input=("SELECT count(*) FROM pg_stat_activity WHERE "
+                       + selector + ";"),
+                capture_output=True,
+                text=True,
+                timeout=min(10.0, remaining),
+                env=_postgresql_admin_environment(),
+            )
+            output = result.stdout.strip()
+            if result.returncode != 0 or output != "0":
+                raise RuntimeError(
+                    "replacement cluster still has exact owner backends")
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError,
+                subprocess.SubprocessError, TimeoutError) as exc:
+            evidence["error"] = f"{type(exc).__name__}: {exc}"
+            return evidence
+        evidence.update({
+            "method": (
+                "replacement_postmaster_and_exact_owner_sql_zero"),
+            "replacement_postmaster_identity": current_postmaster.__dict__,
+            "matching_backends": 0,
+        })
     evidence["cleanup_verified"] = True
     return evidence
 

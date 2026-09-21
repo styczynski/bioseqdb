@@ -68,7 +68,7 @@ bioseq_add_postgresql_extension(
     # The shared GPU runtime references the Vulkan shader compiler, so the
     # benchmark carries the same complete glslang linkage as the extension.
     Vulkan::Vulkan
-    Vulkan::glslang
+    ${BIOSEQ_GLSLANG_STATIC_LIBS}
     spirv-cross-msl
     Vulkan::LayerSettings
     bioseq_bench_framework

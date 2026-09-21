@@ -223,9 +223,11 @@ find_package(spirv_cross_msl CONFIG REQUIRED)
 find_package(VulkanUtilityLibraries CONFIG REQUIRED)
 
 # Vulkan/MoltenVK and glslang provide the G3SA tiled-DP chaining backend.
-# CMake's FindVulkan only materialises Vulkan::glslang when the glslang
-# component is requested, so it is listed explicitly. The shader is GLSL and
-# does not require DXC, preserving valid MoltenVK and non-Windows configurations.
+# Discover glslang through its package config rather than FindVulkan's legacy
+# component shim.  Current glslang packages no longer install OGLCompiler, which
+# older FindVulkan modules require before they create Vulkan::glslang.  Linking
+# the package's exported targets works with both the pinned Apple and Linux
+# toolchains and does not change the compiled shader or pipeline semantics.
 if(APPLE AND BIOSEQ_BENCHMARK_E2E_INTERVALS)
   if(NOT DEFINED VCPKG_INSTALLED_DIR
       OR NOT IS_ABSOLUTE "${VCPKG_INSTALLED_DIR}"
@@ -261,7 +263,8 @@ if(APPLE AND BIOSEQ_BENCHMARK_E2E_INTERVALS)
     "Receipt-owned release Vulkan loader for optimized Apple E2E builds"
     FORCE)
 endif()
-find_package(Vulkan REQUIRED COMPONENTS glslang)
+find_package(Vulkan REQUIRED)
+find_package(glslang CONFIG REQUIRED)
 
 if(APPLE AND BIOSEQ_BENCHMARK_E2E_INTERVALS)
   if(NOT TARGET Vulkan::Vulkan)
@@ -303,22 +306,18 @@ if(APPLE AND BIOSEQ_BENCHMARK_E2E_INTERVALS)
   unset(_bioseq_e2e_vulkan_release_candidate)
 endif()
 
-if(NOT TARGET Vulkan::glslang)
-  message(FATAL_ERROR
-    "the glslang dependency must provide Vulkan::glslang; rerun vcpkg install glslang")
-endif()
-
 set(BIOSEQ_GLSLANG_STATIC_LIBS
-  ${Vulkan_glslang_LIBRARY}
-  ${Vulkan_glslang-spirv_LIBRARY}
-  ${Vulkan_glslang-osdependent_LIBRARY}
-  ${Vulkan_glslang-machineindependent_LIBRARY}
-  ${Vulkan_glslang-genericcodegen_LIBRARY})
+  glslang::glslang
+  glslang::SPIRV
+  glslang::OSDependent
+  glslang::MachineIndependent
+  glslang::GenericCodeGen)
 
-foreach(_bioseq_glslang_lib IN LISTS BIOSEQ_GLSLANG_STATIC_LIBS)
-  if(NOT _bioseq_glslang_lib OR _bioseq_glslang_lib MATCHES "-NOTFOUND$")
+foreach(_bioseq_glslang_target IN LISTS BIOSEQ_GLSLANG_STATIC_LIBS)
+  if(NOT TARGET ${_bioseq_glslang_target})
     message(FATAL_ERROR
-      "glslang did not expose a required static library; rerun vcpkg install glslang")
+      "glslang did not expose required target ${_bioseq_glslang_target}; "
+      "rerun vcpkg install glslang")
   endif()
 endforeach()
 
@@ -922,6 +921,7 @@ bioseq_add_template_flatten_codegen(
   SIGNATURE_SOURCE
     "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm"
   PCM_ROOT "${BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT}/pcm"
+  PREPARE_DEPENDS "${BIOSEQ_MINIMIZER_REGISTRY_STAMP}"
   OUT_IMPLEMENTATION_UNITS
     BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS
   OUT_GENERATION_TARGET BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATION_TARGET

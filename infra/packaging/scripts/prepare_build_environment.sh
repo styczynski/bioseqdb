@@ -195,6 +195,50 @@ install_cmake() {
     || die "CMake ${cmake_version} installation failed"
 }
 
+normalize_libcxx_module_metadata() {
+  local modules_json=
+  modules_json="$(find "${llvm_root}" -name libc++.modules.json -type f -print -quit)"
+  [[ -n "${modules_json}" ]] || die "LLVM archive lacks libc++.modules.json"
+  LLVM_ROOT="${llvm_root}" MODULES_JSON="${modules_json}" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+llvm_root = Path(os.environ["LLVM_ROOT"]).resolve()
+metadata_path = Path(os.environ["MODULES_JSON"]).resolve()
+include_path = llvm_root / "include" / "c++" / "v1"
+if not (include_path / "__config").is_file():
+    raise SystemExit(f"libc++ headers are incomplete under {include_path}")
+target_include_path = (
+    llvm_root / "include" / metadata_path.parent.name / "c++" / "v1"
+)
+if not (target_include_path / "__config_site").is_file():
+    raise SystemExit(
+        "libc++ target headers are incomplete under "
+        f"{target_include_path}"
+    )
+# CMake's libc++ module-metadata consumer currently forwards one include root
+# for the standard-library module compile.  Keep the target configuration next
+# to the generic libc++ headers so that the single portable metadata root is
+# complete on both x86_64 and aarch64 installations.
+generic_config_site = include_path / "__config_site"
+target_config_site = target_include_path / "__config_site"
+if (not generic_config_site.is_file()
+        or generic_config_site.read_bytes() != target_config_site.read_bytes()):
+    temporary_config_site = generic_config_site.with_suffix(".tmp")
+    temporary_config_site.write_bytes(target_config_site.read_bytes())
+    os.replace(temporary_config_site, generic_config_site)
+document = json.loads(metadata_path.read_text(encoding="utf-8"))
+relative_include = os.path.relpath(include_path, metadata_path.parent)
+for module in document.get("modules", []):
+    local_arguments = module.setdefault("local-arguments", {})
+    local_arguments["system-include-directories"] = [relative_include]
+temporary = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+temporary.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+os.replace(temporary, metadata_path)
+PY
+}
+
 install_llvm() {
   local current=
   if [[ -x "${llvm_root}/bin/clang++" ]]; then
@@ -205,6 +249,7 @@ install_llvm() {
       && find "${llvm_root}" -name libc++.a -type f -print -quit | grep -q . \
       && find "${llvm_root}" -name libc++abi.a -type f -print -quit | grep -q . \
       && find "${llvm_root}" -name libunwind.a -type f -print -quit | grep -q .; then
+    normalize_libcxx_module_metadata
     return
   fi
 
@@ -231,6 +276,7 @@ install_llvm() {
     || die "LLVM archive lacks static libc++abi runtime"
   find "${llvm_root}" -name 'libunwind.a' -type f -print -quit | grep -q . \
     || die "LLVM archive lacks static libunwind runtime"
+  normalize_libcxx_module_metadata
 }
 
 install_vcpkg() {

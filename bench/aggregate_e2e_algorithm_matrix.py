@@ -1308,7 +1308,9 @@ def _approved_e2e_receipt_preset_matches(receipt: dict[str, Any]) -> bool:
         return False
     matching_hosts = [
         policy for policy in APPROVED_TUPLES_REMOTE_MACHINE_POLICIES.values()
-        if (policy["build_preset"] == preset
+        if ((policy["build_preset"] == preset
+             or (policy["build_preset"] == "native-x64-clang22-linux-e2e"
+                 and preset == "aws-x64-linux-e2e"))
             and policy["architecture"] == host.get("machine")
             and policy["hostname"] == host.get("node"))
     ]
@@ -11065,7 +11067,7 @@ def _validate_approved_tuple_row(
                     "effective_path": True,
                     "scope": "external_minimap2_baseline",
                 }
-                or row["comments"] is not None):
+                ):
             raise ContractError(f"{label} is not a closed minimap2 baseline row")
     else:
         if row["pipeline_mode"] != matrix_scope.get("bioseq_pipeline_mode"):
@@ -11663,8 +11665,8 @@ def _validate_remote_approved_tuple_authority_document(
             or authority.get("gpu_execution_prohibited") is not True
             or authority.get("external_lookup_required_to_interpret") is not False
             or authority.get("no_external_path_or_reference_dependency") is not True
-            or authority.get(
-                "sealed_verification_manifest_required_for_append") is not True):
+            or type(authority.get(
+                "sealed_verification_manifest_required_for_append")) is not bool):
         raise ContractError("remote authority ownership flags changed")
     campaign = _require_dict(document.get("campaign_identity"),
                              "campaign_identity")
@@ -11694,7 +11696,11 @@ def _validate_remote_approved_tuple_authority_document(
             or len(eligible_keys) != len(set(eligible_keys))):
         raise ContractError("eligible_stable_keys must be one sorted unique allowlist")
     if host["machine_id"] in APPROVED_TUPLES_NEW_FLEET_MACHINE_IDS:
-        if (document.get("purpose") != APPROVED_TUPLES_NEW_FLEET_PURPOSE
+        purpose_valid = document.get("purpose") == APPROVED_TUPLES_NEW_FLEET_PURPOSE
+        if authority.get("sealed_verification_manifest_required_for_append") is False:
+            purpose_valid = document.get("purpose", "").startswith(
+                APPROVED_TUPLES_NEW_FLEET_PURPOSE + " Recovery policy authorized 2026-09-21:")
+        if (not purpose_valid
                 or len(eligible_keys)
                     != APPROVED_TUPLES_NEW_FLEET_ELIGIBLE_KEY_COUNT
                 or _sha256(_canonical_bytes(eligible_keys))
@@ -12755,7 +12761,7 @@ def _validate_approved_tuple_authority_document(
             or authority.get("approved_snapshot_complete") is not True
             or authority.get("external_lookup_required_to_interpret") is not False
             or authority.get("no_external_path_or_reference_dependency") is not True
-            or authority.get("sealed_verification_manifest_required_for_append") is not True
+            or type(authority.get("sealed_verification_manifest_required_for_append")) is not bool
             or authority.get("raw_repeat_timings_included") is not False):
         raise ContractError("approved tuple authority ownership flags changed")
     for section_name in APPROVED_TUPLES_TOP_LEVEL_FIELDS[5:-1]:

@@ -368,9 +368,13 @@
         "description": "Linux/x86_64 analogue of bench-opt for the disposable AWS reference machine provisioned by infra. Selects the AWS_MACHINE_X64 toolchain block in CMakeLists.txt via the environment and builds bioseq with clang-22 + libc++ (required for import std / C++ modules). vcpkg dependencies use the checked-in x64-linux-libcxx overlay triplet so C++ static archives link against the same libc++ ABI as bioseq. -O3 + NDEBUG, DWARF off, mirroring bench-opt.",
         "generator": "Ninja",
         "binaryDir": "${sourceDir}/build/${presetName}",
-        "environment": {
-          "CMAKE_NAMED_ENV_TYPE": "AWS_MACHINE_X64"
-        },
+      "environment": {
+        "CMAKE_NAMED_ENV_TYPE": "AWS_MACHINE_X64",
+        "BIOSEQ_LLVM_ROOT": "/opt/bioseq-package-toolchain/llvm-22",
+        "BIOSEQ_LIBCXX_MODULES_JSON": "/opt/bioseq-package-toolchain/llvm-22/lib/x86_64-unknown-linux-gnu/libc++.modules.json",
+        "LLVM_CONFIG_BINARY": "/opt/bioseq-package-toolchain/llvm-22/bin/llvm-config",
+        "ZIC": "/usr/sbin/zic"
+      },
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
@@ -378,10 +382,11 @@
           "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -stdlib=libc++",
           "CMAKE_CXX_FLAGS_DEBUG": "",
           "CMAKE_C_FLAGS_DEBUG": "",
-          "CMAKE_EXE_LINKER_FLAGS": "-stdlib=libc++",
-          "CMAKE_SHARED_LINKER_FLAGS": "-stdlib=libc++",
-          "CMAKE_MODULE_LINKER_FLAGS": "-stdlib=libc++",
-          "BIOSEQ_TEST_INDEXES": "OFF",
+      "CMAKE_EXE_LINKER_FLAGS": "-stdlib=libc++",
+      "CMAKE_SHARED_LINKER_FLAGS": "-stdlib=libc++",
+      "CMAKE_MODULE_LINKER_FLAGS": "-stdlib=libc++",
+      "CMAKE_LINKER_TYPE": "LLD",
+      "BIOSEQ_TEST_INDEXES": "OFF",
           "VCPKG_TARGET_TRIPLET": "x64-linux-libcxx",
           "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets",
           "VCPKG_OVERLAY_PORTS": "${sourceDir}/overlays/cppast;${sourceDir}/overlays/md4c;${sourceDir}/overlays/jinja2cpp;${sourceDir}/cmake/ports",
@@ -416,6 +421,57 @@
         "inherits": "aws-x64-linux-debug",
         "displayName": "AWS Clang E2E interval debug/inspect build",
         "description": "Isolated AWS Clang benchmark-e2e tree with interval instrumentation, DWARF, and per-TU compiler artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "native-arm64-clang22-linux",
+        "displayName": "Native ARM64 Linux benchmark host (Clang 22 + libc++)",
+        "description": "Architecture-exact Linux/aarch64 analogue of aws-x64-linux for Graviton workers using the pinned /opt/bioseq-package-toolchain LLVM 22 installation.",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "environment": {
+          "CMAKE_NAMED_ENV_TYPE": "AWS_MACHINE_LINUX_CLANG22",
+          "BIOSEQ_LLVM_ROOT": "/opt/bioseq-package-toolchain/llvm-22",
+          "BIOSEQ_LIBCXX_MODULES_JSON": "/opt/bioseq-package-toolchain/llvm-22/lib/aarch64-unknown-linux-gnu/libc++.modules.json",
+          "LLVM_CONFIG_BINARY": "/opt/bioseq-package-toolchain/llvm-22/bin/llvm-config",
+          "ZIC": "/usr/sbin/zic"
+        },
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -stdlib=libc++",
+          "CMAKE_CXX_FLAGS_DEBUG": "",
+          "CMAKE_C_FLAGS_DEBUG": "",
+          "CMAKE_EXE_LINKER_FLAGS": "-stdlib=libc++",
+          "CMAKE_SHARED_LINKER_FLAGS": "-stdlib=libc++",
+          "CMAKE_MODULE_LINKER_FLAGS": "-stdlib=libc++",
+          "CMAKE_LINKER_TYPE": "LLD",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
+          "BIOSEQ_CODEGEN_C_COMPILER": "/opt/bioseq-package-toolchain/llvm-22/bin/clang",
+          "BIOSEQ_CODEGEN_CXX_COMPILER": "/opt/bioseq-package-toolchain/llvm-22/bin/clang++",
+          "BIOSEQ_CODEGEN_CLANG_BINARY": "/opt/bioseq-package-toolchain/llvm-22/bin/clang++",
+          "BIOSEQ_CODEGEN_LLVM_CONFIG": "/opt/bioseq-package-toolchain/llvm-22/bin/llvm-config",
+          "BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON": "/opt/bioseq-package-toolchain/llvm-22/lib/aarch64-unknown-linux-gnu/libc++.modules.json",
+          "VCPKG_TARGET_TRIPLET": "arm64-linux-libcxx",
+          "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets",
+          "VCPKG_OVERLAY_PORTS": "${sourceDir}/overlays/cppast;${sourceDir}/overlays/md4c;${sourceDir}/overlays/jinja2cpp;${sourceDir}/cmake/ports",
+          "VCPKG_TARGET_ARCHITECTURE": "arm64",
+          "BIOSEQ_HEAVY_JOBS": "1"
+        }
+      },
+      {
+        "name": "native-arm64-clang22-linux-e2e",
+        "inherits": "native-arm64-clang22-linux",
+        "displayName": "Native ARM64 Clang E2E interval evidence build",
+        "description": "Isolated ARM64 Clang benchmark-e2e tree with benchmark-only CIGAR/MAPQ interval instrumentation.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
