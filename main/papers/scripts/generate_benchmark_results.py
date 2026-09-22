@@ -3,7 +3,7 @@
 
 Run: python main/papers/scripts/generate_benchmark_results.py
 No build-system integration. --check checks the committed generated output without writing.
-The nine YAML approved_results datasets are authoritative. No benchmark is executed.
+The YAML approved_results datasets are authoritative. No benchmark is executed.
 """
 from __future__ import annotations
 import argparse
@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[3]
 OUTPUT = ROOT / 'main/papers/src/content/bioseqdb/thesis/chapters/16_benchmarking/generated_results.tex'
 HOSTS = ('Local', 'M7A', 'M7I', 'M4', 'C7G')
 FILES = dict(zip(HOSTS, ['ALL_RESULTS_TUPLES.yaml'] + [f'ALL_RESULTS_TUPLES_REMOTE_{h}.yaml' for h in HOSTS[1:]]))
+REMOTE_FALLBACKS = ('TEST3', 'TEST4')
 EXTERNAL_FILES = {h: f'ALL_RESULTS_TUPLES_E2E_EXTERNAL_REMOTE_{h}.yaml' for h in HOSTS[1:]}
 EXTERNAL_ALIGNERS = ('blastn', 'winnowmap', 'lexicmap')
 ALIGNER_ORDER = ('minimap2', 'bioseq', *EXTERNAL_ALIGNERS)
@@ -137,34 +138,58 @@ def validate_row(row, unavailable=False):
 
 
 class Snapshot:
-    """An immutable-in-memory, validated read of the five publication authorities."""
+    """Validated authorities merged by cell, with default / TEST3 / TEST4 priority."""
     def __init__(self, root):
         self.raw, self.docs, self.rows, self.unavailable = {}, {}, {}, set()
+        self.sources, self.absent_sources = {}, set()
         self.seen = set()
         self.excluded_historical = 0
-        for host, name in FILES.items():
-            raw = (root / name).read_bytes()
-            doc = yaml.safe_load(raw)
-            self.raw[host], self.docs[host] = raw, doc
+        for host, default_name in FILES.items():
+            candidates = [(default_name, host)]
             if host != 'Local':
-                assert doc['remote_host_binding']['machine_id'] == host
-            identities = set()
-            for row in doc['approved_results']:
-                validate_row(row)
-                identity = (row['stable_key'], row['timing_scope'])
-                assert identity not in identities, f'duplicate observation {host} {identity}'
-                identities.add(identity)
-                if row['timing_scope'] == HISTORICAL:
-                    self.excluded_historical += 1
-                    continue  # Mismeasured scope: excluded from tables, comparisons and coverage.
-                key = (host, row['timing_scope'], row_key(row), config_key(row))
-                assert key not in self.rows, f'display collision: {key}'
-                self.rows[key] = row
-            for row in doc.get('hardware_unavailable_cells', []):
-                validate_row(row, True)
-                key = (host, CURRENT, row_key(row), config_key(row))
-                assert key not in self.rows and key not in self.unavailable
-                self.unavailable.add(key)
+                candidates += [(f'ALL_RESULTS_TUPLES_REMOTE_{tag}_{host}.yaml', f'{tag}_{host}')
+                               for tag in REMOTE_FALLBACKS]
+            for name, machine_id in candidates:
+                path = root / name
+                if name != default_name and not path.exists():
+                    self.absent_sources.add(name)
+                    continue
+                raw = path.read_bytes()
+                doc = yaml.safe_load(raw)
+                self.raw[name] = raw
+                if name == default_name:
+                    self.docs[host] = doc
+                if host != 'Local':
+                    binding = doc['remote_host_binding']
+                    assert binding['machine_id'] == machine_id, f'wrong host in {name}'
+                    assert binding['instance_type'] == self.docs[host]['remote_host_binding']['instance_type'], f'wrong instance class in {name}'
+                identities, display_keys, unavailable_keys = set(), set(), set()
+                for row in doc.get('approved_results') or []:
+                    identity = (row['stable_key'], row['timing_scope'])
+                    assert identity not in identities, f'duplicate observation {name} {identity}'
+                    identities.add(identity)
+                    # An empty placeholder is not a measurement and cannot block fallback.
+                    metrics = row.get('metrics') or {}
+                    if all(metrics.get(metric) is None for metric in ('p50_a', 'p50_b')):
+                        continue
+                    validate_row(row)
+                    if row['timing_scope'] == HISTORICAL:
+                        self.excluded_historical += 1
+                        continue
+                    key = (host, row['timing_scope'], row_key(row), config_key(row))
+                    assert key not in display_keys, f'display collision in {name}: {key}'
+                    display_keys.add(key)
+                    if key not in self.rows:
+                        self.rows[key] = row
+                        self.sources[key] = name
+                for row in doc.get('hardware_unavailable_cells') or []:
+                    validate_row(row, True)
+                    key = (host, CURRENT, row_key(row), config_key(row))
+                    assert key not in display_keys and key not in unavailable_keys, f'conflicting disposition in {name}: {key}'
+                    unavailable_keys.add(key)
+                self.unavailable.update(unavailable_keys)
+        # A real result from any priority source supersedes an unmeasured disposition.
+        self.unavailable.difference_update(self.rows)
         for key, row in self.rows.items():
             if row['pipeline'] == 'bioseq':
                 assert (key[0], key[1], BASELINE, key[3]) in self.rows, f'missing matched baseline {key}'
@@ -240,10 +265,11 @@ def hardware_table(snapshot):
     for title, values in rows:
         out.append(tex(title) + ' & ' + ' & '.join(tex(v) for v in values) + r'\\[3pt]')
     out += [r'\bottomrule\end{tabularx}\end{table}', r'\noindent The AWS summaries record the Linux kernel but do not seal an OS distribution version. The local legacy capture does not seal the MoltenVK implementation identity. Unrecorded values are not inferred from the current machine.']
+    out += [r'\par Remote cells use the first available approved result in this order: the default summary, TEST3, then TEST4. A and B come from the same observation. The inventory describes the default hosts. Fallback measurements may come from other instances of the same machine class, and comparisons may combine campaigns.\par']
     out += [r'\begin{table}[H]\centering\small', r'\caption{Published snapshot coverage after excluding mismeasured historical timings.}', r'\begin{tabular}{lrrrrr}\toprule Host & Logical tuples & Observations & Repeats & BioseqDB obs. & GPU unavailable\\\midrule']
     for host in HOSTS:
         rows = [r for (h, _, _, _), r in snapshot.rows.items() if h == host]
-        out.append(f"{host} & {len({r['stable_key'] for r in rows})} & {len(rows)} & {sum(r['run_count'] for r in rows)} & {sum(r['pipeline']=='bioseq' for r in rows)} & {len(snapshot.docs[host].get('hardware_unavailable_cells', []))}" + r'\\')
+        out.append(f"{host} & {len({r['stable_key'] for r in rows})} & {len(rows)} & {sum(r['run_count'] for r in rows)} & {sum(r['pipeline']=='bioseq' for r in rows)} & {sum(h == host for h, _, _, _ in snapshot.unavailable)}" + r'\\')
     out += [r'\bottomrule\end{tabular}\end{table}']
     total = len(snapshot.rows)
     runs = sum(r['run_count'] for r in snapshot.rows.values())
@@ -493,8 +519,11 @@ def external_pages(external):
 
 def render(snapshot, external):
     out = ['% Generated by main/papers/scripts/generate_benchmark_results.py. Do not edit.', '% Source byte hashes (regenerate manually after approved results change).']
-    for host, raw in snapshot.raw.items():
-        out.append('% ' + FILES[host] + ' sha256=' + hashlib.sha256(raw).hexdigest())
+    for name, raw in snapshot.raw.items():
+        out.append('% ' + name + ' sha256=' + hashlib.sha256(raw).hexdigest())
+    for name in snapshot.raw:
+        count = sum(source == name for source in snapshot.sources.values())
+        out.append(f'% Selected observations from {name}: {count}')
     for host, raw in external.raw.items():
         out.append('% ' + EXTERNAL_FILES[host] + ' sha256=' + hashlib.sha256(raw).hexdigest())
     out += [r'\definecolor{BenchBest}{HTML}{DDECF8}', r'\definecolor{BenchBaseline}{HTML}{F4F4F4}', r'\definecolor{BenchPreferred}{HTML}{FFFBEA}', r'\newgeometry{left=10mm,right=10mm,top=12mm,bottom=12mm}', r'\begin{landscape}']
@@ -520,9 +549,11 @@ def main():
     snapshot = Snapshot(args.root)
     external = ExternalComparison(snapshot, args.root)
     result = render(snapshot, external)
-    for host, name in FILES.items():
-        if (args.root / name).read_bytes() != snapshot.raw[host]:
+    for name, raw in snapshot.raw.items():
+        if (args.root / name).read_bytes() != raw:
             raise RuntimeError(f'{name} changed during generation. Rerun for a consistent snapshot.')
+    if any((args.root / name).exists() for name in snapshot.absent_sources):
+        raise RuntimeError('A fallback source appeared during generation. Rerun for a consistent snapshot.')
     for host, name in EXTERNAL_FILES.items():
         if (args.root / name).read_bytes() != external.raw[host]:
             raise RuntimeError(f'{name} changed during generation. Rerun for a consistent snapshot.')
@@ -533,6 +564,9 @@ def main():
     else:
         args.output.write_text(result)
     print(f"{'Verified' if args.check else 'Generated'} {args.output}: {len(snapshot.rows)} observations, {sum(r['run_count'] for r in snapshot.rows.values())} repeats; final aligner table {len(external.rows)} observations; every selected observation rendered.")
+    for name in snapshot.raw:
+        count = sum(source == name for source in snapshot.sources.values())
+        print(f'  {name}: {count} selected observations')
     return 0
 
 

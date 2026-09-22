@@ -6,6 +6,8 @@
 After computing minimizers they need to be grouped by their hash, minimap2 choose to use the lowest $b$ hash bits (by default $b=14$) to choose one of $2^b$ buckets~\autocite{minimap2_paper,minimap2_software}.
 Minimap2 builds a hash table per bucket whose keys are the remaining hash bits. This buckets with hasmaps are serialized into \path{.mmi} file.
 I performed in-depth analysis of how the \path{.mmi} format is specified based on available Github old issues~\autocite{minimap2_issue_820,minimap2_mmi_gist} and original code from minimap2's \texttt{mm\_idx\_dump} and \texttt{mm\_idx\_load} functions.
+\noindent
+\coderef{minimap2index/index.c}{Writing and loading an index part}{mm_idx_dump, mm_idx_load}{475}
 
 The index file is concatenation of blocks presented in the Figure~\ref{fig:index-mmi-layout}:
 \begin{itemize}
@@ -145,34 +147,26 @@ The depiction of the index file layout is presented in the Figure~\ref{fig:index
   \draw[zoom,indexBlue]
     (11.80,8.75) -- (11.80,7.95) -- (13.60,7.95) -- (13.60,3.70) -- (12.80,3.70);
   \draw[zoom,indexBlue]
-    (11.80,8.75) -- (11.80,7.95) -- (13.60,7.95) -- (13.60,3.70) -- (12.80,5.00);
+    (11.80,8.75) -- (11.80,7.95) -- (13.60,7.95) -- (13.60,5.00) -- (12.80,5.00);
 \end{tikzpicture}
-\caption{Interpretation of one \texttt{.mmi} index. For very large datasets index file are split into multiple parts where each of them follows the same format.
+\caption[Interpretation of one \texttt{.mmi} index]{%
+Interpretation of one \texttt{.mmi} index.
+For very large datasets index files are split into multiple parts where each of them follows the same format.
 Minimap2 needs to store sequence ID (RID~\ref{lst:minimap-minimizer-cpp-decl}), because the index parts are generated for a set of sequences, not just one, so
 each part needs to identify which reference sequence the minimizer comes from.
 Arrows represent how specific elements of arrays look like in close inspection.
 Panel~(a) depicts high-level structure of the index~\ref{lst:high-level-mmi-index-format-description}.
 Panel~(b) presents records storing sequence information.
 Panel~(c) shows each bucket of minimizers, which stores its own hash-map via two lists.
-Panel~(d) shows how elements of $p$ looks like and key/values in the hash-map list. Hash map key is always remaining 42 bits with bit indicating that there's single value for that key.
+Panel~(d) shows how elements of $p$ looks like and key/values in the hash-map list.
+Hash map key is always remaining 42 bits with bit indicating that there's single value for that key.
 If the bit is set, then value in the key/value pair is (sequence id, position, strand bit), if not, then value points via offset/count pair into the list $p$.
 The list $p$ stores the same (sequence id, position, strand bit) values.}
 \label{fig:index-mmi-layout}
 \end{figure}
 
-There are two cases:
-\begin{itemize}
-  \item A \textbf{singleton} occurs once. Its position is stored directly
-    in the hash-table value.
-  \item A \textbf{repeated key} has several occurrences. Its value stores
-    an offset and a count into the bucket's separate position array.
-\end{itemize}
-Each position record includes the reference sequence identifier, position,
-and strand. A marker bit in the stored key distinguishes the two cases.
-Figure~\ref{fig:index-mmi-construction} uses small integer hashes to show the
-partition and lookup. It omits the marker's bit encoding, which is drawn in
-Figure~\ref{fig:index-mmi-layout}. Its positions are
-zero-based last-symbol coordinates.
+The idea of storing hash-map as two lists inside bucket is also presented in the Figure~\ref{fig:index-mmi-construction} below to allow easier understanding of the 
+index concept.
 
 \begin{figure}[htbp]
 \centering
@@ -201,62 +195,22 @@ zero-based last-symbol coordinates.
   \node[anchor=west,text=black!65] at (0,-.45)
     {A singleton needs no separate list. Repeated keys share a contiguous array.};
 \end{tikzpicture}
-\caption{A simplified minimap2 bucket. Hashes 13 and 21 have the same
-lowest two bits, but different remaining keys. The two occurrences of hash
-21 become adjacent in the bucket's position array. Concept based on the
-minimap2 implementation and format discussion.}
+\caption{A simplified minimap2 bucket: hashes 13 and 21 have the same
+lowest two bits, but different remaining keys, so they land in bucket 1 together. The two occurrences of hash
+21 become adjacent in the bucket's position array.}
 \label{fig:index-mmi-construction}
 \end{figure}
 
-The \texttt{.mmi} writer saves parameters, reference names and lengths,
-bucket position arrays, hash entries, and optionally packed reference symbols.
-The loader allocates the bucket structures and reconstructs one complete index
-part. A large reference can be split into several parts, so ``complete'' here
-does not require every part to be resident at once.
+\subsection{Indexing: mmseqs2}
 
-\noindent
-\coderef{minimap2index/index.c}{Minimizer bucket construction}{worker_post}{226}
+There are alternative approaches in literature to building an index.
+MMseqs2 stores one index file that contains counts and offsets, and then writes larger index files 
+that contain all occurence lists instead of bucketing them like minimap2 does.
+It's worth noting that 2017 MMseqs2\autocite{Steinegger079681,mmseqs2_2017} paper uses spaced k-mers which wasn't the focus of this thesis, so I didn't 
+investigate more how the alignment is precisely done.
 
-\noindent
-\coderef{minimap2index/index.c}{Writing and loading an index part}{mm_idx_dump, mm_idx_load}{475}
-
-This is a useful arrangement for a mapper whose caller chooses a reference
-file. BioSeqDB keeps the same useful key-to-occurrences idea, but adds
-selective database reads and source-version checks. These are concrete
-differences in responsibility, not a measured speed comparison.
-
-\subsection{MMseqs2: words point back to target sequences}
-
-The CPU MMseqs2 prefilter uses an inverted index: a word points to the target
-sequences and positions containing it. Its 2017 description uses
-\emph{spaced k-mers}, words selected through a fixed pattern that skips some
-positions. Query processing also generates similar words according to protein
-substitution scores, instead of requiring every matched word to be
-identical\autocite{Steinegger079681,mmseqs2_2017}.
-
-The lookup has three steps:
-\begin{enumerate}
-  \item Take a spaced word from the query and generate similar words.
-  \item Read their posting lists, whose entries are pairs
-    $(\text{target identifier},\text{target position})$.
-  \item Find successive matches to one target on the same \emph{diagonal}, defined as
-    target position minus query position. These matches suggest an ungapped
-    candidate region for further scoring.
-\end{enumerate}
-
-The current ordinary-sequence builder counts entries for each encoded word,
-forms cumulative offsets, and fills one contiguous entry array. Looking up
-code $c$ then reads entries in $[offset[c],offset[c+1])$. Offsets count
-entries, not bytes. The offset table reserves a slot for every possible
-encoded word, including absent words. This makes a list easy to find, but
-the table's size grows with the alphabet and word length.
-The implementation keeps the first position per
-distinct word code in each target sequence; it does not promise every
-repeated occurrence within that sequence. BioSeqDB's minimizer indexes
-instead retain distinct indexed minimizer occurrences, including occurrences
-at different positions in one target. These positions can support different
-alignments from the same stored row.
-
+MMseqs2 offers great performance in clsutering, which is different problem to alignment, however connected as it involves 
+estimation of edit distances for large datasets. The software also allows sets of taxonomy operations and alignment-based searches as well.\autocite{mmseqs2_linclust_2018}\autocite{mmseqs2_taxonomy_2021}\autocite{mmseqs2_desktop_2019}\autocite{mmseqs2_gpu_2025}.
 \noindent
 \coderef{mmseqsindex/src/prefiltering/IndexBuilder.cpp}{Count and fill the MMseqs2 index}{IndexBuilder::fillDatabase}{56}
 
@@ -265,6 +219,9 @@ alignments from the same stored row.
 
 \noindent
 \coderef{mmseqsindex/src/prefiltering/IndexTable.h}{Keep distinct word codes within one target}{addSequence}{350}
+
+I illustrate the idea of MMseqs2 index on a small example in the Figure~\ref{fig:index-mmseqs-inverted} below, where 
+I just assume that we use 2-letter k-mers of natural language for simplicity.
 
 \begin{figure}[htbp]
 \centering
@@ -293,29 +250,6 @@ alignments from the same stored row.
   \node[anchor=west,align=left] at (6,-.15)
     {Entry = (target ID, word start).\\Positions start at zero.};
 \end{tikzpicture}
-\caption{A small example of MMseqs2's count-and-fill construction, using
-contiguous two-letter words for clarity. The real CPU search uses its
-configured spaced-word pattern and larger words. Counts reserve adjacent
-list ranges, and a second pass fills them. AC occurs in targets 1 and 3.
-Empty code slots are omitted from the drawing.}
+\caption{A small example of MMseqs2's count-and-fill construction, where word/count/offsets triplets are stored in single file, file the actual (very large) lists of entries are stored separately}
 \label{fig:index-mmseqs-inverted}
 \end{figure}
-
-MMseqs2's later tools demonstrate why the distinction matters. Linclust
-selects a limited number of low-hash words per sequence and sorts a table
-containing the word, sequence identifier, and position. Equal words bring
-candidate sequences together for clustering\autocite{mmseqs2_linclust_2018}.
-This whole-sequence sampling differs from choosing a minimizer in each
-sliding window. The interactive server precomputes its CPU index and other
-lookup structures, then uses memory mapping so repeated searches can benefit
-from the operating system's page cache\autocite{mmseqs2_desktop_2019}.
-
-The same software family also serves taxonomy searches, where sequence hits
-must remain connected to taxonomic identifiers and reference
-metadata\autocite{mmseqs2_taxonomy_2021}. Its GPU search follows another
-route: it scans sequence residues with gapless dynamic programming, then
-performs selected gapped alignments. It can keep database batches on the GPU
-or stream them as needed\autocite{mmseqs2_gpu_2025}. Thus a persistent
-word index, a sampled clustering table, and resident sequence batches solve
-different problems. BioSeqDB's persistent minimizer indexes serve its
-seed-and-chain alignment path.
