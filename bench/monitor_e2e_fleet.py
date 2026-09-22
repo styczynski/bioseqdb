@@ -40,7 +40,7 @@ OTHER_KEY = "infra/testing_infra/.secrets/bioseq-bench-aws.pem"
 
 # Explicit identities avoid reliance on stale Terraform state.  The monitor is
 # intentionally limited to the fleet the user asked to keep occupied.
-HOSTS = (
+BASE_HOSTS = (
     ("default-c7g", "34.239.157.97", DEFAULT_KEY, "i-0cab5f0ab9a1cb002"),
     ("default-m4", "3.238.196.238", DEFAULT_KEY, "i-09b8f0b9dc8c60564"),
     ("default-m7a", "3.239.90.172", DEFAULT_KEY, "i-0c724c456e6a87366"),
@@ -56,6 +56,19 @@ HOSTS = (
 )
 
 
+def registered_hosts(*, include_retired: bool = False) -> tuple:
+    path = REPOSITORY / "bench/e2e_fleet_replicas.json"
+    registry = json.loads(path.read_bytes()) if path.exists() else {"hosts": {}}
+    retirement = REPOSITORY / "bench/e2e_fleet_retirement.json"
+    retired = json.loads(retirement.read_bytes())["hosts"] if retirement.exists() else {}
+    hosts = BASE_HOSTS + tuple((name, row["address"], OTHER_KEY, None)
+                              for name, row in sorted(registry["hosts"].items()))
+    return tuple(host for host in hosts if include_retired or not retired.get(host[0], {}).get("retired"))
+
+
+HOSTS = registered_hosts()
+
+
 def _run(command: list[str], *, timeout: int = 20) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -63,6 +76,8 @@ def _run(command: list[str], *, timeout: int = 20) -> subprocess.CompletedProces
 
 
 def _state_projection(document: dict[str, Any]) -> dict[str, Any]:
+    if "benchmark-e2e" not in document:
+        return {"status": "missing"}
     entry = document.get("benchmark-e2e", {})
     if not isinstance(entry, dict):
         return {"status": "missing", "error": "benchmark-e2e entry missing"}

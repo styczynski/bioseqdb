@@ -53,6 +53,8 @@ from build_worker import (
     INSPECT_TARGETS,
     MAX_BUILD_PHASE_TIMEOUT_SEC,
     tool_inspect,
+    tool_import_e2e_artifacts,
+    tool_export_e2e_artifacts,
     tool_papers_build,
     tool_papers_inspect,
     tool_start_build,
@@ -95,6 +97,19 @@ PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "bioseq-build-mcp", "version": "1.1.0"}
 
 TOOL_DEFINITIONS = [
+    {
+        "name": "export_e2e_artifacts",
+        "description": "Read-only validated frozen E2E runtime and dependency inventory for copying to an identical machine family; excludes compiled objects and databases.",
+        "inputSchema": {"type": "object", "properties": {"build_receipt_id": {"type": "string"}},
+                        "required": ["build_receipt_id"], "additionalProperties": False},
+    },
+    {
+        "name": "import_e2e_artifacts",
+        "description": "Validate exact copied frozen E2E artifacts against an original build receipt; register an explicit import receipt without building or benchmarking.",
+        "inputSchema": {"type": "object", "properties": {"source_receipt": {"type": "object"},
+                        "check_only": {"type": "boolean", "default": False}},
+                        "required": ["source_receipt"], "additionalProperties": False},
+    },
     {
         "name": "external_aligners",
         "description": "Build or run only the isolated external-aligner benchmark on its provisioned AWS host.",
@@ -1828,6 +1843,10 @@ def _handle_tools_call(params: dict) -> dict:
             text = tool_status(mode)
     elif name == "inspect":
         text = tool_inspect(args)
+    elif name == "import_e2e_artifacts":
+        text = tool_import_e2e_artifacts(args)
+    elif name == "export_e2e_artifacts":
+        text = tool_export_e2e_artifacts(args)
     elif name == "papers-build":
         text = tool_papers_build(args)
     elif name == "papers-inspect":

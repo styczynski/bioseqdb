@@ -868,14 +868,12 @@ def _legacy_q1024_global_postgresql_zero_evidence(
         "completed_at": time.time(),
     })
     if candidates:
-        # A successful cluster restart is also a complete ownership boundary:
-        # no backend process can survive its postmaster.  Legacy recovery used
-        # to reject the healthy replacement postmaster merely because *some*
-        # PostgreSQL processes existed.  Accept that boundary only when the
-        # replacement service is tied to the recorded data directory and an
-        # exact, read-only pg_stat_activity lookup proves the reserved owner is
-        # absent.  Unrelated PostgreSQL roots and ambiguous process ancestry
-        # remain fail-closed.
+        # PostgreSQL may recover a crashed backend without replacing its
+        # postmaster. With the exact worker/client/watchdog already proven dead
+        # above, either a retained or replacement service can prove cleanup:
+        # bind it to the recorded data directory and executable, then require
+        # a read-only pg_stat_activity query to find zero reserved-owner
+        # backends. Unrelated roots and ambiguous ancestry remain fail-closed.
         boundary = entry.get("postgres_service_boundary")
         recorded_postmaster_value = (
             boundary.get("postmaster_process_identity")
@@ -914,9 +912,8 @@ def _legacy_q1024_global_postgresql_zero_evidence(
             if current_postmaster is None:
                 raise RuntimeError(
                     "cannot capture replacement postmaster identity")
-            if _same_process(current_postmaster, recorded_postmaster):
-                raise RuntimeError(
-                    "recorded postmaster was not replaced")
+            postmaster_replaced = not _same_process(
+                current_postmaster, recorded_postmaster)
             if not _same_process(
                     snapshot.get(current_postmaster.pid), current_postmaster):
                 raise RuntimeError(
@@ -988,7 +985,9 @@ def _legacy_q1024_global_postgresql_zero_evidence(
             return evidence
         evidence.update({
             "method": (
-                "replacement_postmaster_and_exact_owner_sql_zero"),
+                "replacement_postmaster_and_exact_owner_sql_zero"
+                if postmaster_replaced else
+                "retained_postmaster_and_exact_owner_sql_zero"),
             "replacement_postmaster_identity": current_postmaster.__dict__,
             "matching_backends": 0,
         })

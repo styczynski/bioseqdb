@@ -452,10 +452,16 @@ APPROVED_TUPLES_REMOTE_MACHINE_POLICIES = {
         "build_preset": "native-x64-clang22-linux-e2e",
     },
 }
+_replica_registry_path = REPOSITORY_ROOT / "bench/e2e_fleet_replicas.json"
+_registered_replicas = (json.loads(_replica_registry_path.read_bytes())["hosts"]
+                        if _replica_registry_path.exists() else {})
+APPROVED_TUPLES_REMOTE_MACHINE_POLICIES.update({
+    name.upper().replace("-", "_"): row["machine_policy"]
+    for name, row in _registered_replicas.items()})
 APPROVED_TUPLES_NEW_FLEET_MACHINE_IDS = frozenset({
     "TEST3_C7G", "TEST3_M4", "TEST3_M7A", "TEST3_M7I",
     "TEST4_C7G", "TEST4_M4", "TEST4_M7A", "TEST4_M7I",
-})
+} | {name.upper().replace("-", "_") for name in _registered_replicas})
 APPROVED_TUPLES_NEW_FLEET_CAMPAIGN_CONTRACT_SHA256 = (
     "e80407ca3a515ca04ac7ad616f0c7f5e0ef477f3e09884ec8ab93370e8c55933")
 APPROVED_TUPLES_NEW_FLEET_ELIGIBLE_KEY_COUNT = 1296
@@ -1319,9 +1325,21 @@ def _approved_e2e_receipt_preset_matches(receipt: dict[str, Any]) -> bool:
 
 def _validate_build_receipt_snapshot(
         value: Any, label: str) -> dict[str, Any]:
-    receipt = _validate_content_seal(value, BUILD_RECEIPT_FIELDS, label)
-    if (receipt.get("kind") != "bioseq-build-receipt"
-            or receipt.get("schema_revision") != 2
+    imported = isinstance(value, dict) and value.get("kind") == "bioseq-e2e-artifact-import-receipt"
+    receipt = _validate_content_seal(value, BUILD_RECEIPT_FIELDS | ({"artifact_import"} if imported else set()), label)
+    if imported:
+        provenance = _require_dict(receipt.get("artifact_import"), label + " artifact import")
+        origin = _validate_build_receipt_snapshot(provenance.get("source_receipt"), label + " original build")
+        if origin.get("kind") != "bioseq-build-receipt":
+            raise ContractError(label + " import must refer directly to an original build")
+        changed = {"kind", "schema_revision", "build_receipt_id", "created_at",
+                   "host", "artifact_counts", "content_sha256"}
+        if any(receipt[key] != origin[key] for key in origin if key not in changed):
+            raise ContractError(label + " import altered original artifact/configuration/source evidence")
+        if any(receipt["host"].get(key) != origin["host"].get(key) for key in ("system", "machine")):
+            raise ContractError(label + " import changed platform/architecture")
+    if (receipt.get("kind") not in {"bioseq-build-receipt", "bioseq-e2e-artifact-import-receipt"}
+            or receipt.get("schema_revision") != (3 if imported else 2)
             or receipt.get("status") != "completed"
             or receipt.get("exit_code") != 0
             or receipt.get("mode") != "benchmark-e2e"
@@ -10841,6 +10859,10 @@ def _approved_yaml_emit(value: Any, indent: int, output: list[str]) -> None:
                 _approved_yaml_emit(child, indent + 2, output)
             elif isinstance(child, list):
                 if not child:
+                    if key == "approved_results":
+                        # A newly provisioned worker has no measurements yet.
+                        output.append(prefix + " []")
+                        continue
                     raise ContractError("approved authority may not contain an empty sequence")
                 output.append(prefix)
                 _approved_yaml_emit(child, indent, output)
@@ -11764,9 +11786,7 @@ def _validate_remote_approved_tuple_authority_document(
         raise ContractError(
             "hardware_unavailable_cells is not the exact Vulkan allowlist projection")
     raw_rows = _require_list(document.get("approved_results"), "approved_results")
-    if not raw_rows:
-        raise ContractError(
-            "published remote approved_results must start with a host-local baseline")
+    # Empty approved_results is an honest new-worker inventory, not a result.
     rows = [
         _validate_approved_tuple_row(
             raw_row, Q1024_CAMPAIGN_ID, matrix,

@@ -1,0 +1,113 @@
+{
+  "schema": "bioseq-e2e-fleet-replicas-v1",
+  "hosts": {
+    "test7-c7g": {
+      "address": "100.49.44.249",
+      "build_receipt_id": "br_427d79ee9c56d9da06dbad1c2e46dba0",
+      "template_profile": "all_alphabets_uint64",
+      "machine_policy": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST7_C7G.yaml",
+        "account_id": "872590157365",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-0aa16f7d4cd4928e0",
+        "instance_type": "c7g.xlarge",
+        "ec2_architecture": "arm64",
+        "architecture": "aarch64",
+        "hostname": "ip-172-31-73-204",
+        "vcpu_count": 4,
+        "core_count": 4,
+        "threads_per_core": 1,
+        "physical_memory_mib": 8192,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-068193d32da09bca3",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-arm64-clang22-linux-e2e"
+      }
+    },
+    "test7-m4": {
+      "address": "100.25.43.220",
+      "build_receipt_id": "br_a50506cfd384b4597c75d0c97d5ae4dd",
+      "template_profile": "all_alphabets_uint64",
+      "machine_policy": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST7_M4.yaml",
+        "account_id": "872590157365",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-017698097930a2576",
+        "instance_type": "m4.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-64-211",
+        "vcpu_count": 4,
+        "core_count": 2,
+        "threads_per_core": 2,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-0a63e8421fd4596f6",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e"
+      }
+    },
+    "test2-m7a": {
+      "address": "3.236.120.233",
+      "build_receipt_id": "br_122a61b2885d42a71f0e546d6edad5e3",
+      "template_profile": "dna4_uint64",
+      "machine_policy": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST2_M7A.yaml",
+        "account_id": "090072209895",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-075b8dbb0a0e70d48",
+        "instance_type": "m7a.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-79-163",
+        "vcpu_count": 4,
+        "core_count": 4,
+        "threads_per_core": 1,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-04435e08d2956fb13",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e"
+      }
+    },
+    "test2-m7i": {
+      "address": "98.80.104.54",
+      "build_receipt_id": "br_ffed36193d781a37a7c3a0290b3fcea6",
+      "template_profile": "dna4_uint64",
+      "machine_policy": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST2_M7I.yaml",
+        "account_id": "090072209895",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-0a992b8b81a73f459",
+        "instance_type": "m7i.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-64-87",
+        "vcpu_count": 4,
+        "core_count": 2,
+        "threads_per_core": 2,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-00eca18fcc7d265d1",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e"
+      }
+    }
+  }
+}

@@ -1,0 +1,1010 @@
+{
+  "source_account": "970376923108",
+  "captured_at": "2026-09-22",
+  "families": {
+    "c7g": {
+      "instance": {
+        "Architecture": "arm64",
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": {
+              "AttachTime": "2026-09-12T10:44:04+00:00",
+              "DeleteOnTermination": false,
+              "Status": "attached",
+              "VolumeId": "vol-0a68963a0efa7f81b",
+              "EbsCardIndex": 0
+            }
+          }
+        ],
+        "ClientToken": "terraform-20260912104401551700000003",
+        "EbsOptimized": true,
+        "EnaSupport": true,
+        "Hypervisor": "xen",
+        "IamInstanceProfile": {
+          "Arn": "arn:aws:iam::970376923108:instance-profile/bioseq-package-builder-profile",
+          "Id": "AIPA6D3XYY7SGREEJNXIO"
+        },
+        "NetworkInterfaces": [
+          {
+            "Association": {
+              "IpOwnerId": "amazon",
+              "PublicDnsName": "ec2-34-239-157-97.compute-1.amazonaws.com",
+              "PublicIp": "34.239.157.97"
+            },
+            "Attachment": {
+              "AttachTime": "2026-09-12T10:44:03+00:00",
+              "AttachmentId": "eni-attach-0d3baf82c5b0736a4",
+              "DeleteOnTermination": true,
+              "DeviceIndex": 0,
+              "Status": "attached",
+              "NetworkCardIndex": 0
+            },
+            "Description": "",
+            "Groups": [
+              {
+                "GroupId": "sg-0d6dbbb010840d363",
+                "GroupName": "bioseq-package-builder-sg"
+              }
+            ],
+            "Ipv6Addresses": [],
+            "MacAddress": "16:ff:e0:19:ab:13",
+            "NetworkInterfaceId": "eni-05d3ef1478035ec00",
+            "OwnerId": "970376923108",
+            "PrivateDnsName": "ip-172-31-72-135.ec2.internal",
+            "PrivateIpAddress": "172.31.72.135",
+            "PrivateIpAddresses": [
+              {
+                "Association": {
+                  "IpOwnerId": "amazon",
+                  "PublicDnsName": "ec2-34-239-157-97.compute-1.amazonaws.com",
+                  "PublicIp": "34.239.157.97"
+                },
+                "Primary": true,
+                "PrivateDnsName": "ip-172-31-72-135.ec2.internal",
+                "PrivateIpAddress": "172.31.72.135"
+              }
+            ],
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-040cae890fdb61c85",
+            "VpcId": "vpc-0d80148839ed4938c",
+            "InterfaceType": "interface",
+            "Operator": {
+              "Managed": false
+            }
+          }
+        ],
+        "RootDeviceName": "/dev/sda1",
+        "RootDeviceType": "ebs",
+        "SecurityGroups": [
+          {
+            "GroupId": "sg-0d6dbbb010840d363",
+            "GroupName": "bioseq-package-builder-sg"
+          }
+        ],
+        "SourceDestCheck": true,
+        "Tags": [
+          {
+            "Key": "Architecture",
+            "Value": "arm64"
+          },
+          {
+            "Key": "AmiSchemaRevision",
+            "Value": "2"
+          },
+          {
+            "Key": "Name",
+            "Value": "bioseq-package-builder-arm64"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "opentofu"
+          },
+          {
+            "Key": "ProtectedFromDelete",
+            "Value": "true"
+          },
+          {
+            "Key": "Lifecycle",
+            "Value": "persistent-build-cache"
+          },
+          {
+            "Key": "BuildArchitecture",
+            "Value": "arm64"
+          },
+          {
+            "Key": "Project",
+            "Value": "bioseq"
+          },
+          {
+            "Key": "Component",
+            "Value": "package-build-machine"
+          }
+        ],
+        "VirtualizationType": "hvm",
+        "CpuOptions": {
+          "CoreCount": 4,
+          "ThreadsPerCore": 1
+        },
+        "CapacityReservationSpecification": {
+          "CapacityReservationPreference": "open"
+        },
+        "HibernationOptions": {
+          "Configured": false
+        },
+        "MetadataOptions": {
+          "State": "applied",
+          "HttpTokens": "required",
+          "HttpPutResponseHopLimit": 2,
+          "HttpEndpoint": "enabled",
+          "HttpProtocolIpv6": "disabled",
+          "InstanceMetadataTags": "enabled"
+        },
+        "EnclaveOptions": {
+          "Enabled": false
+        },
+        "BootMode": "uefi",
+        "PlatformDetails": "Linux/UNIX",
+        "UsageOperation": "RunInstances",
+        "UsageOperationUpdateTime": "2026-09-12T10:44:03+00:00",
+        "PrivateDnsNameOptions": {
+          "HostnameType": "ip-name",
+          "EnableResourceNameDnsARecord": false,
+          "EnableResourceNameDnsAAAARecord": false
+        },
+        "MaintenanceOptions": {
+          "AutoRecovery": "default",
+          "RebootMigration": "default"
+        },
+        "CurrentInstanceBootMode": "uefi",
+        "NetworkPerformanceOptions": {
+          "BandwidthWeighting": "default"
+        },
+        "Operator": {
+          "Managed": false,
+          "HiddenByDefault": false
+        },
+        "SecondaryInterfaces": [],
+        "InstanceId": "i-0cab5f0ab9a1cb002",
+        "ImageId": "ami-0246d714afcc1d494",
+        "State": {
+          "Code": 16,
+          "Name": "running"
+        },
+        "PrivateDnsName": "ip-172-31-72-135.ec2.internal",
+        "PublicDnsName": "ec2-34-239-157-97.compute-1.amazonaws.com",
+        "StateTransitionReason": "",
+        "KeyName": "bioseq-package-builder",
+        "AmiLaunchIndex": 0,
+        "ProductCodes": [],
+        "InstanceType": "c7g.xlarge",
+        "LaunchTime": "2026-09-21T09:34:45+00:00",
+        "Placement": {
+          "AvailabilityZoneId": "use1-az5",
+          "GroupName": "",
+          "Tenancy": "default",
+          "AvailabilityZone": "us-east-1f"
+        },
+        "Monitoring": {
+          "State": "disabled"
+        },
+        "SubnetId": "subnet-040cae890fdb61c85",
+        "VpcId": "vpc-0d80148839ed4938c",
+        "PrivateIpAddress": "172.31.72.135",
+        "PublicIpAddress": "34.239.157.97"
+      },
+      "volume": {
+        "AvailabilityZoneId": "use1-az5",
+        "Iops": 6000,
+        "Tags": [
+          {
+            "Key": "BuildArchitecture",
+            "Value": "arm64"
+          },
+          {
+            "Key": "Component",
+            "Value": "package-build-machine"
+          },
+          {
+            "Key": "ProtectedFromDelete",
+            "Value": "true"
+          },
+          {
+            "Key": "Name",
+            "Value": "bioseq-package-builder-arm64-root"
+          },
+          {
+            "Key": "Project",
+            "Value": "bioseq"
+          },
+          {
+            "Key": "Architecture",
+            "Value": "arm64"
+          },
+          {
+            "Key": "AmiSchemaRevision",
+            "Value": "2"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "opentofu"
+          }
+        ],
+        "VolumeType": "gp3",
+        "MultiAttachEnabled": false,
+        "Throughput": 500,
+        "Operator": {
+          "Managed": false,
+          "HiddenByDefault": false
+        },
+        "VolumeId": "vol-0a68963a0efa7f81b",
+        "Size": 500,
+        "SnapshotId": "snap-033603172d0c2790a",
+        "AvailabilityZone": "us-east-1f",
+        "State": "in-use",
+        "CreateTime": "2026-09-12T10:44:04.727000+00:00",
+        "Attachments": [
+          {
+            "DeleteOnTermination": false,
+            "EbsCardIndex": 0,
+            "VolumeId": "vol-0a68963a0efa7f81b",
+            "InstanceId": "i-0cab5f0ab9a1cb002",
+            "Device": "/dev/sda1",
+            "State": "attached",
+            "AttachTime": "2026-09-12T10:44:04+00:00"
+          }
+        ],
+        "Encrypted": true,
+        "KmsKeyId": "arn:aws:kms:us-east-1:970376923108:key/4ade8a20-2a6a-44db-9e7c-509c4ea57d99"
+      }
+    },
+    "m4": {
+      "instance": {
+        "Architecture": "x86_64",
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": {
+              "AttachTime": "2026-09-12T10:44:04+00:00",
+              "DeleteOnTermination": false,
+              "Status": "attached",
+              "VolumeId": "vol-0d447fc0269e11320",
+              "EbsCardIndex": 0
+            }
+          }
+        ],
+        "ClientToken": "terraform-20260912104401551700000004",
+        "EbsOptimized": true,
+        "EnaSupport": true,
+        "Hypervisor": "xen",
+        "IamInstanceProfile": {
+          "Arn": "arn:aws:iam::970376923108:instance-profile/bioseq-package-builder-profile",
+          "Id": "AIPA6D3XYY7SGREEJNXIO"
+        },
+        "NetworkInterfaces": [
+          {
+            "Association": {
+              "IpOwnerId": "amazon",
+              "PublicDnsName": "ec2-3-238-196-238.compute-1.amazonaws.com",
+              "PublicIp": "3.238.196.238"
+            },
+            "Attachment": {
+              "AttachTime": "2026-09-12T10:44:04+00:00",
+              "AttachmentId": "eni-attach-02b4c8b27993e7964",
+              "DeleteOnTermination": true,
+              "DeviceIndex": 0,
+              "Status": "attached",
+              "NetworkCardIndex": 0
+            },
+            "Description": "",
+            "Groups": [
+              {
+                "GroupId": "sg-0d6dbbb010840d363",
+                "GroupName": "bioseq-package-builder-sg"
+              }
+            ],
+            "Ipv6Addresses": [],
+            "MacAddress": "16:ff:c6:12:78:65",
+            "NetworkInterfaceId": "eni-01618292524293535",
+            "OwnerId": "970376923108",
+            "PrivateDnsName": "ip-172-31-65-160.ec2.internal",
+            "PrivateIpAddress": "172.31.65.160",
+            "PrivateIpAddresses": [
+              {
+                "Association": {
+                  "IpOwnerId": "amazon",
+                  "PublicDnsName": "ec2-3-238-196-238.compute-1.amazonaws.com",
+                  "PublicIp": "3.238.196.238"
+                },
+                "Primary": true,
+                "PrivateDnsName": "ip-172-31-65-160.ec2.internal",
+                "PrivateIpAddress": "172.31.65.160"
+              }
+            ],
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-040cae890fdb61c85",
+            "VpcId": "vpc-0d80148839ed4938c",
+            "InterfaceType": "interface",
+            "Operator": {
+              "Managed": false
+            }
+          }
+        ],
+        "RootDeviceName": "/dev/sda1",
+        "RootDeviceType": "ebs",
+        "SecurityGroups": [
+          {
+            "GroupId": "sg-0d6dbbb010840d363",
+            "GroupName": "bioseq-package-builder-sg"
+          }
+        ],
+        "SourceDestCheck": true,
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "bioseq"
+          },
+          {
+            "Key": "Architecture",
+            "Value": "x86_64"
+          },
+          {
+            "Key": "Component",
+            "Value": "package-build-machine"
+          },
+          {
+            "Key": "BuildArchitecture",
+            "Value": "x64"
+          },
+          {
+            "Key": "Lifecycle",
+            "Value": "persistent-build-cache"
+          },
+          {
+            "Key": "Name",
+            "Value": "bioseq-package-builder-x64"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "opentofu"
+          },
+          {
+            "Key": "AmiSchemaRevision",
+            "Value": "2"
+          },
+          {
+            "Key": "ProtectedFromDelete",
+            "Value": "true"
+          }
+        ],
+        "VirtualizationType": "hvm",
+        "CpuOptions": {
+          "CoreCount": 2,
+          "ThreadsPerCore": 2
+        },
+        "CapacityReservationSpecification": {
+          "CapacityReservationPreference": "open"
+        },
+        "HibernationOptions": {
+          "Configured": false
+        },
+        "MetadataOptions": {
+          "State": "applied",
+          "HttpTokens": "required",
+          "HttpPutResponseHopLimit": 2,
+          "HttpEndpoint": "enabled",
+          "HttpProtocolIpv6": "disabled",
+          "InstanceMetadataTags": "enabled"
+        },
+        "EnclaveOptions": {
+          "Enabled": false
+        },
+        "BootMode": "uefi-preferred",
+        "PlatformDetails": "Linux/UNIX",
+        "UsageOperation": "RunInstances",
+        "UsageOperationUpdateTime": "2026-09-12T10:44:04+00:00",
+        "PrivateDnsNameOptions": {
+          "HostnameType": "ip-name",
+          "EnableResourceNameDnsARecord": false,
+          "EnableResourceNameDnsAAAARecord": false
+        },
+        "MaintenanceOptions": {
+          "AutoRecovery": "default",
+          "RebootMigration": "default"
+        },
+        "CurrentInstanceBootMode": "legacy-bios",
+        "NetworkPerformanceOptions": {
+          "BandwidthWeighting": "default"
+        },
+        "Operator": {
+          "Managed": false,
+          "HiddenByDefault": false
+        },
+        "SecondaryInterfaces": [],
+        "InstanceId": "i-09b8f0b9dc8c60564",
+        "ImageId": "ami-025d99823a4caad37",
+        "State": {
+          "Code": 16,
+          "Name": "running"
+        },
+        "PrivateDnsName": "ip-172-31-65-160.ec2.internal",
+        "PublicDnsName": "ec2-3-238-196-238.compute-1.amazonaws.com",
+        "StateTransitionReason": "",
+        "KeyName": "bioseq-package-builder",
+        "AmiLaunchIndex": 0,
+        "ProductCodes": [],
+        "InstanceType": "m4.xlarge",
+        "LaunchTime": "2026-09-21T09:34:45+00:00",
+        "Placement": {
+          "AvailabilityZoneId": "use1-az5",
+          "GroupName": "",
+          "Tenancy": "default",
+          "AvailabilityZone": "us-east-1f"
+        },
+        "Monitoring": {
+          "State": "disabled"
+        },
+        "SubnetId": "subnet-040cae890fdb61c85",
+        "VpcId": "vpc-0d80148839ed4938c",
+        "PrivateIpAddress": "172.31.65.160",
+        "PublicIpAddress": "3.238.196.238"
+      },
+      "volume": {
+        "AvailabilityZoneId": "use1-az5",
+        "Iops": 6000,
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "bioseq-package-builder-x64-root"
+          },
+          {
+            "Key": "AmiSchemaRevision",
+            "Value": "2"
+          },
+          {
+            "Key": "BuildArchitecture",
+            "Value": "x64"
+          },
+          {
+            "Key": "Component",
+            "Value": "package-build-machine"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "opentofu"
+          },
+          {
+            "Key": "Project",
+            "Value": "bioseq"
+          },
+          {
+            "Key": "Architecture",
+            "Value": "x86_64"
+          },
+          {
+            "Key": "ProtectedFromDelete",
+            "Value": "true"
+          }
+        ],
+        "VolumeType": "gp3",
+        "MultiAttachEnabled": false,
+        "Throughput": 500,
+        "Operator": {
+          "Managed": false,
+          "HiddenByDefault": false
+        },
+        "VolumeId": "vol-0d447fc0269e11320",
+        "Size": 500,
+        "SnapshotId": "snap-061b4b6a8efb44d83",
+        "AvailabilityZone": "us-east-1f",
+        "State": "in-use",
+        "CreateTime": "2026-09-12T10:44:04.782000+00:00",
+        "Attachments": [
+          {
+            "DeleteOnTermination": false,
+            "EbsCardIndex": 0,
+            "VolumeId": "vol-0d447fc0269e11320",
+            "InstanceId": "i-09b8f0b9dc8c60564",
+            "Device": "/dev/sda1",
+            "State": "attached",
+            "AttachTime": "2026-09-12T10:44:04+00:00"
+          }
+        ],
+        "Encrypted": true,
+        "KmsKeyId": "arn:aws:kms:us-east-1:970376923108:key/4ade8a20-2a6a-44db-9e7c-509c4ea57d99"
+      }
+    },
+    "m7a": {
+      "instance": {
+        "Architecture": "x86_64",
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": {
+              "AttachTime": "2026-09-12T10:47:51+00:00",
+              "DeleteOnTermination": false,
+              "Status": "attached",
+              "VolumeId": "vol-09e1fb2d8a352b673",
+              "EbsCardIndex": 0
+            }
+          }
+        ],
+        "ClientToken": "terraform-20260912104749818800000001",
+        "EbsOptimized": true,
+        "EnaSupport": true,
+        "Hypervisor": "xen",
+        "IamInstanceProfile": {
+          "Arn": "arn:aws:iam::970376923108:instance-profile/bioseq-package-builder-profile",
+          "Id": "AIPA6D3XYY7SGREEJNXIO"
+        },
+        "NetworkInterfaces": [
+          {
+            "Association": {
+              "IpOwnerId": "amazon",
+              "PublicDnsName": "ec2-3-239-90-172.compute-1.amazonaws.com",
+              "PublicIp": "3.239.90.172"
+            },
+            "Attachment": {
+              "AttachTime": "2026-09-12T10:47:50+00:00",
+              "AttachmentId": "eni-attach-087cbcc012f48ceee",
+              "DeleteOnTermination": true,
+              "DeviceIndex": 0,
+              "Status": "attached",
+              "NetworkCardIndex": 0
+            },
+            "Description": "",
+            "Groups": [
+              {
+                "GroupId": "sg-0d6dbbb010840d363",
+                "GroupName": "bioseq-package-builder-sg"
+              }
+            ],
+            "Ipv6Addresses": [],
+            "MacAddress": "16:ff:d3:54:bf:71",
+            "NetworkInterfaceId": "eni-0b2affc4fa6d951cb",
+            "OwnerId": "970376923108",
+            "PrivateDnsName": "ip-172-31-77-104.ec2.internal",
+            "PrivateIpAddress": "172.31.77.104",
+            "PrivateIpAddresses": [
+              {
+                "Association": {
+                  "IpOwnerId": "amazon",
+                  "PublicDnsName": "ec2-3-239-90-172.compute-1.amazonaws.com",
+                  "PublicIp": "3.239.90.172"
+                },
+                "Primary": true,
+                "PrivateDnsName": "ip-172-31-77-104.ec2.internal",
+                "PrivateIpAddress": "172.31.77.104"
+              }
+            ],
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-040cae890fdb61c85",
+            "VpcId": "vpc-0d80148839ed4938c",
+            "InterfaceType": "interface",
+            "Operator": {
+              "Managed": false
+            }
+          }
+        ],
+        "RootDeviceName": "/dev/sda1",
+        "RootDeviceType": "ebs",
+        "SecurityGroups": [
+          {
+            "GroupId": "sg-0d6dbbb010840d363",
+            "GroupName": "bioseq-package-builder-sg"
+          }
+        ],
+        "SourceDestCheck": true,
+        "Tags": [
+          {
+            "Key": "ProtectedFromDelete",
+            "Value": "true"
+          },
+          {
+            "Key": "Name",
+            "Value": "bioseq-benchmark-m7a-x64"
+          },
+          {
+            "Key": "BuildArchitecture",
+            "Value": "x64"
+          },
+          {
+            "Key": "Architecture",
+            "Value": "x86_64"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "opentofu"
+          },
+          {
+            "Key": "Project",
+            "Value": "bioseq"
+          },
+          {
+            "Key": "Component",
+            "Value": "benchmark-machine"
+          },
+          {
+            "Key": "Lifecycle",
+            "Value": "persistent-build-cache"
+          }
+        ],
+        "VirtualizationType": "hvm",
+        "CpuOptions": {
+          "CoreCount": 4,
+          "ThreadsPerCore": 1
+        },
+        "CapacityReservationSpecification": {
+          "CapacityReservationPreference": "open"
+        },
+        "HibernationOptions": {
+          "Configured": false
+        },
+        "MetadataOptions": {
+          "State": "applied",
+          "HttpTokens": "required",
+          "HttpPutResponseHopLimit": 2,
+          "HttpEndpoint": "enabled",
+          "HttpProtocolIpv6": "disabled",
+          "InstanceMetadataTags": "enabled"
+        },
+        "EnclaveOptions": {
+          "Enabled": false
+        },
+        "BootMode": "uefi-preferred",
+        "PlatformDetails": "Linux/UNIX",
+        "UsageOperation": "RunInstances",
+        "UsageOperationUpdateTime": "2026-09-12T10:47:50+00:00",
+        "PrivateDnsNameOptions": {
+          "HostnameType": "ip-name",
+          "EnableResourceNameDnsARecord": false,
+          "EnableResourceNameDnsAAAARecord": false
+        },
+        "MaintenanceOptions": {
+          "AutoRecovery": "default",
+          "RebootMigration": "default"
+        },
+        "CurrentInstanceBootMode": "uefi",
+        "NetworkPerformanceOptions": {
+          "BandwidthWeighting": "default"
+        },
+        "Operator": {
+          "Managed": false,
+          "HiddenByDefault": false
+        },
+        "SecondaryInterfaces": [],
+        "InstanceId": "i-0c724c456e6a87366",
+        "ImageId": "ami-025d99823a4caad37",
+        "State": {
+          "Code": 16,
+          "Name": "running"
+        },
+        "PrivateDnsName": "ip-172-31-77-104.ec2.internal",
+        "PublicDnsName": "ec2-3-239-90-172.compute-1.amazonaws.com",
+        "StateTransitionReason": "",
+        "KeyName": "bioseq-package-builder",
+        "AmiLaunchIndex": 0,
+        "ProductCodes": [],
+        "InstanceType": "m7a.xlarge",
+        "LaunchTime": "2026-09-21T09:34:45+00:00",
+        "Placement": {
+          "AvailabilityZoneId": "use1-az5",
+          "GroupName": "",
+          "Tenancy": "default",
+          "AvailabilityZone": "us-east-1f"
+        },
+        "Monitoring": {
+          "State": "disabled"
+        },
+        "SubnetId": "subnet-040cae890fdb61c85",
+        "VpcId": "vpc-0d80148839ed4938c",
+        "PrivateIpAddress": "172.31.77.104",
+        "PublicIpAddress": "3.239.90.172"
+      },
+      "volume": {
+        "AvailabilityZoneId": "use1-az5",
+        "Iops": 6000,
+        "Tags": [
+          {
+            "Key": "Component",
+            "Value": "benchmark-machine"
+          },
+          {
+            "Key": "Name",
+            "Value": "bioseq-benchmark-m7a-x64-root"
+          },
+          {
+            "Key": "Lifecycle",
+            "Value": "persistent-build-cache"
+          },
+          {
+            "Key": "Project",
+            "Value": "bioseq"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "opentofu"
+          },
+          {
+            "Key": "BuildArchitecture",
+            "Value": "x64"
+          }
+        ],
+        "VolumeType": "gp3",
+        "MultiAttachEnabled": false,
+        "Throughput": 500,
+        "Operator": {
+          "Managed": false,
+          "HiddenByDefault": false
+        },
+        "VolumeId": "vol-09e1fb2d8a352b673",
+        "Size": 500,
+        "SnapshotId": "snap-061b4b6a8efb44d83",
+        "AvailabilityZone": "us-east-1f",
+        "State": "in-use",
+        "CreateTime": "2026-09-12T10:47:51.596000+00:00",
+        "Attachments": [
+          {
+            "DeleteOnTermination": false,
+            "EbsCardIndex": 0,
+            "VolumeId": "vol-09e1fb2d8a352b673",
+            "InstanceId": "i-0c724c456e6a87366",
+            "Device": "/dev/sda1",
+            "State": "attached",
+            "AttachTime": "2026-09-12T10:47:51+00:00"
+          }
+        ],
+        "Encrypted": true,
+        "KmsKeyId": "arn:aws:kms:us-east-1:970376923108:key/4ade8a20-2a6a-44db-9e7c-509c4ea57d99"
+      }
+    },
+    "m7i": {
+      "instance": {
+        "Architecture": "x86_64",
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/sda1",
+            "Ebs": {
+              "AttachTime": "2026-09-12T10:50:53+00:00",
+              "DeleteOnTermination": false,
+              "Status": "attached",
+              "VolumeId": "vol-032e918f7fc9c0763",
+              "EbsCardIndex": 0
+            }
+          }
+        ],
+        "ClientToken": "terraform-20260912105051773000000001",
+        "EbsOptimized": true,
+        "EnaSupport": true,
+        "Hypervisor": "xen",
+        "IamInstanceProfile": {
+          "Arn": "arn:aws:iam::970376923108:instance-profile/bioseq-package-builder-profile",
+          "Id": "AIPA6D3XYY7SGREEJNXIO"
+        },
+        "NetworkInterfaces": [
+          {
+            "Association": {
+              "IpOwnerId": "amazon",
+              "PublicDnsName": "ec2-98-82-140-62.compute-1.amazonaws.com",
+              "PublicIp": "98.82.140.62"
+            },
+            "Attachment": {
+              "AttachTime": "2026-09-12T10:50:52+00:00",
+              "AttachmentId": "eni-attach-0da42c87a9b18e4b0",
+              "DeleteOnTermination": true,
+              "DeviceIndex": 0,
+              "Status": "attached",
+              "NetworkCardIndex": 0
+            },
+            "Description": "",
+            "Groups": [
+              {
+                "GroupId": "sg-0d6dbbb010840d363",
+                "GroupName": "bioseq-package-builder-sg"
+              }
+            ],
+            "Ipv6Addresses": [],
+            "MacAddress": "16:ff:f7:bf:a2:41",
+            "NetworkInterfaceId": "eni-0656f7e2ea01bd292",
+            "OwnerId": "970376923108",
+            "PrivateDnsName": "ip-172-31-73-182.ec2.internal",
+            "PrivateIpAddress": "172.31.73.182",
+            "PrivateIpAddresses": [
+              {
+                "Association": {
+                  "IpOwnerId": "amazon",
+                  "PublicDnsName": "ec2-98-82-140-62.compute-1.amazonaws.com",
+                  "PublicIp": "98.82.140.62"
+                },
+                "Primary": true,
+                "PrivateDnsName": "ip-172-31-73-182.ec2.internal",
+                "PrivateIpAddress": "172.31.73.182"
+              }
+            ],
+            "SourceDestCheck": true,
+            "Status": "in-use",
+            "SubnetId": "subnet-040cae890fdb61c85",
+            "VpcId": "vpc-0d80148839ed4938c",
+            "InterfaceType": "interface",
+            "Operator": {
+              "Managed": false
+            }
+          }
+        ],
+        "RootDeviceName": "/dev/sda1",
+        "RootDeviceType": "ebs",
+        "SecurityGroups": [
+          {
+            "GroupId": "sg-0d6dbbb010840d363",
+            "GroupName": "bioseq-package-builder-sg"
+          }
+        ],
+        "SourceDestCheck": true,
+        "Tags": [
+          {
+            "Key": "ManagedBy",
+            "Value": "opentofu"
+          },
+          {
+            "Key": "Name",
+            "Value": "bioseq-benchmark-m7i-x64"
+          },
+          {
+            "Key": "Project",
+            "Value": "bioseq"
+          },
+          {
+            "Key": "Component",
+            "Value": "benchmark-machine"
+          },
+          {
+            "Key": "Lifecycle",
+            "Value": "persistent-build-cache"
+          },
+          {
+            "Key": "ProtectedFromDelete",
+            "Value": "true"
+          },
+          {
+            "Key": "BuildArchitecture",
+            "Value": "x64"
+          },
+          {
+            "Key": "Architecture",
+            "Value": "x86_64"
+          }
+        ],
+        "VirtualizationType": "hvm",
+        "CpuOptions": {
+          "CoreCount": 2,
+          "ThreadsPerCore": 2
+        },
+        "CapacityReservationSpecification": {
+          "CapacityReservationPreference": "open"
+        },
+        "HibernationOptions": {
+          "Configured": false
+        },
+        "MetadataOptions": {
+          "State": "applied",
+          "HttpTokens": "required",
+          "HttpPutResponseHopLimit": 2,
+          "HttpEndpoint": "enabled",
+          "HttpProtocolIpv6": "disabled",
+          "InstanceMetadataTags": "enabled"
+        },
+        "EnclaveOptions": {
+          "Enabled": false
+        },
+        "BootMode": "uefi-preferred",
+        "PlatformDetails": "Linux/UNIX",
+        "UsageOperation": "RunInstances",
+        "UsageOperationUpdateTime": "2026-09-12T10:50:52+00:00",
+        "PrivateDnsNameOptions": {
+          "HostnameType": "ip-name",
+          "EnableResourceNameDnsARecord": false,
+          "EnableResourceNameDnsAAAARecord": false
+        },
+        "MaintenanceOptions": {
+          "AutoRecovery": "default",
+          "RebootMigration": "default"
+        },
+        "CurrentInstanceBootMode": "uefi",
+        "NetworkPerformanceOptions": {
+          "BandwidthWeighting": "default"
+        },
+        "Operator": {
+          "Managed": false,
+          "HiddenByDefault": false
+        },
+        "SecondaryInterfaces": [],
+        "InstanceId": "i-0e647495fa0691f94",
+        "ImageId": "ami-025d99823a4caad37",
+        "State": {
+          "Code": 16,
+          "Name": "running"
+        },
+        "PrivateDnsName": "ip-172-31-73-182.ec2.internal",
+        "PublicDnsName": "ec2-98-82-140-62.compute-1.amazonaws.com",
+        "StateTransitionReason": "",
+        "KeyName": "bioseq-package-builder",
+        "AmiLaunchIndex": 0,
+        "ProductCodes": [],
+        "InstanceType": "m7i.xlarge",
+        "LaunchTime": "2026-09-21T09:34:45+00:00",
+        "Placement": {
+          "AvailabilityZoneId": "use1-az5",
+          "GroupName": "",
+          "Tenancy": "default",
+          "AvailabilityZone": "us-east-1f"
+        },
+        "Monitoring": {
+          "State": "disabled"
+        },
+        "SubnetId": "subnet-040cae890fdb61c85",
+        "VpcId": "vpc-0d80148839ed4938c",
+        "PrivateIpAddress": "172.31.73.182",
+        "PublicIpAddress": "98.82.140.62"
+      },
+      "volume": {
+        "AvailabilityZoneId": "use1-az5",
+        "Iops": 6000,
+        "Tags": [
+          {
+            "Key": "BuildArchitecture",
+            "Value": "x64"
+          },
+          {
+            "Key": "Component",
+            "Value": "benchmark-machine"
+          },
+          {
+            "Key": "Lifecycle",
+            "Value": "persistent-build-cache"
+          },
+          {
+            "Key": "Name",
+            "Value": "bioseq-benchmark-m7i-x64-root"
+          },
+          {
+            "Key": "Project",
+            "Value": "bioseq"
+          },
+          {
+            "Key": "ManagedBy",
+            "Value": "opentofu"
+          }
+        ],
+        "VolumeType": "gp3",
+        "MultiAttachEnabled": false,
+        "Throughput": 500,
+        "Operator": {
+          "Managed": false,
+          "HiddenByDefault": false
+        },
+        "VolumeId": "vol-032e918f7fc9c0763",
+        "Size": 500,
+        "SnapshotId": "snap-061b4b6a8efb44d83",
+        "AvailabilityZone": "us-east-1f",
+        "State": "in-use",
+        "CreateTime": "2026-09-12T10:50:53.680000+00:00",
+        "Attachments": [
+          {
+            "DeleteOnTermination": false,
+            "EbsCardIndex": 0,
+            "VolumeId": "vol-032e918f7fc9c0763",
+            "InstanceId": "i-0e647495fa0691f94",
+            "Device": "/dev/sda1",
+            "State": "attached",
+            "AttachTime": "2026-09-12T10:50:53+00:00"
+          }
+        ],
+        "Encrypted": true,
+        "KmsKeyId": "arn:aws:kms:us-east-1:970376923108:key/4ade8a20-2a6a-44db-9e7c-509c4ea57d99"
+      }
+    }
+  }
+}

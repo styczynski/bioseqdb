@@ -13,7 +13,7 @@ receive one incremental repair per source-fix digest; never a blind build loop.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import fcntl
 import hashlib
 import json
@@ -32,6 +32,7 @@ import threading
 import yaml
 import monitor_e2e_fleet as monitor
 from recover_e2e_measurements import COLLECTED, MANIFEST, ROOT, atomic, authority_path
+from e2e_tuple_progress import append_progress_log
 
 OUTPUT = ROOT / "reporting/bioseq_benchmark_e2e/fleet_controller"
 HOSTS = {h[0]: h for h in monitor.HOSTS}
@@ -112,12 +113,18 @@ def reclaim_idle_local_indexes() -> None:
 
 
 def priority(child: dict) -> tuple:
+    """User priority: bounded, then SIMD-DP/RMQ/other, then block/KSW2/other."""
     i = child["execution_cell"]["identity"]
+    bounded = any("bounded" in str(i.get("requested_" + stage + "_algorithm") or "").lower()
+                  for stage in ("minimizer", "chaining", "base_alignment"))
+    chaining_rank = {"simd_minimap2": 0, "range_minimum_query": 1}.get(
+        i["requested_chaining_algorithm"], 2)
+    alignment_rank = {"block_aligner": 0, "ksw2": 1}.get(
+        i["requested_base_alignment_algorithm"], 2)
     gpu = "vulkan" in json.dumps(i)
-    preferred = (i["requested_minimizer_algorithm"] == "bounded_nthash_simd"
-                 and i["requested_chaining_algorithm"] == "simd_minimap2"
-                 and i["requested_base_alignment_algorithm"] == "block_aligner")
-    return (gpu, not preferred, i["engine"] != "minimap2", i["target_size_gbp"],
+    # Existing preferences only break ties after the three requested keys.
+    return (not bounded, chaining_rank, alignment_rank,
+            gpu, i["engine"] != "minimap2", i["target_size_gbp"],
             i["alphabet"] != "dna4", i["index_mode"] != "just_index",
             i["bioseq_index_name"] != "minimizers_per_fragment", child["ordinal"])
 
@@ -194,13 +201,15 @@ def sync_files(name: str, paths: tuple[str, ...]) -> None:
     if name == "local":
         return
     remote = ssh(name)
-    for relative in paths:
-        result = subprocess.run(
-            ["rsync", "-az", "-e", shlex.join(remote[:-1]), str(ROOT / relative),
-             remote[-1] + ":/home/ubuntu/bioseqdb/" + relative],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
-        if result.returncode:
-            raise RuntimeError(result.stderr.decode(errors="replace")[-800:])
+    if any(Path(p).is_absolute() or ".." in Path(p).parts or "\n" in p for p in paths):
+        raise ValueError("sync requires exact repository-relative paths")
+    result = subprocess.run(
+        ["rsync", "-azR", "--files-from=-", "-e", shlex.join(remote[:-1]), str(ROOT) + "/",
+         remote[-1] + ":/home/ubuntu/bioseqdb/"],
+        input=("\n".join(paths) + "\n").encode(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    if result.returncode:
+        raise RuntimeError(result.stderr.decode(errors="replace")[-800:])
 
 
 def mcp_start(name: str, args: dict, label: str) -> str:
@@ -239,10 +248,35 @@ def mcp_start(name: str, args: dict, label: str) -> str:
     return str(log)
 
 
-def dispatch(name: str, receipt: str, child: dict) -> None:
+def dispatch(name: str, receipt: str, child: dict) -> dict:
     config = child["path"]
-    sync_files(name, ("build_mcp/build_worker.py", "build_mcp/q1024_watchdog.py",
-                      "bench/aggregate_e2e_algorithm_matrix.py", config))
+    # Keep the Python control package coherent: copying only build_worker can
+    # leave it calling stale PostgreSQL cleanup/process-state helpers. These
+    # are runtime orchestration files, not the measured compiled algorithms.
+    control_files = tuple(str(p.relative_to(ROOT)) for p in sorted((ROOT / "build_mcp").rglob("*.py")))
+    sync_files(name, (*control_files, "bench/aggregate_e2e_algorithm_matrix.py",
+                      "bench/e2e_fleet_replicas.json", "bench_framework/index.cppm", config))
+    # /tmp may disappear on reboot. Preserve genuine successful receipts in
+    # the durable report tree and restore their original bytes/identities,
+    # never manufacture a new build claim or rebuild merely to obtain an ID.
+    program = (
+        "import sys,json,pathlib,os; sys.path.insert(0,'build_mcp'); "
+        "from process_state import _get_build_receipt,_store_build_receipt; "
+        f"rid={receipt!r}; p=pathlib.Path('reporting/bioseq_benchmark_e2e/reusable_build_receipts.json'); "
+        "saved=json.loads(p.read_text()) if p.exists() else {}; r=_get_build_receipt(rid);\n"
+        "if r is None and rid in saved:\n"
+        " _store_build_receipt(saved[rid]); r=_get_build_receipt(rid)\n"
+        "if not r or r.get('status')!='completed' or r.get('mode')!='benchmark-e2e':\n"
+        " raise RuntimeError('No existing successful build receipt; do not infer a need to rebuild')\n"
+        "if rid in saved and saved[rid]!=r: raise RuntimeError('Saved receipt identity collision')\n"
+        "saved[rid]=r; p.parent.mkdir(parents=True,exist_ok=True); "
+        "tmp=p.with_suffix('.tmp'); tmp.write_text(json.dumps(saved,sort_keys=True)+'\\n'); os.replace(tmp,p)"
+    )
+    command = [sys.executable, "-c", program] if name == "local" else ssh(name) + [
+        "cd /home/ubuntu/bioseqdb && python3 -c " + shlex.quote(program)]
+    preserved = subprocess.run(command, capture_output=True, text=True, cwd=ROOT, timeout=30)
+    if preserved.returncode:
+        raise RuntimeError("Could not preserve/recover build receipt: " + preserved.stderr[-800:])
     log = mcp_start(name, {"mode": "benchmark-e2e", "run_only": True, "debug": False,
         "reuse_build_receipt": receipt, "bench_e2e_config": config,
         "filter": {"benchmarks": ["bench_e2e"]}}, f"dispatch_{child['ordinal']:04d}")
@@ -251,6 +285,7 @@ def dispatch(name: str, receipt: str, child: dict) -> None:
         raise RuntimeError("MCP accepted launch, but active config does not match; inspect " + log)
     event("dispatch_verified", host=name, ordinal=child["ordinal"], status=observed.get("status"),
           phase=observed.get("phase"), log=log)
+    return observed
 
 
 def repair_build(name: str, s: dict, state: dict, dry_run: bool) -> bool:
@@ -330,6 +365,11 @@ def main() -> None:
     by_path = {c["path"]: c for c in children}
     recovery = None
     while True:
+        retirement_path = ROOT / "bench/e2e_fleet_retirement.json"
+        retirement = json.loads(retirement_path.read_bytes())["hosts"] if retirement_path.exists() else {}
+        monitor.HOSTS = monitor.registered_hosts()
+        HOSTS.update({h[0]: h for h in monitor.HOSTS})
+        replicas = json.loads((ROOT / "bench/e2e_fleet_replicas.json").read_bytes())["hosts"]
         snapshot = {"local": monitor._local_state()}
         def poll(h):
             try:
@@ -338,8 +378,12 @@ def main() -> None:
                 return h[0], {"status": "unreachable", "error": str(exc)}
         with ThreadPoolExecutor(max_workers=4) as pool:
             snapshot.update(pool.map(poll, monitor.HOSTS))
+        for host in monitor.registered_hosts(include_retired=True):
+            # Keep historical results/reservations without contacting deleted resources.
+            snapshot.setdefault(host[0], {"status": "retired", "phase": None})
         atomic(OUTPUT / "snapshot.json", (json.dumps({"timestamp": time.time(), "hosts": snapshot}, indent=2) + "\n").encode())
         occupied = {}
+        pending_dispatches = []
         for name, s in snapshot.items():
             reserved = occupied.setdefault(family(name), set())
             path = authority_path(name)
@@ -355,25 +399,37 @@ def main() -> None:
                 state["attempted"].setdefault(name, [])
                 if key not in state["attempted"][name]:
                     state["attempted"][name].append(key)
-            reserved.update(state["attempted"].get(name, []))
+            interrupted = retirement.get(name, {}).get("interrupted_stable_key")
+            reserved.update(key for key in state["attempted"].get(name, []) if key != interrupted)
             summary_path = COLLECTED / name / "numeric_recovery_summary.json"
             if summary_path.exists():
                 reserved.update(r["stable_key"] for r in json.loads(summary_path.read_bytes())["dispositions"])
         for name, s in snapshot.items():
             try:
-                if s.get("status") not in ("completed", "aborted", "failed"):
+                retirement_path = ROOT / "bench/e2e_fleet_retirement.json"
+                retirement = json.loads(retirement_path.read_bytes())["hosts"] if retirement_path.exists() else {}
+                if retirement.get(name, {}).get("draining"):
+                    # Preserve terminal output, but never refill a retiring account.
+                    if s.get("status") in ("completed", "aborted", "failed") and not args.dry_run:
+                        token = "drain_" + (s.get("run_receipt_id") or Path(s.get("log_file") or "unknown").stem)
+                        if state["collected"].get(name) != token and collect(name, token):
+                            state["collected"][name] = token
+                    continue
+                imported_receipt = replicas.get(name, {}).get("build_receipt_id")
+                if s.get("status") not in ("completed", "aborted", "failed") and not (
+                        s.get("status") == "missing" and imported_receipt):
                     continue
                 if name == "local" and not args.dry_run:
                     reclaim_idle_local_indexes()
                 # A failed build has no reusable receipt. Repair classified
                 # infrastructure failures once; never submit its pending ID.
-                preferred_receipt = state.get("preferred_build_receipts", {}).get(name)
+                preferred_receipt = state.get("preferred_build_receipts", {}).get(name) or imported_receipt
                 if s.get("status") == "failed" and not s.get("bench_e2e_config") and not preferred_receipt:
                     repair_build(name, s, state, args.dry_run)
                     continue
                 receipt = preferred_receipt or s.get("build_receipt_id")
                 token = "v3_" + (s.get("run_receipt_id") or Path(s.get("log_file") or "unknown").stem)
-                if state["collected"].get(name) != token and not args.dry_run:
+                if state["collected"].get(name) != token and not args.dry_run and s.get("status") != "missing":
                     if shutil.disk_usage(ROOT).free < 4 * 1024**3:
                         # Reports remain durable on the worker. A temporary
                         # local collection backlog must not idle twelve AWS hosts.
@@ -393,7 +449,7 @@ def main() -> None:
                 choices = [c for c in children if c["stable_key"] not in reserved
                            and "ksw2_batched" not in c["stable_key"]
                            and (name == "local" or "vulkan" not in c["stable_key"])]
-                if s.get("template_profile") == "dna4_uint64":
+                if (s.get("template_profile") or replicas.get(name, {}).get("template_profile")) == "dna4_uint64":
                     # Existing x64 binaries explicitly reject DNA5 typmods.
                     # Continue useful DNA4 coverage with these binaries; DNA5
                     # Bioseq cells remain unmeasured until an all-alphabet build.
@@ -414,12 +470,25 @@ def main() -> None:
                 state["last_dispatch"][name] = {"previous_token": token, "ordinal": selected["ordinal"],
                                                "at": time.time(), "accepted": False}
                 atomic(state_path, (json.dumps(state, indent=2) + "\n").encode())
-                dispatch(name, receipt, selected)
-                state["last_dispatch"][name]["accepted"] = True
-                state["attempted"].setdefault(name, []).append(selected["stable_key"])
-                atomic(state_path, (json.dumps(state, indent=2) + "\n").encode())
+                pending_dispatches.append((name, receipt, selected))
             except Exception as exc:
                 event("host_error", host=name, detail=str(exc))
+        # Reserve all same-family cells serially above; only independent host
+        # launches run concurrently. This keeps one slow SSH/install admission
+        # from leaving the rest of the fleet waiting for its queue refill.
+        with ThreadPoolExecutor(max_workers=4) as launch_pool:
+            launches = {launch_pool.submit(dispatch, name, receipt, child): (name, child)
+                        for name, receipt, child in pending_dispatches}
+            for future in as_completed(launches):
+                name, child = launches[future]
+                try:
+                    snapshot[name] = future.result()
+                    state["last_dispatch"][name]["accepted"] = True
+                    state["attempted"].setdefault(name, []).append(child["stable_key"])
+                except Exception as exc:
+                    event("host_error", host=name, detail=str(exc))
+                atomic(state_path, (json.dumps(state, indent=2) + "\n").encode())
+        atomic(OUTPUT / "snapshot.json", (json.dumps({"timestamp": time.time(), "hosts": snapshot}, indent=2) + "\n").encode())
         if not args.dry_run:
             atomic(state_path, (json.dumps(state, indent=2) + "\n").encode())
             if recovery is None or recovery.poll() is not None:
@@ -434,18 +503,19 @@ def main() -> None:
                 for value in snapshot.values():
                     status = str(value.get("status"))
                     counts[status] = counts.get(status, 0) + 1
-                log = ROOT / "DOCS/CURRENT/BENCHMARK_FRAMEWORK/0432_LOCAL_E2E_ALGORITHM_MATRIX_BENCHMARK_LOG.md"
-                with log.open("a") as output:
-                    output.write("\n### " + time.strftime("%Y-%m-%d %H:%M %Z") +
-                                 " — automatic q1024 fleet checkpoint\n\n" +
-                                 "- MCP host statuses: " + json.dumps(counts, sort_keys=True) + ".\n" +
-                                 "- Controller reuses binaries; only classified infrastructure faults receive "
-                                 "one bounded incremental repair. Completed reports are collected compressed, "
-                                 "and raw audit/publication runs independently. Statuses describe workers, "
-                                 "not confirmed new results. Per-host phases and blockers are in the "
-                                 "persistent fleet_controller snapshot/events.\n")
-                state["last_hourly_log"] = time.time()
-                atomic(state_path, (json.dumps(state, indent=2) + "\n").encode())
+                try:
+                    append_progress_log(
+                        "- MCP host statuses: " + json.dumps(counts, sort_keys=True) + ".\n" +
+                        "- Controller reuses binaries. Completed reports are collected compressed, "
+                        "and raw audit/publication runs independently. Statuses describe workers, "
+                        "not confirmed new results. Per-host phases and blockers are in the "
+                        "persistent fleet_controller snapshot/events.",
+                        title="automatic q1024 fleet checkpoint")
+                    state["last_hourly_log"] = time.time()
+                    atomic(state_path, (json.dumps(state, indent=2) + "\n").encode())
+                except Exception as exc:
+                    # A reporting failure must not stop the benchmark queues.
+                    event("tuple_progress_log_error", detail=str(exc))
         event("cycle_complete", hosts={k: {"status": v.get("status"), "phase": v.get("phase")} for k, v in snapshot.items()})
         if args.once:
             break

@@ -2358,15 +2358,18 @@ def _validate_build_receipt(
         "configuration", "runtime_artifacts", "authorized_artifacts",
         "artifact_counts", "content_sha256",
     }
+    imported = receipt.get("kind") == "bioseq-e2e-artifact-import-receipt"
+    if imported:
+        required_keys.add("artifact_import")
     if set(receipt) != required_keys:
         return None, (
             f"build receipt {receipt_id!r} has an unexpected schema: "
             f"missing={sorted(required_keys - set(receipt))} "
             f"extra={sorted(set(receipt) - required_keys)}")
     if (
-        receipt.get("kind") != "bioseq-build-receipt"
+        receipt.get("kind") not in ("bioseq-build-receipt", "bioseq-e2e-artifact-import-receipt")
         or type(receipt.get("schema_revision")) is not int
-        or receipt.get("schema_revision") != 2
+        or receipt.get("schema_revision") != (3 if imported else 2)
         or receipt.get("status") != "completed"
         or receipt.get("exit_code") != 0
     ):
@@ -2379,6 +2382,25 @@ def _validate_build_receipt(
         != canonical_json_sha256(sealed_receipt)
     ):
         return None, f"build receipt {receipt_id!r} content seal is invalid"
+    if imported:
+        if (verify_source or receipt.get("mode") != "benchmark-e2e"
+                or os.environ.get("BIOSEQ_E2E_REUSE_FROZEN_BINARY") != "1"):
+            return None, "imported artifacts require explicit frozen E2E run-only reuse"
+        origin = receipt.get("artifact_import", {}).get("source_receipt")
+        if not isinstance(origin, dict) or set(origin) != required_keys - {"artifact_import"}:
+            return None, "imported artifacts have no complete original build receipt"
+        origin_body = dict(origin)
+        origin_hash = origin_body.pop("content_sha256", None)
+        if (origin.get("kind") != "bioseq-build-receipt" or origin.get("schema_revision") != 2
+                or origin_hash != canonical_json_sha256(origin_body)):
+            return None, "imported artifact source receipt seal is invalid"
+        changed = {"kind", "schema_revision", "build_receipt_id", "created_at",
+                   "host", "artifact_counts", "content_sha256"}
+        if any(receipt[key] != origin[key] for key in origin if key not in changed):
+            return None, "import changed original artifact/configuration/source evidence"
+        if any(receipt["host"].get(key) != origin["host"].get(key)
+               for key in ("system", "machine")):
+            return None, "imported artifacts have incompatible platform/architecture"
     if expected_mode is not None and receipt.get("mode") != expected_mode:
         return None, (
             f"build receipt mode mismatch: expected {expected_mode!r}, "
@@ -2484,6 +2506,97 @@ def _validate_build_receipt(
     receipt["source_repository_root"] = str(source_repository_root)
     receipt["build_dir"] = str(build_dir)
     return receipt, None
+
+
+def tool_export_e2e_artifacts(arguments: Mapping[str, object]) -> str:
+    """Read-only inventory of a validated frozen runtime, not build objects."""
+    if os.environ.get("BIOSEQ_E2E_REUSE_FROZEN_BINARY") != "1":
+        raise RuntimeError("artifact export requires explicit frozen E2E reuse")
+    receipt, error = _validate_build_receipt(str(arguments.get("build_receipt_id", "")),
+        expected_mode="benchmark-e2e", verify_source=False, deadline=time.time() + 120)
+    if error or receipt is None:
+        raise RuntimeError(str(error))
+    tree = Path(str(receipt["build_dir"]))
+    paths = {tree / str(item["relative_path"]) for item in receipt["authorized_artifacts"]}
+    for name in ("CMakeCache.txt", "build.ninja", "compile_commands.json", _CMAKE_CONFIGURE_STAMP_NAME):
+        if (tree / name).is_file():
+            paths.add(tree / name)
+    llvm = Path("/opt/bioseq-package-toolchain/llvm-22")
+    for name in ("clang", "clang++", "clang-22", "llvm-config", "llvm-nm", "llvm-objdump", "llvm-readelf"):
+        path = llvm / "bin" / name
+        if path.exists():
+            paths.update((path, path.resolve()))
+    for path in (llvm / "lib").rglob("*"):
+        if path.is_file() and (path.name.endswith(".so") or ".so." in path.name):
+            paths.update((path, path.resolve()))
+    cmake = Path("/opt/bioseq-package-toolchain/cmake")
+    paths.update(path for path in cmake.rglob("*") if path.is_file() or path.is_symlink())
+    for root in (Path("/etc/postgresql/17/main"),):
+        paths.update(path for path in root.rglob("*") if path.is_file())
+    paths.update(Path(path) for path in (
+        "/usr/local/sbin/bioseq-zram-swap", "/etc/systemd/system/bioseq-zram-swap.service"))
+    return json.dumps({"source_receipt": receipt, "paths": sorted(str(path) for path in paths)})
+
+
+def tool_import_e2e_artifacts(arguments: Mapping[str, object]) -> str:
+    """Admit an exact copied runtime; never claim a build on the recipient.
+
+    The original build receipt remains embedded unchanged. Configuration and
+    all executable/install payload hashes must match it. Compile-only objects
+    need not be copied; their recipient counts are measured, not fabricated.
+    """
+    if os.environ.get("BIOSEQ_E2E_REUSE_FROZEN_BINARY") != "1":
+        raise RuntimeError("artifact import requires explicit frozen E2E reuse")
+    origin = arguments.get("source_receipt")
+    if not isinstance(origin, dict) or origin.get("kind") != "bioseq-build-receipt":
+        raise RuntimeError("source_receipt must be an original successful build receipt")
+    if origin.get("mode") != "benchmark-e2e" or origin.get("status") != "completed":
+        raise RuntimeError("only completed E2E artifacts can be imported")
+    body = dict(origin)
+    if body.pop("content_sha256", None) != canonical_json_sha256(body):
+        raise RuntimeError("source build receipt seal is invalid")
+    tree = Path(str(origin["build_dir"])).resolve(strict=True)
+    tree.relative_to(REPOSITORY_ROOT / "build")
+    deadline = time.time() + 120
+    if (_build_configuration_evidence(tree, deadline=deadline) != origin["configuration"]
+            or _runtime_artifact_evidence("benchmark-e2e", tree, deadline=deadline) != origin["runtime_artifacts"]
+            or _receipt_authorized_artifact_evidence("benchmark-e2e", tree,
+                debug=bool(origin["debug"]), deadline=deadline) != origin["authorized_artifacts"]):
+        raise RuntimeError("copied configuration/runtime/install artifact hashes differ from original")
+    # A copied CPU benchmark may still link the Vulkan loader even though GPU
+    # cells are disabled. Catch missing system DSOs before queue admission.
+    if host_platform.system() == "Linux":
+        dependency_targets = {Path(str(item["path"])) for item in origin["runtime_artifacts"]}
+        dependency_targets.update(tree / str(item["relative_path"])
+            for item in origin["authorized_artifacts"]
+            if str(item["relative_path"]).endswith(".so"))
+        for target in sorted(dependency_targets):
+            result = subprocess.run(["ldd", str(target)], capture_output=True,
+                                    text=True, timeout=20)
+            missing = [line.strip() for line in result.stdout.splitlines() if "not found" in line]
+            if missing:
+                raise RuntimeError(f"copied runtime {target} has missing system dependencies: {missing}")
+    host = {"node": host_platform.node(), "system": host_platform.system(),
+            "machine": host_platform.machine(), "release": host_platform.release()}
+    if any(host[key] != origin["host"][key] for key in ("system", "machine")):
+        raise RuntimeError("cannot import artifacts across platform/architecture")
+    if arguments.get("check_only") is True:
+        return json.dumps({"status": "validated_copied_artifacts_and_dependencies", "host": host})
+    receipt = dict(origin)
+    receipt.update(kind="bioseq-e2e-artifact-import-receipt", schema_revision=3,
+        build_receipt_id="br_" + secrets.token_hex(16), created_at=time.time(), host=host,
+        artifact_counts=_build_artifact_counts(tree, "benchmark-e2e", deadline=deadline),
+        artifact_import={"source_receipt": origin,
+                         "description": "Exact frozen artifact copy, not a recipient build. Compile timings describe the source build."})
+    receipt.pop("content_sha256", None)
+    receipt["content_sha256"] = canonical_json_sha256(receipt)
+    _store_build_receipt(receipt)
+    checked, error = _validate_build_receipt(str(receipt["build_receipt_id"]),
+        expected_mode="benchmark-e2e", verify_source=False, deadline=deadline)
+    if error or checked is None:
+        raise RuntimeError("import validation failed: " + str(error))
+    return json.dumps({"status": "imported_without_build", "build_receipt_id": receipt["build_receipt_id"],
+                       "source_build_receipt_id": origin["build_receipt_id"], "host": host})
 
 
 def _canonical_algorithm_matrix_clang_e2e_receipt_error(
