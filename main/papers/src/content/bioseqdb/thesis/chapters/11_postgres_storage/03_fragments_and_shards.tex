@@ -53,9 +53,12 @@ SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 128);
 \end{lstlisting}
 \end{minipage}
 
+\info{Sequence fragments}{
+\label{info:sequence-fragments}
 Sequences are divided into fragments to enable lazy loading.
 A fragment is $1024$ packed storage units, so actual bytes occupied depend by the width of storage supplied by the user.
 The maximum possible fragment size is for 64-bit storage unit and it's $1024*8B = 8192B$ (note that this goes beyond default postgres page size of $8192B$, because page needs to include the page header as well)
+}
 
 Fragment abstraction is a separate layer above columnar storage.
 Shards for fragments are internally held as \texttt{CREATE TABLE ... (seq bioseq.seq(...)) USING bioseq}, so each fragment is one TAM row in that single sequence column.

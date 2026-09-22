@@ -1,80 +1,45 @@
 \section{BioseqDB indexing abstractions}
 \label{sec:index-abstraction-layers}
 
-Indexes are stored separately in BioseqDB~\ref{lst:types-of-storage-entities-in-bioseqdb} to all internal sequence fragmented tables~\ref{fig:storage-length-buckets} and they are separate entities
-to the usual indexes in Postgres which provide generic access paths to the tables.
+Indexes are stored separately in BioseqDB~\ref{lst:types-of-storage-entities-in-bioseqdb} to all internal sequence fragmented tables~\ref{fig:storage-length-buckets} 
+and they are separate entities to the usual indexes in Postgres which provide generic access paths to the tables.
 
-The index bytes are not stored in the fragment rows.
-I keep them in one of three layouts.
-A \emph{chunk} is one stored piece of those bytes.
-One chunk must stay at or below $960$ MiB, which is $1$ GiB minus $64$ MiB, so the row still fits in Postgres.
+There is thin layer of abstraction over the indexes, so in the future implementation of other types of indexes is easy. The storage abstraction 
+requires implementer only to specify the type and depending on it we only need to provide logic to write the index chunks.
+One problem with current state of BioseqDB is that the index reading is not abstracted, so we encapsulate details of implementation, but they leak into pipeline (as the pipeline 
+currently needs to understand how we store minimizers).
+
+\info{Seed abstraction}{In the future I want to improve curent implementation to use abstract notion of "seed". I already extensively use templates, so 
+introducing new concept to represents types of seeds isn't a problem. This abstraction will allow to fully decouple indexing from the pipeline.
+Pipeline stages then could automatically detect how to compute certain seeds (like minimizers) and how to read and store them.
+Current BioseqDB implementation only uses minimizers, so I decided not to decicate my time to this idea.
+}
+
+I assume here that index store \emph{chunks} which are separate abstraction to the chunks in columnar tables.
+One chunk consists of bytes the index implementation needs to write or store and I assume the chunk cannot be larger than $960MB$ (due to Postgre's TOASTing limits). 
+The chunks are stored in internal tables that does not use columnar storage, they're ordinary heap tables - I decided that columnar storage in this case won't give any advantage (although I didn't A/B test this approach).
+Additionally, index tables are create \texttt{UNLOGGED} to avoid unnecessary logging and to reduce the amount of data written to the disk.
+I didn't investigate how crashes or potential rollbacks might affect the indexes and they might be prone to potential MVCC issues.
+
+There are several supported methods of storing index:
 
 \begin{itemize}
   \item \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}}.
-    One sequence can have many chunks.
-    They are grouped by a \emph{sub-key}, an extra number chosen by the index.
-    For \texttt{minimizers\_per\_fragment} that number is the fragment, so one fragment can fill several chunks.
-    \texttt{minimizers\_per\_sequence} uses this same layout.
-    Its sub-key is the number of one hash group, not a fragment number.
+    One fragment~\ref{info:sequence-fragments} of a sequence can have multiple chunks in the index.
+    % They are grouped by a \emph{sub-key}, an extra number chosen by the index.
+    % For \texttt{minimizers\_per\_fragment} that number is the fragment, so one fragment can fill several chunks.
+    % \texttt{minimizers\_per\_sequence} uses this same layout.
+    % Its sub-key is the number of one hash group, not a fragment number.
   \item \textbf{\texttt{INLINE\_PER\_SEQUENCE}}.
-    One sequence has a single chunk.
-    There is no sub-key and no second chunk.
-    If the bytes exceed $960$ MiB, the write stops with an error.
-    \texttt{symbol\_counts} uses this layout.
-    It stores how many times each symbol occurs in that sequence.
+    One sequence has a single chunk that is stored as Postgres varlena. This means that entire data stored for one sequence cannot exceed $960MB$ if that happens BioseqDB will error.
+    \texttt{symbol\_counts} is BiosqeDB index that uses this layout. It stores how many times each symbol occurs in that sequence and the payload is so small that it nicely fits into one small row.
   \item \textbf{\texttt{CHUNKED\_PER\_TABLE}}.
-    The chunks belong to the whole user table.
-    A build can visit every sequence.
-    It is not maintained automatically when a row is inserted.
-    No production index uses it yet.
-    A test index uses it when tests are compiled in.
+    This is special layout that in its implementation exposes only simple methods to access random chunks of the table. The idea is that some indexing structures may want 
+    to implement custom strategies, for example trees of sequences or graphs of fragments that do not fit into other representations.
+    I don't use this layout at the moment, but it's supported to provide extension point in the future. 
 \end{itemize}
 
-Figure~\ref{fig:index-storage-layouts} draws the three layouts under one user table and the fragment rows of one sequence.
-
-The three layouts go through one storage interface, so a later index can pick a layout without a new file format.
-The check is the C++ concept \texttt{is\_index\_chunked\_storage\_for}.
-The fragment calls take a sub-key and a chunk number.
-The inline calls do not take a sub-key or a chunk number.
-The table calls take a chunk number, and a build can walk every sequence.
-Postgres implements one class for each layout:
-\begin{itemize}
-  \item \texttt{fragment\_index\_storage} for many chunks under a sub-key
-  \item \texttt{sequence\_index\_storage} for the single chunk
-  \item \texttt{table\_index\_storage} for chunks of the whole table
-\end{itemize}
-These classes create the relations. A new index does not need a new table definition. The first use of its name creates the tables in the \texttt{bioseq\_internal} schema.
-
-Each index name has its own family of tables.
-\begin{itemize}
-  \item A per-fragment or per-sequence relation is named \texttt{seqidx\_}, then a short name, then a hash, then the length bucket and the shard.
-  \item \texttt{minimizers\_per\_fragment} is shortened to \texttt{mpf}. \texttt{minimizers\_per\_sequence} is shortened to \texttt{mps}. \texttt{symbol\_counts} is shortened to \texttt{sc}.
-  \item The hash mixes the database, the tablespace, the user table's relfilenode, the sequence column, and the full index name. Two index names therefore do not share a relation.
-  \item The bucket and the shard come from the sequence locator. They are the same length bucket and shard as that sequence's fragment rows.
-\end{itemize}
-\texttt{mps} does not add a new table shape. It uses the same per-fragment storage class as \texttt{mpf}, so the columns match, but the relations are a separate family.
-The inline layout uses the same naming scheme. Its primary key is only the sequence row number, because that sequence has one chunk.
-The per-fragment primary key also contains the sub-key and the chunk number.
-The table-wide layout uses the prefix \texttt{seqidxtab\_} instead of \texttt{seqidx\_}. Its primary key is only the chunk number.
-
-These relations do not use the columnar access method. They are created with \texttt{USING heap}. The user table is the columnar table. A minimizer generation relation is a heap table as well, and that one is created \texttt{UNLOGGED}. The generation check refuses the relation when it is not the heap access method.
-
-\texttt{pg\_supported\_indexes} connects those classes to the registered indexes.
-Listing~\ref{lst:mpf-index-storage-check} is the check used by minimizers per fragment.
-The compiler rejects that index unless the storage provides the fragment-layout calls.
-The listing leaves out the build functions.
-
-\begin{BioseqCppSnippet}[caption={Minimizers per fragment require fragment-chunk storage.},
-  label={lst:mpf-index-storage-check}]
-template <class p_storage>
-struct minimizers_per_fragment_index {
-  static_assert(is_index_chunked_storage_for<
-      p_storage, sequence_index_layout::fragment_chunks>);
-  static constexpr sequence_index_layout index_type =
-      sequence_index_layout::fragment_chunks;
-  using storage_type = p_storage;
-};
-\end{BioseqCppSnippet}
+Figure~\ref{fig:index-storage-layouts} shows what three of these layouts are representing.
 
 \begin{figure}[htbp]
 \centering
@@ -187,16 +152,54 @@ struct minimizers_per_fragment_index {
   }
 \end{tikzpicture}
 \caption[Three index storage layouts]{Each index is drawn as five rows.
-The green brace marks the whole user table, and its line splits into every chunk row.
-The orange arrow leaves the locator of sequence 1 and ends on that sequence's one row.
-That row cannot grow into a second row.
-The blue arrow leaves fragment 1 and splits into that fragment's three chunk rows.
-Grey rows belong to other sequences or other fragments.
-This drawing shows the fragment-number use of \texttt{CHUNKED\_PER\_FRAGMENT}.
-The same layout can use another sub-key.
-For \texttt{minimizers\_per\_sequence} that sub-key is the number of one hash group.}
+The green brace represents the fact that the index structure represents all sequences stored in the table.
+The orange arrow shows that one locator corresponds to exactly one chunk (one row in the index table).
+The blue arrow shows that one fragment can ahve multiple chunks.
+In case of \textbf{\texttt{CHUNKED\_PER\_TABLE}} we only store chunk number and for \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}} I store fragment's number and chunk number.
+}
 \label{fig:index-storage-layouts}
 \end{figure}
+  
+\info{Storage details}{
+\label{info:index-storage-details}
+  It's important to note that both \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}} and \textbf{\texttt{CHUNKED\_PER\_TABLE}} needs to store chunks by chunk number as a key.
+The former one also needs to know the fragment number, so the \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}} have $(\texttt{fragment\_number}, \texttt{chunk\_number})$ as a key.
+I abuse this property to store other value than fragment number in the first field. Technically this means that \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}} should have name changed to something 
+more appropiate.
+}
+
+In code \texttt{pg\_supported\_indexes} is a special templated that connects those implementation classes to the registered indexes. This is frequent practice used by me - encoding 
+implementation vs. abstraction pairs as tuples in type lists created using template metaprogramming, so if extension is required we only need to write new type and add it into the 
+\texttt{pg\_supported\_indexes} template list. Checks if implementation is valid are done via C++26 concepts~\ref{lst:mpf-index-storage-check}:
+
+\begin{BioseqCppSnippet}[caption={Minimizers per fragment require fragment-chunk storage.},
+  label={lst:mpf-index-storage-check}]
+template <class p_storage>
+struct minimizers_per_fragment_index {
+  static_assert(is_index_chunked_storage_for<
+      p_storage, sequence_index_layout::fragment_chunks>);
+  static constexpr sequence_index_layout index_type =
+      sequence_index_layout::fragment_chunks;
+  using storage_type = p_storage;
+};
+\end{BioseqCppSnippet}
+
+\section{BioseqDB supported indexing}
+\label{sec:index-logical-layouts}
+
+There are 3 implementations of indexes inside BioseqDB:
+\begin{itemize}
+  \item \textbf{\texttt{minimizers\_per\_fragment}} (shortened to \texttt{mpf}) stores minimizers calculated per one fragment and uses \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}} layout.
+  \item \textbf{\texttt{minimizers\_per\_sequence}} (shortened to \texttt{mps}) stores minimizers caluclated per sequence, but as the number of minimizers grow
+    they wouldn't fit in single chunk, thus one may consider using \textbf{\texttt{CHUNKED\_PER\_TABLE}} layout.
+    However, as mentioned, the fragment number key~\ref{info:index-storage-details} is a number so in MPS I use this number to represent hash value.
+    in \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}} layout even though 
+    the fragment numbers does not correspond to actual fragments of sequences as seenon figure below~\ref{fig:index-mpf-mps}.
+  \item \textbf{\texttt{symbol\_counts}}: stores counter of occurences of each symbol in a sequence, uses \textbf{\texttt{INLINE\_PER\_SEQUENCE}} layout, because the counter struct is very small,
+    so Postgres inlines the varlena into the row.
+\label{lst:types-of-indexes-in-bioseqdb}
+\end{itemize}
+
 
 
 % The sequence store can fetch a small interval without decoding a whole
@@ -238,20 +241,40 @@ For \texttt{minimizers\_per\_sequence} that sub-key is the number of one hash gr
 % Section~\ref{sec:bioseq-result-cache}. A minimizer index can serve many
 % different query sequences; a cached result describes completed executions.
 
-\section{BioseqDB supported indexing}
-\label{sec:index-logical-layouts}
+The main idea behind MPF and MPS was:
+\begin{itemize}
+  \item \textbf{MPF}: I can keep small hashmaps separated so random queries during seeding stage, where we need to find common minimizers between query and target, can hit
+  CPU caches more often as the accesses are localized.
+  \item \textbf{MPS}: The most frequent minimizers are trimmed by minimap2 and MPF trimming is done per fragment, so it's less reliable and can remove minimizers 
+  that are locally frequent, but globally rare reducing total number of minimizers and speeding up processing at the cost of potentially missing some matches. Additionally,
+  MPF needs to perform multiple hash lookups if we want to determine all locations of minimizer's occurences so there's also performance penalty. This penalty can be 
+  also mitigated by the fact that MPF is easier to parallelize.
+  Thus we can see there are several important trade-offs and it's not clear if the implementation of MPS should be more or less performant in theory.
+  In case of BioseqDB as it would be very inneficient to store all minimizers individually, I decided to still generate minimizers per fragment, but store them and merge later
+  during process that can potentially spill to disk (if the entire index fits into RAM then no spillage occurs, but if it doesn't there are heavy performance penalties).
+  Additionally I must note that MPS uses trick described here~\ref{info:index-storage-details} so the primary column in index is hash itself, this implies that if the query is short there will be 
+  not many minimizers to check and as each row is held as heap tuple, then MPS can be very fast, because it reads only lists individually for one hash not entire hashmap.
+\end{itemize}
 
-BioSeqDB supports \emph{minimizers per fragment} (MPF) and
-\emph{minimizers per sequence} (MPS). MPF groups entries by source interval;
-MPS groups them by hash across one logical sequence. Both preserve positions
-needed to form anchors. Figure~\ref{fig:index-mpf-mps} shows the same six
-occurrences in the two organizations, and the heap rows that store the lists.
-Panel~(c) uses the per-fragment layout of Figure~\ref{fig:index-storage-layouts}.
-The lists are stored.
-A header and a control list sit in front of each position list.
-A directory row stores metadata and does not store positions.
-Here a minimizer position is its
-last-symbol coordinate, using zero-based positions.
+The figure~\ref{fig:index-mpf-mps} below shows 6 minimizers occurences in a sequences in two different MPF and MPS implementations.
+
+A directory is a small metadata chunk stored in the MPS and MPF implementations.
+For MPS the directory is always stored. Its header records how many hash groups exist and how many positions were stored in total. 
+After the header comes one entry per group: the lowest hash in the group, the highest hash, and the sub-key of the chunk that holds that group's controls and positions. 
+A query hash is compared with those ranges, and only the matching group chunk is read.
+For MPF the ordinary fragment chunk already starts with its own header, then the controls and the positions for that fragment. The separate directory row appears when a grouped build is used. That row records the fragments that were built, so a reader can find those fragment chunks without scanning every row.
+
+% As mentione above~\ref{lst:types-of-indexes-in-bioseqdb} BioSeqDB supports \emph{minimizers per fragment} (MPF) and
+% \emph{minimizers per sequence} (MPS). MPF groups entries by source interval;
+% MPS groups them by hash across one logical sequence. Both preserve positions
+% needed to form anchors. Figure~\ref{fig:index-mpf-mps} shows the same six
+% occurrences in the two organizations, and the heap rows that store the lists.
+% Panel~(c) uses the per-fragment layout of Figure~\ref{fig:index-storage-layouts}.
+% The lists are stored.
+% A header and a control list sit in front of each position list.
+% A directory row stores metadata and does not store positions.
+% Here a minimizer position is its
+% last-symbol coordinate, using zero-based positions.
 
 \begin{figure}[htbp]
 \centering
