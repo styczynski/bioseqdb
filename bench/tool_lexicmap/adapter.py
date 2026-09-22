@@ -1,6 +1,7 @@
 """LexicMap index/search with explicit native parameter qualifications."""
 import csv
 import re
+from pathlib import Path
 
 CAPABILITIES={'window':False,'kmer':True,'mapq':False,'gapped_output':True}
 COMMENTS=('LexicMap uses LexicHash masks, not minimizer windows; requested k is retained and w is inapplicable. '
@@ -10,6 +11,7 @@ COMMENTS=('LexicMap uses LexicHash masks, not minimizer windows; requested k is 
           'Input is therefore split into 268435455-base contigs overlapping by the longest actual query, '
           'without consulting occurrence truth; returned coordinates are restored to the logical reference. '
           'FASTA partitioning is index preparation and is measured in no_index. Native query coverage threshold is 80 percent. '
+          'For 4 Gbp on hosts below 10 GiB, existing contigs are placed in separate files with native batch-size 1 after a demonstrated indexing OOM; contig boundaries, masks and search settings are retained. '
           'Native WFA costs are match 0, mismatch 4, gap open 6 and extension 2. '
           'Its separate reported-score/E-value calculation uses match 2, mismatch -3 and gaps 5/2. '
           'These settings are fixed in the implementation and are not rewritten for benchmarking. '
@@ -41,7 +43,22 @@ def setup(root,config,fixture,index,run):
     overlap=max(len(line.strip()) for line in (fixture/'queries.fasta').read_text().splitlines() if not line.startswith('>'))
     target=index/'target.fasta'
     partition_reference(fixture/'target.fasta',target,maximum,overlap)
-    run([str(root/'bench/tool_lexicmap/bin/lexicmap'),'index',str(target),
+    memory_kib=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemTotal:')))
+    targets=[str(target)]; batching=[]
+    if memory_kib<10*1024*1024 and config['data']['reference_length']==4_000_000_000:
+        targets=[]; output=None
+        try:
+            with target.open('rb') as source:
+                for line in source:
+                    if line.startswith(b'>'):
+                        if output is not None:output.close()
+                        part=index/('contig_'+str(len(targets))+'.fasta')
+                        targets.append(str(part));output=part.open('wb')
+                    output.write(line)
+        finally:
+            if output is not None:output.close()
+        batching=['--batch-size','1']
+    run([str(root/'bench/tool_lexicmap/bin/lexicmap'),'index',*targets,*batching,
          '-O',str(index/'target'),'-g',str(maximum),
          '-k',str(config['data']['kmer_size']),'-j',str(config['threads'])])
 
