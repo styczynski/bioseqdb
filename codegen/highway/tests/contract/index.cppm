@@ -1311,17 +1311,23 @@ inline void verify_typed_alignment_binder() {
                 && artifact.content.contains(
                     "alignment_kernels<::seq::dna5> alignment_1")
                 && artifact.content.contains(
-                    ".alphabet_code = 0U, .typed_table_complete = "
-                    "::bioseq::simd::is_alignment_kernel_table_complete("
-                    "alignment_0), .typed_table = &alignment_0")
+                    ".alphabet_code = 0U, .typed_table_complete = ("
+                    "alignment_0.align_ksw2_single_affine != nullptr && "
+                    "alignment_0.align_ksw2_dual_affine != nullptr && "
+                    "alignment_0.align_ksw2_batched != nullptr && "
+                    "alignment_0.prepare_block_global_gap_certificate != nullptr && "
+                    "alignment_0.try_block_certified_gap != nullptr && "
+                    "alignment_0.align_block != nullptr), .typed_table = &alignment_0")
                 && artifact.content.contains(
-                    ".alphabet_code = 1U, .typed_table_complete = "
-                    "::bioseq::simd::is_alignment_kernel_table_complete("
-                    "alignment_1), .typed_table = &alignment_1")
-                && occurrences(
-                       artifact.content,
-                       "::bioseq::simd::is_alignment_kernel_table_complete(")
-                    == 2U
+                    ".alphabet_code = 1U, .typed_table_complete = ("
+                    "alignment_1.align_ksw2_single_affine != nullptr && "
+                    "alignment_1.align_ksw2_dual_affine != nullptr && "
+                    "alignment_1.align_ksw2_batched != nullptr && "
+                    "alignment_1.prepare_block_global_gap_certificate != nullptr && "
+                    "alignment_1.try_block_certified_gap != nullptr && "
+                    "alignment_1.align_block != nullptr), .typed_table = &alignment_1")
+                && !artifact.content.contains(
+                    "::bioseq::simd::is_alignment_kernel_table_complete(")
                 && artifact.content.contains(
                     "static const auto alphabet_identities = ::std::to_array<"
                     "::bioseq::simd_dispatch::"

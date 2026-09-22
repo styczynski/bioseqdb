@@ -1534,12 +1534,19 @@ collect_slot_owners(const source_manifest& inventory) {
                   "::std::to_array<::bioseq::simd::alignment_table_entry>({\n";
         for (const alignment_family_binding& family : alignment_families) {
             const auto code = static_cast<unsigned int>(family.alphabet_code);
+            // Keep these checks inside the fixed-target function. Calling the
+            // shared alphabet-only template here emits one linkonce symbol in
+            // multiple ISA units; the linker may retain an AVX-512 definition
+            // that an AVX2 (or baseline) binder then calls.
             output << "        {.alphabet_code = " << code
-                   << "U, .typed_table_complete = "
-                      "::bioseq::simd::is_alignment_kernel_table_complete("
-                      "alignment_"
-                   << code << "), .typed_table = &alignment_" << code
-                   << "},\n";
+                   << "U, .typed_table_complete = (";
+            for (std::size_t index = 0;
+                 index < alignment_required_members.size(); ++index) {
+                output << (index == 0 ? "" : " && ")
+                       << "alignment_" << code << "."
+                       << alignment_required_members[index] << " != nullptr";
+            }
+            output << "), .typed_table = &alignment_" << code << "},\n";
         }
         output << "    });\n"
                << "    table.alignment_by_alphabet = "
