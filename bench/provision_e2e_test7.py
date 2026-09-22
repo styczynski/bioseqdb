@@ -17,7 +17,8 @@ SOURCES = {'c7g': 'i-0cab5f0ab9a1cb002', 'm4': 'i-09b8f0b9dc8c60564',
            'm7a': 'i-0c724c456e6a87366', 'm7i': 'i-0e647495fa0691f94'}
 ACCOUNTS = {
     'test7': ('872590157365', 'vpc-0c049873c8cd2be05', 'subnet-0711b3bee309e2ba4', tuple(SOURCES)),
-    'test2': ('090072209895', 'vpc-0b8c38283f256e963', 'subnet-0f066472995586f5d', ('m7a', 'm7i')),
+    # 2026-09-22: user released the two external C7G/M4 instances for replacement.
+    'test2': ('090072209895', 'vpc-0b8c38283f256e963', 'subnet-0f066472995586f5d', tuple(SOURCES)),
 }
 
 

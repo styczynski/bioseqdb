@@ -55,6 +55,44 @@ def priority(child):
             {'block_aligner': 0, 'ksw2': 1}.get(align, 2), child['ordinal'])
 
 
+def index_group(child):
+    identity = child['execution_cell']['identity']
+    return tuple(identity[key] for key in (
+        'index_mode', 'engine', 'dataset', 'alphabet', 'target_size_gbp',
+        'bioseq_index_name', 'requested_minimizer_algorithm', 'kmer_size', 'window_size'))
+
+
+def retire_completed_group():
+    """Drop only idle benchmark scratch tables after their index batch is done."""
+    assert fleet.monitor._local_state().get('status') in fleet.TERMINAL_STATUSES
+    psql = '/opt/homebrew/opt/postgresql@17/bin/psql'
+    sql = """
+      SET lock_timeout='5s';
+      DO $cleanup$
+      DECLARE item record;
+      BEGIN
+        IF EXISTS (SELECT FROM pg_stat_activity WHERE datname=current_database()
+                   AND pid<>pg_backend_pid() AND backend_type='client backend') THEN
+          RAISE EXCEPTION 'benchmark cleanup requires no other client sessions';
+        END IF;
+        FOR item IN SELECT tablename FROM pg_tables WHERE schemaname='public'
+          AND tablename ~ '^e2e[mq]_[a-z0-9]+_k[0-9]+_w[0-9]+_[0-9a-f]{16}$'
+        LOOP
+          EXECUTE format('DROP TABLE public.%I CASCADE', item.tablename);
+          RAISE NOTICE 'retired benchmark scratch table %', item.tablename;
+        END LOOP;
+      END $cleanup$;
+    """
+    result = subprocess.run([psql, '-U', 'postgres', '-d', 'bioseq', '-v',
+                             'ON_ERROR_STOP=1', '-c', sql], capture_output=True,
+                            text=True, timeout=60, check=True)
+    event('completed_index_group_retired', detail=result.stderr,
+          recovery='Regenerate benchmark scratch tables/indexes; results retained')
+    # There are no clients left; unreferenced, unopened image files do not need
+    # the ordinary one-hour grace period at this explicit batch boundary.
+    fleet.reclaim_idle_local_indexes(minimum_free_gib=48, orphan_grace_seconds=0)
+
+
 def document():
     if RESULTS.exists():
         return load_yaml(RESULTS)
@@ -222,10 +260,8 @@ def main():
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     if args.daemon:
-        with (OUTPUT / 'controller.log').open('ab') as log:
-            process = subprocess.Popen([sys.executable, __file__], cwd=ROOT,
-                stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        print(json.dumps({'pid': process.pid})); return
+        from e2e_queue_supervisor import start
+        print(json.dumps({'supervisor_pid': start('fast_local')})); return
     lock = (OUTPUT / 'controller.lock').open('a')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     recovery.atomic(OUTPUT / 'controller.pid', (str(os.getpid()) + '\n').encode())
@@ -280,12 +316,41 @@ def main():
             continue
         if not remaining:
             event('queue_exhausted', fast_approved=len(out['approved_results'])); return
-        child = remaining[0]
-        if fleet.shutil.disk_usage(ROOT).free < 12 * 1024**3:
-            fleet.reclaim_idle_local_indexes()
-            if fleet.shutil.disk_usage(ROOT).free < 12 * 1024**3:
-                event('blocked', reason='Less than 12 GiB available after safe idle cleanup')
-                time.sleep(60); continue
+        # A fresh target/index can temporarily occupy much more than its final
+        # image. Preserve controller/report headroom; do not repeat the 4-Gbp
+        # ENOSPC failure admitted by the former flat 12-GiB check. This is an
+        # operational estimate, not a promise that every tuple fits that size.
+        previous = by_ordinal.get(int(config.stem.removeprefix('tuple_'))) \
+            if config.parent == CONFIGS and config.stem.startswith('tuple_') else None
+        if previous:
+            same_group = [c for c in remaining if index_group(c) == index_group(previous)]
+            remaining = same_group + [c for c in remaining if index_group(c) != index_group(previous)]
+        if previous and index_group(previous) != index_group(remaining[0]):
+            retire_completed_group()
+
+        def required_space(child):
+            identity = child['execution_cell']['identity']
+            if (current.get('status') == 'completed' and previous
+                    and identity['index_mode'] == 'just_index'
+                    and index_group(child) == index_group(previous)):
+                return 8 * 1024**3
+            return (8 + 8 * identity['target_size_gbp']) * 1024**3
+
+        free = fleet.shutil.disk_usage(ROOT).free
+        if free < required_space(remaining[0]):
+            fleet.reclaim_idle_local_indexes(minimum_free_gib=48)
+            free = fleet.shutil.disk_usage(ROOT).free
+        just_index = [c for c in remaining
+                      if c['execution_cell']['identity']['index_mode'] == 'just_index']
+        fitting = [c for c in (just_index or remaining) if required_space(c) <= free]
+        if not fitting:
+            event('blocked', reason='Insufficient headroom for a fresh index; tuples remain pending',
+                  free_gib=round(free / 1024**3, 2))
+            time.sleep(60); continue
+        child = fitting[0]
+        if child is not remaining[0]:
+            event('capacity_deferred', preferred_ordinal=remaining[0]['ordinal'],
+                  selected_ordinal=child['ordinal'], free_gib=round(free / 1024**3, 2))
         if time.time() - state.get('last_log', 0) >= 3600:
             fleet.append_progress_log(
                 f'Fast local (separate one-sample methodology): {len(out["approved_results"])} approved; '

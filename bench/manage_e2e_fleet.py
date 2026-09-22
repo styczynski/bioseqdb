@@ -68,19 +68,19 @@ def family(name: str) -> str:
     return name.rsplit("-", 1)[-1]
 
 
-def reclaim_idle_local_indexes() -> None:
+def reclaim_idle_local_indexes(*, minimum_free_gib: int = 35, orphan_grace_seconds: int = 3600) -> None:
     """Remove only unreferenced, unopened benchmark image files on an idle host.
 
     PostgreSQL owns the catalogs. Never unlink a referenced image, manipulate
     PostgreSQL relation files, or delete files while a SQL workload is active.
     User explicitly authorized dropping benchmark tables/indexes for space.
     """
-    if shutil.disk_usage(ROOT).free >= 35 * 1024**3 or monitor._local_state().get("status") == "running":
+    if shutil.disk_usage(ROOT).free >= minimum_free_gib * 1024**3 or monitor._local_state().get("status") == "running":
         return
     # Previous dataset fixtures are deterministic scratch files, not results.
     # Expire only old, unopened fixtures between runs; never touch an active one.
     for path in sorted(Path('/private/tmp').glob('e2e_matrix_*_target*.fasta')):
-        if shutil.disk_usage(ROOT).free >= 35 * 1024**3:
+        if shutil.disk_usage(ROOT).free >= minimum_free_gib * 1024**3:
             break
         if (path.is_symlink() or not path.is_file()
                 or not re.fullmatch(r'e2e_matrix_[24]gbp_dna[45]_k\d+_w\d+_target(?:\.split)?\.fasta', path.name)
@@ -117,7 +117,7 @@ def reclaim_idle_local_indexes() -> None:
         match = re.fullmatch(r"(\d+)\.(\d+)\.\d+\.\d+\.\d+\.\d+\.minimizer_fragment_index", path.name)
         if not match or path.is_symlink() or match[1] in references or match[2] in references:
             continue
-        if time.time() - path.stat().st_mtime < 3600:
+        if time.time() - path.stat().st_mtime < orphan_grace_seconds:
             continue
         opened = subprocess.run(["lsof", str(path)], capture_output=True, timeout=15)
         if opened.returncode != 1 or opened.stdout or opened.stderr:

@@ -96,6 +96,9 @@ def write_results(family, document, children):
     scope['minimap2_expected_cells'] = sum(c['execution_cell']['identity']['engine']=='minimap2'
                                           and c['stable_key'] not in excluded for c in children)
     document['matrix_scope'] = scope
+    document['benchmark_host_profile']['replicas'] = [
+        local.load_yaml(recovery.authority_path(host))['remote_host_binding']
+        for host, *_ in fleet.monitor.registered_hosts() if fleet.family(host) == family]
     metrics = copy.deepcopy(local_standard['metric_definitions'])
     for name in ('a', 'b'):
         metrics[name]['aggregation'] = 'One accepted sample; P50 equals its value.'
@@ -143,10 +146,7 @@ def document_for(family, children):
 
 
 def group_key(child):
-    identity = child['execution_cell']['identity']
-    return json.dumps([identity[key] for key in (
-        'index_mode', 'engine', 'dataset', 'alphabet', 'target_size_gbp',
-        'bioseq_index_name', 'requested_minimizer_algorithm', 'kmer_size', 'window_size')])
+    return json.dumps(local.index_group(child))
 
 
 def hold(host, reason):
@@ -347,10 +347,8 @@ def main():
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     if args.daemon:
-        with (OUTPUT / 'controller.log').open('ab') as log:
-            process = subprocess.Popen([sys.executable, __file__], cwd=ROOT,
-                stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        print(json.dumps({'pid': process.pid})); return
+        from e2e_queue_supervisor import start
+        print(json.dumps({'supervisor_pid': start('fast_remote')})); return
     with (OUTPUT / 'controller.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         recovery.atomic(OUTPUT / 'controller.pid', (str(os.getpid()) + '\n').encode())
@@ -369,7 +367,9 @@ def main():
             for host in candidates:
                 hold(host, 'Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import')
         while True:
-            hosts = ['local', *(h[0] for h in fleet.monitor.registered_hosts())]
+            registered = fleet.monitor.registered_hosts()
+            fleet.HOSTS.update({h[0]: h for h in registered})
+            hosts = ['local', *(h[0] for h in registered)]
             with ThreadPoolExecutor(max_workers=6) as pool:
                 observed = dict(zip(hosts, pool.map(observe, hosts)))
             for family, candidates in BUILD_CANDIDATES.items():

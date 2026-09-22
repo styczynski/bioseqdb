@@ -476,7 +476,7 @@ matrix_scope:
   - scalar_minimap2
   - simd_minimap2
   - range_minimum_query
-  bioseq_expected_cells: 694
+  bioseq_expected_cells: 692
   bioseq_index_types:
   - minimizers_per_fragment
   - minimizers_per_sequence
@@ -508,8 +508,8 @@ matrix_scope:
   - 2
   - 4
   target_size_unit: Decimal Gbp, exactly 1,000,000,000 base pairs.
-  total_expected_cells: 694
-  total_expected_runs: 694
+  total_expected_cells: 692
+  total_expected_runs: 692
   window_kmer_pairs:
   - kmer_size: 15
     window_size: 10

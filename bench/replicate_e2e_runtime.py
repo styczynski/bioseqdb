@@ -112,8 +112,12 @@ def main():
     subprocess.run(dest + ['cd /home/ubuntu/bioseqdb && python3 bench/aggregate_e2e_algorithm_matrix.py --help >/dev/null'],
                    check=True, timeout=30)
     print(host, 'validating copied artifacts through MCP; no configure/build', flush=True)
+    origin = exported['source_receipt']
+    while origin.get('kind') == 'bioseq-e2e-artifact-import-receipt':
+        origin = origin['artifact_import']['source_receipt']
+    assert origin['kind'] == 'bioseq-build-receipt'
     imported = rpc(dest + ['cd /home/ubuntu/bioseqdb && ' + fleet.ENVIRONMENT + 'python3 build_mcp/server.py'],
-                   'import_e2e_artifacts', {'source_receipt': exported['source_receipt']})
+                   'import_e2e_artifacts', {'source_receipt': origin})
     imported.update(fleet_host=host, address=address, instance_id=instance['InstanceId'],
                     instance_type=instance['InstanceType'], copied_at=time.time())
     atomic(output / 'imported.json', (json.dumps(imported, indent=2) + '\n').encode())

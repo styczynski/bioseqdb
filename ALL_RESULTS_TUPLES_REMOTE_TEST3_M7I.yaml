@@ -16,16 +16,16 @@ authority:
   profile: aws_cpu_only_v1
   sealed_verification_manifest_required_for_append: false
 projection_provenance:
-  approved_result_count: 57
-  approved_results_projection_sha256: 9a04671ae7408beb1e38db596a1f3f45755c142e13f97f9b64b2105dd03fcf93
-  approved_run_count: 285
+  approved_result_count: 58
+  approved_results_projection_sha256: f3de8281a0b86fb507e7b97f7d5705658db3ca1b6d04610e1d7db6a9c6a2ab18
+  approved_run_count: 290
   classification: derived_non_authoritative
   eligible_stable_keys_projection_sha256: 5aad579ff70013c20835e561350803653c2cb5e0323cd878ff1e40e8501f9a96
   generator: bioseq-approved-results-projection
   generator_version: 1
   hardware_unavailable_cells_projection_sha256: bcd2f938f405b0ab0d406cbc318b07e89baa48a089849b872dfbeef51aba31cd
   hardware_unavailable_count: 512
-  remaining_eligible_count: 727
+  remaining_eligible_count: 726
   source_local_approved_results_projection_sha256: 04c6af57c226aae465d177f89b7d4499503c7ebe8c216bab2d0d4dfde0a57928
   source_local_authority_sha256: 755ccaaf575dbe1d45999aa711b3db4f144b5aafbf7480ce91e85520dc3b33a6
 campaign_identity:
@@ -18621,6 +18621,43 @@ approved_results:
     unit: ns
     p50_a: 99159650581
     p50_b: 77912006287
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","bioseq","minimizers_per_sequence","scalar","range_minimum_query","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: scalar -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 167427758878
+    p50_b: 135808190760
   comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","bioseq","minimizers_per_sequence","scalar","simd_minimap2","block_aligner"]'

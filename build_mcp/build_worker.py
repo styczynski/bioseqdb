@@ -759,6 +759,40 @@ def _run_cmake_preset_configure(
         deadline_clock=deadline_clock,
     )
 
+def _cmake_configure_can_reuse_cache(
+        build_dir: Path, expected: Mapping[str, object]) -> bool:
+    """Keep objects when only preset-file contents or PATH changed.
+
+    The resolved selected preset, mode overrides, compiler environment and
+    tool identities must still match. CMake is run again (and may reject an
+    incompatible generator); this does not bypass configure or reseal early.
+    Missing/legacy stamps and removed/null cache variables remain full repairs.
+    """
+    stamp = build_dir / _CMAKE_CONFIGURE_STAMP_NAME
+    try:
+        if stamp.is_symlink() or not stamp.is_file():
+            return False
+        previous = json.loads(stamp.read_text(encoding="utf-8"))
+        if not isinstance(previous, dict):
+            return False
+        valid, _ = _cmake_configure_stamp_status(build_dir, previous)
+        if not valid:
+            return False
+
+        def effective_inputs(document):
+            inputs = dict(document["inputs"])
+            # Reconfigure against the new files, but unrelated preset edits
+            # must not erase object/PCM files below CMakeFiles.
+            inputs.pop("preset_files", None)
+            environment = dict(inputs["managed_environment"])
+            environment.pop("PATH", None)
+            inputs["managed_environment"] = environment
+            return inputs
+
+        return effective_inputs(previous) == effective_inputs(expected)
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        return False
+
 def _ensure_cmake_preset_tree_fresh(
         *,
         build_dir: Path,
@@ -782,10 +816,11 @@ def _ensure_cmake_preset_tree_fresh(
     if build_ninja.is_file() and stamp_matches:
         return False
 
+    reuse_cache = _cmake_configure_can_reuse_cache(build_dir, configure_stamp)
     _invalidate_cmake_configure_stamp(build_dir)
     cache = build_dir / "CMakeCache.txt"
     cmake_files = build_dir / "CMakeFiles"
-    if (
+    if not reuse_cache and (
         cache.exists()
         or cache.is_symlink()
         or cmake_files.exists()
@@ -801,6 +836,10 @@ def _ensure_cmake_preset_tree_fresh(
             log_handle,
             reason,
         )
+    if reuse_cache:
+        log_handle.write(
+            "# CMake in-place reconfigure: selected configuration unchanged; "
+            "preserving cache, object files and modules.\n")
     log_handle.write(
         "# CMake configure freshness mismatch: "
         f"{stamp_reason}; reconfiguring with preset {preset}.\n")
