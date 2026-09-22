@@ -300,7 +300,8 @@ runtime::finalize_selected_pipeline_operation_transaction(
             break;
         }
         const auto& current = operation.audit();
-        if (!accepted_kind || !live_features.available || live_features.software_device ||
+        if (!accepted_kind || current.native_vulkan != audit.native_vulkan ||
+            !live_features.available || live_features.software_device ||
             current.device_uuid != live_features.device_uuid ||
             current.api_version != live_features.api_version ||
             current.driver_version != live_features.driver_version ||
@@ -346,7 +347,7 @@ runtime::finalize_selected_pipeline_operation_transaction(
         distinct_receipts.data(), receipt_count};
     runtime_gpu_cache_metrics_audit maximum{
         .token_identity = audit.operation_identity,
-        .gpu_pipeline_cache_loads = 1u,
+        .gpu_pipeline_cache_loads = audit.native_vulkan ? 0u : 1u,
         .gpu_pipeline_cache_seed_bytes = audit.seed_size,
         .gpu_pipeline_cache_load_ns = receipts.front()->audit().seed_load_ns,
     };
@@ -372,11 +373,12 @@ runtime::finalize_selected_pipeline_operation_transaction(
         .gpu_environment_present = true,
         .gpu_device_uuid = audit.device_uuid,
         .gpu_driver_identity = canonical_vulkan_driver_identity(live_features),
-        .cache_policy = runtime_pipeline_cache_policy::immutable_preseed_all_hit,
+        .cache_policy = audit.native_vulkan ? runtime_pipeline_cache_policy::native_vulkan
+                                           : runtime_pipeline_cache_policy::immutable_preseed_all_hit,
         .seed_sha256 = audit.seed_sha256,
         .seed_size = audit.seed_size,
         .manifest_checksum = audit.manifest_checksum,
-        .pipeline_cache_all_hit = true,
+        .pipeline_cache_all_hit = !audit.native_vulkan,
     };
     if (!result.first.is_internally_consistent()) {
         throw vulkan_runtime_error("selected pipeline environment is incomplete");

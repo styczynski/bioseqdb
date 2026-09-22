@@ -23,6 +23,7 @@ enum class pipeline_cache_policy : std::uint8_t {
     not_applicable,
     immutable_preseed_all_hit,
     isolated_miss_diagnostic,
+    native_vulkan,
     mixed_invalid,
 };
 
@@ -56,6 +57,8 @@ pipeline_cache_policy_name(pipeline_cache_policy policy) noexcept {
         return "immutable_preseed_all_hit";
     case pipeline_cache_policy::isolated_miss_diagnostic:
         return "isolated_miss_diagnostic";
+    case pipeline_cache_policy::native_vulkan:
+        return "native_vulkan";
     case pipeline_cache_policy::mixed_invalid:
         return "mixed_invalid";
     }
@@ -562,6 +565,17 @@ is_environment_valid_for_backend(const execution_environment_snapshot& environme
 #endif
     )
         return false;
+#if defined(__linux__)
+    if (environment.gpu_pipeline_cache_policy == pipeline_cache_policy::native_vulkan) {
+        return environment.is_gpu_environment_available &&
+               !is_all_zero(environment.gpu_device_uuid) &&
+               is_canonical_nonempty_driver_identity(environment.gpu_driver_identity) &&
+               is_all_zero(environment.gpu_pipeline_cache_seed_sha256) &&
+               environment.gpu_pipeline_cache_seed_size == 0u &&
+               environment.gpu_pipeline_cache_manifest_checksum == 0u &&
+               environment.gpu_pipeline_cache_hit == optional_observation_bool::false_value;
+    }
+#endif
     const bool common_gpu_identity_valid =
         environment.is_gpu_environment_available && !is_all_zero(environment.gpu_device_uuid) &&
         is_canonical_nonempty_driver_identity(environment.gpu_driver_identity) &&

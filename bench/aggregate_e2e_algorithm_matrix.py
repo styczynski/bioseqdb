@@ -5732,23 +5732,40 @@ def _validate_selected_vulkan_stage_receipts(
         "gpu_target_window_request_dispatches",
     )
     first = rows["query_sketch"]
-    for field, digits in (
-            ("gpu_device_uuid", 32), ("gpu_pipeline_cache_seed_sha256", 64),
-            ("gpu_pipeline_cache_manifest_checksum", 16)):
-        encoded = _require_hex(first.get(field), field, digits)
-        if int(encoded, 16) == 0:
-            raise ContractError(f"hybrid Vulkan evidence has an empty {field}")
+    if int(_require_hex(first.get("gpu_device_uuid"), "gpu_device_uuid", 32), 16) == 0:
+        raise ContractError("hybrid Vulkan evidence has an empty GPU device UUID")
     _require_string(first.get("gpu_driver"), "hybrid Vulkan driver")
-    if first.get("gpu_pipeline_cache_policy") != "immutable_preseed_all_hit" \
-            or _require_bool(first.get("gpu_pipeline_cache_hit"), "GPU cache hit") is not True:
-        raise ContractError("hybrid Vulkan execution lacks immutable all-hit cache proof")
-    seed_size = _require_int(
-        first.get("gpu_pipeline_cache_seed_size"), "GPU cache seed size", minimum=1)
-    if (_require_int(first.get("gpu_pipeline_cache_loads"), "GPU cache loads") != 1
-            or _require_int(first.get("gpu_pipeline_cache_seed_bytes"), "GPU cache bytes")
-                != seed_size):
-        raise ContractError("hybrid Vulkan cache load was not accounted exactly once")
-    for field in ("gpu_pipeline_cache_load_ns", "gpu_pipeline_creation_ns", "gpu_pipeline_creates"):
+    policy = first.get("gpu_pipeline_cache_policy")
+    if policy == "native_vulkan":
+        # Linux uses native SPIR-V pipelines, not the macOS Metal archive cache.
+        # Their causal pipeline/submission receipts remain mandatory below.
+        for field, digits in (("gpu_pipeline_cache_seed_sha256", 64),
+                              ("gpu_pipeline_cache_manifest_checksum", 16)):
+            if int(_require_hex(first.get(field), field, digits), 16) != 0:
+                raise ContractError("native Vulkan claims a Metal cache identity")
+        for field in ("gpu_pipeline_cache_seed_size", "gpu_pipeline_cache_loads",
+                      "gpu_pipeline_cache_seed_bytes", "gpu_pipeline_cache_load_ns"):
+            if _require_int(first.get(field), field) != 0:
+                raise ContractError("native Vulkan claims Metal cache activity")
+        if _require_bool(first.get("gpu_pipeline_cache_hit"), "GPU cache hit"):
+            raise ContractError("native Vulkan claims a Metal cache hit")
+    elif policy == "immutable_preseed_all_hit":
+        for field, digits in (("gpu_pipeline_cache_seed_sha256", 64),
+                              ("gpu_pipeline_cache_manifest_checksum", 16)):
+            if int(_require_hex(first.get(field), field, digits), 16) == 0:
+                raise ContractError(f"hybrid Vulkan evidence has an empty {field}")
+        if not _require_bool(first.get("gpu_pipeline_cache_hit"), "GPU cache hit"):
+            raise ContractError("hybrid Vulkan execution lacks immutable all-hit cache proof")
+        seed_size = _require_int(
+            first.get("gpu_pipeline_cache_seed_size"), "GPU cache seed size", minimum=1)
+        if (_require_int(first.get("gpu_pipeline_cache_loads"), "GPU cache loads") != 1
+                or _require_int(first.get("gpu_pipeline_cache_seed_bytes"), "GPU cache bytes")
+                    != seed_size):
+            raise ContractError("hybrid Vulkan cache load was not accounted exactly once")
+        _require_int(first.get("gpu_pipeline_cache_load_ns"), "GPU cache load ns", minimum=1)
+    else:
+        raise ContractError("hybrid Vulkan execution has an unsupported cache policy")
+    for field in ("gpu_pipeline_creation_ns", "gpu_pipeline_creates"):
         _require_int(first.get(field), field, minimum=1)
     for field, selected in (("gpu_seed_dispatches", vulkan_seed),
                             ("gpu_chain_dispatches", vulkan_chain)):

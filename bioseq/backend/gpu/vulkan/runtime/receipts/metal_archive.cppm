@@ -29,6 +29,13 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
+/// Native Linux dispatch receipts carry no Metal archive/cache qualification.
+#if defined(__linux__)
+inline constexpr bool k_native_vulkan_pipeline_receipts = true;
+#else
+inline constexpr bool k_native_vulkan_pipeline_receipts = false;
+#endif
+
 /// @brief One exact Metal binary archive inside the process-owned sealed seed image.
 /// The ordinal binds runtime staging to retained bytes rather than a cache
 /// pathname that could be replaced after supervisor validation.
@@ -571,6 +578,11 @@ struct runtime_metal_archive_process_qualification {
 /// replaced the descriptor archive set, forced fail-on-miss, and first proved
 /// that the same descriptor misses against a fresh empty archive.
 struct runtime_metal_archive_pipeline_audit {
+    // Native Vulkan still proves successful pipeline creation and causal use;
+    // only the macOS archive qualification is inapplicable.
+    bool native_vulkan = false;
+    std::uint64_t native_shader_module_identity = 0u;
+    std::uint64_t native_pipeline_identity = 0u;
     std::uint64_t receipt_identity = 0u;                 ///< Stable identity of this pipeline receipt.
     std::uint64_t scope_identity = 0u;                   ///< Identity of the scoped interception window.
     std::string cache_digest;                            ///< Runtime cache digest bound to the seed load.
@@ -636,6 +648,36 @@ struct runtime_metal_archive_pipeline_audit {
     /// @brief Checks the complete seed, archive, device, interception, and miss-control record.
     /// @return Whether the pipeline call proved immutable archive-only execution.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
+        if (native_vulkan) {
+            return k_native_vulkan_pipeline_receipts && receipt_identity != 0u &&
+                   native_shader_module_identity != 0u && native_pipeline_identity != 0u &&
+                   is_shader_variant_key_valid(shader_key) &&
+                   expected_entry_name == "main" && observed_entry_name == expected_entry_name &&
+                   outer_vulkan_pipeline_succeeded && pipeline_create_ns != 0u &&
+                   api_version != 0u && driver_version != 0u &&
+                   std::any_of(runtime_vulkan_device_uuid.begin(),
+                               runtime_vulkan_device_uuid.end(),
+                               [](std::uint8_t byte) { return byte != 0u; }) &&
+                   std::any_of(pipeline_cache_uuid.begin(), pipeline_cache_uuid.end(),
+                               [](std::uint8_t byte) { return byte != 0u; }) &&
+                   scope_identity == 0u && cache_digest.empty() &&
+                   seed_sha256 == std::array<std::uint8_t, 32>{} && seed_size == 0u &&
+                   manifest_checksum == 0u && seed_receipt_identity == 0u &&
+                   seed_load_count == 0u && seed_load_ns == 0u &&
+                   seed_manifest_read_count == 0u && seed_artifact_read_count == 0u &&
+                   seed_manifest_bytes == 0u && seed_artifact_bytes == 0u &&
+                   seed_admission_count == 0u && seed_peak_admitted_bytes == 0u &&
+                   seed_retained_capacity_bytes == 0u &&
+                   cache_qualification == runtime_metal_archive_process_qualification{} &&
+                   expected_archives == runtime_metal_archive_set_identity{} &&
+                   loaded_archives == runtime_metal_archive_set_identity{} &&
+                   !command_interpose_installed && !command_interpose_immutable_fail_closed &&
+                   scoped_interceptions == 0u && outside_scope_interceptions == 0u &&
+                   actual_sync_calls == 0u && actual_async_calls == 0u &&
+                   !nested_scope && !sticky_failure;
+        }
+        if (native_shader_module_identity != 0u || native_pipeline_identity != 0u)
+            return false;
         const std::uint64_t actual_calls = actual_sync_calls + actual_async_calls;
         return receipt_identity != 0u && scope_identity != 0u &&
                is_runtime_cache_digest_valid(cache_digest) &&

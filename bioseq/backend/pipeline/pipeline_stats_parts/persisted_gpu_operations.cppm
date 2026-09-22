@@ -924,7 +924,8 @@ make_persisted_grouped_soa_gpu_environment_snapshot(
     const std::size_t effective_cpu_workers) noexcept {
     using runtime_policy = ::bioseq::gpu::vulkan::runtime_pipeline_cache_policy;
     if (!binding.is_internally_consistent() ||
-        binding.cache_policy != runtime_policy::immutable_preseed_all_hit ||
+        (binding.cache_policy != runtime_policy::immutable_preseed_all_hit &&
+         binding.cache_policy != runtime_policy::native_vulkan) ||
         effective_cpu_workers == 0 || effective_cpu_workers > k_sql_integer_value_max ||
         binding.seed_size > k_sql_bigint_value_max) {
         return std::nullopt;
@@ -934,7 +935,10 @@ make_persisted_grouped_soa_gpu_environment_snapshot(
     environment.is_gpu_environment_available = binding.gpu_environment_present;
     environment.gpu_device_uuid = binding.gpu_device_uuid;
     environment.gpu_driver_identity = binding.gpu_driver_identity;
-    environment.gpu_pipeline_cache_policy = pipeline_cache_policy::immutable_preseed_all_hit;
+    environment.gpu_pipeline_cache_policy =
+        binding.cache_policy == runtime_policy::native_vulkan
+            ? pipeline_cache_policy::native_vulkan
+            : pipeline_cache_policy::immutable_preseed_all_hit;
     environment.gpu_pipeline_cache_seed_sha256 = binding.seed_sha256;
     environment.gpu_pipeline_cache_seed_size = binding.seed_size;
     environment.gpu_pipeline_cache_manifest_checksum = binding.manifest_checksum;
