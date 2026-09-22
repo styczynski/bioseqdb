@@ -1,4 +1,244 @@
-\section{The same minimizers in two orders}
+\section{BioseqDB indexing abstractions}
+\label{sec:index-abstraction-layers}
+
+Indexes are stored separately in BioseqDB~\ref{lst:types-of-storage-entities-in-bioseqdb} to all internal sequence fragmented tables~\ref{fig:storage-length-buckets} and they are separate entities
+to the usual indexes in Postgres which provide generic access paths to the tables.
+
+The index bytes are not stored in the fragment rows.
+I keep them in one of three layouts.
+A \emph{chunk} is one stored piece of those bytes.
+One chunk must stay at or below $960$ MiB, which is $1$ GiB minus $64$ MiB, so the row still fits in Postgres.
+
+\begin{itemize}
+  \item \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}}.
+    One sequence can have many chunks.
+    They are grouped by a \emph{sub-key}, an extra number chosen by the index.
+    For \texttt{minimizers\_per\_fragment} that number is the fragment, so one fragment can fill several chunks.
+    \texttt{minimizers\_per\_sequence} uses this same layout.
+    Its sub-key is the number of one hash group, not a fragment number.
+  \item \textbf{\texttt{INLINE\_PER\_SEQUENCE}}.
+    One sequence has a single chunk.
+    There is no sub-key and no second chunk.
+    If the bytes exceed $960$ MiB, the write stops with an error.
+    \texttt{symbol\_counts} uses this layout.
+    It stores how many times each symbol occurs in that sequence.
+  \item \textbf{\texttt{CHUNKED\_PER\_TABLE}}.
+    The chunks belong to the whole user table.
+    A build can visit every sequence.
+    It is not maintained automatically when a row is inserted.
+    No production index uses it yet.
+    A test index uses it when tests are compiled in.
+\end{itemize}
+
+Figure~\ref{fig:index-storage-layouts} draws the three layouts under one user table and the fragment rows of one sequence.
+
+The three layouts go through one storage interface, so a later index can pick a layout without a new file format.
+The check is the C++ concept \texttt{is\_index\_chunked\_storage\_for}.
+The fragment calls take a sub-key and a chunk number.
+The inline calls do not take a sub-key or a chunk number.
+The table calls take a chunk number, and a build can walk every sequence.
+Postgres implements one class for each layout:
+\begin{itemize}
+  \item \texttt{fragment\_index\_storage} for many chunks under a sub-key
+  \item \texttt{sequence\_index\_storage} for the single chunk
+  \item \texttt{table\_index\_storage} for chunks of the whole table
+\end{itemize}
+These classes create the relations. A new index does not need a new table definition. The first use of its name creates the tables in the \texttt{bioseq\_internal} schema.
+
+Each index name has its own family of tables.
+\begin{itemize}
+  \item A per-fragment or per-sequence relation is named \texttt{seqidx\_}, then a short name, then a hash, then the length bucket and the shard.
+  \item \texttt{minimizers\_per\_fragment} is shortened to \texttt{mpf}. \texttt{minimizers\_per\_sequence} is shortened to \texttt{mps}. \texttt{symbol\_counts} is shortened to \texttt{sc}.
+  \item The hash mixes the database, the tablespace, the user table's relfilenode, the sequence column, and the full index name. Two index names therefore do not share a relation.
+  \item The bucket and the shard come from the sequence locator. They are the same length bucket and shard as that sequence's fragment rows.
+\end{itemize}
+\texttt{mps} does not add a new table shape. It uses the same per-fragment storage class as \texttt{mpf}, so the columns match, but the relations are a separate family.
+The inline layout uses the same naming scheme. Its primary key is only the sequence row number, because that sequence has one chunk.
+The per-fragment primary key also contains the sub-key and the chunk number.
+The table-wide layout uses the prefix \texttt{seqidxtab\_} instead of \texttt{seqidx\_}. Its primary key is only the chunk number.
+
+These relations do not use the columnar access method. They are created with \texttt{USING heap}. The user table is the columnar table. A minimizer generation relation is a heap table as well, and that one is created \texttt{UNLOGGED}. The generation check refuses the relation when it is not the heap access method.
+
+\texttt{pg\_supported\_indexes} connects those classes to the registered indexes.
+Listing~\ref{lst:mpf-index-storage-check} is the check used by minimizers per fragment.
+The compiler rejects that index unless the storage provides the fragment-layout calls.
+The listing leaves out the build functions.
+
+\begin{BioseqCppSnippet}[caption={Minimizers per fragment require fragment-chunk storage.},
+  label={lst:mpf-index-storage-check}]
+template <class p_storage>
+struct minimizers_per_fragment_index {
+  static_assert(is_index_chunked_storage_for<
+      p_storage, sequence_index_layout::fragment_chunks>);
+  static constexpr sequence_index_layout index_type =
+      sequence_index_layout::fragment_chunks;
+  using storage_type = p_storage;
+};
+\end{BioseqCppSnippet}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\footnotesize,
+  lab/.style={align=center,font=\scriptsize,inner sep=1pt},
+  arr/.style={line width=0.85pt,line join=miter,line cap=rect,
+    -{Latex[length=2.4mm,width=1.7mm]}},
+  stem/.style={line width=0.85pt,line join=miter,line cap=rect}
+]
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0.85,12.22)
+    {(a) User table};
+  \draw[indexGreen,line width=1pt,fill=black!3]
+    (0.85,9.35) rectangle (6.35,12.05);
+  \node[lab,anchor=west] at (1.05,11.68) {id};
+  \node[lab,anchor=west] at (2.45,11.68) {sequence locator};
+  \draw[black!25] (0.85,11.42) -- (6.35,11.42);
+  \fill[black!5] (1.05,10.72) rectangle (2.05,11.22);
+  \draw[black!40] (1.05,10.72) rectangle (2.05,11.22);
+  \node[lab] at (1.55,10.97) {2};
+  \fill[black!5] (2.25,10.72) rectangle (6.15,11.22);
+  \draw[black!40] (2.25,10.72) rectangle (6.15,11.22);
+  \node[lab] at (4.20,10.97) {locator of sequence 2};
+  \fill[black!5] (1.05,9.58) rectangle (2.05,10.28);
+  \draw[black!40] (1.05,9.58) rectangle (2.05,10.28);
+  \node[lab] at (1.55,9.93) {1};
+  \fill[indexOrange!22] (2.25,9.58) rectangle (6.15,10.28);
+  \draw[indexOrange,line width=1pt] (2.25,9.58) rectangle (6.15,10.28);
+  \node[lab] at (4.20,9.93) {locator of sequence 1};
+
+  % ---------- (b) fragments ----------
+  \node[anchor=south west,font=\bfseries\footnotesize] at (7.15,12.22)
+    {(b) Fragment rows of sequence 1};
+  \draw[black!55,fill=black!3] (7.15,9.35) rectangle (15.05,12.05);
+  \fill[black!5] (7.40,9.72) rectangle (9.55,11.55);
+  \draw[black!40] (7.40,9.72) rectangle (9.55,11.55);
+  \node[lab] at (8.475,10.64) {fragment 0};
+  \fill[indexBlue!18] (9.80,9.72) rectangle (12.35,11.55);
+  \draw[indexBlue,line width=1pt] (9.80,9.72) rectangle (12.35,11.55);
+  \node[lab] at (11.075,10.64) {fragment 1};
+  \fill[black!5] (12.60,9.72) rectangle (14.80,11.55);
+  \draw[black!40] (12.60,9.72) rectangle (14.80,11.55);
+  \node[lab] at (13.70,10.64) {fragment 2};
+
+  % ---------- shared row geometry ----------
+  % bar i top = 4.28 - i*0.56, height 0.46, center = 4.05 - i*0.56
+
+  % ---------- (c) table chunks: all 5 rows ----------
+  \draw[indexGreen!70,fill=indexGreen!5] (1.05,1.28) rectangle (4.85,5.62);
+  \node[lab,font=\bfseries\scriptsize] at (2.95,5.22) {\texttt{CHUNKED\_PER\_TABLE}};
+  \node[lab] at (2.95,4.72) {chunks of the whole table};
+  \foreach \i/\name in {0/{chunk 0},1/{chunk 1},2/{chunk 2},3/{chunk 3},4/{chunk 4}} {
+    \fill[indexGreen!20] (1.22,{4.28-\i*0.56}) rectangle (4.68,{3.82-\i*0.56});
+    \draw[indexGreen] (1.22,{4.28-\i*0.56}) rectangle (4.68,{3.82-\i*0.56});
+    \node[lab] at (2.95,{4.05-\i*0.56}) {\name};
+  }
+
+  % ---------- (d) inline: 5 rows, one belongs to sequence 1 ----------
+  \draw[black!45,fill=indexOrange!4] (6.05,1.28) rectangle (9.85,5.62);
+  \node[lab,font=\bfseries\scriptsize] at (7.95,5.22) {\texttt{INLINE\_PER\_SEQUENCE}};
+  \node[lab] at (7.95,4.72) {one row for each sequence};
+  \foreach \i/\name/\on in {0/{sequence 2}/0,1/{sequence 1}/1,2/{other sequence}/0,3/{other sequence}/0,4/{other sequence}/0} {
+    \ifnum\on=1
+      \fill[indexOrange!24] (6.22,{4.28-\i*0.56}) rectangle (9.68,{3.82-\i*0.56});
+      \draw[indexOrange,line width=0.9pt] (6.22,{4.28-\i*0.56}) rectangle (9.68,{3.82-\i*0.56});
+    \else
+      \fill[black!4] (6.22,{4.28-\i*0.56}) rectangle (9.68,{3.82-\i*0.56});
+      \draw[black!35] (6.22,{4.28-\i*0.56}) rectangle (9.68,{3.82-\i*0.56});
+    \fi
+    \node[lab] at (7.95,{4.05-\i*0.56}) {\name};
+  }
+
+  % ---------- (e) fragment chunks: 3 of 5 rows are fragment 1 ----------
+  \draw[black!45,fill=indexBlue!4] (10.85,1.28) rectangle (15.05,5.62);
+  \node[lab,font=\bfseries\scriptsize] at (12.95,5.22) {\texttt{CHUNKED\_PER\_FRAGMENT}};
+  \node[lab] at (12.95,4.72) {chunks of fragment 1};
+  \foreach \i/\name/\on in {
+      0/{fragment 0}/0,
+      1/{fragment 1, chunk 0}/1,
+      2/{fragment 1, chunk 1}/1,
+      3/{fragment 1, chunk 2}/1,
+      4/{fragment 2}/0} {
+    \ifnum\on=1
+      \fill[indexBlue!18] (11.02,{4.28-\i*0.56}) rectangle (14.88,{3.82-\i*0.56});
+      \draw[indexBlue] (11.02,{4.28-\i*0.56}) rectangle (14.88,{3.82-\i*0.56});
+    \else
+      \fill[black!4] (11.02,{4.28-\i*0.56}) rectangle (14.88,{3.82-\i*0.56});
+      \draw[black!35] (11.02,{4.28-\i*0.56}) rectangle (14.88,{3.82-\i*0.56});
+    \fi
+    \node[lab] at (12.95,{4.05-\i*0.56}) {\name};
+  }
+
+  % Green: open brace on the whole user table, then one branch into every chunk row.
+  % End caps stop short of the table border so they do not form an extra column.
+  \draw[stem,indexGreen] (0.62,11.92) -- (0.42,11.92) -- (0.42,10.70)
+    -- (0.28,10.70) -- (0.28,1.81);
+  \draw[stem,indexGreen] (0.62,9.48) -- (0.42,9.48) -- (0.42,10.70);
+  \foreach \i in {0,1,2,3,4} {
+    \draw[arr,indexGreen] (0.28,{4.05-\i*0.56}) -- (1.22,{4.05-\i*0.56});
+  }
+
+  % Orange: locator cell -> the one sequence-1 row (bar 1, center 3.49).
+  \draw[stem,indexOrange] (4.20,9.58) -- (4.20,8.55) -- (5.45,8.55) -- (5.45,3.49);
+  \draw[arr,indexOrange] (5.45,3.49) -- (6.22,3.49);
+
+  % Blue: leave fragment 1 itself, then split into its three chunk rows.
+  \draw[stem,indexBlue] (11.075,9.72) -- (11.075,7.55) -- (10.22,7.55) -- (10.22,2.37);
+  \foreach \i in {1,2,3} {
+    \draw[arr,indexBlue] (10.22,{4.05-\i*0.56}) -- (11.02,{4.05-\i*0.56});
+  }
+\end{tikzpicture}
+\caption[Three index storage layouts]{Each index is drawn as five rows.
+The green brace marks the whole user table, and its line splits into every chunk row.
+The orange arrow leaves the locator of sequence 1 and ends on that sequence's one row.
+That row cannot grow into a second row.
+The blue arrow leaves fragment 1 and splits into that fragment's three chunk rows.
+Grey rows belong to other sequences or other fragments.
+This drawing shows the fragment-number use of \texttt{CHUNKED\_PER\_FRAGMENT}.
+The same layout can use another sub-key.
+For \texttt{minimizers\_per\_sequence} that sub-key is the number of one hash group.}
+\label{fig:index-storage-layouts}
+\end{figure}
+
+
+% The sequence store can fetch a small interval without decoding a whole
+% chromosome. Seed lookup has a different question: at which positions does a
+% query minimizer occur in the target? Reading every target symbol and rebuilding
+% its minimizer table for each query would repeat much of the same work.
+% A persistent index saves that table between executions.
+
+% The useful object is a mapping from a seed key to its occurrences. A
+% \emph{posting} is one stored occurrence, including a position and any source or
+% strand information needed to interpret it. A \emph{posting list} contains all
+% stored occurrences for one key. The key may be a minimizer hash, as in
+% BioSeqDB and minimap2, or a spaced word, as in the CPU MMseqs2 prefilter.
+% The seed-selection rule determines which occurrences the index stores.
+
+% Reuse of reference indexes already appears in biological workflows. For
+% example, BioWorkbench's RASflow workflow checks for an existing Bowtie2 index
+% before preparing it again\autocite{Mondelli_2018}. MMseqs2's interactive
+% search system also saves precomputed search structures to reduce setup for
+% repeated requests\autocite{mmseqs2_desktop_2019}. BioSeqDB has to connect this
+% reuse to the database's changing rows and to the search operators from the
+% previous chapters.
+
+% Four questions guide the design:
+% \begin{itemize}
+%   \item \textbf{What is stored?} Minimizer positions answer seed lookups;
+%     symbol counts answer a different question about sequence composition.
+%   \item \textbf{How is it grouped?} Grouping by target interval makes
+%     construction local. Grouping by hash makes later reads selective.
+%   \item \textbf{When is it usable?} The index must describe the same source
+%     version and minimizer rules as the query expects.
+%   \item \textbf{Who keeps its bytes alive?} A reader needs valid storage and
+%     buffers until its last lookup, including when another transaction changes
+%     the source.
+% \end{itemize}
+
+% An index is derived data: removing it does not remove the sequence. This also
+% distinguishes it from the completed-query cache in
+% Section~\ref{sec:bioseq-result-cache}. A minimizer index can serve many
+% different query sequences; a cached result describes completed executions.
+
+\section{BioseqDB supported indexing}
 \label{sec:index-logical-layouts}
 
 BioSeqDB supports \emph{minimizers per fragment} (MPF) and
