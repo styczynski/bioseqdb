@@ -125,7 +125,10 @@ struct scoring_matrix_storage {
      * @brief Validates that shuffle rows exactly project the scalar matrix.
      * @return `true` when scores and sentinel padding match the canonical layout.
      */
-    [[nodiscard]] bool is_block_layout_valid() const noexcept {
+    // Each Highway translation unit has a different ISA. Keep this small
+    // imported template predicate in its caller so the linker cannot coalesce
+    // an AVX-512 definition into an AVX2 call site with the same weak symbol.
+    [[nodiscard, gnu::always_inline]] bool is_block_layout_valid() const noexcept {
         for (std::size_t row = 0; row < p_alphabet_dimension; ++row) {
             for (std::size_t column = 0;
                  column < p_alphabet_dimension;
