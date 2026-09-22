@@ -1370,9 +1370,43 @@ def run_inspect(
             f"({binary}); inspect against the unstripped build artifact")
         warnings.append(stripped_note)
 
-    all_matches = [s for s in syms
-                   if function_name in (s.get("demangled") or "")
-                   and s.get("type", "").lower() == "t"]
+    if function_name.startswith(("address:0x", "file-offset:0x")):
+        # Resolve an unrelocated instruction address without a rebuild
+        # or disassembling the entire DSO. Existing symbol bounds are reused.
+        try:
+            instruction_address = int(function_name.split(":", 1)[1], 16)
+            if function_name.startswith("file-offset:"):
+                # Linux print_vma_addr reports a file offset, which need not
+                # equal an ELF symbol virtual address (notably with lld).
+                with binary.open("rb") as source:
+                    header = source.read(64)
+                    if header[:6] != b"\x7fELF\x02\x01":
+                        return _error("file-offset selector requires little-endian ELF64")
+                    phoff = struct.unpack_from("<Q", header, 32)[0]
+                    entsize, count = struct.unpack_from("<HH", header, 54)
+                    if entsize < 56 or count > 4096:
+                        return _error("invalid ELF program header table")
+                    mapped = None
+                    for index in range(count):
+                        source.seek(phoff + index * entsize)
+                        kind, flags, offset, vaddr, _, size, _, _ = struct.unpack("<IIQQQQQQ", source.read(56))
+                        if kind == 1 and flags & 1 and offset <= instruction_address < offset + size:
+                            mapped = vaddr + instruction_address - offset
+                            break
+                    if mapped is None:
+                        return _error("file offset is outside executable ELF load segments")
+                    instruction_address = mapped
+                warnings.append(f"file offset translated to instruction address 0x{instruction_address:x}")
+        except (ValueError, OSError, struct.error):
+            return _error("invalid instruction address selector")
+        all_matches = [s for s in syms
+                       if s.get("type", "").lower() == "t"
+                       and s["address"] <= instruction_address
+                       < s["address"] + (s.get("size") or 0)]
+    else:
+        all_matches = [s for s in syms
+                       if function_name in (s.get("demangled") or "")
+                       and s.get("type", "").lower() == "t"]
     all_matches.sort(key=lambda s: -(s.get("size") or 0))
     total_matches_before_cap = len(all_matches)
     matches = all_matches[:max_matches]

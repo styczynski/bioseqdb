@@ -98,6 +98,11 @@ SERVER_INFO = {"name": "bioseq-build-mcp", "version": "1.1.0"}
 
 TOOL_DEFINITIONS = [
     {
+        "name": "inspect_postgres_crash",
+        "description": "Inspect the saved Ubuntu PostgreSQL Apport crash through gdb in read-only postmortem mode. No live attach, builds, or inferior execution. Report timestamp is included; historical cores need not represent the latest failure.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "export_e2e_artifacts",
         "description": "Read-only validated frozen E2E runtime and dependency inventory for copying to an identical machine family; excludes compiled objects and databases.",
         "inputSchema": {"type": "object", "properties": {"build_receipt_id": {"type": "string"}},
@@ -602,7 +607,10 @@ TOOL_DEFINITIONS = [
                         "'void bioseq::simd::N_NEON::collect_minimizers_two_stack_nthash_simd@' "
                         "(prefix-anchored, recommended), or "
                         "'collect_minimizers_two_stack_nthash_simd' "
-                        "(broader, may match many lambdas/closures).",
+                        "(broader, may match many lambdas/closures). "
+                        "Use 'address:0x...' to select the containing text symbol "
+                        "for a known unrelocated instruction address, or "
+                        "'file-offset:0x...' for a Linux kernel fault file offset.",
                 },
                 "target": {
                     "type": "string",
@@ -1796,6 +1804,9 @@ def _handle_tools_call(params: dict) -> dict:
     # validation failures into transport-level JSON-RPC errors.
     if name != "subagent":
         _reject_unknown_tool_arguments(name, args)
+    if name == "inspect_postgres_crash":
+        from crash_inspect import inspect_postgres_crash
+        return {"content": [{"type": "text", "text": inspect_postgres_crash()}]}
     if name == "external_aligners":
         from external_aligners import tool_external_aligners
         return {"content": [{"type": "text", "text": tool_external_aligners(**args)}]}

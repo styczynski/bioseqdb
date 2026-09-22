@@ -437,6 +437,10 @@ def main() -> None:
                     elif collect(name, token):
                         state["collected"][name] = token
                 previous = state["last_dispatch"].get(name, {})
+                maintenance_path = ROOT / "bench/e2e_fleet_maintenance.json"
+                maintenance = json.loads(maintenance_path.read_bytes())["hosts"] if maintenance_path.exists() else {}
+                if maintenance.get(name, {}).get("paused"):
+                    continue
                 if not receipt:
                     event("dispatch_blocked", host=name, detail="No successful reusable build receipt")
                     continue

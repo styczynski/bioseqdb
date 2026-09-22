@@ -924,7 +924,9 @@ HWY_INLINE void ascii_to_rank_lut_simd_impl(
         const auto chunk = hn::LoadU(simd_tag, source + cursor);
         const auto ranks = lookup_ranks_via_32byte_lut(
             simd_tag, lower_lut, upper_lut, chunk);
-        hn::Store(ranks, simd_tag, destination + cursor);
+        // Callers may write into byte-offset storage (including PostgreSQL
+        // varlena payloads); the output interface promises no SIMD alignment.
+        hn::StoreU(ranks, simd_tag, destination + cursor);
         cursor += k_lanes;
     }
     while (cursor < size) {

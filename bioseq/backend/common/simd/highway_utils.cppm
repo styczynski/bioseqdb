@@ -265,6 +265,136 @@ template <typename p_simd_tag>
 concept simd_lane_widenable_once =
     sizeof(hn::TFromD<p_simd_tag>) <= 4u;
 
+#if HWY_TARGET == HWY_SCALAR
+
+// Keep the scalar translation entirely free of multi-lane Highway operations.
+// These stubs let the common reset/consume templates compile, but the target
+// gate rejects them before any biological work or stats accounting.
+/// @brief Rejects u64 transpose admission for the scalar Highway target.
+/// @tparam p_simd_tag Highway descriptor with u64 lanes.
+/// @return Always `false` on the scalar target.
+template<class p_simd_tag>
+[[nodiscard]] HWY_INLINE bool u64_lane_transpose_shape_supported(p_simd_tag) noexcept
+{
+    static_assert(std::is_same_v<hn::TFromD<p_simd_tag>, std::uint64_t>);
+    return false;
+}
+
+/// @brief Rejects matrix transpose execution for the scalar Highway target.
+/// @tparam p_simd_tag Highway descriptor with u64 lanes.
+/// @return Always `false` on the scalar target.
+template<class p_simd_tag>
+[[nodiscard]] HWY_INLINE bool transpose_u64_lane_matrix(
+    p_simd_tag,
+    hn::Vec<p_simd_tag>* HWY_RESTRICT) noexcept
+{
+    static_assert(std::is_same_v<hn::TFromD<p_simd_tag>, std::uint64_t>);
+    return false;
+}
+
+#else
+
+/**
+ * @brief Tests whether recursive half descriptors form a square u64 matrix.
+ *
+ * Repeated half-descriptor operations must exactly describe a power-of-two square
+ * for this target. This is checked before any biological work so an unusual
+ * scalable-vector shape cannot reach a late transpose failure.
+ * @tparam p_simd_tag Highway descriptor with u64 lanes.
+ * @param d Active u64 descriptor.
+ * @return Whether the recursive in-register transpose supports this shape.
+ */
+template<class p_simd_tag>
+[[nodiscard]] HWY_INLINE bool u64_lane_transpose_shape_supported(p_simd_tag d) noexcept
+{
+    static_assert(std::is_same_v<hn::TFromD<p_simd_tag>, std::uint64_t>);
+    const std::size_t lanes = hn::Lanes(d);
+    if (lanes < 2 || lanes > 16) return false;
+    if (lanes == 2) return true;
+    if ((lanes & (lanes - 1)) != 0) return false;
+
+    if constexpr (hn::MaxLanes(p_simd_tag{}) < 4) {
+        return false;
+    } else {
+        using half_simd_tag_type = hn::Half<p_simd_tag>;
+        const half_simd_tag_type dh;
+        return hn::Lanes(dh) * 2 == lanes
+            && u64_lane_transpose_shape_supported(dh);
+    }
+}
+
+/**
+ * @brief Transposes an in-register square matrix of u64 lanes.
+ *
+ * The generic square lane matrix widens
+ * lane types between stages, which reaches a nonexistent u128 lane for u64
+ * matrices. This network instead recursively transposes four half-width
+ * quadrants and joins them with Highway Combine. The only base operation is a
+ * two-lane Interleave. There are no scalar lane or event-record stores.
+ * @tparam p_simd_tag Highway descriptor with u64 lanes.
+ * @param d Active u64 descriptor defining both matrix dimensions.
+ * @param matrix Mutable array of at least `Lanes(d)` vectors.
+ * @return Whether the matrix shape was supported and transposed.
+ */
+template<class p_simd_tag>
+[[nodiscard]] HWY_INLINE bool transpose_u64_lane_matrix(
+    p_simd_tag d,
+    hn::Vec<p_simd_tag>* HWY_RESTRICT matrix) noexcept
+{
+    static_assert(std::is_same_v<hn::TFromD<p_simd_tag>, std::uint64_t>);
+    const std::size_t lanes = hn::Lanes(d);
+    if (lanes == 2) {
+        const hn::Vec<p_simd_tag> column0 = matrix[0];
+        const hn::Vec<p_simd_tag> column1 = matrix[1];
+        matrix[0] = hn::InterleaveLower(d, column0, column1);
+        matrix[1] = hn::InterleaveUpper(d, column0, column1);
+        return true;
+    }
+    if (lanes < 4 || lanes > 16 || (lanes & (lanes - 1)) != 0) {
+        return false;
+    }
+
+    if constexpr (hn::MaxLanes(p_simd_tag{}) < 4) {
+        return false;
+    } else {
+        using half_simd_tag_type = hn::Half<p_simd_tag>;
+        using half_vector_type = hn::Vec<half_simd_tag_type>;
+        constexpr std::size_t half_capacity = hn::MaxLanes(half_simd_tag_type{});
+        const half_simd_tag_type dh;
+        const std::size_t half_lanes = lanes / 2;
+        if (hn::Lanes(dh) != half_lanes) return false;
+
+        HWY_ALIGN std::array<half_vector_type, half_capacity> lower_left{};
+        HWY_ALIGN std::array<half_vector_type, half_capacity> lower_right{};
+        HWY_ALIGN std::array<half_vector_type, half_capacity> upper_left{};
+        HWY_ALIGN std::array<half_vector_type, half_capacity> upper_right{};
+        for (std::size_t column = 0; column < half_lanes; ++column) {
+            lower_left[column] = hn::LowerHalf(dh, matrix[column]);
+            upper_left[column] = hn::UpperHalf(dh, matrix[column]);
+            lower_right[column] =
+                hn::LowerHalf(dh, matrix[column + half_lanes]);
+            upper_right[column] =
+                hn::UpperHalf(dh, matrix[column + half_lanes]);
+        }
+
+        if (!transpose_u64_lane_matrix(dh, lower_left.data())
+            || !transpose_u64_lane_matrix(dh, lower_right.data())
+            || !transpose_u64_lane_matrix(dh, upper_left.data())
+            || !transpose_u64_lane_matrix(dh, upper_right.data())) {
+            return false;
+        }
+        for (std::size_t row = 0; row < half_lanes; ++row) {
+            matrix[row] = hn::Combine(
+                d, lower_right[row], lower_left[row]);
+            matrix[row + half_lanes] = hn::Combine(
+                d, upper_right[row], upper_left[row]);
+        }
+        return true;
+    }
+}
+
+#endif
+
 /**
  * @brief Loads and transposes one square matrix of active SIMD lanes.
  *
@@ -836,6 +966,16 @@ public:
      */
     constexpr auto transpose_in_place(p_simd_tag& simd_tag) -> void {
         const std::size_t lane_count = hn::Lanes(simd_tag);
+        if constexpr (std::same_as<hn::TFromD<p_simd_tag>, std::uint64_t>) {
+            if (lane_count > 2u) {
+                // Reuse the existing SIMD-only half-width network: widening
+                // u64 to a fictitious u128 lane is not a valid transpose.
+                if (!transpose_u64_lane_matrix(simd_tag, &matrix_storage_[0])) {
+                    std::abort();
+                }
+                return;
+            }
+        }
         if (lane_count == 1u) {
             transpose_one_lane(simd_tag, matrix_storage_);
         } else if (lane_count == 2u) {

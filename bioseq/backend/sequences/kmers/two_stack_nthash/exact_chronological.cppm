@@ -14,6 +14,7 @@ import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.highway.sources.minimizer_two_stack_nthash_state;
+import bioseq.highway.sources.simd_utils;
 import bioseq.highway.sources.minimizer_two_stack_nthash_resident_stream;
 import bioseq.highway.sources.hasher_minimap_int;
 import bioseq.highway.sources.minimizer_two_stack_nthash_exact_vectors;

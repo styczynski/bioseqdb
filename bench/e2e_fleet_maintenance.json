@@ -1,0 +1,6 @@
+{
+  "description": "Temporary queue ownership for targeted bug-fix build/verification; other workers continue measuring.",
+  "hosts": {
+    "test3-m4": {"reason": "Build and verify unaligned DNA5 SIMD store and shared u64 transpose fixes", "paused": true}
+  }
+}

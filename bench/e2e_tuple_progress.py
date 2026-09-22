@@ -76,6 +76,12 @@ def format_counters(counts: dict, previous: dict | None) -> str:
 
 
 def append_progress_log(details: str = "", *, title: str = "q1024 tuple coverage checkpoint") -> str:
+    # Billing lookups must not prevent tuple logging or benchmark queue refill.
+    try:
+        from e2e_aws_credits import format_credit_balances
+        credits = format_credit_balances()
+    except Exception as exc:
+        credits = "AWS credits unavailable: " + str(exc)
     OUTPUT.mkdir(parents=True, exist_ok=True)
     with (OUTPUT / "tuple_progress.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -88,6 +94,7 @@ def append_progress_log(details: str = "", *, title: str = "q1024 tuple coverage
             output.write(f"\n### {stamp} — {title}\n\n{table}\n\n{DEFINITION}{first}\n")
             if details:
                 output.write("\n" + details.rstrip() + "\n")
+            output.write("\n" + credits + "\n")
         atomic(STATE, (json.dumps({"timestamp": stamp, "counts": counts}, indent=2) + "\n").encode())
         return table
 

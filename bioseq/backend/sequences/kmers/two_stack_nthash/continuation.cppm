@@ -14,6 +14,7 @@ import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.highway.sources.minimizer_two_stack_nthash_state;
+import bioseq.highway.sources.simd_utils;
 import bioseq.highway.sources.minimizer_two_stack_nthash_exact_vectors;
 import bioseq.highway.sources.minimizer_two_stack_nthash_exact_decode;
 import bioseq.highway.sources.minimizer_two_stack_nthash_exact_k15_w10;
@@ -68,7 +69,7 @@ template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_tr
         two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>::
             max_vector_lanes,
         two_stack_internal::exact_compiled_target_is_scalar,
-        two_stack_internal::u64_lane_transpose_shape_supported(d));
+        u64_lane_transpose_shape_supported(d));
     if (target_status != two_stack_continuation_status::ok) {
         return target_status;
     }
