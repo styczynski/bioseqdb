@@ -199,7 +199,7 @@ The largest bucket is designated to store sequences longer than $2^{41}$ symbols
 \centering
 \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
   \node[anchor=west,font=\bfseries] at (0,4.75)
-    {One sequence column, several length buckets};
+    {Length buckets in internal storage};
   \foreach \x/\b/\range in {1.65/0/{0--256},4.6/1/{257--512},7.55/2/{513--1,024},10.5/34/{over $2^{41}$}} {
     \draw[rounded corners,black!55,fill=black!3]
       (\x-1.25,.8) rectangle (\x+1.25,3.8);
