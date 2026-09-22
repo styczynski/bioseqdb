@@ -22,6 +22,13 @@ import tempfile
 import yaml
 import aggregate_e2e_algorithm_matrix as audit
 
+class AuthorityLoader(yaml.CSafeLoader):
+    """Keep ISO metadata timestamps as strings, as the authority emitter expects."""
+
+
+AuthorityLoader.add_constructor(
+    "tag:yaml.org,2002:timestamp", AuthorityLoader.construct_scalar)
+
 ROOT = Path(__file__).resolve().parent.parent
 COLLECTED = ROOT / "reporting/bioseq_benchmark_e2e/fleet_collected_20260921"
 MANIFEST = ROOT / "bench/bench_e2e_algorithm_matrix_q1024_observed_singleton_partition_manifest.json"
@@ -85,7 +92,7 @@ def parse_report(report_bytes: bytes, raw_bytes: bytes, name: str, children: dic
     return [audit._validate_record(r, source, audit.Q1024_CAMPAIGN_ID, 1024, True) for r in records]
 
 
-def approved_row(row: dict) -> dict:
+def approved_row(row: dict, *, fast_local: bool = False) -> dict:
     engine = row["engine"]
     requested = {k: row[f"requested_{k}_algorithm"] for k in ("minimizer", "chaining", "base_alignment")}
     observed = {k: row[f"observed_{k}_algorithm"] for k in requested}
@@ -104,7 +111,7 @@ def approved_row(row: dict) -> dict:
         raise ValueError("unclassified observed path; needs review, not automatic approval")
     result = {
         "stable_key_schema": "bioseq-e2e-cell-v2", "stable_key": row["stable_key"],
-        "timing_scope": audit.APPROVED_TUPLES_QUERY_TIMING_SCOPE,
+        "timing_scope": audit.FAST_LOCAL_TIMING_SCOPE if fast_local else audit.APPROVED_TUPLES_QUERY_TIMING_SCOPE,
         **{k: row[k] for k in ("campaign_id", "dataset", "target_size_gbp", "alphabet", "kmer_size", "window_size")},
         "query_count": 1024, "mode": row["index_mode"], "pipeline": engine,
         "pipeline_mode": "task_parallel" if engine == "bioseq" else None,
@@ -112,9 +119,16 @@ def approved_row(row: dict) -> dict:
         "requested_algorithms": requested, "observed_algorithms": observed,
         "effective_path": path, "execution_conformance": conformance,
         "comparison_eligibility": {"requested_path": exact, "effective_path": True, "scope": scope},
-        "prefilter": False, "exact_baseline_match_count_equal": True, "status": "accepted", "run_count": 5,
+        "prefilter": False, "exact_baseline_match_count_equal": True, "status": "accepted", "run_count": row["run_count"],
         "metrics": {"unit": "ns", "p50_a": row["outer_e2e_ns_p50"], "p50_b": row["outer_e2e_minus_cigar_or_mapq_union_ns_p50"]},
-        "comments": ((row["COMMENTS"] + "; ") if row["COMMENTS"] else "") + COMMENT,
+        "comments": ((row["COMMENTS"] + "; ") if row["COMMENTS"] else "") + (
+            "FAST LOCAL: one measured q1024 sample, not a five-run estimate; P50 equals that sample. "
+            "PostgreSQL restarts before the measurement; the OS filesystem cache is not cleared. "
+            "Compatible persisted indexes are retained across just_index tuples; index creation and restarts are untimed. "
+            "Existing correctness, observed-stage, prefilter-off and timing-interval validation passed. "
+            "Compared with saved local minimap2 correctness evidence; baseline timings are not copied. "
+            "Do not pool with the standard five-repeat campaign."
+            if fast_local else COMMENT),
     }
     return audit._approved_row_in_fixed_order(result)
 
@@ -252,7 +266,7 @@ def recover(host_dir: Path, children: dict, publish: bool) -> dict:
     if publish and candidates and path.exists():
         with path.with_name("." + path.name + ".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            document = yaml.load(path.read_bytes(), Loader=yaml.CSafeLoader)
+            document = yaml.load(path.read_bytes(), Loader=AuthorityLoader)
             existing = document["approved_results"]
             seen = {(r["stable_key"], r["timing_scope"]) for r in existing}
             for row in candidates:

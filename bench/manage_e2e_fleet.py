@@ -35,6 +35,7 @@ from recover_e2e_measurements import COLLECTED, MANIFEST, ROOT, atomic, authorit
 from e2e_tuple_progress import append_progress_log
 
 OUTPUT = ROOT / "reporting/bioseq_benchmark_e2e/fleet_controller"
+TERMINAL_STATUSES = frozenset({"completed", "aborted", "failed", "killed_timeout"})
 HOSTS = {h[0]: h for h in monitor.HOSTS}
 ENVIRONMENT = (
     "export PATH=/opt/bioseq-package-toolchain/cmake/bin:/opt/bioseq-package-toolchain/llvm-22/bin:/usr/local/bin:/usr/bin:/bin "
@@ -410,20 +411,23 @@ def main() -> None:
                 retirement = json.loads(retirement_path.read_bytes())["hosts"] if retirement_path.exists() else {}
                 if retirement.get(name, {}).get("draining"):
                     # Preserve terminal output, but never refill a retiring account.
-                    if s.get("status") in ("completed", "aborted", "failed") and not args.dry_run:
+                    if s.get("status") in TERMINAL_STATUSES and not args.dry_run:
                         token = "drain_" + (s.get("run_receipt_id") or Path(s.get("log_file") or "unknown").stem)
                         if state["collected"].get(name) != token and collect(name, token):
                             state["collected"][name] = token
                     continue
                 imported_receipt = replicas.get(name, {}).get("build_receipt_id")
-                if s.get("status") not in ("completed", "aborted", "failed") and not (
+                if s.get("status") not in TERMINAL_STATUSES and not (
                         s.get("status") == "missing" and imported_receipt):
                     continue
                 if name == "local" and not args.dry_run:
                     reclaim_idle_local_indexes()
                 # A failed build has no reusable receipt. Repair classified
                 # infrastructure failures once; never submit its pending ID.
-                preferred_receipt = state.get("preferred_build_receipts", {}).get(name) or imported_receipt
+                maintenance_path = ROOT / "bench/e2e_fleet_maintenance.json"
+                maintenance = json.loads(maintenance_path.read_bytes())["hosts"] if maintenance_path.exists() else {}
+                preferred_receipt = (maintenance.get(name, {}).get("build_receipt_id")
+                                     or state.get("preferred_build_receipts", {}).get(name) or imported_receipt)
                 if s.get("status") == "failed" and not s.get("bench_e2e_config") and not preferred_receipt:
                     repair_build(name, s, state, args.dry_run)
                     continue
@@ -437,8 +441,6 @@ def main() -> None:
                     elif collect(name, token):
                         state["collected"][name] = token
                 previous = state["last_dispatch"].get(name, {})
-                maintenance_path = ROOT / "bench/e2e_fleet_maintenance.json"
-                maintenance = json.loads(maintenance_path.read_bytes())["hosts"] if maintenance_path.exists() else {}
                 if maintenance.get(name, {}).get("paused"):
                     continue
                 if not receipt:

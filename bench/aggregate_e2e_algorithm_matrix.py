@@ -120,6 +120,7 @@ APPROVED_TUPLES_LEGACY_PROJECTION_SHA256 = (
     "e463090b47dbe6446b6f1667a8ff23df99c8742be25ad190201a783d04d8cb78")
 APPROVED_TUPLES_HISTORICAL_TIMING_SCOPE = "historical_outer_e2e_v1"
 APPROVED_TUPLES_QUERY_TIMING_SCOPE = "query_only_framework_iteration_v1"
+FAST_LOCAL_TIMING_SCOPE = "query_only_framework_iteration_fast_local_single_sample_v1"
 APPROVED_TUPLES_TIMING_SCOPES = (
     APPROVED_TUPLES_HISTORICAL_TIMING_SCOPE,
     APPROVED_TUPLES_QUERY_TIMING_SCOPE,
@@ -4212,7 +4213,10 @@ def _validate_raw_sidecar(
     report: dict[str, Any],
     config: dict[str, Any],
     config_entry: dict[str, Any],
+    *, expected_repeats: int = MIN_ACCEPTED_REPEATS,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], Path, str]:
+    if expected_repeats not in (1, MIN_ACCEPTED_REPEATS):
+        raise ContractError("unsupported explicit repeat policy")
     manifest = _require_dict(report.get("raw_evidence"), "report.raw_evidence")
     _require_exact_keys(manifest, RAW_MANIFEST_FIELDS, "raw evidence manifest")
     if (_require_int(manifest.get("schema"), "raw evidence schema") != 1
@@ -4344,8 +4348,8 @@ def _validate_raw_sidecar(
         if (outer_e2e_ns is not None) != (accepted_raw == 1):
             raise ContractError(
                 "framework outer timing presence contradicts E2E tuple disposition")
-        if group_index != 0 or group_count != 1 or repeat >= MIN_ACCEPTED_REPEATS:
-            raise ContractError("campaign raw cell group/repeat shape is not exact serial five-repeat")
+        if group_index != 0 or group_count != 1 or repeat >= expected_repeats:
+            raise ContractError("campaign raw cell group/repeat shape differs from explicit repeat policy")
         route = (test_case, algorithm, tuple_index)
         descriptor = descriptors_by_route.get(route)
         if descriptor is None:
@@ -4424,7 +4428,7 @@ def _validate_raw_sidecar(
             repeat,
         )
         for descriptor in config_entry["cells"]
-        for repeat in range(MIN_ACCEPTED_REPEATS)
+        for repeat in range(expected_repeats)
     }
     if seen_cell_repeats != expected_cell_repeats:
         raise ContractError("raw sidecar canonical cell/repeat membership is truncated or forged")
@@ -4466,8 +4470,8 @@ def _validate_raw_sidecar(
             descriptor["tuple_index"],
         )
         selected = sorted(cell_records.get(route, []), key=lambda item: item["repeat"])
-        if [item["repeat"] for item in selected] != list(range(MIN_ACCEPTED_REPEATS)):
-            raise ContractError("raw cell does not own exact repeat ordinals 0..4")
+        if [item["repeat"] for item in selected] != list(range(expected_repeats)):
+            raise ContractError("raw cell does not own the exact configured repeat ordinals")
         outer_values = [
             item["outer_e2e_ns"] for item in selected
             if item["outer_e2e_ns"] is not None
@@ -4493,7 +4497,7 @@ def _validate_raw_sidecar(
             "algorithm": descriptor["algorithm"],
             "tuple_index": descriptor["tuple_index"],
             "group_index": 0,
-            "record_count": MIN_ACCEPTED_REPEATS,
+            "record_count": expected_repeats,
             "schedule_sorted_checksum": cell_checksum,
             "outer_e2e_ns": _duration_summary(outer_values),
             "first_repeat_outer_e2e_ns": _duration_summary(
@@ -8763,7 +8767,9 @@ def _evidence_refs(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-def _aggregate(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _aggregate(records: list[dict[str, Any]], *, expected_repeats: int = MIN_ACCEPTED_REPEATS) -> list[dict[str, Any]]:
+    if expected_repeats not in (1, MIN_ACCEPTED_REPEATS):
+        raise ContractError("unsupported explicit repeat policy")
     cells: dict[str, list[dict[str, Any]]] = {}
     repeats_seen: set[tuple[str, int]] = set()
     baselines: dict[tuple[str, str, str, int], dict[str, Any]] = {}
@@ -8928,9 +8934,9 @@ def _aggregate(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if len(transition_values) > 1:
             invalid.append(
                 "**INVALID**: requested-to-observed route classification changed across repeats")
-        if len(cell) != MIN_ACCEPTED_REPEATS \
-                or [item["repeat"] for item in cell] != list(range(MIN_ACCEPTED_REPEATS)):
-            invalid.append("**INVALID**: cell does not own exact repeat ordinals 0..4")
+        if len(cell) != expected_repeats \
+                or [item["repeat"] for item in cell] != list(range(expected_repeats)):
+            invalid.append("**INVALID**: cell does not own the exact configured repeat ordinals")
 
         if invalid:
             status = "invalid"
@@ -8951,10 +8957,10 @@ def _aggregate(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             comments = "; ".join(accepted_comments) if accepted_comments else None
 
         accepted_for_timing = status == "accepted" and all(item["accepted"] for item in cell)
-        outer_p50 = _nearest_rank_p50(
-            [item["outer_e2e_ns"] for item in cell]) if accepted_for_timing else None
-        adjusted_p50 = _nearest_rank_p50(
-            [item["adjusted_ns"] for item in cell]) if accepted_for_timing else None
+        outer_p50 = (cell[0]["outer_e2e_ns"] if expected_repeats == 1 else _nearest_rank_p50(
+            [item["outer_e2e_ns"] for item in cell])) if accepted_for_timing else None
+        adjusted_p50 = (cell[0]["adjusted_ns"] if expected_repeats == 1 else _nearest_rank_p50(
+            [item["adjusted_ns"] for item in cell])) if accepted_for_timing else None
         observed = dict(observed_values.pop()) if len(observed_values) == 1 else {
             "observed_minimizer_algorithm": None,
             "observed_chaining_algorithm": None,
@@ -10987,6 +10993,7 @@ def _validate_approved_tuple_row(
         allow_legacy_preservation: bool,
         require_field_order: bool,
         authority_version: int = APPROVED_TUPLES_VERSION,
+        fast_local: bool = False,
 ) -> dict[str, Any]:
     row = _require_dict(raw_row, label)
     fields = (APPROVED_TUPLES_V2_ROW_FIELDS
@@ -10999,7 +11006,8 @@ def _validate_approved_tuple_row(
     if authority_version == APPROVED_TUPLES_VERSION:
         timing_scope = _require_string(
             row.get("timing_scope"), f"{label}.timing_scope")
-        if timing_scope not in APPROVED_TUPLES_TIMING_SCOPES:
+        allowed_scopes = (FAST_LOCAL_TIMING_SCOPE,) if fast_local else APPROVED_TUPLES_TIMING_SCOPES
+        if timing_scope not in allowed_scopes:
             raise ContractError(f"{label}.timing_scope is not recognized")
     elif authority_version != APPROVED_TUPLES_LEGACY_VERSION:
         raise ContractError(f"{label} uses an unsupported authority version")
@@ -11066,8 +11074,8 @@ def _validate_approved_tuple_row(
             f"{label}.exact_baseline_match_count_equal must be true")
     if row.get("status") != "accepted":
         raise ContractError(f"{label}.status must be accepted")
-    if _require_int(row.get("run_count"), f"{label}.run_count") != 5:
-        raise ContractError(f"{label}.run_count must be exactly five")
+    if _require_int(row.get("run_count"), f"{label}.run_count") != (1 if fast_local else 5):
+        raise ContractError(f"{label}.run_count differs from the authority repeat policy")
     if metrics.get("unit") != "ns":
         raise ContractError(f"{label}.metrics.unit must be ns")
     p50_a = _require_int(metrics.get("p50_a"), f"{label}.metrics.p50_a", minimum=1)

@@ -2,7 +2,7 @@
 schema: bioseq.approved-e2e-result-tuples
 version: 3
 status: approved_partial_matrix
-purpose: Deterministic authority for interpreting and comparing approved q1024 local E2E benchmark tuples. approved_results is the sole normative tuple dataset. Every other section is a generated, derived_non_authoritative projection. The document intentionally publishes medians and run counts rather than raw repeat observations and is not a standalone forensic evidence archive.
+purpose: 'Deterministic authority for interpreting and comparing approved q1024 local E2E benchmark tuples. approved_results is the sole normative tuple dataset. Every other section is a generated, derived_non_authoritative projection. The document intentionally publishes medians and run counts rather than raw repeat observations and is not a standalone forensic evidence archive. Recovery policy authorized 2026-09-21: complete saved raw measurements may be accepted without ephemeral build/run receipts or a sealed append manifest. Recovered rows are explicitly annotated; this does not attest their exact source/binary provenance. Existing checks for five repeats, correctness, observed stages, disabled prefilter, timing intervals and minimap2 match counts remain required. No minimizer bit-parity is required.'
 authority:
   all_other_sections: derived_non_authoritative
   approved_snapshot_complete: true
@@ -15,26 +15,26 @@ authority:
   no_external_path_or_reference_dependency: true
   normative_tuple_dataset: approved_results
   raw_repeat_timings_included: false
-  sealed_verification_manifest_required_for_append: true
+  sealed_verification_manifest_required_for_append: false
   single_source_of_truth_for_approved_results: true
   standalone_forensic_evidence_archive: false
 projection_provenance:
   approved_results_projection_encoding: UTF-8 bytes of compact JSON for the complete approved_results sequence; rows are sorted by (stable_key, timing_scope), list order is retained, mapping keys are recursively lexicographically sorted, ensure_ascii=true, separators are comma and colon without spaces, YAML empty plain scalars normalize to JSON null, booleans use lowercase JSON literals, integers use shortest decimal notation, non-finite numbers are forbidden, and no terminal LF or other byte is appended.
-  approved_results_projection_sha256: bf8f533e10a97e925a902ae93af4830df673274e01f59ceb2780cd5460ea0ba1
+  approved_results_projection_sha256: 44be99519de8a5d3e063e9c54f545929d006f265f56fdfc1ce999b75f57e0279
   classification: derived_non_authoritative
   current_p50_audit:
     by_timing_scope:
     - approved_rows: 66
       contributing_runs: 330
       timing_scope: historical_outer_e2e_v1
-    - approved_rows: 74
-      contributing_runs: 370
+    - approved_rows: 103
+      contributing_runs: 515
       timing_scope: query_only_framework_iteration_v1
     independent_recomputation_completed: true
     interpretation_or_comparison_dependency: false
     median_partition_rule: Each published row P50 is computed only from repeats carrying that row's timing_scope; observations from different scopes are never pooled.
     raw_repeat_observations_embedded: false
-    scope: All 140 timing observations and 700 actual contributing runs were checked without combining P50 inputs across timing_scope values.
+    scope: All 169 timing observations and 845 actual contributing runs were checked without combining P50 inputs across timing_scope values.
   generator: bioseq-approved-results-projection
   generator_inputs:
     base_alignment_label_renderer: bioseq::simd::base_alignment_algorithm_name
@@ -342,11 +342,11 @@ run_count_expectations:
   campaign_target_per_cell: 5
   classification: derived_non_authoritative
   current_approved_rows_all_have_exactly_five: true
-  current_approved_run_total: 700
-  current_logical_tuple_count: 121
-  current_query_only_observation_count: 74
-  current_query_only_run_total: 370
-  current_timing_observation_count: 140
+  current_approved_run_total: 845
+  current_logical_tuple_count: 148
+  current_query_only_observation_count: 103
+  current_query_only_run_total: 515
+  current_timing_observation_count: 169
   minimum_for_approval: 5
   projection_description: Generated run-count summary over approved_results.
   recorded_attempts_are_not_synonymous_with_valid_runs: true
@@ -400,44 +400,44 @@ benchmark_host_profile:
 corrected_summaries:
   accepted_marginals:
     by_alphabet:
-    - approved_logical_cells: 97
+    - approved_logical_cells: 113
       key: dna4
-    - approved_logical_cells: 24
+    - approved_logical_cells: 35
       key: dna5
     by_index_type:
-    - approved_logical_cells: 103
+    - approved_logical_cells: 113
       key: minimizers_per_fragment
-    - approved_logical_cells: 2
+    - approved_logical_cells: 19
       key: minimizers_per_sequence
     - approved_logical_cells: 16
       key: minimap2_internal
     by_mode:
-    - approved_logical_cells: 96
+    - approved_logical_cells: 103
       key: just_index
-    - approved_logical_cells: 25
+    - approved_logical_cells: 45
       key: no_index
     by_pipeline:
-    - approved_logical_cells: 105
+    - approved_logical_cells: 132
       key: bioseq
     - approved_logical_cells: 16
       key: minimap2
     by_target_size_gbp:
-    - approved_logical_cells: 74
+    - approved_logical_cells: 91
       key: 2
-    - approved_logical_cells: 47
+    - approved_logical_cells: 57
       key: 4
     by_window_kmer:
-    - approved_logical_cells: 71
+    - approved_logical_cells: 83
       kmer_size: 15
       window_size: 10
-    - approved_logical_cells: 50
+    - approved_logical_cells: 65
       kmer_size: 20
       window_size: 15
   approved_execution_classes:
-  - approved_rows: 96
+  - approved_rows: 125
     class: exact_requested_path_bioseq
     user_preserved_subset_rows: 1
-    valid_runs: 480
+    valid_runs: 625
   - approved_rows: 12
     class: documented_scalar_minimizer_fallback
     requested_simd_performance_eligible: false
@@ -447,37 +447,37 @@ corrected_summaries:
     valid_runs: 160
   classification: derived_non_authoritative
   overall:
-    approved_logical_cells: 121
+    approved_logical_cells: 148
     approved_observations_by_timing_scope:
     - approved_rows: 66
       contributing_runs: 330
       timing_scope: historical_outer_e2e_v1
-    - approved_rows: 74
-      contributing_runs: 370
+    - approved_rows: 103
+      contributing_runs: 515
       timing_scope: query_only_framework_iteration_v1
-    approved_rows: 140
-    approved_valid_runs: 700
+    approved_rows: 169
+    approved_valid_runs: 845
     historical_invalid_cells: 1
     historical_rejected_cells: 47
     historically_nonvalid_now_approved_cells: 4
     invalid_attempts_excluded: 5
     invalid_cells_excluded: 1
-    materialized_cells: 165
-    missing_cells: 1131
-    planned_valid_runs_still_needed: 6110
-    query_only_approved_cells: 74
-    query_only_contributing_runs: 370
-    query_only_missing_cells: 1222
-    recorded_attempts: 940
+    materialized_cells: 192
+    missing_cells: 1104
+    planned_valid_runs_still_needed: 5965
+    query_only_approved_cells: 103
+    query_only_contributing_runs: 515
+    query_only_missing_cells: 1193
+    recorded_attempts: 1085
     rejected_attempts_excluded: 235
     rejected_cells_excluded: 43
     total_matrix_cells: 1296
     total_planned_runs: 6480
-    unrecorded_planned_runs: 5655
+    unrecorded_planned_runs: 5520
   projection_description: Logical coverage uses unique stable_key values; approved_rows and approved_valid_runs count actual timing observations and their contributing runs. Query-only completion and each timing scope are reported separately from frozen historical observations.
   requested_path_performance_eligible:
-    approved_rows: 128
-    valid_runs: 640
+    approved_rows: 157
+    valid_runs: 785
 high_priority_families:
   classification: derived_non_authoritative
   corrected_user_intended:
@@ -806,9 +806,9 @@ excluded_and_nonvalid_summary:
     recorded_attempts: 5
     summary: One bounded_nthash_simd + range_minimum_query + block_aligner MPF no-index cell had mixed repeat dispositions. Partial timings are not salvageable.
   missing:
-    cells: 1131
+    cells: 1104
     p50_published: false
-    planned_runs_not_recorded: 5655
+    planned_runs_not_recorded: 5520
   projection_description: Rejected and invalid summaries describe the frozen historical attempts, including cells that may now be approved. Missing describes current unrecorded cell coverage. corrected_summaries separates those historical attempts from logical cell coverage and separately reports query-only campaign progress and actual observation runs.
   rejected:
     cells: 47
@@ -914,14 +914,14 @@ invariants:
   - Canonical stable keys remain unchanged logical identities; observation pairs (stable_key, timing_scope) are unique and approved_results is in ascending pair order.
   - Every run_count is exactly five.
   - Every metrics.unit is ns and every p50_a and p50_b is a non-null positive integer with p50_b <= p50_a.
-  - Every P50, run_count, requested identity, and observed identity retains the approved value. The 71 non-null comments are publication annotations; 12 qualify scalar fallback and 1 qualify legacy user preservation, including zero ksw2_batched activity.
+  - Every P50, run_count, requested identity, and observed identity retains the approved value. The 100 non-null comments are publication annotations; 12 qualify scalar fallback and 1 qualify legacy user preservation, including zero ksw2_batched activity.
   - Every exact_baseline_match_count_equal is true; no returned-count value is stored.
   - Every row has prefilter=false.
   - No approved row uses an excluded runtime-only base-alignment algorithm.
   - A documented_scalar_minimizer_fallback row requests simd_minimap2_reference, observes scalar, exposes the scalar effective path, and has requested_path=false.
   - No other Bioseq row may have a requested/observed algorithm mismatch.
   - External minimap2 rows have null Bioseq requested and observed algorithm fields and index_type=minimap2_internal.
-  - The current snapshot has exactly 140 timing observations, 121 logical cells, 74 query-only observations, and 700 actual contributing runs, including exactly 12 documented scalar-minimizer fallback observations.
+  - The current snapshot has exactly 169 timing observations, 148 logical cells, 103 query-only observations, and 845 actual contributing runs, including exactly 12 documented scalar-minimizer fallback observations.
   - Approved plus currently unapproved historical rejected and invalid plus missing cell counts reconcile to 1296. Five planned valid runs per cell reconcile to 6480; historical failed attempts are additional and are never counted as approved runs or as additional distinct cells.
   - The corrected user-intended valid-run vector is 50/40/45/40/80/80 and the historical RMQ-mislabeled vector is 15/40/0/40/80/80.
   - No approved row stores receipt identity, proof, raw-repeat, path, URI, or log-location fields; historical_outer_e2e_v1 remains exactly the pinned 66-row v2 projection and new observations use only query_only_framework_iteration_v1.
@@ -1187,6 +1187,43 @@ approved_results:
     p50_a: 18716362000
     p50_b: 18245030834
   comments:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 3657836584
+    p50_b: 2404953335
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","block_aligner"]'
   timing_scope: historical_outer_e2e_v1
@@ -1891,6 +1928,43 @@ approved_results:
     p50_b: 394097264023
   comments: Five accepted query-only repeats physically executed Vulkan query sketch and persisted-index seed lookup, Vulkan tiled-DP chaining, and host SIMD Block alignment. Revision-6 CIGAR/MAPQ interval origins were complete with one finalization per repeat. The immutable preseed pipeline cache hit seed SHA-256 6a568f79e7670fe5f3dce6a7d3f3d432d067e176c1ded555381ad9e32d160ef7; no fallback, decline, index build/recompute, prefilter, saturation, overlap duplication, KSW2, or scalar biological fallback occurred.
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 5165019250
+    p50_b: 3199871042
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","minimap2",null,null,null,null]'
   timing_scope: historical_outer_e2e_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -2039,6 +2113,43 @@ approved_results:
     p50_b: 105462722467
   comments: 'CPU no-index execution: scalar CPU performs cold transient target-index assembly and seed lookup; bounded_nthash_simd performs SIMD minimizer sketching, simd_minimap2 uses the bounded_batch_approximate SIMD-DP policy and SIMD backtracking, and block_aligner extensions run on CPU SIMD. Each repeat builds one cold transient index and reuses it for the remaining queries; persistence and prefiltering are off, with no fallback. The empty persisted-GPU ledger is expected for this CPU-only route. The measured no-index query phase includes cold transient index construction plus mapping and excludes fixture/restart setup; query_only_framework_iteration_v1 does not mean index-build-free.'
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 112749703000
+    p50_b: 100049720000
+  comments: 'configured MPF direct_compact_hash_lookup is not applicable to no-index execution: transient target construction and querying ran without a persisted MPF reader; Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.'
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","ksw2"]'
   timing_scope: historical_outer_e2e_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -2112,6 +2223,80 @@ approved_results:
     p50_a: 376879965834
     p50_b: 366942346247
   comments: 'Hybrid CPU/Vulkan execution: GPU performs query/target sketching, transient index upload, seed lookup, and chain scoring; scalar CPU performs transient target-index assembly and chain backtracking; Block Aligner extensions run on CPU SIMD. The empty persisted-GPU ledger is expected for the no-index route and does not imply absent GPU execution. The no-index measured query phase includes cold transient index construction plus mapping and excludes fixture/restart setup; query_only_framework_iteration_v1 does not mean index-build-free.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 119597634458
+    p50_b: 108960149629
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 123141738417
+    p50_b: 110436685997
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","minimap2",null,null,null,null]'
   timing_scope: historical_outer_e2e_v1
@@ -3186,6 +3371,80 @@ approved_results:
     p50_b: 3935617626
   comments: 'Exact requested LOCAL observed-singleton CPU persisted-index execution: bounded_nthash_simd performed query sketching with 2,611,664 ntHash SIMD vector batches per repeat and zero scalar backend or tail activity; persisted minimizers_per_sequence hash-major decode was host I/O, partition selection and seed lookup were scalar CPU support, scalar_minimap2 performed exact scalar CPU chain scoring and backtracking, and KSW2 extensions used the scalar CPU stage route. These support stages are selected work, not fallbacks. No target-index build/recompute or missing-index path, GPU algorithm stage or operation, Block Aligner, biological fallback, prefilter, decline, fallback, or saturation occurred. Metric A is the process-cold persisted-index read plus mapping query phase; metric B is computed per repeat as A minus only the statement-owned KSW2 CIGAR/CPU-MAPQ interval union, then summarized by the median. Exact ordered primary match counts, positions (maximum absolute offset 7 bp), strands, CIGAR replay, and MAPQ-result presence matched the saved same-host LOCAL0643 minimap2 JUST-INDEX q1024/n5 control. That saved control supplies correctness evidence only; its older build/helper provenance and separately published timings remain preserved. Numeric MAPQ equality and minimizer parity are not validity gates. The disposable benchmark database OID was stable within these five accepted repeats; equality to any historical database OID is neither required nor claimed. Evidence is report report_562.json, run receipt rr_1ed2bbe9c715332853a5b4eb83ef4c66, and build receipt br_57fb86555b14b85157599357454c9981. Every process-priority attestation was null, so no nice -20 or noise-free claim is made; OS-cache state is unspecified. Controller, PostgreSQL application cleanup, process cleanup, service-boundary identity, and watchdog closure were verified.'
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 4450988541
+    p50_b: 3793348748
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 5324154625
+    p50_b: 3764742040
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_sequence","two_stack_nthash","scalar_minimap2","ksw2"]'
   timing_scope: query_only_framework_iteration_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -3334,6 +3593,43 @@ approved_results:
     p50_b: 76773213848
   comments: 'CPU no-index execution: scalar CPU performs cold transient target-index assembly and seed lookup; bounded_nthash_simd performs SIMD minimizer sketching, simd_minimap2 uses the bounded_batch_approximate SIMD-DP policy and SIMD backtracking, and block_aligner extensions run on CPU SIMD. Each repeat builds one cold transient index and reuses it for the remaining 1023 queries; persistence and prefiltering are off, with no fallback. The empty persisted-GPU ledger is expected for this CPU-only route. The measured no-index query phase includes cold transient index construction plus mapping and excludes fixture/restart setup; query_only_framework_iteration_v1 does not mean index-build-free.'
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 86057615792
+    p50_b: 73932373766
+  comments: 'configured MPF direct_compact_hash_lookup is not applicable to no-index execution: transient target construction and querying ran without a persisted MPF reader; Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.'
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -3370,6 +3666,80 @@ approved_results:
     p50_a: 190685481666
     p50_b: 180223076312
   comments: 'Hybrid CPU/Vulkan no-index execution: GPU performs query and target sketching, transient-index upload, seed lookup, and Vulkan tiled-DP chain scoring; CPU performs transient target-index assembly, canonical partition selection, chain backtracking, and MAPQ; Block Aligner extensions run on CPU SIMD. These CPU stages are required parts of the hybrid route, not scalar-DP or biological fallbacks. Each repeat builds one cold transient index and reuses it for the remaining 1023 queries; persistence and prefiltering are off, with no fallback, decline, or saturation. The empty legacy persisted-GPU ledger is expected for this no-index route and does not imply absent GPU execution. The measured query phase includes cold transient index construction plus mapping and excludes fixture and restart setup; query_only_framework_iteration_v1 does not mean index-build-free.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 88003543083
+    p50_b: 78289305700
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 90630192542
+    p50_b: 77683152969
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"no_index","minimap2",null,null,null,null]'
   timing_scope: historical_outer_e2e_v1
@@ -3481,6 +3851,43 @@ approved_results:
     p50_a: 5372133583
     p50_b: 4152424334
   comments: Five accepted query-only repeats physically executed bounded ntHash SIMD query sketching, persisted MPF lookup, bounded-batch SIMD-DP chaining, and host SIMD Block alignment. Persisted-index decode and partition/seed-lookup support remained host-I/O/scalar CPU as instrumented and are not fallbacks. Revision-6 CIGAR/MAPQ interval origins were complete with one finalization per repeat; no GPU algorithm stage, scalar algorithm replacement, exact-RMQ, KSW2, biological fallback, decline, index build/recompute, missing-index path, prefilter, compact-direct fallback, or saturation occurred.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 6039560542
+    p50_b: 4452418833
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
@@ -3630,6 +4037,43 @@ approved_results:
     p50_b: 114924615643
   comments: 'Five accepted local cold no-index repeats. Scalar CPU performs the transient target-index assembly and seed lookup; bounded_nthash_simd performs vector minimizer sketching, simd_minimap2 uses bounded_batch_approximate SIMD-DP and SIMD backtracking, and block_aligner extensions use CPU SIMD. Every repeat has exactly one transient prepared-index build and 1023 reuses, 1024 correct matches/strands/CIGAR replays and MAPQ result rows, and 2048 statement-owned CIGAR/MAPQ intervals. Persistence and prefiltering are off; there is no backend fallback/decline, KSW2 call, GPU operation, or saturation. The no-index timed SQL includes transient construction plus mapping and excludes fixture and restart setup. Report 273 is a deterministic-fixture minimap2 JUST-INDEX correctness oracle only: it is not a same-mode performance baseline. Dataset, seed, query order/projection, and the ordered 1024-query match-count digest agree; target CRC fields are null, so CRC identity is not claimed. Numeric minimap2 MAPQ equality and minimizer parity are not claimed or validity gates.'
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 312146683833
+    p50_b: 106654823072
+  comments: 'configured MPF direct_compact_hash_lookup is not applicable to no-index execution: transient target construction and querying ran without a persisted MPF reader; Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.'
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -3666,6 +4110,80 @@ approved_results:
     p50_a: 560392764875
     p50_b: 357165119862
   comments: 'Exact requested hybrid CPU/Vulkan no-index execution: Vulkan performed query and target sketching, transient-index upload, seed lookup, and tiled-DP chain scoring. Scalar CPU performed transient target-index assembly and chain backtracking; CPU also performed MAPQ, while Block Aligner extensions used CPU SIMD. These scalar stages are planned required parts of the selected hybrid route, not scalar-DP or biological fallbacks; this is not an all-GPU claim. Each repeat built one cold transient index and reused it for the remaining 1023 queries. Persistence and prefiltering were off, with no fallback, decline, KSW2 call, biological fallback, or saturation. The empty legacy persisted-GPU ledger is expected for this no-index route and does not imply absent Vulkan execution. Metric A includes cold transient index construction plus mapping and excludes fixture generation and PostgreSQL restart setup. Metric B subtracts only the statement-owned CIGAR/MAPQ interval union; its CIGAR scope includes Block DP, trace storage, traceback, CIGAR assembly, and result materialization. Count, strand, CIGAR replay, MAPQ-result, and position correctness passed, and ordered primary counts matched the saved same-fixture minimap2 JUST-INDEX correctness control collected under an older sealed build receipt br_8c2b9c4fda9e6ab21667391abaf63af8. That control is correctness-only, not a no-index timing baseline; numeric minimap2 MAPQ equality and minimizer parity are not claimed or validity gates. Target CRC identity and per-repeat process-priority attestation were unavailable; no nice -20 setting is claimed for this ordinary local-priority run. The measured run used build receipt br_1232b90ff00944904d0ca2a80bf3be14 and source graph 9757d31ccf0acf6d31872868e11bbde35b5e3b144affa613299db78a98dc2048.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 315730388666
+    p50_b: 114651660025
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 313293122709
+    p50_b: 110937074553
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"no_index","minimap2",null,null,null,null]'
   timing_scope: historical_outer_e2e_v1
@@ -3777,6 +4295,43 @@ approved_results:
     p50_a: 5276575750
     p50_b: 3867436501
   comments: Five accepted query-only repeats physically executed bounded ntHash SIMD query sketching, persisted MPF lookup, bounded-batch SIMD-DP chaining, and host SIMD Block alignment. Persisted-index decode and partition/seed-lookup support remained host-I/O/scalar CPU as instrumented and are not fallbacks. Revision-6 CIGAR/MAPQ interval origins were complete with one finalization per repeat; no GPU algorithm stage, scalar algorithm replacement, exact-RMQ, KSW2, biological fallback, decline, index build/recompute, missing-index path, prefilter, compact-direct fallback, or saturation occurred.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 5037526959
+    p50_b: 3570325457
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
@@ -3926,6 +4481,43 @@ approved_results:
     p50_b: 86565968496
   comments: 'Five accepted local cold no-index repeats. Scalar CPU performs the transient target-index assembly and seed lookup; bounded_nthash_simd performs vector minimizer sketching, simd_minimap2 uses bounded_batch_approximate SIMD-DP and SIMD backtracking, and block_aligner extensions use CPU SIMD. Every repeat has exactly one transient prepared-index build and 1023 reuses, 1024 correct matches/strands/CIGAR replays and MAPQ result rows, and 2048 statement-owned CIGAR/MAPQ intervals. Persistence and prefiltering are off; there is no backend fallback/decline, KSW2 call, GPU operation, or saturation. The no-index timed SQL includes transient construction plus mapping and excludes fixture and restart setup. The original wrapper aborted only after the completed report at its HEAD-only receipt postflight. Recovery event re_ce6c7c40514ad2ba7e012fcb598dd140 sealed canonical run receipt rr_ce6c7c40514ad2ba7e012fcb598dd140 while preserving the original aborted wrapper and historically unverified process-descendant cleanup disposition; its verify-only recovery check found present quiescence and zero matching PostgreSQL backends. The receipted build remains br_1232b90ff00944904d0ca2a80bf3be14 at source commit 4a346fe1efa0fe311e6e328a390d780a2ef0ab2c, source graph 9757d31ccf0acf6d31872868e11bbde35b5e3b144affa613299db78a98dc2048 and executable 6c54d96ab8220a4e54f35883c099f41c71d6aee84a2e136aef37eebc0e45d8f7 unchanged; later human-only HEAD abfbf01ba7e8af50ec500cf70e59d9b3fd551ebf is provenance only. Report 292 is a deterministic-fixture minimap2 JUST-INDEX correctness oracle only: it is not a same-mode performance baseline. Dataset, seed, query order/projection, and the ordered 1024-query match-count digest agree; target CRC fields are null, so CRC identity is not claimed. Numeric minimap2 MAPQ equality and minimizer parity are not claimed or validity gates.'
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 281427310708
+    p50_b: 81858076588
+  comments: 'configured MPF direct_compact_hash_lookup is not applicable to no-index execution: transient target construction and querying ran without a persisted MPF reader; Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.'
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -3962,6 +4554,80 @@ approved_results:
     p50_a: 401193703625
     p50_b: 201470324757
   comments: 'Exact requested hybrid CPU/Vulkan no-index execution: Vulkan performed query and target sketching, transient-index upload, seed lookup, and tiled-DP chain scoring. Scalar CPU performed transient target-index assembly and chain backtracking; CPU MAPQ is evidenced by the statement-owned MAPQ interval origins, while Block Aligner extensions used CPU SIMD. Partition selection reported zero eligible and zero executed jobs and is not attributed to either CPU or GPU. The scalar CPU stages are planned required parts of the selected hybrid route, not scalar-DP or biological fallbacks; this is not an all-GPU claim. Each repeat built one cold transient index and reused it for the remaining 1023 queries. Persistence and prefiltering were off, with no fallback, decline, KSW2 call, biological fallback, or saturation. The empty legacy persisted-GPU ledger is expected for this no-index route and does not imply absent Vulkan execution. Metric A includes cold transient-index construction plus mapping and excludes fixture generation and PostgreSQL restart setup. Metric B subtracts only the statement-owned CIGAR/MAPQ interval union; its CIGAR scope includes fused Block DP, trace storage, traceback, CIGAR assembly, and result materialization, so no pure seed/chaining interpretation is claimed. Count, strand, CIGAR replay, MAPQ-result, and position correctness passed, and ordered primary counts matched the saved same-fixture minimap2 JUST-INDEX correctness control collected under older sealed build receipt br_f6e6dfc6664ca01c2fb4626cc9457bc0. That control is correctness-only, not a no-index timing baseline; numeric minimap2 MAPQ equality and minimizer parity are not claimed or validity gates. Target CRC identity and per-repeat process-priority attestation were unavailable. The ordinary local run used nice 0, and no elevated-priority claim is made. The measured run used build receipt br_1232b90ff00944904d0ca2a80bf3be14 and source graph 9757d31ccf0acf6d31872868e11bbde35b5e3b144affa613299db78a98dc2048.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 286890293125
+    p50_b: 85335317279
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 284714147625
+    p50_b: 85344615406
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"no_index","minimap2",null,null,null,null]'
   timing_scope: historical_outer_e2e_v1
@@ -4295,6 +4961,43 @@ approved_results:
     p50_a: 47140546125
     p50_b: 46649701625
   comments:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 20828101750
+    p50_b: 19054955876
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","block_aligner"]'
   timing_scope: historical_outer_e2e_v1
@@ -5110,6 +5813,43 @@ approved_results:
     p50_b: 214951714970
   comments: Five accepted local cold no-index repeats. Scalar CPU performed transient target-index assembly and lookup, while bounded_nthash_simd performed vector minimizer sketching, simd_minimap2 used bounded_batch_approximate SIMD-DP and SIMD backtracking, and block_aligner extensions used CPU SIMD. Every repeat had exactly one transient prepared-index build and reused it for every remaining query. Persistence and prefiltering were off; no backend fallback/decline, KSW2 call, GPU operation, or saturation occurred. Metric A includes cold transient index construction plus mapping and excludes fixture generation and PostgreSQL restart setup. Metric B subtracts only the statement-owned CIGAR/MAPQ interval union, whose CIGAR scope includes Block DP, trace storage, traceback, CIGAR assembly, and result materialization. Candidate match-count, strand, CIGAR replay, MAPQ-result, and position correctness passed; its ordered match counts also agreed with a saved same-fixture, same-order minimap2 JUST-INDEX correctness control. That control is not a no-index performance baseline. Target CRC identity and per-repeat process-priority attestation were unavailable and are not claimed. Numeric minimap2 MAPQ equality and minimizer parity are not claimed or validity gates. The sealed run used build receipt br_1232b90ff00944904d0ca2a80bf3be14 and source graph 9757d31ccf0acf6d31872868e11bbde35b5e3b144affa613299db78a98dc2048.
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 212694376542
+    p50_b: 197741396124
+  comments: 'configured MPF direct_compact_hash_lookup is not applicable to no-index execution: transient target construction and querying ran without a persisted MPF reader; Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.'
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -5146,6 +5886,80 @@ approved_results:
     p50_a: 590495311250
     p50_b: 577918779747
   comments: 'Exact requested hybrid CPU/Vulkan no-index execution: Vulkan performed query and target sketching, transient-index upload, seed lookup, and tiled-DP chain scoring. Scalar CPU performed transient target-index assembly and chain backtracking; CPU MAPQ is evidenced by 1024 statement-owned cpu_mapping_quality origins per repeat, while Block Aligner extensions used CPU SIMD. Partition selection and the native MAPQ stage rows each reported zero eligible and zero executed jobs and are not attributed to either CPU or GPU. The scalar CPU stages are planned required parts of the selected hybrid route, not scalar-DP or biological fallbacks; this is not an all-GPU claim. Each repeat built one cold transient index and reused it for the remaining 1023 queries. Persistence and prefiltering were off, with no fallback, decline, KSW2 call, biological fallback, or saturation. The empty legacy persisted-GPU ledger is expected for this no-index route and does not imply absent Vulkan execution. Metric A includes cold transient-index construction plus mapping and excludes fixture generation and PostgreSQL restart setup. Metric B subtracts only the statement-owned CIGAR/MAPQ interval union; its CIGAR scope includes fused Block DP, trace storage, traceback, CIGAR assembly, and result materialization, so no pure seed/chaining interpretation is claimed. Count, position (maximum absolute offset 3 bp), strand, CIGAR replay, and MAPQ-result presence passed, and all five ordered primary-count vectors matched the saved same-fixture minimap2 NO-INDEX correctness control collected under older sealed build receipt br_1232b90ff00944904d0ca2a80bf3be14. This proof reuses that saved run for correctness; its separately published timing measurements remain preserved. The build provenance differs and is disclosed. Numeric minimap2 MAPQ equality and minimizer parity are not claimed or validity gates. Target CRC identity and per-repeat process-priority attestation were unavailable. The ordinary local run used nice 0, and no elevated-priority claim is made. The measured run used build receipt br_a3465fdfc78ab75106c3cc895b4001bf and source graph ab60d56237f213fed16c21e93b6a4b8292f49406d4f018b1a3ef822c027cf403.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 233570070667
+    p50_b: 220286041238
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 234047100709
+    p50_b: 219020398472
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"no_index","minimap2",null,null,null,null]'
   timing_scope: historical_outer_e2e_v1
@@ -5257,6 +6071,43 @@ approved_results:
     p50_a: 14553613375
     p50_b: 13779930125
   comments: Five accepted query-only repeats physically executed bounded ntHash SIMD query sketching, persisted MPF lookup, bounded-batch SIMD-DP chaining, and host SIMD Block alignment. Persisted-index decode and partition/seed-lookup support remained host-I/O/scalar CPU as instrumented and are not fallbacks. Revision-6 CIGAR/MAPQ interval origins were complete with one finalization per repeat; no GPU algorithm stage, scalar algorithm replacement, exact-RMQ, KSW2, biological fallback, decline, index build/recompute, missing-index path, prefilter, compact-direct fallback, or saturation occurred.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 19755375458
+    p50_b: 18197259207
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
@@ -5406,6 +6257,43 @@ approved_results:
     p50_b: 159272843832
   comments: Five accepted local cold no-index repeats. Scalar CPU performed transient target-index assembly and lookup, while bounded_nthash_simd performed vector minimizer sketching, simd_minimap2 used the literal bounded_batch_approximate SIMD-DP route and SIMD backtracking, and block_aligner extensions used CPU SIMD. Every repeat had exactly one transient prepared-index build and reused it for every remaining query. Persistence and prefiltering were off; no backend fallback/decline, KSW2 call, GPU operation, or saturation occurred. Metric A includes cold transient index construction plus mapping and excludes fixture generation and PostgreSQL restart setup. Metric B subtracts only the statement-owned CIGAR/MAPQ interval union, whose CIGAR scope includes Block DP, trace storage, traceback, CIGAR assembly, and result materialization. Candidate match-count, strand, CIGAR replay, MAPQ-result, and position correctness passed; its ordered match counts also agreed with a saved same-fixture, same-order minimap2 JUST-INDEX correctness control collected under older sealed build receipt br_f6e6dfc6664ca01c2fb4626cc9457bc0. That control is correctness-only and is not a no-index performance baseline. Target CRC identity and per-repeat process-priority attestation were unavailable and are not claimed. Numeric minimap2 MAPQ equality and minimizer parity are not claimed or validity gates. The measured no-index run used build receipt br_1232b90ff00944904d0ca2a80bf3be14 and source graph 9757d31ccf0acf6d31872868e11bbde35b5e3b144affa613299db78a98dc2048.
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"no_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 164941131250
+    p50_b: 152207165911
+  comments: 'configured MPF direct_compact_hash_lookup is not applicable to no-index execution: transient target construction and querying ran without a persisted MPF reader; Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.'
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -5442,6 +6330,80 @@ approved_results:
     p50_a: 250147195625
     p50_b: 241008921380
   comments: 'Exact requested hybrid CPU/Vulkan no-index execution: Vulkan performed query and target sketching, transient-index upload, seed lookup, and tiled-DP chain scoring. Scalar CPU performed transient target-index assembly and chain backtracking; Block Aligner extensions ran on CPU SIMD. Partition selection and the native MAPQ stage rows reported zero eligible and zero executed jobs and are not attributed to CPU or GPU. These scalar support stages are required parts of the selected route, not fallbacks, and this is not an all-GPU claim. Every repeat performed one cold transient-index recomputation with persistence disabled. No persisted-index read, prefilter work, backend decline, backend fallback, KSW2 call, biological fallback, or saturation occurred. The complete native 20-row/151-column evidence records 1024 Vulkan seed and chain dispatches per repeat; the empty legacy persisted-GPU ledger is expected on this recomputed route and does not imply absent Vulkan execution. Metric A includes cold transient-index construction plus mapping and excludes fixture generation and PostgreSQL restart setup. Metric B subtracts only the same-statement CIGAR/MAPQ interval union. Exact counts, positions (maximum absolute offset 3 bp), strands, CIGAR replay, and MAPQ-result presence passed. All five ordered primary-count vectors matched the saved same-host LOCAL0650 minimap2 NO-INDEX q1024/n5 control. That saved control is correctness-only; its published timing remains preserved and it was not rerun. Its older build provenance differs and is disclosed; numeric minimap2 MAPQ equality and minimizer parity are not validity gates. Per-repeat priority attestation was unavailable. This ordinary local measurement makes no elevated-priority or noise-free claim; normal system noise is possible. The measured run is sealed by run receipt rr_9eac4e0cff7eeefeb22c46e80c574f4b, build receipt br_88737a50e6ae939369071f426db2f604, config SHA ec727982dbc70a4550873cb612609700fc44b032f4f126d556ac1fb675544dce, and source graph 789e6c9079de16a4f26b3f9fadca16889faffc032f32823bf9ae9ef1cdd8e652.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 171293160958
+    p50_b: 158079897570
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 172569614833
+    p50_b: 156762951905
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"no_index","minimap2",null,null,null,null]'
   timing_scope: historical_outer_e2e_v1
@@ -5739,6 +6701,43 @@ approved_results:
     p50_b: 550694146694
   comments: 'Exact requested hybrid CPU/Vulkan no-index execution: Vulkan performed query and target sketching, transient-index upload, seed lookup, and tiled-DP chain scoring. Scalar CPU performed transient target-index assembly and chain backtracking; CPU MAPQ is evidenced by 1024 statement-owned cpu_mapping_quality origins per repeat, while Block Aligner extensions used CPU SIMD. Partition selection and the native MAPQ stage rows each reported zero eligible and zero executed jobs and are not attributed to either CPU or GPU. The scalar CPU stages are planned required support in the selected hybrid route, not scalar-DP or biological fallbacks; this is not an all-GPU claim. Each repeat reports one cold transient-index recomputation; the record does not provide a physical index-reuse count for this hybrid route. Persistence and prefiltering were off, with no fallback, decline, KSW2 call, biological fallback, or saturation. The empty legacy persisted-GPU ledger is expected on this recomputed route and does not imply absent Vulkan execution; the physical native stage rows are authoritative. Metric A includes cold transient-index construction plus mapping and excludes fixture generation and PostgreSQL restart setup. Metric B subtracts only the statement-owned CIGAR/MAPQ interval union; its CIGAR scope includes fused Block DP, trace storage, traceback, CIGAR assembly, and result materialization, so no pure seed/chaining interpretation is claimed. Count, position (maximum absolute offset 4 bp), strand, CIGAR replay, and MAPQ-result presence passed, and all five full ordered primary-count vectors matched the saved same-fixture local minimap2 NO-INDEX correctness control collected under older sealed build receipt br_1232b90ff00944904d0ca2a80bf3be14. This proof reuses that saved run for correctness; its separately published timing measurements remain preserved. The build provenance differs and is disclosed; numeric minimap2 MAPQ equality and minimizer parity are not claimed or validity gates. Target CRC identity and per-repeat process-priority attestation were unavailable. The ordinary local run used nice 0, and no elevated-priority claim is made. The measured run used build receipt br_a3465fdfc78ab75106c3cc895b4001bf and source graph ab60d56237f213fed16c21e93b6a4b8292f49406d4f018b1a3ef822c027cf403.'
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 530730489834
+    p50_b: 226038215541
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"no_index","minimap2",null,null,null,null]'
   timing_scope: historical_outer_e2e_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1
@@ -5849,6 +6848,43 @@ approved_results:
     p50_a: 20958644709
     p50_b: 19828542792
   comments: Five accepted query-only repeats physically executed bounded ntHash SIMD query sketching, persisted MPF lookup, bounded-batch SIMD-DP chaining, and host SIMD Block alignment. Persisted-index decode and partition/seed-lookup support remained host-I/O/scalar CPU as instrumented and are not fallbacks. Revision-6 CIGAR/MAPQ interval origins were complete with one finalization per repeat; no GPU algorithm stage, scalar algorithm replacement, exact-RMQ, KSW2, biological fallback, decline, index build/recompute, missing-index path, prefilter, compact-direct fallback, or saturation occurred.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 30100014250
+    p50_b: 28545017875
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]'
   timing_scope: query_only_framework_iteration_v1
@@ -6034,6 +7070,43 @@ approved_results:
     p50_a: 591733721459
     p50_b: 275535493665
   comments: 'Exact requested hybrid CPU/Vulkan no-index execution: Vulkan performed query and target sketching, transient-index upload, seed lookup, and tiled-DP chain scoring. Scalar CPU performed transient target-index assembly and chain backtracking; CPU MAPQ is evidenced by 1024 statement-owned cpu_mapping_quality origins per repeat, while Block Aligner extensions used CPU SIMD. Partition selection and the native MAPQ stage rows each reported zero eligible and zero executed jobs and are not attributed to either CPU or GPU. The scalar CPU stages are planned required support in the selected hybrid route, not scalar-DP or biological fallbacks; this is not an all-GPU claim. Each repeat reports one cold transient-index recomputation; the record does not provide a physical index-reuse count for this hybrid route. Persistence and prefiltering were off, with no fallback, decline, KSW2 call, biological fallback, or saturation. The empty legacy persisted-GPU ledger is expected on this recomputed route and does not imply absent Vulkan execution; the physical native stage rows are authoritative. Metric A includes cold transient-index construction plus mapping and excludes fixture generation and PostgreSQL restart setup. Metric B subtracts only the statement-owned CIGAR/MAPQ interval union; its CIGAR scope includes fused Block DP, trace storage, traceback, CIGAR assembly, and result materialization, so no pure seed/chaining interpretation is claimed. Count, position (maximum absolute offset 4 bp), strand, CIGAR replay, and MAPQ-result presence passed, and all five full ordered primary-count vectors matched the saved same-fixture local minimap2 NO-INDEX correctness control (q1024, five repeats) collected under older sealed build receipt br_1232b90ff00944904d0ca2a80bf3be14. This proof reuses that saved run for correctness; its separately published timing measurements remain preserved. The build provenance differs and is disclosed; numeric minimap2 MAPQ equality and minimizer parity are not claimed or validity gates. Target CRC identity and per-repeat process-priority attestation were unavailable. The ordinary local run used nice 0, and no elevated-priority claim is made. The measured run used build receipt br_a3465fdfc78ab75106c3cc895b4001bf and source graph ab60d56237f213fed16c21e93b6a4b8292f49406d4f018b1a3ef822c027cf403.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"no_index","bioseq","minimizers_per_sequence","bounded_nthash_simd","simd_minimap2","block_aligner"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: no_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 478485980375
+    p50_b: 168901235908
+  comments: Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"no_index","minimap2",null,null,null,null]'
   timing_scope: historical_outer_e2e_v1

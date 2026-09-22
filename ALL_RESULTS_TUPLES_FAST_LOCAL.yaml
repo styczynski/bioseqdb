@@ -1,0 +1,404 @@
+---
+schema: bioseq.approved-e2e-result-tuples
+version: 3
+status: approved_partial_matrix
+purpose: Self-contained authority for FAST LOCAL q1024 E2E measurements authorized 2026-09-22. One sample
+  per previously unapproved local tuple; P50 equals that single observation and is not a five-repeat median
+  estimate. All just_index groups precede no_index. A compatible persisted index is reused across chaining/alignment
+  configurations for the same target content, alphabet, index type, producer and k/w. PostgreSQL restarts
+  before each measurement; OS filesystem cache is not cleared. Index creation, restart and post-measurement
+  validation are untimed. Original five-repeat results remain separate and unchanged. Existing approved-row
+  fields are preserved; run_count=1, timing_scope and comments identify this methodology. approved_results
+  is the sole numerical authority; no external files are needed to interpret it. The standard five-repeat
+  document validator must not be used to relabel these rows as standard measurements.
+authority:
+  all_other_sections: derived_non_authoritative
+  approved_snapshot_complete: true
+  contains_only_approved_rows: true
+  enum_authority_rule: Terminology below is a descriptive generated projection. It neither defines nor
+    supersedes configuration or runtime code enums.
+  external_lookup_required_to_interpret: false
+  frozen_evidence_archive_is_publication_authority: false
+  full_matrix_complete: false
+  identity_contract_rule: Each row reuses the existing bioseq-e2e-cell-v2 aggregator identity through
+    its stable_key_schema, canonical stable_key, and campaign_id. This file defines no parallel row-identity
+    schema.
+  no_external_path_or_reference_dependency: true
+  normative_tuple_dataset: approved_results
+  raw_repeat_timings_included: false
+  sealed_verification_manifest_required_for_append: false
+  single_source_of_truth_for_approved_results: true
+  standalone_forensic_evidence_archive: false
+campaign_identity:
+  campaign_digest: 011fbb1ef33a214ab80d3568c2341e8d0f8311f82e21a5955bdcb93b3c63b979
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  classification: derived_non_authoritative
+  execution_scope: local_campaign
+  projection_description: Generated projection of the campaign identity carried by every normative row.
+  row_identity_note: campaign_id is carried by every row and is the first stable-key value. campaign_digest
+    is campaign-level metadata and is not a bioseq-e2e-cell-v2 row-identity field.
+stable_key_contract:
+  approved_row_field_projection:
+    alphabet: alphabet
+    bioseq_index_name: index_type for pipeline bioseq; null for pipeline minimap2
+    campaign_id: campaign_id
+    dataset: dataset
+    engine: pipeline
+    index_mode: mode
+    kmer_size: kmer_size
+    requested_base_alignment_algorithm: requested_algorithms.base_alignment
+    requested_chaining_algorithm: requested_algorithms.chaining
+    requested_minimizer_algorithm: requested_algorithms.minimizer
+    target_size_gbp: target_size_gbp
+    window_size: window_size
+  classification: derived_non_authoritative
+  observation_identity_rule: stable_key remains the logical tuple identity; the publication observation
+    identity is the ordered pair (stable_key, timing_scope).
+  ordered_aggregator_fields:
+  - campaign_id
+  - dataset
+  - alphabet
+  - target_size_gbp
+  - kmer_size
+  - window_size
+  - index_mode
+  - engine
+  - bioseq_index_name
+  - requested_minimizer_algorithm
+  - requested_chaining_algorithm
+  - requested_base_alignment_algorithm
+  projection_description: Generated descriptive copy of the existing aggregator contract used by every
+    approved row; it is not a second identity authority.
+  stable_key_encoding: 'The literal prefix bioseq-e2e-cell-v2: followed by a compact JSON array of the
+    ordered field values, encoded with ensure_ascii=true and separators comma and colon.'
+  stable_key_schema: bioseq-e2e-cell-v2
+  validation_rule: Decode each stable_key and compare its twelve values with the row field projection.
+    Stable keys may repeat only across timing scopes; every (stable_key, timing_scope) observation pair
+    is unique.
+terminology:
+  approved_row_field_guide:
+    alphabet: Sequence alphabet key used by the measured dataset.
+    campaign_id: Campaign identity included as the first value in stable_key.
+    classification: derived_non_authoritative
+    comments: Null or a complete qualification needed to interpret preservation or fallback status.
+    comparison_eligibility: Boolean gates for exact observed-path and requested-path performance comparisons.
+    dataset: Stable campaign dataset key; matrix_<target>gbp_<alphabet>_k<kmer_size>_w<window_size> describes
+      the target size, alphabet, k-mer size, and window size.
+    effective_path: Human-readable projection of the observed stage sequence; display-only and never a
+      replacement for observed_algorithms.
+    exact_baseline_match_count_equal: Whether each accepted repeat produced exactly the same match count
+      as its mode-matched minimap2 baseline; counts themselves are intentionally omitted.
+    execution_conformance: Classification relating requested and observed execution identities.
+    index_type: Index representation used by the row; interpreted by terminology.index_types.
+    kmer_size: Number of symbols in each k-mer.
+    metrics: Exact integer P50 A and B durations in nanoseconds, interpreted by metric_definitions.
+    mode: Index-use mode, interpreted by terminology.modes.
+    observed_algorithms: Literal operation-observed minimizer, chaining, and base-alignment keys for Bioseq,
+      or three nulls for external minimap2.
+    pipeline: Measured engine; bioseq selects the Bioseq pipeline and minimap2 selects the external minimap2
+      baseline.
+    pipeline_mode: Bioseq concurrency mode, or null when the external minimap2 pipeline does not use this
+      setting.
+    prefilter: Whether a prefilter participated in the measured path; every approved row is false.
+    projection_description: Generated interpretation guide for fields in each normative approved_results
+      row; it is descriptive and does not establish another row schema.
+    query_count: Number of query fragments in the measured cell.
+    requested_algorithms: Literal minimizer, chaining, and base-alignment keys requested for Bioseq, or
+      three nulls for external minimap2.
+    run_count: Number of complete accepted repeats contributing to the row P50s.
+    stable_key: Canonical full identity string for this campaign cell; its construction is described by
+      stable_key_contract.
+    stable_key_schema: Identifies the existing aggregator stable-key contract used by stable_key.
+    status: Publication disposition; approved_results contains accepted only.
+    target_size_gbp: Target dataset size in decimal gigabase pairs, where 1 Gbp is 1,000,000,000 base
+      pairs.
+    timing_scope: Non-metric classification of the timing boundary used by this row.
+    window_size: Number of consecutive k-mers in each minimizer window.
+  classification: derived_non_authoritative
+  execution_conformance_values:
+  - definition: All requested Bioseq algorithm identities equal the observed identities.
+    key: exact_requested_path
+  - definition: Requested and observed identities agree; approval is retained by an explicit audited preservation
+      decision.
+    key: exact_requested_path_user_preserved
+  - definition: The requested minimizer was simd_minimap2_reference but the observed minimizer was scalar.
+      The effective scalar path is factual; requested SIMD execution is not proved.
+    key: documented_scalar_minimizer_fallback
+  - definition: External minimap2 baseline; Bioseq algorithm enum fields are not applicable and are null.
+    key: external_minimap2_baseline
+  guc_and_pipeline_algorithm_enums:
+    minimizer:
+      guc_cpp_type: bioseq::aligner::minimizer_algorithm
+      guc_setting: bioseq.aligner.minimizer.algorithm
+      ordinals_match: true
+      pipeline_cpp_type: bioseq::simd::minimizer_algorithm
+      values:
+      - human_label: Scalar Minimizers
+        key: scalar
+        ordinal: 0
+      - human_label: SIMD Minimap2 (slow reference)
+        key: simd_minimap2_reference
+        note: A request for this key is not proof of SIMD execution; observed identity controls.
+        ordinal: 1
+      - human_label: Two-Stack nthash SIMD Minimizers
+        key: two_stack_nthash
+        ordinal: 2
+      - human_label: Vulkan minimap-int minimizers
+        key: vulkan_minimap_integer
+        ordinal: 3
+      - human_label: Bounded u32 ntHash SIMD Minimizers
+        key: bounded_nthash_simd
+        ordinal: 4
+    chaining:
+      guc_cpp_type: bioseq::aligner::chaining_algorithm
+      guc_setting: bioseq.aligner.chaining.algorithm
+      ordinals_match: true
+      pipeline_cpp_type: bioseq::simd::chaining_algorithm
+      values:
+      - human_label: Minimap2 Scalar
+        key: scalar_minimap2
+        note: Scalar minimap2 dynamic programming.
+        ordinal: 0
+      - human_label: Minimap2 SIMD
+        key: simd_minimap2
+        note: The generated display shorthand is SIMD-DP. The literal key records the requested or observed
+          value, while the code enum remains authoritative.
+        ordinal: 1
+      - human_label: Minimap2 RMQ
+        key: range_minimum_query
+        note: RMQ is a distinct CPU chaining algorithm and must never be relabeled SIMD-DP.
+        ordinal: 2
+      - human_label: Vulkan tiled DP
+        key: vulkan_tiled_dynamic_programming
+        ordinal: 3
+    base_alignment:
+      campaign_values:
+      - human_label: KSW2
+        key: ksw2
+        ordinal: 0
+      - human_label: Block Aligner
+        key: block_aligner
+        ordinal: 1
+      guc_cpp_type: bioseq::aligner::base_alignment_algorithm
+      guc_setting: bioseq.aligner.base_alignment.algorithm
+      pipeline_cpp_type: bioseq::simd::base_alignment_algorithm
+      runtime_only_excluded_values:
+      - human_label: KSW2 (inter-region batched)
+        key: ksw2_batched
+        note: Internal runtime value only; excluded from this matrix and absent from approved rows.
+        ordinal: 2
+  index_types:
+  - constant_name: k_minimizers_per_fragment_index_name
+    human_label: Minimizers per fragment
+    key: minimizers_per_fragment
+    short_label: MPF
+  - constant_name: k_minimizers_per_sequence_index_name
+    human_label: Minimizers per sequence
+    key: minimizers_per_sequence
+    short_label: MPS
+  - applies_to_pipeline: minimap2
+    human_label: minimap2 internal index representation
+    key: minimap2_internal
+    short_label: minimap2
+  modes:
+  - definition: The index is created before measurement and the measured operation queries it.
+    human_label: Just index
+    key: just_index
+  - definition: No pre-existing query index is used; any required transient/recomputed work is inside
+      the measured path.
+    human_label: No index
+    key: no_index
+  pipeline_concurrency_enums:
+    campaign_selected: task_parallel
+    guc_cpp_type: bioseq::scheduler::pipeline_concurrency_mode
+    guc_setting: bioseq.scheduler.pipeline.mode
+    guc_values:
+    - human_label: Single thread
+      key: single_thread
+      ordinal: 0
+    - human_label: Parallel dispatch
+      key: parallel_dispatch
+      ordinal: 1
+    - human_label: Task parallel
+      key: task_parallel
+      ordinal: 2
+    ordinal_one_spelling_note: The GUC enum spells ordinal 1 parallel_dispatch; the pipeline runtime enum
+      spells it dispatch_parallel. This campaign selects task_parallel (ordinal 2) only.
+    pipeline_cpp_type: bioseq::parallelism::pipeline_concurrency_mode
+    pipeline_values:
+    - human_label: Single thread
+      key: single_thread
+      ordinal: 0
+    - human_label: Parallel dispatch
+      key: dispatch_parallel
+      ordinal: 1
+    - human_label: Task parallel
+      key: task_parallel
+      ordinal: 2
+  projection_description: Generated descriptive projection for interpreting approved_results. Literal
+    keys record the aggregator-observed configuration values; labels are explanatory only, requested and
+    observed identities are separate facts, and code enums remain authoritative.
+metric_definitions:
+  a:
+    aggregation: One accepted sample; P50 equals its value.
+    per_repeat_definition: Framework measured-iteration window for mapping with CIGAR and MAPQ.
+    row_key: metrics.p50_a
+    unit: ns
+  b:
+    aggregation: One accepted sample after subtracting its CIGAR/MAPQ interval union.
+    bioseq_cigar_interval_scope: For Block Aligner and KSW2, the CIGAR interval brackets the fused per-region
+      base-alignment invocation, including DP, trace storage, traceback, CIGAR construction, and the required
+      CIGAR-derived result fields.
+    forbidden_derivations:
+    - Subtract independently aggregated medians.
+    - Add overlapping CIGAR and MAPQ durations without taking their interval union.
+    - Subtract a downstream wall-time metric instead of the CIGAR/MAPQ interval union.
+    interpretation_limit: B removes the instrumented CIGAR/MAPQ union, not an isolated traceback or formatting
+      cost; on fused Bioseq paths it also removes the corresponding base-alignment work. It is not a universal
+      seeding-plus-chaining-only timing.
+    per_repeat_definition: For each repeat, B = A - union(CIGAR intervals, MAPQ intervals), where the
+      merged half-open union prevents overlap from being subtracted twice.
+    row_key: metrics.p50_b
+    unit: ns
+  classification: derived_non_authoritative
+  clock_semantics:
+    bioseq_intervals: Monotonic nanosecond durations from the finalized statement interval receipt and
+      the identical framework clock implementation.
+    duration_unit: Integer nanoseconds.
+    framework_outer: Monotonic duration of the one framework measured-iteration window.
+    minimap2_intervals: Monotonic nanosecond durations from the helper-declared monotonic clock receipt.
+    subtraction_rate_gate: B is admitted only when outer and interval durations have a proven equal nanosecond
+      rate.
+    timestamp_rule: Absolute timestamps from different clock domains are neither subtracted nor compared;
+      only nonnegative equal-rate durations are used.
+  p50_method: Single-sample identity, not a statistical five-repeat estimate.
+  projection_description: Generated timing-semantics projection for the normative row metrics.
+  timing_scope:
+    allowed_values:
+    - query_only_framework_iteration_fast_local_single_sample_v1
+    classification: non_metric_observation_scope
+    p50_partition_rule: FAST LOCAL one-sample methodology; never pool with standard five-repeat rows.
+validity_rules:
+  classification: derived_non_authoritative
+  current_campaign_expected_repeat_count: 1
+  documented_fallback_exception: Any admitted known fallback is described per row; requested_path is false
+    when a different engine ran.
+  minimum_repeat_count: 1
+  projection_description: Generated validation projection over approved_results, not a second publication
+    dataset.
+  requirements:
+  - The row has accepted status and exactly one complete accepted sample.
+  - Every repeat belongs to the same immutable tuple identity and uses compatible monotonic nanosecond
+    duration clocks.
+  - CIGAR and MAPQ projections are enabled and their finalized interval receipt supports the per-repeat
+    B calculation.
+  - metrics.p50_a and metrics.p50_b are non-null positive integers; metrics.p50_b is not greater than
+    metrics.p50_a.
+  - exact_baseline_match_count_equal is true for every approved row.
+  - Selected and observed physical stages are audited; any difference is explicit in execution_conformance
+    and comments.
+  - No hidden biological fallback, decline, rejection, or prefilter activity is admitted.
+  - Small-query calibration, partial repeats, rejected rows, invalid rows, and timeout diagnostics cannot
+    supply an approved P50.
+  value_disclosure: 'Returned-count values are intentionally omitted. The only row-level correctness disclosure
+    is exact_baseline_match_count_equal: true.'
+benchmark_host_profile:
+  architecture:
+    aarch64: true
+    advanced_simd_present: true
+    hw_optional_arm64: 1
+    hw_optional_neon: 1
+    name: arm64
+  captured_at: '2026-08-26T11:14:02+02:00'
+  classification: derived_non_authoritative
+  cpu:
+    efficiency_cores: 2
+    logical_cores: 8
+    performance_cores: 6
+    physical_cores: 8
+  gpu:
+    core_count: 14
+    integrated: true
+    memory_architecture: unified
+    metal_support: Metal 3
+    model: Apple M1 Pro
+    moltenvk_identity: not_sealed
+    moltenvk_note: No MoltenVK implementation identity was sealed for these legacy rows; no value is inferred.
+    shared_physical_memory_bytes: 17179869184
+    vendor: Apple
+  machine:
+    chip: Apple M1 Pro
+    model_identifier: MacBookPro18,3
+    model_number: MKGR3ZE/A
+    name: MacBook Pro
+  memory:
+    human: 16 GiB
+    physical_bytes: 17179869184
+  operating_system:
+    build: 24G5054d
+    kernel_release: Darwin 24.6.0
+    kernel_variant: RELEASE_ARM64_T6000
+    name: macOS
+    version: '15.6'
+  physical_storage:
+    capacity_bytes: 500277792768
+    device: disk0
+    free_bytes_at_capture: not_sealed
+    free_space_note: No free-space value was sealed with the host capture; no value is inferred.
+    model: APPLE SSD AP0512R
+  projection_description: Generated machine-context projection for interpreting the normative local measurements.
+  scope_note: Host identity context only; per-row interpretation is fully contained in each approved row.
+  timezone: Europe/Warsaw
+matrix_scope:
+  alphabets:
+  - dna4
+  - dna5
+  bioseq_base_alignment_algorithms:
+  - ksw2
+  - block_aligner
+  bioseq_chaining_algorithms:
+  - scalar_minimap2
+  - simd_minimap2
+  - range_minimum_query
+  - vulkan_tiled_dynamic_programming
+  bioseq_expected_cells: 1280
+  bioseq_index_types:
+  - minimizers_per_fragment
+  - minimizers_per_sequence
+  bioseq_minimizer_algorithms:
+  - scalar
+  - simd_minimap2_reference
+  - two_stack_nthash
+  - vulkan_minimap_integer
+  - bounded_nthash_simd
+  bioseq_pipeline_mode: task_parallel
+  cigar_projection: true
+  classification: derived_non_authoritative
+  excluded_runtime_only_base_alignment_algorithms:
+  - ksw2_batched
+  execution_location: local
+  mapq_projection: true
+  minimap2_expected_cells: 16
+  modes:
+  - no_index
+  - just_index
+  pipelines:
+  - bioseq
+  - minimap2
+  prefilter: false
+  projection_description: Full allowed dimensions; expected cells/runs exclude already approved standard-local
+    tuples. One sample is planned per remaining logical tuple. Failed attempts do not count as approved.
+  query_count: 1024
+  repetitions_per_cell: 1
+  target_size_gbp:
+  - 2
+  - 4
+  target_size_unit: Decimal Gbp, exactly 1,000,000,000 base pairs.
+  total_expected_cells: 1149
+  total_expected_runs: 1149
+  window_kmer_pairs:
+  - kmer_size: 15
+    window_size: 10
+  - kmer_size: 20
+    window_size: 15
+approved_results: []
