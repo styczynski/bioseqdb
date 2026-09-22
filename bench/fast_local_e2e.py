@@ -189,7 +189,8 @@ def publish(child, config_path, report_paths, out):
             'schedule_sorted_checksum': manifest['schedule_sorted_checksum'],
             'run_receipt_id': None, 'run_receipt_sha256': None,
         }
-        record = audit._validate_record(raw[0], source, audit.Q1024_CAMPAIGN_ID, 1024, True)
+        record = audit._validate_record(raw[0], source, audit.Q1024_CAMPAIGN_ID, 1024, True,
+                                        require_control_queries=False)
         assert record['stable_key'] == child['stable_key']
         identity = dict(record['identity'], engine='minimap2', bioseq_index_name=None,
             requested_minimizer_algorithm=None, requested_chaining_algorithm=None,
@@ -205,7 +206,10 @@ def publish(child, config_path, report_paths, out):
         if row['status'] != 'accepted':
             return False
         if row['stable_key'] not in {r['stable_key'] for r in out['approved_results']}:
-            out['approved_results'].append(recovery.approved_row(row, fast_local=True))
+            approved = recovery.approved_row(row, fast_local=True)
+            if raw[0].get('gate8_sql') is None and row['engine'] == 'bioseq':
+                approved['comments'] += ' Extra EXPLAIN ANALYZE/cache-off/vectorization-off mapping controls were disabled by user request; measured-statement checks were retained.'
+            out['approved_results'].append(approved)
             write_document(out)
         return True
     raise RuntimeError('Terminal fast run has no complete report to audit')
@@ -286,7 +290,7 @@ def main():
             fleet.append_progress_log(
                 f'Fast local (separate one-sample methodology): {len(out["approved_results"])} approved; '
                 f'{len(remaining)} not yet attempted; {len(state["attempted"])} submitted. '
-                'Standard local queue remains paused; remote five-repeat queues unchanged.',
+                'Standard local queue remains paused; AWS queues transition independently to their separate fast authorities.',
                 title='fast-local queue checkpoint')
             state['last_log'] = time.time()
         receipt = current.get('build_receipt_id')

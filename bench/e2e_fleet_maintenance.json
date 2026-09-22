@@ -1,8 +1,50 @@
 {
   "description": "Temporary queue ownership for targeted bug-fix build/verification; other workers continue measuring.",
   "hosts": {
-    "local": {"reason": "User requested pause of standard local queue for separate one-sample index-reuse methodology; let active run finish", "paused": true},
-    "test3-m4": {"reason": "Owned by finish_e2e_pending_repair: finish existing build, apply reviewed identity guard patch incrementally, verify q1024 tuple 443, then resume", "paused": true},
-    "test4-m4": {"reason": "Validated same-family frozen runtime replacement after AVX-512 SIGILL", "paused": false, "build_receipt_id": "br_dc2475cb80c2d3944747e3850aab4107"}
+    "local": {
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "paused": true,
+      "owner": "fast_remote_e2e"
+    },
+    "test3-m4": {
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "paused": true,
+      "owner": "fast_remote_e2e"
+    },
+    "test4-m4": {
+      "reason": "Validated same-family frozen runtime replacement after AVX-512 SIGILL",
+      "paused": false,
+      "build_receipt_id": "br_dc2475cb80c2d3944747e3850aab4107"
+    },
+    "test3-c7g": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test3-m7a": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test4-m7i": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test4-c7g": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test4-m7a": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test3-m7i": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    }
   }
 }

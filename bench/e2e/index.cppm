@@ -15201,9 +15201,9 @@ void finalize_e2e_matrix_iteration(
             in, prep.persisted, prep.fair_workers),
         prep.minimizer_index);
     if (prep.persisted) capture_hash_major_build_stats(*in.conn, out);
-    if (out.tuple_accepted == 1) {
-        out.gate8_sql_proof = bind_gate8_sql_proof(in, params, prep, out);
-    }
+    // Coverage campaign: validate the measured statement above, without three
+    // extra full mapping executions (EXPLAIN ANALYZE/cache-off/vectorization-off).
+    // Leave gate8_sql null: absent control evidence must never be fabricated.
     log_measured_case(
         algorithm, prep.pipeline_mode, prep.fair_workers, in, out,
         prep.minimizer_index);

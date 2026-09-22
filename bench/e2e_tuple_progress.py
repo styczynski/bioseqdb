@@ -22,7 +22,8 @@ STATE = OUTPUT / "tuple_progress_last_logged.json"
 # Resolved through bioseq-build doc_read(DOC0432).
 LOG = ROOT / "DOCS/CURRENT/BENCHMARK_FRAMEWORK/0432_LOCAL_E2E_ALGORITHM_MATRIX_BENCHMARK_LOG.md"
 DEFINITION = (
-    "Distinct audited/approved q1024 tuples with at least five repeats; replicas "
+    "Distinct audited/approved q1024 tuples: original five-repeat results plus "
+    "explicitly separate, user-authorized one-sample FAST results; replicas "
     "and historical/current timing scopes are deduplicated by stable key. "
     "Coverage does not imply that different timing scopes can be compared. "
     "Remaining includes running, unaudited, failed and currently blocked cells. "
@@ -57,6 +58,19 @@ def tuple_counts() -> dict:
             and row.get("status") == "accepted" and row.get("prefilter") is False
             and row.get("exact_baseline_match_count_equal") is True
         )
+    for family in FAMILIES:
+        filename = ('ALL_RESULTS_TUPLES_FAST_LOCAL.yaml' if family == 'local'
+                    else 'ALL_RESULTS_TUPLES_FAST_REMOTE_' + family.upper() + '.yaml')
+        path = ROOT / filename
+        if not path.exists():
+            continue
+        document = yaml.load(path.read_bytes(), Loader=yaml.CSafeLoader)
+        expected_scope = ('query_only_framework_iteration_fast_local_single_sample_v1'
+                          if family == 'local' else 'query_only_framework_iteration_fast_remote_single_sample_v1')
+        approved[family].update(row['stable_key'] for row in document['approved_results']
+            if row.get('query_count') == 1024 and row.get('run_count') == 1
+            and row.get('timing_scope') == expected_scope and row.get('status') == 'accepted'
+            and row.get('prefilter') is False and row.get('exact_baseline_match_count_equal') is True)
     return {family: {"completed": len(approved[family] & eligible[family]),
                      "remaining": len(eligible[family] - approved[family])}
             for family in FAMILIES}

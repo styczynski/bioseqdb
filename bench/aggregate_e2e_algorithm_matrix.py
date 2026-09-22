@@ -121,6 +121,7 @@ APPROVED_TUPLES_LEGACY_PROJECTION_SHA256 = (
 APPROVED_TUPLES_HISTORICAL_TIMING_SCOPE = "historical_outer_e2e_v1"
 APPROVED_TUPLES_QUERY_TIMING_SCOPE = "query_only_framework_iteration_v1"
 FAST_LOCAL_TIMING_SCOPE = "query_only_framework_iteration_fast_local_single_sample_v1"
+FAST_REMOTE_TIMING_SCOPE = "query_only_framework_iteration_fast_remote_single_sample_v1"
 APPROVED_TUPLES_TIMING_SCOPES = (
     APPROVED_TUPLES_HISTORICAL_TIMING_SCOPE,
     APPROVED_TUPLES_QUERY_TIMING_SCOPE,
@@ -7250,6 +7251,7 @@ def _validate_record(
         mapq_projection: bool,
         cigar_projection: bool = True,
         prefilter_enabled: bool = False,
+        *, require_control_queries: bool = True,
 ) -> dict[str, Any]:
     if (_require_int(record.get("schema"), "raw framework schema") != 1
             or record.get("benchmark") != "bench_e2e"):
@@ -7702,7 +7704,7 @@ def _validate_record(
         and not ordered_oracle["sealed"]
     )
     gate8_sql = record.get("gate8_sql")
-    if gate8_required:
+    if gate8_required and (require_control_queries or gate8_sql is not None):
         gate8_sql = _validate_gate8_sql_proof(
             gate8_sql, record, identity, expected_query_count,
             cigar_projection, mapq_projection, prefilter_enabled)
@@ -11008,7 +11010,7 @@ def _validate_approved_tuple_row(
     if authority_version == APPROVED_TUPLES_VERSION:
         timing_scope = _require_string(
             row.get("timing_scope"), f"{label}.timing_scope")
-        allowed_scopes = (FAST_LOCAL_TIMING_SCOPE,) if fast_local else APPROVED_TUPLES_TIMING_SCOPES
+        allowed_scopes = (FAST_LOCAL_TIMING_SCOPE, FAST_REMOTE_TIMING_SCOPE) if fast_local else APPROVED_TUPLES_TIMING_SCOPES
         if timing_scope not in allowed_scopes:
             raise ContractError(f"{label}.timing_scope is not recognized")
     elif authority_version != APPROVED_TUPLES_LEGACY_VERSION:

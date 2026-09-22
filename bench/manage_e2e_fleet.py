@@ -229,7 +229,11 @@ def sync_files(name: str, paths: tuple[str, ...]) -> None:
         raise RuntimeError(result.stderr.decode(errors="replace")[-800:])
 
 
-def mcp_start(name: str, args: dict, label: str, *, build_preset: str | None = None) -> str:
+def mcp_start(name: str, args: dict, label: str, *, build_preset: str | None = None,
+              environment: dict[str, str] | None = None) -> str:
+    environment = environment or {}
+    if any(not re.fullmatch(r'BIOSEQ_[A-Z0-9_]+', key) for key in environment):
+        raise ValueError('Only explicit Bioseq runtime environment settings may be forwarded')
     messages = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "q1024-fleet-controller", "version": "1"}}},
@@ -243,6 +247,8 @@ def mcp_start(name: str, args: dict, label: str, *, build_preset: str | None = N
         command = remote + ["cd /home/ubuntu/bioseqdb && " + ENVIRONMENT +
                             ("export BIOSEQ_BUILD_PRESET=" + shlex.quote(build_preset) + "; "
                              if build_preset else "") +
+                            ''.join('export ' + key + '=' + shlex.quote(value) + '; '
+                                    for key, value in environment.items()) +
                             "export BIOSEQ_BUILD_PARALLEL_JOBS=3; " +
                             ("export BIOSEQ_BUILD_HARD_TIMEOUT_MIN=720; "
                              if args.get("build_only") and family(name) == "m4" else "") +
@@ -251,7 +257,7 @@ def mcp_start(name: str, args: dict, label: str, *, build_preset: str | None = N
     with log.open("wb") as output:
         result = subprocess.run(command, input=("\n".join(json.dumps(m) for m in messages) + "\n").encode(),
                                 stdout=output, stderr=subprocess.STDOUT, cwd=ROOT, timeout=150,
-                                env=os.environ | {"BIOSEQ_E2E_REUSE_FROZEN_BINARY": "1", "BIOSEQ_BUILD_PARALLEL_JOBS": "2"})
+                                env=os.environ | {"BIOSEQ_E2E_REUSE_FROZEN_BINARY": "1", "BIOSEQ_BUILD_PARALLEL_JOBS": "2"} | environment)
     response = None
     for line in log.read_text(errors="replace").splitlines():
         try:
@@ -445,6 +451,10 @@ def main() -> None:
                 maintenance_path = ROOT / "bench/e2e_fleet_maintenance.json"
                 maintenance = json.loads(maintenance_path.read_bytes())["hosts"] if maintenance_path.exists() else {}
                 hold = maintenance.get(name, {})
+                if hold.get('owner') == 'fast_remote_e2e':
+                    # Its controller drains the original run and audits one-sample
+                    # results separately. Do not feed those to the five-run auditor.
+                    continue
                 awaited_build = hold.get("resume_after_build_receipt")
                 if (awaited_build and hold.get("paused")
                         and s.get("status") == "completed" and s.get("build_only")
