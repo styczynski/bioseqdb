@@ -488,27 +488,30 @@ select_transient_target_generation(const minimap2_parameters& params,
     };
 }
 
-/** Verify that independently selected query and target records share biological hash identity. */
+/**
+ * Verify biological hash identity, not the independently validated record capacity.
+ * physical_kmer_size sizes a packed record; it is not the runtime sketch k.
+ * For example a short two-stack query can use L15/K15 while a large target
+ * uses L63/K20, both carrying the same runtime-k hash without truncation.
+ */
 [[nodiscard]] inline bool transient_query_matches_target_identity(
     const transient_physical_query& query,
     const bioseq::indexing::minimizer_generation_algorithm_identity& target) noexcept {
     return query.layout.requested_algorithm == target.requested_algorithm &&
            query.layout.effective_algorithm == target.effective_algorithm &&
            query.layout.alphabet_id == target.alphabet_id &&
-           query.layout.physical_kmer_size == target.physical_kmer_size &&
            query.layout.hash_width == target.hash_width &&
            query.layout.runtime_kmer_size == target.runtime_kmer_size &&
            query.layout.runtime_window_size == target.runtime_window_size;
 }
 
-/** Verify a retained generated query layout against a target producer identity. */
+/** Verify a retained query's biological identity, independent of record capacity. */
 [[nodiscard]] inline bool transient_query_layout_matches_target_identity(
     const bioseq::minimizers::minimizer_physical_layout_selection& query,
     const bioseq::indexing::minimizer_generation_algorithm_identity& target) noexcept {
     return query.requested_algorithm == target.requested_algorithm &&
            query.effective_algorithm == target.effective_algorithm &&
            query.alphabet_id == target.alphabet_id &&
-           query.physical_kmer_size == target.physical_kmer_size &&
            query.hash_width == target.hash_width &&
            query.runtime_kmer_size == target.runtime_kmer_size &&
            query.runtime_window_size == target.runtime_window_size;

@@ -1,0 +1,328 @@
+{
+  "params": {
+    "bioseq_algorithm_matrix_just_index": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "full GUC algorithm matrix, cold persisted index"
+      },
+      "minimizer_algorithm": {
+        "type": "string",
+        "default": "scalar",
+        "enum": [
+          "scalar",
+          "simd_minimap2_reference",
+          "two_stack_nthash",
+          "vulkan_minimap_integer",
+          "bounded_nthash_simd"
+        ],
+        "description": "requested minimizer GUC"
+      },
+      "chaining_algorithm": {
+        "type": "string",
+        "default": "scalar_minimap2",
+        "enum": [
+          "scalar_minimap2",
+          "simd_minimap2",
+          "range_minimum_query",
+          "vulkan_tiled_dynamic_programming"
+        ],
+        "description": "requested chaining GUC"
+      },
+      "base_alignment_algorithm": {
+        "type": "string",
+        "default": "ksw2",
+        "enum": [
+          "ksw2",
+          "block_aligner"
+        ],
+        "description": "requested base-alignment GUC"
+      },
+      "minimizer_index": {
+        "type": "string",
+        "default": "minimizers_per_fragment",
+        "enum": [
+          "minimizers_per_fragment",
+          "minimizers_per_sequence"
+        ],
+        "description": "active minimizer-index policy"
+      },
+      "pipeline_mode": {
+        "type": "string",
+        "default": "task_parallel",
+        "enum": [
+          "task_parallel"
+        ],
+        "description": "scheduler mode"
+      }
+    }
+  },
+  "test_cases": {
+    "M2_D5_K15_W10": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna5",
+        "size_label": "matrix_2gbp_dna5_k15_w10",
+        "reference_length": 2000000000,
+        "fragment_count": 1024,
+        "fragment_length_mean": 20000,
+        "fragment_length_stddev": 500,
+        "substitution_rate": 0.001,
+        "insertion_rate": 0.0005,
+        "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0,
+        "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5,
+        "kmer_size": 15,
+        "window_size": 10,
+        "cigar_projection": true,
+        "mapq_projection": true,
+        "minimap2_split_bp": 2000000352,
+        "seed": 33325010
+      },
+      "description": "2 Gbp dna5, k15/w10, 1024 deterministic fixed-seed-prefix queries"
+    }
+  },
+  "bench_e2e": {
+    "tags": [
+      "e2e",
+      "algorithm-matrix",
+      "campaign-singleton",
+      "q1024-observed"
+    ],
+    "description": "FAST LOCAL single-sample q1024; retained compatible index; cold PostgreSQL before timing; separate publication. bioseq-e2e-cell-v2:[\"bioseq-e2e-algorithm-matrix-local-v1\",\"matrix_2gbp_dna5_k15_w10\",\"dna5\",2,15,10,\"just_index\",\"bioseq\",\"minimizers_per_fragment\",\"bounded_nthash_simd\",\"scalar_minimap2\",\"ksw2\"]",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 333
+    },
+    "matrix": {
+      "for": {
+        "M2_D5_K15_W10": 1
+      },
+      "over": {
+        "bioseq_algorithm_matrix_just_index": {
+          "minimizer_algorithm": [
+            "bounded_nthash_simd"
+          ],
+          "chaining_algorithm": [
+            "scalar_minimap2"
+          ],
+          "base_alignment_algorithm": [
+            "ksw2"
+          ],
+          "minimizer_index": [
+            "minimizers_per_fragment"
+          ],
+          "pipeline_mode": [
+            "task_parallel"
+          ]
+        }
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": []
+        },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "tuple_accepted": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "match_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "expected_match_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "correct_match_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "exact_primary_count_accepted": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "correct_cigar_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "cigar_replay_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "mapq_result_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "pipeline_validation_accepted": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "stage_engine_matrix_valid": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "backend_declines": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "backend_fallbacks": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "prefilter_activity_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "measured_region_ns_manual": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "cigar_or_mapq_interval_union_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "outer_e2e_minus_cigar_or_mapq_union_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_interval_schema_revision": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_interval_available": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_interval_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_cigar_interval_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_mapq_interval_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "benchmark_e2e_interval_finalization_count": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "downstream_active_wall_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "downstream_active_wall_available": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "downstream_work_ns": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "mapq_execution_available": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        },
+        "mapq_executed": {
+          "type": "evaluation",
+          "applicable_algorithms": [
+            "bioseq_algorithm_matrix_just_index"
+          ],
+          "rules": []
+        }
+      }
+    }
+  },
+  "regression_rules": []
+}

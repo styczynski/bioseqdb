@@ -180,9 +180,16 @@ def publish(child, config_path, report_paths, out):
             continue
         report = json.loads(path.read_bytes())
         config = json.loads(config_path.read_bytes())
-        raw, _, _, _ = audit._validate_raw_sidecar(path, report, config,
+        raw, manifest, sidecar, _ = audit._validate_raw_sidecar(path, report, config,
             {'expected_raw_records': 1, 'cells': [child['execution_cell']]}, expected_repeats=1)
-        record = audit._validate_record(raw[0], {}, audit.Q1024_CAMPAIGN_ID, 1024, True)
+        source = {
+            'report': str(path.relative_to(ROOT)),
+            'raw_sidecar': str(sidecar.relative_to(ROOT)),
+            'run_id': manifest['run_id'],
+            'schedule_sorted_checksum': manifest['schedule_sorted_checksum'],
+            'run_receipt_id': None, 'run_receipt_sha256': None,
+        }
+        record = audit._validate_record(raw[0], source, audit.Q1024_CAMPAIGN_ID, 1024, True)
         assert record['stable_key'] == child['stable_key']
         identity = dict(record['identity'], engine='minimap2', bioseq_index_name=None,
             requested_minimizer_algorithm=None, requested_chaining_algorithm=None,

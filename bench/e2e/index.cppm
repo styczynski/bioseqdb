@@ -7440,6 +7440,14 @@ static_assert(expected_algorithm_matrix_storage_engine(
         expect_persisted && e2e_expects_hash_major(in, minimizer_index, expect_gpu_seed);
     const bool expect_grouped_soa =
         expect_persisted && !expect_hash_major;
+    // MPS retains a query-selected position image after reading its complete
+    // generation. Only MPF uses the zero-position-buffer fragment-native route.
+    const bool expect_sequence_grouped_soa_reader =
+        expect_grouped_soa && !expect_gpu_seed
+        && minimizer_index == k_minimizers_per_sequence_index;
+    const bool expect_fragment_native_reader =
+        expect_grouped_soa && !expect_gpu_seed
+        && minimizer_index == k_minimizers_per_fragment_index;
     out.persisted_layout = expect_hash_major
         ? "hash_major" : expect_grouped_soa ? "grouped_soa" : "none";
     const bool persisted_manifest_size_valid =
@@ -8041,7 +8049,7 @@ static_assert(expected_algorithm_matrix_storage_engine(
             [&fragment_native](const std::string_view key) {
                 return fragment_native(key) == 0;
             });
-    const bool fragment_native_query_gate = expect_grouped_soa && !expect_gpu_seed
+    const bool fragment_native_query_gate = expect_fragment_native_reader
         ? canonical_p3_packed_single_wave
             && compact_direct_one_decode_gate
             && fragment_native("fragment_native_waves") > 0
@@ -8180,8 +8188,43 @@ static_assert(expected_algorithm_matrix_storage_engine(
             && !out.minimizer_fragment_reader_stats[
                 "are_fragment_native_stats_saturated"].get<bool>()
         : no_fragment_native_query_stats;
+    // These are the existing MPS reader's four allocation-ledger barriers:
+    // query routing, end of controls, position allocation, and finish. Keep
+    // its exact-sized image and admission checks, not MPF's zero-buffer shape.
+    const bool sequence_grouped_soa_reader_stats_gate =
+        expect_sequence_grouped_soa_reader
+        && grouped_soa_reader_sessions > 0
+        && grouped_soa_reader_passes == 4 * grouped_soa_reader_sessions
+        && out.grouped_soa_reader_global_position_storage_preparations
+            == out.persisted_generation_read_sessions
+        && out.grouped_soa_reader_global_position_storage_allocations
+            == out.persisted_generation_read_sessions
+        && out.grouped_soa_reader_position_append_growth_reservations == 0
+        && out.grouped_soa_reader_retained_position_count > 0
+        && out.grouped_soa_reader_retained_position_capacity
+            == out.grouped_soa_reader_retained_position_count
+        && grouped_soa_reader_exact_position_bytes
+            == out.grouped_soa_reader_global_position_capacity_bytes
+        && out.grouped_soa_reader_exact_position_image_checks
+            == out.persisted_generation_read_sessions
+        && out.grouped_soa_reader_exact_position_image_failures == 0
+        && out.grouped_soa_reader_retained_layout_checks
+            == out.persisted_generation_read_sessions
+        && out.grouped_soa_reader_retained_layout_failures == 0
+        && grouped_soa_reader_layout_bytes
+            == out.grouped_soa_reader_owned_capacity_bytes
+        && out.grouped_soa_reader_owned_capacity_bytes
+            == out.grouped_soa_reader_admitted_bytes
+        && out.grouped_soa_reader_directory_capacity_bytes > 0
+        && out.grouped_soa_reader_query_hash_capacity_bytes > 0
+        && out.grouped_soa_reader_current_selected_control_capacity_bytes == 0
+        && out.grouped_soa_reader_control_payload_capacity_bytes == 0
+        && no_fragment_native_query_stats
+        && out.are_grouped_soa_reader_memory_stats_saturated == 0;
     const bool minimizer_fragment_reader_stats_gate =
-        expect_grouped_soa && !expect_gpu_seed
+        expect_sequence_grouped_soa_reader
+        ? sequence_grouped_soa_reader_stats_gate
+        : expect_fragment_native_reader
         ? out.grouped_soa_reader_global_position_storage_preparations == 0
             && out.grouped_soa_reader_global_position_storage_allocations == 0
             && out.grouped_soa_reader_position_append_growth_reservations == 0

@@ -394,11 +394,339 @@ matrix_scope:
   - 2
   - 4
   target_size_unit: Decimal Gbp, exactly 1,000,000,000 base pairs.
-  total_expected_cells: 1149
-  total_expected_runs: 1149
+  total_expected_cells: 1148
+  total_expected_runs: 1148
   window_kmer_pairs:
   - kmer_size: 15
     window_size: 10
   - kmer_size: 20
     window_size: 15
-approved_results: []
+approved_results:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","vulkan_tiled_dynamic_programming","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> vulkan_tiled_dynamic_programming -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 37921718667
+    p50_b: 25346225208
+  comments: 'FAST LOCAL: one measured q1024 sample, not a five-run estimate; P50 equals that sample. PostgreSQL
+    restarts before the measurement; the OS filesystem cache is not cleared. Compatible persisted indexes
+    are retained across just_index tuples; index creation and restarts are untimed. Existing correctness,
+    observed-stage, prefilter-off and timing-interval validation passed. Compared with saved local minimap2
+    correctness evidence; baseline timings are not copied. Do not pool with the standard five-repeat campaign.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","vulkan_tiled_dynamic_programming","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> vulkan_tiled_dynamic_programming -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 42034873750
+    p50_b: 27857587754
+  comments: 'FAST LOCAL: one measured q1024 sample, not a five-run estimate; P50 equals that sample. PostgreSQL
+    restarts before the measurement; the OS filesystem cache is not cleared. Compatible persisted indexes
+    are retained across just_index tuples; index creation and restarts are untimed. Existing correctness,
+    observed-stage, prefilter-off and timing-interval validation passed. Compared with saved local minimap2
+    correctness evidence; baseline timings are not copied. Do not pool with the standard five-repeat campaign.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 5898390291
+    p50_b: 4554049499
+  comments: 'FAST LOCAL: one measured q1024 sample, not a five-run estimate; P50 equals that sample. PostgreSQL
+    restarts before the measurement; the OS filesystem cache is not cleared. Compatible persisted indexes
+    are retained across just_index tuples; index creation and restarts are untimed. Existing correctness,
+    observed-stage, prefilter-off and timing-interval validation passed. Compared with saved local minimap2
+    correctness evidence; baseline timings are not copied. Do not pool with the standard five-repeat campaign.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 5839313250
+    p50_b: 3878128375
+  comments: 'FAST LOCAL: one measured q1024 sample, not a five-run estimate; P50 equals that sample. PostgreSQL
+    restarts before the measurement; the OS filesystem cache is not cleared. Compatible persisted indexes
+    are retained across just_index tuples; index creation and restarts are untimed. Existing correctness,
+    observed-stage, prefilter-off and timing-interval validation passed. Compared with saved local minimap2
+    correctness evidence; baseline timings are not copied. Do not pool with the standard five-repeat campaign.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 5444768500
+    p50_b: 4293286375
+  comments: 'FAST LOCAL: one measured q1024 sample, not a five-run estimate; P50 equals that sample. PostgreSQL
+    restarts before the measurement; the OS filesystem cache is not cleared. Compatible persisted indexes
+    are retained across just_index tuples; index creation and restarts are untimed. Existing correctness,
+    observed-stage, prefilter-off and timing-interval validation passed. Compared with saved local minimap2
+    correctness evidence; baseline timings are not copied. Do not pool with the standard five-repeat campaign.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 5782432667
+    p50_b: 4153565042
+  comments: 'FAST LOCAL: one measured q1024 sample, not a five-run estimate; P50 equals that sample. PostgreSQL
+    restarts before the measurement; the OS filesystem cache is not cleared. Compatible persisted indexes
+    are retained across just_index tuples; index creation and restarts are untimed. Existing correctness,
+    observed-stage, prefilter-off and timing-interval validation passed. Compared with saved local minimap2
+    correctness evidence; baseline timings are not copied. Do not pool with the standard five-repeat campaign.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","vulkan_tiled_dynamic_programming","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> vulkan_tiled_dynamic_programming -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 244211700000
+    p50_b: 38631934693
+  comments: 'FAST LOCAL: one measured q1024 sample, not a five-run estimate; P50 equals that sample. PostgreSQL
+    restarts before the measurement; the OS filesystem cache is not cleared. Compatible persisted indexes
+    are retained across just_index tuples; index creation and restarts are untimed. Existing correctness,
+    observed-stage, prefilter-off and timing-interval validation passed. Compared with saved local minimap2
+    correctness evidence; baseline timings are not copied. Do not pool with the standard five-repeat campaign.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","vulkan_tiled_dynamic_programming","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> vulkan_tiled_dynamic_programming -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 239236491666
+    p50_b: 30788772437
+  comments: 'FAST LOCAL: one measured q1024 sample, not a five-run estimate; P50 equals that sample. PostgreSQL
+    restarts before the measurement; the OS filesystem cache is not cleared. Compatible persisted indexes
+    are retained across just_index tuples; index creation and restarts are untimed. Existing correctness,
+    observed-stage, prefilter-off and timing-interval validation passed. Compared with saved local minimap2
+    correctness evidence; baseline timings are not copied. Do not pool with the standard five-repeat campaign.'

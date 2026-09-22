@@ -8904,7 +8904,9 @@ def _aggregate(records: list[dict[str, Any]], *, expected_repeats: int = MIN_ACC
                 bioseq_oracle = item["ordered_oracle"]
                 baseline_oracle = baseline["ordered_oracle"]
                 if bioseq_oracle is not None and baseline_oracle is not None:
-                    if bioseq_oracle["counts"] != baseline_oracle["counts"]:
+                    # JSON recovery caches encode validated tuples as lists.
+                    # Compare the ordered values, not their Python container type.
+                    if tuple(bioseq_oracle["counts"]) != tuple(baseline_oracle["counts"]):
                         invalid.append(
                             "**INVALID**: observed Bioseq ordered primary-count "
                             "vector differs from the same-repeat minimap2 baseline "

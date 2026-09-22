@@ -77,6 +77,22 @@ def reclaim_idle_local_indexes() -> None:
     """
     if shutil.disk_usage(ROOT).free >= 35 * 1024**3 or monitor._local_state().get("status") == "running":
         return
+    # Previous dataset fixtures are deterministic scratch files, not results.
+    # Expire only old, unopened fixtures between runs; never touch an active one.
+    for path in sorted(Path('/private/tmp').glob('e2e_matrix_*_target*.fasta')):
+        if shutil.disk_usage(ROOT).free >= 35 * 1024**3:
+            break
+        if (path.is_symlink() or not path.is_file()
+                or not re.fullmatch(r'e2e_matrix_[24]gbp_dna[45]_k\d+_w\d+_target(?:\.split)?\.fasta', path.name)
+                or time.time() - path.stat().st_mtime < 3600):
+            continue
+        opened = subprocess.run(['lsof', str(path)], capture_output=True, timeout=15)
+        if opened.returncode != 1 or opened.stdout or opened.stderr:
+            continue
+        size = path.stat().st_size
+        path.unlink()
+        event('stale_fixture_cleanup', path=str(path), bytes=size,
+              recovery='deterministically regenerate benchmark FASTA')
     psql = "/opt/homebrew/opt/postgresql@17/bin/psql"
     def query(sql: str) -> list[str]:
         result = subprocess.run([psql, "-U", "postgres", "-d", "bioseq", "-At", "-v", "ON_ERROR_STOP=1", "-c", sql],
@@ -213,7 +229,7 @@ def sync_files(name: str, paths: tuple[str, ...]) -> None:
         raise RuntimeError(result.stderr.decode(errors="replace")[-800:])
 
 
-def mcp_start(name: str, args: dict, label: str) -> str:
+def mcp_start(name: str, args: dict, label: str, *, build_preset: str | None = None) -> str:
     messages = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "q1024-fleet-controller", "version": "1"}}},
@@ -225,6 +241,8 @@ def mcp_start(name: str, args: dict, label: str) -> str:
     else:
         remote = ssh(name)
         command = remote + ["cd /home/ubuntu/bioseqdb && " + ENVIRONMENT +
+                            ("export BIOSEQ_BUILD_PRESET=" + shlex.quote(build_preset) + "; "
+                             if build_preset else "") +
                             "export BIOSEQ_BUILD_PARALLEL_JOBS=3; " +
                             ("export BIOSEQ_BUILD_HARD_TIMEOUT_MIN=720; "
                              if args.get("build_only") and family(name) == "m4" else "") +
@@ -426,6 +444,21 @@ def main() -> None:
                 # infrastructure failures once; never submit its pending ID.
                 maintenance_path = ROOT / "bench/e2e_fleet_maintenance.json"
                 maintenance = json.loads(maintenance_path.read_bytes())["hosts"] if maintenance_path.exists() else {}
+                hold = maintenance.get(name, {})
+                awaited_build = hold.get("resume_after_build_receipt")
+                if (awaited_build and hold.get("paused")
+                        and s.get("status") == "completed" and s.get("build_only")
+                        and s.get("build_receipt_id") == awaited_build
+                        and not s.get("cleanup_unverified")):
+                    event("maintenance_build_complete", host=name, receipt=awaited_build,
+                          dry_run=args.dry_run)
+                    if not args.dry_run:
+                        # Resume only this explicitly named successful build.
+                        # Its next real q1024 run still passes the normal audit.
+                        document = json.loads(maintenance_path.read_bytes())
+                        document["hosts"][name].update(paused=False, build_receipt_id=awaited_build)
+                        atomic(maintenance_path, (json.dumps(document, indent=2) + "\n").encode())
+                    hold.update(paused=False, build_receipt_id=awaited_build)
                 preferred_receipt = (maintenance.get(name, {}).get("build_receipt_id")
                                      or state.get("preferred_build_receipts", {}).get(name) or imported_receipt)
                 if s.get("status") == "failed" and not s.get("bench_e2e_config") and not preferred_receipt:
