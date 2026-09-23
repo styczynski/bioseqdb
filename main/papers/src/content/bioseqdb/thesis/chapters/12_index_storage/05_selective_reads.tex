@@ -1,27 +1,22 @@
-\section{Read counts before large position lists}
+\section{Selective reads}
 \label{sec:index-cold-loading}
-\label{sec:index-format6}
+\label{sec:index-mps-selective-reads}
 
-Suppose the query contains hashes 12, 35, and 78. Reading every target posting
-would waste work on keys that cannot produce an anchor for this query. It can
-also waste work on a highly repeated key that the occurrence filter will
-reject. The selective MPS format, called Format~6, separates the information
-needed to make these two decisions.
+Main benefit of MPS is that each group can be a single row within Postgres
+(if $n$, $m$ are not causing the array to spill over multiple chunks~\ref{fig:index-storage-layouts}).
+This means that minimap2 has to read and check every entry in index, while BioseqDB can only read entiore directory row 
+and using $min(hash)$ and $max(hash)$ values to decide if we should read certain groups of minimizers.
 
-The reader performs four steps:
+The similar logic applies to grouped MPF index as well, but in case of grouped MPF we can also check count array and if the count is very high, then 
+we can abandon readind reparate position array at all (the most frequent minimizers should be filtered out as they are not good candiates for anchors). 
+
+The reader for grouped-MPS/MPS performs the following steps:
 \begin{enumerate}
-  \item Read and check the complete directory, then find hash ranges
-    intersecting the distinct query hashes.
-  \item Read the selected controls to find each key's exact global
-    occurrence count.
-  \item Apply the occurrence threshold before requesting positions.
-  \item Read accepted posting ranges and form the lookup needed by the
-    alignment batch.
+  \item Read and check the complete directory, then find hash ranges that intersect with query hashes.
+  \item Read the selected controls to find each key's exact global occurrence count
+  \item Apply the occurence count threshold: if the count is high, we don't process this hash
+  \item Read the chunks selected by this filtering and read positions form them
 \end{enumerate}
-``Global'' here means over the indexed target sequence. Looking at one loaded
-piece alone could underestimate repetition and wrongly admit a frequent key.
-The stored compact counts therefore have additional exact-count information
-when their small field cannot hold the value.
 
 \begin{figure}[htbp]
 \centering
@@ -50,7 +45,7 @@ when their small field cannot hold the value.
   \draw[thick,indexOrange] (5.02,2.92)--(5.38,2.92);
   \node[anchor=west,text=indexOrange] at (5.52,3.03) {$90>5$: stop before positions};
   \node[anchor=west,align=left] at (1.45,.6)
-    {The index retains all occurrences.\\This query reads only the accepted lists.};
+    {Query filters out the most frequent minimizers according to configured threshold and skips min-max ranges of hashes};
 \end{tikzpicture}
 \caption{Two decisions save different reads. All directory entries are
 read; blue ranges select the controls. Counts reject a frequent hash before
@@ -59,14 +54,4 @@ its long list is loaded. Positions and thresholds are illustrative.}
 \label{fig:format6-streams}
 \end{figure}
 
-Adjacent accepted ranges can be read together through a bounded I/O buffer.
-The PostgreSQL representation stores payloads in heap rows, so a requested
-range may fetch a complete row containing some additional bytes. Selective
-logical ranges therefore reduce unnecessary reads without making the physical
-read granularity equal to one posting.
 
-The selective MPS reader prepares a lookup for the complete stored target
-identified by its locator. This reader does not support transformed targets
-or arbitrary SQL slices. Other index readers can clip and rebase positions
-for supported intervals. The conditions for using each reader remain
-separate from the lazy sequence interface itself.

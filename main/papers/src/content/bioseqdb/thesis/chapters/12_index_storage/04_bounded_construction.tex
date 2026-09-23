@@ -1,18 +1,17 @@
-\section{Build a large index with bounded work buffers}
+\section{Building MPS}
 \label{sec:index-construction}
 
-A simple MPS builder could collect every $(hash,position,strand)$ record and
-sort the complete vector. Its memory use would then grow with the number of
-target minimizers. BioSeqDB instead sorts smaller \emph{runs}: ordered groups
-of records that can be merged without holding their complete contents in
-memory.
-
-The source scan must first handle boundaries correctly. A \emph{halo} is
-the extra context read on either side of a core. For the current grouped
-builder, a halo of $k+w-2$ symbols covers the span needed around a minimizer
-window. An occurrence belongs to the core containing its last-symbol
-coordinate. Thus overlap supplies context without giving the same occurrence
-to two owners.
+Building MPF index is rather simple as we traverse each fragment and can separately construct hashmaps with minimizers (and hashmaps for fragmenst are relatively
+small compared to all RAM capacity).
+Constructing MPS is more complex as I need to somehow store all minimizer globally and this can potentially be bigger than entire RAM capacity.
+Index builder could collect every $(hash,position,strand)$ record and
+sort the complete vector, but for maps bigger than RAM this couldn't be done efficiently, instead current code does similar thing to MPF with a slight differences:
+\begin{itemize}
+  \item To reduce memory access costs as much as possible MPF treats each fragment as entirely separate sequence, thus minimizers on edges won't be generated (the first and last $k+w-2$ symbols). 
+  This reduces minimizer density at edges but means that we access only one fragment to generate index entry.
+  \item For MPS I use subtly different approach and I collect all minimizers. This means that during parallelized fragment read, the reader need to read not only own fragment, but also 
+  parts of fragment to the right and left. This is depicted as "context" on the figure below~\ref{fig:index-build-halos}.
+\end{itemize}
 
 \begin{figure}[htbp]
 \centering
@@ -20,9 +19,9 @@ to two owners.
   \node[anchor=west,font=\bfseries] at (0,5.1) {Neighboring construction cores};
   \draw[fill=indexBlue!12,draw=indexBlue] (1,3.25) rectangle (6,3.85);
   \draw[fill=indexGreen!12,draw=indexGreen] (6,3.25) rectangle (11,3.85);
-  \node at (3.5,3.55) {core 0}; \node at (8.5,3.55) {core 1};
+  \node at (3.5,3.55) {fragment 0}; \node at (8.5,3.55) {fragment 1};
   \draw[dashed,black!55] (6,.25)--(6,4.15);
-  \node[above] at (6,4.15) {boundary $b$};
+  \node[above] at (6,4.15) {fragment 0 ends at positon $p$ of sequence};
   \draw[fill=indexBlue!8,draw=indexBlue] (1,2.15) rectangle (7.2,2.62);
   \draw[pattern=north east lines,pattern color=indexBlue,draw=indexBlue]
     (6,2.15) rectangle (7.2,2.62);
@@ -31,31 +30,25 @@ to two owners.
     (4.8,1.05) rectangle (6,1.52);
   \node[anchor=east] at (.8,2.38) {read 0};
   \node[anchor=east] at (.8,1.28) {read 1};
-  \node[anchor=west] at (7.45,2.38) {right halo};
-  \node[anchor=east] at (4.55,1.28) {left halo};
+  \node[anchor=west] at (7.45,2.38) {right context};
+  \node[anchor=east] at (4.55,1.28) {left context};
   \draw[very thick,indexOrange] (5.25,.5)--(6.25,.5);
   \fill[indexOrange] (6.25,.5) circle[radius=2.5pt];
-  \node[anchor=west] at (6.5,.5) {seed ending in core 1: emitted by core 1};
+  \node[anchor=west] at (6.5,.5) {seed ending in fragment 1: emitted by fragment 1};
 \end{tikzpicture}
-\caption{The readers overlap, but their output ownership does not. The
-orange seed crosses the boundary; its last position belongs to core 1.
-The drawing shows only the internal halos, with lengths exaggerated.}
+\caption{Each reader to generate minimziers for one fragment in MPS read also neighbouring fragments so first and last minimizers in fragment
+can be generated. Size of "context" is $w+k-2$ symbols.}
 \label{fig:index-build-halos}
 \end{figure}
 
-\noindent\begin{minipage}{\linewidth}
-MPS turns the resulting global records into a sequence-wide order:
+\begin{minipage}{\linewidth}
+MPS does the following steps to build entire index:
 \begin{enumerate}
-  \item Fill one work buffer, sort it by hash, then position and strand, and
-    remove duplicate records.
-  \item Write the sorted run to PostgreSQL temporary-file storage, then
-    reuse the work buffer.
-  \item Merge a bounded number of runs at a time. Reading a small prefix
-    from each input is enough to choose the next output record.
-  \item Continue merging until one ordered stream remains. Remove
-    duplicates across runs as well.
-  \item Read that stream to count each hash's occurrences, then replay it
-    to encode controls and positions with the correct counts.
+  \item Read fragments and for one fragment compute minimizers, sort them by hash and remove duplicates similarily to MPF.
+  \item Write this computed MPF-like part into temporary file storage.
+  \item After all fragments have temporary files, then select fixed number of them and merge them into one sorted temporary file.
+  \item Continue this merging procedure until one temporary file remains.
+  \item Read the final temporary file and build directory row inside storage.
 \end{enumerate}
 \end{minipage}
 
@@ -73,31 +66,17 @@ MPS turns the resulting global records into a sequence-wide order:
   \draw[index arrow] (r2.south)--(m1.north west);
   \draw[index arrow] (r3.south)--(m1.north east);
   \node[anchor=west,align=left] at (0,1.7)
-    {Only small read buffers\\for each open input};
+    {Merging fixed count per iteration - in this case $2$ runs at the time};
   \node[index green,minimum width=6.8cm] (final) at (7.6,1.2)
     {$a,a,a,b,b,c,c,d,e,e,f,f$};
   \draw[index arrow] (m0.south)--(final.north west);
   \draw[index arrow] (m1.south)--(final.north east);
   \node[anchor=west,text=black!65] at (0,.1)
-    {Two runs merge at a time. Only hashes are shown; positions are omitted.};
+    {Each entry can be very large and we don't have guarantee that any merged run will fit in RAM};
 \end{tikzpicture}
-\caption{External merging bounds the number of simultaneously open input
-runs. Equal letters represent equal hashes with different positions, so
-their occurrences are preserved. Only duplicate full records are removed.}
+\caption{Merging of hash entries (hash value and minimizer position)until one final entry is left and can be stored permamently in index storage. Letters represent different hash values.}
 \label{fig:index-mps-merge}
 \end{figure}
 
-The spill implementation uses PostgreSQL's \texttt{BufFile} temporary-file
-interface, rather than giving each run an unmanaged permanent file. The
-number of merge inputs is limited independently of the total run count.
-One unusually frequent hash can also have a posting list larger than a work
-buffer. Its positions are streamed through bounded buffers, so one long list
-does not require one equally large vector.
-Temporary disk use can still grow with the input and the merge passes. A
-memory bound does not imply constant disk space or constant build time.
-
-Construction writes the complete payload before its final navigation
-metadata becomes usable. In the sequence-wide stream layout, directory
-entries may only refer to finished controls and postings. Publication of the
-new generation is a separate final step, described in
-Section~\ref{sec:index-generations}.
+This file-spill algorithm implementation uses PostgreSQL's \texttt{BufFile} temporary-file
+interface. It's important to note that BioseqDB will try to use RAM whether possible to avoid using disk if merging can avoid it.

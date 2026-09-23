@@ -22,8 +22,9 @@ matrix. The machine inventory precedes the result tables.
   restart setup lie outside the current measured interval.
   \item \textbf{Timing scopes.} Historical outer-E2E timings are treated as
   mismeasurements and excluded from the tables, coverage counts and comparisons.
-  All observations in the BioseqDB algorithm tables use the current framework
-  mapping-iteration interval.
+  Standard observations use the current framework mapping-iteration interval.
+  FAST fallbacks retain their distinct single-sample timing scope and carry
+  an \textsuperscript{s} marker. They are never pooled with standard repeats.
   The final external-aligner table identifies its separate timing boundary explicitly.
   In particular, ``mapping interval'' still includes transient construction in
   no-index mode.
@@ -31,7 +32,8 @@ matrix. The machine inventory precedes the result tables.
   nearest-rank P50 of the complete measured interval. The second, B, is the
   nearest-rank P50 after subtracting the physical union of instrumented CIGAR
   and MAPQ intervals separately in each repeat. With five repeats the P50 is the
-  third sorted observation. If $U_i$ is that interval union, the definitions are
+  third sorted observation. For FAST entries, P50 is the single observed value.
+  If $U_i$ is that interval union, the definitions are
   \[
     A_{50}=\operatorname{P50}(A_i),\qquad
     B_{50}=\operatorname{P50}(A_i-|U_i|).
@@ -72,11 +74,18 @@ The configured parameters are as follows.
   distribution or an occurrence standard deviation. This provenance does not
   imply that an aligner returns exactly one hit. The original five summaries certify
   exact baseline match-count equality but intentionally omit the actual counts.
-  \item \textbf{Repetitions and variability.} Each published configuration and
-  timing scope has five accepted repeats. A repeat measures the complete query
+  \item \textbf{Repetitions and variability.} Standard observations have five
+  accepted repeats. FAST observations have one measured batch and cannot
+  establish repeat-to-repeat variability. A repeat measures the complete query
   batch, not a single query. The original five summaries contain medians and repeat counts,
   but no raw timing samples, so timing standard deviations and confidence
   intervals cannot be recovered from these files.
+  \item \textbf{FAST procedure.} Compatible persisted indexes are reused across
+  index-mode configurations. PostgreSQL restarts before measurement, and the
+  operating-system filesystem cache is not cleared. Index preparation and restart
+  are outside the timer. No-index measurements still include transient index
+  construction. FAST remote runs omit the additional plan and alternative-setting
+  controls, while retaining measured-statement correctness and timing checks.
 \end{itemize}
 
 \paragraph{Execution rows.}
@@ -99,8 +108,20 @@ Each cell places the A duration above its comparison, followed by the B duration
 and its own comparison. Durations are rounded to tenths of a second for display.
 All comparisons and minima use the original integer nanoseconds.
 \begin{itemize}
-  \item A BioseqDB value is compared with minimap2 on the same machine, fixture,
-  index mode and timing scope. The minimap2 row compares with the fastest
+  \item Minimap2 remains the first row. Local execution rows are ordered by
+  their minimum available Index-mode A timing across all local sizes, minimizer
+  parameters and alphabets, with all cases retained in the same table.
+  AWS execution rows are ordered separately for each target-size and $(k,w)$
+  group, taking the minimum across both alphabets and all four machine classes
+  within that group. Each order is retained across continuation pages.
+  No-index timings and B timings do not affect ordering. Rows without Index
+  measurements in the relevant group appear last. Equal minima use the execution
+  configuration as a deterministic tie-breaker. This ordering reflects the
+  fastest available Index case, not average performance.
+  \item A BioseqDB value is compared with minimap2 for the same machine class,
+  fixture and index mode. Marked FAST fallbacks may be compared with standard observations,
+  which have a different repeat count and execution procedure.
+  The minimap2 row compares with the fastest
   measured eligible BioseqDB effective path in that same column, independently
   for A and B. Thus its two reference algorithms can differ. Baselines are
   repeated on continuation pages solely to assist reading.
@@ -159,15 +180,22 @@ Missing C7G BioseqDB timings cannot establish either a win or a loss.
 The standalone Python generator reads only the normative
 \texttt{approved\_results} rows and the remote
 \texttt{hardware\_unavailable\_cells}, with their embedded machine metadata.
-It validates identities and timing scopes, rejects duplicate display cells, and
+It validates identities and timing scopes, rejects duplicates within a source, and
 records the SHA-256 of each input in the generated LaTeX source. Coverage totals
 are recomputed from approved rows rather than copied from historical progress
 summaries. Regeneration is manual and is not part of CMake. The fixture description
 was checked against the campaign JSON and its sequence generator, together with
-DOC0432 and DOC0433. The full row-specific qualifications remain in the five
-source YAML authorities. For each remote cell, the generator selects the first
-available approved observation from the default summary, then TEST3, then TEST4
-for the same machine class and workload. Both A and B come from that observation.
+DOC0432 and DOC0433. The full row-specific qualifications remain in the
+source YAML authorities. Each cell selects the approved observation with the
+lowest A across all configured sources. Remote sources are the default summary,
+TEST3, TEST4, TEST7, TEST2 and FAST. Local sources are the default local summary
+and FAST LOCAL. The listed source order breaks exact A ties only. Both A and B,
+the repeat count and the timing scope come from the same selected observation.
+This reports the best observed timing across the available campaigns, not a
+pooled median or typical runtime. Selecting a lower timing does not by itself
+establish that a slower observation suffered swapping. The generator checks that every unique eligible
+tuple in these sources is rendered once logically, excluding the historical
+mismeasurements and accounting for repeated baseline rows on continuation pages.
 Missing fallback files are skipped. This selection also supplies the minimap2
 and BioseqDB rows in the final comparison table.
 The final table additionally reads the four external-aligner

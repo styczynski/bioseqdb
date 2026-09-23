@@ -1,86 +1,9 @@
-\section{A saved index needs a source version}
-\label{sec:index-compatibility}
-
-The same table and SQL primary key can survive an update that changes a
-sequence. An index must therefore identify more than its owner by name. The
-versioned index metadata binds the payload to a source epoch and to the rules
-that produced its minimizers. Invalidation changes the old epoch's catalog
-state. A replacement source receives a new epoch.
-
-The important checks have simple reasons:
-\begin{itemize}
-  \item \textbf{Source identity.} The relation, column, source locator,
-    epoch, and generation must name the intended source version.
-  \item \textbf{Seed meaning.} The alphabet, $k,w$, hash scheme, and scheme
-    version must agree with the query. Equal parameter names alone do not
-    make different hash schemes compatible.
-  \item \textbf{Position meaning.} Width and coordinate encoding must
-    represent the target without truncation, including its strand bits.
-  \item \textbf{Array meaning.} The reader must recognize the format and
-    every addressed range. A device reader also needs a compatible array
-    interface.
-\end{itemize}
-
-Lengths, offsets, and checksums help detect damaged or misaddressed data.
-Checks happen before the reader forms a span or allocates a destination from
-an untrusted stored count. A checksum is a corruption check; it does not
-replace source-version or algorithm checks. Ordinary serialized minimizer
-formats record layout revisions and array sizes, but do not store a source
-epoch or hash-scheme identifier. Generation readers also check the stored
-source version and minimizer hash scheme.
-
-\subsection{Publish complete generations}
+\subsection{Index versioning}
 \label{sec:index-generations}
 \label{sec:index-physical-persistence}
+\label{sec:index-compatibility}
 
-A small \emph{descriptor} is the record that identifies a generation and its
-payload. Building a new generation does not require changing
-the old payload in place:
-\begin{enumerate}
-  \item Allocate a new generation and write its payload.
-  \item Check the complete layout and its source and algorithm identities.
-  \item Replace the catalog descriptor transactionally, after the payload
-    is ready.
-\end{enumerate}
-The descriptor update uses PostgreSQL's tuple visibility. An older snapshot
-can continue to see its older descriptor; a later eligible snapshot can see
-the replacement. Failure before publication must not make a partial build
-the current index.
 
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
-  \draw[index arrow,black!50] (1,5.6)--(12.2,5.6) node[right] {time};
-  \node[anchor=east] at (.8,4.55) {writer};
-  \node[index orange,minimum width=4.2cm] at (4.1,4.55) {write and check generation $g+1$};
-  \node[index green,minimum width=2.8cm] at (9.05,4.55) {publish; commit};
-  \draw[index arrow] (6.3,4.55)--(7.6,4.55);
-  \draw[dashed,black!60] (9.05,.85)--(9.05,4.2);
-  \draw[dashed,black!60] (9.05,4.9)--(9.05,5.2);
-  \node[anchor=east] at (.8,3.05) {reader A};
-  \draw[line width=8pt,indexBlue!25] (1.8,3.05)--(10.9,3.05);
-  \node at (5.45,3.05) {older snapshot: descriptor for $g$};
-  \node[anchor=east] at (.8,1.6) {reader B};
-  \draw[line width=8pt,indexGreen!25] (9.45,1.6)--(12,1.6);
-  \node[anchor=east] at (8.85,1.6) {new snapshot};
-  \node at (10.75,1.6) {$g+1$};
-  \node[anchor=west,align=left] at (1.6,.3)
-    {Publication changes which descriptor is visible.\\It does not overwrite the payload still used by reader A.};
-\end{tikzpicture}
-\caption{Versioned publication with two snapshots. Reader A resolves the
-old descriptor and retains its read resources. Reader B starts after commit
-and can resolve the new one. Physical reclamation is a separate operation.}
-\label{fig:index-generation-lifecycle}
-\end{figure}
-
-A snapshot that sees a parent sequence's deletion must also reject its old
-source epoch. These changes belong to the same transaction. Updating a
-sequence similarly invalidates the old source for newer snapshots and
-appends a replacement. Neither
-operation means that every fragment and index byte is immediately erased.
-An old reader may still need the former version, and the stored objects need
-their own cleanup policy. The current MPS build path does not automatically
-delete replaced payloads; reclaiming them requires separate cleanup.
 
 \subsection{From stored index rows to a CPU reader file}
 \label{sec:index-mpf5-sidecar}
