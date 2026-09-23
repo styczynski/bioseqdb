@@ -311,6 +311,63 @@ benchmark_host_profile:
   replicas:
   - schema: bioseq.remote-benchmark-host
     version: 1
+    machine_id: M7A
+    cloud_provider: aws
+    aws_identity:
+      account_id: '970376923108'
+      region: us-east-1
+      availability_zone: us-east-1f
+      instance_id: i-0c724c456e6a87366
+      ec2_architecture: x86_64
+    instance_type: m7a.xlarge
+    architecture: x86_64
+    cpu:
+      architecture: x86_64
+      model: AMD EPYC 9R14
+      isa: 'x86_64 flags: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush
+        mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology
+        nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq monitor ssse3 fma cx16 pcid
+        sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy cr8_legacy
+        abm sse4a misalignsse 3dnowprefetch topoext perfctr_core ssbd perfmon_v2 ibrs ibpb stibp ibrs_enhanced
+        vmmcall fsgsbase bmi1 avx2 smep bmi2 invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt
+        clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx512_bf16 clzero xsaveerptr
+        rdpru wbnoinvd arat avx512vbmi pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg
+        avx512_vpopcntdq rdpid flush_l1d'
+      vcpu_count: 4
+      core_count: 4
+      threads_per_core: 1
+    memory:
+      physical_mib: 16384
+    storage:
+      kind: ebs
+      root_device: /dev/sda1
+      volume_id: vol-09e1fb2d8a352b673
+      capacity_gib: 500
+      volume_type: gp3
+      provisioned_iops: 6000
+      provisioned_throughput_mib_per_s: 500
+      encrypted: true
+      instance_store_present: false
+    receipt_host:
+      machine: x86_64
+      node: ip-172-31-77-104
+      release: 7.0.0-1012-aws
+      system: Linux
+    measurement_device:
+      identity: cpu:x86_64:ip-172-31-77-104
+      version: Linux:7.0.0-1012-aws
+    build_preset: native-x64-clang22-linux-e2e
+    preset_family: e2e
+    gpu:
+      available: false
+      device_count: 0
+      identity: null
+      driver: null
+      vulkan_available: false
+      aws_gpu_info: null
+    descriptor_sha256: d52a2e186dbc534a93a78c79f82a6a8294e24dfcba6be45890f2037bc83ae334
+  - schema: bioseq.remote-benchmark-host
+    version: 1
     machine_id: TEST3_M7A
     cloud_provider: aws
     aws_identity:
@@ -491,7 +548,7 @@ matrix_scope:
   - scalar_minimap2
   - simd_minimap2
   - range_minimum_query
-  bioseq_expected_cells: 524
+  bioseq_expected_cells: 520
   bioseq_index_types:
   - minimizers_per_fragment
   - minimizers_per_sequence
@@ -523,11 +580,2461 @@ matrix_scope:
   - 2
   - 4
   target_size_unit: Decimal Gbp, exactly 1,000,000,000 base pairs.
-  total_expected_cells: 524
-  total_expected_runs: 524
+  total_expected_cells: 520
+  total_expected_runs: 520
   window_kmer_pairs:
   - kmer_size: 15
     window_size: 10
   - kmer_size: 20
     window_size: 15
-approved_results: []
+approved_results:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 18732989767
+    p50_b: 14457724065
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 11973032428
+    p50_b: 7697284082
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 10174811667
+    p50_b: 5951888721
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 9940962550
+    p50_b: 5792585407
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 10214878591
+    p50_b: 5903922129
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: scalar -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 10008662644
+    p50_b: 5914297298
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: scalar -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 9988907406
+    p50_b: 5886034201
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: scalar -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 10101675022
+    p50_b: 5876275711
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: scalar -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 10074700003
+    p50_b: 5901107114
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: scalar -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 10417268130
+    p50_b: 6046317182
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: scalar -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 10248914108
+    p50_b: 5948264186
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","range_minimum_query","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: simd_minimap2_reference -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 13557120465
+    p50_b: 7758497455
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","range_minimum_query","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: simd_minimap2_reference -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 13644691564
+    p50_b: 7479213453
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","scalar_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: simd_minimap2_reference -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 12738739157
+    p50_b: 7436248006
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","scalar_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: simd_minimap2_reference -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 12785350346
+    p50_b: 7308308096
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","simd_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: simd_minimap2_reference -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 13171475823
+    p50_b: 7686203013
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","simd_minimap2_reference","simd_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: simd_minimap2_reference
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: simd_minimap2_reference -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 16688333235
+    p50_b: 11150579547
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 11136162122
+    p50_b: 7060211394
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 9390573564
+    p50_b: 5296036135
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 9488796144
+    p50_b: 5304518344
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 9499464608
+    p50_b: 5332551978
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 11497873896
+    p50_b: 7385744127
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: scalar -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 472165175389
+    p50_b: 468541936385
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: scalar -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 469215837929
+    p50_b: 465560458555
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: scalar -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 478366416385
+    p50_b: 474668698503
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: scalar -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 466714596809
+    p50_b: 462991303103
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: scalar -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 471997615588
+    p50_b: 468290746746
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: scalar -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 498491717165
+    p50_b: 494815985610
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test3-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: scalar -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 673750013648
+    p50_b: 672960296620
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: scalar -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 671289877469
+    p50_b: 667601873584
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: scalar -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 690644103458
+    p50_b: 689877486004
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 25696707925
+    p50_b: 21310041595
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 30932838196
+    p50_b: 26532251787
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 18736879006
+    p50_b: 14259259845
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 22391557586
+    p50_b: 18083448660
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 23066880056
+    p50_b: 18625126540
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 29953802474
+    p50_b: 25473013365
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: scalar -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 35034063184
+    p50_b: 30549023592
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: scalar -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 26356090134
+    p50_b: 21883775426
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: scalar -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 19063634045
+    p50_b: 14567216972
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","scalar_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: scalar -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 20035873434
+    p50_b: 15583174156
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: scalar -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 23187118693
+    p50_b: 18757836047
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: scalar -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 42222355798
+    p50_b: 37600012199
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 35886464985
+    p50_b: 31797014333
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 26835084075
+    p50_b: 22716507416
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 17012919109
+    p50_b: 12802277920
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","scalar_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: scalar_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> scalar_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 14791649575
+    p50_b: 10656561543
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","simd_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 34577857243
+    p50_b: 30375598714
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test2-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: scalar -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 949557300601
+    p50_b: 945843380380
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test4-m7a. Correctness-only minimap2 baseline from default-m7a
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Linux process-memory
+    accounting charges anonymous/shared RSS, private swap and explicit huge pages; file-backed RSS remains
+    subject to the independent system-available-memory guard. PostgreSQL cold starts are configured at
+    nice=-20; the benchmark launcher requests inherited nice=-20 using passwordless sudo. This remains
+    ordinary time-sharing scheduling, not real-time.

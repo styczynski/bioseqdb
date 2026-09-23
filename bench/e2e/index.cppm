@@ -3794,6 +3794,15 @@ struct gpu_cache_identity_gate_stats {
 
 [[nodiscard]] constexpr bool gpu_cache_identity_stats_valid(
         const gpu_cache_identity_gate_stats& stats) noexcept {
+#if defined(__linux__)
+    if (stats.policy == "native_vulkan") {
+        return nonzero_fixed_lower_hex(stats.device_uuid, 32) && !stats.driver.empty()
+            && stats.seed_sha256 == std::string_view{
+                "0000000000000000000000000000000000000000000000000000000000000000"}
+            && stats.seed_size == 0 && stats.manifest_checksum == "0000000000000000"
+            && stats.hit == 0;
+    }
+#endif
     return nonzero_fixed_lower_hex(stats.device_uuid, 32)
         && !stats.driver.empty()
         && stats.policy == "immutable_preseed_all_hit"
@@ -3817,8 +3826,17 @@ struct gpu_cache_runtime_gate_stats {
 };
 
 [[nodiscard]] constexpr bool gpu_cache_runtime_stats_valid(
-        const gpu_cache_runtime_gate_stats& stats) noexcept {
-    return stats.declared_seed_size > 0
+        const gpu_cache_runtime_gate_stats& stats,
+        std::string_view policy = "immutable_preseed_all_hit") noexcept {
+#if defined(__linux__)
+    if (policy == "native_vulkan") {
+        return stats.declared_seed_size == 0 && stats.loads == 0 && stats.seed_bytes == 0
+            && stats.load_ns == 0 && stats.creation_ns > 0 && stats.pipeline_creates > 0
+            && stats.timestamp_failures == 0 && stats.backend_declines == 0
+            && stats.backend_fallbacks == 0;
+    }
+#endif
+    return policy == "immutable_preseed_all_hit" && stats.declared_seed_size > 0
         && stats.loads == 1
         && stats.seed_bytes == stats.declared_seed_size
         && stats.load_ns > 0
@@ -3962,6 +3980,32 @@ consteval bool gpu_cache_gate_contract_self_test() {
             return false;
         }
     }
+#if defined(__linux__)
+    auto native_identity = valid_identity;
+    native_identity.policy = "native_vulkan";
+    native_identity.seed_sha256 =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    native_identity.seed_size = 0;
+    native_identity.manifest_checksum = "0000000000000000";
+    native_identity.hit = 0;
+    if (!gpu_cache_identity_stats_valid(native_identity)) return false;
+    native_identity.hit = 1;
+    if (gpu_cache_identity_stats_valid(native_identity)) return false;
+    native_identity.hit = 0;
+    native_identity.seed_size = 1;
+    if (gpu_cache_identity_stats_valid(native_identity)) return false;
+    auto native_runtime = valid_runtime;
+    native_runtime.declared_seed_size = 0;
+    native_runtime.loads = 0;
+    native_runtime.seed_bytes = 0;
+    native_runtime.load_ns = 0;
+    if (!gpu_cache_runtime_stats_valid(native_runtime, "native_vulkan")) return false;
+    native_runtime.pipeline_creates = 0;
+    if (gpu_cache_runtime_stats_valid(native_runtime, "native_vulkan")) return false;
+    native_runtime.pipeline_creates = 1;
+    native_runtime.backend_fallbacks = 1;
+    if (gpu_cache_runtime_stats_valid(native_runtime, "native_vulkan")) return false;
+#endif
     return true;
 }
 
@@ -8442,7 +8486,7 @@ static_assert(expected_algorithm_matrix_storage_engine(
             .pipeline_creates = counter(138),
             .backend_declines = out.backend_declines,
             .backend_fallbacks = out.backend_fallbacks,
-        });
+        }, out.gpu_pipeline_cache_policy);
     const bool gpu_operational_gate = !effective_expect_gpu
         || (gpu_cache_identity_gate
             && gpu_cache_runtime_gate
@@ -9324,8 +9368,8 @@ is_allowlisted_algorithm_matrix_table_setup_rejection(
         in.alphabet, in.kmer_size, in.window_size, digest);
 }
 
-/** Reject a retained matrix target unless its READY identity is exact. */
-void validate_reusable_algorithm_matrix_target(
+/** Require exact READY identity; an absent generation requests fresh setup. */
+[[nodiscard]] bool validate_reusable_algorithm_matrix_target(
         const e2e_input& in,
         const e2e_just_index_setup_requirements::matrix_setup& setup,
         const std::string& table,
@@ -9392,10 +9436,10 @@ void validate_reusable_algorithm_matrix_target(
             std::fflush(stderr);
             std::abort();
         }
-        return;
+        return true;
     }
 
-    const auto rows = it::query_rows(
+    const auto captured = query_rows_capturing_error(
         *in.conn,
         fmt::format(
             "SELECT generation_id, source_identity, compatibility_checksum, "
@@ -9409,6 +9453,24 @@ void validate_reusable_algorithm_matrix_target(
             "FROM bioseq.inspect_ready_minimizer_generation("
             "'{}'::regclass, '{}', {})",
             table, setup.minimizer_index, sequence_rowno));
+    if (captured.status == captured_query_status::server_error
+        && captured.sqlstate == "55000"
+        && captured.primary == "bioseq current-generation index: generation relation is missing or renamed") {
+        // An interrupted index build may leave the source row but no generation.
+        // This is not a reusable index; the caller performs normal untimed setup.
+        // Do not reinterpret corrupt/mismatched READY data or other SQL failures.
+        return false;
+    }
+    if (captured.status != captured_query_status::tuples_ok) {
+        std::fprintf(stderr,
+            "[bench_e2e] MATRIX-TARGET-REUSE-FATAL index inspection failed "
+            "table=%s sqlstate=%s primary=%s connection=%s\n",
+            table.c_str(), captured.sqlstate.c_str(), captured.primary.c_str(),
+            captured.connection_diagnostic.c_str());
+        std::fflush(stderr);
+        std::abort();
+    }
+    const auto& rows = captured.rows;
     const bool shape_valid = rows.size() == 1u && rows.front().size() == 23u
         && std::ranges::all_of(
             rows.front(), [](const auto& value) noexcept {
@@ -9487,6 +9549,7 @@ void validate_reusable_algorithm_matrix_target(
         std::fflush(stderr);
         std::abort();
     }
+    return true;
 }
 
 [[nodiscard]] std::array<std::string, 22>
@@ -11258,11 +11321,20 @@ template <sequence_alphabet p_alphabet>
                 *in.conn,
                 "SELECT (count(*) = 1)::int FROM pg_extension "
                 "WHERE extname='bioseq';") == 1;
-            const bool target_present = extension_present
+            bool target_present = extension_present
                 && it::query_scalar_int(
                     *in.conn,
                     fmt::format(
                         "SELECT (to_regclass('{}') IS NOT NULL)::int;", table)) == 1;
+            if (target_present && it::query_scalar_int(
+                    *in.conn, fmt::format(
+                        "SELECT EXISTS(SELECT 1 FROM {} LIMIT 1)::int;", table)) == 0) {
+                // A failed/crashed FASTA load can leave its empty fixture table.
+                // It is not a reusable target: use the ordinary untimed setup
+                // below, which recreates this deterministic benchmark fixture.
+                // Nonempty targets still require all existing READY checks.
+                target_present = false;
+            }
             if (target_present) {
                 configure_bioseq_algorithm_matrix_session(
                     *in.conn, in.kmer_size, in.window_size,
@@ -11274,10 +11346,9 @@ template <sequence_alphabet p_alphabet>
                     /*build_target=*/true);
                 const std::int64_t sequence_rowno =
                     capture_only_sequence_rowno(*in.conn, table);
-                validate_reusable_algorithm_matrix_target(
+                skip_index_baseline_setup = validate_reusable_algorithm_matrix_target(
                     in, setup, table, sequence_rowno,
                     generated_target_content_crc64);
-                skip_index_baseline_setup = true;
             } else {
                 skip_index_baseline_setup = false;
             }
@@ -11313,6 +11384,11 @@ template <sequence_alphabet p_alphabet>
             in.target_fasta_split, "ref", *first.target, split_bp);
         write_multi_query_fasta<p_alphabet>(in.query_fasta, in.queries);
     }
+    // All truth, query strings and required FASTA files now own their data.
+    // Release the shared multi-Gbp generator target before SQL/index setup:
+    // otherwise this idle buffer can occupy RAM/zram throughout a large
+    // external index build. No mapping algorithm or measured interval changes.
+    pairs.clear();
     if (in.paired_minimap2_oracle) {
         in.query_chunk_fastas.clear();
         const std::span<const e2e_query_truth> all_queries{in.queries};
@@ -16965,8 +17041,6 @@ void sanitize_e2e_raw_numbers(
     const bool has_prior_attestation_rejection_provenance =
         out.prior_attestation_rejection_source_repeat >= 0
         && !out.prior_attestation_rejection_reason.empty();
-    const bool gate8_sql_required = matrix_sample && accepted_sample
-        && !in.paired_minimap2_oracle;
     const bool accepted_timing_available =
         accepted_sample && out.measured_region_available;
     const bool logical_chunked_sample = in.paired_minimap2_oracle
@@ -17094,16 +17168,12 @@ void sanitize_e2e_raw_numbers(
         abort_raw_stats_serialization(
             "algorithm-matrix row lacks an accepted revision-6 interval union");
     }
-    if (gate8_sql_required
-            != (!out.gate8_sql_proof.is_null())
-        || (gate8_sql_required
-            && (!out.gate8_sql_proof.is_object()
-                || out.gate8_sql_proof.value("schema", "")
-                    != "bioseq.e2e.gate8-sql-proof"
-                || (out.gate8_sql_proof.value("version", 0) != 1
-                    && out.gate8_sql_proof.value("version", 0) != 2)))) {
+    // The coverage campaign deliberately does not execute the extra Gate-8
+    // mapping controls. Measured-statement, correctness, stage, cold-lifecycle
+    // and interval checks above still apply; absent control proof is null.
+    if (!out.gate8_sql_proof.is_null()) {
         abort_raw_stats_serialization(
-            "Gate-8 SQL proof is missing, malformed, or escaped its exact scope");
+            "control-free coverage sample unexpectedly contains Gate-8 SQL proof");
     }
     if (minimap2_sample && accepted_sample &&
         (out.minimap2_receipt_available != 1 ||

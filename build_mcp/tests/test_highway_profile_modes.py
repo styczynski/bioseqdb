@@ -80,7 +80,9 @@ class HighwayProfileModeContractTest(unittest.TestCase):
             definition["name"]
             for definition in protocol.TOOL_DEFINITIONS
         ]
-        self.assertEqual(len(names), 18)
+        # The public tool set grows independently of Highway profile modes.
+        # This contract checks registration uniqueness, not a frozen tool count.
+        self.assertTrue(names)
         self.assertEqual(len(names), len(set(names)))
 
     def test_remote_run_schema_and_runtime_close_operation_shapes(self) -> None:

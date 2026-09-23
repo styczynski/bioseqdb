@@ -759,6 +759,40 @@ def _run_cmake_preset_configure(
         deadline_clock=deadline_clock,
     )
 
+def _cmake_configure_can_reuse_cache(
+        build_dir: Path, expected: Mapping[str, object]) -> bool:
+    """Keep objects when only preset-file contents or PATH changed.
+
+    The resolved selected preset, mode overrides, compiler environment and
+    tool identities must still match. CMake is run again (and may reject an
+    incompatible generator); this does not bypass configure or reseal early.
+    Missing/legacy stamps and removed/null cache variables remain full repairs.
+    """
+    stamp = build_dir / _CMAKE_CONFIGURE_STAMP_NAME
+    try:
+        if stamp.is_symlink() or not stamp.is_file():
+            return False
+        previous = json.loads(stamp.read_text(encoding="utf-8"))
+        if not isinstance(previous, dict):
+            return False
+        valid, _ = _cmake_configure_stamp_status(build_dir, previous)
+        if not valid:
+            return False
+
+        def effective_inputs(document):
+            inputs = dict(document["inputs"])
+            # Reconfigure against the new files, but unrelated preset edits
+            # must not erase object/PCM files below CMakeFiles.
+            inputs.pop("preset_files", None)
+            environment = dict(inputs["managed_environment"])
+            environment.pop("PATH", None)
+            inputs["managed_environment"] = environment
+            return inputs
+
+        return effective_inputs(previous) == effective_inputs(expected)
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        return False
+
 def _ensure_cmake_preset_tree_fresh(
         *,
         build_dir: Path,
@@ -782,10 +816,11 @@ def _ensure_cmake_preset_tree_fresh(
     if build_ninja.is_file() and stamp_matches:
         return False
 
+    reuse_cache = _cmake_configure_can_reuse_cache(build_dir, configure_stamp)
     _invalidate_cmake_configure_stamp(build_dir)
     cache = build_dir / "CMakeCache.txt"
     cmake_files = build_dir / "CMakeFiles"
-    if (
+    if not reuse_cache and (
         cache.exists()
         or cache.is_symlink()
         or cmake_files.exists()
@@ -801,6 +836,10 @@ def _ensure_cmake_preset_tree_fresh(
             log_handle,
             reason,
         )
+    if reuse_cache:
+        log_handle.write(
+            "# CMake in-place reconfigure: selected configuration unchanged; "
+            "preserving cache, object files and modules.\n")
     log_handle.write(
         "# CMake configure freshness mismatch: "
         f"{stamp_reason}; reconfiguring with preset {preset}.\n")
@@ -1424,6 +1463,19 @@ _BUILD_OPERATIONAL_PATHS = frozenset({
     "bench/manage_e2e_fleet.py",
     "bench/monitor_e2e_fleet.py",
     "bench/recover_e2e_measurements.py",
+    "bench/fast_remote_e2e.py",
+    "bench/fast_local_e2e.py",
+    "bench/e2e_queue_supervisor.py",
+    "bench/replace_e2e_runtime.py",
+    "bench/replicate_e2e_runtime.py",
+    "bench/register_e2e_replica.py",
+    "bench/provision_e2e_test7.py",
+    "bench/e2e_tuple_progress.py",
+    "bench/e2e_aws_credits.py",
+    "bench/e2e_fast_quarantine.json",
+    "bench/e2e_fleet_maintenance.json",
+    "bench/e2e_fleet_replicas.json",
+    "bench/e2e_fleet_retirement.json",
 })
 
 _PAPERS_EXCLUDED_PATHSPECS = (
@@ -1508,6 +1560,8 @@ def _source_graph_fingerprint(
                 for part in relative_parts)
             or relative.endswith(".pyc")
             or relative in _BUILD_OPERATIONAL_PATHS
+            or (relative.startswith(("bench/e2e_fast_local/", "bench/e2e_fast_remote/"))
+                and relative.endswith(".json"))
         ):
             continue
         path = repository_root / relative
@@ -2558,11 +2612,23 @@ def tool_import_e2e_artifacts(arguments: Mapping[str, object]) -> str:
     tree = Path(str(origin["build_dir"])).resolve(strict=True)
     tree.relative_to(REPOSITORY_ROOT / "build")
     deadline = time.time() + 120
-    if (_build_configuration_evidence(tree, deadline=deadline) != origin["configuration"]
-            or _runtime_artifact_evidence("benchmark-e2e", tree, deadline=deadline) != origin["runtime_artifacts"]
-            or _receipt_authorized_artifact_evidence("benchmark-e2e", tree,
-                debug=bool(origin["debug"]), deadline=deadline) != origin["authorized_artifacts"]):
-        raise RuntimeError("copied configuration/runtime/install artifact hashes differ from original")
+    configuration = _build_configuration_evidence(tree, deadline=deadline)
+    runtime = _runtime_artifact_evidence("benchmark-e2e", tree, deadline=deadline)
+    artifacts = _receipt_authorized_artifact_evidence("benchmark-e2e", tree,
+        debug=bool(origin["debug"]), deadline=deadline)
+    if (configuration != origin["configuration"] or runtime != origin["runtime_artifacts"]
+            or artifacts != origin["authorized_artifacts"]):
+        expected = {item["relative_path"]: item for item in origin["authorized_artifacts"]}
+        actual = {item["relative_path"]: item for item in artifacts}
+        details = {
+            "configuration_fields": sorted(k for k in configuration if configuration[k] != origin["configuration"].get(k)),
+            "runtime_differs": runtime != origin["runtime_artifacts"],
+            "missing_paths": sorted(expected.keys() - actual.keys()),
+            "unexpected_paths": sorted(actual.keys() - expected.keys()),
+            "changed_paths": sorted(k for k in actual.keys() & expected.keys() if actual[k] != expected[k]),
+        }
+        raise RuntimeError("copied configuration/runtime/install artifact hashes differ from original: "
+                           + json.dumps(details, sort_keys=True))
     # A copied CPU benchmark may still link the Vulkan loader even though GPU
     # cells are disabled. Catch missing system DSOs before queue admission.
     if host_platform.system() == "Linux":
@@ -9355,7 +9421,8 @@ def tool_start_build(mode: str, build_only: bool = False,
                      fresh: bool = False,
                      build_timeout_sec: int | None = None,
                      run_only: bool = False,
-                     reuse_build_receipt: str | None = None) -> str:
+                     reuse_build_receipt: str | None = None,
+                     memory_buffer_percent: int | None = None) -> str:
     identity_error = _refuse_root_build_identity("start_build")
     if identity_error is not None:
         return f"Build worker identity error: {identity_error}"
@@ -9370,6 +9437,13 @@ def tool_start_build(mode: str, build_only: bool = False,
     if mode not in VALID_MODES:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
+
+    if memory_buffer_percent is not None and (
+            isinstance(memory_buffer_percent, bool)
+            or not isinstance(memory_buffer_percent, int)
+            or not 0 <= memory_buffer_percent <= 50
+            or build_only or not supports_bench_cli_options(mode)):
+        return "memory_buffer_percent requires benchmark execution and an integer in [0, 50]"
 
     if mode == ALL_ALPHABETS_UNIT_INTEGRATION_MODE and debug:
         return f"{mode} uses a fixed optimized preset and rejects debug=true"
@@ -9642,6 +9716,8 @@ def tool_start_build(mode: str, build_only: bool = False,
         bench_flags = list(filter_args)
         if debug_report:
             bench_flags.append("--debug")
+        if memory_buffer_percent is not None:
+            bench_flags.extend(["--memory-buffer", str(memory_buffer_percent)])
 
     # Terminal legacy q1024 recovery runs before the scheduling admission
     # lock because its own claim/finish operations are independently CAS-
@@ -10494,6 +10570,17 @@ def tool_status(mode: str | None = None) -> str:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
 
+    # A timed-out process may disappear after the bounded termination sweep.
+    # Reuse admission's read-only proof, without admitting a new job merely
+    # to clear stale cleanup uncertainty. This helper owns its own CAS lock.
+    if mode == "benchmark-e2e":
+        previous = _load_state().get(mode)
+        if (isinstance(previous, dict)
+                and previous.get("status") in {
+                    "completed", "failed", "aborted", "killed_timeout"}
+                and previous.get("cleanup_unverified")):
+            _revalidate_legacy_q1024_postgresql_cleanup_before_admission()
+
     with _global_lock():
         state = _load_state()
         recorded_entry = state.get(mode)
@@ -10505,6 +10592,13 @@ def tool_status(mode: str | None = None) -> str:
                     recorded_entry)
                 if isinstance(recorded_entry, dict) else None),
         )
+        if (isinstance(refreshed_entry, dict)
+                and refreshed_entry.get("status") in {
+                    "completed", "failed", "aborted", "killed_timeout"}
+                and refreshed_entry.get("cleanup_unverified")
+                and not refreshed_entry.get("postgres_cleanup_unverified")):
+            _unverified_guard_cleanup(state, persist=True)
+            refreshed_entry = state.get(mode)
         entry = (
             dict(refreshed_entry)
             if refreshed_entry is not None else None

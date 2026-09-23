@@ -427,7 +427,9 @@ inline constexpr bool is_alignment_kernel_table_neutral =
  * @return `true` when every callable is non-null.
  */
 template <sequence_alphabet p_alphabet>
-[[nodiscard]] constexpr auto
+// Imported templates can otherwise produce one weak symbol shared by
+// different ISA callers. Keep this predicate in the caller's target context.
+[[nodiscard, gnu::always_inline]] inline constexpr auto
 is_alignment_kernel_table_complete(const alignment_kernels<p_alphabet>& kernels) noexcept -> bool {
     return kernels.align_ksw2_single_affine != nullptr
         && kernels.align_ksw2_dual_affine != nullptr

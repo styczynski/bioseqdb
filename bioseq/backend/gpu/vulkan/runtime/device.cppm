@@ -674,9 +674,21 @@ buffer runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage
     VkMemoryAllocateInfo alloc{};
     alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     alloc.allocationSize = reqs.size;
-    alloc.memoryTypeIndex = find_memory_type(reqs.memoryTypeBits,
-                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    // These persistently mapped buffers are read as well as written by the
+    // CPU. Prefer cached host memory; coherent memory alone may be uncached
+    // on a discrete GPU and makes every host payload read unnecessarily slow.
+    try {
+        alloc.memoryTypeIndex = find_memory_type(
+            reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    } catch (const vulkan_runtime_error&) {
+        alloc.memoryTypeIndex = find_memory_type(
+            reqs.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    }
     VkPhysicalDeviceMemoryProperties memory_properties{};
     vkGetPhysicalDeviceMemoryProperties(physical_, &memory_properties);
     const VkMemoryPropertyFlags selected_properties =
@@ -879,26 +891,39 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
     VkMemoryRequirements reqs{};
     vkGetBufferMemoryRequirements(device_, buffer_handle, &reqs);
 
-    // Vulkan chaining targets unified memory: prefer device-local that is ALSO
-    // host-visible+coherent so the round-trip can write/read it directly.
-    // Apple Silicon / MoltenVK always satisfies this; the fallback keeps the
-    // buffer host-visible (every Vulkan device exposes at least one
-    // host-visible+coherent type) so the direct path still applies.
+    // The direct mapped path performs CPU binary searches, read-modify-write
+    // fills, and checksum validation before GPU dispatch. A host-visible BAR
+    // mapping of discrete VRAM is coherent but need not be CPU-cached.
+    // Prefer cached unified memory, then cached host memory accessible to the
+    // GPU. Retain the original coherent choices when caching is unavailable.
     std::uint32_t mem_type = 0;
     bool found = false;
-    try {
-        mem_type = find_memory_type(reqs.memoryTypeBits,
-                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        found = true;
-    } catch (const vulkan_runtime_error&) {
-        found = false;
+    constexpr VkMemoryPropertyFlags mapped_memory_preferences[] = {
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+            VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+            VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    };
+    for (const VkMemoryPropertyFlags properties : mapped_memory_preferences) {
+        try {
+            mem_type = find_memory_type(reqs.memoryTypeBits, properties);
+            found = true;
+            break;
+        } catch (const vulkan_runtime_error&) {
+            // This preference is unavailable; try the next compatible type.
+        }
     }
     if (!found) {
-        mem_type = find_memory_type(reqs.memoryTypeBits,
-                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        vkDestroyBuffer(device_, buffer_handle, nullptr);
+        throw vulkan_runtime_error("no compatible mapped Vulkan memory type");
     }
     VkPhysicalDeviceMemoryProperties memory_properties{};
     vkGetPhysicalDeviceMemoryProperties(physical_, &memory_properties);
@@ -920,12 +945,10 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
         vkDestroyBuffer(device_, buffer_handle, nullptr);
         throw vulkan_runtime_error("vkBindBufferMemory(device)");
     }
-    // Map persistently — on unified memory the device-local buffer is
-    // host-visible, so the round-trip writes inputs / reads outputs directly.
+    // Map persistently: every selected type supports direct host access.
     void* mapped = nullptr;
     if (vkMapMemory(device_, memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
-        // Not host-visible: leave unmapped. The round-trip rejects this case
-        // (Vulkan chaining requires unified memory) rather than silently mis-staging.
+        // Leave a failed mapping unusable; the direct round-trip rejects it.
         mapped = nullptr;
     }
     const bool footprint_reflected =

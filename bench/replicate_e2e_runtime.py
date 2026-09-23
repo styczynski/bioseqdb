@@ -35,6 +35,8 @@ def rpc(command, tool, arguments):
             payload = response.get('result', {})
             if 'error' in response or payload.get('isError'):
                 raise RuntimeError(str(response))
+            if tool == 'status':
+                return payload['content'][0]['text']
             return json.loads(payload['content'][0]['text'])
     raise RuntimeError(result.stderr[-1500:] + result.stdout[-1500:])
 
@@ -43,6 +45,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('family', choices=['c7g', 'm4', 'm7a', 'm7i'])
     parser.add_argument('--profile', choices=['test7', 'test2'], default='test7')
+    parser.add_argument('--wait-bootstrap', action='store_true',
+                        help='Wait up to 30 minutes for the new instance bootstrap')
+    parser.add_argument('--source', choices=sorted(fleet.HOSTS),
+                        help='Use a verified surviving worker from this same family')
     args = parser.parse_args()
     host = args.profile + '-' + args.family
     record = json.loads(state_path(args.profile).read_bytes())['hosts'][args.family]
@@ -52,10 +58,19 @@ def main():
     key = ROOT / 'infra/testing_infra/.secrets/bioseq-bench-aws.pem'
     dest = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
             '-o', 'ConnectTimeout=15', '-i', str(key), 'ubuntu@' + address]
-    subprocess.run(dest + ['test -f /var/lib/bioseq-e2e-replica-bootstrap.ready'], check=True)
+    deadline = time.monotonic() + (1800 if args.wait_bootstrap else 0)
+    while True:
+        probe = subprocess.run(dest + ['test -f /var/lib/bioseq-e2e-replica-bootstrap.ready'],
+                               capture_output=True, timeout=25)
+        if probe.returncode == 0:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Replica bootstrap is not ready: ' + host)
+        time.sleep(60)
     output = ROOT / ('reporting/bioseq_benchmark_e2e/' + args.profile + '_replicas') / host
     output.mkdir(parents=True, exist_ok=True)
-    source = 'default-' + args.family
+    source = args.source or 'default-' + args.family
+    assert fleet.family(source) == args.family
     retirement_path = ROOT / 'bench/e2e_fleet_retirement.json'
     retirement = json.loads(retirement_path.read_bytes())['hosts'] if retirement_path.exists() else {}
     if retirement.get(source, {}).get('draining'):
@@ -101,6 +116,7 @@ def main():
     files += [str(p.relative_to(ROOT)) for p in ROOT.glob('CMake*.txt')]
     files += [str(p.relative_to(ROOT)) for p in ROOT.glob('CMake*.json')]
     files += ['infra/package_build_infra/scripts/finish_e2e_replica.sh']
+    files += ['infra/package_build_infra/scripts/postgresql_e2e_priority.conf']
     files += ['infra/package_build_infra/scripts/register_frozen_runtime_libraries.sh']
     files += ['bench_framework/index.cppm']
     transport = shlex.join(dest[:-1])
@@ -112,8 +128,12 @@ def main():
     subprocess.run(dest + ['cd /home/ubuntu/bioseqdb && python3 bench/aggregate_e2e_algorithm_matrix.py --help >/dev/null'],
                    check=True, timeout=30)
     print(host, 'validating copied artifacts through MCP; no configure/build', flush=True)
+    origin = exported['source_receipt']
+    while origin.get('kind') == 'bioseq-e2e-artifact-import-receipt':
+        origin = origin['artifact_import']['source_receipt']
+    assert origin['kind'] == 'bioseq-build-receipt'
     imported = rpc(dest + ['cd /home/ubuntu/bioseqdb && ' + fleet.ENVIRONMENT + 'python3 build_mcp/server.py'],
-                   'import_e2e_artifacts', {'source_receipt': exported['source_receipt']})
+                   'import_e2e_artifacts', {'source_receipt': origin})
     imported.update(fleet_host=host, address=address, instance_id=instance['InstanceId'],
                     instance_type=instance['InstanceType'], copied_at=time.time())
     atomic(output / 'imported.json', (json.dumps(imported, indent=2) + '\n').encode())

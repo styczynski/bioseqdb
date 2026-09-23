@@ -199,11 +199,11 @@ validated_mapped_sorted_dense_prefix_view(
 }
 
 /**
- * @brief Validate a runtime-resident sorted-dense index and open a prefix view.
+ * @brief Authenticate a completed runtime resident and open its read-only prefix view.
  * @param[in] vulkan_runtime Runtime that must own the mapped buffers.
  * @param[in] resident GPU-resident sorted-dense minimizer index.
  * @return Non-owning prefix view bound to the resident mapped payload.
- * @throws mapped_prefix_invalid_error When residency, ABI, or payload authority fail.
+ * @throws mapped_prefix_invalid_error When residency, ABI, or materialization authority fail.
  */
 [[nodiscard]] inline mapped_sorted_dense_prefix_view
 validated_mapped_sorted_dense_prefix_view(
@@ -276,20 +276,24 @@ validated_mapped_sorted_dense_prefix_view(
             actual_allocation_sum)) {
         throw mapped_prefix_invalid_error{};
     }
-    const auto controls = std::span<const bioseq::indexing::gpu_minimizer_slot>{
-        static_cast<const bioseq::indexing::gpu_minimizer_slot*>(
+    // Completed resident materialization already checked the entire payload
+    // against source_stream_checksum and recorded its mapped traversal. The
+    // resident is read-only throughout lookup. Repeating that target-wide scan
+    // in both prefix passes costs O(queries * target positions), even though
+    // every query borrows the same authenticated resident.
+    //
+    // Keep the ownership, representation, bounds and materialization checks
+    // above. Untrusted span callers still use the full-payload overload.
+    if (resident->target_len == 0u) {
+        throw mapped_prefix_invalid_error{};
+    }
+    return mapped_sorted_dense_prefix_view{
+        .resident = resident,
+        .controls = static_cast<const bioseq::indexing::gpu_minimizer_slot*>(
             resident->slots.mapped),
-        resident->bucket_count};
-    const auto positions = std::span<const std::uint64_t>{
-        static_cast<const std::uint64_t*>(resident->positions.mapped),
-        resident->position_count};
-    auto view = validated_mapped_sorted_dense_prefix_view(
-        controls,
-        positions,
-        static_cast<std::uint64_t>(resident->target_len),
-        resident->source_stream_checksum);
-    view.resident = resident;
-    return view;
+        .bucket_count = resident->bucket_count,
+        .position_count = resident->position_count,
+    };
 }
 
 /**

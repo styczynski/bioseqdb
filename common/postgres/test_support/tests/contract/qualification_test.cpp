@@ -103,6 +103,27 @@ TEST_CASE("Darwin page queues do not double-count speculative pages",
         0, 2).has_value());
 }
 
+TEST_CASE("Linux allocation charge excludes file RSS but retains private swap",
+          "[component:common][layer:contract][feature:memory_budget]") {
+    using bioseq::common::memory::linux_process_charge_bytes;
+    constexpr std::string_view sample =
+        "Name:\tpostgres\nVmRSS:\t7348820 kB\nRssAnon:\t240032 kB\n"
+        "RssFile:\t7108596 kB\nRssShmem:\t192 kB\n"
+        "VmSwap:\t1275048 kB\nHugetlbPages:\t0 kB\n";
+    REQUIRE(linux_process_charge_bytes(sample).has_value());
+    CHECK(*linux_process_charge_bytes(sample) == (240032ULL + 192ULL + 1275048ULL) * 1024ULL);
+    CHECK(*linux_process_charge_bytes(
+        "RssAnon: 0 kB\nRssShmem: 0 kB\nVmSwap: 1 kB\nHugetlbPages: 2 kB\n") == 3072u);
+    CHECK_FALSE(linux_process_charge_bytes("RssAnon: 1 kB\n").has_value());
+    CHECK_FALSE(linux_process_charge_bytes(std::string{sample} + "VmSwap: 0 kB\n").has_value());
+    CHECK_FALSE(linux_process_charge_bytes(
+        "RssAnon: -1 kB\nRssShmem: 0 kB\nVmSwap: 0 kB\nHugetlbPages: 0 kB\n").has_value());
+    CHECK_FALSE(linux_process_charge_bytes(
+        "RssAnon: 1 MB\nRssShmem: 0 kB\nVmSwap: 0 kB\nHugetlbPages: 0 kB\n").has_value());
+    CHECK_FALSE(linux_process_charge_bytes(
+        "RssAnon: 18014398509481983 kB\nRssShmem: 1 kB\nVmSwap: 0 kB\nHugetlbPages: 0 kB\n").has_value());
+}
+
 TEST_CASE("nested cgroup memory limits constrain total and live headroom",
           "[component:common][layer:contract][feature:memory_budget]") {
     constexpr std::array limits{

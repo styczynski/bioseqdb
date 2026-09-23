@@ -5,10 +5,14 @@
 module;
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string_view>
+#include <system_error>
 
 #if defined(__APPLE__) || defined(__linux__)
 #  include <unistd.h>
@@ -84,7 +88,58 @@ darwin_conservative_available_page_bytes(
 #endif
 }
 
-/** Return this process's resident/physical footprint, or zero if unavailable. */
+/**
+ * Parse Linux's non-file process charge from one /proc/self/status sample.
+ *
+ * File-backed RSS is reclaimable through the OS page cache and must not also
+ * consume the process's allocation cap: a read-only index larger than RAM can
+ * otherwise prevent even a small heap allocation despite ample MemAvailable.
+ * Keep resident anonymous/shared memory, swapped private memory and huge pages
+ * charged. In particular, swapping private pages must not manufacture capacity.
+ * System-wide availability remains an independent admission constraint.
+ *
+ * Missing, duplicated, malformed or overflowing fields return no observation;
+ * the live caller then retains the former, conservative full-RSS behavior.
+ */
+[[nodiscard]] inline std::optional<std::uint64_t>
+linux_process_charge_bytes(std::string_view status) noexcept {
+    constexpr std::array<std::string_view, 4> names{
+        "RssAnon:", "RssShmem:", "VmSwap:", "HugetlbPages:"};
+    std::array<bool, names.size()> found{};
+    std::uint64_t total_kib = 0u;
+    while (!status.empty()) {
+        const auto newline = status.find('\n');
+        const auto line = status.substr(0u, newline);
+        status.remove_prefix(newline == std::string_view::npos ? status.size() : newline + 1u);
+        for (std::size_t field = 0u; field < names.size(); ++field) {
+            if (!line.starts_with(names[field])) {
+                continue;
+            }
+            if (found[field]) {
+                return std::nullopt;
+            }
+            auto value = line.substr(names[field].size());
+            value.remove_prefix(std::min(value.find_first_not_of(" \t"), value.size()));
+            std::uint64_t kib = 0u;
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), kib);
+            if (parsed.ec != std::errc{}) {
+                return std::nullopt;
+            }
+            auto unit = value.substr(static_cast<std::size_t>(parsed.ptr - value.data()));
+            unit.remove_prefix(std::min(unit.find_first_not_of(" \t"), unit.size()));
+            if (unit != "kB" || kib > (std::numeric_limits<std::uint64_t>::max)() / 1024u - total_kib) {
+                return std::nullopt;
+            }
+            total_kib += kib;
+            found[field] = true;
+        }
+    }
+    return std::all_of(found.begin(), found.end(), [](bool present) { return present; })
+        ? std::optional<std::uint64_t>{total_kib * 1024u}
+        : std::nullopt;
+}
+
+/** Return the process's allocation charge/physical footprint, or zero if unavailable. */
 [[nodiscard]] inline std::uint64_t process_footprint_bytes() noexcept {
 #if defined(__APPLE__)
     task_vm_info_data_t info{};
@@ -105,6 +160,17 @@ darwin_conservative_available_page_bytes(
     }
     return 0;
 #elif defined(__linux__)
+    // One bounded, allocation-free proc read. Very large status files (for
+    // example, unusually long supplementary-group lists) fall back to RSS
+    // unless all required memory fields fit in this sample.
+    if (std::FILE* status_file = std::fopen("/proc/self/status", "r")) {
+        std::array<char, 4096> status{};
+        const auto bytes = std::fread(status.data(), 1u, status.size(), status_file);
+        std::fclose(status_file);
+        if (const auto charge = linux_process_charge_bytes({status.data(), bytes})) {
+            return *charge;
+        }
+    }
     unsigned long long size_pages = 0;
     unsigned long long resident_pages = 0;
     std::FILE* file = std::fopen("/proc/self/statm", "r");

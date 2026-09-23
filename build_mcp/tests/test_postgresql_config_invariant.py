@@ -584,7 +584,10 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
         self.assertIn("verify-postgresql-runtime-identity", command)
         self.assertTrue(command.startswith("( "))
         self.assertTrue(command.endswith(
-            " ) > /tmp/bioseq_e2e_pg_restart.log 2>&1"))
+            " ) > /tmp/bioseq_e2e_pg_restart.log 2>&1"
+            " || { bioseq_restart_status=$?; "
+            "tail -n 80 /tmp/bioseq_e2e_pg_restart.log >&2; "
+            "exit \"$bioseq_restart_status\"; }"))
 
     def test_checked_in_safety_presets_inherit_local_pin(self) -> None:
         expected = "/opt/homebrew/opt/postgresql@17/bin/pg_config"

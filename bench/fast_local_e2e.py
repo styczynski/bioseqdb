@@ -55,6 +55,44 @@ def priority(child):
             {'block_aligner': 0, 'ksw2': 1}.get(align, 2), child['ordinal'])
 
 
+def index_group(child):
+    identity = child['execution_cell']['identity']
+    return tuple(identity[key] for key in (
+        'index_mode', 'engine', 'dataset', 'alphabet', 'target_size_gbp',
+        'bioseq_index_name', 'requested_minimizer_algorithm', 'kmer_size', 'window_size'))
+
+
+def retire_completed_group():
+    """Drop only idle benchmark scratch tables after their index batch is done."""
+    assert fleet.monitor._local_state().get('status') in fleet.TERMINAL_STATUSES
+    psql = '/opt/homebrew/opt/postgresql@17/bin/psql'
+    sql = """
+      SET lock_timeout='5s';
+      DO $cleanup$
+      DECLARE item record;
+      BEGIN
+        IF EXISTS (SELECT FROM pg_stat_activity WHERE datname=current_database()
+                   AND pid<>pg_backend_pid() AND backend_type='client backend') THEN
+          RAISE EXCEPTION 'benchmark cleanup requires no other client sessions';
+        END IF;
+        FOR item IN SELECT tablename FROM pg_tables WHERE schemaname='public'
+          AND tablename ~ '^e2e[mq]_[a-z0-9]+_k[0-9]+_w[0-9]+_[0-9a-f]{16}$'
+        LOOP
+          EXECUTE format('DROP TABLE public.%I CASCADE', item.tablename);
+          RAISE NOTICE 'retired benchmark scratch table %', item.tablename;
+        END LOOP;
+      END $cleanup$;
+    """
+    result = subprocess.run([psql, '-U', 'postgres', '-d', 'bioseq', '-v',
+                             'ON_ERROR_STOP=1', '-c', sql], capture_output=True,
+                            text=True, timeout=60, check=True)
+    event('completed_index_group_retired', detail=result.stderr,
+          recovery='Regenerate benchmark scratch tables/indexes; results retained')
+    # There are no clients left; unreferenced, unopened image files do not need
+    # the ordinary one-hour grace period at this explicit batch boundary.
+    fleet.reclaim_idle_local_indexes(minimum_free_gib=48, orphan_grace_seconds=0)
+
+
 def document():
     if RESULTS.exists():
         return load_yaml(RESULTS)
@@ -219,19 +257,49 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--daemon', action='store_true')
     parser.add_argument('--plan', action='store_true')
+    parser.add_argument('--retry-setup-failure', action='append', type=int, default=[],
+                        help='Explicitly requeue an unmeasured tuple after its setup failure is diagnosed and fixed')
+    parser.add_argument('--reason', help='Required explanation for an explicit setup retry')
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     if args.daemon:
-        with (OUTPUT / 'controller.log').open('ab') as log:
-            process = subprocess.Popen([sys.executable, __file__], cwd=ROOT,
-                stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        print(json.dumps({'pid': process.pid})); return
+        from e2e_queue_supervisor import start
+        print(json.dumps({'supervisor_pid': start('fast_local')})); return
     lock = (OUTPUT / 'controller.lock').open('a')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     recovery.atomic(OUTPUT / 'controller.pid', (str(os.getpid()) + '\n').encode())
     children = sorted(json.loads(recovery.MANIFEST.read_bytes())['children'], key=priority)
     by_ordinal = {c['ordinal']: c for c in children}
     state = json.loads(STATE.read_bytes()) if STATE.exists() else {'attempted': [], 'active': None}
+    if args.retry_setup_failure:
+        assert args.reason, '--reason is required for a diagnosed setup retry'
+        latest = {}
+        for line in (OUTPUT / 'events.jsonl').read_text().splitlines():
+            row = json.loads(line)
+            if row['event'] in ('audit_failed', 'audited'):
+                latest[row['ordinal']] = row
+        approved = {r['stable_key'] for r in document()['approved_results']} | {
+            r['stable_key'] for r in load_yaml(ROOT / 'ALL_RESULTS_TUPLES.yaml')['approved_results']}
+        retry_keys = set()
+        for ordinal in set(args.retry_setup_failure):
+            child = by_ordinal[ordinal]
+            assert ordinal != (state.get('active') or {}).get('ordinal'), 'Cannot requeue an active owner'
+            assert child['stable_key'] not in approved, 'Already approved; reuse that result'
+            failure = latest.get(ordinal, {})
+            assert (failure.get('event') == 'audit_failed' and failure.get('detail')
+                    == 'Terminal fast run has no complete report to audit'), 'No proven unmeasured attempt'
+            retry_keys.add(child['stable_key'])
+        state['attempted'] = [k for k in state['attempted'] if k not in retry_keys]
+        recovery.atomic(STATE, (json.dumps(state, indent=2) + '\n').encode())
+        event('setup_failures_requeued', ordinals=sorted(set(args.retry_setup_failure)), reason=args.reason)
+        return
+    if 'last_ordinal' not in state and (OUTPUT / 'events.jsonl').exists():
+        # MCP build-only state replaces the last run's config. Retain the
+        # index group across a binary repair instead of switching datasets.
+        for line in (OUTPUT / 'events.jsonl').read_text().splitlines():
+            event_row = json.loads(line)
+            if event_row.get('event') == 'dispatched':
+                state['last_ordinal'] = event_row['ordinal']
     out = document(); write_document(out)
     while True:
         maintenance = json.loads((ROOT / 'bench/e2e_fleet_maintenance.json').read_bytes())
@@ -252,6 +320,7 @@ def main():
             event('blocked', reason='MCP cleanup unverified'); time.sleep(60); continue
         if state['active']:
             active = state['active']; child = by_ordinal[active['ordinal']]
+            state['last_ordinal'] = active['ordinal']
             assert current.get('bench_e2e_config') == active['config'], 'Local run owner changed'
             try:
                 publish(child, Path(active['config']), current.get('report_files', []), out)
@@ -271,6 +340,15 @@ def main():
                 state['active'] = {'ordinal': ordinal, 'config': str(config)}
                 recovery.atomic(STATE, (json.dumps(state, indent=2) + '\n').encode())
                 continue
+        quarantine_path = ROOT / 'bench/e2e_fast_quarantine.json'
+        quarantine = json.loads(quarantine_path.read_bytes()).get('families', {}) if quarantine_path.exists() else {}
+        if 'local' in quarantine:
+            time.sleep(60); continue
+        rollout_path = ROOT / 'reporting/bioseq_benchmark_e2e/fast_remote/state.json'
+        if rollout_path.exists() and 'local' not in json.loads(rollout_path.read_bytes()).get('ready', {}):
+            # The central controller retired the old payload for a repair.
+            # Do not race its build admission with another old-binary tuple.
+            time.sleep(60); continue
         if not state.get('standard_drained'):
             fleet.collect('local', 'before_fast_drain_' + str(int(time.time())))
             subprocess.run([sys.executable, 'bench/recover_e2e_measurements.py', '--publish', '--host', 'local'],
@@ -280,12 +358,41 @@ def main():
             continue
         if not remaining:
             event('queue_exhausted', fast_approved=len(out['approved_results'])); return
-        child = remaining[0]
-        if fleet.shutil.disk_usage(ROOT).free < 12 * 1024**3:
-            fleet.reclaim_idle_local_indexes()
-            if fleet.shutil.disk_usage(ROOT).free < 12 * 1024**3:
-                event('blocked', reason='Less than 12 GiB available after safe idle cleanup')
-                time.sleep(60); continue
+        # A fresh target/index can temporarily occupy much more than its final
+        # image. Preserve controller/report headroom; do not repeat the 4-Gbp
+        # ENOSPC failure admitted by the former flat 12-GiB check. This is an
+        # operational estimate, not a promise that every tuple fits that size.
+        previous = by_ordinal.get(int(config.stem.removeprefix('tuple_'))) \
+            if config.parent == CONFIGS and config.stem.startswith('tuple_') else by_ordinal.get(state.get('last_ordinal'))
+        if previous:
+            same_group = [c for c in remaining if index_group(c) == index_group(previous)]
+            remaining = same_group + [c for c in remaining if index_group(c) != index_group(previous)]
+        if previous and index_group(previous) != index_group(remaining[0]):
+            retire_completed_group()
+
+        def required_space(child):
+            identity = child['execution_cell']['identity']
+            if (current.get('status') == 'completed' and not current.get('build_only') and previous
+                    and identity['index_mode'] == 'just_index'
+                    and index_group(child) == index_group(previous)):
+                return 8 * 1024**3
+            return (8 + 8 * identity['target_size_gbp']) * 1024**3
+
+        free = fleet.shutil.disk_usage(ROOT).free
+        if free < required_space(remaining[0]):
+            fleet.reclaim_idle_local_indexes(minimum_free_gib=48)
+            free = fleet.shutil.disk_usage(ROOT).free
+        just_index = [c for c in remaining
+                      if c['execution_cell']['identity']['index_mode'] == 'just_index']
+        fitting = [c for c in (just_index or remaining) if required_space(c) <= free]
+        if not fitting:
+            event('blocked', reason='Insufficient headroom for a fresh index; tuples remain pending',
+                  free_gib=round(free / 1024**3, 2))
+            time.sleep(60); continue
+        child = fitting[0]
+        if child is not remaining[0]:
+            event('capacity_deferred', preferred_ordinal=remaining[0]['ordinal'],
+                  selected_ordinal=child['ordinal'], free_gib=round(free / 1024**3, 2))
         if time.time() - state.get('last_log', 0) >= 3600:
             fleet.append_progress_log(
                 f'Fast local (separate one-sample methodology): {len(out["approved_results"])} approved; '

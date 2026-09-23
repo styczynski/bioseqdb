@@ -2152,6 +2152,11 @@ def _postgresql_e2e_restart_shell_command(
         "( " + shlex.join(restart_argv)
         + " && " + shlex.join(verifier_argv)
         + " ) > /tmp/bioseq_e2e_pg_restart.log 2>&1"
+        # Preserve existing diagnostics in the owning run log before the next
+        # cold restart overwrites this shared scratch log. No extra SQL/metrics.
+        + " || { bioseq_restart_status=$?; "
+        + "tail -n 80 /tmp/bioseq_e2e_pg_restart.log >&2; "
+        + "exit \"$bioseq_restart_status\"; }"
     )
 
 

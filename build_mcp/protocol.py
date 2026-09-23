@@ -294,6 +294,12 @@ TOOL_DEFINITIONS = [
                         "BIOSEQ_E2E_CONFIG_OVERRIDE."
                     ),
                 },
+                "memory_buffer_percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 50,
+                    "description": "Benchmark execution only. Forward the existing --memory-buffer CLI option; does not change algorithm or PostgreSQL settings.",
+                },
                 "debug_report": {
                     "type": "boolean",
                     "default": False,
@@ -1838,6 +1844,7 @@ def _handle_tools_call(params: dict) -> dict:
                                 debug_supplied="debug" in args,
                                 filter_supplied="filter" in args,
                                 bench_e2e_config=bench_e2e_config,
+                                memory_buffer_percent=args.get("memory_buffer_percent"),
                                 fresh=fresh,
                                 build_timeout_sec=build_timeout_sec,
                                 run_only=run_only,

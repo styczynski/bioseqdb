@@ -180,7 +180,7 @@ class runtime_gpu_cache_metrics_claim_plan {
         const runtime_metal_archive_pipeline_receipt* first = receipts.front();
         if (first == nullptr || !first->is_valid())
             return plan;
-        plan.claim_seed_ = !seed_already_claimed;
+        plan.claim_seed_ = !first->audit().native_vulkan && !seed_already_claimed;
         if (plan.claim_seed_) {
             plan.audit_.gpu_pipeline_cache_loads = 1u;
             plan.audit_.gpu_pipeline_cache_seed_bytes = first->audit().seed_size;
@@ -189,6 +189,7 @@ class runtime_gpu_cache_metrics_claim_plan {
         for (std::size_t i = 0u; i < receipts.size(); ++i) {
             const runtime_metal_archive_pipeline_receipt* receipt = receipts[i];
             if (receipt == nullptr || !receipt->is_valid() ||
+                receipt->audit().native_vulkan != first->audit().native_vulkan ||
                 receipt->audit().seed_size != first->audit().seed_size ||
                 receipt->audit().seed_load_ns != first->audit().seed_load_ns) {
                 return runtime_gpu_cache_metrics_claim_plan{};
@@ -320,6 +321,7 @@ static_assert(std::is_nothrow_move_constructible_v<runtime_gpu_cache_metrics_del
 enum class runtime_pipeline_cache_policy : std::uint8_t {
     invalid,                   ///< No accepted cache policy.
     immutable_preseed_all_hit, ///< Every pipeline came from the sealed preseed set.
+    native_vulkan,             ///< Native dispatch; Metal cache qualification is inapplicable.
 };
 
 /// @brief Immutable GPU environment identity attached to accepted operations.
@@ -336,6 +338,15 @@ struct runtime_gpu_execution_environment_snapshot {
     /// @brief Checks device, driver, cache policy, seed identity, and all-hit state.
     /// @return Whether this snapshot represents an accepted immutable GPU environment.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
+        if (cache_policy == runtime_pipeline_cache_policy::native_vulkan) {
+            return k_native_vulkan_pipeline_receipts && gpu_environment_present &&
+                   std::any_of(gpu_device_uuid.begin(), gpu_device_uuid.end(),
+                               [](std::uint8_t value) { return value != 0u; }) &&
+                   std::any_of(gpu_driver_identity.begin(), gpu_driver_identity.end(),
+                               [](char value) { return value != '\0'; }) &&
+                   seed_sha256 == std::array<std::uint8_t, 32>{} &&
+                   seed_size == 0u && manifest_checksum == 0u && !pipeline_cache_all_hit;
+        }
         return gpu_environment_present &&
                std::any_of(gpu_device_uuid.begin(),
                            gpu_device_uuid.end(),
@@ -396,6 +407,7 @@ struct runtime_pipeline_job_use_audit {
 
 /// @brief Complete causal audit for one runtime pipeline operation.
 struct runtime_pipeline_operation_audit {
+    bool native_vulkan = false;
     runtime_pipeline_operation_kind kind = runtime_pipeline_operation_kind::invalid;
     std::uint64_t operation_identity = 0u;
     std::array<runtime_pipeline_prepared_audit, k_runtime_pipeline_prepared_slots> prepared{};
@@ -902,20 +914,27 @@ class runtime_pipeline_operation_token {
             audit_.burned_pending_uses != 0u || audit_.pending || audit_.invalid ||
             audit_.saturated || !audit_.cache_metrics.is_internally_consistent() ||
             audit_.cache_metrics.token_identity != audit_.operation_identity ||
-            audit_.api_version == 0u || audit_.driver_version == 0u || audit_.seed_size == 0u ||
-            audit_.manifest_checksum == 0u || audit_.seed_receipt_identity == 0u ||
-            !audit_.archive_set.is_valid() ||
-            !audit_.cache_qualification.is_internally_consistent() ||
-            audit_.cache_qualification.archive_set != audit_.archive_set ||
+            audit_.api_version == 0u || audit_.driver_version == 0u ||
+            (audit_.native_vulkan
+                ? !k_native_vulkan_pipeline_receipts ||
+                      audit_.seed_sha256 != std::array<std::uint8_t, 32>{} ||
+                      audit_.seed_size != 0u || audit_.manifest_checksum != 0u ||
+                      audit_.seed_receipt_identity != 0u ||
+                      audit_.archive_set != runtime_metal_archive_set_identity{} ||
+                      audit_.cache_qualification != runtime_metal_archive_process_qualification{}
+                : audit_.seed_size == 0u || audit_.manifest_checksum == 0u ||
+                      audit_.seed_receipt_identity == 0u || !audit_.archive_set.is_valid() ||
+                      !audit_.cache_qualification.is_internally_consistent() ||
+                      audit_.cache_qualification.archive_set != audit_.archive_set) ||
             std::all_of(audit_.device_uuid.begin(),
                         audit_.device_uuid.end(),
                         [](std::uint8_t value) { return value == 0u; }) ||
             std::all_of(audit_.pipeline_cache_uuid.begin(),
                         audit_.pipeline_cache_uuid.end(),
                         [](std::uint8_t value) { return value == 0u; }) ||
-            std::all_of(audit_.seed_sha256.begin(),
+            (!audit_.native_vulkan && std::all_of(audit_.seed_sha256.begin(),
                         audit_.seed_sha256.end(),
-                        [](std::uint8_t value) { return value == 0u; })) {
+                        [](std::uint8_t value) { return value == 0u; }))) {
             return false;
         }
         for (std::size_t i = 0u; i < audit_.prepared_count; ++i) {
@@ -927,7 +946,8 @@ class runtime_pipeline_operation_token {
                 return false;
             }
             const runtime_metal_archive_pipeline_audit& pipeline = receipt->audit();
-            if (pipeline.receipt_identity != prepared.receipt_identity ||
+            if (pipeline.native_vulkan != audit_.native_vulkan ||
+                pipeline.receipt_identity != prepared.receipt_identity ||
                 pipeline.shader_key != prepared.shader_key ||
                 pipeline.runtime_vulkan_device_uuid != audit_.device_uuid ||
                 pipeline.api_version != audit_.api_version ||
@@ -1216,6 +1236,7 @@ class runtime_pipeline_use_collector {
 
         const runtime_metal_archive_pipeline_audit& source = receipt->audit();
         if (!environment_sealed_) {
+            audit_.native_vulkan = source.native_vulkan;
             audit_.device_uuid = source.runtime_vulkan_device_uuid;
             audit_.api_version = source.api_version;
             audit_.driver_version = source.driver_version;
@@ -1229,7 +1250,8 @@ class runtime_pipeline_use_collector {
             audit_.archive_set = source.expected_archives;
             audit_.cache_qualification = source.cache_qualification;
             environment_sealed_ = true;
-        } else if (source.runtime_vulkan_device_uuid != audit_.device_uuid ||
+        } else if (source.native_vulkan != audit_.native_vulkan ||
+                   source.runtime_vulkan_device_uuid != audit_.device_uuid ||
                    source.api_version != audit_.api_version ||
                    source.driver_version != audit_.driver_version ||
                    source.vendor_id != audit_.vendor_id || source.device_id != audit_.device_id ||
