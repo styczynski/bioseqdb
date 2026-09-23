@@ -40,6 +40,25 @@ def event(kind, **fields):
     print(json.dumps(row), flush=True)
 
 
+def wait_for_local_run():
+    """Notice terminal MCP state promptly without polling SQL or build metadata.
+
+    The normal controller loop still verifies ownership and cleanup before
+    collection/admission. While a job runs, only its small state file is read;
+    expensive result/queue scans remain at most once per minute.
+    """
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        time.sleep(min(5, max(0, deadline - time.monotonic())))
+        try:
+            status = json.loads(Path(fleet.monitor.STATE_PATH).read_bytes()).get(
+                'benchmark-e2e', {}).get('status')
+        except (OSError, ValueError):
+            return  # The normal observation path handles unreadable state.
+        if status != 'running':
+            return
+
+
 def priority(child):
     """Exhaust each compatible index group before changing its dataset/producer."""
     i = child['execution_cell']['identity']
@@ -315,7 +334,7 @@ def main():
                 'first_ordinals': [c['ordinal'] for c in remaining[:24]]}, indent=2)); return
         current = fleet.monitor._local_state()
         if current.get('status') == 'running':
-            time.sleep(60); continue
+            wait_for_local_run(); continue
         if current.get('cleanup_unverified'):
             event('blocked', reason='MCP cleanup unverified'); time.sleep(60); continue
         if state['active']:
@@ -408,7 +427,7 @@ def main():
         state['active'] = {'ordinal': child['ordinal'], 'config': str(path)}
         recovery.atomic(STATE, (json.dumps(state, indent=2) + '\n').encode())
         event('dispatched', ordinal=child['ordinal'], status=observed['status'], build_receipt=receipt)
-        time.sleep(60)
+        wait_for_local_run()
 
 
 if __name__ == '__main__':

@@ -711,8 +711,9 @@ TOOL_DEFINITIONS = [
                         "read-only historical mode is required for a "
                         "non-debug receipt, disables .bc-to-.s synthesis, "
                         "and never proves the current worktree. Receipt seal, "
-                        "commit, configuration, target ownership, and exact "
-                        "artifact hashes remain validated."
+                        "configuration, target ownership, and exact artifact "
+                        "hashes remain validated. Commit and source metadata "
+                        "are provenance only, never reuse rejection gates."
                     ),
                 },
             },

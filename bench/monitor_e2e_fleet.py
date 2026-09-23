@@ -163,11 +163,18 @@ def _remote_state(name: str, host: str, key: str, instance_id: str | None) -> di
         "print(json.dumps(d))"
     )
     remote_command = f"python3 -c {shlex.quote(remote_python)}"
-    result = _run([
-        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-        "-o", f"HostKeyAlias={name}", "-o", "StrictHostKeyChecking=no",
-        "-i", key, f"ubuntu@{host}", remote_command,
-    ])
+    try:
+        result = _run([
+            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+            "-o", f"HostKeyAlias={name}", "-o", "StrictHostKeyChecking=no",
+            "-i", key, f"ubuntu@{host}", remote_command,
+        ])
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        # A slow/unreachable worker is unknown, not failed or idle. Keep its
+        # tuple reservation and let healthy peers finish this scheduling pass.
+        return {"status": "unreachable", "error": (
+            f"SSH observation exceeded {exc.timeout}s" if isinstance(
+                exc, subprocess.TimeoutExpired) else str(exc))}
     if result.returncode != 0:
         return {"status": "unreachable", "error": result.stderr.strip() or result.stdout.strip()}
     try:

@@ -3454,10 +3454,13 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
             with mock.patch.object(
                 process_state, "BUILD_RECEIPT_FILE", receipt_path,
             ), mock.patch.object(
-                build_worker, "_source_graph_fingerprint",
-                return_value="source-digest",
+                build_worker, "REPOSITORY_ROOT", repository,
             ), mock.patch.object(
-                build_worker, "_git_commit", return_value="a" * 40,
+                build_worker, "_source_graph_fingerprint",
+                side_effect=AssertionError("reuse must not inspect current sources"),
+            ), mock.patch.object(
+                build_worker, "_git_commit",
+                side_effect=AssertionError("reuse must not inspect current HEAD"),
             ), mock.patch.object(
                 build_worker, "_build_configuration_evidence",
                 return_value={"sealed": True},
@@ -3477,13 +3480,29 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
                 self.assertIsNone(error)
                 self.assertEqual(
                     observed["build_receipt_id"], "br_round_trip")
-                with mock.patch.object(
-                        build_worker, "_source_graph_fingerprint",
-                        return_value="changed-source-digest"):
-                    rejected, rejection = build_worker._validate_build_receipt(
-                        "br_round_trip", expected_mode="unit-integration")
-                self.assertIsNone(rejected)
-                self.assertIn("source graph no longer matches", rejection)
+                # A build that succeeds after a commit/source edit must also
+                # seal without consulting current sources. Preserve the
+                # scheduling metadata; don't relabel the artifact as current.
+                sealed_after_edit = build_worker._seal_successful_build_receipt(
+                    mode="unit-integration",
+                    entry={**receipt, "pending_build_receipt_id": "br_after_edit"},
+                    build_dir=build_dir, preset="test-opt", debug=False)
+                self.assertEqual(sealed_after_edit["source_commit"], "a" * 40)
+                self.assertEqual(sealed_after_edit["source_graph_fingerprint"],
+                                 "source-digest")
+                reused, error = build_worker._validate_build_receipt("br_after_edit")
+                self.assertIsNone(error)
+                self.assertEqual(reused, sealed_after_edit)
+                for checker, value in (
+                    ("_build_configuration_evidence", {"changed": True}),
+                    ("_runtime_artifact_evidence", [{"changed": True}]),
+                ):
+                    with self.subTest(checker=checker), mock.patch.object(
+                            build_worker, checker, return_value=value):
+                        rejected, rejection = build_worker._validate_build_receipt(
+                            "br_round_trip")
+                        self.assertIsNone(rejected)
+                        self.assertIsNotNone(rejection)
                 schema_mutations = {
                     "legacy": lambda value: value.update(
                         schema_version=value.pop("schema_revision")),
@@ -4462,7 +4481,6 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
         validate.assert_called_once_with(
             "br_fast",
             expected_debug=None,
-            verify_source=False,
         )
         self.assertEqual(captured["build_dir"], build_dir)
         self.assertEqual(captured["artifact_names"], ("bioseq_benchmark",))
@@ -6107,7 +6125,7 @@ class Q1024ServiceLifecycleTests(unittest.TestCase):
                     ._revalidate_legacy_q1024_postgresql_cleanup_before_admission(
                         request_deadline=time.time() + 30))
             self.assertTrue(verified)
-            self.assertFalse(validate.call_args.kwargs["verify_source"])
+            self.assertNotIn("verify_source", validate.call_args.kwargs)
             self.assertLessEqual(
                 validate.call_args.kwargs["deadline"], time.time() + 15.1)
             self.assertEqual(captured["preserved_terminal_status"], "aborted")

@@ -332,9 +332,7 @@ def repair_build(name: str, s: dict, state: dict, dry_run: bool) -> bool:
     """Allow one incremental retry only after a specifically identified fix."""
     reason = None
     paths = ("build_mcp/build_worker.py", "build_mcp/q1024_watchdog.py", "bench/aggregate_e2e_algorithm_matrix.py")
-    if "source graph changed during build" in (s.get("notes") or ""):
-        reason = "operational_source_fingerprint"
-    elif (family(name) == "m4" and s.get("build_only") is True
+    if (family(name) == "m4" and s.get("build_only") is True
           and s.get("notes") == "process identity snapshot deadline was reached"):
         # These slow hosts exhausted the old four-hour build budget while
         # compiling. Preserve every completed object and resume once with the

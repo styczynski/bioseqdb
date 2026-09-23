@@ -2391,7 +2391,6 @@ def _validate_build_receipt(
         *,
         expected_mode: str | None = None,
         expected_debug: bool | None = None,
-        verify_source: bool = True,
         deadline: float | None = None,
 ) -> tuple[dict[str, object] | None, str | None]:
     _require_control_deadline(deadline, "build-receipt validation")
@@ -2437,7 +2436,7 @@ def _validate_build_receipt(
     ):
         return None, f"build receipt {receipt_id!r} content seal is invalid"
     if imported:
-        if (verify_source or receipt.get("mode") != "benchmark-e2e"
+        if (receipt.get("mode") != "benchmark-e2e"
                 or os.environ.get("BIOSEQ_E2E_REUSE_FROZEN_BINARY") != "1"):
             return None, "imported artifacts require explicit frozen E2E run-only reuse"
         origin = receipt.get("artifact_import", {}).get("source_receipt")
@@ -2485,30 +2484,10 @@ def _validate_build_receipt(
         build_dir.relative_to(source_repository_root / "build")
     except (OSError, ValueError):
         return None, "build receipt paths are missing or outside the owned tree"
-    if verify_source:
-        try:
-            observed_source = _source_graph_fingerprint(
-                source_repository_root, deadline=deadline)
-        except RuntimeError as exc:
-            return None, f"cannot validate build receipt source graph: {exc}"
-        if observed_source != receipt.get("source_graph_fingerprint"):
-            return None, "build receipt source graph no longer matches"
-    frozen_e2e_artifacts = (
-        not verify_source
-        and receipt.get("mode") == "benchmark-e2e"
-        and os.environ.get("BIOSEQ_E2E_REUSE_FROZEN_BINARY") == "1"
-    )
-    if not frozen_e2e_artifacts:
-        try:
-            observed_commit = _git_commit(
-                source_repository_root, deadline=deadline)
-        except RuntimeError as exc:
-            return None, f"cannot validate build receipt commit: {exc}"
-        if observed_commit != receipt.get("source_commit"):
-            return None, "build receipt source commit no longer matches"
-    # A frozen E2E run measures the receipt's recorded source, not current HEAD.
-    # Keep that identity unchanged. Moving HEAD alone must not force a build;
-    # all artifact, compiler/configuration and host checks below still apply.
+    # Reuse validates the existing artifacts, never current HEAD or worktree.
+    # Source metadata is provenance from scheduling, not a freshness gate or
+    # proof that the executable represents current sources. Keep it unchanged.
+    # Artifact, compiler/configuration and host checks below still apply.
     mode = receipt.get("mode")
     if not isinstance(mode, str) or mode not in MODES:
         return None, "build receipt names an unknown mode"
@@ -2567,7 +2546,7 @@ def tool_export_e2e_artifacts(arguments: Mapping[str, object]) -> str:
     if os.environ.get("BIOSEQ_E2E_REUSE_FROZEN_BINARY") != "1":
         raise RuntimeError("artifact export requires explicit frozen E2E reuse")
     receipt, error = _validate_build_receipt(str(arguments.get("build_receipt_id", "")),
-        expected_mode="benchmark-e2e", verify_source=False, deadline=time.time() + 120)
+        expected_mode="benchmark-e2e", deadline=time.time() + 120)
     if error or receipt is None:
         raise RuntimeError(str(error))
     tree = Path(str(receipt["build_dir"]))
@@ -2658,7 +2637,7 @@ def tool_import_e2e_artifacts(arguments: Mapping[str, object]) -> str:
     receipt["content_sha256"] = canonical_json_sha256(receipt)
     _store_build_receipt(receipt)
     checked, error = _validate_build_receipt(str(receipt["build_receipt_id"]),
-        expected_mode="benchmark-e2e", verify_source=False, deadline=deadline)
+        expected_mode="benchmark-e2e", deadline=deadline)
     if error or checked is None:
         raise RuntimeError("import validation failed: " + str(error))
     return json.dumps({"status": "imported_without_build", "build_receipt_id": receipt["build_receipt_id"],
@@ -2797,14 +2776,9 @@ def _seal_successful_build_receipt(
     receipt_id = entry.get("pending_build_receipt_id")
     if not isinstance(receipt_id, str) or not receipt_id:
         raise RuntimeError("build-only run has no reserved receipt id")
-    source_fingerprint = _source_graph_fingerprint(REPOSITORY_ROOT)
-    if source_fingerprint != entry.get("source_graph_fingerprint"):
-        raise RuntimeError(
-            "source graph changed during build; refusing to seal receipt")
-    source_commit = _git_commit(REPOSITORY_ROOT)
-    if source_commit != entry.get("source_commit"):
-        raise RuntimeError(
-            "source commit changed during build; refusing to seal receipt")
+    # Preserve the scheduling snapshot as provenance, without claiming source
+    # stability throughout the build. A commit or edit must not discard a
+    # successful compilation. The sealed artifacts identify what was built.
     receipt: dict[str, object] = {
         "kind": "bioseq-build-receipt",
         "schema_revision": 2,
@@ -2821,8 +2795,8 @@ def _seal_successful_build_receipt(
         "targets": list(MODES[mode].targets),
         "build_dir": str(build_dir.resolve(strict=True)),
         "source_repository_root": str(REPOSITORY_ROOT.resolve(strict=True)),
-        "source_commit": source_commit,
-        "source_graph_fingerprint": source_fingerprint,
+        "source_commit": entry.get("source_commit"),
+        "source_graph_fingerprint": entry.get("source_graph_fingerprint"),
         "build_timeout_sec": entry.get("build_timeout_sec"),
         "build_phase_started_at": entry.get("build_phase_started_at"),
         "configure_completed_at": entry.get("configure_completed_at"),
@@ -7285,8 +7259,6 @@ def _run_only_from_build_receipt(
             str(receipt["build_receipt_id"]),
             expected_mode=mode,
             expected_debug=bool(receipt["debug"]),
-            verify_source=not (mode == "benchmark-e2e" and os.environ.get(
-                "BIOSEQ_E2E_REUSE_FROZEN_BINARY") == "1"),
             deadline=deadline,
         )
         if install_receipt_error is not None or install_receipt is None:
@@ -7431,8 +7403,6 @@ def _run_only_from_build_receipt(
             str(receipt["build_receipt_id"]),
             expected_mode=mode,
             expected_debug=bool(receipt["debug"]),
-            verify_source=not (mode == "benchmark-e2e" and os.environ.get(
-                "BIOSEQ_E2E_REUSE_FROZEN_BINARY") == "1"),
             deadline=deadline,
         )
         if receipt_error is not None or revalidated_receipt is None:
@@ -8032,12 +8002,6 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 reuse_build_receipt,
                 expected_mode=mode,
                 expected_debug=debug,
-                # Opt-in frozen E2E campaign: retain the receipt's original
-                # source identity, but still verify every binary, installed
-                # artifact, compiler configuration, and receipt content seal.
-                # Reporting/controller edits must not force recompilation.
-                verify_source=not (mode == "benchmark-e2e" and os.environ.get(
-                    "BIOSEQ_E2E_REUSE_FROZEN_BINARY") == "1"),
                 deadline=deadline,
             )
             if receipt_error is not None or receipt is None:
@@ -8069,13 +8033,6 @@ def _run_build_worker(mode: str, build_only: bool = False,
         if reuse_build_receipt is not None:
             raise RuntimeError(
                 "reuse_build_receipt is valid only with run_only=true")
-        expected_source_fingerprint = entry.get("source_graph_fingerprint")
-        if expected_source_fingerprint is not None:
-            observed_source_fingerprint = _source_graph_fingerprint(
-                REPOSITORY_ROOT)
-            if observed_source_fingerprint != expected_source_fingerprint:
-                raise RuntimeError(
-                    "source graph changed between scheduling and worker start")
         env = _build_worker_descendant_environment()
         # Never let ambient MCP-server state select an E2E configuration. The
         # explicit start_build argument below is the sole supported override.
@@ -8945,7 +8902,6 @@ def _revalidate_legacy_q1024_postgresql_cleanup_before_admission(
             receipt_id,
             expected_mode="benchmark-e2e",
             expected_debug=False,
-            verify_source=False,
             deadline=deadline,
         )
     except (OSError, RuntimeError, TimeoutError):
@@ -9632,8 +9588,6 @@ def tool_start_build(mode: str, build_only: bool = False,
                 str(reuse_build_receipt),
                 expected_mode=mode,
                 expected_debug=(debug if debug_supplied else None),
-                verify_source=not (mode == "benchmark-e2e" and os.environ.get(
-                    "BIOSEQ_E2E_REUSE_FROZEN_BINARY") == "1"),
             )
             if receipt_error is not None or selected_receipt is None:
                 return f"Build receipt validation error: {receipt_error}"
@@ -10315,17 +10269,10 @@ def tool_inspect(arguments: dict) -> str:
                 _parse_worker_bool("debug", debug_raw)
                 if debug_raw is not None else None
             )
-            if historical_artifact_only:
-                selected_receipt, receipt_error = _validate_build_receipt(
-                    receipt_id,
-                    expected_debug=explicit_debug,
-                    verify_source=False,
-                )
-            else:
-                selected_receipt, receipt_error = _validate_build_receipt(
-                    receipt_id,
-                    expected_debug=explicit_debug,
-                )
+            selected_receipt, receipt_error = _validate_build_receipt(
+                receipt_id,
+                expected_debug=explicit_debug,
+            )
             if receipt_error is not None or selected_receipt is None:
                 raise RuntimeError(
                     f"inspect receipt validation failed: {receipt_error}")
@@ -10427,13 +10374,13 @@ def tool_inspect(arguments: dict) -> str:
         out["build_metadata"]["build_receipt_id"] = receipt_id
         out["build_metadata"]["source_graph_fingerprint"] = (
             selected_receipt["source_graph_fingerprint"])
+        out["build_metadata"]["current_worktree_source_verified"] = False
+        out["build_metadata"]["source_scope"] = (
+            "receipt-recorded scheduling snapshot; current worktree not verified")
         if historical_artifact_only:
             out["build_metadata"]["historical_artifact_only"] = True
-            out["build_metadata"]["current_worktree_source_verified"] = False
             out["build_metadata"]["artifact_scope"] = (
                 "exact receipt-pinned historical artifact")
-            out["build_metadata"]["source_scope"] = (
-                "receipt-recorded source graph; current worktree not verified")
     return json.dumps(out, indent=2)
 
 def _unknown_document_activity() -> dict:

@@ -7,7 +7,7 @@
       "owner": "fast_remote_e2e"
     },
     "test3-m4": {
-      "reason": "Fast campaign owns family; drain current standard tuple, then import same-family binary",
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
       "paused": true,
       "owner": "fast_remote_e2e"
     },

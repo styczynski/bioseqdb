@@ -238,33 +238,13 @@ def rollout(host, observed, state):
     if host == leader:
         progress = state['builds'].get(host)
         if progress:
-            if (observed.get('status') == 'failed'
-                    and 'source graph changed during build' in (observed.get('notes') or '')
-                    and state.setdefault('source_seal_retries', {}).get(host, 0) < 1):
-                # No clean/reconfigure: Ninja reuses every completed object.
-                state['source_seal_retries'][host] = 1
-                state.setdefault('rollout_history', []).append({'host': host, 'build': progress,
-                    'reason': 'One incremental retry after source-change seal rejection'})
-                state['builds'].pop(host); save(state)
-                emit('source_seal_retry', host=host)
-                return
             if observed.get('build_receipt_id') != progress['receipt']:
                 raise RuntimeError('Build owner changed: ' + host)
             if observed['status'] != 'completed' or not observed.get('build_only'):
                 raise RuntimeError('One-time fast build failed: ' + host + ' ' + str(observed))
-            required_paths = build_source_paths(host)
-            # Queue/audit Python changes do not alter the measured executable.
-            # They are synchronized for operation, but must not force another
-            # C++ build merely because scheduling changed while Clang ran.
-            required = {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest()
-                        for p in required_paths
-                        if not (p.startswith('bench/') and p.endswith('.py'))}
-            if any(progress.get('patch_sha256', {}).get(p) != digest for p, digest in required.items()):
-                state.setdefault('rollout_history', []).append({'host': host, 'build': progress,
-                    'reason': 'Completed build predates authoritative source batch; incremental update required'})
-                state['builds'].pop(host); save(state)
-                emit('repair_batch_incremental_update', host=host)
-                return
+            # Use the completed executable even if local sources moved while
+            # it compiled. Source hashes are historical provenance only; a
+            # source-driven rebuild requires an explicit --refresh-family.
             if family in ('m4', 'm7a', 'm7i'):
                 receipt = observed['build_receipt_id']
                 if state.setdefault('isa_verified', {}).get(host) != receipt:
@@ -360,6 +340,28 @@ print(json.dumps({'zram_started':repaired,'zram_size_bytes':ram_kib*1024,'zram_a
     return result
 
 
+def suspend_package_timers(host):
+    """Defer automatic updates until reboot/explicit restore, not active apt jobs.
+
+    Unattended upgrades invoke needrestart and can kill measured PostgreSQL
+    sessions. Only mask timers in /run; never stop a service or package manager.
+    Restore with systemctl unmask --runtime followed by start for both timers.
+    """
+    command = (
+        'sudo -n systemctl mask --runtime --now apt-daily.timer apt-daily-upgrade.timer && '
+        'systemctl show apt-daily.timer apt-daily-upgrade.timer '
+        '--property=Id --property=LoadState --property=ActiveState')
+    result = subprocess.run(fleet.ssh(host) + [command], capture_output=True,
+                            text=True, timeout=35)
+    states = [line.removeprefix('ActiveState=') for line in result.stdout.splitlines()
+              if line.startswith('ActiveState=')]
+    if (result.returncode or result.stdout.count('LoadState=masked') != 2
+            or len(states) != 2 or any(s not in ('inactive', 'failed') for s in states)):
+        raise RuntimeError('Could not suspend automatic upgrade timers: '
+                           + result.stdout[-500:] + result.stderr[-500:])
+    return {'apt_timers': 'runtime-masked; restore after campaign or reboot'}
+
+
 def ensure_benchmark_priority(host):
     """Configure future cold PostgreSQL starts; never restart a live server here."""
     source = 'infra/package_build_infra/scripts/postgresql_e2e_priority.conf'
@@ -385,13 +387,19 @@ def launch(host, child, state):
     # and is not a failed measurement of that algorithm combination.
     state.setdefault('memory_profiles', {})[host] = ensure_memory_profile(host)
     state.setdefault('priority_profiles', {})[host] = ensure_benchmark_priority(host)
+    state.setdefault('maintenance_profiles', {})[host] = suspend_package_timers(host)
     config = make_config(child)
     fleet.sync_files(host, (*CONTROL, 'bench/aggregate_e2e_algorithm_matrix.py', config))
     identity = child['execution_cell']['identity']
+    force_fresh = group_key(child) in state.get('fresh_setup_groups', {}).get(fleet.family(host), [])
+    damaged_group = state.get('damaged_index_groups', {}).get(host)
+    force_fresh = force_fresh or damaged_group == group_key(child)
     retained = identity['index_mode'] == 'just_index' and identity['engine'] == 'bioseq'
     env = {'BIOSEQ_E2E_REUSE_FROZEN_BINARY': '1', 'BIOSEQ_E2E_KEEP_ARTIFACTS': '0',
            'BIOSEQ_E2E_RETAIN_MATRIX_JUST_INDEX_TARGET': '1' if retained else '0',
-           'BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP': '1' if retained else '0',
+           # Keep the fresh target after measurement, but don't inspect/reuse
+           # the interrupted generation on this first recovery attempt.
+           'BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP': '1' if retained and not force_fresh else '0',
            'BIOSEQ_E2E_SKIP_MINIMAP2_BASELINE_SETUP': '0',
            'BIOSEQ_E2E_JUST_INDEX_SETUP_ONLY': '',
            'BIOSEQ_E2E_JUST_INDEX_SETUP_PIPELINE_MODE': 'task_parallel'}
@@ -405,6 +413,12 @@ def launch(host, child, state):
     observed = observe(host)
     assert observed.get('bench_e2e_config') == config, observed
     state['active'][host].update(admitted=True, log=log)
+    if force_fresh:
+        groups = state.get('fresh_setup_groups', {}).get(fleet.family(host), [])
+        if group_key(child) in groups:
+            groups.remove(group_key(child))
+        emit('interrupted_index_setup_reset_requested', host=host, ordinal=child['ordinal'])
+    state.get('damaged_index_groups', {}).pop(host, None)
     state['attempted'].setdefault(fleet.family(host), []).append(child['stable_key'])
     save(state); emit('fast_dispatched', host=host, ordinal=child['ordinal'], group=group_key(child))
 
@@ -448,13 +462,18 @@ def failure_evidence(host, observed):
         destination = OUTPUT / 'evidence' / host / log.name
         recovery.atomic(destination, fetched.stdout)
         result['terminal_log_tail'] = str(destination.relative_to(ROOT))
-        markers = ('MATRIX-SQL-FATAL', 'RAW-STATS-SERIALIZATION-FAIL',
+        markers = ('MATRIX-SQL-FATAL', 'MATRIX-TARGET-REUSE-FATAL',
+                   'BIOSEQ-RESULT-STRUCTURAL-CORRUPTION', 'RAW-STATS-SERIALIZATION-FAIL',
                    'E2E memory admission refused', 'Illegal instruction',
                    'Assertion failed', 'SSL error', 'Segmentation fault',
                    'memory budget', 'No benchmark iterations', 'No iterations')
         diagnostics = [line for line in fetched.stdout.decode(errors='replace').splitlines()
                        if any(marker in line for marker in markers)]
-        result['failure_diagnostics'] = diagnostics[-6:]
+        # Keep both the diagnostic prefix and SQL error suffix, not a 20-kbp
+        # INSERT payload. The complete original tail is retained above.
+        result['failure_diagnostics'] = [line if len(line) <= 1200 else
+            line[:400] + ' ... [SQL payload omitted; full saved log retained] ... ' + line[-600:]
+            for line in diagnostics[-6:]]
     except (OSError, subprocess.TimeoutExpired) as exc:
         result['log_fetch_error'] = str(exc)[-500:]
     return result
@@ -558,6 +577,8 @@ def main():
     parser.add_argument('--refresh-family', action='append', choices=tuple(LEADERS), default=[],
                         help='At an idle boundary, retire rollout receipts and retry failed setup rows; preserve all results')
     parser.add_argument('--reason', help='Required explanation for an explicit rollout refresh')
+    parser.add_argument('--retry-operational-failure', action='append', default=[], metavar='HOST:ORDINAL',
+                        help='Requeue a diagnosed interrupted run with fresh setup; never a correctness failure')
     parser.add_argument('--keep-index-groups', action='store_true',
                         help='With --refresh-family only: preserve group affinity when the repair leaves index semantics/format unchanged')
     parser.add_argument('--drain-running-peers', action='store_true',
@@ -577,6 +598,41 @@ def main():
         state = json.loads(STATE.read_bytes()) if STATE.exists() else {
             'ready': {}, 'builds': {}, 'active': {}, 'attempted': {}, 'groups': {}, 'pending': []}
         LEADERS.update(state.get('leaders', {}))
+        if args.retry_operational_failure:
+            assert args.reason and not args.refresh_family, 'Retry requires --reason and no refresh'
+            requested = []
+            for token in dict.fromkeys(args.retry_operational_failure):
+                host, ordinal_text = token.rsplit(':', 1)
+                assert host in fleet.HOSTS, 'Only active hosts may be retried'
+                ordinal = int(ordinal_text); child = by_ordinal[ordinal]; family = fleet.family(host)
+                key = child['stable_key']
+                approved = standard_keys(family) | {
+                    r['stable_key'] for r in local.load_yaml(result_path(family))['approved_results']}
+                assert key not in approved, 'Already approved; preserve it'
+                assert not any(fleet.family(h) == family and a['ordinal'] == ordinal
+                               for h,a in state['active'].items()), 'Tuple is already active'
+                failures = [p for p in state['pending'] if p['host'] == host and p['ordinal'] == ordinal]
+                assert failures and not failures[-1].get('reports'), 'No incomplete attempt to retry'
+                failure = failures[-1]
+                assert not failure.get('operational_retry_at'), 'Explicit retry already scheduled'
+                log = ROOT / failure['terminal_log_tail']
+                assert log.resolve().is_relative_to((OUTPUT / 'evidence').resolve())
+                text = log.read_text(errors='replace')
+                assert 'BIOSEQ-RESULT-STRUCTURAL-CORRUPTION' not in text, 'Correctness failure is not an operational retry'
+                assert any(marker in text for marker in (
+                    'active generation head is missing', 'generation relation is missing or renamed',
+                    'SSL connection has been closed unexpectedly', 'SSL error: unexpected eof',
+                    'terminating connection due to administrator command')), 'Not a diagnosed interruption'
+                requested.append((host, child, failure))
+            for host, child, failure in requested:
+                family = fleet.family(host); key = child['stable_key']
+                state['attempted'][family] = [k for k in state['attempted'][family] if k != key]
+                fresh = state.setdefault('fresh_setup_groups', {}).setdefault(family, [])
+                if group_key(child) not in fresh: fresh.append(group_key(child))
+                failure.update(operational_retry_at=time.time(), operational_retry_reason=args.reason)
+            save(state)
+            emit('operational_failures_requeued', tuples=args.retry_operational_failure, reason=args.reason)
+            return
         if args.refresh_family:
             assert args.reason, '--reason is required'
             for family in args.refresh_family:
@@ -638,7 +694,8 @@ def main():
                 hold(host, 'Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import')
         while True:
             quarantine_path = ROOT / 'bench/e2e_fast_quarantine.json'
-            quarantined = json.loads(quarantine_path.read_bytes()).get('families', {}) if quarantine_path.exists() else {}
+            quarantine = json.loads(quarantine_path.read_bytes()) if quarantine_path.exists() else {}
+            quarantined = quarantine.get('families', {})
             registered = fleet.monitor.registered_hosts()
             fleet.HOSTS = {h[0]: h for h in registered}
             retire_closed_hosts(state, by_ordinal)
@@ -693,6 +750,11 @@ def main():
                             publish(host, child, active['config'], reports, documents, state, children)
                         except Exception as exc:
                             failure = failure_evidence(host, current)
+                            diagnostics = '\n'.join(failure.get('failure_diagnostics', []))
+                            if ('MATRIX-TARGET-REUSE-FATAL' in diagnostics and any(message in diagnostics
+                                    for message in ('active generation head is missing',
+                                                    'generation relation is missing or renamed'))):
+                                state.setdefault('damaged_index_groups', {})[host] = group_key(child)
                             state['pending'].append({'host': host, **active, 'error': str(exc),
                                                      'reports': [str(p) for p in reports], **failure})
                             emit('fast_audit_failed', host=host, ordinal=active['ordinal'],
@@ -719,6 +781,12 @@ def main():
                         continue
                     if family in quarantined:
                         continue
+                    # A bounded diagnostic lease drains and publishes the live
+                    # job first, retaining its fixture without idling siblings.
+                    # Expiry makes a lost interactive session self-recovering.
+                    diagnostic = quarantine.get('hosts', {}).get(host, {})
+                    if time.time() < diagnostic.get('until_epoch', 0):
+                        continue
                     excluded = approved[family] | set(state['attempted'].get(family, []))
                     # A sibling can still be draining its last five-run tuple.
                     # Reserve it until its results have been fetched and audited.
@@ -733,11 +801,15 @@ def main():
                         for h,a in state['active'].items())
                     just_index_draining = any(c['path'] in standard_inflight
                         and c['execution_cell']['identity']['index_mode']=='just_index' for c in children)
-                    if (just_index_active or just_index_draining
-                            or any(c['execution_cell']['identity']['index_mode']=='just_index' for c in remaining)):
-                        remaining = [c for c in remaining if c['execution_cell']['identity']['index_mode']=='just_index']
                     owned = {group for h,group in state['groups'].items() if h != host and fleet.family(h)==family}
                     candidates = [c for c in remaining if group_key(c) not in owned]
+                    # Prefer just-index among work this host can actually own.
+                    # A sibling's final retained group must not leave the other
+                    # replicas idle while hundreds of no-index cells are ready.
+                    just_index_candidates = [c for c in candidates
+                        if c['execution_cell']['identity']['index_mode']=='just_index']
+                    if just_index_candidates:
+                        candidates = just_index_candidates
                     current_group = state['groups'].get(host)
                     same_group = [c for c in candidates if group_key(c)==current_group]
                     if not candidates:
@@ -745,6 +817,11 @@ def main():
                     child = (same_group or candidates)[0]
                     state['groups'][host] = group_key(child)
                     launch(host, child, state)
+                    if (child['execution_cell']['identity']['index_mode']=='no_index'
+                            and (just_index_active or just_index_draining or any(
+                                c['execution_cell']['identity']['index_mode']=='just_index' for c in remaining))):
+                        emit('idle_replica_admitted_no_index', host=host, ordinal=child['ordinal'],
+                             reason='All remaining just-index groups are owned by siblings; preserve their index reuse')
                 except Exception as exc:
                     emit('queue_error', host=host, detail=str(exc))
             # A missing raw baseline is not a reason to rerun a saved sample.
