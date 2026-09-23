@@ -470,7 +470,8 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     std::unique_ptr<runtime_pipeline_use_collector> query_pipeline_collector;
     const bool causal_pipeline_token_required =
         materialization == vulkan_sketch_host_materialization::device_only &&
-        (should_use_shader_provider_locked() || is_runtime_metal_archive_configuration_installed());
+        (k_native_vulkan_pipeline_receipts || should_use_shader_provider_locked() ||
+         is_runtime_metal_archive_configuration_installed());
     if (causal_pipeline_token_required) {
         query_pipeline_collector = runtime_pipeline_use_collector::create(
             runtime_pipeline_operation_kind::query_sketch, 1u, next_operation_identity_locked());

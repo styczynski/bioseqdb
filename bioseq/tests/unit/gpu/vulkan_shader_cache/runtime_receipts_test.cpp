@@ -750,3 +750,51 @@ TEST_CASE("grouped-SoA radix pass count is exact at byte boundaries",
     CHECK_FALSE(
         gv::runtime_grouped_soa_radix_pass_count((std::numeric_limits<std::uint64_t>::max)(), 2u));
 }
+
+TEST_CASE("native Vulkan receipts exempt Metal archives but retain pipeline identity",
+          "[component:bioseq][layer:unit][feature:gpu_runtime][resource:filesystem]") {
+    const auto metal = accepted_runtime_metal_archive_audit();
+    gv::runtime_metal_archive_pipeline_audit native{};
+    native.native_vulkan = true;
+    native.native_shader_module_identity = 1u;
+    native.native_pipeline_identity = 2u;
+    native.receipt_identity = 3u;
+    native.shader_key = metal.shader_key;
+    native.expected_entry_name = "main";
+    native.observed_entry_name = "main";
+    native.runtime_vulkan_device_uuid = metal.runtime_vulkan_device_uuid;
+    native.api_version = metal.api_version;
+    native.driver_version = metal.driver_version;
+    native.pipeline_cache_uuid = metal.pipeline_cache_uuid;
+    native.pipeline_create_ns = 1u;
+    native.outer_vulkan_pipeline_succeeded = true;
+#if defined(__linux__)
+    REQUIRE(native.is_internally_consistent());
+    CHECK(gv::runtime_metal_archive_pipeline_receipt::self_test_move_and_reuse_contract(native));
+    for (const auto member : {&gv::runtime_metal_archive_pipeline_audit::receipt_identity,
+                             &gv::runtime_metal_archive_pipeline_audit::native_shader_module_identity,
+                             &gv::runtime_metal_archive_pipeline_audit::native_pipeline_identity,
+                             &gv::runtime_metal_archive_pipeline_audit::pipeline_create_ns}) {
+        auto invalid = native;
+        invalid.*member = 0u;
+        CHECK_FALSE(invalid.is_internally_consistent());
+    }
+    auto invalid = native;
+    invalid.seed_size = 1u;
+    CHECK_FALSE(invalid.is_internally_consistent());
+    invalid = native;
+    invalid.outer_vulkan_pipeline_succeeded = false;
+    CHECK_FALSE(invalid.is_internally_consistent());
+    invalid = native;
+    invalid.runtime_vulkan_device_uuid = {};
+    CHECK_FALSE(invalid.is_internally_consistent());
+#else
+    CHECK_FALSE(native.is_internally_consistent());
+#endif
+    auto invalid_metal = metal;
+    invalid_metal.native_vulkan = true;
+    CHECK_FALSE(invalid_metal.is_internally_consistent());
+    invalid_metal = metal;
+    invalid_metal.seed_size = 0u;
+    CHECK_FALSE(invalid_metal.is_internally_consistent());
+}

@@ -1657,6 +1657,39 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
             }
         return rows
 
+    def test_native_vulkan_receipts_exempt_only_metal_cache(self):
+        for seed, chain in ((True, False), (False, True), (True, True)):
+            rows = self._selected_vulkan_receipt_rows(seed, chain)
+            for row in rows.values():
+                row.update(gpu_pipeline_cache_policy="native_vulkan",
+                           gpu_pipeline_cache_seed_sha256="0" * 64,
+                           gpu_pipeline_cache_manifest_checksum="0" * 16,
+                           gpu_pipeline_cache_seed_size=0, gpu_pipeline_cache_hit=False,
+                           gpu_pipeline_cache_loads=0, gpu_pipeline_cache_seed_bytes=0,
+                           gpu_pipeline_cache_load_ns=0)
+            aggregator._validate_selected_vulkan_stage_receipts(rows, seed, chain)
+            for field, value in (("gpu_pipeline_cache_hit", True),
+                                 ("gpu_pipeline_cache_loads", 1),
+                                 ("gpu_pipeline_cache_seed_size", 64),
+                                 ("gpu_pipeline_cache_seed_sha256", "1" * 64),
+                                 ("gpu_pipeline_cache_manifest_checksum", "1" * 16),
+                                 ("gpu_pipeline_cache_seed_bytes", 64),
+                                 ("gpu_pipeline_cache_load_ns", 1),
+                                 ("gpu_pipeline_creation_ns", 0),
+                                 ("gpu_pipeline_creates", 0),
+                                 ("gpu_device_uuid", "0" * 32),
+                                 ("gpu_timestamp_query_failures", 1),
+                                 ("gpu_pipeline_cache_policy", "not_applicable"),
+                                 ("gpu_seed_dispatches", int(not seed)),
+                                 ("gpu_chain_dispatches", int(not chain))):
+                invalid = copy.deepcopy(rows)
+                for row in invalid.values():
+                    row[field] = value
+                with self.subTest(seed=seed, chain=chain, field=field):
+                    with self.assertRaises(aggregator.ContractError):
+                        aggregator._validate_selected_vulkan_stage_receipts(
+                            invalid, seed, chain)
+
     @staticmethod
     def _empty_hybrid_legacy_gpu_ledger():
         """Synthetic reader fixture for the producer's exact empty revision-3 shape."""

@@ -24,6 +24,41 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+namespace {
+
+/// Seal native pipeline creation without inventing Metal cache/seed evidence.
+/// Handles remain owned by the pipeline-cache entry for the receipt's lifetime.
+[[nodiscard]] runtime_metal_archive_pipeline_audit native_pipeline_audit(
+    const vulkan_feature_set& features,
+    const shader_variant_key& key,
+    VkShaderModule module,
+    VkPipeline pipeline,
+    std::uint64_t identity,
+    std::uint64_t creation_ns) {
+    runtime_metal_archive_pipeline_audit audit{};
+    audit.native_vulkan = true;
+    audit.native_shader_module_identity = vulkan_handle_identity(module);
+    audit.native_pipeline_identity = vulkan_handle_identity(pipeline);
+    audit.receipt_identity = identity;
+    audit.shader_key = key;
+    audit.expected_entry_name = "main";
+    audit.observed_entry_name = "main";
+    audit.runtime_vulkan_device_uuid = features.device_uuid;
+    audit.api_version = features.api_version;
+    audit.driver_version = features.driver_version;
+    audit.vendor_id = features.vendor_id;
+    audit.device_id = features.device_id;
+    audit.pipeline_cache_uuid = features.pipeline_cache_uuid;
+    audit.pipeline_create_ns = creation_ns;
+    audit.outer_vulkan_pipeline_succeeded = true;
+    if (!audit.is_internally_consistent()) {
+        throw vulkan_runtime_error("native Vulkan pipeline creation receipt is invalid");
+    }
+    return audit;
+}
+
+} // namespace
+
 /// @brief Destroys one pipeline handle set in reverse ownership order.
 ///
 /// All handles become null before return. The owning device must still be live.
@@ -317,6 +352,14 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
         runtime_metal_archive_pipeline_audit& audit = **archive_verdict;
         candidate.metal_archive_receipt.reset(
             new runtime_metal_archive_pipeline_receipt(std::move(audit)));
+    } else if constexpr (k_native_vulkan_pipeline_receipts) {
+        if (archive_receipt_required) {
+            throw vulkan_runtime_error("native Vulkan cannot replace a required Metal receipt");
+        }
+        candidate.metal_archive_receipt.reset(new runtime_metal_archive_pipeline_receipt(
+            native_pipeline_audit(features_, shader_key, candidate.handles.module,
+                                  candidate.handles.pipeline, next_operation_identity_locked(),
+                                  candidate.pipeline_create_ns)));
     }
     pipeline_cache_.push_back(std::move(candidate));
     try {
@@ -707,6 +750,14 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
         runtime_metal_archive_pipeline_audit& audit = **archive_verdict;
         entry.metal_archive_receipt.reset(
             new runtime_metal_archive_pipeline_receipt(std::move(audit)));
+    } else if constexpr (k_native_vulkan_pipeline_receipts) {
+        if (archive_receipt_required) {
+            throw vulkan_runtime_error("native Vulkan cannot replace a required Metal receipt");
+        }
+        entry.metal_archive_receipt.reset(new runtime_metal_archive_pipeline_receipt(
+            native_pipeline_audit(features_, shader_key, entry.handles.module,
+                                  entry.handles.pipeline, next_operation_identity_locked(),
+                                  entry.pipeline_create_ns)));
     }
 
     compute_pipelines_.push_back(std::move(entry));

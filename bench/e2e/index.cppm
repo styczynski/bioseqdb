@@ -3794,6 +3794,15 @@ struct gpu_cache_identity_gate_stats {
 
 [[nodiscard]] constexpr bool gpu_cache_identity_stats_valid(
         const gpu_cache_identity_gate_stats& stats) noexcept {
+#if defined(__linux__)
+    if (stats.policy == "native_vulkan") {
+        return nonzero_fixed_lower_hex(stats.device_uuid, 32) && !stats.driver.empty()
+            && stats.seed_sha256 == std::string_view{
+                "0000000000000000000000000000000000000000000000000000000000000000"}
+            && stats.seed_size == 0 && stats.manifest_checksum == "0000000000000000"
+            && stats.hit == 0;
+    }
+#endif
     return nonzero_fixed_lower_hex(stats.device_uuid, 32)
         && !stats.driver.empty()
         && stats.policy == "immutable_preseed_all_hit"
@@ -3817,8 +3826,17 @@ struct gpu_cache_runtime_gate_stats {
 };
 
 [[nodiscard]] constexpr bool gpu_cache_runtime_stats_valid(
-        const gpu_cache_runtime_gate_stats& stats) noexcept {
-    return stats.declared_seed_size > 0
+        const gpu_cache_runtime_gate_stats& stats,
+        std::string_view policy = "immutable_preseed_all_hit") noexcept {
+#if defined(__linux__)
+    if (policy == "native_vulkan") {
+        return stats.declared_seed_size == 0 && stats.loads == 0 && stats.seed_bytes == 0
+            && stats.load_ns == 0 && stats.creation_ns > 0 && stats.pipeline_creates > 0
+            && stats.timestamp_failures == 0 && stats.backend_declines == 0
+            && stats.backend_fallbacks == 0;
+    }
+#endif
+    return policy == "immutable_preseed_all_hit" && stats.declared_seed_size > 0
         && stats.loads == 1
         && stats.seed_bytes == stats.declared_seed_size
         && stats.load_ns > 0
@@ -3962,6 +3980,32 @@ consteval bool gpu_cache_gate_contract_self_test() {
             return false;
         }
     }
+#if defined(__linux__)
+    auto native_identity = valid_identity;
+    native_identity.policy = "native_vulkan";
+    native_identity.seed_sha256 =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    native_identity.seed_size = 0;
+    native_identity.manifest_checksum = "0000000000000000";
+    native_identity.hit = 0;
+    if (!gpu_cache_identity_stats_valid(native_identity)) return false;
+    native_identity.hit = 1;
+    if (gpu_cache_identity_stats_valid(native_identity)) return false;
+    native_identity.hit = 0;
+    native_identity.seed_size = 1;
+    if (gpu_cache_identity_stats_valid(native_identity)) return false;
+    auto native_runtime = valid_runtime;
+    native_runtime.declared_seed_size = 0;
+    native_runtime.loads = 0;
+    native_runtime.seed_bytes = 0;
+    native_runtime.load_ns = 0;
+    if (!gpu_cache_runtime_stats_valid(native_runtime, "native_vulkan")) return false;
+    native_runtime.pipeline_creates = 0;
+    if (gpu_cache_runtime_stats_valid(native_runtime, "native_vulkan")) return false;
+    native_runtime.pipeline_creates = 1;
+    native_runtime.backend_fallbacks = 1;
+    if (gpu_cache_runtime_stats_valid(native_runtime, "native_vulkan")) return false;
+#endif
     return true;
 }
 
@@ -8442,7 +8486,7 @@ static_assert(expected_algorithm_matrix_storage_engine(
             .pipeline_creates = counter(138),
             .backend_declines = out.backend_declines,
             .backend_fallbacks = out.backend_fallbacks,
-        });
+        }, out.gpu_pipeline_cache_policy);
     const bool gpu_operational_gate = !effective_expect_gpu
         || (gpu_cache_identity_gate
             && gpu_cache_runtime_gate
