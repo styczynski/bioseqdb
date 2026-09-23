@@ -87,6 +87,9 @@ def retire_completed_group():
     psql = '/opt/homebrew/opt/postgresql@17/bin/psql'
     sql = """
       SET lock_timeout='5s';
+      -- A fresh psql backend has not necessarily initialized the extension.
+      -- Load its existing DROP hooks before retiring benchmark relations.
+      LOAD 'bioseq';
       DO $cleanup$
       DECLARE item record;
       BEGIN
@@ -100,6 +103,22 @@ def retire_completed_group():
           EXECUTE format('DROP TABLE public.%I CASCADE', item.tablename);
           RAISE NOTICE 'retired benchmark scratch table %', item.tablename;
         END LOOP;
+        -- Repair leftovers from earlier maintenance sessions that dropped the
+        -- owner without loading the extension's object-access hooks. Only an
+        -- empty benchmark database may have its extension catalogs reset.
+        IF current_database() = 'bioseq'
+           AND EXISTS (SELECT FROM bioseq_internal.minimizer_generation_storage s
+                       WHERE NOT EXISTS (SELECT FROM pg_class c WHERE c.oid=s.user_relid))
+           AND NOT EXISTS (
+             SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+             WHERE n.nspname NOT IN ('pg_catalog','information_schema','bioseq','bioseq_internal')
+               AND n.nspname NOT LIKE 'pg_toast%'
+               AND n.nspname NOT LIKE 'pg_temp%'
+               AND c.relkind IN ('r','p','v','m','f','S')) THEN
+          DROP EXTENSION bioseq CASCADE;
+          CREATE EXTENSION bioseq;
+          RAISE NOTICE 'reset empty benchmark extension after orphaned generation owner';
+        END IF;
       END $cleanup$;
     """
     result = subprocess.run([psql, '-U', 'postgres', '-d', 'bioseq', '-v',

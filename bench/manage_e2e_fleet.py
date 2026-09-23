@@ -129,6 +129,12 @@ def reclaim_idle_local_indexes(*, minimum_free_gib: int = 35, orphan_grace_secon
         removed.append(str(path))
     if removed:
         event("orphan_index_cleanup", removed=removed, bytes=reclaimed, recovery="regenerate benchmark indexes")
+    if shutil.disk_usage(ROOT).free < minimum_free_gib * 1024**3:
+        from compress_e2e_evidence import compress_idle_evidence
+        compressed = compress_idle_evidence(ROOT, minimum_free_gib=minimum_free_gib)
+        if compressed['files']:
+            event('old_evidence_transparently_compressed', **compressed,
+                  recovery='No data deleted; existing report paths and bytes preserved')
 
 
 def priority(child: dict) -> tuple:

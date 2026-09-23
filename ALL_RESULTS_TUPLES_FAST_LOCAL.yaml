@@ -8599,3 +8599,89 @@ approved_results:
     correctness evidence; baseline timings are not copied. Do not pool with the standard five-repeat campaign.
     Extra EXPLAIN ANALYZE/cache-off/vectorization-off mapping controls were disabled by user request;
     measured-statement checks were retained.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","vulkan_tiled_dynamic_programming","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  effective_path: bounded_nthash_simd -> vulkan_tiled_dynamic_programming -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 44503390292
+    p50_b: 29502060578
+  comments: 'FAST LOCAL: one measured q1024 sample, not a five-run estimate; P50 equals that sample. PostgreSQL
+    restarts before the measurement; the OS filesystem cache is not cleared. Compatible persisted indexes
+    are retained across just_index tuples; index creation and restarts are untimed. Existing correctness,
+    observed-stage, prefilter-off and timing-interval validation passed. Compared with saved local minimap2
+    correctness evidence; baseline timings are not copied. Do not pool with the standard five-repeat campaign.
+    Extra EXPLAIN ANALYZE/cache-off/vectorization-off mapping controls were disabled by user request;
+    measured-statement checks were retained.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","vulkan_tiled_dynamic_programming","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: bounded_nthash_simd
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  effective_path: bounded_nthash_simd -> vulkan_tiled_dynamic_programming -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 57111554000
+    p50_b: 40223149350
+  comments: 'FAST LOCAL: one measured q1024 sample, not a five-run estimate; P50 equals that sample. PostgreSQL
+    restarts before the measurement; the OS filesystem cache is not cleared. Compatible persisted indexes
+    are retained across just_index tuples; index creation and restarts are untimed. Existing correctness,
+    observed-stage, prefilter-off and timing-interval validation passed. Compared with saved local minimap2
+    correctness evidence; baseline timings are not copied. Do not pool with the standard five-repeat campaign.
+    Extra EXPLAIN ANALYZE/cache-off/vectorization-off mapping controls were disabled by user request;
+    measured-statement checks were retained.'

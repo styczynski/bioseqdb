@@ -474,7 +474,31 @@ def failure_evidence(host, observed):
         result['failure_diagnostics'] = [line if len(line) <= 1200 else
             line[:400] + ' ... [SQL payload omitted; full saved log retained] ... ' + line[-600:]
             for line in diagnostics[-6:]]
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        # The existing extension warnings contain allocator/route detail that
+        # libpq's primary error omits. Capture before the next backend opens
+        # this file with mode "w". No SQL, new metrics, or diagnostic rerun.
+        extension_reader = (
+            "import json,pathlib; p=pathlib.Path('/tmp/bioseq_loglog.log'); "
+            "s=p.stat(); f=p.open('rb'); f.seek(max(0,s.st_size-65536)); "
+            "print(json.dumps({'source':str(p),'mtime_epoch':s.st_mtime,"
+            "'size_bytes':s.st_size,'tail':f.read().decode(errors='replace')}))")
+        extension = subprocess.run(fleet.ssh(host) + [
+            'sudo -n -u postgres python3 -c ' + shlex.quote(extension_reader)],
+            capture_output=True, timeout=30)
+        if extension.returncode == 0:
+            captured = json.loads(extension.stdout)
+            extension_path = destination.with_suffix('.extension.json')
+            recovery.atomic(extension_path, (json.dumps(captured, indent=2) + '\n').encode())
+            result['extension_log_tail'] = str(extension_path.relative_to(ROOT))
+            result['extension_log_mtime_epoch'] = captured['mtime_epoch']
+            # Separate from benchmark markers: a file log can be overwritten
+            # by another backend and is supplementary, not tuple-validity proof.
+            result['extension_failure_diagnostics'] = [line[:2000]
+                for line in captured['tail'].splitlines()
+                if '.failure]' in line or 'reservation_denied' in line][-6:]
+        else:
+            result['extension_log_fetch_error'] = extension.stderr.decode(errors='replace')[-500:]
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         result['log_fetch_error'] = str(exc)[-500:]
     return result
 
