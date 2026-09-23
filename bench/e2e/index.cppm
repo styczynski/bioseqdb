@@ -10820,6 +10820,8 @@ void cleanup_e2e_input(std::string_view,
         }
     }
 
+    if (jbool(data, "reuse_generated_input", false)) return;
+
     for (const auto& path : {in.target_fasta, in.target_fasta_split,
                              in.query_fasta, in.mmi_path}) {
         std::error_code ec;
@@ -10933,6 +10935,125 @@ inline constexpr int k_normal_user_best_nice = 0;
             || (value >= '0' && value <= '9')
             || value == '_' || value == '-';
     });
+}
+
+
+/** @brief Seal immutable generated FASTA files without rescanning gigabytes.
+ * Owned scratch files are published before their manifest. Device/inode,
+ * size, mtime and ctime must remain unchanged on every reuse. Query truth has
+ * its own checksum; persisted targets also pass their existing CRC64 audit.
+ */
+[[nodiscard]] nlohmann::json generated_fixture_file_identity(
+        const std::string& path) {
+    struct stat value{};
+    if (::stat(path.c_str(), &value) != 0 || !S_ISREG(value.st_mode)) {
+        return nullptr;
+    }
+#if defined(__APPLE__)
+    const auto modified = value.st_mtimespec;
+    const auto changed = value.st_ctimespec;
+#else
+    const auto modified = value.st_mtim;
+    const auto changed = value.st_ctim;
+#endif
+    return nlohmann::json::array({path, value.st_dev, value.st_ino,
+        value.st_size, modified.tv_sec, modified.tv_nsec,
+        changed.tv_sec, changed.tv_nsec});
+}
+
+/** @brief Recover the exact deterministic queries and unchanged FASTA set. */
+[[nodiscard]] bool reuse_generated_fixture(
+        const std::string& path, const nlohmann::json& identity,
+        const std::size_t expected_queries, e2e_input& in,
+        std::string& target_crc64) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return false;
+    const auto sealed = nlohmann::json::parse(stream, nullptr, false);
+    if (sealed.is_discarded() || !sealed.is_object()
+        || sealed.value("version", 0) != 1
+        || !sealed.contains("payload") || !sealed["payload"].is_object()
+        || !sealed.contains("checksum") || !sealed["checksum"].is_string()) {
+        throw std::runtime_error("generated fixture manifest is malformed");
+    }
+    const auto& payload = sealed["payload"];
+    minimap2_fnv1a64 checksum;
+    checksum.append_string(payload.dump());
+    if (sealed["checksum"] != minimap2_hex_u64(checksum.value)) {
+        throw std::runtime_error("generated fixture checksum mismatch");
+    }
+    if (payload.at("identity") != identity) return false;
+    const auto files = nlohmann::json::array({
+        generated_fixture_file_identity(in.target_fasta),
+        generated_fixture_file_identity(in.target_fasta_split),
+        generated_fixture_file_identity(in.query_fasta)});
+    if (std::ranges::any_of(files, [](const auto& file) { return file.is_null(); })
+        || payload.at("files") != files) {
+        throw std::runtime_error("retained generated FASTA changed or disappeared");
+    }
+    const auto& queries = payload.at("queries");
+    if (!queries.is_array() || queries.size() != expected_queries) {
+        throw std::runtime_error("retained query cardinality mismatch");
+    }
+    in.queries.clear();
+    in.queries.reserve(expected_queries);
+    for (const auto& query : queries) {
+        if (!query.is_array() || query.size() != 7u
+            || query.at(0).get<std::int32_t>() != in.queries.size()) {
+            throw std::runtime_error("retained query ordering mismatch");
+        }
+        in.queries.push_back(e2e_query_truth{
+            .id = query.at(0).get<std::int32_t>(),
+            .bases = query.at(1).get<std::string>(),
+            .truth_target_start = query.at(2).get<std::int64_t>(),
+            .truth_target_end = query.at(3).get<std::int64_t>(),
+            .truth_is_reverse = query.at(4).get<bool>(),
+            .target_window_start = query.at(5).get<std::int64_t>(),
+            .target_window_bases = query.at(6).get<std::string>(),
+        });
+    }
+    target_crc64 = payload.at("target_crc64").get<std::string>();
+    if (in.queries.empty() || !fixed_lower_hex(target_crc64, 16)) {
+        throw std::runtime_error("retained generated target identity is invalid");
+    }
+    in.target_bp = payload.at("target_bp").get<std::int64_t>();
+    in.truth_target_start = in.queries.front().truth_target_start;
+    in.truth_is_reverse = in.queries.front().truth_is_reverse;
+    std::fprintf(stderr, "[bench_e2e] generated_fixture_reused path=%s queries=%zu target_bp=%lld\n",
+        path.c_str(), in.queries.size(), static_cast<long long>(in.target_bp));
+    return true;
+}
+
+/** @brief Publish query truth only after all generated FASTA files are closed. */
+void seal_generated_fixture(
+        const std::string& path, const nlohmann::json& identity,
+        const e2e_input& in, const std::string& target_crc64) {
+    nlohmann::json queries = nlohmann::json::array();
+    for (const auto& query : in.queries) {
+        queries.push_back(nlohmann::json::array({query.id, query.bases,
+            query.truth_target_start, query.truth_target_end,
+            query.truth_is_reverse, query.target_window_start,
+            query.target_window_bases}));
+    }
+    const nlohmann::json payload{
+        {"identity", identity}, {"queries", std::move(queries)},
+        {"target_bp", in.target_bp}, {"target_crc64", target_crc64},
+        {"files", nlohmann::json::array({
+            generated_fixture_file_identity(in.target_fasta),
+            generated_fixture_file_identity(in.target_fasta_split),
+            generated_fixture_file_identity(in.query_fasta)})},
+    };
+    minimap2_fnv1a64 checksum;
+    checksum.append_string(payload.dump());
+    const nlohmann::json sealed{{"version", 1}, {"payload", payload},
+        {"checksum", minimap2_hex_u64(checksum.value)}};
+    const std::string temporary = path + ".tmp";
+    std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+    stream << sealed.dump();
+    stream.close();
+    if (!stream) throw std::runtime_error("failed to seal generated fixture");
+    std::filesystem::rename(temporary, path);
+    std::fprintf(stderr, "[bench_e2e] generated_fixture_created path=%s queries=%zu target_bp=%lld\n",
+        path.c_str(), in.queries.size(), static_cast<long long>(in.target_bp));
 }
 
 // ---- §10.2 on_input (all untimed setup) ----
@@ -11227,8 +11348,34 @@ template <sequence_alphabet p_alphabet>
         std::abort();
     }
 
+    // FAST input reuse is setup-only and never retains a transient index.
+    const bool reuse_generated_input = jbool(data, "reuse_generated_input", false);
+    const std::string generated_fixture_path = in.target_fasta + ".truth.json";
+    const nlohmann::json generated_fixture_identity{
+        {"schema", "bioseq.generated-e2e-fixture-v1"},
+        {"alphabet", in.alphabet}, {"reference_length", gp.reference_length},
+        {"fragment_count", gp.fragment_count},
+        {"fragment_length_mean", gp.fragment_length_mean},
+        {"fragment_length_stddev", gp.fragment_length_stddev},
+        {"substitution_rate", gp.substitution_rate},
+        {"insertion_rate", gp.insertion_rate}, {"deletion_rate", gp.deletion_rate},
+        {"insertion_length_mean", gp.insertion_length_mean},
+        {"deletion_length_mean", gp.deletion_length_mean},
+        {"reverse_complement_rate", gp.reverse_complement_rate},
+        {"seed", gp.seed}, {"use_vulkan", gp.use_vulkan},
+        {"split_bp", split_bp}, {"designed_indel_cigar", in.designed_indel_cigar},
+        {"designed_many_gap_cigar", in.designed_many_gap_cigar},
+        {"position_tolerance_bp", k_position_tolerance_bp},
+    };
+    std::vector<bench_pair_t<p_alphabet>> pairs;
+    std::string generated_target_content_crc64;
+    const bool generated_fixture_reused = reuse_generated_input
+        && reuse_generated_fixture(generated_fixture_path,
+            generated_fixture_identity, gp.fragment_count, in,
+            generated_target_content_crc64);
+    if (!generated_fixture_reused) {
     // (1) generate one shared target plus N query fragments.
-    auto pairs = gen::alphabet_sequence_generator<
+    pairs = gen::alphabet_sequence_generator<
                      p_alphabet,
                      bench_storage_t>(gp)
                      .generate_sequences_pairs(gp.fragment_count);
@@ -11290,8 +11437,7 @@ template <sequence_alphabet p_alphabet>
     in.truth_target_start = static_cast<std::int64_t>(first.truth_target_start);
     in.truth_is_reverse   = first.is_reverse;
     in.target_bp          = static_cast<std::int64_t>(gp.reference_length);
-    std::string generated_target_content_crc64;
-    if (in.paired_minimap2_oracle || retain_matrix_just_index_target) {
+    if (reuse_generated_input || in.paired_minimap2_oracle || retain_matrix_just_index_target) {
         generated_target_content_crc64 = minimap2_hex_u64(
             decoded_target_content_crc64<p_alphabet>(*first.target));
         if (!fixed_lower_hex(generated_target_content_crc64, 16)) {
@@ -11301,6 +11447,14 @@ template <sequence_alphabet p_alphabet>
             std::fflush(stderr);
             std::abort();
         }
+    }
+    if (reuse_generated_input) {
+        write_single_record_fasta<p_alphabet>(in.target_fasta, "ref", *first.target);
+        write_split_fasta<p_alphabet>(in.target_fasta_split, "ref", *first.target, split_bp);
+        write_multi_query_fasta<p_alphabet>(in.query_fasta, in.queries);
+        seal_generated_fixture(generated_fixture_path,
+            generated_fixture_identity, in, generated_target_content_crc64);
+    }
     }
     if (in.paired_minimap2_oracle) {
         in.paired_generated_target_content_crc64 =
@@ -11364,24 +11518,24 @@ template <sequence_alphabet p_alphabet>
     // (2) Write artifacts only while creating the fixture.  Reuse keeps the
     // existing files byte-for-byte; SQL-only cells do not consume them, while
     // minimap/no-index cells can reuse the retained deterministic copies.
-    if (!skip_index_baseline_setup) {
+    if (!reuse_generated_input && !skip_index_baseline_setup) {
         // Only bioseq.load consumes the unsplit copy. A standalone minimap2
         // run uses the split FASTA exclusively, including index construction.
         if (!minimap2_only_singleton) {
             write_single_record_fasta<p_alphabet>(
-                in.target_fasta, "ref", *first.target);
+                in.target_fasta, "ref", *pairs.front().target);
         }
         write_split_fasta<p_alphabet>(
-            in.target_fasta_split, "ref", *first.target, split_bp);
+            in.target_fasta_split, "ref", *pairs.front().target, split_bp);
         write_multi_query_fasta<p_alphabet>(in.query_fasta, in.queries);
-    } else if (setup_requirements.minimap2
+    } else if (!reuse_generated_input && setup_requirements.minimap2
                && !skip_minimap2_baseline_setup) {
         // Reuse applies only to the already-persisted Bioseq generation. A
         // paired minimap2 baseline receives a fresh, config-namespaced target,
         // query file, and .mmi so q1024 can never consume a stale q1/q8 query
         // artifact or an index built from an unproven target.
         write_split_fasta<p_alphabet>(
-            in.target_fasta_split, "ref", *first.target, split_bp);
+            in.target_fasta_split, "ref", *pairs.front().target, split_bp);
         write_multi_query_fasta<p_alphabet>(in.query_fasta, in.queries);
     }
     // All truth, query strings and required FASTA files now own their data.
@@ -15277,9 +15431,8 @@ void finalize_e2e_matrix_iteration(
             in, prep.persisted, prep.fair_workers),
         prep.minimizer_index);
     if (prep.persisted) capture_hash_major_build_stats(*in.conn, out);
-    // Coverage campaign: validate the measured statement above, without three
-    // extra full mapping executions (EXPLAIN ANALYZE/cache-off/vectorization-off).
-    // Leave gate8_sql null: absent control evidence must never be fabricated.
+    // FAST coverage: the measured statement is validated above. Extra full
+    // EXPLAIN/cache-off/vectorization-off mapping controls are not executed.
     log_measured_case(
         algorithm, prep.pipeline_mode, prep.fair_workers, in, out,
         prep.minimizer_index);

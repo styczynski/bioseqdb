@@ -139,6 +139,7 @@ struct grouped_soa_resident_layout {
     std::uint32_t position_word_count = 0u;
     std::uint64_t control_padded_bytes = 0u;
     std::uint64_t position_padded_bytes = 0u;
+    std::vector<gpu_grouped_soa_buffer_window> windows{};
 };
 
 /// @brief Validated minimizer layout used by upload and resident-buffer paths.
@@ -206,9 +207,27 @@ populate_grouped_soa_seed_descriptor_extents(gpu_grouped_soa_seed_push& push,
     push.prefix_extent = extents[6];
     push.anchor_extent = extents[7];
     push.anchor_key_extent = extents[8];
-    if (extents[9] < push.status_index) {
+    push.repetitive_word_extent = extents[9];
+    if (std::uint64_t{extents[9]} < std::uint64_t{push.status_index} * 2u) {
         throw vulkan_runtime_error("gpu grouped-SoA repetitive-flag descriptor is undersized");
     }
+}
+
+/// @brief Bind one complete-partition window while preserving aggregate offsets in metadata.
+inline void bind_grouped_soa_buffer_window(
+    gpu_grouped_soa_seed_push& push,
+    std::array<VkDescriptorBufferInfo, 10>& infos,
+    const gpu_grouped_soa_buffer_window& window,
+    std::uint64_t max_storage_buffer_range) {
+    push.partition_begin = window.partition_begin;
+    push.partition_count = window.partition_end;
+    push.control_base_word = static_cast<std::uint32_t>(window.control_offset / 4u);
+    push.position_base_word = static_cast<std::uint32_t>(window.position_offset / 4u);
+    infos[2].offset = window.control_offset;
+    infos[2].range = window.control_bytes;
+    infos[3].offset = window.position_offset;
+    infos[3].range = window.position_bytes;
+    populate_grouped_soa_seed_descriptor_extents(push, infos, max_storage_buffer_range);
 }
 
 /// @brief Classifies a batch and validates its common target identity.
@@ -414,9 +433,7 @@ inspect_coordinate_batch_shape(std::span<const gpu_seed_coordinate_job> jobs,
     layout.position_padded_bytes = static_cast<std::uint64_t>(layout.position_word_count) * 4u;
     if (layout.control_padded_bytes > common_shape_view->controls->bytes ||
         layout.position_padded_bytes > common_shape_view->positions->bytes ||
-        common_shape_view->descriptor_bytes > features.max_storage_buffer_range ||
-        layout.control_padded_bytes > features.max_storage_buffer_range ||
-        layout.position_padded_bytes > features.max_storage_buffer_range) {
+        common_shape_view->descriptor_bytes > features.max_storage_buffer_range) {
         throw vulkan_runtime_error(
             "gpu grouped-SoA resident byte extent exceeds its buffer or Vulkan range");
     }
@@ -442,6 +459,18 @@ inspect_coordinate_batch_shape(std::span<const gpu_seed_coordinate_job> jobs,
             descriptor.segment_end_bp > shape.common_target_len) {
             throw vulkan_runtime_error("gpu grouped-SoA resident descriptor validation failed");
         }
+    }
+    const std::span<const std::byte> descriptor_span{
+        descriptor_bytes, static_cast<std::size_t>(common_shape_view->descriptor_bytes)};
+    for (std::uint32_t first = 0u; first < common_shape_view->partition_count;) {
+        const auto window = plan_gpu_grouped_soa_buffer_window(
+            descriptor_span, first, common_shape_view->control_bytes, common_shape_view->position_bytes,
+            features.max_storage_buffer_range, features.min_storage_buffer_offset_alignment);
+        if (!window) {
+            throw vulkan_runtime_error("gpu grouped-SoA partition cannot fit an aligned storage-buffer binding");
+        }
+        layout.windows.push_back(*window);
+        first = window->partition_end;
     }
     if (max_occ >= 0 && static_cast<std::uint64_t>(max_occ) > common_shape_view->max_occ_cap) {
         throw vulkan_runtime_error("gpu grouped-SoA query max_occ exceeds persisted generation cap");
@@ -558,9 +587,10 @@ has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
     bool coordinate_vote_selected,
     bool grouped_soa_selected,
     std::uint64_t min_words_bytes,
-    std::uint64_t query_record_bytes) {
+    std::uint64_t query_record_bytes,
+    std::uint32_t maximum_jobs_per_wave = k_gpu_seed_coordinate_batch_wave_size) {
     std::size_t wave_end =
-        std::min<std::size_t>(jobs.size(), wave_begin + k_gpu_seed_coordinate_batch_wave_size);
+        std::min<std::size_t>(jobs.size(), wave_begin + maximum_jobs_per_wave);
     if (coordinate_vote_selected && wave_begin + 1u < wave_end) {
         std::size_t same_target_end = wave_begin + 1u;
         while (same_target_end < wave_end &&
@@ -581,7 +611,7 @@ has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
             per_wave_problem_bytes,
             bioseq::common::saturating_add(
                 bioseq::common::saturating_add(std::uint64_t{qrec.minimizer_count} *
-                                                   (grouped_soa_selected ? 12u : 8u),
+                                                   (grouped_soa_selected ? 16u : 8u),
                                                grouped_soa_selected ? 4u : 0u),
                 std::uint64_t{qblocks} * 4u));
     }
@@ -592,7 +622,7 @@ has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
             bioseq::common::saturating_add(min_words_bytes, query_record_bytes),
             bioseq::common::saturating_add(
                 per_wave_problem_bytes,
-                bioseq::common::saturating_mul(static_cast<std::uint64_t>(3u * wave_count + 2u),
+                bioseq::common::saturating_mul(static_cast<std::uint64_t>((grouped_soa_selected ? 4u : 3u) * wave_count + 2u),
                                                std::uint64_t{k_gpu_buffer_offset_alignment}))),
     };
 }

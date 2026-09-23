@@ -714,9 +714,11 @@ private:
              &non_host_visible,
              &idx,
              &fill_stats]() -> bioseq::parallelism::memory_materialization_snapshot {
-                resident->slots = runtime.create_device_buffer(
+                // Prefix lookup repeatedly reads this resident on the CPU.
+                // Keep its Vulkan-visible payload in cached host memory.
+                resident->slots = runtime.create_host_buffer(
                     plan.slot_buffer_bytes, usage);
-                resident->positions = runtime.create_device_buffer(
+                resident->positions = runtime.create_host_buffer(
                     plan.position_buffer_bytes, usage);
                 const std::uint64_t actual_allocation_bytes =
                     bioseq::common::saturating_add(
@@ -888,8 +890,8 @@ private:
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
             VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         auto resident = std::make_shared<gpu_resident_minimizer_index>();
-        resident->slots = runtime.create_device_buffer(std::max<std::uint64_t>(slot_bytes, 16u), usage);
-        resident->positions = runtime.create_device_buffer(std::max<std::uint64_t>(pos_bytes, 8u), usage);
+        resident->slots = runtime.create_host_buffer(std::max<std::uint64_t>(slot_bytes, 16u), usage);
+        resident->positions = runtime.create_host_buffer(std::max<std::uint64_t>(pos_bytes, 8u), usage);
         if (resident->slots.mapped == nullptr || resident->positions.mapped == nullptr) {
             return nullptr;
         }

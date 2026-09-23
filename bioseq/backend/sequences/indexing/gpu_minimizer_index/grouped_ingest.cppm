@@ -1623,13 +1623,28 @@ class gpu_grouped_soa_generation_ingest {
             return std::unexpected(gpu_grouped_soa_ingest_error::metadata_mismatch);
         }
 
-        const std::uint64_t control_request = std::max<std::uint64_t>(control_bytes, 16u);
-        const std::uint64_t position_request = std::max<std::uint64_t>(position_bytes, 16u);
-        const std::uint64_t descriptor_request = std::max<std::uint64_t>(descriptor_bytes, 16u);
-        if (control_request > runtime.features().max_storage_buffer_range ||
-            position_request > runtime.features().max_storage_buffer_range ||
-            descriptor_request > runtime.features().max_storage_buffer_range) {
+        // Allocation size is independent of maxStorageBufferRange. Every shader
+        // binding is planned from complete partitions and checked below.
+        constexpr std::uint64_t word_limit =
+            std::uint64_t{(std::numeric_limits<std::uint32_t>::max)()} * 4u;
+        if (control_bytes > word_limit || position_bytes > word_limit) {
             return std::unexpected(gpu_grouped_soa_ingest_error::arithmetic_overflow);
+        }
+        const std::uint64_t control_request = std::max<std::uint64_t>((control_bytes + 3u) & ~std::uint64_t{3u}, 16u);
+        const std::uint64_t position_request = std::max<std::uint64_t>((position_bytes + 3u) & ~std::uint64_t{3u}, 16u);
+        const std::uint64_t descriptor_request = std::max<std::uint64_t>(descriptor_bytes, 16u);
+        if (descriptor_request > runtime.features().max_storage_buffer_range) {
+            return std::unexpected(gpu_grouped_soa_ingest_error::arithmetic_overflow);
+        }
+        for (std::uint32_t first = 0u; first < descriptors.size();) {
+            const auto window = bioseq::gpu::vulkan::plan_gpu_grouped_soa_buffer_window(
+                std::as_bytes(std::span{descriptors}), first, control_bytes, position_bytes,
+                runtime.features().max_storage_buffer_range,
+                runtime.features().min_storage_buffer_offset_alignment);
+            if (!window) {
+                return std::unexpected(gpu_grouped_soa_ingest_error::arithmetic_overflow);
+            }
+            first = window->partition_end;
         }
         constexpr VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT |

@@ -451,8 +451,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
             out.ownership.execution_peak_admissions = 1u;
             out.peak_admission_bytes = peak_permit->bytes();
             out.ownership.peak_admitted_bytes = peak_permit->bytes();
-            out.slots = create_device_buffer(16u, k_compute_buffer_usage);
-            out.positions = create_device_buffer(8u, k_compute_buffer_usage);
+            out.slots = create_host_buffer(16u, k_compute_buffer_usage);
+            out.positions = create_host_buffer(8u, k_compute_buffer_usage);
             if (out.slots.mapped == nullptr || out.positions.mapped == nullptr ||
                 out.slots.allocation_bytes != empty_slot_requirement ||
                 out.positions.allocation_bytes != empty_position_requirement) {
@@ -742,7 +742,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
         auto _alloc_s = bioseq::instrumentation::region(_alloc_d);
         keys_scr = create_device_buffer(std::max<std::uint64_t>(tm * 8u, flag_scan_bytes),
                                         k_compute_buffer_usage);
-        vals_scr = create_device_buffer(tm * 8u, k_compute_buffer_usage);
+        // This buffer becomes the CPU-searched resident position stream.
+        vals_scr = create_host_buffer(tm * 8u, k_compute_buffer_usage);
         hist = create_device_buffer(std::uint64_t{swg.num_workgroups} * 256u * 4u,
                                     k_compute_buffer_usage);
     }
@@ -990,7 +991,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     // sorted-bucket form removes that whole submit. `buckets` becomes the resident
     // index ("slots"); `positions` is the hash-run-ordered pos_strand array.
     iblocks.reset();
-    buffer buckets = create_device_buffer(std::uint64_t{num_buckets} * 16u, k_compute_buffer_usage);
+    // Prefix lookup binary-searches these resident controls on the CPU.
+    buffer buckets = create_host_buffer(std::uint64_t{num_buckets} * 16u, k_compute_buffer_usage);
     if (buckets.mapped == nullptr) {
         out.failure_reason = gpu_index_build_failure::device_buffer_allocation_failed;
         arena.rewind(mark);

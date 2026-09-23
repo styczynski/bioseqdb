@@ -952,6 +952,15 @@ struct vulkan_seed_frontend_job_execution {
             completion == vulkan_seed_frontend_completion_kind::mpf_runtime ||
             completion == vulkan_seed_frontend_completion_kind::mps_runtime;
         if (runtime_seed) {
+            if (completion == vulkan_seed_frontend_completion_kind::mps_runtime) {
+                // MPS records one physical lookup per bounded buffer window.
+                // The retained runtime operation authenticates the exact count.
+                return operation_identity != 0u && minimizer_count != 0u &&
+                       seed_stats.seed_lookup_dispatches != 0u &&
+                       seed_stats.seed_open_addressed_lookup_dispatches == 0u &&
+                       seed_stats.seed_sorted_dense_lookup_dispatches ==
+                           seed_stats.seed_lookup_dispatches;
+            }
             return operation_identity != 0u && minimizer_count != 0u &&
                    seed_stats.seed_lookup_dispatches == 1u &&
                    ((seed_stats.seed_open_addressed_lookup_dispatches == 1u &&
@@ -999,7 +1008,10 @@ struct vulkan_seed_frontend_job_execution {
             return false;
         }
         const auto& job = audit.jobs[operation_job_index];
-        return job.minimizer_count == minimizer_count && job.target_len == target_len &&
+        const std::uint64_t expected_mps_lookups =
+            minimizer_count != 0u ? job.binding_window_count : 0u;
+        return (mpf || seed_stats.seed_lookup_dispatches == expected_mps_lookups) &&
+               job.minimizer_count == minimizer_count && job.target_len == target_len &&
                job.target_position_offset == target_position_offset &&
                job.anchor_count == anchor_count && job.range_count == 0u &&
                job.query_authority_identity == query_authority_identity &&

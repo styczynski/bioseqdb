@@ -338,6 +338,13 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
             this, batch_shape, query_inputs, features_, kmer_size, max_occ, run);
     const std::uint64_t shape_control_padded_bytes = resident_layout.control_padded_bytes;
     const std::uint64_t shape_position_padded_bytes = resident_layout.position_padded_bytes;
+    const std::uint32_t binding_window_count = static_cast<std::uint32_t>(resident_layout.windows.size());
+    const std::uint32_t maximum_window_jobs = grouped_soa_selected
+        ? gpu_dispatch_job_capacity(binding_window_count + 3u, binding_window_count * 10u + 9u)
+        : coordinate_pipeline_detail::k_gpu_seed_coordinate_batch_wave_size;
+    if (maximum_window_jobs == 0u) {
+        throw vulkan_runtime_error("grouped-SoA binding windows exceed one job's descriptor capacity");
+    }
     const std::uint32_t total_mc = query_inputs.minimizer_count;
     if (jobs.empty() || max_occ < 0 || (total_mc == 0u && !grouped_soa_selected)) {
         run.grouped_soa_direct.direct_count_scan_emit_completed = grouped_soa_selected;
@@ -470,7 +477,8 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                                                                   coordinate_vote_selected,
                                                                   grouped_soa_selected,
                                                                   min_words_bytes,
-                                                                  query_record_bytes);
+                                                                  query_record_bytes,
+                                                                  maximum_window_jobs);
         const std::size_t wave_end = wave.end;
         const std::size_t next_wave_begin = wave_end;
         const std::size_t wave_count = wave.count;
@@ -518,6 +526,7 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                         query_authority.identity_,
                         query_authority.query_tile_counts_[state.job.query_index],
                         query_authority.dispatch_stats_);
+                    state.operation_audit.binding_window_count = binding_window_count;
                 }
                 state.minimizer_count = state.query_record.minimizer_count;
                 state.query_len = state.query_record.query_len;
@@ -525,7 +534,8 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                     shape_pipeline_collector->set_shape_input(state.result_index,
                                                               state.minimizer_count,
                                                               state.job.target_len,
-                                                              state.job.target_position_offset);
+                                                              state.job.target_position_offset,
+                                                              binding_window_count);
                 }
                 state.num_blocks = std::max<std::uint32_t>(
                     bioseq::common::ceil_div(state.minimizer_count, k_prefix_scan_block_size), 1u);
@@ -550,7 +560,7 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                 state.blocks_s = arena.allocate_device(std::uint64_t{state.num_blocks} * 4u, 16u);
                 if (grouped_soa_selected) {
                     state.repetitive_s = arena.allocate_device(
-                        std::max<std::uint64_t>(state.minimizer_count, 1u) * 4u, 16u);
+                        std::max<std::uint64_t>(state.minimizer_count, 1u) * 8u, 16u);
                 }
                 if (!state.counts_s.is_valid() || !state.prefix_s.is_valid() ||
                     !state.blocks_s.is_valid() ||
@@ -920,79 +930,89 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                 // modifies the resident query image between later waves.
                 record_compute_barrier(command_buffer_);
             }
-            for (gpu_seed_coordinate_wave_state& state : states) {
-                if (state.skip_seed) {
-                    continue;
+            const std::uint32_t count_window_count = grouped_soa_selected ? binding_window_count : 1u;
+            // Batch independent jobs within each window; synchronize only when
+            // the next window needs their accumulated counts or emit cursors.
+            for (std::uint32_t window_index = 0u; window_index < count_window_count; ++window_index) {
+                for (gpu_seed_coordinate_wave_state& state : states) {
+                    if (state.skip_seed) {
+                        continue;
+                    }
+                    if (grouped_soa_selected) {
+                        const auto& window = resident_layout.windows[window_index];
+                        const gpu_grouped_soa_resident_view& view = *state.job.grouped_soa;
+                        gpu_grouped_soa_seed_push window_push = state.grouped_soa_seed_push;
+                        std::array<VkDescriptorBufferInfo, 10> seed_infos{{
+                            {min_words_buffer, min_words_offset, min_words_range},
+                            {view.descriptors->buffer_handle, 0, view.descriptor_bytes},
+                            {view.controls->buffer_handle, 0, shape_control_padded_bytes},
+                            {view.positions->buffer_handle, 0, shape_position_padded_bytes},
+                            {qrec_s.buffer->buffer_handle,
+                             qrec_s.offset + std::uint64_t{state.job.query_index} * qrec_stride,
+                             sizeof(gpu_seed_query_record_wire)},
+                            {state.counts_s.buffer->buffer_handle,
+                             state.counts_s.offset,
+                             state.counts_s.size},
+                            {state.prefix_s.buffer->buffer_handle,
+                             state.prefix_s.offset,
+                             state.prefix_s.size},
+                            {state.counts_s.buffer->buffer_handle,
+                             state.counts_s.offset,
+                             state.counts_s.size},
+                            {state.counts_s.buffer->buffer_handle,
+                             state.counts_s.offset,
+                             state.counts_s.size},
+                            {state.repetitive_s.buffer->buffer_handle,
+                             state.repetitive_s.offset,
+                             state.repetitive_s.size},
+                        }};
+                        coordinate_pipeline_detail::bind_grouped_soa_buffer_window(
+                            window_push,
+                            seed_infos, window,
+                            features_.max_storage_buffer_range);
+                        record_compute_dispatch_locked(command_buffer_,
+                                                       count_pipe,
+                                                       seed_infos,
+                                                       &window_push,
+                                                       sizeof(window_push),
+                                                       1u,
+                                                       shape_pipeline_collector.get(),
+                                                       state.result_index);
+                        run.grouped_soa_direct.count_dispatches += 1u;
+                        state.operation_audit.direct_count_dispatches += 1u;
+                    } else {
+                        const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
+                            {min_words_buffer, min_words_offset, min_words_range},
+                            {state.job.slots->buffer_handle, 0, VK_WHOLE_SIZE},
+                            {state.job.positions->buffer_handle, 0, VK_WHOLE_SIZE},
+                            {qrec_s.buffer->buffer_handle,
+                             qrec_s.offset + std::uint64_t{state.job.query_index} * qrec_stride,
+                             sizeof(gpu_seed_query_record_wire)},
+                            {state.counts_s.buffer->buffer_handle,
+                             state.counts_s.offset,
+                             state.counts_s.size},
+                            {state.prefix_s.buffer->buffer_handle,
+                             state.prefix_s.offset,
+                             state.prefix_s.size},
+                            {state.counts_s.buffer->buffer_handle,
+                             state.counts_s.offset,
+                             state.counts_s.size},
+                            {state.counts_s.buffer->buffer_handle,
+                             state.counts_s.offset,
+                             state.counts_s.size},
+                        }};
+                        record_compute_dispatch_locked(command_buffer_,
+                                                       count_pipe,
+                                                       seed_infos,
+                                                       &state.seed_push,
+                                                       sizeof(state.seed_push),
+                                                       state.seed_groups);
+                    }
+                    run.stats.seed_count_dispatches += 1u;
                 }
-                if (grouped_soa_selected) {
-                    const gpu_grouped_soa_resident_view& view = *state.job.grouped_soa;
-                    const std::array<VkDescriptorBufferInfo, 10> seed_infos{{
-                        {min_words_buffer, min_words_offset, min_words_range},
-                        {view.descriptors->buffer_handle, 0, view.descriptor_bytes},
-                        {view.controls->buffer_handle, 0, shape_control_padded_bytes},
-                        {view.positions->buffer_handle, 0, shape_position_padded_bytes},
-                        {qrec_s.buffer->buffer_handle,
-                         qrec_s.offset + std::uint64_t{state.job.query_index} * qrec_stride,
-                         sizeof(gpu_seed_query_record_wire)},
-                        {state.counts_s.buffer->buffer_handle,
-                         state.counts_s.offset,
-                         state.counts_s.size},
-                        {state.prefix_s.buffer->buffer_handle,
-                         state.prefix_s.offset,
-                         state.prefix_s.size},
-                        {state.counts_s.buffer->buffer_handle,
-                         state.counts_s.offset,
-                         state.counts_s.size},
-                        {state.counts_s.buffer->buffer_handle,
-                         state.counts_s.offset,
-                         state.counts_s.size},
-                        {state.repetitive_s.buffer->buffer_handle,
-                         state.repetitive_s.offset,
-                         state.repetitive_s.size},
-                    }};
-                    coordinate_pipeline_detail::populate_grouped_soa_seed_descriptor_extents(
-                        state.grouped_soa_seed_push,
-                        seed_infos,
-                        features_.max_storage_buffer_range);
-                    record_compute_dispatch_locked(command_buffer_,
-                                                   count_pipe,
-                                                   seed_infos,
-                                                   &state.grouped_soa_seed_push,
-                                                   sizeof(state.grouped_soa_seed_push),
-                                                   1u,
-                                                   shape_pipeline_collector.get(),
-                                                   state.result_index);
-                    run.grouped_soa_direct.count_dispatches += 1u;
-                    state.operation_audit.direct_count_dispatches += 1u;
-                } else {
-                    const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
-                        {min_words_buffer, min_words_offset, min_words_range},
-                        {state.job.slots->buffer_handle, 0, VK_WHOLE_SIZE},
-                        {state.job.positions->buffer_handle, 0, VK_WHOLE_SIZE},
-                        {qrec_s.buffer->buffer_handle,
-                         qrec_s.offset + std::uint64_t{state.job.query_index} * qrec_stride,
-                         sizeof(gpu_seed_query_record_wire)},
-                        {state.counts_s.buffer->buffer_handle,
-                         state.counts_s.offset,
-                         state.counts_s.size},
-                        {state.prefix_s.buffer->buffer_handle,
-                         state.prefix_s.offset,
-                         state.prefix_s.size},
-                        {state.counts_s.buffer->buffer_handle,
-                         state.counts_s.offset,
-                         state.counts_s.size},
-                        {state.counts_s.buffer->buffer_handle,
-                         state.counts_s.offset,
-                         state.counts_s.size},
-                    }};
-                    record_compute_dispatch_locked(command_buffer_,
-                                                   count_pipe,
-                                                   seed_infos,
-                                                   &state.seed_push,
-                                                   sizeof(state.seed_push),
-                                                   state.seed_groups);
+                if (window_index + 1u < count_window_count) {
+                    record_compute_barrier(command_buffer_);
                 }
-                run.stats.seed_count_dispatches += 1u;
             }
             record_compute_barrier(command_buffer_);
             for (gpu_seed_coordinate_wave_state& state : states) {
@@ -1180,8 +1200,9 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                     using trace_word = benchmark_e2e_grouped_soa_count_trace_word;
                     constexpr std::size_t trace_word_count =
                         static_cast<std::size_t>(trace_word::word_count);
-                    const std::uint64_t diagnostic_word_count =
-                        static_cast<std::uint64_t>(state.minimizer_count) + 1u + trace_word_count;
+                    const std::uint64_t diagnostic_word_count = std::max(
+                        static_cast<std::uint64_t>(state.minimizer_count) + 1u + trace_word_count,
+                        static_cast<std::uint64_t>(state.minimizer_count) * 2u);
                     if (state.result_index == 0u && state.job.query_index == 0u &&
                         diagnostic_word_count <=
                             features_.max_storage_buffer_range / sizeof(std::uint32_t) &&
@@ -1222,7 +1243,7 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                                               expected_partition_ordinal);
 
                         const gpu_grouped_soa_resident_view& view = *state.job.grouped_soa;
-                        const std::array<VkDescriptorBufferInfo, 10> trace_infos{{
+                        std::array<VkDescriptorBufferInfo, 10> trace_infos{{
                             {min_words_buffer, min_words_offset, min_words_range},
                             {view.descriptors->buffer_handle, 0, view.descriptor_bytes},
                             {view.controls->buffer_handle, 0, shape_control_padded_bytes},
@@ -1239,8 +1260,15 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                             {diagnostic_counts.buffer_handle, 0, diagnostic_counts.bytes},
                         }};
                         gpu_grouped_soa_seed_push trace_push = state.grouped_soa_seed_push;
-                        coordinate_pipeline_detail::populate_grouped_soa_seed_descriptor_extents(
-                            trace_push, trace_infos, features_.max_storage_buffer_range);
+                        const auto trace_window = std::find_if(resident_layout.windows.begin(),
+                            resident_layout.windows.end(), [](const auto& window) {
+                                return window.partition_begin <= expected_partition_ordinal &&
+                                    expected_partition_ordinal < window.partition_end;
+                            });
+                        coordinate_pipeline_detail::bind_grouped_soa_buffer_window(
+                            trace_push, trace_infos,
+                            trace_window == resident_layout.windows.end() ? resident_layout.windows.front() : *trace_window,
+                            features_.max_storage_buffer_range);
 
                         audit.device_count_trace_attempted = true;
                         reset_dispatch_descriptor_pool_locked();
@@ -1371,80 +1399,89 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                 shape_pipeline_collector->begin(command_buffer_);
             }
             record_host_to_shader(command_buffer_);
-            for (gpu_seed_coordinate_wave_state& state : states) {
-                if (!state.has_anchors) {
-                    continue;
+            const std::uint32_t emit_window_count = grouped_soa_selected ? binding_window_count : 1u;
+            // Batch independent jobs within each window; synchronize only when
+            // the next window needs their accumulated counts or emit cursors.
+            for (std::uint32_t window_index = 0u; window_index < emit_window_count; ++window_index) {
+                for (gpu_seed_coordinate_wave_state& state : states) {
+                    if (!state.has_anchors) {
+                        continue;
+                    }
+                    gpu_arena_slice anchors_s = state.anchors_slice();
+                    gpu_arena_slice anchor_keys_s = state.anchor_keys_slice();
+                    if (grouped_soa_selected) {
+                        gpu_grouped_soa_seed_push emit_push = state.grouped_soa_seed_push;
+                        emit_push.emit_mode = 1u;
+                        emit_push.anchor_capacity = state.total_anchors_u32;
+                        const auto& window = resident_layout.windows[window_index];
+                        const gpu_grouped_soa_resident_view& view = *state.job.grouped_soa;
+                        std::array<VkDescriptorBufferInfo, 10> seed_infos{{
+                            {min_words_buffer, min_words_offset, min_words_range},
+                            {view.descriptors->buffer_handle, 0, view.descriptor_bytes},
+                            {view.controls->buffer_handle, 0, shape_control_padded_bytes},
+                            {view.positions->buffer_handle, 0, shape_position_padded_bytes},
+                            {qrec_s.buffer->buffer_handle,
+                             qrec_s.offset + std::uint64_t{state.job.query_index} * qrec_stride,
+                             sizeof(gpu_seed_query_record_wire)},
+                            {state.counts_s.buffer->buffer_handle,
+                             state.counts_s.offset,
+                             state.counts_s.size},
+                            {state.prefix_s.buffer->buffer_handle,
+                             state.prefix_s.offset,
+                             state.prefix_s.size},
+                            {anchors_s.buffer->buffer_handle, anchors_s.offset, anchors_s.size},
+                            {anchor_keys_s.buffer->buffer_handle,
+                             anchor_keys_s.offset,
+                             anchor_keys_s.size},
+                            {state.repetitive_s.buffer->buffer_handle,
+                             state.repetitive_s.offset,
+                             state.repetitive_s.size},
+                        }};
+                        coordinate_pipeline_detail::bind_grouped_soa_buffer_window(
+                            emit_push, seed_infos, window, features_.max_storage_buffer_range);
+                        record_compute_dispatch_locked(command_buffer_,
+                                                       emit_pipe,
+                                                       seed_infos,
+                                                       &emit_push,
+                                                       sizeof(emit_push),
+                                                       1u,
+                                                       shape_pipeline_collector.get(),
+                                                       state.result_index);
+                        run.grouped_soa_direct.emit_dispatches += 1u;
+                        state.operation_audit.direct_emit_dispatches += 1u;
+                    } else {
+                        seed_push_constants emit_push = state.seed_push;
+                        emit_push.emit_mode = 1u;
+                        const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
+                            {min_words_buffer, min_words_offset, min_words_range},
+                            {state.job.slots->buffer_handle, 0, VK_WHOLE_SIZE},
+                            {state.job.positions->buffer_handle, 0, VK_WHOLE_SIZE},
+                            {qrec_s.buffer->buffer_handle,
+                             qrec_s.offset + std::uint64_t{state.job.query_index} * qrec_stride,
+                             sizeof(gpu_seed_query_record_wire)},
+                            {state.counts_s.buffer->buffer_handle,
+                             state.counts_s.offset,
+                             state.counts_s.size},
+                            {state.prefix_s.buffer->buffer_handle,
+                             state.prefix_s.offset,
+                             state.prefix_s.size},
+                            {anchors_s.buffer->buffer_handle, anchors_s.offset, anchors_s.size},
+                            {anchor_keys_s.buffer->buffer_handle,
+                             anchor_keys_s.offset,
+                             anchor_keys_s.size},
+                        }};
+                        record_compute_dispatch_locked(command_buffer_,
+                                                       emit_pipe,
+                                                       seed_infos,
+                                                       &emit_push,
+                                                       sizeof(emit_push),
+                                                       state.seed_groups);
+                    }
+                    run.stats.seed_emit_dispatches += 1u;
                 }
-                gpu_arena_slice anchors_s = state.anchors_slice();
-                gpu_arena_slice anchor_keys_s = state.anchor_keys_slice();
-                if (grouped_soa_selected) {
-                    gpu_grouped_soa_seed_push emit_push = state.grouped_soa_seed_push;
-                    emit_push.emit_mode = 1u;
-                    emit_push.anchor_capacity = state.total_anchors_u32;
-                    const gpu_grouped_soa_resident_view& view = *state.job.grouped_soa;
-                    const std::array<VkDescriptorBufferInfo, 10> seed_infos{{
-                        {min_words_buffer, min_words_offset, min_words_range},
-                        {view.descriptors->buffer_handle, 0, view.descriptor_bytes},
-                        {view.controls->buffer_handle, 0, shape_control_padded_bytes},
-                        {view.positions->buffer_handle, 0, shape_position_padded_bytes},
-                        {qrec_s.buffer->buffer_handle,
-                         qrec_s.offset + std::uint64_t{state.job.query_index} * qrec_stride,
-                         sizeof(gpu_seed_query_record_wire)},
-                        {state.counts_s.buffer->buffer_handle,
-                         state.counts_s.offset,
-                         state.counts_s.size},
-                        {state.prefix_s.buffer->buffer_handle,
-                         state.prefix_s.offset,
-                         state.prefix_s.size},
-                        {anchors_s.buffer->buffer_handle, anchors_s.offset, anchors_s.size},
-                        {anchor_keys_s.buffer->buffer_handle,
-                         anchor_keys_s.offset,
-                         anchor_keys_s.size},
-                        {state.repetitive_s.buffer->buffer_handle,
-                         state.repetitive_s.offset,
-                         state.repetitive_s.size},
-                    }};
-                    coordinate_pipeline_detail::populate_grouped_soa_seed_descriptor_extents(
-                        emit_push, seed_infos, features_.max_storage_buffer_range);
-                    record_compute_dispatch_locked(command_buffer_,
-                                                   emit_pipe,
-                                                   seed_infos,
-                                                   &emit_push,
-                                                   sizeof(emit_push),
-                                                   1u,
-                                                   shape_pipeline_collector.get(),
-                                                   state.result_index);
-                    run.grouped_soa_direct.emit_dispatches += 1u;
-                    state.operation_audit.direct_emit_dispatches += 1u;
-                } else {
-                    seed_push_constants emit_push = state.seed_push;
-                    emit_push.emit_mode = 1u;
-                    const std::array<VkDescriptorBufferInfo, 8> seed_infos{{
-                        {min_words_buffer, min_words_offset, min_words_range},
-                        {state.job.slots->buffer_handle, 0, VK_WHOLE_SIZE},
-                        {state.job.positions->buffer_handle, 0, VK_WHOLE_SIZE},
-                        {qrec_s.buffer->buffer_handle,
-                         qrec_s.offset + std::uint64_t{state.job.query_index} * qrec_stride,
-                         sizeof(gpu_seed_query_record_wire)},
-                        {state.counts_s.buffer->buffer_handle,
-                         state.counts_s.offset,
-                         state.counts_s.size},
-                        {state.prefix_s.buffer->buffer_handle,
-                         state.prefix_s.offset,
-                         state.prefix_s.size},
-                        {anchors_s.buffer->buffer_handle, anchors_s.offset, anchors_s.size},
-                        {anchor_keys_s.buffer->buffer_handle,
-                         anchor_keys_s.offset,
-                         anchor_keys_s.size},
-                    }};
-                    record_compute_dispatch_locked(command_buffer_,
-                                                   emit_pipe,
-                                                   seed_infos,
-                                                   &emit_push,
-                                                   sizeof(emit_push),
-                                                   state.seed_groups);
+                if (window_index + 1u < emit_window_count) {
+                    record_compute_barrier(command_buffer_);
                 }
-                run.stats.seed_emit_dispatches += 1u;
             }
             record_compute_barrier(command_buffer_);
             if (grouped_soa_selected) {
@@ -2356,12 +2393,13 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
     }
     // Count uses one 10-binding seed set plus three 3-binding scan sets.
     // Emit uses one 10-binding seed set plus three 5-binding sets per radix pass.
-    constexpr std::uint32_t count_descriptor_sets_per_job = 4u;
-    constexpr std::uint32_t count_storage_descriptors_per_job = 10u + 3u * 3u;
+    const std::uint32_t binding_window_count = static_cast<std::uint32_t>(resident_layout.windows.size());
+    const std::uint32_t count_descriptor_sets_per_job = binding_window_count + 3u;
+    const std::uint32_t count_storage_descriptors_per_job = 10u * binding_window_count + 3u * 3u;
     const std::uint32_t emit_descriptor_sets_per_job =
-        1u + 3u * *radix_pass_count;
+        binding_window_count + 3u * *radix_pass_count;
     const std::uint32_t emit_storage_descriptors_per_job =
-        10u + 3u * 5u * *radix_pass_count;
+        10u * binding_window_count + 3u * 5u * *radix_pass_count;
     const std::uint32_t maximum_jobs_per_wave = std::min(
         gpu_dispatch_job_capacity(count_descriptor_sets_per_job,
                                   count_storage_descriptors_per_job),
@@ -2496,7 +2534,7 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
          ++job_index) {
         const gpu_seed_query_record_wire& record = query_inputs.host_query_records[job_index];
         collector->set_shape_input(
-            job_index, record.minimizer_count, target_len, target_position_offset);
+            job_index, record.minimizer_count, target_len, target_position_offset, binding_window_count);
         if (record.minimizer_count == 0u) {
             collector->set_shape_outcome(job_index, 0u, 0u);
             collector->set_seed_anchor_authentication(
@@ -2621,7 +2659,8 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
                 !append_mps_device_extent(count_arena_bytes, counts_bytes) ||
                 !append_mps_device_extent(count_arena_bytes, prefix_bytes) ||
                 !append_mps_device_extent(count_arena_bytes, blocks_bytes) ||
-                !append_mps_device_extent(count_arena_bytes, prefix_bytes)) {
+                prefix_bytes * 2u > features_.max_storage_buffer_range ||
+                !append_mps_device_extent(count_arena_bytes, prefix_bytes * 2u)) {
                 throw vulkan_runtime_error(
                     "grouped-SoA seed-only count arena or descriptor plan is invalid");
             }
@@ -2687,7 +2726,7 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
                 state.counts = count_arena.allocate_device(counts_bytes, 16u);
                 state.prefix = count_arena.allocate_device(prefix_bytes, 16u);
                 state.blocks = count_arena.allocate_device(blocks_bytes, 16u);
-                state.repetitive = count_arena.allocate_device(prefix_bytes, 16u);
+                state.repetitive = count_arena.allocate_device(prefix_bytes * 2u, 16u);
                 if (!state.counts.is_valid() || !state.prefix.is_valid() ||
                     !state.blocks.is_valid() || !state.repetitive.is_valid()) {
                     throw vulkan_runtime_error(
@@ -2743,49 +2782,54 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
             collector->begin(command_buffer_);
             record_host_to_shader(command_buffer_);
             record_compute_barrier(command_buffer_);
-            for (mps_seed_wave_state& state : states) {
-                if (state.query_record.minimizer_count == 0u)
-                    continue;
-                const std::array<VkDescriptorBufferInfo, 10> infos{{
-                    {query_inputs.device_minimizer_words->buffer_handle,
-                     0u,
-                     query_layout.required_min_words_bytes},
-                    {target.descriptors->buffer_handle, 0u, target.descriptor_bytes},
-                    {target.controls->buffer_handle, 0u, resident_layout.control_padded_bytes},
-                    {target.positions->buffer_handle, 0u, resident_layout.position_padded_bytes},
-                    {query_records.buffer->buffer_handle,
-                     query_records.offset +
-                         static_cast<std::uint64_t>(state.local_index) *
-                             k_mps_query_record_stride,
-                     sizeof(gpu_seed_query_record_wire)},
-                    {state.counts.buffer->buffer_handle,
-                     state.counts.offset,
-                     state.counts.size},
-                    {state.prefix.buffer->buffer_handle,
-                     state.prefix.offset,
-                     state.prefix.size},
-                    {count_placeholder.buffer->buffer_handle,
-                     count_placeholder.offset,
-                     count_placeholder.size},
-                    {count_placeholder.buffer->buffer_handle,
-                     count_placeholder.offset,
-                     count_placeholder.size},
-                    {state.repetitive.buffer->buffer_handle,
-                     state.repetitive.offset,
-                     state.repetitive.size},
-                }};
-                coordinate_pipeline_detail::populate_grouped_soa_seed_descriptor_extents(
-                    state.push, infos, features_.max_storage_buffer_range);
-                record_compute_dispatch_locked(command_buffer_,
-                                               count_pipe,
-                                               infos,
-                                               &state.push,
-                                               sizeof(state.push),
-                                               1u,
-                                               collector.get(),
-                                               state.job_index);
+            // Each window depends on the previous window of the same job;
+            // jobs within one window have disjoint outputs and remain batched.
+            for (const auto& window : resident_layout.windows) {
+                for (mps_seed_wave_state& state : states) {
+                    if (state.query_record.minimizer_count == 0u)
+                        continue;
+                    gpu_grouped_soa_seed_push window_push = state.push;
+                    std::array<VkDescriptorBufferInfo, 10> infos{{
+                        {query_inputs.device_minimizer_words->buffer_handle,
+                         0u,
+                         query_layout.required_min_words_bytes},
+                        {target.descriptors->buffer_handle, 0u, target.descriptor_bytes},
+                        {target.controls->buffer_handle, 0u, resident_layout.control_padded_bytes},
+                        {target.positions->buffer_handle, 0u, resident_layout.position_padded_bytes},
+                        {query_records.buffer->buffer_handle,
+                         query_records.offset +
+                             static_cast<std::uint64_t>(state.local_index) *
+                                 k_mps_query_record_stride,
+                         sizeof(gpu_seed_query_record_wire)},
+                        {state.counts.buffer->buffer_handle,
+                         state.counts.offset,
+                         state.counts.size},
+                        {state.prefix.buffer->buffer_handle,
+                         state.prefix.offset,
+                         state.prefix.size},
+                        {count_placeholder.buffer->buffer_handle,
+                         count_placeholder.offset,
+                         count_placeholder.size},
+                        {count_placeholder.buffer->buffer_handle,
+                         count_placeholder.offset,
+                         count_placeholder.size},
+                        {state.repetitive.buffer->buffer_handle,
+                         state.repetitive.offset,
+                         state.repetitive.size},
+                    }};
+                    coordinate_pipeline_detail::bind_grouped_soa_buffer_window(
+                        window_push, infos, window, features_.max_storage_buffer_range);
+                    record_compute_dispatch_locked(command_buffer_,
+                                                   count_pipe,
+                                                   infos,
+                                                   &window_push,
+                                                   sizeof(window_push),
+                                                   1u,
+                                                   collector.get(),
+                                                   state.job_index);
+                }
+                record_compute_barrier(command_buffer_);
             }
-            record_compute_barrier(command_buffer_);
             for (mps_seed_wave_state& state : states) {
                 if (state.query_record.minimizer_count == 0u)
                     continue;
@@ -3048,52 +3092,56 @@ grouped_soa_seed_anchor_result runtime::run_grouped_soa_seed_anchor_roundtrip(
             collector->begin(command_buffer_);
             record_host_to_shader(command_buffer_);
             record_compute_barrier(command_buffer_);
-            for (mps_seed_wave_state& state : states) {
-                if (state.total_anchors == 0u)
-                    continue;
-                gpu_grouped_soa_seed_push emit_push = state.push;
-                emit_push.emit_mode = 1u;
-                emit_push.anchor_capacity = state.total_anchors_u32;
-                const std::array<VkDescriptorBufferInfo, 10> infos{{
-                    {query_inputs.device_minimizer_words->buffer_handle,
-                     0u,
-                     query_layout.required_min_words_bytes},
-                    {target.descriptors->buffer_handle, 0u, target.descriptor_bytes},
-                    {target.controls->buffer_handle, 0u, resident_layout.control_padded_bytes},
-                    {target.positions->buffer_handle, 0u, resident_layout.position_padded_bytes},
-                    {query_records.buffer->buffer_handle,
-                     query_records.offset +
-                         static_cast<std::uint64_t>(state.local_index) *
-                             k_mps_query_record_stride,
-                     sizeof(gpu_seed_query_record_wire)},
-                    {state.counts.buffer->buffer_handle,
-                     state.counts.offset,
-                     state.counts.size},
-                    {state.prefix.buffer->buffer_handle,
-                     state.prefix.offset,
-                     state.prefix.size},
-                    {state.anchors.buffer->buffer_handle,
-                     state.anchors.offset,
-                     state.anchors.size},
-                    {state.anchor_keys.buffer->buffer_handle,
-                     state.anchor_keys.offset,
-                     state.anchor_keys.size},
-                    {state.repetitive.buffer->buffer_handle,
-                     state.repetitive.offset,
-                     state.repetitive.size},
-                }};
-                coordinate_pipeline_detail::populate_grouped_soa_seed_descriptor_extents(
-                    emit_push, infos, features_.max_storage_buffer_range);
-                record_compute_dispatch_locked(command_buffer_,
-                                               emit_pipe,
-                                               infos,
-                                               &emit_push,
-                                               sizeof(emit_push),
-                                               1u,
-                                               collector.get(),
-                                               state.job_index);
+            // Each window depends on the previous window of the same job;
+            // jobs within one window have disjoint outputs and remain batched.
+            for (const auto& window : resident_layout.windows) {
+                for (mps_seed_wave_state& state : states) {
+                    if (state.total_anchors == 0u)
+                        continue;
+                    gpu_grouped_soa_seed_push emit_push = state.push;
+                    emit_push.emit_mode = 1u;
+                    emit_push.anchor_capacity = state.total_anchors_u32;
+                    std::array<VkDescriptorBufferInfo, 10> infos{{
+                        {query_inputs.device_minimizer_words->buffer_handle,
+                         0u,
+                         query_layout.required_min_words_bytes},
+                        {target.descriptors->buffer_handle, 0u, target.descriptor_bytes},
+                        {target.controls->buffer_handle, 0u, resident_layout.control_padded_bytes},
+                        {target.positions->buffer_handle, 0u, resident_layout.position_padded_bytes},
+                        {query_records.buffer->buffer_handle,
+                         query_records.offset +
+                             static_cast<std::uint64_t>(state.local_index) *
+                                 k_mps_query_record_stride,
+                         sizeof(gpu_seed_query_record_wire)},
+                        {state.counts.buffer->buffer_handle,
+                         state.counts.offset,
+                         state.counts.size},
+                        {state.prefix.buffer->buffer_handle,
+                         state.prefix.offset,
+                         state.prefix.size},
+                        {state.anchors.buffer->buffer_handle,
+                         state.anchors.offset,
+                         state.anchors.size},
+                        {state.anchor_keys.buffer->buffer_handle,
+                         state.anchor_keys.offset,
+                         state.anchor_keys.size},
+                        {state.repetitive.buffer->buffer_handle,
+                         state.repetitive.offset,
+                         state.repetitive.size},
+                    }};
+                    coordinate_pipeline_detail::bind_grouped_soa_buffer_window(
+                        emit_push, infos, window, features_.max_storage_buffer_range);
+                    record_compute_dispatch_locked(command_buffer_,
+                                                   emit_pipe,
+                                                   infos,
+                                                   &emit_push,
+                                                   sizeof(emit_push),
+                                                   1u,
+                                                   collector.get(),
+                                                   state.job_index);
+                }
+                record_compute_barrier(command_buffer_);
             }
-            record_compute_barrier(command_buffer_);
             for (mps_seed_wave_state& state : states) {
                 if (state.total_anchors == 0u)
                     continue;

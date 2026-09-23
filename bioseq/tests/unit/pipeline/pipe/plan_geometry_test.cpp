@@ -871,6 +871,37 @@ TEST_CASE("GPU seed frontend proof is source-bound and seed-fields-only",
     REQUIRE(proof.target_source() ==
             ::bioseq::pipeline_stats::target_index_source::recomputed);
 
+    SECTION("MPS accepts complete multi-window lookup geometry") {
+        auto windowed = proof;
+        windowed.completion = vulkan_seed_frontend_completion_kind::mps_runtime;
+        windowed.target_completion =
+            vulkan_seed_target_completion_kind::mps_runtime_generated;
+        windowed.operation_identity = 29u;
+        windowed.seed_stats.seed_lookup_dispatches = 2u;
+        windowed.seed_stats.seed_sorted_dense_lookup_dispatches = 2u;
+        REQUIRE(windowed.is_internally_consistent());
+
+        auto missing_window = windowed;
+        missing_window.seed_stats.seed_sorted_dense_lookup_dispatches = 1u;
+        REQUIRE_FALSE(missing_window.is_internally_consistent());
+
+        auto missing_lookup = windowed;
+        missing_lookup.seed_stats.seed_lookup_dispatches = 0u;
+        missing_lookup.seed_stats.seed_sorted_dense_lookup_dispatches = 0u;
+        REQUIRE_FALSE(missing_lookup.is_internally_consistent());
+
+        auto wrong_representation = windowed;
+        wrong_representation.seed_stats.seed_open_addressed_lookup_dispatches = 2u;
+        wrong_representation.seed_stats.seed_sorted_dense_lookup_dispatches = 0u;
+        REQUIRE_FALSE(wrong_representation.is_internally_consistent());
+
+        auto mpf = windowed;
+        mpf.completion = vulkan_seed_frontend_completion_kind::mpf_runtime;
+        mpf.target_completion =
+            vulkan_seed_target_completion_kind::mpf_runtime_generated;
+        REQUIRE_FALSE(mpf.is_internally_consistent());
+    }
+
     auto wrong_source = proof;
     wrong_source.target_completion =
         vulkan_seed_target_completion_kind::mpf_persisted;

@@ -312,21 +312,25 @@ public:
 namespace vulkan_chaining_detail {
 
 /**
- * @brief Creates one device allocation with an adjacent physical permit.
+ * @brief Creates one Vulkan allocation with an adjacent physical permit.
+ * @param cpu_readback Prefer CPU-cached memory for arrays used by host backtracking.
  * @param allocation_permit Null outside an admitted attempt; otherwise receives
  * only unreflected driver allocation bytes and must outlive the returned buffer.
  * The driver requirement is resolved before the admission transaction, avoiding
  * acquisition of the runtime planning mutex while materialization is locked.
  */
-[[nodiscard]] inline bioseq::gpu::vulkan::buffer make_chaining_device_buffer(
+[[nodiscard]] inline bioseq::gpu::vulkan::buffer make_chaining_buffer(
     bioseq::gpu::vulkan::runtime& vulkan_runtime,
     std::uint64_t requested_bytes,
     VkBufferUsageFlags usage,
     std::uint64_t allocation_requirement,
     const vulkan_chaining_memory_plan& memory_plan,
-    bioseq::parallelism::memory_permit* allocation_permit) {
+    bioseq::parallelism::memory_permit* allocation_permit,
+    bool cpu_readback) {
     if (allocation_permit == nullptr) {
-        return vulkan_runtime.create_device_buffer(requested_bytes, usage);
+        return cpu_readback
+            ? vulkan_runtime.create_host_buffer(requested_bytes, usage)
+            : vulkan_runtime.create_device_buffer(requested_bytes, usage);
     }
     if (*allocation_permit || requested_bytes == 0u || allocation_requirement < requested_bytes) {
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
@@ -344,8 +348,11 @@ namespace vulkan_chaining_detail {
     bioseq::gpu::vulkan::buffer created{};
     const auto materialization = admission.materialize(
         *allocation_permit,
-        [&vulkan_runtime, &created, requested_bytes, usage, allocation_requirement]() {
-            created = vulkan_runtime.create_device_buffer(requested_bytes, usage);
+        [&vulkan_runtime, &created, requested_bytes, usage, allocation_requirement,
+         cpu_readback]() {
+            created = cpu_readback
+                ? vulkan_runtime.create_host_buffer(requested_bytes, usage)
+                : vulkan_runtime.create_device_buffer(requested_bytes, usage);
             if (created.allocation_bytes != allocation_requirement ||
                 created.allocation_bytes > (std::numeric_limits<std::size_t>::max)() ||
                 created.mapped == nullptr || !created.is_host_visible_coherent()) {
@@ -714,38 +721,39 @@ struct vulkan_chaining_shape_plan {
             device_anchor_count));
     }
 
-    // Unified memory writes and reads mapped device buffers directly. The
-    // transfer parameter remains an invalid sentinel and allocates no 24*N
-    // bounce buffer.
+    // GPU inputs stay device-local. Host backtracking repeatedly reads scores
+    // and predecessors, so those mapped arrays must prefer CPU-cached memory.
+    // Coordinate-only execution backtracks on the GPU and retains device-local
+    // arrays. The transfer sentinel still allocates no bounce buffer.
     bioseq::gpu::vulkan::buffer transfer_scratch{};
     bioseq::parallelism::memory_permit anchor_permit{};
-    auto anchor_buffer = make_chaining_device_buffer(vulkan_runtime,
+    auto anchor_buffer = make_chaining_buffer(vulkan_runtime,
         device_anchor_count_u64 * sizeof(anchor),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         memory_plan.device_anchor_bytes, memory_plan,
-        attempt_retention == nullptr ? nullptr : &anchor_permit);
+        attempt_retention == nullptr ? nullptr : &anchor_permit, false);
     bioseq::parallelism::memory_permit range_permit{};
-    auto range_buffer = make_chaining_device_buffer(vulkan_runtime,
+    auto range_buffer = make_chaining_buffer(vulkan_runtime,
         dp_ranges.size() * sizeof(bioseq::gpu::vulkan::gpu_chain_range),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         memory_plan.device_range_bytes, memory_plan,
-        attempt_retention == nullptr ? nullptr : &range_permit);
+        attempt_retention == nullptr ? nullptr : &range_permit, false);
     bioseq::parallelism::memory_permit score_permit{};
-    auto score_buffer = make_chaining_device_buffer(vulkan_runtime,
+    auto score_buffer = make_chaining_buffer(vulkan_runtime,
         device_anchor_count_u64 * sizeof(int32_t),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
         VK_BUFFER_USAGE_TRANSFER_DST_BIT |
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         memory_plan.device_score_bytes, memory_plan,
-        attempt_retention == nullptr ? nullptr : &score_permit);
+        attempt_retention == nullptr ? nullptr : &score_permit, !params.coordinate_only);
     bioseq::parallelism::memory_permit predecessor_permit{};
-    auto predecessor_buffer = make_chaining_device_buffer(vulkan_runtime,
+    auto predecessor_buffer = make_chaining_buffer(vulkan_runtime,
         device_anchor_count_u64 * sizeof(int64_t),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
         VK_BUFFER_USAGE_TRANSFER_DST_BIT |
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         memory_plan.device_predecessor_bytes, memory_plan,
-        attempt_retention == nullptr ? nullptr : &predecessor_permit);
+        attempt_retention == nullptr ? nullptr : &predecessor_permit, !params.coordinate_only);
     if (anchor_buffer.mapped == nullptr || range_buffer.mapped == nullptr
         || score_buffer.mapped == nullptr
         || predecessor_buffer.mapped == nullptr
@@ -754,7 +762,7 @@ struct vulkan_chaining_shape_plan {
         || !score_buffer.is_host_visible_coherent()
         || !predecessor_buffer.is_host_visible_coherent()) {
         throw bioseq::gpu::vulkan::vulkan_runtime_error(
-            "Vulkan chaining requires host-visible coherent unified-memory buffers");
+            "Vulkan chaining requires host-visible coherent buffers");
     }
     std::span<int32_t> best_scores{
         static_cast<int32_t*>(score_buffer.mapped), device_anchor_count};

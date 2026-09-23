@@ -507,6 +507,7 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
                 .query_scan_dispatches = 3u,
                 .query_emit_dispatches = 1u,
                 .query_completed_roundtrips = 2u,
+                .binding_window_count = 1u,
                 .direct_count_dispatches = 1u,
                 .direct_scan_dispatches = 3u,
                 .anchor_count = 12u,
@@ -557,6 +558,23 @@ TEST_CASE("persisted GPU SQL accumulation is admitted, causal, and immutable acr
         REQUIRE(chunk.has_published_cache_metrics());
         REQUIRE(chunk.is_sealed());
     };
+
+    {
+        auto windowed = make_chunk(0x1000u, 0x2000u, 30u);
+        REQUIRE(windowed != nullptr);
+        auto& job = windowed->jobs()[0];
+        job.binding_window_count = 2u;
+        job.direct_count_dispatches = 2u;
+        job.direct_emit_dispatches = 2u;
+        REQUIRE(job.is_internally_consistent(0x2000u));
+        --job.direct_count_dispatches;
+        REQUIRE_FALSE(job.is_internally_consistent(0x2000u));
+        ++job.direct_count_dispatches;
+        --job.direct_emit_dispatches;
+        REQUIRE_FALSE(job.is_internally_consistent(0x2000u));
+        ++job.direct_emit_dispatches;
+        REQUIRE(windowed->seal());
+    }
 
     {
         auto inconsistent_wait = make_chunk(0x1000u, 0x2000u, 30u);

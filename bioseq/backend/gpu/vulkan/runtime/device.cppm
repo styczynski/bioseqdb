@@ -891,11 +891,9 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
     VkMemoryRequirements reqs{};
     vkGetBufferMemoryRequirements(device_, buffer_handle, &reqs);
 
-    // The direct mapped path performs CPU binary searches, read-modify-write
-    // fills, and checksum validation before GPU dispatch. A host-visible BAR
-    // mapping of discrete VRAM is coherent but need not be CPU-cached.
-    // Prefer cached unified memory, then cached host memory accessible to the
-    // GPU. Retain the original coherent choices when caching is unavailable.
+    // GPU working sets prefer device-local memory. Cached host memory is a
+    // fallback, not a substitute for VRAM bandwidth on discrete GPUs. Callers
+    // performing repeated CPU payload searches use create_host_buffer instead.
     std::uint32_t mem_type = 0;
     bool found = false;
     constexpr VkMemoryPropertyFlags mapped_memory_preferences[] = {
@@ -903,12 +901,12 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
             VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-            VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+            VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
     };
