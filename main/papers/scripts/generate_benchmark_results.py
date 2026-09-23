@@ -142,7 +142,7 @@ def validate_row(row, unavailable=False, fast_scope=None):
 
 
 class Snapshot:
-    """First complete observation per tuple; keep FAST scope and sample count intact."""
+    """Lowest-A complete observation per tuple; keep its B, scope and sample count."""
     def __init__(self, root):
         self.raw, self.docs, self.rows, self.unavailable = {}, {}, {}, set()
         self.sources, self.absent_sources = {}, set()
@@ -199,7 +199,8 @@ class Snapshot:
                     key = (host, DISPLAY_SCOPE, row_key(row), config_key(row))
                     assert key not in display_keys, f'display collision in {name}: {key}'
                     display_keys.add(key)
-                    if key not in self.rows:
+                    # Strict comparison keeps source-list priority only for exact A ties.
+                    if key not in self.rows or row['metrics']['p50_a'] < self.rows[key]['metrics']['p50_a']:
                         self.rows[key] = row
                         self.sources[key] = name
                 for row in doc.get('hardware_unavailable_cells') or []:
@@ -209,12 +210,35 @@ class Snapshot:
                     unavailable_keys.add(key)
                 self.unavailable.update(unavailable_keys)
                 self.source_counts[name] = len(display_keys)
-        # A real result from any priority source supersedes an unmeasured disposition.
+        # A real result from any configured source supersedes an unmeasured disposition.
         self.unavailable.difference_update(self.rows)
         assert {(key[0], row['stable_key']) for key, row in self.rows.items()} == self.expected_tuples, 'deduplicated source coverage mismatch'
         for key, row in self.rows.items():
             if row['pipeline'] == 'bioseq':
                 assert (key[0], key[1], BASELINE, key[3]) in self.rows, f'missing matched baseline {key}'
+        self.build_row_orders()
+
+    def build_row_orders(self):
+        """Rank Local globally and AWS per (size, k, w), using Index A minima."""
+        self.row_orders, self.row_ranks, self.index_minima = {}, {}, {}
+        for remote, hosts in ((False, ('Local',)), (True, HOSTS[1:])):
+            groups = itertools.product((4, 2), ((15, 10), (20, 15))) if remote else [(None, None)]
+            for size, kw in groups:
+                group = (remote, size, kw)
+                minima = {}
+                executions = {rk for h, _, rk, cfg in set(self.rows) | self.unavailable
+                              if h in hosts and rk != BASELINE and (not remote or cfg[1:3] == (size, kw))}
+                for (host, _, execution, config), row in self.rows.items():
+                    if (host in hosts and execution != BASELINE and config[0] == 'just_index'
+                            and (not remote or config[1:3] == (size, kw))):
+                        value = row['metrics']['p50_a']
+                        minimum, count = minima.get(execution, (value, 0))
+                        minima[execution] = (min(minimum, value), count + 1)
+                order = sorted(executions, key=lambda execution:
+                               (execution not in minima, minima.get(execution, (0, 0))[0], execution))
+                self.row_orders[group] = order
+                self.row_ranks[group] = {execution: rank for rank, execution in enumerate(order)}
+                self.index_minima[group] = minima
 
     def minimum(self, host, scope, config, metric, bioseq_only=False):
         candidates = [r['metrics'][metric] for (h, s, rk, cfg), r in self.rows.items()
@@ -227,7 +251,9 @@ class Snapshot:
         """Select one column winner; exact ties use the first displayed execution."""
         candidates = [(rk, r) for (h, s, rk, cfg), r in self.rows.items()
                       if (h, s, cfg) == (host, scope, config)]
-        return min(candidates, key=lambda item: (item[1]['metrics'][metric], item[0] != BASELINE, item[0]))[0] if candidates else None
+        group = (False, None, None) if host == 'Local' else (True, config[1], config[2])
+        ranks = self.row_ranks[group]
+        return min(candidates, key=lambda item: (item[1]['metrics'][metric], ranks.get(item[0], -1)))[0] if candidates else None
 
     def cell(self, host, scope, execution, config, show_best=True):
         if execution == VULKAN_SUMMARY:
@@ -289,7 +315,7 @@ def hardware_table(snapshot):
     for title, values in rows:
         out.append(tex(title) + ' & ' + ' & '.join(tex(v) for v in values) + r'\\[3pt]')
     out += [r'\bottomrule\end{tabularx}\end{table}', r'\noindent The AWS summaries record the Linux kernel but do not seal an OS distribution version. The local legacy capture does not seal the MoltenVK implementation identity. Unrecorded values are not inferred from the current machine.']
-    out += [r'\par Remote cells use the first available approved result in this order: the default summary, TEST3, TEST4, TEST7, TEST2, then FAST. Local cells use the default summary, then FAST LOCAL. A and B come from the same observation. The inventory describes the default hosts. Fallback measurements may come from other instances of the same machine class, and comparisons may combine campaigns.\par']
+    out += [r'\par Each cell selects the approved observation with the lowest A across its configured sources. Remote sources are the default summary, TEST3, TEST4, TEST7, TEST2 and FAST. Local sources are the default summary and FAST LOCAL. This source order breaks exact A ties only. B, repeat count and timing scope come from the same selected observation. These are best observed timings across campaigns, not estimates of typical execution time. The inventory describes the default hosts. Other measurements may come from different instances of the same machine class.\par']
     out += [r'\begin{table}[H]\centering\small', r'\caption{Published snapshot coverage after excluding mismeasured historical timings.}', r'\begin{tabular}{lrrrrr}\toprule Host & Logical tuples & Observations & Repeats & BioseqDB obs. & GPU unavailable\\\midrule']
     for host in HOSTS:
         rows = [r for (h, _, _, _), r in snapshot.rows.items() if h == host]
@@ -319,8 +345,15 @@ def header(configs, remote, first_labels='Engine & Execution'):
 def result_pages(snapshot, scope, remote, configs, title):
     hosts = HOSTS[1:] if remote else ('Local',)
     relevant = {key[2] for key in set(snapshot.rows) | snapshot.unavailable if key[0] in hosts and key[1] == scope and key[3] in configs}
-    # Keep row order identical across panels, and repeat baseline as a reading aid.
-    keys = sorted(relevant - {BASELINE})
+    size, kw = None, None
+    if remote:
+        groups = {cfg[1:3] for cfg in configs}
+        assert len(groups) == 1, 'Each AWS table must contain one (size, k, w) group'
+        size, kw = next(iter(groups))
+    keys = [key for key in snapshot.row_orders[(remote, size, kw)] if key in relevant]
+    column_count = len(configs) * len(hosts)
+    column_width = '13.55'
+    order_scope = 'within this size/k/w group, across alphabets and all displayed machines' if remote else 'across all local sizes, k/w pairs and alphabets'
     vulkan_keys = {key for key in keys if is_vulkan(key)}
     has_vulkan_results = any(h in hosts and s == scope and cfg in configs and rk in vulkan_keys
                              for h, s, rk, cfg in snapshot.rows)
@@ -331,7 +364,7 @@ def result_pages(snapshot, scope, remote, configs, title):
                for i in range(page_count)]
     out = []
     for page, batch in enumerate(batches, 1):
-        out += [r'\clearpage', r'\noindent{\large\bfseries ' + tex(title) + rf'\hfill {page}/{len(batches)}' + r'}\par\smallskip', r'{\fontsize{7.1}{8.1}\selectfont\setlength{\tabcolsep}{1pt}\setlength{\fboxsep}{2pt}\renewcommand{\arraystretch}{1.12}', r'\noindent\begin{tabular}{@{}p{14mm}p{27mm}|' + ('p{13.55mm}|' * 16) + r'@{}}\hline']
+        out += [r'\clearpage', r'\noindent{\large\bfseries ' + tex(title) + rf'\hfill {page}/{len(batches)}' + r'}\par\smallskip', r'{\fontsize{7.1}{8.1}\selectfont\setlength{\tabcolsep}{1pt}\setlength{\fboxsep}{2pt}\renewcommand{\arraystretch}{1.12}', r'\noindent\begin{tabular}{@{}p{14mm}p{27mm}|' + (f'p{{{column_width}mm}}|' * column_count) + r'@{}}\hline']
         out += header(configs, remote)
         out.append(r'\hline')
         for n, key in enumerate([BASELINE] + batch):
@@ -340,9 +373,10 @@ def result_pages(snapshot, scope, remote, configs, title):
             if key == VULKAN_SUMMARY:
                 engine_label = r'\rule{0pt}{12pt}' + engine_label
             cells = [snapshot.cell(h, scope, key, cfg, show_best=(key != BASELINE or page == 1)) for cfg in configs for h in hosts]
-            assert len(cells) == 16
+            assert len(cells) == column_count
             out.append(row_tint(key) + engine_label + ' & ' + label + ' & ' + ' & '.join(cells) + r'\\[3pt]\hline')
-        out += [r'\end{tabular}\par}', r'\smallskip{\footnotesize\noindent Each cell: A, comparison, B, comparison. Times cover 1,024 queries. $\cdot$ = no approved observation. ---\textsuperscript{g} = GPU unavailable, not executed. n/a = no measured comparison.\par', r'\noindent \textsuperscript{f}SIMD-ref request observed as scalar, compared only as that effective path. \textsuperscript{p}Accepted by explicit preservation after wrapper postflight failure, no run receipt claimed.\par', r'\noindent MPF/MPS = minimizers per fragment/sequence. Row order: index representation / minimizer, then chaining / base alignment. SIMD-ref is the reference minimizer, Bounded is bounded ntHash.\par']
+        out += [r'\end{tabular}\par}', r'\smallskip{\footnotesize\noindent Each cell: A, comparison, B, comparison. Times cover 1,024 queries. $\cdot$ = no approved observation. ---\textsuperscript{g} = GPU unavailable, not executed. n/a = no measured comparison.\par', r'\noindent \textsuperscript{f}SIMD-ref request observed as scalar, compared only as that effective path. \textsuperscript{p}Accepted by explicit preservation after wrapper postflight failure, no run receipt claimed.\par', r'\noindent MPF/MPS = minimizers per fragment/sequence. Labels: index representation / minimizer, then chaining / base alignment. SIMD-ref is the reference minimizer, Bounded is bounded ntHash.\par',
+                r'\noindent Minimap2 stays first. Other rows follow increasing minima of available Index A times ' + order_scope + r'. No Index results = last. Coverage varies.\par']
         if any(r['run_count'] == 1 and h in hosts and cfg in configs and rk in [BASELINE] + batch
                for (h, _, rk, cfg), r in snapshot.rows.items()):
             out.append(r'\noindent\textsuperscript{s}' + tex(FAST_NOTE) + r'\par')
@@ -497,7 +531,7 @@ class ExternalComparison:
 def external_description(external):
     """Plain-language methods, explicitly distinguishing these campaign boundaries."""
     paragraphs = [r'\clearpage\subsection{Comparison with other aligners}\label{sec:external-aligner-results}',
-            r'The final table places minimap2 and one fixed BioseqDB configuration alongside blastn, Winnowmap and LexicMap. Both minimap2 and BioseqDB timings come from the corresponding machine\textquotesingle s non-external remote summary, matched by machine class, target size, alphabet, $(k,w)$ and index mode. External-campaign minimap2 timings are excluded. BioseqDB always uses minimizers per fragment (MPF), bounded ntHash SIMD minimizers, SIMD-DP chaining and Block Aligner. Missing observations are marked with a dot. The same default / TEST3 / TEST4 / TEST7 / TEST2 / FAST priority applies to both rows. FAST entries carry a single-sample footnote. No other BioseqDB configuration or historical timing scope is substituted.',
+            r'The final table places minimap2 and one fixed BioseqDB configuration alongside blastn, Winnowmap and LexicMap. Both minimap2 and BioseqDB timings come from the corresponding machine\textquotesingle s non-external remote summary, matched by machine class, target size, alphabet, $(k,w)$ and index mode. External-campaign minimap2 timings are excluded. BioseqDB always uses minimizers per fragment (MPF), bounded ntHash SIMD minimizers, SIMD-DP chaining and Block Aligner. Missing observations are marked with a dot. Both rows select the lowest-A observation across default / TEST3 / TEST4 / TEST7 / TEST2 / FAST sources, retaining its B and sample count. Source order breaks exact A ties only. FAST entries carry a single-sample footnote. No other BioseqDB configuration or historical timing scope is substituted.',
             f'The table contains {len(external.rows)} distinct observations and {sum(r["run_count"] for r in external.rows.values()):,} accepted repeats. Only approved results are included. Qualification runs, interrupted attempts and the small-query checks used before the full runs are excluded.',
             r'\paragraph{Measurement procedure.}',
             r'\begin{itemize}',
@@ -518,15 +552,16 @@ def external_description(external):
     return [line + (r'\par' if line and not line.startswith('\\') else '') for line in paragraphs]
 
 
-def external_pages(external):
+def external_pages(external, letters):
     out = external_description(external)
     out += [r'\newgeometry{left=10mm,right=10mm,top=12mm,bottom=12mm}', r'\begin{landscape}', r'\refstepcounter{table}\label{tab:external-aligners}']
     labels = {'minimap2': ('minimap2', 'Retained baseline'), 'bioseq': ('BioseqDB', r'\begin{tabular}[t]{@{}l@{}}\rule{0pt}{12pt}MPF / Bounded\\SIMD-DP / Block\end{tabular}'),
               'blastn': ('blastn', r'Native\textsuperscript{*}'), 'winnowmap': ('winnowmap', r'Native\textsuperscript{*}'), 'lexicmap': ('lexicmap', r'Native\textsuperscript{*}')}
     for panel, (size, kw) in enumerate(itertools.product((4, 2), ((15, 10), (20, 15))), 1):
+        letter = next(letters)
         configs = [cfg for cfg in CONFIGS if cfg[1:3] == (size, kw)]
         notes = set()
-        out += [r'\clearpage', rf'\noindent{{\large\bfseries Table \thetable: aligner comparison, {size} Gbp, k={kw[0]}, w={kw[1]}\hfill {panel}/4}}\par\smallskip',
+        out += [r'\clearpage', rf'\noindent{{\large\bfseries ({letter}): Table \thetable: aligner comparison, {size} Gbp, k={kw[0]}, w={kw[1]}\hfill {panel}/4}}\par\smallskip',
                 r'\noindent{\footnotesize Different campaigns and native timing boundaries. A/B ratios are descriptive, subject to the measurement notes.}\par\smallskip',
                 r'{\fontsize{7.1}{8.1}\selectfont\setlength{\tabcolsep}{1pt}\setlength{\fboxsep}{2pt}\renewcommand{\arraystretch}{1.12}',
                 r'\noindent\begin{tabular}{@{}p{15mm}p{26mm}|' + ('p{13.55mm}|' * 16) + r'@{}}\hline']
@@ -555,17 +590,23 @@ def render(snapshot, external):
         out.append('% ' + name + ' sha256=' + hashlib.sha256(raw).hexdigest())
     for name in snapshot.raw:
         count = sum(source == name for source in snapshot.sources.values())
-        out.append(f'% {name}: available={snapshot.source_counts[name]}, selected={count}, shadowed={snapshot.source_counts[name] - count}')
+        out.append(f'% {name}: available={snapshot.source_counts[name]}, selected={count}, not_selected={snapshot.source_counts[name] - count}')
     for host, raw in external.raw.items():
         out.append('% ' + EXTERNAL_FILES[host] + ' sha256=' + hashlib.sha256(raw).hexdigest())
+    for (remote, size, kw), order in snapshot.row_orders.items():
+        for rank, execution in enumerate(order, 1):
+            minimum, count = snapshot.index_minima[(remote, size, kw)].get(execution, (None, 0))
+            group_label = f"size={size} k={kw[0]} w={kw[1]}" if remote else "all local cases"
+            out.append(f'% Row rank {"AWS" if remote else "Local"} {rank} {group_label}: index_a_min_ns={minimum}, index_cells={count}, execution={execution}')
     out += [r'\definecolor{BenchBest}{HTML}{DDECF8}', r'\definecolor{BenchBaseline}{HTML}{F4F4F4}', r'\definecolor{BenchPreferred}{HTML}{FFFBEA}', r'\newgeometry{left=10mm,right=10mm,top=12mm,bottom=12mm}', r'\begin{landscape}']
     out += hardware_table(snapshot)
-    out += result_pages(snapshot, DISPLAY_SCOPE, False, CONFIGS, 'Local machine: mapping interval')
+    letters = iter('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+    out += result_pages(snapshot, DISPLAY_SCOPE, False, CONFIGS, f'({next(letters)}): Local machine: mapping interval')
     for size, kw in itertools.product((4, 2), ((15, 10), (20, 15))):
         configs = [cfg for cfg in CONFIGS if cfg[1:3] == (size, kw)]
-        out += result_pages(snapshot, DISPLAY_SCOPE, True, configs, f'AWS: {size} Gbp, k={kw[0]}, w={kw[1]} (mapping interval)')
+        out += result_pages(snapshot, DISPLAY_SCOPE, True, configs, f'({next(letters)}): AWS: {size} Gbp, k={kw[0]}, w={kw[1]} (mapping interval)')
     out += [r'\end{landscape}', r'\restoregeometry', '']
-    out += external_pages(external)
+    out += external_pages(external, letters)
     assert {(key[0], snapshot.rows[key]['stable_key']) for key in snapshot.seen} == snapshot.expected_tuples, 'rendered tuples differ from deduplicated source union'
     assert snapshot.seen == set(snapshot.rows), f'unrendered observations: {set(snapshot.rows) - snapshot.seen}'
     return '\n'.join(out)
@@ -599,7 +640,7 @@ def main():
     print(f"{'Verified' if args.check else 'Generated'} {args.output}: {len(snapshot.rows)} observations, {sum(r['run_count'] for r in snapshot.rows.values())} repeats; final aligner table {len(external.rows)} observations; every selected observation rendered.")
     for name in snapshot.raw:
         count = sum(source == name for source in snapshot.sources.values())
-        print(f'  {name}: {snapshot.source_counts[name]} available, {count} selected, {snapshot.source_counts[name] - count} shadowed')
+        print(f'  {name}: {snapshot.source_counts[name]} available, {count} selected, {snapshot.source_counts[name] - count} not selected')
     for host in HOSTS:
         selected = [r for (h, _, _, _), r in snapshot.rows.items() if h == host]
         expected = sum(h == host for h, _ in snapshot.expected_tuples)
