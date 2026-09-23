@@ -75,7 +75,9 @@ def reclaim_idle_local_indexes(*, minimum_free_gib: int = 35, orphan_grace_secon
     PostgreSQL relation files, or delete files while a SQL workload is active.
     User explicitly authorized dropping benchmark tables/indexes for space.
     """
-    if shutil.disk_usage(ROOT).free >= minimum_free_gib * 1024**3 or monitor._local_state().get("status") == "running":
+    observed = monitor._local_state()
+    if (shutil.disk_usage(ROOT).free >= minimum_free_gib * 1024**3
+            or (observed.get("status") == "running" and not observed.get("build_only"))):
         return
     # Previous dataset fixtures are deterministic scratch files, not results.
     # Expire only old, unopened fixtures between runs; never touch an active one.
@@ -214,14 +216,16 @@ def _collect_reports(name: str, token: str) -> bool:
     return True
 
 
-def sync_files(name: str, paths: tuple[str, ...]) -> None:
+def sync_files(name: str, paths: tuple[str, ...], *, checksum: bool = False) -> None:
     if name == "local":
         return
     remote = ssh(name)
     if any(Path(p).is_absolute() or ".." in Path(p).parts or "\n" in p for p in paths):
         raise ValueError("sync requires exact repository-relative paths")
     result = subprocess.run(
-        ["rsync", "-azR", "--files-from=-", "-e", shlex.join(remote[:-1]), str(ROOT) + "/",
+        # Content-only source sync must not rewrite the mtime of identical
+        # files: that would needlessly invalidate the remote Ninja cache.
+        ["rsync", *(["-rlpzR", "--checksum"] if checksum else ["-azR"]), "--files-from=-", "-e", shlex.join(remote[:-1]), str(ROOT) + "/",
          remote[-1] + ":/home/ubuntu/bioseqdb/"],
         input=("\n".join(paths) + "\n").encode(),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
@@ -250,8 +254,18 @@ def mcp_start(name: str, args: dict, label: str, *, build_preset: str | None = N
                             ''.join('export ' + key + '=' + shlex.quote(value) + '; '
                                     for key, value in environment.items()) +
                             "export BIOSEQ_BUILD_PARALLEL_JOBS=3; " +
+                            # The default derives 3 // 2 == 1 heavy compile,
+                            # serializing module builds even on 16 GiB hosts.
+                            # Two ~5 GiB peaks fit those hosts; C7G has 8 GiB.
+                            ("export BIOSEQ_BUILD_HEAVY_JOBS="
+                             + ("1" if family(name) == "c7g" else "2") + "; ") +
                             ("export BIOSEQ_BUILD_HARD_TIMEOUT_MIN=720; "
-                             if args.get("build_only") and family(name) == "m4" else "") +
+                             if args.get("build_only") else "") +
+                            # Raise only benchmark launches, never builds. The
+                            # MCP server and detached worker inherit this value;
+                            # the existing worker guard preserves negative nice.
+                            ("sudo -n renice -n -20 -p $$ >&2 || true; "
+                             if args.get("mode") == "benchmark-e2e" and not args.get("build_only") else "") +
                             "python3 build_mcp/server.py"]
     log = OUTPUT / f"{label}_{name}_{int(time.time())}.log"
     with log.open("wb") as output:
@@ -268,7 +282,8 @@ def mcp_start(name: str, args: dict, label: str, *, build_preset: str | None = N
             response = value
     payload = (response or {}).get("result", {})
     text = " ".join(item.get("text", "") for item in payload.get("content", []))
-    if result.returncode or not response or "error" in response or payload.get("isError") or " is scheduled (" not in text:
+    scheduled = any(phrase in text for phrase in (" is scheduled (", " are scheduled ("))
+    if result.returncode or not response or "error" in response or payload.get("isError") or not scheduled:
         raise RuntimeError("MCP did not admit launch: " + (text or str(response))[-1200:])
     return str(log)
 

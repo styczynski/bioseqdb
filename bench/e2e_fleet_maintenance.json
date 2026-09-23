@@ -7,14 +7,15 @@
       "owner": "fast_remote_e2e"
     },
     "test3-m4": {
-      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "reason": "Fast campaign owns family; drain current standard tuple, then import same-family binary",
       "paused": true,
       "owner": "fast_remote_e2e"
     },
     "test4-m4": {
-      "reason": "Validated same-family frozen runtime replacement after AVX-512 SIGILL",
-      "paused": false,
-      "build_receipt_id": "br_dc2475cb80c2d3944747e3850aab4107"
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "paused": true,
+      "build_receipt_id": "br_dc2475cb80c2d3944747e3850aab4107",
+      "owner": "fast_remote_e2e"
     },
     "test3-c7g": {
       "paused": true,
@@ -44,6 +45,36 @@
     "test3-m7i": {
       "paused": true,
       "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test7-m4": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "owner": "fast_remote_e2e"
+    },
+    "test2-c7g": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "owner": "fast_remote_e2e"
+    },
+    "test7-c7g": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "owner": "fast_remote_e2e"
+    },
+    "test2-m7i": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "owner": "fast_remote_e2e"
+    },
+    "test2-m7a": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "owner": "fast_remote_e2e"
+    },
+    "test2-m4": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
       "owner": "fast_remote_e2e"
     }
   }

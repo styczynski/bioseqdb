@@ -257,6 +257,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--daemon', action='store_true')
     parser.add_argument('--plan', action='store_true')
+    parser.add_argument('--retry-setup-failure', action='append', type=int, default=[],
+                        help='Explicitly requeue an unmeasured tuple after its setup failure is diagnosed and fixed')
+    parser.add_argument('--reason', help='Required explanation for an explicit setup retry')
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     if args.daemon:
@@ -268,6 +271,35 @@ def main():
     children = sorted(json.loads(recovery.MANIFEST.read_bytes())['children'], key=priority)
     by_ordinal = {c['ordinal']: c for c in children}
     state = json.loads(STATE.read_bytes()) if STATE.exists() else {'attempted': [], 'active': None}
+    if args.retry_setup_failure:
+        assert args.reason, '--reason is required for a diagnosed setup retry'
+        latest = {}
+        for line in (OUTPUT / 'events.jsonl').read_text().splitlines():
+            row = json.loads(line)
+            if row['event'] in ('audit_failed', 'audited'):
+                latest[row['ordinal']] = row
+        approved = {r['stable_key'] for r in document()['approved_results']} | {
+            r['stable_key'] for r in load_yaml(ROOT / 'ALL_RESULTS_TUPLES.yaml')['approved_results']}
+        retry_keys = set()
+        for ordinal in set(args.retry_setup_failure):
+            child = by_ordinal[ordinal]
+            assert ordinal != (state.get('active') or {}).get('ordinal'), 'Cannot requeue an active owner'
+            assert child['stable_key'] not in approved, 'Already approved; reuse that result'
+            failure = latest.get(ordinal, {})
+            assert (failure.get('event') == 'audit_failed' and failure.get('detail')
+                    == 'Terminal fast run has no complete report to audit'), 'No proven unmeasured attempt'
+            retry_keys.add(child['stable_key'])
+        state['attempted'] = [k for k in state['attempted'] if k not in retry_keys]
+        recovery.atomic(STATE, (json.dumps(state, indent=2) + '\n').encode())
+        event('setup_failures_requeued', ordinals=sorted(set(args.retry_setup_failure)), reason=args.reason)
+        return
+    if 'last_ordinal' not in state and (OUTPUT / 'events.jsonl').exists():
+        # MCP build-only state replaces the last run's config. Retain the
+        # index group across a binary repair instead of switching datasets.
+        for line in (OUTPUT / 'events.jsonl').read_text().splitlines():
+            event_row = json.loads(line)
+            if event_row.get('event') == 'dispatched':
+                state['last_ordinal'] = event_row['ordinal']
     out = document(); write_document(out)
     while True:
         maintenance = json.loads((ROOT / 'bench/e2e_fleet_maintenance.json').read_bytes())
@@ -288,6 +320,7 @@ def main():
             event('blocked', reason='MCP cleanup unverified'); time.sleep(60); continue
         if state['active']:
             active = state['active']; child = by_ordinal[active['ordinal']]
+            state['last_ordinal'] = active['ordinal']
             assert current.get('bench_e2e_config') == active['config'], 'Local run owner changed'
             try:
                 publish(child, Path(active['config']), current.get('report_files', []), out)
@@ -307,6 +340,15 @@ def main():
                 state['active'] = {'ordinal': ordinal, 'config': str(config)}
                 recovery.atomic(STATE, (json.dumps(state, indent=2) + '\n').encode())
                 continue
+        quarantine_path = ROOT / 'bench/e2e_fast_quarantine.json'
+        quarantine = json.loads(quarantine_path.read_bytes()).get('families', {}) if quarantine_path.exists() else {}
+        if 'local' in quarantine:
+            time.sleep(60); continue
+        rollout_path = ROOT / 'reporting/bioseq_benchmark_e2e/fast_remote/state.json'
+        if rollout_path.exists() and 'local' not in json.loads(rollout_path.read_bytes()).get('ready', {}):
+            # The central controller retired the old payload for a repair.
+            # Do not race its build admission with another old-binary tuple.
+            time.sleep(60); continue
         if not state.get('standard_drained'):
             fleet.collect('local', 'before_fast_drain_' + str(int(time.time())))
             subprocess.run([sys.executable, 'bench/recover_e2e_measurements.py', '--publish', '--host', 'local'],
@@ -321,7 +363,7 @@ def main():
         # ENOSPC failure admitted by the former flat 12-GiB check. This is an
         # operational estimate, not a promise that every tuple fits that size.
         previous = by_ordinal.get(int(config.stem.removeprefix('tuple_'))) \
-            if config.parent == CONFIGS and config.stem.startswith('tuple_') else None
+            if config.parent == CONFIGS and config.stem.startswith('tuple_') else by_ordinal.get(state.get('last_ordinal'))
         if previous:
             same_group = [c for c in remaining if index_group(c) == index_group(previous)]
             remaining = same_group + [c for c in remaining if index_group(c) != index_group(previous)]
@@ -330,7 +372,7 @@ def main():
 
         def required_space(child):
             identity = child['execution_cell']['identity']
-            if (current.get('status') == 'completed' and previous
+            if (current.get('status') == 'completed' and not current.get('build_only') and previous
                     and identity['index_mode'] == 'just_index'
                     and index_group(child) == index_group(previous)):
                 return 8 * 1024**3

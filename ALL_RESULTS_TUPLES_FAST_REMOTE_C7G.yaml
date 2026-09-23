@@ -311,6 +311,57 @@ benchmark_host_profile:
   replicas:
   - schema: bioseq.remote-benchmark-host
     version: 1
+    machine_id: C7G
+    cloud_provider: aws
+    aws_identity:
+      account_id: '970376923108'
+      region: us-east-1
+      availability_zone: us-east-1f
+      instance_id: i-0cab5f0ab9a1cb002
+      ec2_architecture: arm64
+    instance_type: c7g.xlarge
+    architecture: aarch64
+    cpu:
+      architecture: aarch64
+      model: Neoverse-V1
+      isa: 'aarch64 features: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm
+        jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm paca pacg
+        dcpodp svei8mm svebf16 i8mm bf16 dgh rng'
+      vcpu_count: 4
+      core_count: 4
+      threads_per_core: 1
+    memory:
+      physical_mib: 8192
+    storage:
+      kind: ebs
+      root_device: /dev/sda1
+      volume_id: vol-0a68963a0efa7f81b
+      capacity_gib: 500
+      volume_type: gp3
+      provisioned_iops: 6000
+      provisioned_throughput_mib_per_s: 500
+      encrypted: true
+      instance_store_present: false
+    receipt_host:
+      machine: aarch64
+      node: ip-172-31-72-135
+      release: 7.0.0-1012-aws
+      system: Linux
+    measurement_device:
+      identity: cpu:aarch64:ip-172-31-72-135
+      version: Linux:7.0.0-1012-aws
+    build_preset: native-arm64-clang22-linux-e2e
+    preset_family: e2e
+    gpu:
+      available: false
+      device_count: 0
+      identity: null
+      driver: null
+      vulkan_available: false
+      aws_gpu_info: null
+    descriptor_sha256: 36352e91b67f1c931d6cedd66745ba4d35693acf01c5b3c28bcd0279f8608051
+  - schema: bioseq.remote-benchmark-host
+    version: 1
     machine_id: TEST3_C7G
     cloud_provider: aws
     aws_identity:
@@ -409,6 +460,57 @@ benchmark_host_profile:
     descriptor_sha256: 6c97c19917ebd4a3114d7a42ee309d2729025ee8a4dfce1dd7d2eb429768e36d
   - schema: bioseq.remote-benchmark-host
     version: 1
+    machine_id: TEST2_C7G
+    cloud_provider: aws
+    aws_identity:
+      account_id: 090072209895
+      region: us-east-1
+      availability_zone: us-east-1f
+      instance_id: i-02b506ab879e01423
+      ec2_architecture: arm64
+    instance_type: c7g.xlarge
+    architecture: aarch64
+    cpu:
+      architecture: aarch64
+      model: Neoverse-V1
+      isa: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc
+        dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm paca pacg dcpodp svei8mm
+        svebf16 i8mm bf16 dgh rng
+      vcpu_count: 4
+      core_count: 4
+      threads_per_core: 1
+    memory:
+      physical_mib: 8192
+    storage:
+      kind: ebs
+      root_device: /dev/sda1
+      volume_id: vol-0da9e783bf564cff2
+      capacity_gib: 500
+      volume_type: gp3
+      provisioned_iops: 6000
+      provisioned_throughput_mib_per_s: 500
+      encrypted: true
+      instance_store_present: false
+    receipt_host:
+      machine: aarch64
+      node: ip-172-31-77-184
+      release: 7.0.0-1012-aws
+      system: Linux
+    measurement_device:
+      identity: cpu:aarch64:ip-172-31-77-184
+      version: Linux:7.0.0-1012-aws
+    build_preset: native-arm64-clang22-linux-e2e
+    preset_family: e2e
+    gpu:
+      available: false
+      device_count: 0
+      identity: null
+      driver: null
+      vulkan_available: false
+      aws_gpu_info: null
+    descriptor_sha256: fe9354df664ec7b00b3bf4325fa6bf0077a2613a8412a5c4e4e62c82eb26421e
+  - schema: bioseq.remote-benchmark-host
+    version: 1
     machine_id: TEST7_C7G
     cloud_provider: aws
     aws_identity:
@@ -469,7 +571,7 @@ matrix_scope:
   - scalar_minimap2
   - simd_minimap2
   - range_minimum_query
-  bioseq_expected_cells: 700
+  bioseq_expected_cells: 639
   bioseq_index_types:
   - minimizers_per_fragment
   - minimizers_per_sequence
@@ -501,11 +603,58 @@ matrix_scope:
   - 2
   - 4
   target_size_unit: Decimal Gbp, exactly 1,000,000,000 base pairs.
-  total_expected_cells: 700
-  total_expected_runs: 700
+  total_expected_cells: 639
+  total_expected_runs: 639
   window_kmer_pairs:
   - kmer_size: 15
     window_size: 10
   - kmer_size: 20
     window_size: 15
-approved_results: []
+approved_results:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","scalar","simd_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: scalar -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 15561872307
+    p50_b: 12544101070
+  comments: Single-sample coverage campaign authorized 2026-09-22. P50 is the single observation, not
+    a five-run estimate. Compatible just_index tuples are pre-grouped by dataset, alphabet, index type,
+    minimizer producer and k/w; the index is reused across chaining/alignment configurations. PostgreSQL
+    restarts before each measured statement; OS filesystem cache is not cleared. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, exact minimap2 match counts, position
+    tolerance, actual stages/fallbacks, prefilter-off and timing intervals remain checked. Index setup
+    is untimed for just_index; no_index still includes transient index construction in its measured query.
+    Never pool with five-run results. Measured on test7-c7g. Correctness-only minimap2 baseline from default-c7g
+    for the same canonical q1024 dataset, index mode and k/w; same-family evidence reused. Build/run receipt
+    provenance is not required for publication; no timing was copied from another machine. Framework fixture-admission
+    RAM reserve is 20%; PostgreSQL/algorithm settings are unchanged.

@@ -1,8 +1,20 @@
 {
-  "description": "User-requested permanent drain before deletion of AWS account 970376923108 resources on 2026-09-22 at 13:30 CEST. Never dispatch new jobs to these hosts. Keep polling/collecting until retired is true.",
+  "description": "Permanently excluded workers. Original account 970376923108 was retired before its deletion deadline below; test7 account 872590157365 was subsequently confirmed closed by the user. Never contact or dispatch to hosts marked retired. Preserve locally collected results.",
   "account_id": "970376923108",
   "deadline": "2026-09-22T13:30:00+02:00",
   "hosts": {
+    "test7-c7g": {
+      "account_id": "872590157365",
+      "draining": true,
+      "retired": true,
+      "reason": "User confirmed test7 account closed; no further API calls, SSH, collection attempts, or queue dispatch."
+    },
+    "test7-m4": {
+      "account_id": "872590157365",
+      "draining": true,
+      "retired": true,
+      "reason": "User confirmed test7 account closed; no further API calls, SSH, collection attempts, or queue dispatch."
+    },
     "default-c7g": {
       "draining": true,
       "retired": true,

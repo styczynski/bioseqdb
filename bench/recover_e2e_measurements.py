@@ -137,14 +137,17 @@ def family_baselines(host_dir: Path) -> tuple[dict, list[dict]]:
     """Reuse checked correctness evidence, never another host's timings.
 
     All records were validated against the same canonical q1024 singleton
-    fixture/configuration. Require every available baseline for an identity
-    to agree on the ordered per-query counts in each repeat; disagreements
-    are not resolved by selecting whichever baseline makes Bioseq pass.
+    fixture/configuration. Prefer the same family. If a remote family's raw
+    baseline is unavailable, reuse only correctness from other hosts with the
+    identical canonical identity (including index mode, alphabet and k/w).
+    Every available donor must agree on ordered per-query counts in each
+    repeat; disagreements are never resolved by choosing a passing donor.
+    The local campaign continues to require its own local baseline.
     """
     family = host_dir.name.rsplit("-", 1)[-1]
     grouped = {}
     for peer in sorted(COLLECTED.iterdir()):
-        if not peer.is_dir() or peer.name.rsplit("-", 1)[-1] != family:
+        if not peer.is_dir() or (family == "local" and peer.name != "local"):
             continue
         path = peer / "numeric_recovery_cache.json"
         if not path.exists():
@@ -166,8 +169,10 @@ def family_baselines(host_dir: Path) -> tuple[dict, list[dict]]:
             grouped.setdefault(records[0]["stable_key"], []).append((peer.name, records, signature))
     baselines, conflicts = {}, []
     for key, options in grouped.items():
+        preferred = [option for option in options if option[0].rsplit("-", 1)[-1] == family]
+        options = preferred or sorted(options, key=lambda option: (option[0] != "local", option[0]))
         if len({option[2] for option in options}) != 1:
-            conflicts.append({"stable_key": key, "error": "same-family saved minimap2 correctness baselines disagree; no peer baseline reused"})
+            conflicts.append({"stable_key": key, "error": "saved canonical-fixture minimap2 correctness baselines disagree; no peer baseline reused"})
         else:
             baselines[key] = options[0][:2]
     return baselines, conflicts
@@ -250,8 +255,10 @@ def recover(host_dir: Path, children: dict, publish: bool) -> dict:
                         requested_base_alignment_algorithm=None)
         donor = reused.get(audit._stable_key_for_identity(identity))
         if donor:
-            note = (f"Correctness-only minimap2 baseline reused from {donor} in the same machine family, "
-                    "with the same canonical q1024 dataset/configuration and repeat ordinals. "
+            scope = ("in the same machine family" if donor.rsplit("-", 1)[-1] == host_dir.name.rsplit("-", 1)[-1]
+                     else "across hosts because matching same-family raw baseline evidence was unavailable")
+            note = (f"Correctness-only minimap2 baseline reused from {donor} {scope}, "
+                    "with the same canonical q1024 dataset/configuration, index mode and repeat ordinals. "
                     "Saved baseline ordered counts agree; no donor timings were used or published for this host.")
             row["COMMENTS"] = ((row["COMMENTS"] + "; ") if row["COMMENTS"] else "") + note
     candidates = []

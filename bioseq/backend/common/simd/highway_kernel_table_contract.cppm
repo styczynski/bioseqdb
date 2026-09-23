@@ -250,7 +250,9 @@ struct highway_kernel_table final {
      * @return `true` only when every family is bound and the alphabet and
      * alignment records form a unique, strictly ordered one-to-one mapping.
      */
-    [[nodiscard]] auto is_complete() const noexcept -> bool {
+    // Called both by fixed-target binders and neutral dispatch. Do not allow
+    // an out-of-line validation body to inherit another caller's ISA.
+    [[nodiscard, gnu::always_inline]] auto is_complete() const noexcept -> bool {
         if (!available_kernels.all()
             || minimizers.minimap2_reference == nullptr
             || minimizers.two_stack_nthash == nullptr

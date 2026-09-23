@@ -311,6 +311,58 @@ benchmark_host_profile:
   replicas:
   - schema: bioseq.remote-benchmark-host
     version: 1
+    machine_id: M4
+    cloud_provider: aws
+    aws_identity:
+      account_id: '970376923108'
+      region: us-east-1
+      availability_zone: us-east-1f
+      instance_id: i-09b8f0b9dc8c60564
+      ec2_architecture: x86_64
+    instance_type: m4.xlarge
+    architecture: x86_64
+    cpu:
+      architecture: x86_64
+      model: Intel(R) Xeon(R) CPU E5-2686 v4 @ 2.30GHz
+      isa: 'x86_64 flags: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush
+        mmx fxsr sse sse2 ht syscall nx pdpe1gb rdtscp lm rep_good nopl xtopology cpuid tsc_known_freq
+        pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave
+        avx f16c rdrand hypervisor lahf_lm abm pti fsgsbase bmi1 avx2 smep bmi2 erms invpcid xsaveopt'
+      vcpu_count: 4
+      core_count: 2
+      threads_per_core: 2
+    memory:
+      physical_mib: 16384
+    storage:
+      kind: ebs
+      root_device: /dev/sda1
+      volume_id: vol-0d447fc0269e11320
+      capacity_gib: 500
+      volume_type: gp3
+      provisioned_iops: 6000
+      provisioned_throughput_mib_per_s: 500
+      encrypted: true
+      instance_store_present: false
+    receipt_host:
+      machine: x86_64
+      node: ip-172-31-65-160
+      release: 7.0.0-1012-aws
+      system: Linux
+    measurement_device:
+      identity: cpu:x86_64:ip-172-31-65-160
+      version: Linux:7.0.0-1012-aws
+    build_preset: native-x64-clang22-linux-e2e
+    preset_family: e2e
+    gpu:
+      available: false
+      device_count: 0
+      identity: null
+      driver: null
+      vulkan_available: false
+      aws_gpu_info: null
+    descriptor_sha256: f0d6b280d1c8d01d3ad705ba4c660af1f4f51c6dba1e150fe8bdac148c70cde1
+  - schema: bioseq.remote-benchmark-host
+    version: 1
     machine_id: TEST3_M4
     cloud_provider: aws
     aws_identity:
@@ -413,6 +465,58 @@ benchmark_host_profile:
       vulkan_available: false
       aws_gpu_info: null
     descriptor_sha256: 91fe75ae1c9bde1dd65371a4f39ecb15800a707d6a49026047c668cb6f2c0cea
+  - schema: bioseq.remote-benchmark-host
+    version: 1
+    machine_id: TEST2_M4
+    cloud_provider: aws
+    aws_identity:
+      account_id: 090072209895
+      region: us-east-1
+      availability_zone: us-east-1f
+      instance_id: i-04f1e20d57d24f505
+      ec2_architecture: x86_64
+    instance_type: m4.xlarge
+    architecture: x86_64
+    cpu:
+      architecture: x86_64
+      model: Intel(R) Xeon(R) CPU E5-2686 v4 @ 2.30GHz
+      isa: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse
+        sse2 ht syscall nx pdpe1gb rdtscp lm rep_good nopl xtopology cpuid tsc_known_freq pni pclmulqdq
+        ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand
+        hypervisor lahf_lm abm pti fsgsbase bmi1 avx2 smep bmi2 erms invpcid xsaveopt
+      vcpu_count: 4
+      core_count: 2
+      threads_per_core: 2
+    memory:
+      physical_mib: 16384
+    storage:
+      kind: ebs
+      root_device: /dev/sda1
+      volume_id: vol-083557c204df0a8dd
+      capacity_gib: 500
+      volume_type: gp3
+      provisioned_iops: 6000
+      provisioned_throughput_mib_per_s: 500
+      encrypted: true
+      instance_store_present: false
+    receipt_host:
+      machine: x86_64
+      node: ip-172-31-69-18
+      release: 7.0.0-1012-aws
+      system: Linux
+    measurement_device:
+      identity: cpu:x86_64:ip-172-31-69-18
+      version: Linux:7.0.0-1012-aws
+    build_preset: native-x64-clang22-linux-e2e
+    preset_family: e2e
+    gpu:
+      available: false
+      device_count: 0
+      identity: null
+      driver: null
+      vulkan_available: false
+      aws_gpu_info: null
+    descriptor_sha256: 2e0df6b7f7de51b3ccea9bd2b381dd588aa37cbc9c64076730b7610dfc7d3e29
   - schema: bioseq.remote-benchmark-host
     version: 1
     machine_id: TEST7_M4

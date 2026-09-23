@@ -2900,11 +2900,18 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
                     "preset": policy["build_preset"],
                     "host": descriptor["receipt_host"],
                 }))
-        wrong_host_preset = self._synthetic_remote_host_descriptor("M7A")
-        self.assertFalse(aggregator._approved_e2e_receipt_preset_matches({
+        legacy_clang_host = self._synthetic_remote_host_descriptor("M7A")
+        # The existing Clang AWS preset is an admitted historical runtime;
+        # retaining its valid samples must not require rebuilding it.
+        self.assertTrue(aggregator._approved_e2e_receipt_preset_matches({
             "preset_family": "e2e",
             "preset": "aws-x64-linux-e2e",
-            "host": wrong_host_preset["receipt_host"],
+            "host": legacy_clang_host["receipt_host"],
+        }))
+        self.assertFalse(aggregator._approved_e2e_receipt_preset_matches({
+            "preset_family": "e2e",
+            "preset": "aws-x64-linux-gcc161-e2e",
+            "host": legacy_clang_host["receipt_host"],
         }))
         rejected_old_size = self._synthetic_remote_host_descriptor("M7A")
         rejected_old_size["instance_type"] = "m7a.4xlarge"

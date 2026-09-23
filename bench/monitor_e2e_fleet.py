@@ -81,6 +81,9 @@ def _state_projection(document: dict[str, Any]) -> dict[str, Any]:
     entry = document.get("benchmark-e2e", {})
     if not isinstance(entry, dict):
         return {"status": "missing", "error": "benchmark-e2e entry missing"}
+    config = entry.get("bench_e2e_config")
+    if isinstance(config, str) and config.startswith("/home/ubuntu/bioseqdb/"):
+        config = config.removeprefix("/home/ubuntu/bioseqdb/")
     return {
         "status": entry.get("status"),
         "phase": entry.get("active_phase"),
@@ -96,7 +99,7 @@ def _state_projection(document: dict[str, Any]) -> dict[str, Any]:
         "build_only": entry.get("build_only"),
         "cleanup_unverified": entry.get("cleanup_unverified"),
         "template_profile": document.get("_fleet_template_profile"),
-        "bench_e2e_config": entry.get("bench_e2e_config"),
+        "bench_e2e_config": config,
         "report_files": entry.get("report_files", []),
         "exit_code": entry.get("exit_code"),
         "notes": entry.get("notes"),
@@ -200,7 +203,7 @@ def _previous_snapshot() -> dict[str, Any] | None:
 
 def _poll_once() -> None:
     hosts = {"local": _local_state()}
-    for name, host, key, instance_id in HOSTS:
+    for name, host, key, instance_id in registered_hosts():
         hosts[name] = _remote_state(name, host, key, instance_id)
     snapshot = {
         "schema": "bioseq.e2e.fleet-monitor",

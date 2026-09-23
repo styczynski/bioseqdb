@@ -108,6 +108,60 @@
         "provisioned_throughput_mib_per_s": 500,
         "build_preset": "native-x64-clang22-linux-e2e"
       }
+    },
+    "test2-c7g": {
+      "address": "34.225.194.155",
+      "build_receipt_id": "br_abbe64434637e212e97783003ef415a8",
+      "template_profile": "all_alphabets_uint64",
+      "machine_policy": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST2_C7G.yaml",
+        "account_id": "090072209895",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-02b506ab879e01423",
+        "instance_type": "c7g.xlarge",
+        "ec2_architecture": "arm64",
+        "architecture": "aarch64",
+        "hostname": "ip-172-31-77-184",
+        "vcpu_count": 4,
+        "core_count": 4,
+        "threads_per_core": 1,
+        "physical_memory_mib": 8192,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-0da9e783bf564cff2",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-arm64-clang22-linux-e2e"
+      }
+    },
+    "test2-m4": {
+      "address": "3.236.210.50",
+      "build_receipt_id": "br_1b4f4688ca89c86dadd6b1c7d4113e02",
+      "template_profile": "all_alphabets_uint64",
+      "machine_policy": {
+        "authority_filename": "ALL_RESULTS_TUPLES_REMOTE_TEST2_M4.yaml",
+        "account_id": "090072209895",
+        "region": "us-east-1",
+        "availability_zone": "us-east-1f",
+        "instance_id": "i-04f1e20d57d24f505",
+        "instance_type": "m4.xlarge",
+        "ec2_architecture": "x86_64",
+        "architecture": "x86_64",
+        "hostname": "ip-172-31-69-18",
+        "vcpu_count": 4,
+        "core_count": 2,
+        "threads_per_core": 2,
+        "physical_memory_mib": 16384,
+        "root_device": "/dev/sda1",
+        "volume_id": "vol-083557c204df0a8dd",
+        "capacity_gib": 500,
+        "volume_type": "gp3",
+        "provisioned_iops": 6000,
+        "provisioned_throughput_mib_per_s": 500,
+        "build_preset": "native-x64-clang22-linux-e2e"
+      }
     }
   }
 }

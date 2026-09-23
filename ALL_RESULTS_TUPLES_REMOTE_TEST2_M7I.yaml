@@ -16,16 +16,16 @@ authority:
   profile: aws_cpu_only_v1
   sealed_verification_manifest_required_for_append: false
 projection_provenance:
-  approved_result_count: 34
-  approved_results_projection_sha256: 0d414a64f5f9f37a9cc75a09fa65cc6d0fc8f8609b5e98e743f9b5334b6c6f81
-  approved_run_count: 170
+  approved_result_count: 35
+  approved_results_projection_sha256: 2f68b07d3953a1e8a20733d7a45d981c4bbed05392e6eb711c46f592863cf9de
+  approved_run_count: 175
   classification: derived_non_authoritative
   eligible_stable_keys_projection_sha256: 5aad579ff70013c20835e561350803653c2cb5e0323cd878ff1e40e8501f9a96
   generator: bioseq-approved-results-projection
   generator_version: 1
   hardware_unavailable_cells_projection_sha256: bcd2f938f405b0ab0d406cbc318b07e89baa48a089849b872dfbeef51aba31cd
   hardware_unavailable_count: 512
-  remaining_eligible_count: 750
+  remaining_eligible_count: 749
   source_local_approved_results_projection_sha256: bf8f533e10a97e925a902ae93af4830df673274e01f59ceb2780cd5460ea0ba1
   source_local_authority_sha256: 7e6f9531d61bd124a41ee5d274c20ef8a01fdfd9a5b00a127ccf409abf441bbb
 campaign_identity:
@@ -18326,6 +18326,43 @@ approved_results:
     p50_a: 9622950321
     p50_b: 7345658901
   comments: Correctness-only minimap2 baseline reused from default-m7i in the same machine family, with the same canonical q1024 dataset/configuration and repeat ordinals. Saved baseline ordered counts agree; no donor timings were used or published for this host.; Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","scalar","range_minimum_query","ksw2"]'
+  timing_scope: query_only_framework_iteration_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: scalar
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: scalar -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 5
+  metrics:
+    unit: ns
+    p50_a: 1512412884580
+    p50_b: 1510518120087
+  comments: 'configured MPF direct_compact_hash_lookup was not the effective reader: existing counters prove the persisted control reader ran; compact-direct applicability follows the generated hash profile, without changing seeding/chaining/alignment algorithms; Correctness-only minimap2 baseline reused from default-m7i in the same machine family, with the same canonical q1024 dataset/configuration, index mode and repeat ordinals. Saved baseline ordered counts agree; no donor timings were used or published for this host.; Recovered from complete checksummed raw measurements; build/run receipt provenance was not required or re-established. Exact source/binary provenance is therefore unverified. Existing correctness, stage and interval validators passed for all five repeats. Process priority and OS cache state are not attested.'
 - stable_key_schema: bioseq-e2e-cell-v2
   stable_key: 'bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","two_stack_nthash","simd_minimap2","ksw2"]'
   timing_scope: query_only_framework_iteration_v1
