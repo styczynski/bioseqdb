@@ -886,10 +886,12 @@ materialize_sorted_dense_from_presorted_minimizers(
                  &resident_permit, &stats,
                  &allocation_requirement_mismatch, &non_host_visible]()
                     -> bioseq::parallelism::memory_materialization_snapshot {
-                    resident->slots = runtime_ptr->create_device_buffer(
+                    // Prefix lookup repeatedly reads this resident on the CPU.
+                    // Keep its Vulkan-visible payload in cached host memory.
+                resident->slots = runtime_ptr->create_host_buffer(
                         plan.slot_buffer_bytes,
                         k_gpu_source_direct_buffer_usage);
-                    resident->positions = runtime_ptr->create_device_buffer(
+                    resident->positions = runtime_ptr->create_host_buffer(
                         plan.position_buffer_bytes,
                         k_gpu_source_direct_buffer_usage);
                     if (resident->slots.allocation_bytes
@@ -1382,9 +1384,11 @@ materialize_sorted_dense_from_segmented_spill_replay(
                  &stats,
                  &allocation_requirement_mismatch,
                  &non_host_visible]() -> bioseq::parallelism::memory_materialization_snapshot {
-                    resident->slots = runtime_ptr->create_device_buffer(
+                    // Prefix lookup repeatedly reads this resident on the CPU.
+                    // Keep its Vulkan-visible payload in cached host memory.
+                resident->slots = runtime_ptr->create_host_buffer(
                         preflight.control_bytes, k_gpu_source_direct_buffer_usage);
-                    resident->positions = runtime_ptr->create_device_buffer(
+                    resident->positions = runtime_ptr->create_host_buffer(
                         preflight.position_bytes, k_gpu_source_direct_buffer_usage);
                     if (resident->slots.allocation_bytes !=
                             preflight.control_allocation_requirement_bytes ||
@@ -2096,9 +2100,11 @@ materialize_sorted_dense_from_mapped_fragment_reader(
                  &stats,
                  &allocation_requirement_mismatch,
                  &non_host_visible]() -> bioseq::parallelism::memory_materialization_snapshot {
-                    resident->slots = runtime_ptr->create_device_buffer(
+                    // Prefix lookup repeatedly reads this resident on the CPU.
+                    // Keep its Vulkan-visible payload in cached host memory.
+                resident->slots = runtime_ptr->create_host_buffer(
                         preflight.control_bytes, k_gpu_source_direct_buffer_usage);
-                    resident->positions = runtime_ptr->create_device_buffer(
+                    resident->positions = runtime_ptr->create_host_buffer(
                         preflight.position_bytes, k_gpu_source_direct_buffer_usage);
                     if (resident->slots.allocation_bytes !=
                             preflight.control_allocation_requirement_bytes ||

@@ -512,7 +512,7 @@ void main() {
 inline constexpr std::string_view k_grouped_soa_seed_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
-const uint k_grouped_soa_seed_push_abi_revision = 5u;
+const uint k_grouped_soa_seed_push_abi_revision = 6u;
 const uint k_grouped_soa_partition_required_flags = 7u;
 const uint k_grouped_soa_status_validation = 1u;
 const uint k_grouped_soa_status_query = 2u;
@@ -612,6 +612,10 @@ layout(push_constant) uniform push_constants {
     uint prefix_extent;
     uint anchor_extent;
     uint anchor_key_extent;
+    uint partition_begin;
+    uint control_base_word;
+    uint position_base_word;
+    uint repetitive_word_extent;
 } pc;
 
 void grouped_soa_signal_status(uint status_bit) {
@@ -662,6 +666,10 @@ bool grouped_soa_read_control_scalar(
             byte_offset, width, pc.control_word_count)) {
         return false;
     }
+    uint64_t binding_base = uint64_t(pc.control_base_word) * uint64_t(4u);
+    if (byte_offset < binding_base || !grouped_soa_scalar_range_valid(
+            byte_offset - binding_base, width, pc.control_word_extent)) return false;
+    byte_offset -= binding_base;
     uint word_index = uint(byte_offset >> 2u);
     uint shift = uint(byte_offset & uint64_t(3u)) * 8u;
     if (width == 2u) {
@@ -687,6 +695,10 @@ bool grouped_soa_read_position_scalar(
             byte_offset, width, pc.position_word_count)) {
         return false;
     }
+    uint64_t binding_base = uint64_t(pc.position_base_word) * uint64_t(4u);
+    if (byte_offset < binding_base || !grouped_soa_scalar_range_valid(
+            byte_offset - binding_base, width, pc.position_word_extent)) return false;
+    byte_offset -= binding_base;
     uint word_index = uint(byte_offset >> 2u);
     uint shift = uint(byte_offset & uint64_t(3u)) * 8u;
     if (width == 2u) {
@@ -903,7 +915,7 @@ bool grouped_soa_count_hash(
     repetitive = false;
     uint64_t total = uint64_t(0);
     uint64_t threshold = uint64_t(pc.max_occ);
-    for (uint partition_index = 0u;
+    for (uint partition_index = pc.partition_begin;
          partition_index < pc.partition_count;
          ++partition_index) {
         uint64_t position_begin;
@@ -949,7 +961,7 @@ bool grouped_soa_dispatch_valid() {
         && uint64_t(pc.max_occ) <= cap
         && expected_minimizer_words != uint64_t(0)
         && expected_minimizer_words <= uint64_t(pc.minimizer_word_extent)
-        && pc.partition_count != 0u
+        && pc.partition_begin < pc.partition_count
         && pc.partition_count <= pc.partition_extent
         && pc.query_record_count == 1u
         && pc.query_record_count <= pc.query_record_extent
@@ -959,9 +971,12 @@ bool grouped_soa_dispatch_valid() {
         && pc.status_index == pc.prefix_extent
         && pc.status_index <= pc.query_minimizer_count
         && pc.control_word_count != 0u
-        && pc.control_word_count <= pc.control_word_extent
+        && pc.control_word_extent != 0u
+        && uint64_t(pc.control_base_word) + pc.control_word_extent <= uint64_t(pc.control_word_count)
         && pc.position_word_count != 0u
-        && pc.position_word_count <= pc.position_word_extent
+        && pc.position_word_extent != 0u
+        && uint64_t(pc.position_base_word) + pc.position_word_extent <= uint64_t(pc.position_word_count)
+        && uint64_t(pc.status_index) * uint64_t(2u) <= uint64_t(pc.repetitive_word_extent)
         && pc.anchor_capacity <= pc.anchor_extent
         && pc.anchor_capacity <= pc.anchor_key_extent
         && ((pc.emit_mode == 0u && pc.anchor_capacity == 0u)
@@ -1404,9 +1419,10 @@ void main() {
          local_index < record.minimizer_count;
          local_index += gl_WorkGroupSize.x) {
         uint minimizer_index = record.minimizer_offset + local_index;
-        if (pc.emit_mode == 0u) {
+        if (pc.emit_mode == 0u && pc.partition_begin == 0u) {
             counts[local_index] = 0u;
             repetitive_flags[local_index] = 0u;
+            repetitive_flags[pc.status_index + local_index] = 0u;
         }
         if (minimizer_index >= pc.query_minimizer_count
             || !minimizer_fragment_words_valid(minimizer_index)) {
@@ -1422,18 +1438,30 @@ void main() {
             continue;
         }
         if (pc.emit_mode == 0u) {
-            counts[local_index] = accepted_count;
-            repetitive_flags[local_index] = repetitive ? 1u : 0u;
+            uint64_t total = uint64_t(counts[local_index]) + uint64_t(accepted_count);
+            bool globally_repetitive = repetitive_flags[local_index] != 0u
+                || repetitive || total > uint64_t(pc.max_occ);
+            counts[local_index] = globally_repetitive ? 0u : uint(total);
+            repetitive_flags[local_index] = globally_repetitive ? 1u : 0u;
             continue;
         }
-        if (counts[local_index] != accepted_count ||
-            repetitive_flags[local_index] != (repetitive ? 1u : 0u)) {
+        // Count covers every window before scan. Keep global counts immutable;
+        // the second half of the flags buffer owns deterministic emit cursors.
+        uint global_count = counts[local_index];
+        uint cursor = repetitive_flags[pc.status_index + local_index];
+        if (repetitive_flags[local_index] != 0u) {
+            if (global_count != 0u || cursor != 0u)
+                grouped_soa_signal_status(k_grouped_soa_status_emission);
+            continue;
+        }
+        if (repetitive || cursor > global_count || accepted_count > global_count - cursor
+            || (pc.partition_count == pc.partition_extent && cursor + accepted_count != global_count)) {
             grouped_soa_signal_status(k_grouped_soa_status_emission);
             continue;
         }
         if (accepted_count == 0u) continue;
 
-        uint64_t destination = uint64_t(prefix[local_index]);
+        uint64_t destination = uint64_t(prefix[local_index]) + uint64_t(cursor);
         if (destination > uint64_t(pc.anchor_capacity)
             || uint64_t(accepted_count)
                 > uint64_t(pc.anchor_capacity) - destination) {
@@ -1452,7 +1480,7 @@ void main() {
             + uint64_t(pc.kmer_size) - uint64_t(2u);
         uint emitted = 0u;
         bool emission_valid = true;
-        for (uint partition_index = 0u;
+        for (uint partition_index = pc.partition_begin;
              emission_valid && partition_index < pc.partition_count;
              ++partition_index) {
             grouped_soa_partition_descriptor descriptor =
@@ -1522,6 +1550,8 @@ void main() {
         // provided if the resident bytes change or fail validation.
         if (!emission_valid || emitted != accepted_count) {
             grouped_soa_signal_status(k_grouped_soa_status_emission);
+        } else {
+            repetitive_flags[pc.status_index + local_index] = cursor + emitted;
         }
     }
 }

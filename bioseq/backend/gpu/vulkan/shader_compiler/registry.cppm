@@ -248,7 +248,7 @@ descriptor_binding_count(descriptor_layout_kind kind) noexcept {
         return 52; // SeedPushC (13 × u32)
     case shader_kind::grouped_soa_seed_count:
     case shader_kind::grouped_soa_seed_emit:
-        return 108; // grouped-SoA seed push block (27 × u32)
+        return 124; // grouped-SoA seed push block (31 × u32)
     case shader_kind::radix_sort_histogram:
     case shader_kind::radix_sort_scan:
     case shader_kind::radix_sort_scatter:

@@ -13,7 +13,7 @@ import bioseq.gpu.vulkan.abi;
 export namespace bioseq::gpu::vulkan {
 
 /// @brief Grouped-SoA shader-layout revision encoded in serialized cache keys.
-inline constexpr std::uint32_t k_grouped_soa_seed_cache_abi_revision = 5u;
+inline constexpr std::uint32_t k_grouped_soa_seed_cache_abi_revision = 6u;
 
 /// @brief Process-independent ordered-sketch capacity families sealed into the AOT cache.
 ///

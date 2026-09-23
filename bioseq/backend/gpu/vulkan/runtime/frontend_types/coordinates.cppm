@@ -455,6 +455,7 @@ struct persisted_grouped_soa_coordinate_job_audit {
     std::uint64_t query_scan_dispatches = 0;
     std::uint64_t query_emit_dispatches = 0;
     std::uint64_t query_completed_roundtrips = 0;
+    std::uint64_t binding_window_count = 0; ///< Complete bounded partition windows required by this job.
     std::uint64_t direct_count_dispatches = 0;
     std::uint64_t direct_scan_dispatches = 0;
     std::uint64_t direct_emit_dispatches = 0;
@@ -551,7 +552,8 @@ struct persisted_grouped_soa_coordinate_job_audit {
             // relabelled from batch-level sketch work.
             return false;
         }
-        const bool direct_front_end = direct_count_dispatches == 1u &&
+        const bool direct_front_end = binding_window_count != 0u && binding_window_count <= partition_count &&
+                                      direct_count_dispatches == binding_window_count &&
                                       direct_scan_dispatches == 3u &&
                                       count_submit_wait_identity != 0u && count_status_checks == 1u;
         if (!direct_front_end)
@@ -569,7 +571,7 @@ struct persisted_grouped_soa_coordinate_job_audit {
                    are_coordinate_result_wires_equal(result, gpu_coordinate_result_wire{});
         }
         const bool emitted_and_ranged =
-            direct_emit_dispatches == 1u && sort_operations == 1u && range_build_dispatches == 1u &&
+            direct_emit_dispatches == binding_window_count && sort_operations == 1u && range_build_dispatches == 1u &&
             emit_submit_wait_identity != 0u && sort_range_submit_wait_identity != 0u &&
             count_submit_wait_identity != emit_submit_wait_identity &&
             count_submit_wait_identity != sort_range_submit_wait_identity &&

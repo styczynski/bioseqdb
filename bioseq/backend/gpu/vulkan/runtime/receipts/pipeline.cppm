@@ -386,6 +386,7 @@ struct runtime_pipeline_job_use_audit {
     std::uint64_t target_position_offset = 0u;
     std::uint64_t anchor_count = 0u;
     std::uint64_t range_count = 0u;
+    std::uint32_t binding_window_count = 0u; ///< Required count/emit dispatches for MPS.
     std::uint64_t query_authority_identity = 0u;
     std::uint64_t anchor_digest_lo = k_seed_anchor_digest_seed_low;
     std::uint64_t anchor_digest_hi = k_seed_anchor_digest_seed_high;
@@ -669,7 +670,7 @@ class runtime_pipeline_operation_token {
         std::uint64_t anchored_jobs = 0u;
         std::uint64_t active_jobs = 0u;
         for (const runtime_pipeline_job_use_audit& job : audit_.jobs) {
-            if (!job.shape_contract_set || job.target_len == 0u ||
+            if (!job.shape_contract_set || job.binding_window_count == 0u || job.target_len == 0u ||
                 job.target_position_offset >
                     (std::numeric_limits<std::uint64_t>::max)() - (job.target_len - 1u) ||
                 job.range_count != 0u || job.query_authority_identity == 0u ||
@@ -702,8 +703,8 @@ class runtime_pipeline_operation_token {
             }
 
             ++active_jobs;
-            std::uint64_t expected_total = 4u;
-            if (job.count(shader_kind::grouped_soa_seed_count) != 1u ||
+            std::uint64_t expected_total = std::uint64_t{job.binding_window_count} + 3u;
+            if (job.count(shader_kind::grouped_soa_seed_count) != job.binding_window_count ||
                 job.count(shader_kind::prefix_scan_block) != 1u ||
                 job.count(shader_kind::prefix_scan_add) != 2u) {
                 return false;
@@ -718,8 +719,8 @@ class runtime_pipeline_operation_token {
             } else {
                 ++anchored_jobs;
                 const std::uint64_t passes = *pass_count;
-                expected_total += 1u + 3u * passes;
-                if (job.count(shader_kind::grouped_soa_seed_emit) != 1u ||
+                expected_total += job.binding_window_count + 3u * passes;
+                if (job.count(shader_kind::grouped_soa_seed_emit) != job.binding_window_count ||
                     job.committed_submissions != 2u ||
                     job.count(shader_kind::radix_sort_histogram) != passes ||
                     job.count(shader_kind::radix_sort_scan) != passes ||
@@ -768,7 +769,7 @@ class runtime_pipeline_operation_token {
         }
         std::uint64_t anchored_jobs = 0u;
         for (const runtime_pipeline_job_use_audit& job : audit_.jobs) {
-            if (!job.shape_contract_set || job.minimizer_count == 0u || job.target_len == 0u ||
+            if (!job.shape_contract_set || job.binding_window_count == 0u || job.minimizer_count == 0u || job.target_len == 0u ||
                 job.target_position_offset >
                     (std::numeric_limits<std::uint64_t>::max)() - (job.target_len - 1u)) {
                 return false;
@@ -778,21 +779,21 @@ class runtime_pipeline_operation_token {
             if (!pass_count.has_value())
                 return false;
             const std::uint64_t passes = *pass_count;
-            const bool front = job.count(shader_kind::grouped_soa_seed_count) == 1u &&
+            const bool front = job.count(shader_kind::grouped_soa_seed_count) == job.binding_window_count &&
                                job.count(shader_kind::prefix_scan_block) == 1u &&
                                job.count(shader_kind::prefix_scan_add) == 2u;
             if (!front)
                 return false;
-            std::uint64_t expected_total = 4u;
+            std::uint64_t expected_total = std::uint64_t{job.binding_window_count} + 3u;
             std::uint64_t expected_submissions = 1u;
             if (job.anchor_count == 0u) {
                 if (job.range_count != 0u)
                     return false;
             } else {
                 ++anchored_jobs;
-                expected_total = 6u + 3u * passes;
+                expected_total = 2ull * job.binding_window_count + 4u + 3u * passes;
                 expected_submissions = 3u;
-                if (job.count(shader_kind::grouped_soa_seed_emit) != 1u ||
+                if (job.count(shader_kind::grouped_soa_seed_emit) != job.binding_window_count ||
                     job.count(shader_kind::radix_sort_histogram) != passes ||
                     job.count(shader_kind::radix_sort_scan) != passes ||
                     job.count(shader_kind::radix_sort_scatter) != passes ||
@@ -1280,7 +1281,8 @@ class runtime_pipeline_use_collector {
     void set_shape_input(std::size_t job_index,
                          std::uint64_t minimizer_count,
                          std::uint64_t target_len,
-                         std::uint64_t target_position_offset) noexcept {
+                         std::uint64_t target_position_offset,
+                         std::uint32_t binding_window_count = 1u) noexcept {
         if (job_index >= audit_.jobs.size()) {
             invalidate();
             return;
@@ -1289,6 +1291,7 @@ class runtime_pipeline_use_collector {
         job.minimizer_count = minimizer_count;
         job.target_len = target_len;
         job.target_position_offset = target_position_offset;
+        job.binding_window_count = binding_window_count;
         job.shape_contract_set = true;
     }
 
@@ -1707,14 +1710,15 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         }
         collector->set_shape_input(0u, 1u, 1u, 0u);
         collector->set_shape_input(1u, 1u, 255u, 0u);
-        collector->set_shape_input(2u, 1u, 65536u, 0u);
+        collector->set_shape_input(2u, 1u, 65536u, 0u, 3u);
         collector->set_shape_outcome(0u, 0u, 0u);
         collector->set_shape_outcome(1u, 1u, 0u);
         collector->set_shape_outcome(2u, 1u, 1u);
 
         collector->begin(command(11u));
         for (std::size_t job = 0u; job < 3u; ++job) {
-            collector->use(command(11u), job, keys[3], &receipts[3], 1u);
+            for (std::size_t window = 0u; window < (job == 2u ? 3u : 1u); ++window)
+                collector->use(command(11u), job, keys[3], &receipts[3], 1u);
             collector->use(command(11u), job, keys[1], &receipts[1], 1u);
             collector->use(command(11u), job, keys[2], &receipts[2], 1u);
             collector->use(command(11u), job, keys[2], &receipts[2], 1u);
@@ -1723,7 +1727,8 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
 
         collector->begin(command(12u));
         for (std::size_t job = 1u; job < 3u; ++job) {
-            collector->use(command(12u), job, keys[4], &receipts[4], 1u);
+            for (std::size_t window = 0u; window < (job == 2u ? 3u : 1u); ++window)
+                collector->use(command(12u), job, keys[4], &receipts[4], 1u);
         }
         collector->commit(command(12u));
 
@@ -1751,6 +1756,12 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         shape.audit_.begun_command_generations != 4u ||
         shape.audit_.committed_command_generations != 4u || !shape.capacity_permit_) {
         return false;
+    }
+    for (const auto kind : {shader_kind::grouped_soa_seed_count, shader_kind::grouped_soa_seed_emit}) {
+        auto& count = shape.audit_.jobs[2].dispatches[static_cast<std::size_t>(kind)];
+        --count;
+        if (shape.is_valid_for_grouped_soa_coordinate()) return false;
+        ++count;
     }
     constexpr std::array<std::uint64_t, 3> expected_submissions{1u, 3u, 4u};
     for (std::size_t job = 0u; job < shape.audit_.jobs.size(); ++job) {
@@ -1798,7 +1809,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
                 collector->prepare(keys[slot], &receipts[slot]);
 
             for (std::size_t job = 0u; job < 3u; ++job)
-                collector->set_shape_input(job, job == 0u ? 0u : 1u, 255u, 0u);
+                collector->set_shape_input(job, job == 0u ? 0u : 1u, 255u, 0u, 2u);
             collector->set_shape_outcome(0u, 0u, 0u);
             collector->set_shape_outcome(1u, 0u, 0u);
             collector->set_shape_outcome(2u, 1u, 0u);
@@ -1822,7 +1833,8 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
                 command(static_cast<std::uintptr_t>(identity));
             collector->begin(count_command);
             for (std::size_t job = 1u; job < 3u; ++job) {
-                collector->use(count_command, job, keys[3], &receipts[3], 1u);
+                for (std::size_t window = 0u; window < 2u; ++window)
+                    collector->use(count_command, job, keys[3], &receipts[3], 1u);
                 collector->use(count_command, job, keys[1], &receipts[1], 1u);
                 collector->use(count_command, job, keys[2], &receipts[2], 1u);
                 collector->use(count_command, job, keys[2], &receipts[2], 1u);
@@ -1832,7 +1844,8 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
             const VkCommandBuffer emit_command =
                 command(static_cast<std::uintptr_t>(identity + 1u));
             collector->begin(emit_command);
-            collector->use(emit_command, 2u, keys[4], &receipts[4], 1u);
+            for (std::size_t window = 0u; window < 2u; ++window)
+                collector->use(emit_command, 2u, keys[4], &receipts[4], 1u);
             for (std::size_t pass = 0u; pass < 2u; ++pass) {
                 for (std::size_t slot = 8u; slot < 11u; ++slot)
                     collector->use(emit_command, 2u, keys[slot], &receipts[slot], 1u);
@@ -1870,6 +1883,13 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         empty_seed_only.audit_.committed_submissions != 0u ||
         rejected_seed_only.is_valid_for_grouped_soa_seed_anchor_roundtrip()) {
         return false;
+    }
+
+    for (const auto kind : {shader_kind::grouped_soa_seed_count, shader_kind::grouped_soa_seed_emit}) {
+        auto& count = seed_only.audit_.jobs[2].dispatches[static_cast<std::size_t>(kind)];
+        --count;
+        if (seed_only.is_valid_for_grouped_soa_seed_anchor_roundtrip()) return false;
+        ++count;
     }
 
     // One logical alignment operation may use a trace-free screening wave and

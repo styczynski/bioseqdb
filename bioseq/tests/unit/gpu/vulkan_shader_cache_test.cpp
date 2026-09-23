@@ -137,7 +137,7 @@ TEST_CASE("grouped-SoA current ABI direct seed shaders pin raw SoA and local-pos
     STATIC_REQUIRE(offsetof(gv::gpu_grouped_soa_resident_partition_descriptor, low_hash) == 72u);
     STATIC_REQUIRE(offsetof(gv::gpu_grouped_soa_resident_partition_descriptor, segment_end_bp) ==
                    96u);
-    STATIC_REQUIRE(sizeof(gv::gpu_grouped_soa_seed_push) == 108u);
+    STATIC_REQUIRE(sizeof(gv::gpu_grouped_soa_seed_push) == 124u);
     STATIC_REQUIRE(offsetof(gv::gpu_grouped_soa_seed_push, status_index) == 68u);
     STATIC_REQUIRE(
         gv::encode_gpu_grouped_soa_seed_status(gv::gpu_grouped_soa_seed_status::contract) == 1u);
@@ -177,8 +177,8 @@ TEST_CASE("grouped-SoA current ABI direct seed shaders pin raw SoA and local-pos
           gv::descriptor_layout_kind::grouped_soa_seed);
     CHECK(gv::descriptor_layout_for(gv::shader_kind::grouped_soa_seed_emit) ==
           gv::descriptor_layout_kind::grouped_soa_seed);
-    CHECK(gv::push_constant_size(gv::shader_kind::grouped_soa_seed_count) == 108u);
-    CHECK(gv::push_constant_size(gv::shader_kind::grouped_soa_seed_emit) == 108u);
+    CHECK(gv::push_constant_size(gv::shader_kind::grouped_soa_seed_count) == 124u);
+    CHECK(gv::push_constant_size(gv::shader_kind::grouped_soa_seed_emit) == 124u);
 
     const std::array kinds{
         gv::shader_kind::grouped_soa_seed_count,
@@ -227,9 +227,9 @@ TEST_CASE("grouped-SoA current ABI direct seed shaders pin raw SoA and local-pos
                                                                               88u,
                                                                               96u}));
         CHECK(layout.has_binding_array_stride(0u, 9u, 4u));
-        CHECK(layout.has_push_constant_offsets(std::array<std::uint32_t, 27>{
+        CHECK(layout.has_push_constant_offsets(std::array<std::uint32_t, 31>{
             0u,  4u,  8u,  12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u,  48u, 52u,
-            56u, 60u, 64u, 68u, 72u, 76u, 80u, 84u, 88u, 92u, 96u, 100u, 104u}));
+            56u, 60u, 64u, 68u, 72u, 76u, 80u, 84u, 88u, 92u, 96u, 100u, 104u, 108u, 112u, 116u, 120u}));
     }
 }
 
@@ -315,6 +315,7 @@ make_grouped_soa_coordinate_hit_audit(const std::size_t problem_index,
     audit.query_scan_dispatches = 3u;
     audit.query_emit_dispatches = 1u;
     audit.query_completed_roundtrips = 2u;
+    audit.binding_window_count = 1u;
     audit.direct_count_dispatches = 1u;
     audit.direct_scan_dispatches = 3u;
     audit.direct_emit_dispatches = 1u;
@@ -413,6 +414,94 @@ TEST_CASE("seed jobs require strict XOR resident representation",
           gv::gpu_seed_index_representation::invalid);
 }
 
+
+TEST_CASE("grouped-SoA bindings window large aggregates without payload copies",
+          "[component:bioseq][layer:unit][feature:gpu_runtime]") {
+    // Metadata alone represents a 6-GB aggregate; the test allocates 208 bytes.
+    const auto partition = [](std::uint32_t ordinal, std::uint64_t controls,
+                              std::uint64_t positions, std::uint32_t count) {
+        return gv::gpu_grouped_soa_resident_partition_descriptor{
+            .partition_id = ordinal,
+            .directory_ordinal = ordinal,
+            .flags = gv::k_gpu_grouped_soa_partition_required_flags,
+            .hash_byte_offset = controls,
+            .prefix_byte_offset = controls + std::uint64_t{count} * 4u,
+            .count_byte_offset = controls + (std::uint64_t{count} * 2u + 1u) * 4u,
+            .position_byte_offset = positions,
+            .control_count = count,
+            .position_count = count,
+            .hash_width = 4u,
+            .offset_width = 4u,
+            .count_width = 4u,
+            .position_width = 4u,
+            .low_hash = 1u,
+            .high_hash = 100u,
+            .segment_end_bp = 1000u,
+        };
+    };
+    constexpr std::uint64_t limit = 0xffff'ffffull;
+    constexpr std::uint64_t control_stride = 3'000'000'016ull;
+    const std::array descriptors{
+        partition(0u, 0u, 0u, 250'000'000u),
+        partition(1u, control_stride, 1'000'000'000u, 250'000'000u),
+    };
+    const auto bytes = std::as_bytes(std::span{descriptors});
+    const auto first = gv::plan_gpu_grouped_soa_buffer_window(
+        bytes, 0u, control_stride * 2u, 2'000'000'000u, limit, 256u);
+    REQUIRE(first.has_value());
+    CHECK(first->partition_begin == 0u);
+    CHECK(first->partition_end == 1u);
+    CHECK(first->control_offset == 0u);
+    CHECK(first->control_bytes == 3'000'000'004ull);
+    const auto second = gv::plan_gpu_grouped_soa_buffer_window(
+        bytes, first->partition_end, control_stride * 2u, 2'000'000'000u, limit, 256u);
+    REQUIRE(second.has_value());
+    CHECK(second->partition_begin == first->partition_end);
+    CHECK(second->partition_end == descriptors.size());
+    CHECK(second->control_offset % 256u == 0u);
+    CHECK(second->position_offset % 256u == 0u);
+    CHECK(second->control_offset <= control_stride);
+    CHECK(second->control_offset + second->control_bytes == control_stride + 3'000'000'004ull);
+    CHECK(second->control_bytes <= limit);
+    CHECK(second->position_bytes <= limit);
+
+    SECTION("position extent independently splits a window") {
+        const std::array positions{
+            partition(0u, 0u, 0u, 2u),
+            partition(1u, 32u, 0x1'0000'0010ull, 2u),
+        };
+        const auto one = gv::plan_gpu_grouped_soa_buffer_window(
+            std::as_bytes(std::span{positions}), 0u, 64u, 0x1'0000'0100ull, limit, 16u);
+        REQUIRE(one.has_value());
+        CHECK(one->partition_end == 1u);
+        const auto two = gv::plan_gpu_grouped_soa_buffer_window(
+            std::as_bytes(std::span{positions}), 1u, 64u, 0x1'0000'0100ull, limit, 16u);
+        REQUIRE(two.has_value());
+        CHECK(two->position_offset == 0x1'0000'0010ull);
+        CHECK(two->position_bytes == 8u);
+    }
+    SECTION("an indivisible oversized partition is rejected") {
+        const std::array oversized{partition(0u, 0u, 0u, 360'000'000u)};
+        CHECK_FALSE(gv::plan_gpu_grouped_soa_buffer_window(
+            std::as_bytes(std::span{oversized}), 0u, 5'000'000'000ull,
+            2'000'000'000ull, limit, 256u).has_value());
+    }
+    SECTION("aligned padding counts against the advertised range") {
+        const std::array tiny{partition(0u, 32u, 16u, 2u)};
+        CHECK_FALSE(gv::plan_gpu_grouped_soa_buffer_window(
+            std::as_bytes(std::span{tiny}), 0u, 64u, 32u, 32u, 64u).has_value());
+    }
+    SECTION("small aggregates retain a single window") {
+        const std::array tiny{partition(0u, 0u, 0u, 2u), partition(1u, 32u, 16u, 2u)};
+        const auto all = gv::plan_gpu_grouped_soa_buffer_window(
+            std::as_bytes(std::span{tiny}), 0u, 64u, 32u, 64u, 16u);
+        REQUIRE(all.has_value());
+        CHECK(all->partition_end == 2u);
+        CHECK(all->control_bytes == 60u);
+        CHECK(all->position_bytes == 24u);
+    }
+}
+
 TEST_CASE("persisted grouped-SoA coordinate receipt is strict and one-shot",
           "[component:bioseq][layer:unit][feature:gpu_runtime]") {
     STATIC_REQUIRE(!std::is_copy_constructible_v<gv::device_query_sketch_authorization>);
@@ -425,6 +514,22 @@ TEST_CASE("persisted grouped-SoA coordinate receipt is strict and one-shot",
 
     auto hit = make_grouped_soa_coordinate_hit_audit(0u, 100u);
     REQUIRE(hit.is_internally_consistent());
+    SECTION("every bounded window must be counted and emitted") {
+        auto windowed = hit;
+        windowed.partition_count = 2u;
+        windowed.descriptor_bytes = 2u * sizeof(gv::gpu_grouped_soa_resident_partition_descriptor);
+        windowed.resident_descriptors.bytes = windowed.descriptor_bytes;
+        windowed.binding_window_count = 2u;
+        windowed.direct_count_dispatches = 2u;
+        windowed.direct_emit_dispatches = 2u;
+        REQUIRE(windowed.is_internally_consistent());
+        windowed.direct_count_dispatches = 1u;
+        CHECK_FALSE(windowed.is_internally_consistent());
+        windowed.direct_count_dispatches = 2u;
+        windowed.direct_emit_dispatches = 1u;
+        CHECK_FALSE(windowed.is_internally_consistent());
+    }
+
     const auto as_zero_minimizer_query = [](auto audit) {
         audit.query_record.minimizer_count = 0u;
         audit.result = {};

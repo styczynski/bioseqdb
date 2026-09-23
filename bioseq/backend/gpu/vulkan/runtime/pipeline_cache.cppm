@@ -589,9 +589,9 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
              !binding_struct(4u, 16u, {0u, 4u, 8u, 12u}) || !binding_scalar(5u, 4u) ||
              !binding_scalar(6u, 4u) || !binding_struct(7u, 24u, {0u, 8u, 16u, 20u}) ||
              !binding_scalar(8u, 8u) || !binding_scalar(9u, 4u) ||
-             !scan.has_push_constant_offsets(std::array<std::uint32_t, 27>{
+             !scan.has_push_constant_offsets(std::array<std::uint32_t, 31>{
                  0u,  4u,  8u,  12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u,  48u, 52u,
-                 56u, 60u, 64u, 68u, 72u, 76u, 80u, 84u, 88u, 92u, 96u, 100u, 104u}))) {
+                 56u, 60u, 64u, 68u, 72u, 76u, 80u, 84u, 88u, 92u, 96u, 100u, 104u, 108u, 112u, 116u, 120u}))) {
             throw vulkan_runtime_error("SPIR-V grouped-SoA seed ABI mismatch");
         }
         if (kind == shader_kind::chain_candidate_reduce &&

@@ -22,7 +22,7 @@ export namespace bioseq::gpu::vulkan {
 /** @brief Wire revision of the retained grouped-SoA resident representation. */
 inline constexpr std::uint32_t k_gpu_grouped_soa_abi_revision = 3u;
 /** @brief Transient grouped-SoA seed shader/layout revision; persisted ABI remains revision 3. */
-inline constexpr std::uint32_t k_gpu_grouped_soa_seed_push_abi_revision = 5u;
+inline constexpr std::uint32_t k_gpu_grouped_soa_seed_push_abi_revision = 6u;
 /** @brief ABI revision of the bounded Format-5 two-phase stream. */
 inline constexpr std::uint32_t k_gpu_shape_v5_stream_abi_revision = 3u;
 /** @brief Flag identifying untranscoded grouped-SoA control streams. */
@@ -319,6 +319,10 @@ struct gpu_grouped_soa_seed_push {
     std::uint32_t prefix_extent = 0;
     std::uint32_t anchor_extent = 0;
     std::uint32_t anchor_key_extent = 0;
+    std::uint32_t partition_begin = 0; ///< First partition of this bounded dispatch.
+    std::uint32_t control_base_word = 0; ///< Bound control range's aggregate word offset.
+    std::uint32_t position_base_word = 0; ///< Bound position range's aggregate word offset.
+    std::uint32_t repetitive_word_extent = 0; ///< Flags followed by per-minimizer emit cursors.
 };
 
 static_assert(sizeof(gpu_grouped_soa_resident_partition_descriptor) == 104u);
@@ -328,7 +332,7 @@ static_assert(offsetof(gpu_grouped_soa_resident_partition_descriptor, control_co
 static_assert(offsetof(gpu_grouped_soa_resident_partition_descriptor, low_hash) == 72u);
 static_assert(offsetof(gpu_grouped_soa_resident_partition_descriptor, segment_end_bp) == 96u);
 static_assert(std::is_standard_layout_v<gpu_grouped_soa_resident_partition_descriptor>);
-static_assert(sizeof(gpu_grouped_soa_seed_push) == 108u);
+static_assert(sizeof(gpu_grouped_soa_seed_push) == 124u);
 static_assert(sizeof(gpu_grouped_soa_seed_push) <= 128u);
 static_assert(offsetof(gpu_grouped_soa_seed_push, abi_revision) == 0u);
 static_assert(offsetof(gpu_grouped_soa_seed_push, words32_per_minimizer) == 4u);
@@ -357,6 +361,10 @@ static_assert(offsetof(gpu_grouped_soa_seed_push, count_extent) == 92u);
 static_assert(offsetof(gpu_grouped_soa_seed_push, prefix_extent) == 96u);
 static_assert(offsetof(gpu_grouped_soa_seed_push, anchor_extent) == 100u);
 static_assert(offsetof(gpu_grouped_soa_seed_push, anchor_key_extent) == 104u);
+static_assert(offsetof(gpu_grouped_soa_seed_push, partition_begin) == 108u);
+static_assert(offsetof(gpu_grouped_soa_seed_push, control_base_word) == 112u);
+static_assert(offsetof(gpu_grouped_soa_seed_push, position_base_word) == 116u);
+static_assert(offsetof(gpu_grouped_soa_seed_push, repetitive_word_extent) == 120u);
 
 /**
  * @brief Reports whether a persisted grouped-SoA scalar width is supported.
@@ -502,6 +510,81 @@ is_gpu_shape_v5_partition_wire_valid(const gpu_shape_v5_partition_wire& descript
                                                  descriptor.position_count,
                                                  descriptor.position_width,
                                                  position_buffer_bytes);
+}
+
+/// @brief Consecutive partitions covered by two aligned, bounded SSBO ranges.
+struct gpu_grouped_soa_buffer_window {
+    std::uint32_t partition_begin = 0u;
+    std::uint32_t partition_end = 0u;
+    std::uint64_t control_offset = 0u;
+    std::uint64_t control_bytes = 0u;
+    std::uint64_t position_offset = 0u;
+    std::uint64_t position_bytes = 0u;
+};
+
+/// @brief Plan the next complete-partition binding window without decoding payloads.
+/// @param[in] descriptors Byte-exact resident partition descriptors.
+/// @param[in] first First uncovered partition ordinal.
+/// @param[in] control_bytes Logical aggregate control extent.
+/// @param[in] position_bytes Logical aggregate position extent.
+/// @param[in] range_limit Device limit for each storage-buffer descriptor range.
+/// @param[in] offset_alignment Device storage-buffer offset alignment.
+/// @return The maximal consecutive window, or no value for malformed/unbindable input.
+[[nodiscard]] inline std::optional<gpu_grouped_soa_buffer_window>
+plan_gpu_grouped_soa_buffer_window(std::span<const std::byte> descriptors,
+                                   std::uint32_t first,
+                                   std::uint64_t control_bytes,
+                                   std::uint64_t position_bytes,
+                                   std::uint64_t range_limit,
+                                   std::uint64_t offset_alignment) noexcept {
+    constexpr std::uint64_t stride = sizeof(gpu_grouped_soa_resident_partition_descriptor);
+    const std::uint64_t count = descriptors.size() / stride;
+    const std::uint64_t alignment = std::max<std::uint64_t>(4u, offset_alignment);
+    constexpr std::uint64_t word_limit =
+        std::uint64_t{(std::numeric_limits<std::uint32_t>::max)()} * 4u;
+    if (descriptors.size() % stride != 0u || first >= count ||
+        count > (std::numeric_limits<std::uint32_t>::max)() ||
+        !std::has_single_bit(alignment) || range_limit < 4u ||
+        control_bytes > word_limit || position_bytes > word_limit) {
+        return std::nullopt;
+    }
+    gpu_grouped_soa_buffer_window window{.partition_begin = first, .partition_end = first};
+    std::uint64_t control_end = 0u;
+    std::uint64_t position_end = 0u;
+    for (std::uint64_t ordinal = first; ordinal < count; ++ordinal) {
+        gpu_grouped_soa_resident_partition_descriptor descriptor{};
+        std::memcpy(&descriptor, descriptors.data() + ordinal * stride, sizeof(descriptor));
+        if (descriptor.partition_id != ordinal || descriptor.directory_ordinal != ordinal ||
+            !is_gpu_grouped_soa_partition_descriptor_valid(
+                descriptor, control_bytes, position_bytes)) {
+            return std::nullopt;
+        }
+        const std::uint64_t begin_control = std::min({descriptor.hash_byte_offset,
+            descriptor.prefix_byte_offset, descriptor.count_byte_offset}) & ~(alignment - 1u);
+        const std::uint64_t begin_position = descriptor.position_byte_offset & ~(alignment - 1u);
+        const std::uint64_t end_control = (std::max({
+            descriptor.hash_byte_offset + std::uint64_t{descriptor.control_count} * descriptor.hash_width,
+            descriptor.prefix_byte_offset + (std::uint64_t{descriptor.control_count} + 1u) * descriptor.offset_width,
+            descriptor.count_byte_offset + std::uint64_t{descriptor.control_count} * descriptor.count_width}) + 3u) & ~std::uint64_t{3u};
+        const std::uint64_t end_position = (descriptor.position_byte_offset +
+            std::uint64_t{descriptor.position_count} * descriptor.position_width + 3u) & ~std::uint64_t{3u};
+        const std::uint64_t next_control_begin = ordinal == first ? begin_control : std::min(window.control_offset, begin_control);
+        const std::uint64_t next_position_begin = ordinal == first ? begin_position : std::min(window.position_offset, begin_position);
+        const std::uint64_t next_control_end = std::max(control_end, end_control);
+        const std::uint64_t next_position_end = std::max(position_end, end_position);
+        if (next_control_end - next_control_begin > range_limit ||
+            next_position_end - next_position_begin > range_limit) {
+            return ordinal == first ? std::nullopt : std::optional{window};
+        }
+        window.control_offset = next_control_begin;
+        window.position_offset = next_position_begin;
+        control_end = next_control_end;
+        position_end = next_position_end;
+        window.control_bytes = control_end - window.control_offset;
+        window.position_bytes = position_end - window.position_offset;
+        window.partition_end = static_cast<std::uint32_t>(ordinal + 1u);
+    }
+    return window;
 }
 
 } // namespace bioseq::gpu::vulkan

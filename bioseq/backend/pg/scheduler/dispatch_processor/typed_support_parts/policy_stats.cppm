@@ -1671,6 +1671,7 @@ make_persisted_gpu_cache_validation_stats(
         .query_scan_dispatches = audit.query_scan_dispatches,
         .query_emit_dispatches = audit.query_emit_dispatches,
         .query_completed_roundtrips = audit.query_completed_roundtrips,
+        .binding_window_count = audit.binding_window_count,
         .direct_count_dispatches = audit.direct_count_dispatches,
         .direct_scan_dispatches = audit.direct_scan_dispatches,
         .anchor_count = audit.anchor_count,

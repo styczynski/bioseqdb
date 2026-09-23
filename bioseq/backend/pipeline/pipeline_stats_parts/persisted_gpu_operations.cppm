@@ -266,6 +266,7 @@ struct persisted_gpu_job_stats {
     std::uint64_t query_scan_dispatches = 0u;
     std::uint64_t query_emit_dispatches = 0u;
     std::uint64_t query_completed_roundtrips = 0u;
+    std::uint64_t binding_window_count = 0u; ///< Required windows authenticated by the runtime receipt.
     std::uint64_t direct_count_dispatches = 0u;
     std::uint64_t direct_scan_dispatches = 0u;
     std::uint64_t anchor_count = 0u;
@@ -299,9 +300,11 @@ struct persisted_gpu_job_stats {
             query_minimizer_count > k_sql_bigint_value_max || query_tile_count == 0u ||
             query_tile_count > k_sql_bigint_value_max || query_count_dispatches != 1u ||
             query_scan_dispatches != 3u || query_emit_dispatches != 1u ||
-            query_completed_roundtrips != 2u || direct_count_dispatches != 1u ||
+            query_completed_roundtrips != 2u || binding_window_count == 0u ||
+            binding_window_count > k_sql_bigint_value_max ||
+            direct_count_dispatches != binding_window_count ||
             direct_scan_dispatches != 3u || anchor_count == 0u ||
-            anchor_count > k_sql_bigint_value_max || direct_emit_dispatches != 1u ||
+            anchor_count > k_sql_bigint_value_max || direct_emit_dispatches != binding_window_count ||
             sort_operations != 1u || range_build_dispatches != 1u || range_count == 0u ||
             range_count > k_sql_bigint_value_max || chain_dispatches != 1u ||
             chain_backtrack_dispatches != 1u || coordinate_dispatches != 1u ||

@@ -1787,6 +1787,8 @@ def _postgresql_restart_argv(
             *trailing,
         ]
     if _is_aws_preset(active_preset):
+        if not os.path.isdir("/run/systemd/system") and shutil.which("pg_ctlcluster"):
+            return ["sudo", "-n", "pg_ctlcluster", "--skip-systemctl-redirect", "17", "main", "restart"]
         systemctl = shutil.which("systemctl")
         if systemctl:
             # systemd has no pg_ctl -p equivalent. Runtime attestation below
