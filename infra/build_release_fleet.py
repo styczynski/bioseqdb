@@ -19,6 +19,8 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +50,48 @@ SOURCE_ROOTS = (
     "bench", "bench_framework", "bioseq", "bioseq_caching", "build_mcp", "cmake",
     "codegen", "common", "data", "infra", "overlays", "vendor", "website", "DOCS",
 )
+_SNAPSHOT_LOCK = threading.Lock()
+
+
+def committed_source_snapshot():
+    """Freeze a complete local commit before copying a release batch.
+
+    This is not a dirty-tree, receipt, or binary-reuse gate. A new commit never
+    invalidates accepted binaries. It prevents the automatic dispatcher from
+    copying half of a multi-file edit (e.g. an import before its module exists).
+    Commit completed source batches locally before releasing their retries.
+    """
+    revision = subprocess.check_output(
+        ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    if re.fullmatch(r'[0-9a-f]{40}', revision) is None:
+        raise RuntimeError('Cannot resolve local release source commit')
+    destination = CONTROL / 'source-snapshots' / revision
+    with _SNAPSHOT_LOCK:
+        if destination.is_dir():
+            return destination, revision
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix='.assembling-', dir=destination.parent))
+        tracked = set(subprocess.check_output(
+            ['git', 'ls-tree', '--name-only', revision], cwd=ROOT, text=True).splitlines())
+        roots = [path for path in SOURCE_ROOTS if path in tracked]
+        archive = subprocess.Popen(['git', 'archive', '--format=tar', revision, '--', *roots],
+                                   cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            unpack = subprocess.run(['tar', '-xf', '-', '-C', str(staging)],
+                                    stdin=archive.stdout, capture_output=True, timeout=120)
+            archive.stdout.close()
+            archive.stdout = None
+            error = archive.communicate(timeout=30)[1]
+            if unpack.returncode or archive.returncode:
+                raise RuntimeError('Cannot materialize release source snapshot: ' +
+                                   (unpack.stderr + error).decode(errors='replace')[-1000:])
+        finally:
+            if archive.poll() is None:
+                archive.terminate()
+                archive.wait(timeout=10)
+        os.replace(staging, destination)
+        event('local_release_source_frozen', revision=revision)
+    return destination, revision
 
 
 def rpc(command, tool, arguments):
@@ -189,6 +233,7 @@ def status_snapshot():
 
 
 def sync_source(host, roots=SOURCE_ROOTS):
+    source, revision = committed_source_snapshot()
     ssh = fleet.ssh(host)
     endpoint = ssh[-1]
     # Local edits can predate completion of the previous remote build. Keeping
@@ -200,11 +245,12 @@ def sync_source(host, roots=SOURCE_ROOTS):
     for exclusion in ("build", "reporting", ".git", ".secrets", ".terraform", "*.tfstate*",
                       ".venv", "__pycache__", "*.pyc", ".DS_Store", "bin_artifacts"):
         args += ["--exclude=" + exclusion]
-    args += [str(ROOT) + "/./" + path for path in roots]
+    args += [str(source) + "/./" + path for path in roots if (source / path).exists()]
     args += [endpoint + ":" + REMOTE + "/"]
     result = subprocess.run(args, capture_output=True, text=True, timeout=1200)
     if result.returncode:
         raise RuntimeError(result.stderr[-1000:])
+    return revision
 
 
 def write_json_atomic(path, document):
@@ -295,7 +341,7 @@ def launch(host, *, validate_existing_only=False, cell=None, website_only_update
     # A render/indexing repair does not need unrelated PG19/20 package edits.
     # Keep the already-built PG17 extension tree and sync only the explicit
     # website source scope from local; the ordinary launch still syncs all roots.
-    sync_source(host, ("codegen/website", "website") if website_only_update else SOURCE_ROOTS)
+    revision = sync_source(host, ("codegen/website", "website") if website_only_update else SOURCE_ROOTS)
     # Native package validation needs these host-side archive readers only;
     # compilation and installed SQL run inside matching distro containers.
     host_packages = ["rpm", "cpio", "zstd", "binutils"]
@@ -313,7 +359,6 @@ def launch(host, *, validate_existing_only=False, cell=None, website_only_update
            " > /tmp/bioseq-package-validation-setup.log 2>&1", 600)
     environment = fleet.ENVIRONMENT + "unset BIOSEQ_E2E_REUSE_FROZEN_BINARY; "
     environment += "export BIOSEQ_BUILD_HARD_TIMEOUT_MIN=720 "
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     environment += "BIOSEQ_PACKAGE_SOURCE_REVISION=" + shlex.quote(revision) + " "
     environment += "BIOSEQ_PACKAGE_DISTROS=" + shlex.quote(cell["distro"] if cell else ",".join(PLAN[host])) + "; "
     environment += "export BIOSEQ_PACKAGE_POSTGRES_MAJORS=" + str(cell["postgres_major"] if cell else 17) + "; "
