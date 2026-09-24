@@ -2895,6 +2895,9 @@ void verify_reference_pipeline() {
                && terminal_html.find("<thead>") != std::string::npos
                && terminal_html.find("<tbody>") != std::string::npos,
            "ordinary runnable nests a semantic executed-result table in its terminal");
+    expect(render_content_html({make_text_node("{\"plan\":{}}")})
+               == "&#123;\"plan\":&#123;&#125;&#125;",
+           "literal JSON braces remain visible without resembling template delimiters");
 }
 
 /// @brief Runs `website plan`: validates config, parses tutorials, writes plan.

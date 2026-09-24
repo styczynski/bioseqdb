@@ -930,7 +930,7 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     }
     Expr* predicate = nullptr;
     if (list_length(clauses) == 1) {
-        predicate = static_cast<Expr*>(copyObject(linitial(clauses)));
+        predicate = static_cast<Expr*>(copyObjectImpl(linitial(clauses)));
     } else {
         predicate = make_andclause(
             static_cast<List*>(copyObject(clauses)));

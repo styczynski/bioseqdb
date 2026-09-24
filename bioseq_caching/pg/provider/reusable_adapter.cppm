@@ -16,6 +16,7 @@ module;
 extern "C" {
 #include "postgres.h"
 
+#include "catalog/pg_type_d.h"
 #include "executor/executor.h"
 #include "commands/explain.h"
 #if PG_VERSION_NUM >= 180000
@@ -431,7 +432,7 @@ void reset_abi_pod(p_value& value) noexcept {
         }
         *node_count = static_cast<std::uint32_t>(count);
     }
-    *copied = copyObject(const_cast<void*>(source));
+    *copied = copyObjectImpl(source);
     pfree(serialized);
     return *copied != nullptr;
 }

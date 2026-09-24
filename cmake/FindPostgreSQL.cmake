@@ -125,13 +125,18 @@ include(SelectLibraryConfigurations)
 select_library_configurations(PostgreSQL)
 
 # ----------------------------------------------------------------------------
-# If you have a good way of getting the version (from a header file, for example),
-# you can use that information to set Foo_VERSION (although note that find modules have
-# traditionally used Foo_VERSION_STRING, so you may want to set both).
-
-string(REGEX MATCHALL "[0-9]+" PostgreSQL_VERSION_LIST "${PostgreSQL_VERSION}")
-list(GET PostgreSQL_VERSION_LIST 0 PostgreSQL_VERSION_MAJOR)
-list(GET PostgreSQL_VERSION_LIST 1 PostgreSQL_VERSION_MINOR)
+# pg_config may report "PostgreSQL 20devel" or "PostgreSQL 19beta3".
+# Only a dotted component is the minor release; qualifier/package digits are
+# not version components. Preserve the original label for diagnostics.
+set(PostgreSQL_VERSION_STRING "${PostgreSQL_VERSION}")
+if(NOT PostgreSQL_VERSION MATCHES "^PostgreSQL ([0-9]+)(\\.([0-9]+))?")
+  message(FATAL_ERROR "Unrecognized pg_config version: ${PostgreSQL_VERSION}")
+endif()
+set(PostgreSQL_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(PostgreSQL_VERSION_MINOR "${CMAKE_MATCH_3}")
+if(PostgreSQL_VERSION_MINOR STREQUAL "")
+  set(PostgreSQL_VERSION_MINOR 0)
+endif()
 set(PostgreSQL_VERSION "${PostgreSQL_VERSION_MAJOR}.${PostgreSQL_VERSION_MINOR}")
 
 # ----------------------------------------------------------------------------

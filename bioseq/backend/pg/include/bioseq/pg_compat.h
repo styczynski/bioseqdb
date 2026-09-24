@@ -138,7 +138,9 @@ extern "C" {
 #include "access/tableam.h"
 #include "catalog/pg_am.h"
 #include "catalog/index.h"
+#if PG_VERSION_NUM < 200000
 #include "executor/execdebug.h"
+#endif
 #include "executor/nodeIndexscan.h"
 #include "lib/pairingheap.h"
 #include "miscadmin.h"
@@ -226,7 +228,9 @@ extern "C" {
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
+#if PG_VERSION_NUM < 190000
 #include "utils/dynahash.h"
+#endif
 #include "utils/expandeddatum.h"
 #include "utils/logtape.h"
 #include "utils/lsyscache.h"

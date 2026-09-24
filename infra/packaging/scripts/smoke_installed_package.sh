@@ -63,17 +63,20 @@ install_debian_package() {
   [[ -n "${VERSION_CODENAME:-}" ]] || die "VERSION_CODENAME is missing"
   local pgdg_suite="${VERSION_CODENAME}-pgdg"
   local pgdg_components=main
+  local -a pgdg_install_options=()
   if (( postgres_major >= 19 )); then
     pgdg_components="main ${postgres_major}"
   fi
   if (( postgres_major >= 20 )); then
     pgdg_suite="${VERSION_CODENAME}-pgdg-snapshot"
+    pgdg_install_options=(-t "${pgdg_suite}")
   fi
   printf '%s\n' \
     "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${pgdg_suite} ${pgdg_components}" \
     > /etc/apt/sources.list.d/pgdg.list
   apt-get update
-  apt-get install -y --no-install-recommends "postgresql-${postgres_major}"
+  apt-get install -y --no-install-recommends "${pgdg_install_options[@]}" \
+    "postgresql-${postgres_major}"
   apt-get install -y --no-install-recommends "${package_path}"
   dpkg-query -W -f='${Status}\n' "${package_name}" | grep -Fx 'install ok installed'
 }
@@ -86,11 +89,11 @@ install_fedora_package() {
     local pgdg_url="https://download.postgresql.org/pub/repos/yum/testing/${postgres_major}/fedora/fedora-${VERSION_ID}-$(uname -m)"
     curl -fsSL --retry 3 "${pgdg_url}/repodata/repomd.xml" >/dev/null \
       || die "no native PGDG prerelease repository at ${pgdg_url}"
-    dnf -y --allowerasing \
+    dnf -y \
       --repofrompath="bioseq-pgdg,${pgdg_url}" \
       --setopt=bioseq-pgdg.gpgcheck=1 \
       --setopt=bioseq-pgdg.gpgkey=https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-Fedora \
-      install "postgresql${postgres_major}" "postgresql${postgres_major}-server"
+      install --allowerasing "postgresql${postgres_major}" "postgresql${postgres_major}-server"
   fi
   dnf install -y --allowerasing --nogpgcheck "${package_path}"
   rpm -q "${package_name}"
@@ -260,6 +263,36 @@ defaults="$(run_pg "${psql_command[@]}" -Atqc "SELECT
 # registered shared memory, rather than merely creating a placeholder GUC.
 run_pg "${psql_command[@]}" -c \
   "SET bioseq_cache.query_cache.mode = 'exact_query'; RESET bioseq_cache.query_cache.mode;"
+# Cover the PostgreSQL planner ABI used by the companion: generic-plan
+# partition pruning, SubqueryScan and both SetOp inputs. Repeat the prepared
+# request after an INSERT so a stale cache result also fails the package check.
+run_pg "${psql_command[@]}" <<'SQL'
+SET statement_timeout = '30s';
+CREATE TABLE bioseq_package_cache_probe (id integer) PARTITION BY RANGE (id);
+CREATE TABLE bioseq_package_cache_probe_low PARTITION OF bioseq_package_cache_probe FOR VALUES FROM (0) TO (10);
+CREATE TABLE bioseq_package_cache_probe_high PARTITION OF bioseq_package_cache_probe FOR VALUES FROM (10) TO (20);
+INSERT INTO bioseq_package_cache_probe VALUES (1), (11), (12);
+SET bioseq_cache.query_cache.mode = 'exact_query';
+SET plan_cache_mode = force_generic_plan;
+PREPARE bioseq_package_cache_probe_query(integer) AS
+SELECT sum(id) AS cache_sum FROM (
+  SELECT id FROM (SELECT id FROM bioseq_package_cache_probe WHERE id > $1 OFFSET 0) AS selected
+  INTERSECT
+  SELECT id FROM bioseq_package_cache_probe WHERE id >= 11
+) AS matched;
+EXPLAIN (COSTS OFF) EXECUTE bioseq_package_cache_probe_query(10);
+EXECUTE bioseq_package_cache_probe_query(10) \gset
+SELECT 1 / (:cache_sum = 23)::integer AS cache_initial_result_valid;
+EXECUTE bioseq_package_cache_probe_query(10) \gset
+SELECT 1 / (:cache_sum = 23)::integer AS cache_repeated_result_valid;
+INSERT INTO bioseq_package_cache_probe VALUES (13);
+EXECUTE bioseq_package_cache_probe_query(10) \gset
+SELECT 1 / (:cache_sum = 36)::integer AS cache_changed_result_valid;
+DEALLOCATE bioseq_package_cache_probe_query;
+RESET bioseq_cache.query_cache.mode;
+RESET plan_cache_mode;
+DROP TABLE bioseq_package_cache_probe;
+SQL
 extension_count="$(run_pg "${psql_command[@]}" -Atqc \
   "SELECT count(*) FROM pg_extension WHERE extname IN ('bioseq','bioseq_cache')")"
 [[ "${extension_count}" == "2" ]] || die "both extensions were not created"

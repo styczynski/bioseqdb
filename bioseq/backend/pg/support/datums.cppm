@@ -949,7 +949,7 @@ detoast_values(TupleDesc tuple_desc, Datum *original_values, bool *nulls)
 	{
 		if (!nulls[attribute_index]
 			&& TupleDescAttr(tuple_desc, attribute_index)->attlen == -1
-			&& VARATT_IS_EXTENDED(values[attribute_index]))
+			&& VARATT_IS_EXTENDED(DatumGetPointer(values[attribute_index])))
 		{
 			if (values == original_values)
 			{

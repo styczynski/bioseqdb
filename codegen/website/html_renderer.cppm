@@ -29,6 +29,10 @@ void append_escaped_text(std::string& out, std::string_view text) {
         case '&': out += "&amp;"; break;
         case '<': out += "&lt;"; break;
         case '>': out += "&gt;"; break;
+        // JSON/SQL examples may contain adjacent braces. Preserve their visible
+        // text while distinguishing it from unresolved template syntax.
+        case '{': out += "&#123;"; break;
+        case '}': out += "&#125;"; break;
         default: out.push_back(character); break;
         }
     }

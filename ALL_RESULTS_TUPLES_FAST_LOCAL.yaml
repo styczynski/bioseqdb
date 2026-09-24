@@ -2377,6 +2377,182 @@ approved_results:
     Extra EXPLAIN ANALYZE/cache-off/vectorization-off mapping controls were disabled by user request;
     measured-statement checks were retained.'
 - stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","range_minimum_query","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: range_minimum_query
+    base_alignment: block_aligner
+  effective_path: vulkan_minimap_integer -> range_minimum_query -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 7016634807667
+    p50_b: 7005843527505
+  comments: 'Persisted grouped-SoA MPS uses GPU partition selection within Vulkan seed lookup; this is
+    an index operation, not prefiltering or a chaining/alignment fallback.; FAST LOCAL: one measured q1024
+    sample, not a five-run estimate; P50 equals that sample. PostgreSQL restarts before the measurement;
+    the OS filesystem cache is not cleared. Compatible persisted indexes are retained across just_index
+    tuples; index creation and restarts are untimed. Existing correctness, observed-stage, prefilter-off
+    and timing-interval validation passed. Compared with saved local minimap2 correctness evidence; baseline
+    timings are not copied. Do not pool with the standard five-repeat campaign. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls were disabled by user request; measured-statement checks were retained.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","range_minimum_query","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: range_minimum_query
+    base_alignment: ksw2
+  effective_path: vulkan_minimap_integer -> range_minimum_query -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 7013491899917
+    p50_b: 7001708397323
+  comments: 'Persisted grouped-SoA MPS uses GPU partition selection within Vulkan seed lookup; this is
+    an index operation, not prefiltering or a chaining/alignment fallback.; FAST LOCAL: one measured q1024
+    sample, not a five-run estimate; P50 equals that sample. PostgreSQL restarts before the measurement;
+    the OS filesystem cache is not cleared. Compatible persisted indexes are retained across just_index
+    tuples; index creation and restarts are untimed. Existing correctness, observed-stage, prefilter-off
+    and timing-interval validation passed. Compared with saved local minimap2 correctness evidence; baseline
+    timings are not copied. Do not pool with the standard five-repeat campaign. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls were disabled by user request; measured-statement checks were retained.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","simd_minimap2","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: simd_minimap2
+    base_alignment: block_aligner
+  effective_path: vulkan_minimap_integer -> simd_minimap2 -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 7040157159125
+    p50_b: 7029752093786
+  comments: 'Persisted grouped-SoA MPS uses GPU partition selection within Vulkan seed lookup; this is
+    an index operation, not prefiltering or a chaining/alignment fallback.; FAST LOCAL: one measured q1024
+    sample, not a five-run estimate; P50 equals that sample. PostgreSQL restarts before the measurement;
+    the OS filesystem cache is not cleared. Compatible persisted indexes are retained across just_index
+    tuples; index creation and restarts are untimed. Existing correctness, observed-stage, prefilter-off
+    and timing-interval validation passed. Compared with saved local minimap2 correctness evidence; baseline
+    timings are not copied. Do not pool with the standard five-repeat campaign. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls were disabled by user request; measured-statement checks were retained.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","simd_minimap2","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: simd_minimap2
+    base_alignment: ksw2
+  effective_path: vulkan_minimap_integer -> simd_minimap2 -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 7018661418917
+    p50_b: 7005580666795
+  comments: 'Persisted grouped-SoA MPS uses GPU partition selection within Vulkan seed lookup; this is
+    an index operation, not prefiltering or a chaining/alignment fallback.; FAST LOCAL: one measured q1024
+    sample, not a five-run estimate; P50 equals that sample. PostgreSQL restarts before the measurement;
+    the OS filesystem cache is not cleared. Compatible persisted indexes are retained across just_index
+    tuples; index creation and restarts are untimed. Existing correctness, observed-stage, prefilter-off
+    and timing-interval validation passed. Compared with saved local minimap2 correctness evidence; baseline
+    timings are not copied. Do not pool with the standard five-repeat campaign. Extra EXPLAIN ANALYZE/cache-off/vectorization-off
+    mapping controls were disabled by user request; measured-statement checks were retained.'
+- stable_key_schema: bioseq-e2e-cell-v2
   stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","bounded_nthash_simd","range_minimum_query","ksw2"]
   timing_scope: query_only_framework_iteration_fast_local_single_sample_v1
   campaign_id: bioseq-e2e-algorithm-matrix-local-v1

@@ -352,7 +352,11 @@ export [[nodiscard]] bool is_vector_tuple_table_slot(const TupleTableSlot* slot)
 /** Allocate a vector slot with one owned column per tuple attribute. */
 export TupleTableSlot* create_vector_tuple_table_slot(TupleDesc tuple_desc) {
     TupleTableSlot* slot =
-        MakeTupleTableSlot(CreateTupleDescCopy(tuple_desc), vector_tuple_slot_ops());
+        MakeTupleTableSlot(CreateTupleDescCopy(tuple_desc), vector_tuple_slot_ops()
+#if PG_VERSION_NUM >= 190000
+                           , 0  // Preserve the pre-PG19 slot flags.
+#endif
+        );
 
     TupleDesc slot_tuple_descriptor = slot->tts_tupleDescriptor;
 

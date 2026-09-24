@@ -74,17 +74,21 @@ install_debian_dependencies() {
     || die "VERSION_CODENAME is required to configure the PostgreSQL repository"
   local pgdg_suite="${VERSION_CODENAME}-pgdg"
   local pgdg_components=main
+  local -a pgdg_install_options=()
   if (( BIOSEQ_POSTGRES_MAJOR >= 19 )); then
     pgdg_components="main ${BIOSEQ_POSTGRES_MAJOR}"
   fi
   if (( BIOSEQ_POSTGRES_MAJOR >= 20 )); then
     pgdg_suite="${VERSION_CODENAME}-pgdg-snapshot"
+    # Snapshot packages have a lower default APT priority. Select their matching
+    # libpq runtime/development packages too, not the distro's older candidate.
+    pgdg_install_options=(-t "${pgdg_suite}")
   fi
   printf '%s\n' \
     "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${pgdg_suite} ${pgdg_components}" \
     > /etc/apt/sources.list.d/pgdg.list
   apt-get update
-  apt-get install -y --no-install-recommends \
+  apt-get install -y --no-install-recommends "${pgdg_install_options[@]}" \
     "postgresql-${BIOSEQ_POSTGRES_MAJOR}" \
     "postgresql-server-dev-${BIOSEQ_POSTGRES_MAJOR}" libpq-dev
 }
@@ -111,11 +115,11 @@ install_fedora_dependencies() {
   local pgdg_url="https://download.postgresql.org/pub/repos/yum/testing/${BIOSEQ_POSTGRES_MAJOR}/fedora/fedora-${VERSION_ID}-$(uname -m)"
   curl -fsSL --retry 3 "${pgdg_url}/repodata/repomd.xml" >/dev/null \
     || die "no native PGDG prerelease repository at ${pgdg_url}"
-  dnf -y --allowerasing \
+  dnf -y \
     --repofrompath="bioseq-pgdg,${pgdg_url}" \
     --setopt=bioseq-pgdg.gpgcheck=1 \
     --setopt=bioseq-pgdg.gpgkey=https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-Fedora \
-    install "postgresql${BIOSEQ_POSTGRES_MAJOR}-devel" "postgresql${BIOSEQ_POSTGRES_MAJOR}-server"
+    install --allowerasing "postgresql${BIOSEQ_POSTGRES_MAJOR}-devel" "postgresql${BIOSEQ_POSTGRES_MAJOR}-server"
 }
 
 install_opensuse_dependencies() {
@@ -331,6 +335,16 @@ install_vcpkg() {
 
 install_cmake
 install_llvm
+
+# Catch removed PostgreSQL headers and C++ boundary declarations before the
+# expensive dependency/code-generator build. This runs inside the MCP-owned
+# native package cell against its exact selected server headers.
+"${llvm_root}/bin/clang++" -std=gnu++26 -stdlib=libc++ -x c++ -fsyntax-only \
+  -Wno-pragma-once-outside-header \
+  -I"$("${pg_config_path}" --includedir-server)" \
+  -I"$("${pg_config_path}" --includedir)" \
+  /source/bioseq/backend/pg/include/bioseq/pg_compat.h
+
 install_vcpkg
 
 # This bind mount lives on the builder's persistent EBS volume. Package tools

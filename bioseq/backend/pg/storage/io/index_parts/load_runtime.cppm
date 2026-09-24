@@ -221,7 +221,13 @@ void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_c
         }
         ctx.caches = static_cast<bioseq::storage::seq_caches*>(ctx.write_state->seq_caches);
         ctx.slot = bioseq::postgres::support::invoke_pg_as_cpp(
-            [&ctx] { return MakeTupleTableSlot(ctx.parent_td, &TTSOpsVirtual); });
+            [&ctx] {
+                return MakeTupleTableSlot(ctx.parent_td, &TTSOpsVirtual
+#if PG_VERSION_NUM >= 190000
+                                          , 0
+#endif
+                );
+            });
 
         pg_identifier_writer writer{ctx, ctx.dest, ctx.defaults};
         ctx.writer_ref = idp::make_identifier_writer_reference(writer);
