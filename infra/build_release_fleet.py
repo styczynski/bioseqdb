@@ -107,14 +107,14 @@ print(json.dumps(state))
         "package_manifest_digest")}
 
 
-def sync_source(host):
+def sync_source(host, roots=SOURCE_ROOTS):
     ssh = fleet.ssh(host)
     endpoint = ssh[-1]
     args = ["rsync", "-a", "--delete", "--relative", "-e", shlex.join(ssh[:-1])]
     for exclusion in ("build", "reporting", ".git", ".secrets", ".terraform", "*.tfstate*",
                       ".venv", "__pycache__", "*.pyc", ".DS_Store", "bin_artifacts"):
         args += ["--exclude=" + exclusion]
-    args += [str(ROOT) + "/./" + path for path in SOURCE_ROOTS]
+    args += [str(ROOT) + "/./" + path for path in roots]
     args += [endpoint + ":" + REMOTE + "/"]
     result = subprocess.run(args, capture_output=True, text=True, timeout=1200)
     if result.returncode:
@@ -188,7 +188,7 @@ def write_release_manifest():
     })
 
 
-def launch(host, *, validate_existing_only=False, cell=None):
+def launch(host, *, validate_existing_only=False, cell=None, website_only_update=False):
     prior = state_on(host, "benchmark-e2e")
     if prior.get("status") == "running" or prior.get("cleanup_unverified"):
         raise RuntimeError("remote benchmark has not stopped cleanly; no package launch")
@@ -200,7 +200,12 @@ def launch(host, *, validate_existing_only=False, cell=None):
         if cell:
             raise RuntimeError("host already has a running job; reserved cell was not started")
         return existing
-    sync_source(host)
+    if website_only_update and mode != "website":
+        raise RuntimeError("website-only source refresh requires a website worker")
+    # A render/indexing repair does not need unrelated PG19/20 package edits.
+    # Keep the already-built PG17 extension tree and sync only the explicit
+    # website source scope from local; the ordinary launch still syncs all roots.
+    sync_source(host, ("codegen/website", "website") if website_only_update else SOURCE_ROOTS)
     # Native package validation needs these host-side archive readers only;
     # compilation and installed SQL run inside matching distro containers.
     host_packages = ["rpm", "cpio", "zstd", "binutils"]
@@ -233,6 +238,34 @@ def launch(host, *, validate_existing_only=False, cell=None):
     return observed
 
 
+def verify_website_delivery(destination):
+    """Verify transferred bytes against the website's existing output manifest."""
+    manifest = json.loads((destination / "site-manifest.json").read_text())
+    outputs = manifest.get("outputs")
+    if (manifest.get("schema") != "bioseq.website.site_manifest"
+            or manifest.get("hash_algorithm") != "sha256"
+            or not isinstance(outputs, dict) or "/index.html" not in outputs):
+        raise RuntimeError("website delivery lacks the generated output manifest")
+    actual = {}
+    for path in destination.rglob("*"):
+        if path.is_symlink():
+            raise RuntimeError(f"website delivery contains a symlink: {path}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise RuntimeError(f"website delivery contains a special file: {path}")
+        route = "/" + path.relative_to(destination).as_posix()
+        if route != "/site-manifest.json":
+            actual[route] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual != outputs:
+        missing = sorted(outputs.keys() - actual.keys())
+        extra = sorted(actual.keys() - outputs.keys())
+        changed = sorted(key for key in actual.keys() & outputs.keys()
+                         if actual[key] != outputs[key])
+        raise RuntimeError(f"website transfer differs from its manifest: "
+                           f"missing={missing[:5]}, extra={extra[:5]}, changed={changed[:5]}")
+
+
 def collect(host, observed, *, mode=None):
     ssh = fleet.ssh(host)
     endpoint = ssh[-1]
@@ -256,6 +289,8 @@ def collect(host, observed, *, mode=None):
         capture_output=True, text=True, timeout=1200)
     if result.returncode:
         raise RuntimeError(result.stderr[-1000:])
+    if mode == "website":
+        verify_website_delivery(destination)
     if mode == "package-linux":
         manifest = json.loads(remote(host, "cat " + source + "manifest.json"))
         manifest_path = destination / (host + "-manifest.json")
@@ -396,7 +431,9 @@ def main():
                 state["jobs"][host] = value
                 STATE.write_text(json.dumps(state, indent=2) + "\n")
     while True:
-        for host, job in state["jobs"].items():
+        # Inspect and collect the priority website before package transfers.
+        for host, job in sorted(state["jobs"].items(), key=lambda item:
+                item[1].get("mode") != "website" and PLAN[item[0]] != ["website"]):
             if not job.get("launched"):
                 continue
             try:
@@ -404,7 +441,10 @@ def main():
                 observed = state_on(host, mode)
                 previous = job.get("observed", {})
                 job["observed"] = observed
-                if observed.get("status") != "running" and not job.get("collected"):
+                website_refresh = (mode == "website"
+                    and job.get("refresh_after_current_pid") == observed.get("pid"))
+                if (observed.get("status") != "running" and not job.get("collected")
+                        and not website_refresh):
                     collect(host, observed, mode=mode)
                     job["collected"] = True
                     event("job_terminal", host=host, observed=observed)
@@ -433,7 +473,8 @@ def main():
                             and observed.get("pid") == pending_pid
                             and not observed.get("cleanup_unverified")):
                         event("repaired_retry_started", host=host, previous_pid=pending_pid)
-                        job["observed"] = launch(host, cell=job.get("cell"))
+                        job["observed"] = launch(host, cell=job.get("cell"),
+                            website_only_update=bool(job.pop("website_only_update", False)))
                         job["collected"] = False
                     else:
                         event("repaired_retry_not_needed_or_unsafe", host=host,

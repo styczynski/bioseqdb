@@ -3,6 +3,7 @@ module;
 #include <filesystem>
 #include <functional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -189,9 +190,16 @@ namespace structural = ::bioseq::codegen::structural_analysis;
 [[nodiscard]] cpp_reference_index scan_cpp_reference_units(
     const std::vector<std::filesystem::path>& reachable_units,
     const std::filesystem::path& compile_database) {
-    return from_structural_index(
+    const structural::structural_index index =
         structural::scan_translation_units_from_database(
-            reachable_units, compile_database));
+            reachable_units, compile_database);
+    if (index.translation_units.size() != reachable_units.size()) {
+        throw std::runtime_error(
+            "website C++ reference omitted source units: requested "
+            + std::to_string(reachable_units.size()) + ", parsed "
+            + std::to_string(index.translation_units.size()));
+    }
+    return from_structural_index(index);
 }
 
 /// @brief Scans each reachable unit's provided module and import edges (§11.3).

@@ -3047,7 +3047,13 @@ namespace {
     const auto clang_started = std::chrono::steady_clock::now();
     std::vector<fs::path> units;
     for (const std::string& line : read_lines(reachable_units)) {
-        units.emplace_back(line);
+        const fs::path input{line};
+        // source_graph writes repository-relative identities. Clang's compile
+        // database is rooted in the build directory, so passing those strings
+        // directly silently selects no compile commands and yields an empty
+        // C++ reference. Resolve against the same source root as Doxygen.
+        units.push_back(fs::absolute(input.is_absolute()
+            ? input : source_root / input).lexically_normal());
     }
     const cpp_reference_index structural =
         scan_cpp_reference_units(units, compile_db);
