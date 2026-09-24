@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reuse the existing fleet for MCP-owned packages and a static website.
 
-No provisioning, Git writes, S3 publication, or benchmark-binary replacement.
+No provisioning, automatic Git writes, S3 publication, or benchmark-binary replacement.
 Run --launch once, then --daemon to collect artifacts on terminal transitions.
 --retry HOST explicitly synchronizes fixes and retries only that failed job.
 """
@@ -37,6 +37,9 @@ PLAN = {
     "test3-m7a": ["fedora_44"],
     "test4-m7a": ["arch"],
     "test3-m7i": ["website"],
+    "test4-m7i": ["debian_13"],
+    "test2-m7a": ["ubuntu_26.04"],
+    "test2-m7i": ["opensuse_16.0"],
 }
 SOURCE_ROOTS = (
     "CMakeLists.txt", "CMakePresets.json", "vcpkg.json", "vcpkg-configuration.json",
@@ -161,7 +164,8 @@ def write_release_manifest():
                 build_host=source.name.removesuffix("-manifest.json"),
                 template_profile=manifest["template_profile"],
                 optimization=manifest["optimization"],
-                git_revision_informational_only=manifest.get("git_revision_informational_only"),
+                git_revision_informational_only=package.get("git_revision_informational_only", manifest.get("git_revision_informational_only")),
+                postgres_release_channel=matrix.get("postgresql_release_channels", {}).get(str(key[2]), "unknown"),
                 published=manifest["published"], signed=manifest["signed"])
     missing = [{"distro": distro, "architecture": architecture, "postgres_major": major}
                for distro, architecture, major in sorted(expected.keys() - packages.keys())]
@@ -184,15 +188,17 @@ def write_release_manifest():
     })
 
 
-def launch(host, *, validate_existing_only=False):
+def launch(host, *, validate_existing_only=False, cell=None):
     prior = state_on(host, "benchmark-e2e")
     if prior.get("status") == "running" or prior.get("cleanup_unverified"):
         raise RuntimeError("remote benchmark has not stopped cleanly; no package launch")
-    mode = "website" if PLAN[host] == ["website"] else "package-linux"
+    mode = "package-linux" if cell else ("website" if PLAN[host] == ["website"] else "package-linux")
     if validate_existing_only and mode != "package-linux":
         raise RuntimeError("acceptance-only retry is only for native packages")
     existing = state_on(host, mode)
     if existing.get("status") == "running":
+        if cell:
+            raise RuntimeError("host already has a running job; reserved cell was not started")
         return existing
     sync_source(host)
     # Native package validation needs these host-side archive readers only;
@@ -214,7 +220,8 @@ def launch(host, *, validate_existing_only=False):
     environment += "export BIOSEQ_BUILD_HARD_TIMEOUT_MIN=720 "
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     environment += "BIOSEQ_PACKAGE_SOURCE_REVISION=" + shlex.quote(revision) + " "
-    environment += "BIOSEQ_PACKAGE_DISTROS=" + shlex.quote(",".join(PLAN[host])) + "; "
+    environment += "BIOSEQ_PACKAGE_DISTROS=" + shlex.quote(cell["distro"] if cell else ",".join(PLAN[host])) + "; "
+    environment += "export BIOSEQ_PACKAGE_POSTGRES_MAJORS=" + str(cell["postgres_major"] if cell else 17) + "; "
     environment += "export BIOSEQ_PACKAGE_VALIDATE_EXISTING_ONLY=" + (
         "1" if validate_existing_only else "0") + "; "
     answer = rpc(fleet.ssh(host) + ["cd " + REMOTE + " && " + environment + "python3 build_mcp/server.py"],
@@ -226,10 +233,10 @@ def launch(host, *, validate_existing_only=False):
     return observed
 
 
-def collect(host, observed):
+def collect(host, observed, *, mode=None):
     ssh = fleet.ssh(host)
     endpoint = ssh[-1]
-    mode = "website" if PLAN[host] == ["website"] else "package-linux"
+    mode = mode or ("website" if PLAN[host] == ["website"] else "package-linux")
     destination = OUTPUT / ("website" if mode == "website" else "packages")
     destination.mkdir(parents=True, exist_ok=True)
     if mode == "website":
@@ -254,8 +261,9 @@ def collect(host, observed):
             # artifacts. Recheck their local bytes below before retaining them.
             incoming = {entry["file"] for entry in manifest["packages"]}
             previous = json.loads(manifest_path.read_text())
-            manifest["packages"].extend(entry for entry in previous.get("packages", [])
-                                        if entry["file"] not in incoming)
+            manifest["packages"].extend(dict(entry, git_revision_informational_only=
+                entry.get("git_revision_informational_only", previous.get("git_revision_informational_only")))
+                for entry in previous.get("packages", []) if entry["file"] not in incoming)
         for package in manifest["packages"]:
             target = destination / package["file"]
             digest = hashlib.sha256()
@@ -268,6 +276,67 @@ def collect(host, observed):
         write_release_manifest()
     event("artifacts_collected" if mode == "website" or manifest["packages"] else "manifest_collected",
           host=host, destination=str(destination))
+
+
+def cell_key(cell):
+    return f"pg{cell['postgres_major']}/{cell['distro']}/{cell['architecture']}"
+
+
+def dispatch_available(state):
+    """Reserve distinct native cells before concurrent launch; do not loop failed builds."""
+    matrix = json.loads((ROOT / "infra/package_matrix.json").read_text())
+    inventory = json.loads((OUTPUT / "packages/manifest.json").read_text())
+    occupied = {cell_key(p) for p in inventory["packages"]
+                if p["installed_sql_smoke"].get("default_insert_search") is True}
+    occupied.update(state.get("attempted_cells", []))
+    for host, job in state["jobs"].items():
+        if job.get("cell"):
+            occupied.add(cell_key(job["cell"]))
+        elif job.get("observed", {}).get("status") == "running" and PLAN[host] != ["website"]:
+            for distro in job.get("targets", PLAN[host]):
+                occupied.add(cell_key(dict(postgres_major=17, distro=distro,
+                    architecture="arm64" if host.endswith("c7g") else "x64")))
+    pending = []
+    for host in PLAN:
+        job = state["jobs"].get(host, {})
+        observed = job.get("observed", {})
+        if job.get("cell") and not job.get("launched") and not job.get("error"):
+            # A controller interruption during admission leaves a reservation.
+            # Reconcile it explicitly rather than overwrite a possibly live job.
+            continue
+        if observed.get("status") == "running" or observed.get("cleanup_unverified"):
+            continue
+        if job.get("refresh_after_current_pid") or job.get("retry_after_failure_pid"):
+            continue
+        if PLAN[host] == ["website"] and not (job.get("collected") and observed.get("status") == "completed"):
+            continue
+        architecture = "arm64" if host.endswith("c7g") else "x64"
+        distros = sorted((d["id"] for d in matrix["distributions"]),
+                        key=lambda d: (d not in PLAN[host], d))
+        candidates = [dict(postgres_major=major, distro=distro, architecture=architecture)
+                      for major in sorted(matrix["postgresql_majors"]) for distro in distros]
+        cell = next((c for c in candidates if cell_key(c) not in occupied), None)
+        if cell is None:
+            continue
+        key = cell_key(cell)
+        occupied.add(key)
+        state.setdefault("attempted_cells", []).append(key)
+        state.setdefault("history", []).append(dict(host=host, previous_job=job))
+        state["jobs"][host] = dict(launched=False, cell=cell, mode="package-linux", targets=[cell["distro"]])
+        pending.append((host, cell))
+        event("package_cell_reserved", host=host, cell=cell)
+    write_json_atomic(STATE, state)
+    def start(item):
+        host, cell = item
+        try:
+            return host, dict(launched=True, observed=launch(host, cell=cell))
+        except Exception as error:
+            event("launch_failed", host=host, cell=cell, error=str(error))
+            return host, dict(launched=False, error=str(error))
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        for host, update in pool.map(start, pending):
+            state["jobs"][host].update(update)
+            write_json_atomic(STATE, state)
 
 
 def main():
@@ -311,9 +380,11 @@ def main():
                 not in ("running", "completed")]
         def start(host):
             try:
+                cell = state["jobs"].get(host, {}).get("cell")
                 return host, {"launched": True,
-                              "observed": launch(host, validate_existing_only=bool(args.revalidate)),
-                              "targets": PLAN[host]}
+                              "observed": launch(host, validate_existing_only=bool(args.revalidate), cell=cell),
+                              "cell": cell, "mode": "package-linux" if cell else ("website" if PLAN[host] == ["website"] else "package-linux"),
+                              "targets": [cell["distro"]] if cell else PLAN[host]}
             except Exception as error:
                 event("launch_failed", host=host, error=str(error))
                 return host, {"launched": False, "error": str(error), "targets": PLAN[host]}
@@ -326,12 +397,12 @@ def main():
             if not job.get("launched"):
                 continue
             try:
-                mode = "website" if PLAN[host] == ["website"] else "package-linux"
+                mode = job.get("mode") or ("website" if PLAN[host] == ["website"] else "package-linux")
                 observed = state_on(host, mode)
                 previous = job.get("observed", {})
                 job["observed"] = observed
                 if observed.get("status") != "running" and not job.get("collected"):
-                    collect(host, observed)
+                    collect(host, observed, mode=mode)
                     job["collected"] = True
                     event("job_terminal", host=host, observed=observed)
                 elif previous.get("step") != observed.get("step"):
@@ -343,7 +414,7 @@ def main():
                 digest = observed.get("package_manifest_digest")
                 if (observed.get("status") == "running" and digest
                         and digest != job.get("collected_package_manifest")):
-                    collect(host, observed)
+                    collect(host, observed, mode=mode)
                     job["collected_package_manifest"] = digest
                     event("partial_packages_collected", host=host)
                 refresh = bool(job.get("refresh_after_current_pid"))
@@ -359,7 +430,7 @@ def main():
                             and observed.get("pid") == pending_pid
                             and not observed.get("cleanup_unverified")):
                         event("repaired_retry_started", host=host, previous_pid=pending_pid)
-                        job["observed"] = launch(host)
+                        job["observed"] = launch(host, cell=job.get("cell"))
                         job["collected"] = False
                     else:
                         event("repaired_retry_not_needed_or_unsafe", host=host,
@@ -367,6 +438,8 @@ def main():
             except Exception as error:
                 event("monitor_error", host=host, error=str(error))
         state["local_benchmark"] = fleet.monitor._local_state()
+        if args.daemon:
+            dispatch_available(state)
         if args.daemon and time.time() - state.get("last_hourly_log", 0) >= 3600:
             from e2e_tuple_progress import append_progress_log
             inventory = json.loads((OUTPUT / "packages/manifest.json").read_text())
@@ -377,8 +450,8 @@ def main():
             failed_jobs = [h for h, job in state["jobs"].items()
                 if job.get("observed", {}).get("status") == "failed"]
             append_progress_log(
-                f"Release fleet: {completed_packages}/10 installation-validated packages collected; "
-                f"{ready_packages}/10 also passed current functional acceptance. "
+                f"Release fleet: {completed_packages}/{inventory['expected_package_count']} installation-validated packages collected; "
+                f"{ready_packages}/{inventory['expected_package_count']} also passed current functional acceptance. "
                 f"Active workers: {', '.join(active_jobs) or 'none'}. "
                 f"Failed workers requiring investigation: {', '.join(failed_jobs) or 'none'}. "
                 f"Local benchmark: {state['local_benchmark'].get('status')}; "
@@ -394,7 +467,7 @@ def main():
             print("local", state["local_benchmark"].get("status"),
                   state["local_benchmark"].get("bench_e2e_config"))
             return
-        time.sleep(300)
+        time.sleep(60)
 
 
 if __name__ == "__main__":

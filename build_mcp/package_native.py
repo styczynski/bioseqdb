@@ -81,6 +81,10 @@ def collect(repository: Path, selection: str) -> int:
     from bioseq_packaging.workspace import WorkspaceManager
 
     matrix = json.loads((repository / "infra/package_matrix.json").read_text())
+    requested_majors = os.environ.get("BIOSEQ_PACKAGE_POSTGRES_MAJORS", "").strip()
+    majors = tuple(int(value) for value in requested_majors.split(",")) if requested_majors else tuple(matrix["postgresql_majors"])
+    if not majors or len(set(majors)) != len(majors) or not set(majors).issubset(matrix["postgresql_majors"]):
+        raise RuntimeError("PostgreSQL selection must be a nonempty unique subset of the package matrix")
     architecture = native_architecture()
     distros = parse_distros([selection])
     output = repository / "bin_artifacts/packages"
@@ -92,7 +96,7 @@ def collect(repository: Path, selection: str) -> int:
     # constructed. Their local-only sentinel is never used as an AWS target.
     request = WorkerRequest(
         architecture=architecture, bucket="local-output-not-published",
-        region="local", postgres_majors=tuple(matrix["postgresql_majors"]),
+        region="local", postgres_majors=majors,
         distro_ids=distros, source_dir=repository,
         build_root=repository / "build/package-linux/native",
         manifest_path=output / "manifest.json", s3_prefix="local-only",
@@ -114,7 +118,7 @@ def collect(repository: Path, selection: str) -> int:
                 "architecture": architecture.value, "packages": [], "failures": []}
     validate_existing_only = os.environ.get("BIOSEQ_PACKAGE_VALIDATE_EXISTING_ONLY") == "1"
     for spec in build_cells(request):
-        print(f"PACKAGE_CELL_START {spec.distro.distro_id}/{architecture}", flush=True)
+        print(f"PACKAGE_CELL_START pg{spec.postgres_major}/{spec.distro.distro_id}/{architecture}", flush=True)
         try:
             if validate_existing_only:
                 # Explicit acceptance-only retry after a validator/provisioning
@@ -134,7 +138,11 @@ def collect(repository: Path, selection: str) -> int:
                 cell, artifact = build_cell(spec, workspace, request, builders, containers, templates)
             record, validation = acceptance.validate_built(cell, artifact)
             smoke = acceptance.smoke(cell, artifact)
-            destination = output / str(cell.distro.distro_id) / architecture.value
+            channel = matrix.get("postgresql_release_channels", {}).get(str(cell.postgres_major), "unknown")
+            destination = output
+            if channel != "stable":
+                destination /= "experimental"
+            destination = destination / str(cell.distro.distro_id) / architecture.value
             destination.mkdir(parents=True, exist_ok=True)
             target = destination / artifact.name
             shutil.copy2(artifact, target)
@@ -142,11 +150,13 @@ def collect(repository: Path, selection: str) -> int:
                 raise RuntimeError("collected package checksum differs from validated artifact")
             manifest["packages"].append({"distro": str(cell.distro.distro_id),
                 "postgres_major": cell.postgres_major, "file": str(target.relative_to(output)),
+                "postgres_release_channel": channel,
+                "git_revision_informational_only": revision,
                 "bytes": record.size, "sha256": record.sha256,
                 "validation": validation, "installed_sql_smoke": smoke})
-            print(f"PACKAGE_CELL_COMPLETE {cell.distro.distro_id}/{architecture}", flush=True)
+            print(f"PACKAGE_CELL_COMPLETE pg{cell.postgres_major}/{cell.distro.distro_id}/{architecture}", flush=True)
         except Exception as error:
-            manifest["failures"].append({"distro": str(spec.distro.distro_id), "error": str(error)})
+            manifest["failures"].append({"postgres_major": spec.postgres_major, "distro": str(spec.distro.distro_id), "error": str(error)})
             print(f"PACKAGE_CELL_FAILED {spec.distro.distro_id}/{architecture}: {error}", flush=True)
         temporary = request.manifest_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(manifest, indent=2) + "\n")

@@ -1,8 +1,17 @@
 {
   "schema_revision": 1,
   "postgresql_majors": [
-    17
+    17,
+    18,
+    19,
+    20
   ],
+  "postgresql_release_channels": {
+    "17": "stable",
+    "18": "stable",
+    "19": "prerelease",
+    "20": "development"
+  },
   "architectures": {
     "arm64": {
       "aws_architecture": "arm64",

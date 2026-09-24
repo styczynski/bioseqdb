@@ -61,8 +61,16 @@ install_debian_package() {
   curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
   [[ -n "${VERSION_CODENAME:-}" ]] || die "VERSION_CODENAME is missing"
+  local pgdg_suite="${VERSION_CODENAME}-pgdg"
+  local pgdg_components=main
+  if (( postgres_major >= 19 )); then
+    pgdg_components="main ${postgres_major}"
+  fi
+  if (( postgres_major >= 20 )); then
+    pgdg_suite="${VERSION_CODENAME}-pgdg-snapshot"
+  fi
   printf '%s\n' \
-    "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+    "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${pgdg_suite} ${pgdg_components}" \
     > /etc/apt/sources.list.d/pgdg.list
   apt-get update
   apt-get install -y --no-install-recommends "postgresql-${postgres_major}"
