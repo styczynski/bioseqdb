@@ -71,6 +71,9 @@ def docker_command(
         "run",
         "--rm",
         "--init",
+        # PostgreSQL parallel query DSM can exceed Docker's 64 MiB default.
+        # This is a tmpfs ceiling, not a preallocation or a planner override.
+        "--shm-size=1g",
         "--mount",
         f"type=bind,src={artifact.resolve()},dst={package_target},readonly",
         "--mount",
