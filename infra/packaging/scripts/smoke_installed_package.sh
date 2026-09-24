@@ -442,10 +442,18 @@ INSERT INTO bioseq_package_tableam_probe VALUES (1, 10), (2, 20), (3, 30);
 ALTER TABLE bioseq_package_tableam_probe ADD COLUMN wide_value bigint DEFAULT 1000000000000;
 EXPLAIN (ANALYZE, COSTS OFF)
 SELECT avg(value), avg(wide_value) FROM bioseq_package_tableam_probe;
-SELECT avg(value) AS integer_average, avg(wide_value) AS bigint_average
-FROM bioseq_package_tableam_probe \gset
-SELECT 1 / (:'integer_average'::numeric = 20 AND :'bigint_average'::numeric = 1000000000000)::integer
-AS numeric_average_valid;
+SELECT id, value, wide_value FROM bioseq_package_tableam_probe ORDER BY id;
+DO $$
+DECLARE observed record;
+BEGIN
+  SELECT avg(value) AS integer_average, avg(wide_value) AS bigint_average
+    INTO observed FROM bioseq_package_tableam_probe;
+  IF observed.integer_average IS DISTINCT FROM 20::numeric OR
+     observed.bigint_average IS DISTINCT FROM 1000000000000::numeric THEN
+    RAISE EXCEPTION 'numeric average mismatch: integer=%, bigint=%',
+      observed.integer_average, observed.bigint_average;
+  END IF;
+END $$;
 SET enable_seqscan = off;
 SET enable_bitmapscan = off;
 SET enable_indexonlyscan = off;
