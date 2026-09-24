@@ -319,7 +319,12 @@ export {
         runtime.collect_actual =
             runtime.boundary_count != 0u && state->custom_scan_state.ss.ps.instrument != nullptr;
         runtime.timing =
+#if PG_VERSION_NUM >= 190000
+            // PG19 separates per-node counters from general instrumentation.
+            runtime.collect_actual && state->custom_scan_state.ss.ps.instrument->instr.need_timer;
+#else
             runtime.collect_actual && state->custom_scan_state.ss.ps.instrument->need_timer;
+#endif
         if (runtime.boundary_count != 0u) {
             runtime.boundaries =
                 static_cast<slice_materialization_boundary*>(MemoryContextAllocZero(

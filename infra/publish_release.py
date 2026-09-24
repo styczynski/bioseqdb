@@ -184,7 +184,10 @@ def accepted_packages():
             signed=bool(package.get('signed')),
             validation=('Mach-O and extracted-payload private PostgreSQL SQL passed; unsigned/unnotarized installer'
                         if package['validation'].get('format') == 'pkg'
-                        else 'ELF and fresh installed SQL passed')))
+                        else 'ELF and fresh installed SQL passed'),
+            **{field: package[field] for field in
+               ('postgres_version', 'postgres_runtime_requirement', 'postgres_sdk_formula')
+               if field in package}))
     if not accepted:
         raise RuntimeError('No accepted packages to publish')
     return accepted
@@ -337,13 +340,16 @@ def publish_packages(apply):
          note='Release label differs from the retained embedded package version. '
               'Unsigned alpha packages; more accepted cells may be added to this same release.'))
     readme = f'# BioseqDB {RELEASE}\n\n{DESCRIPTION}\n\n'
-    readme += ('## Release identity\n\nThe public release is 0.1.0-alpha.1. Existing archives retain '
+    readme += ('## Release identity\n\nThe public release is 0.1.0-alpha.1. Linux archives retain '
                'their embedded package version 4.2.3; they have not been relabelled or rebuilt. '
+               'macOS installers use package version 0.1.0-alpha.1. '
                'This folder grows as additional distro/PostgreSQL packages pass acceptance. '
                'Checksums and the current exact cell list are in manifest.json and SHA256SUMS.\n\n'
                '## Available packages\n\n')
     for p in records:
         readme += f"- PostgreSQL {p['postgres_major']} ({p['postgres_release_channel']}), {p['distro']}, {p['architecture']}: [{Path(p['file']).name}]({p['file']})\n"
+        if p.get('postgres_runtime_requirement'):
+            readme += f"  Runtime requirement: {p['postgres_runtime_requirement']}. SDK formula: `{p['postgres_sdk_formula']}`.\n"
     (stage / 'README.md').write_text(readme)
     shutil.copy2(ROOT / 'website/static/favicon.svg', stage / 'bioseqdb-logo.svg')
     (stage / 'SHA256SUMS').write_text(''.join(
