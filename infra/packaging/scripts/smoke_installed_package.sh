@@ -387,6 +387,15 @@ SELECT value AS indexed_value FROM bioseq_package_tableam_probe WHERE id = 2 \gs
 SELECT 1 / (:indexed_value = 20)::integer AS index_fetch_valid;
 SET enable_indexonlyscan = on;
 EXPLAIN (COSTS OFF) SELECT id FROM bioseq_package_tableam_probe WHERE id = 2;
+DO $$
+DECLARE observed_plan json;
+BEGIN
+  EXECUTE 'EXPLAIN (FORMAT JSON, COSTS OFF) SELECT id FROM bioseq_package_tableam_probe WHERE id = 2'
+    INTO observed_plan;
+  IF observed_plan::text LIKE '%"Index Only Scan"%' THEN
+    RAISE EXCEPTION 'columnar relation-info hook allowed an unsupported index-only path: %', observed_plan;
+  END IF;
+END $$;
 SELECT id AS indexed_id FROM bioseq_package_tableam_probe WHERE id = 2 \gset
 SELECT 1 / (:indexed_id = 2)::integer AS projected_index_result_valid;
 DO $$

@@ -910,14 +910,29 @@ export {
     }
 
     /** @brief Apply table-AM planner capabilities after the prior relation-info hook. */
+#if PG_VERSION_NUM >= 190000
+    void bioseq_column_build_simple_rel_hook(PlannerInfo* root,
+                                             RelOptInfo* rel,
+                                             RangeTblEntry* rte) {
+        if (previous_build_simple_rel_hook) {
+            previous_build_simple_rel_hook(root, rel, rte);
+        }
+        // PG19 moved this hook after relation setup and also calls it for
+        // functions, subqueries and CTEs. Only tables have a catalog OID.
+        if (rte->rtekind != RTE_RELATION) {
+            return;
+        }
+        const Oid relation_object_id = rte->relid;
+#else
     void bioseq_column_get_relation_info_hook(PlannerInfo* root,
                                               Oid relation_object_id,
                                               bool inhparent,
                                               RelOptInfo* rel) {
-        bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnGetRelationInfoHook() entered");
         if (previous_get_relation_info_hook) {
             previous_get_relation_info_hook(root, relation_object_id, inhparent, rel);
         }
+#endif
+        bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnRelationInfoHook() entered");
 
         if (relation_oid_uses_column_table_access_method(relation_object_id)) {
             /* disable parallel query */
@@ -937,8 +952,13 @@ export {
         previous_set_join_pathlist_hook = set_join_pathlist_hook;
         set_join_pathlist_hook = bioseq_batch_join_set_join_pathlist_hook;
 
+#if PG_VERSION_NUM >= 190000
+        previous_build_simple_rel_hook = build_simple_rel_hook;
+        build_simple_rel_hook = bioseq_column_build_simple_rel_hook;
+#else
         previous_get_relation_info_hook = get_relation_info_hook;
         get_relation_info_hook = bioseq_column_get_relation_info_hook;
+#endif
 
         RegisterCustomScanMethods(bioseq_column_scan_scan_methods());
         RegisterCustomScanMethods(bioseq_batch_join_scan_methods());
