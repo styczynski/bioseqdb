@@ -176,8 +176,8 @@ export {
                 pathkeys_contained_in(join->path.pathkeys, outer_path->pathkeys)
                     ? join->path.pathkeys
                     : outer_path->pathkeys;
-            initial_cost_nestloop(
-                root, &workspace, JOIN_INNER, outer_path, inner_path, &filtered_extra);
+            workspace = initial_cost_serial_nested_loop(
+                root, JOIN_INNER, outer_path, inner_path, &filtered_extra);
             Path* result = reinterpret_cast<Path*>(create_nestloop_path(root,
                                                                         joinrel,
                                                                         JOIN_INNER,

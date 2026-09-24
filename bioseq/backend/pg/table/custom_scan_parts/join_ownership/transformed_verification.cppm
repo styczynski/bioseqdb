@@ -899,9 +899,8 @@ export {
                     if (bms_overlap(required_outer, joinrel->relids)) {
                         bms_free(required_outer);
                     } else {
-                        JoinCostWorkspace workspace{};
-                        initial_cost_nestloop(
-                            root, &workspace, JOIN_INNER, best_outer, best_bmo, extra);
+                        JoinCostWorkspace workspace = initial_cost_serial_nested_loop(
+                            root, JOIN_INNER, best_outer, best_bmo, extra);
                         NestPath* constructed = create_nestloop_path(
                             root,
                             joinrel,
