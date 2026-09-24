@@ -5,13 +5,13 @@
 module;
 
 #include <stdint.h>
-#include "pg_config.h"
 
 extern "C" {
 #include "postgres_ext.h"
 
 // This narrow declaration must match postgres.h for the selected server SDK.
-#if PG_VERSION_NUM >= 190000
+// The target version avoids a libpq dependency's unrelated pg_config.h.
+#if POSTGRESQL_VERSION_MAJOR >= 19
 typedef uint64_t Datum;
 #else
 typedef uintptr_t Datum;

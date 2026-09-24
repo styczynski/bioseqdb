@@ -126,14 +126,14 @@ module;
 
 #include <stddef.h>
 #include <stdint.h>
-#include "pg_config.h"
 
 extern "C" {
 #include "postgres_ext.h"
 
 // Match PostgreSQL's lightweight ABI declaration without importing its heavy
 // server headers into this scheduler facade. PG19 makes Datum uint64_t.
-#if PG_VERSION_NUM >= 190000
+// Use the selected server target, not a libpq dependency's pg_config.h.
+#if POSTGRESQL_VERSION_MAJOR >= 19
 typedef uint64_t Datum;
 #else
 typedef uintptr_t Datum;
