@@ -13,6 +13,7 @@ import runpy
 import signal
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -99,6 +100,45 @@ def cell_context(
         cmake_cache=(root / "caches" / "cmake" / distro.value).resolve(),
     )
     return model.CellContext.from_spec(spec, paths)
+
+
+class ReleaseFleetAssignmentTests(unittest.TestCase):
+    def test_former_website_host_keeps_dispatching_packages(self) -> None:
+        # Load scheduler logic without importing live benchmark-fleet clients.
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        host = "test3-m7i"
+        mode = namespace["job_mode"]
+        self.assertEqual(mode(host, {}), "website")
+        previous_cell = dict(postgres_major=18, distro="debian_13", architecture="x64")
+        self.assertEqual(mode(host, {"cell": previous_cell}), "package-linux")
+        dispatch = namespace["dispatch_available"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "infra").mkdir()
+            (root / "packages").mkdir()
+            (root / "infra/package_matrix.json").write_text(json.dumps({
+                "postgresql_majors": [18, 19],
+                "distributions": [{"id": "debian_13"}],
+            }))
+            (root / "packages/manifest.json").write_text('{"packages": []}')
+            state = {"jobs": {host: {
+                "launched": True, "mode": "website", "collected": True,
+                "observed": {"status": "failed", "pid": 1},
+            }}}
+            launch = mock.Mock(return_value={"status": "running", "pid": 3})
+            with mock.patch.dict(dispatch.__globals__, {
+                    "ROOT": root, "OUTPUT": root, "STATE": root / "state.json",
+                    "PLAN": {host: ["website"]}, "launch": launch, "event": mock.Mock()}):
+                dispatch(state)
+                launch.assert_not_called()  # An unaccepted website still takes priority.
+                state["jobs"][host].update(mode="package-linux", cell=previous_cell)
+                dispatch(state)
+            expected = dict(postgres_major=19, distro="debian_13", architecture="x64")
+            launch.assert_called_once_with(host, cell=expected)
+            self.assertEqual(state["jobs"][host]["cell"], expected)
+            self.assertEqual(state["jobs"][host]["observed"]["pid"], 3)
 
 
 class PostgresHeaderIdentityTests(unittest.TestCase):

@@ -325,6 +325,12 @@ def cell_key(cell):
     return f"pg{cell['postgres_major']}/{cell['distro']}/{cell['architecture']}"
 
 
+def job_mode(host, job):
+    """Use the current assignment after the website host joins package work."""
+    return job.get("mode") or (
+        "package-linux" if job.get("cell") or PLAN[host] != ["website"] else "website")
+
+
 def dispatch_available(state):
     """Reserve distinct native cells before concurrent launch; do not loop failed builds."""
     matrix = json.loads((ROOT / "infra/package_matrix.json").read_text())
@@ -351,7 +357,8 @@ def dispatch_available(state):
             continue
         if job.get("refresh_after_current_pid") or job.get("retry_after_failure_pid"):
             continue
-        if PLAN[host] == ["website"] and not (job.get("collected") and observed.get("status") == "completed"):
+        if (job_mode(host, job) == "website"
+                and not (job.get("collected") and observed.get("status") == "completed")):
             continue
         architecture = "arm64" if host.endswith("c7g") else "x64"
         distros = sorted((d["id"] for d in matrix["distributions"]),
@@ -404,7 +411,7 @@ def main():
     write_release_manifest()
     if args.retry_after_failure or args.refresh_after_current:
         host = args.retry_after_failure or args.refresh_after_current
-        mode = "website" if PLAN[host] == ["website"] else "package-linux"
+        mode = job_mode(host, state["jobs"].get(host, {}))
         observed = state_on(host, mode)
         if observed.get("status") != "running" or not observed.get("pid"):
             raise RuntimeError("deferred retry requires an identified running MCP worker")
@@ -419,7 +426,7 @@ def main():
             h for h in PLAN if not state["jobs"].get(h, {}).get("launched")]
         if args.retry_failed:
             selected = [h for h in PLAN if state_on(h,
-                "website" if PLAN[h] == ["website"] else "package-linux").get("status")
+                job_mode(h, state["jobs"].get(h, {}))).get("status")
                 not in ("running", "completed")]
         def start(host):
             try:
@@ -438,11 +445,11 @@ def main():
     while True:
         # Inspect and collect the priority website before package transfers.
         for host, job in sorted(state["jobs"].items(), key=lambda item:
-                item[1].get("mode") != "website" and PLAN[item[0]] != ["website"]):
+                job_mode(*item) != "website"):
             if not job.get("launched"):
                 continue
             try:
-                mode = job.get("mode") or ("website" if PLAN[host] == ["website"] else "package-linux")
+                mode = job_mode(host, job)
                 observed = state_on(host, mode)
                 previous = job.get("observed", {})
                 job["observed"] = observed
