@@ -110,7 +110,12 @@ print(json.dumps(state))
 def sync_source(host, roots=SOURCE_ROOTS):
     ssh = fleet.ssh(host)
     endpoint = ssh[-1]
-    args = ["rsync", "-a", "--delete", "--relative", "-e", shlex.join(ssh[:-1])]
+    # Local edits can predate completion of the previous remote build. Keeping
+    # their old timestamps would let Ninja reuse outputs from the old contents.
+    # Compare contents to leave identical inputs alone; changed inputs acquire
+    # their transfer-time mtime and therefore invalidate the right outputs.
+    args = ["rsync", "-a", "--checksum", "--no-times", "--omit-dir-times",
+            "--delete", "--relative", "-e", shlex.join(ssh[:-1])]
     for exclusion in ("build", "reporting", ".git", ".secrets", ".terraform", "*.tfstate*",
                       ".venv", "__pycache__", "*.pyc", ".DS_Store", "bin_artifacts"):
         args += ["--exclude=" + exclusion]

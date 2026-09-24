@@ -572,13 +572,26 @@ def _assert_authored_content_contract(version: str) -> None:
            "cannot resolve canonical k_hoe_probe_sequence source")
 
     tutorial = tutorial_path.read_text(encoding="utf-8")
+    runnable_match = re.search(
+        r"```sql runnable id=canonical_mmsearch[^\n]*\n(.*?)\n```",
+        tutorial, re.S)
+    _check(runnable_match is not None,
+           "similarity tutorial has no canonical runnable search")
+    runnable_source = runnable_match.group(1)
+    fixture_insert = re.search(
+        r"INSERT INTO tutorial_mmsearch\b.*?;", runnable_source, re.S)
+    _check(fixture_insert is not None,
+           "similarity tutorial has no canonical target INSERT")
     for target, _secondary_probe in fixture_pairs:
-        _check(tutorial.count(target) == 1,
+        _check(fixture_insert.group(0).count(f"'{target}'") == 1,
                "similarity tutorial does not copy each canonical hoe target exactly once")
     probe = probe_match.group(1)
     _check(tutorial.count(f"'{probe}'") >= 2,
-           "similarity tutorial must use exact k_hoe_probe_sequence in its "
-           "executed and visible SQL")
+           "similarity tutorial must retain the canonical short-motif examples")
+    visible_query = runnable_source.split("-- bioseq:visible", 1)[-1].split(
+        "-- bioseq:teardown", 1)[0]
+    _check(visible_query.count(f"'{fixture_pairs[0][0]}'") == 2,
+           "similarity tutorial must explain and execute the same full-read query")
     for assertion in (
         "EXPLAIN (VERBOSE, COSTS OFF)", "public.mmsearch(",
         "The first result shows whether the planner selected `BioseqScan`",
