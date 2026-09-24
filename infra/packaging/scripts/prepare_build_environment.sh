@@ -132,8 +132,11 @@ install_opensuse_dependencies() {
     libxkbcommon-devel wayland-devel wayland-protocols-devel
 
   if (( BIOSEQ_POSTGRES_MAJOR >= 19 )); then
+    # Leap's development pattern can already provide the zlib ABI through
+    # zlib-ng-compat-devel. Request the capability, not its conflicting package.
     zypper --non-interactive install -y --allow-vendor-change \
-      libicu-devel readline-devel liblz4-devel libzstd-devel zlib-devel
+      libicu-devel readline-devel liblz4-devel libzstd-devel 'pkgconfig(zlib)'
+    pkg-config --exists zlib || die "PostgreSQL SDK requires the zlib development ABI"
     export BIOSEQ_SDK_DISTRO=opensuse
     return
   fi

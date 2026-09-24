@@ -538,7 +538,11 @@ def dispatch_available(state):
             if validation_only:
                 repair = rechecks[host]
                 validation_only = False
-        cell = (rechecks[host] if validation_only else repair) or next(
+        # Explicitly diagnosed older failures retain their original host's
+        # cache. Consume each queued rebuild once; never retry blindly in a loop.
+        rebuilds = state.get("package_rebuilds", {}).get(host, [])
+        rebuild = rebuilds[0] if rebuilds and not validation_only and repair is None else None
+        cell = (rechecks[host] if validation_only else repair or rebuild) or next(
             (c for c in candidates if cell_key(c) not in occupied), None)
         if cell is None:
             continue
@@ -574,6 +578,9 @@ def dispatch_available(state):
                 state["tableam_qualification_attempted_cells"].append(cell_key(cell))
                 event("tableam_qualification_reserved", host=host, cell=cell)
             rechecks.pop(host, None)
+        if rebuild:
+            rebuilds.pop(0)
+            event("diagnosed_package_rebuild_reserved", host=host, cell=cell)
         pending.append((host, cell, validation_only))
         event("package_cell_reserved", host=host, cell=cell, validation_only=validation_only)
     write_json_atomic(STATE, state)
