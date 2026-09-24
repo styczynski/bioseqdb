@@ -699,7 +699,9 @@ def main():
                 observed = job.get("observed", {})
                 print(host, observed.get("status", "not_launched"),
                       observed.get("step", job.get("error", "")))
-            print("local", state["local_benchmark"].get("status"),
+            print("local-package", state["local_package"].get("status"),
+                  state["local_package"].get("step"))
+            print("local-benchmark-history", state["local_benchmark"].get("status"),
                   state["local_benchmark"].get("bench_e2e_config"))
             return
         time.sleep(60)
