@@ -423,6 +423,14 @@ class CatalogAndProvenanceTests(unittest.TestCase):
             config.runtime_dependencies(model.DistroId.ARCH, 17),
             ("postgresql-old-upgrade", "vulkan-icd-loader"),
         )
+        self.assertEqual(
+            config.runtime_dependencies(model.DistroId.ARCH, 19),
+            ("bioseq-postgresql19-runtime=19beta3-1", "vulkan-icd-loader"),
+        )
+        self.assertEqual(
+            config.runtime_dependencies(model.DistroId.OPENSUSE_16_0, 20),
+            ("bioseq-postgresql20-runtime = 20.0devel20260924-1", "libvulkan1"),
+        )
 
     def test_cells_preserve_requested_order_and_never_reduce_the_matrix(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -131,6 +131,13 @@ install_opensuse_dependencies() {
     libXfixes-devel libXcursor-devel libXinerama-devel libxcb-devel \
     libxkbcommon-devel wayland-devel wayland-protocols-devel
 
+  if (( BIOSEQ_POSTGRES_MAJOR >= 19 )); then
+    zypper --non-interactive install -y --allow-vendor-change \
+      libicu-devel readline-devel liblz4-devel libzstd-devel zlib-devel
+    export BIOSEQ_SDK_DISTRO=opensuse
+    return
+  fi
+
   if ! zypper --non-interactive install -y --allow-vendor-change \
       "postgresql${BIOSEQ_POSTGRES_MAJOR}-devel" \
       "postgresql${BIOSEQ_POSTGRES_MAJOR}-server-devel" \
@@ -153,6 +160,12 @@ install_arch_dependencies() {
     util-linux wget xz zip zlib libx11 libxext libxrandr libxrender libxi \
     libxfixes libxcursor libxinerama libxcb libxkbcommon wayland-protocols
 
+  if (( BIOSEQ_POSTGRES_MAJOR >= 19 )); then
+    pacman -S --noconfirm --needed icu readline lz4 zstd
+    export BIOSEQ_SDK_DISTRO=arch
+    return
+  fi
+
   if [[ "${BIOSEQ_POSTGRES_MAJOR}" == "17" ]]; then
     pacman -S --noconfirm --needed postgresql-old-upgrade
   else
@@ -173,9 +186,11 @@ esac
 
 # Reject unavailable server majors before downloading compiler toolchains or
 # populating persistent caches. Never substitute the distro's current major.
-pg_config_path="$(BIOSEQ_POSTGRES_MAJOR="${BIOSEQ_POSTGRES_MAJOR}" \
-  python3 /source/infra/packaging/scripts/resolve_pg_config.py)"
-[[ -x "${pg_config_path}" ]] || die "resolved pg_config is not executable"
+if [[ -z "${BIOSEQ_SDK_DISTRO:-}" ]]; then
+  pg_config_path="$(BIOSEQ_POSTGRES_MAJOR="${BIOSEQ_POSTGRES_MAJOR}" \
+    python3 /source/infra/packaging/scripts/resolve_pg_config.py)"
+  [[ -x "${pg_config_path}" ]] || die "resolved pg_config is not executable"
+fi
 
 # Arch's makepkg drops to an unprivileged user. Give only the ephemeral chrt
 # executable the capability it needs so the launcher can set SCHED_RR/1 and
@@ -335,6 +350,12 @@ install_vcpkg() {
 
 install_cmake
 install_llvm
+
+if [[ -n "${BIOSEQ_SDK_DISTRO:-}" ]]; then
+  python3 /source/infra/packaging/scripts/prepare_postgres_sdk.py
+  pg_config_path="$(python3 /source/infra/packaging/scripts/resolve_pg_config.py)"
+  [[ -x "${pg_config_path}" ]] || die "versioned SDK pg_config is missing"
+fi
 
 # Catch removed PostgreSQL headers and C++ boundary declarations before the
 # expensive dependency/code-generator build. This runs inside the MCP-owned

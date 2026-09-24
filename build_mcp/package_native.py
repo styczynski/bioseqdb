@@ -57,6 +57,8 @@ def run_native_packages(*, repository_root, log_handle, deadline, progress):
     progress("checking retained packaging contracts before compilation")
     run([bootstrap / "bin/poetry", "run", "python", "-m", "unittest", "discover",
          "-s", str(packaging / "tests")], cwd=packaging)
+    for script in ('prepare_build_environment.sh', 'build_and_stage.sh', 'smoke_installed_package.sh'):
+        run(['bash', '-n', packaging / 'scripts' / script])
     progress("validating existing native packages and installed SQL; no compilation"
              if environment.get("BIOSEQ_PACKAGE_VALIDATE_EXISTING_ONLY") == "1"
              else "building native distro packages; validating ELF and installed SQL")
@@ -79,6 +81,7 @@ def collect(repository: Path, selection: str) -> int:
     from bioseq_packaging.packagers import deb, rpm, pacman
     from bioseq_packaging.templates import TemplateRenderer
     from bioseq_packaging.workspace import WorkspaceManager
+    from bioseq_packaging import postgres_sdk
 
     matrix = json.loads((repository / "infra/package_matrix.json").read_text())
     requested_majors = os.environ.get("BIOSEQ_PACKAGE_POSTGRES_MAJORS", "").strip()
@@ -148,12 +151,49 @@ def collect(repository: Path, selection: str) -> int:
             shutil.copy2(artifact, target)
             if sha256_file(target) != record.sha256:
                 raise RuntimeError("collected package checksum differs from validated artifact")
+            sdk_details = {}
+            if postgres_sdk.required(cell):
+                runtime, sdk = postgres_sdk.runtime_package(cell)
+                companions = destination / 'sdk' / f'pg{cell.postgres_major}'
+                companions.mkdir(parents=True, exist_ok=True)
+                runtime_copy = companions / runtime.name
+                shutil.copy2(runtime, runtime_copy)
+                if sha256_file(runtime_copy) != sdk['sha256']:
+                    raise RuntimeError('SDK companion changed during collection')
+                metadata_file = companions / 'sdk.json'
+                metadata_file.write_text(json.dumps(sdk, indent=2) + '\n')
+                setup = companions / 'SDK_SETUP.txt'
+                installer = ('sudo pacman -U' if cell.distro.package_format is PackageFormat.PACMAN
+                             else 'sudo zypper --no-gpg-checks install')
+                requirement = cell.distro.runtime_dependencies(cell.postgres_major)[0]
+                setup.write_text(f'''Experimental PostgreSQL SDK for BioseqDB
+Required runtime: {requirement}
+Source URL: {sdk['source_url']}
+Source SHA-256: {sdk['source_sha256']}
+Runtime package SHA-256: {sdk['sha256']}
+Prefix: {sdk['prefix']}
+
+Download the runtime package and Bioseq package into the same directory, then:
+{installer} {runtime_copy.name} {target.name}
+
+These unsigned alpha packages are native to {cell.distro.distro_id}/{architecture.value}.
+This is a prerelease/development server, not qualified for production data.
+It does not replace the distro server, initialize a database, or start a service.
+Use the server binaries in {sdk['prefix']}/bin to create a separate development cluster.
+Then configure shared_preload_libraries = 'bioseq', restart that cluster and run
+CREATE EXTENSION bioseq_cache; CREATE EXTENSION bioseq;
+The query cache remains disabled by default. Other prerelease ABIs are not interchangeable.
+''')
+                sdk_details = dict(postgres_version=sdk['version'], postgres_runtime_requirement=requirement,
+                    postgres_sdk_support_files=[dict(file=str(p.relative_to(output)),
+                        bytes=p.stat().st_size, sha256=sha256_file(p))
+                        for p in (runtime_copy, metadata_file, setup)])
             manifest["packages"].append({"distro": str(cell.distro.distro_id),
                 "postgres_major": cell.postgres_major, "file": str(target.relative_to(output)),
                 "postgres_release_channel": channel,
                 "git_revision_informational_only": revision,
                 "bytes": record.size, "sha256": record.sha256,
-                "validation": validation, "installed_sql_smoke": smoke})
+                "validation": validation, "installed_sql_smoke": smoke, **sdk_details})
             print(f"PACKAGE_CELL_COMPLETE pg{cell.postgres_major}/{cell.distro.distro_id}/{architecture}", flush=True)
         except Exception as error:
             manifest["failures"].append({"postgres_major": spec.postgres_major, "distro": str(spec.distro.distro_id), "error": str(error)})

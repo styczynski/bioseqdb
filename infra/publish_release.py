@@ -376,7 +376,9 @@ def publish_packages(apply):
     for p in records:
         readme += f"- PostgreSQL {p['postgres_major']} ({p['postgres_release_channel']}), {p['distro']}, {p['architecture']}: [{Path(p['file']).name}]({p['file']})\n"
         if p.get('postgres_runtime_requirement'):
-            readme += f"  Runtime requirement: {p['postgres_runtime_requirement']}. SDK formula: `{p['postgres_sdk_formula']}`.\n"
+            readme += f"  Runtime requirement: {p['postgres_runtime_requirement']}.\n"
+            if p.get('postgres_sdk_formula'):
+                readme += f"  SDK formula: `{p['postgres_sdk_formula']}`.\n"
         for companion in p.get('postgres_sdk_support_files', []):
             readme += f"  SDK support: [{PurePosixPath(companion['file']).name}]({companion['file']})\n"
     (stage / 'README.md').write_text(readme)

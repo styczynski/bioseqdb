@@ -1,0 +1,12 @@
+{
+  "19": {
+    "version": "19beta3",
+    "url": "https://ftp.postgresql.org/pub/source/v19beta3/postgresql-19beta3.tar.bz2",
+    "sha256": "ea4ad8933121930a58f23c73dc99c26a4184faca26faefa77d15ce0fba7dfe2c"
+  },
+  "20": {
+    "version": "20.0devel20260924",
+    "url": "https://codeload.github.com/postgres/postgres/tar.gz/df3978c2340d79c6319f8239a69abbd27b1069df",
+    "sha256": "bbd9339e7628c8efad180cedf56c2adb5af6da2a4ae045f5117de1c928119f2c"
+  }
+}

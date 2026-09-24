@@ -111,6 +111,13 @@ install_fedora_package() {
 }
 
 install_opensuse_package() {
+  if [[ -n "${BIOSEQ_POSTGRES_RUNTIME_PACKAGE:-}" ]]; then
+    zypper --non-interactive install -y libvulkan1 shadow util-linux
+    zypper --no-gpg-checks --non-interactive install -y \
+      "${BIOSEQ_POSTGRES_RUNTIME_PACKAGE}" "${package_path}"
+    rpm -q "${package_name}"
+    return
+  fi
   if ! zypper --non-interactive install -y --allow-vendor-change \
       "postgresql${postgres_major}" "postgresql${postgres_major}-server" \
       libvulkan1 shadow util-linux; then
@@ -154,7 +161,14 @@ install_arch_package() {
     printf 'Sandbox setting is not present exactly once under [options]\n' >&2
     return 64
   fi
-  pacman -Syu --noconfirm --needed ca-certificates util-linux vulkan-icd-loader postgresql
+  pacman -Syu --noconfirm --needed ca-certificates util-linux vulkan-icd-loader
+  if [[ -n "${BIOSEQ_POSTGRES_RUNTIME_PACKAGE:-}" ]]; then
+    pacman -S --noconfirm --needed icu readline openssl lz4 zstd zlib
+    pacman -U --noconfirm "${BIOSEQ_POSTGRES_RUNTIME_PACKAGE}" "${package_path}"
+    pacman -Q "${package_name}"
+    return
+  fi
+  pacman -S --noconfirm --needed postgresql
   if [[ "${postgres_major}" == "17" ]]; then
     pacman -S --noconfirm --needed postgresql-old-upgrade
   fi

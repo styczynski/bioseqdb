@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+import json
 from pathlib import Path, PurePosixPath
 import re
 from types import MappingProxyType
@@ -102,6 +103,12 @@ class DistroSpec:
     def runtime_dependencies(self, postgres_major: int) -> tuple[str, ...]:
         if isinstance(postgres_major, bool) or postgres_major < 17:
             raise PackageBuildError("PostgreSQL majors below 17 are unsupported")
+        if postgres_major in (19, 20) and self.distro_id in (DistroId.ARCH, DistroId.OPENSUSE_16_0):
+            pin = json.loads((Path(__file__).resolve().parents[1] / 'postgres_sdks.json').read_text())[
+                str(postgres_major)]
+            equality = '=' if self.distro_id is DistroId.ARCH else ' = '
+            runtime = f"bioseq-postgresql{postgres_major}-runtime{equality}{pin['version']}-1"
+            return (runtime, self.runtime_dependency_pattern[1])
         return tuple(
             value.format(
                 postgres_major=postgres_major,

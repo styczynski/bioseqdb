@@ -277,11 +277,11 @@ def exact_package_payload_paths(
         and extension_parent.parts and extension_parent.parts[0] == "usr"
         and extension_parent.name == "extension"
     )
-    # Arch's postgresql-old-upgrade supplies older supported majors here.
-    # Match its exact versioned pair, not arbitrary payloads below /opt.
+    # Arch's old-upgrade package and the explicit prerelease SDK provider use
+    # this exact versioned pair; arbitrary payloads below /opt remain invalid.
     arch_prefix = PurePosixPath(f"opt/pgsql-{postgres_major}")
     arch_old_major_layout = (
-        fmt == "pacman"
+        (fmt == "pacman" or (fmt == "rpm" and postgres_major in (19, 20)))
         and dso_parent == arch_prefix / "lib"
         and extension_parent == arch_prefix / "share" / "extension"
     )

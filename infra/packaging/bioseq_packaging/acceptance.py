@@ -31,6 +31,7 @@ from .model import (
     SignatureEvidence,
 )
 from .signing import require_pinned_fingerprint, verify_with_gpgv
+from . import postgres_sdk
 
 
 _PACKAGE_SUFFIXES = {
@@ -337,6 +338,10 @@ class AcceptanceService:
         )
         if not script.is_file():
             raise PackageBuildError(f"installed-package smoke script is missing: {script}")
+        sdk_arguments = ()
+        if postgres_sdk.required(cell):
+            runtime, _ = postgres_sdk.runtime_package(cell)
+            sdk_arguments = ('--postgres-runtime-artifact', str(runtime))
         command = Command(
             argv=(
                 sys.executable,
@@ -351,6 +356,7 @@ class AcceptanceService:
                 cell.distro.distro_id.value,
                 "--arch-image",
                 cell.distro.image_for(cell.request.architecture),
+                *sdk_arguments,
             )
         )
         output = self.runner.run_captured(command, environment=self.environment)

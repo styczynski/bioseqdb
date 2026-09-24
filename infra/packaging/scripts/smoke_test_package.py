@@ -55,6 +55,7 @@ def docker_command(
     postgres_major: int,
     distro: str,
     arch_image: str,
+    postgres_runtime_artifact: Path | None = None,
 ) -> tuple[list[str], str]:
     image = container_image(distro, arch_image)
     script = source_dir / "infra" / "packaging" / "scripts" / "smoke_installed_package.sh"
@@ -86,10 +87,17 @@ def docker_command(
         f"BIOSEQ_ARCHITECTURE={architecture}",
         "--env",
         f"BIOSEQ_PACKAGE_PATH={package_target}",
-        image,
-        "/bin/bash",
-        "/smoke/smoke_installed_package.sh",
     ]
+    if postgres_runtime_artifact is not None:
+        runtime = postgres_runtime_artifact.resolve()
+        if (not runtime.is_file() or runtime.stat().st_size <= 0
+                or not runtime.name.startswith(f'bioseq-postgresql{postgres_major}-runtime-')
+                or not runtime.name.endswith(('.rpm', '.pkg.tar.zst'))):
+            raise SmokeError('Invalid native PostgreSQL SDK companion package')
+        runtime_target = '/runtime/' + runtime.name
+        command.extend(['--mount', f'type=bind,src={runtime},dst={runtime_target},readonly',
+                        '--env', f'BIOSEQ_POSTGRES_RUNTIME_PACKAGE={runtime_target}'])
+    command.extend([image, '/bin/bash', '/smoke/smoke_installed_package.sh'])
     if "--platform" in command or any(value.startswith("--platform=") for value in command):
         raise SmokeError("package smoke must not request architecture emulation")
     return command, image
@@ -159,6 +167,7 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--arch-image", required=True)
     result.add_argument("--docker-bin", default=os.environ.get("BIOSEQ_DOCKER_BIN", "docker"))
+    result.add_argument("--postgres-runtime-artifact", type=Path)
     result.add_argument(
         "--source-dir",
         type=Path,
@@ -184,6 +193,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             postgres_major=arguments.postgres_major,
             distro=arguments.distro,
             arch_image=arguments.arch_image,
+            postgres_runtime_artifact=arguments.postgres_runtime_artifact,
         )
         result = parse_result(
             run_smoke(command),

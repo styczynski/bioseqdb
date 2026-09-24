@@ -374,6 +374,33 @@ After the SDK is installed, install the accompanying BioseqDB .pkg.
         installed_sql_smoke=smoke)
 
 
+def reclaim_accepted_compiler_cache(state, major, progress):
+    """Discard only regenerable compiler intermediates after package verification.
+
+    The caller has accepted and hashed the final installer; the MCP mode owns
+    this build tree exclusively. Linked modules, CMake cache, generated source,
+    extracted SQL proof and all benchmark data stay in place.
+    """
+    base = (state / f'pg{major}' / 'bioseq').resolve()
+    if not base.is_relative_to(state.resolve()) or major not in (17, 18, 19, 20):
+        raise RuntimeError('Unsafe accepted-package compiler cache root')
+    objects = base / 'CMakeFiles'
+    generated = base / 'generated'
+    if objects.is_symlink() or generated.is_symlink():
+        raise RuntimeError('Refusing a symlinked compiler cache')
+    reclaimed = 0
+    if objects.is_dir():
+        reclaimed += sum(p.stat().st_size for p in objects.rglob('*') if p.is_file() and not p.is_symlink())
+        shutil.rmtree(objects)
+    if generated.is_dir():
+        for path in generated.rglob('*.pcm'):
+            if path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(base):
+                reclaimed += path.stat().st_size
+                path.unlink()
+    if reclaimed:
+        progress(f'reclaimed {reclaimed / 1024**3:.1f} GiB of regenerable PG{major} compiler intermediates; accepted installer retained')
+
+
 def run_package_macos(*, repository_root, log_handle, deadline, progress):
     if platform.system() != 'Darwin' or platform.machine() != 'arm64':
         raise RuntimeError('Native macOS Apple Silicon host is required')
@@ -404,6 +431,7 @@ def run_package_macos(*, repository_root, log_handle, deadline, progress):
         if any(p['postgres_major'] == major and (output / p['file']).is_file()
                and sha256(output / p['file']) == p['sha256'] for p in manifest['packages']):
             progress(f'reusing accepted macOS PostgreSQL {major} package')
+            reclaim_accepted_compiler_cache(state, major, progress)
             continue
         if shutil.disk_usage(state).free < 20 * 1024**3:
             raise RuntimeError('macOS package build requires at least 20 GiB free; retained measurements are untouched')
@@ -418,4 +446,5 @@ def run_package_macos(*, repository_root, log_handle, deadline, progress):
         manifest['packages'] = [p for p in manifest['packages'] if p['postgres_major'] != major] + [package]
         manifest['unavailable'] = [r for r in manifest['unavailable'] if r['postgres_major'] != major]
         _write_json_atomic(manifest_path, manifest)
+        reclaim_accepted_compiler_cache(state, major, progress)
     return dict(receipt_path=str(manifest_path), published=False, packages=manifest['packages'])
