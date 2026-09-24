@@ -551,7 +551,12 @@ static void preflight_typmodless_letter_copy(Node* parsetree) {
 
     CopyFormatOptions options{};
     ProcessCopyOptions(nullptr, &options, true, copy->options);
-    if (options.binary) {
+#if PG_VERSION_NUM >= 190000
+    const bool binary_input = options.format == COPY_FORMAT_BINARY;
+#else
+    const bool binary_input = options.binary;
+#endif
+    if (binary_input) {
         /* Binary letter input carries and validates its physical alphabet. */
         return;
     }

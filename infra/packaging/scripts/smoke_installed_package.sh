@@ -386,6 +386,22 @@ VACUUM (FULL, ANALYZE) bioseq_package_tableam_probe;
 SELECT count(*) AS row_count, sum(value) AS value_sum FROM bioseq_package_tableam_probe \gset
 SELECT 1 / (:row_count = 2 AND :value_sum = 51)::integer AS rewritten_rows_valid;
 DROP TABLE bioseq_package_tableam_probe;
+-- PG19 replaced CopyFormatOptions.binary with an explicit format enum.
+-- Binary input still carries its alphabet; untyped text input must fail before
+-- PostgreSQL attempts to open the deliberately nonexistent input file.
+CREATE TABLE bioseq_package_letter_copy (value bioseq.letter);
+COPY (SELECT 'A'::bioseq.letter('dna4')) TO '/tmp/bioseq-package-letter.bin' (FORMAT binary);
+COPY bioseq_package_letter_copy FROM '/tmp/bioseq-package-letter.bin' (FORMAT binary);
+SELECT count(*) = 1 AND min(value::text) = 'A' AS binary_letter_valid
+FROM bioseq_package_letter_copy \gset
+SELECT 1 / (:'binary_letter_valid'::boolean)::integer AS binary_letter_copy_valid;
+DO $$
+BEGIN
+  COPY bioseq_package_letter_copy FROM '/tmp/bioseq-package-missing-letter.txt' (FORMAT text);
+  RAISE EXCEPTION 'typmodless letter text COPY was accepted';
+EXCEPTION WHEN invalid_parameter_value THEN NULL;
+END $$;
+DROP TABLE bioseq_package_letter_copy;
 SQL
 fi
 
