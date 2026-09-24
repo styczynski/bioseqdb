@@ -39,9 +39,19 @@ if (( ${#build_dependencies[@]} == 0 )); then
   exit 64
 fi
 
-apt-get update
-apt-get install -y --no-install-recommends \
-  build-essential ca-certificates debhelper rsync "${build_dependencies[@]}"
+# An updated security archive can remove a package while an intermediary still
+# serves the previous index. Refresh indexes before bounded download retries;
+# never restart compilation or hide a permanent dependency failure.
+for dependency_attempt in 1 2 3; do
+  apt-get -o Acquire::Retries=3 -o Acquire::http::No-Cache=true \
+    -o Acquire::https::No-Cache=true update
+  if apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+      build-essential ca-certificates debhelper rsync "${build_dependencies[@]}"; then
+    break
+  fi
+  if (( dependency_attempt == 3 )); then exit 100; fi
+  printf 'Refreshing package indexes after dependency download failure\n' >&2
+done
 
 /source/infra/packaging/scripts/prepare_build_environment.sh
 

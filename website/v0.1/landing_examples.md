@@ -33,13 +33,13 @@ CREATE TABLE landing_hero_sequences (
   seq bioseq.seq('dna4', 64)
 ) USING bioseq;
 INSERT INTO landing_hero_sequences VALUES
-  (1042, 'NR_046018.2', 'CTAGTCACTGTAGCCTGATCGTAGCTAGCACG'::bioseq.seq('dna4', 64)),
+  (1042, 'NR_046018.2', 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 64)),
   (2087, 'NC_000913.3', 'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 64)),
   (3765, 'CP041828.1',  'GGGGCCCCTTTTAAAAGGGGCCCCTTTTAAAA'::bioseq.seq('dna4', 64));
 -- bioseq:visible
 SELECT id, accession
 FROM landing_hero_sequences
-WHERE public.mmsearch(seq, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64))
+WHERE public.mmsearch(seq, 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 64))
 ORDER BY id;
 -- bioseq:teardown
 DROP TABLE landing_hero_sequences;
@@ -82,7 +82,7 @@ VALUES (
   'manual_read_001',
   'validation_batch',
   'run_042',
-  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)
+  'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 64)
 );
 
 SELECT bioseq.update_index('run_reads'::regclass, 'minimizers_per_fragment');
@@ -94,7 +94,7 @@ SELECT read_id,
 FROM run_reads
 WHERE public.mmsearch(
         seq,
-        'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)
+        'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 64)
       )
 ORDER BY collected_on DESC, read_id;
 -- bioseq:teardown
@@ -130,7 +130,7 @@ BEGIN
           'AND collected_on >= DATE ''2025-01-01'' '
           'AND bioseq.len(seq) >= 1000 '
           'AND public.mmsearch(seq, '
-          '''CTAGTCACTGTAGCCTGATCGTAGCTAGT''::bioseq.seq(''dna4'', 64))'
+          '''TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA''::bioseq.seq(''dna4'', 64))'
     INTO plan_json;
   IF plan_json #>> '{0,Plan,"Node Type"}' IS DISTINCT FROM 'Custom Scan'
      OR plan_json #>> '{0,Plan,"Custom Plan Provider"}' IS DISTINCT FROM 'BioseqScan' THEN
@@ -150,13 +150,13 @@ CREATE TABLE reference_reads (
 
 INSERT INTO reference_reads VALUES
   (5521, 'NR_046018.2', 'Homo sapiens', DATE '2026-06-10', 99.5,
-   (repeat('A', 600) || 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' || repeat('C', 600))::bioseq.seq('dna4', 64)),
+   (repeat('A', 600) || 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA' || repeat('C', 600))::bioseq.seq('dna4', 64)),
   (4410, 'NC_000913.3', 'Homo sapiens', DATE '2025-11-04', 97.0,
-   (repeat('C', 520) || 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' || repeat('G', 540))::bioseq.seq('dna4', 64)),
+   (repeat('C', 520) || 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA' || repeat('G', 540))::bioseq.seq('dna4', 64)),
   (6193, 'CP041828.1', 'Homo sapiens', DATE '2025-02-18', 94.5,
-   (repeat('G', 500) || 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' || repeat('T', 700))::bioseq.seq('dna4', 64)),
+   (repeat('G', 500) || 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA' || repeat('T', 700))::bioseq.seq('dna4', 64)),
   (7102, 'FILTERED.1', 'Mus musculus', DATE '2026-07-01', 100.0,
-   (repeat('T', 600) || 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' || repeat('A', 600))::bioseq.seq('dna4', 64));
+   (repeat('T', 600) || 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA' || repeat('A', 600))::bioseq.seq('dna4', 64));
 
 SELECT id,
        accession,
@@ -168,7 +168,7 @@ WHERE organism = 'Homo sapiens'
   AND bioseq.len(seq) >= 1000
   AND public.mmsearch(
         seq,
-        'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)
+        'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 64)
       )
 ORDER BY quality_score DESC, accession
 LIMIT 25;

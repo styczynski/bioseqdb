@@ -63,7 +63,7 @@ SELECT pk
 FROM highway_dispatch_reads
 WHERE public.mmsearch(
   seq0,
-  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32))
+  'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 32))
 ORDER BY pk;
 
 SET bioseq.vectorization.enabled = off;
@@ -72,7 +72,7 @@ SELECT pk
 FROM highway_dispatch_reads
 WHERE public.mmsearch(
   seq0,
-  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32))
+  'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 32))
 ORDER BY pk;
 -- bioseq:teardown
 DROP TABLE highway_dispatch_reads;

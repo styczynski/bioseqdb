@@ -50,12 +50,24 @@ case "${distro}:${ID:-}" in
   *) die "container OS ${ID:-unknown} does not match ${distro}" ;;
 esac
 
+apt_install_refreshed() {
+  local dependency_attempt
+  for dependency_attempt in 1 2 3; do
+    apt-get -o Acquire::Retries=3 -o Acquire::http::No-Cache=true \
+      -o Acquire::https::No-Cache=true update
+    if apt-get -o Acquire::Retries=3 install -y --no-install-recommends "$@"; then
+      return 0
+    fi
+    if (( dependency_attempt == 3 )); then return 100; fi
+    printf 'Refreshing package indexes after dependency download failure\n' >&2
+  done
+}
+
 install_debian_package() {
   export DEBIAN_FRONTEND=noninteractive
   printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
   chmod 0755 /usr/sbin/policy-rc.d
-  apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl gnupg libvulkan1 \
+  apt_install_refreshed ca-certificates curl gnupg libvulkan1 \
     locales postgresql-common util-linux
   install -d -m 0755 /usr/share/postgresql-common/pgdg
   curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
@@ -74,10 +86,9 @@ install_debian_package() {
   printf '%s\n' \
     "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${pgdg_suite} ${pgdg_components}" \
     > /etc/apt/sources.list.d/pgdg.list
-  apt-get update
-  apt-get install -y --no-install-recommends "${pgdg_install_options[@]}" \
+  apt_install_refreshed "${pgdg_install_options[@]}" \
     "postgresql-${postgres_major}"
-  apt-get install -y --no-install-recommends "${package_path}"
+  apt_install_refreshed "${package_path}"
   dpkg-query -W -f='${Status}\n' "${package_name}" | grep -Fx 'install ok installed'
 }
 
@@ -361,6 +372,13 @@ if (( postgres_major >= 19 )); then
 SET statement_timeout = '60s';
 CREATE TABLE bioseq_package_tableam_probe (id integer PRIMARY KEY, value integer) USING bioseq;
 INSERT INTO bioseq_package_tableam_probe VALUES (1, 10), (2, 20), (3, 30);
+ALTER TABLE bioseq_package_tableam_probe ADD COLUMN wide_value bigint DEFAULT 1000000000000;
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT avg(value), avg(wide_value) FROM bioseq_package_tableam_probe;
+SELECT avg(value) AS integer_average, avg(wide_value) AS bigint_average
+FROM bioseq_package_tableam_probe \gset
+SELECT 1 / (:'integer_average'::numeric = 20 AND :'bigint_average'::numeric = 1000000000000)::integer
+AS numeric_average_valid;
 SET enable_seqscan = off;
 SET enable_bitmapscan = off;
 SET enable_indexonlyscan = off;
@@ -373,7 +391,7 @@ SELECT id AS indexed_id FROM bioseq_package_tableam_probe WHERE id = 2 \gset
 SELECT 1 / (:indexed_id = 2)::integer AS projected_index_result_valid;
 DO $$
 BEGIN
-  INSERT INTO bioseq_package_tableam_probe VALUES (2, 999);
+  INSERT INTO bioseq_package_tableam_probe (id, value) VALUES (2, 999);
   RAISE EXCEPTION 'duplicate primary key was accepted';
 EXCEPTION WHEN unique_violation THEN NULL;
 END $$;

@@ -644,6 +644,7 @@ def _assert_authored_content_contract(version: str) -> None:
         "bioseq.list_seq_storage_shards", "alter_bioseq_table_set",
         "alter_bioseq_table_reset", "bioseq.column_cache.capacity_mb",
         "bioseq.vacuum_seq_storage", "NULL and empty inputs",
+        "Administrator-only shard inspection",
     ):
         _check(spelling in columnar,
                f"columnar/vector tutorial is missing {spelling}")
@@ -669,8 +670,9 @@ def _assert_authored_content_contract(version: str) -> None:
         "minimizers_per_fragment", "minimizers_per_sequence", "symbol_counts",
         "UPDATE_ON_INSERT", "UPDATE_MANUALLY", "bioseq.list_metadata()",
         "Bioseq Fetched From Meta", "index_read_requirement => 2",
-        "Actual Target Index Source",
+        "actual_index_source=persisted",
         "bioseq.last_alignment_execution_stats()",
+        "bioseq.set_active_read_index", "administrator/policy-manager",
     ):
         _check(spelling in index_tutorial,
                f"index-lifecycle tutorial is missing {spelling}")
@@ -1149,8 +1151,9 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     ]["sql_examples"][0]
     _check("EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)"
            in columnar_example["visible_sql"]
-           and "bioseq.list_seq_storage_shards" in columnar_example["visible_sql"],
-           "columnar tutorial lost its analyzed aggregate or shard inspection")
+           and "bioseq.list_seq_storage_shards" not in columnar_example["visible_sql"],
+           "columnar tutorial must execute its analyzed aggregate without "
+           "administrator-only shard inspection")
     columnar_results = "\n".join(
         cell
         for table in _result_tables(by_slug[
@@ -1184,7 +1187,8 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     ]["sql_examples"][0]
     for spelling in (
         "bioseq.list_metadata()", "bioseq.update_index",
-        "bioseq.set_active_read_index", "index_read_requirement => 2",
+        "minimizers_per_fragment", "minimizers_per_sequence", "symbol_counts",
+        "index_read_requirement => 2",
         "bioseq.last_alignment_execution_stats()", "stage = 'query_sketch'",
     ):
         _check(spelling in index_example["visible_sql"],
@@ -1196,11 +1200,30 @@ def _load_static_contract(site: Path, base_path: str, version: str,
         for row in table
         for cell in row
     )
-    _check("Actual Target Index Source" in index_results
+    _check("Custom Scan (BioseqBatchJoin)" in index_results
+           and "require_compatible_persisted" in index_results
            and "Bioseq Fetched From Meta" in index_results
-           and "persisted" in index_results
-           and "persisted_generation_id" in index_results,
+           and "actual_index_source=persisted" in index_results,
            "index lifecycle did not capture public persisted-route evidence")
+    index_tables = _result_tables(
+        by_slug["index_lifecycle_and_metadata"].get("content", []))
+    stats_table = next((table for table in index_tables
+                        if table and table[0][0].startswith(
+                            "requested_target_index_source")), None)
+    _check(stats_table is not None and len(stats_table) == 2,
+           "index lifecycle needs one captured query-sketch statistics row")
+    stats = dict(zip(stats_table[0], stats_table[1]))
+    _check(stats.get("requested_target_index_sourcetext") == "persisted"
+           and stats.get("actual_target_index_sourcetext") == "persisted"
+           and int(stats.get("persisted_index_rowsbigint", "0")) > 0
+           and stats.get("missing_persisted_index_rowsbigint") == "0"
+           and stats.get("recomputed_target_index_rowsbigint") == "0"
+           and int(stats.get("persisted_generation_read_sessionsbigint", "0")) > 0,
+           "index lifecycle statistics do not prove persisted reads without recomputation")
+    batch_rows = re.search(
+        r"Custom Scan \(BioseqBatchJoin\).*\brows=([0-9]+)", index_results)
+    _check(batch_rows is not None and int(batch_rows.group(1)) > 0,
+           "index lifecycle must find matches through its persisted batch join")
 
     similarity_sql = by_slug["similarity_search"]["sql_examples"][0]["visible_sql"]
     required_sql = (
@@ -1258,12 +1281,17 @@ def _load_static_contract(site: Path, base_path: str, version: str,
            "EXPLAIN tutorial did not capture a formatted PostgreSQL plan table")
     explain_output = "\n".join(row[0] for row in explain_tables[0][1:])
     for label in (
-        "Custom Scan (BioseqScan)", "Bioseq Pipeline",
-        "Highway SIMD Dispatch", "Pipeline Stages",
-        "Bioseq Execution Statistics",
+        "Custom Scan (BioseqScan)", "One-to-many alignment:",
+        "Highway Compiled Targets", "Executed Architecture",
+        "| QuerySketchStage:", "| chain_stage:", "| align_stage:",
+        "* Execution statistics [", "* Index outcomes [",
     ):
         _check(label in explain_output,
                f"executed text plan is missing Bioseq section {label}")
+    scan_rows = re.search(
+        r"Custom Scan \(BioseqScan\).*\brows=([0-9]+)", explain_output)
+    _check(scan_rows is not None and int(scan_rows.group(1)) > 0,
+           "EXPLAIN tutorial must demonstrate a search that finds matches")
 
     remote_content = by_slug["remote_provider_to_search"].get("content", [])
     remote_table_nodes = [
@@ -1304,6 +1332,8 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     for slot, item in landing.items():
         _check(item.get("has_result") is True and isinstance(item.get("result"), dict),
                f"landing slot {slot} has no captured PostgreSQL result")
+        _check(bool(item["result"].get("rows")),
+               f"landing slot {slot} must demonstrate a nonempty search result")
         for column in item["result"].get("columns", []):
             _check("type_oid" not in column and bool(column.get("type_name")),
                    f"landing slot {slot} has an unresolved PostgreSQL column type")
@@ -1329,7 +1359,8 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     for spelling in (
         "CREATE TABLE run_reads", "row_no", "bigserial PRIMARY KEY",
         "run_name      name NOT NULL DEFAULT 'run_042'",
-        "SET bioseq.index.insert_maintenance.enabled = on",
+        "SET bioseq.index.insert_maintenance.enabled = off",
+        "bioseq.update_index", "minimizers_per_fragment",
         "bioseq.load", "landing_reads.fasta", "bioseq.column_mapping",
         "INSERT INTO run_reads", "public.mmsearch", "bioseq.target_start",
         "bioseq.target_end", "ORDER BY collected_on DESC, read_id",

@@ -262,15 +262,15 @@ CREATE TABLE tutorial_indexed_reads (
     seq0 bioseq.seq('dna4', 64) NOT NULL
 ) USING bioseq;
 INSERT INTO tutorial_indexed_reads VALUES
-    (1, 'alpha', (repeat('ACGT', 96) || 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' || repeat('TGCA', 32))::bioseq.seq('dna4', 64)),
-    (2, 'alpha', (repeat('TGCA', 72) || 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' || repeat('ACGT', 48))::bioseq.seq('dna4', 64)),
+    (1, 'alpha', (repeat('ACGT', 96) || repeat('TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA', 4) || repeat('TGCA', 32))::bioseq.seq('dna4', 64)),
+    (2, 'alpha', (repeat('TGCA', 72) || repeat('TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA', 4) || repeat('ACGT', 48))::bioseq.seq('dna4', 64)),
     (3, 'beta',  repeat('GATTACA', 80)::bioseq.seq('dna4', 64));
 CREATE TABLE tutorial_index_queries (
     query_id integer PRIMARY KEY,
     seq0 bioseq.seq('dna4', 64) NOT NULL
 ) USING bioseq;
 INSERT INTO tutorial_index_queries VALUES
-    (1, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64));
+    (1, repeat('TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA', 4)::bioseq.seq('dna4', 64));
 -- bioseq:visible
 SELECT column_name,
        index_name,
@@ -353,13 +353,21 @@ The first result has three registered rows with zero storage. Each build returns
 three indexed sequences. The post-build table shows nonzero physical storage.
 The letter-count plan reports `Bioseq Fetched From Meta` for `seq0.symbol_count`.
 The analyzed plan must report `Bioseq Index Read Requirement` as
-`require_compatible_persisted` and `Actual Target Index Source` as `persisted`.
+`require_compatible_persisted`; the batch-join execution summary reports
+`actual_index_source=persisted`. Its query is 372 bases long so the demonstration
+uses the default minimizer recipe and clears the alignment filters.
 
 The final public `bioseq.last_alignment_execution_stats` snapshot supplies
-the accepted generation ID and source identity. `missing_persisted_index_rows`
+generation identity fields and persisted-read counts. `missing_persisted_index_rows`
 and `recomputed_target_index_rows` should be zero for this strict query. Read
 the snapshot immediately after the statement because it is backend-local
 last-run state.
+
+For a multi-target statement, inspect the execution summary's
+`persisted_identity_mixed` and `identity_conflict` flags before interpreting the
+aggregate identity fields as one unique generation. Persisted-read counts with
+zero missing/recomputed rows prove the index route; they do not by themselves
+prove one uniform backend or source identity for every alignment job.
 
 ## Verify readiness through public SQL
 
