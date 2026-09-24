@@ -2255,6 +2255,89 @@ class BuildAndStageContractTests(unittest.TestCase):
                 )
 
 
+class ReleasePublisherTests(unittest.TestCase):
+    def publisher(self):
+        return runpy.run_path(str(REPOSITORY_ROOT / 'infra/publish_release.py'))
+
+    def site(self, root):
+        root.mkdir()
+        (root / 'index.html').write_text('new website')
+        (root / 'site-manifest.json').write_text(json.dumps({
+            'schema': 'bioseq.website.site_manifest', 'hash_algorithm': 'sha256',
+            'outputs': {'/index.html': sha256(root / 'index.html')}}))
+
+    def test_website_manifest_rejects_changed_extra_and_workflow_files(self):
+        publisher = self.publisher()
+        with tempfile.TemporaryDirectory() as raw:
+            site = Path(raw) / 'site'
+            self.site(site)
+            publisher['website_inventory'](site)
+            (site / 'index.html').write_text('corrupted')
+            with self.assertRaises(RuntimeError):
+                publisher['website_inventory'](site)
+            (site / 'index.html').write_text('new website')
+            (site / '.github').mkdir()
+            (site / '.github/workflow.yml').write_text('do not publish')
+            with self.assertRaises(RuntimeError):
+                publisher['website_inventory'](site)
+            publisher['website_inventory'](site, repository=True)
+            (site / 'old.txt').write_text('old trash')
+            with self.assertRaises(RuntimeError):
+                publisher['website_inventory'](site, repository=True)
+
+    def test_website_replacement_preserves_workflows_and_removes_old_files(self):
+        publisher = self.publisher()
+        function = publisher['replace_website']
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            site = base / 'site'
+            self.site(site)
+            checkout = base / 'control/website/checkout'
+            checkout.mkdir(parents=True)
+            (checkout / '.git').mkdir()
+            (checkout / '.github').mkdir()
+            workflow = checkout / '.github/static.yml'
+            workflow.write_text('preserve me')
+            (checkout / 'old').mkdir()
+            (checkout / 'old/old.html').write_text('remove me')
+            # Publication exercises real Git; this offline test covers file scope.
+            with mock.patch.dict(function.__globals__, {
+                    'CONTROL': base / 'control', 'ROOT': base / 'source',
+                    'command': lambda *a, **k: str(checkout)}):
+                function(checkout, site)
+            self.assertEqual(workflow.read_text(), 'preserve me')
+            self.assertTrue((checkout / '.git').is_dir())
+            self.assertFalse((checkout / 'old').exists())
+            self.assertEqual((checkout / 'index.html').read_text(), 'new website')
+
+    def test_website_replacement_refuses_source_checkout(self):
+        publisher = self.publisher()
+        function = publisher['replace_website']
+        with mock.patch.dict(function.__globals__, {'command': lambda *a, **k: str(REPOSITORY_ROOT)}):
+            with self.assertRaises(RuntimeError):
+                function(REPOSITORY_ROOT, REPOSITORY_ROOT)
+
+    def test_sourceforge_credentials_use_body_or_header_and_refuse_redirects(self):
+        publisher = self.publisher()
+        function = publisher['sf_api']
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"result":true}'
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.dict(os.environ, {'SOURCE_FORCE_OAUTH_TOKEN': 'oauth-secret',
+                'SOURCE_FORGE_RELEASE_TOKEN': 'release-secret'}), \
+                mock.patch('urllib.request.build_opener', return_value=opener):
+            function('/rest/p/bioseqdb', oauth=True)
+            request = opener.open.call_args.args[0]
+            self.assertEqual(request.get_header('Authorization'), 'Bearer oauth-secret')
+            self.assertNotIn('oauth-secret', request.full_url)
+            function('/projects/bioseqdb/files/file', method='PUT', fields={'download_label': 'alpha'})
+            request = opener.open.call_args.args[0]
+            self.assertIn(b'api_key=release-secret', request.data)
+            self.assertNotIn('release-secret', request.full_url)
+        self.assertIsNone(publisher['NoRedirect']().redirect_request(None, None, 302, '', {}, 'https://elsewhere'))
+
+
 class ManifestAndLegacyTests(unittest.TestCase):
     def test_manifest_records_exact_provenance_before_any_cell_work(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
