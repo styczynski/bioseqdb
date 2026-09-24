@@ -222,22 +222,37 @@ def build_one(repository, major, state, output, run, progress):
     runtime_requirement = (f'{version}; exact keg {pg_prefix}' if matching_keg
                            else f'Homebrew PostgreSQL {major}')
     build = state / f'pg{major}'
-    progress(f'configuring optimized native arm64 PostgreSQL {major} production modules')
-    flags = '-O3 -DNDEBUG -fno-omit-frame-pointer'
-    run(['cmake', '--preset', 'bench-opt', '-S', repository, '-B', build,
-         '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_C_FLAGS=', '-DCMAKE_CXX_FLAGS=',
-         '-DCMAKE_C_FLAGS_RELEASE=' + flags, '-DCMAKE_CXX_FLAGS_RELEASE=' + flags,
-         '-DCMAKE_MODULE_LINKER_FLAGS=-Wl,-headerpad_max_install_names',
-         '-DBIOSEQ_PACKAGE_BUILD=ON', '-DBIOSEQ_BENCHMARK_E2E_INTERVALS=OFF',
-         '-DBIOSEQ_TEMPLATE_FLATTEN_PROFILE=all_alphabets_uint64',
-         '-DBIOSEQ_BUILD_TESTS=OFF', '-DBIOSEQ_TEST_INDEXES=OFF',
-         '-DBIOSEQ_BUILD_CORE=ON', '-DBIOSEQ_BUILD_CACHE=ON',
-         '-DBIOSEQ_BUILD_PAPERS=OFF', '-DBIOSEQ_BUILD_WEBSITE=OFF',
-         '-DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=OFF', '-DBIOSEQ_CACHE_BUILD_TESTS=OFF',
-         '-DBIOSEQ_CACHE_TESTING=OFF', '-DPostgreSQL_CONFIG=' + str(pg_config)])
-    progress(f'compiling native arm64 PostgreSQL {major} .pkg payload')
-    run(['cmake', '--build', build, '--target', 'postgresql_bioseq', 'postgresql_bioseq_cache',
-         '--parallel', os.environ.get('BIOSEQ_MACOS_BUILD_JOBS', '4')])
+    validation_only = os.environ.get('BIOSEQ_PACKAGE_VALIDATE_EXISTING_ONLY') == '1'
+    if validation_only:
+        # SQL/packaging repairs do not require a configure pass, which itself
+        # refreshes code-generator dependencies. Reuse only this major's actual
+        # linked outputs, never another SDK's extension or a receipt substitute.
+        targets_file = build / 'bioseq-package-target-artifacts.tsv'
+        if not (build / 'CMakeCache.txt').is_file() or not targets_file.is_file():
+            raise RuntimeError(f'No configured PostgreSQL {major} package payload to validate')
+        existing = dict(line.split('\t') for line in targets_file.read_text().splitlines())
+        for name in ('postgresql_bioseq', 'postgresql_bioseq_cache'):
+            artifact = Path(existing[name]).resolve()
+            if not artifact.is_relative_to(build.resolve()) or not artifact.is_file():
+                raise RuntimeError(f'Missing compiled PostgreSQL {major} package module: {name}')
+        progress(f'reusing compiled native arm64 PostgreSQL {major} modules for package validation')
+    else:
+        progress(f'configuring optimized native arm64 PostgreSQL {major} production modules')
+        flags = '-O3 -DNDEBUG -fno-omit-frame-pointer'
+        run(['cmake', '--preset', 'bench-opt', '-S', repository, '-B', build,
+             '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_C_FLAGS=', '-DCMAKE_CXX_FLAGS=',
+             '-DCMAKE_C_FLAGS_RELEASE=' + flags, '-DCMAKE_CXX_FLAGS_RELEASE=' + flags,
+             '-DCMAKE_MODULE_LINKER_FLAGS=-Wl,-headerpad_max_install_names',
+             '-DBIOSEQ_PACKAGE_BUILD=ON', '-DBIOSEQ_BENCHMARK_E2E_INTERVALS=OFF',
+             '-DBIOSEQ_TEMPLATE_FLATTEN_PROFILE=all_alphabets_uint64',
+             '-DBIOSEQ_BUILD_TESTS=OFF', '-DBIOSEQ_TEST_INDEXES=OFF',
+             '-DBIOSEQ_BUILD_CORE=ON', '-DBIOSEQ_BUILD_CACHE=ON',
+             '-DBIOSEQ_BUILD_PAPERS=OFF', '-DBIOSEQ_BUILD_WEBSITE=OFF',
+             '-DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=OFF', '-DBIOSEQ_CACHE_BUILD_TESTS=OFF',
+             '-DBIOSEQ_CACHE_TESTING=OFF', '-DPostgreSQL_CONFIG=' + str(pg_config)])
+        progress(f'compiling native arm64 PostgreSQL {major} .pkg payload')
+        run(['cmake', '--build', build, '--target', 'postgresql_bioseq', 'postgresql_bioseq_cache',
+             '--parallel', os.environ.get('BIOSEQ_MACOS_BUILD_JOBS', '4')])
     run_root = Path(tempfile.mkdtemp(prefix=f'pg{major}-', dir=state))
     payload = run_root / 'payload'
     payload.mkdir()
@@ -370,6 +385,7 @@ After the SDK is installed, install the accompanying BioseqDB .pkg.
         postgres_sdk_support_files=support_files,
         validation=dict(passed=True, format='pkg', package_version=VERSION,
                         architecture='arm64', mach_o=mach_o, notarized=False,
+                        reused_compiled_modules=validation_only,
                         code_signature='ad-hoc Mach-O only; installer unsigned'),
         installed_sql_smoke=smoke)
 
