@@ -154,7 +154,7 @@ export {
         for (const bioseq::postgres::support::row_descriptor_field& expected :
              aligner_options_codec::expected_descriptor) {
             const Form_pg_attribute attribute =
-                TupleDescAttr(tupdesc, expected.attribute_number - 1);
+                bioseq::postgres::support::tuple_descriptor_attribute(tupdesc, expected.attribute_number - 1);
             if (attribute->attnum != expected.attribute_number || attribute->attisdropped ||
                 attribute->atttypid != expected.type_oid ||
                 attribute->attnotnull != !expected.nullable ||

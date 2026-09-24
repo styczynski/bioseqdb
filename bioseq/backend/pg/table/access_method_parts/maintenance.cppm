@@ -663,7 +663,7 @@ static void log_relation_statistics(Relation rel, int elevel) {
                                                                stripe->chunk_count,
                                                                GetTransactionSnapshot());
             for (uint32_t column = 0; column < skiplist->column_count; column++) {
-                bool attr_dropped = TupleDescAttr(tuple_descriptor, column)->attisdropped;
+                bool attr_dropped = bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, column)->attisdropped;
                 for (uint32_t chunk = 0; chunk < skiplist->chunk_count; chunk++) {
                     chunk_skip_node* skipnode = &skiplist->chunk_skip_nodes[column][chunk];
 

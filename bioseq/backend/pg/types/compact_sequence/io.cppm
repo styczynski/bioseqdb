@@ -991,7 +991,7 @@ text* seq_send(
             materialization_reason::client_output,
             descriptor.bp_length, descriptor.bp_length,
             static_cast<std::uint64_t>(VARSIZE_ANY_EXHDR(result)), false,
-            static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
+            static_cast<std::uint64_t>(bioseq::postgres::support::varlena_4byte_size(result)), trace_started);
         return result;
     }
 
@@ -1043,7 +1043,7 @@ text* seq_send(
         materialization_reason::client_output,
         descriptor.bp_length, descriptor.bp_length,
         static_cast<std::uint64_t>(VARSIZE_ANY_EXHDR(result)), false,
-        static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
+        static_cast<std::uint64_t>(bioseq::postgres::support::varlena_4byte_size(result)), trace_started);
     return result;
 }
 

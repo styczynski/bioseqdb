@@ -259,7 +259,7 @@ void tuple_dispatch_buffer::prepare_join_cpu_after_highway_selection(
                                         "incompatible alphabet")));
                     }
                     const std::size_t rewidthed_bytes =
-                        static_cast<std::size_t>(VARSIZE(rewidthed));
+                        static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(rewidthed));
                     auto& owned = join_cpu_preparation_scratch.rewidthed_query_varlenas
                                       [join_cpu_preparation_scratch.query_headers.size()];
                     owned.assign(reinterpret_cast<const char*>(rewidthed),
@@ -678,7 +678,7 @@ void tuple_dispatch_buffer::prepare_join_target_queries(
                          errmsg("bioseq batch join query preparation rewidth rejected an "
                                 "incompatible alphabet")));
             }
-            const std::size_t rewidthed_bytes = static_cast<std::size_t>(VARSIZE(rewidthed));
+            const std::size_t rewidthed_bytes = static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(rewidthed));
             auto& owned = rewidthed_query_varlenas[query_headers.size()];
             owned.assign(reinterpret_cast<const char*>(rewidthed),
                          reinterpret_cast<const char*>(rewidthed) + rewidthed_bytes);

@@ -149,7 +149,7 @@ resolve_active_read_index_outcome(
                          errmsg("bioseq active-read policy catalog shape is invalid")));
             }
             for (std::size_t i = 0; i < attributes.size(); ++i) {
-                Form_pg_attribute attribute = TupleDescAttr(tuple_desc, static_cast<int>(i));
+                Form_pg_attribute attribute = bioseq::postgres::support::tuple_descriptor_attribute(tuple_desc, static_cast<int>(i));
                 if (attribute->attisdropped || attribute->atttypid != attributes[i].type_oid ||
                     attribute->attnotnull != !attributes[i].nullable ||
                     std::string_view{NameStr(attribute->attname)} != attributes[i].name) {

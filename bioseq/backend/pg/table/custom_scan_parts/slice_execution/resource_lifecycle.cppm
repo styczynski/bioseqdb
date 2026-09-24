@@ -649,7 +649,7 @@ export {
         for (int index = 0; index < natts; ++index) {
             if (!scan_slot->tts_isnull[index]) {
                 scan_slot->tts_values[index] = MakeExpandedObjectReadOnly(
-                    scan_slot->tts_values[index], false, TupleDescAttr(descriptor, index)->attlen);
+                    scan_slot->tts_values[index], false, bioseq::postgres::support::tuple_descriptor_attribute(descriptor, index)->attlen);
             }
         }
         ExecStoreVirtualTuple(scan_slot);

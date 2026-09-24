@@ -316,7 +316,7 @@ void setup_typed_column_mapping(load_context& ctx,
     std::vector<idp::column_descriptor> columns;
     std::vector<column_attr> col_attrs;
     for (int i = 0; i < td->natts; ++i) {
-        const Form_pg_attribute attr = TupleDescAttr(td, i);
+        const Form_pg_attribute attr = bioseq::postgres::support::tuple_descriptor_attribute(td, i);
         if (attr->attisdropped || attr->attnum <= 0) {
             continue;
         }

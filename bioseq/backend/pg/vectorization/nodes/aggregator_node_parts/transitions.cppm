@@ -139,7 +139,7 @@ export void initialize_aggregate(AggState* aggregate_state,
          * Uses the Datum sorter for one input and the tuple sorter otherwise.
          */
         if (transition_state->numInputs == 1) {
-            Form_pg_attribute sort_attribute = TupleDescAttr(transition_state->sortdesc, 0);
+            Form_pg_attribute sort_attribute = bioseq::postgres::support::tuple_descriptor_attribute(transition_state->sortdesc, 0);
 
             transition_state->sortstates[aggregate_state->current_set] =
                 tuplesort_begin_datum(sort_attribute->atttypid,

@@ -337,7 +337,7 @@ inline void validate_catalog_schema(Relation relation) {
     for (const bioseq::postgres::support::row_descriptor_field& expected :
          sequence_source_version_codec::expected_descriptor) {
         const Form_pg_attribute attribute =
-            TupleDescAttr(descriptor, expected.attribute_number - 1);
+            bioseq::postgres::support::tuple_descriptor_attribute(descriptor, expected.attribute_number - 1);
         if (attribute->attnum != expected.attribute_number || attribute->attisdropped ||
             attribute->attnotnull != !expected.nullable ||
             attribute->atttypid != expected.type_oid ||

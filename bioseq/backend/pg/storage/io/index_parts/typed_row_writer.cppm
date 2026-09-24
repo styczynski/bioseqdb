@@ -147,7 +147,7 @@ struct load_columns {
     std::int16_t seq_attno = 0;
     int seq_count = 0;
     for (int i = 0; i < td->natts; ++i) {
-        const Form_pg_attribute attr = TupleDescAttr(td, i);
+        const Form_pg_attribute attr = bioseq::postgres::support::tuple_descriptor_attribute(td, i);
         if (attr->attisdropped || attr->attnum <= 0) {
             continue;
         }
@@ -171,7 +171,7 @@ struct load_columns {
     }
 
     // (alphabet, width) off the seq column's typmod — NEVER hardcoded.
-    const Form_pg_attribute seq_attr = TupleDescAttr(td, seq_attno - 1);
+    const Form_pg_attribute seq_attr = bioseq::postgres::support::tuple_descriptor_attribute(td, seq_attno - 1);
     if (seq_attr->atttypmod < 0) {
         raise_load_error_as_cpp(ERRCODE_INVALID_TABLE_DEFINITION,
                                 "bioseq.seq column has no typmod (declare it as "

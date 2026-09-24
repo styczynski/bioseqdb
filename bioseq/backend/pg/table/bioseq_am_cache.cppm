@@ -69,7 +69,7 @@ void populate_sequence_attributes(table_access_cache& cache, Relation relation) 
     TupleDesc tuple_descriptor = RelationGetDescr(relation);
     cache.sequence_attribute_numbers.reserve(static_cast<std::size_t>(tuple_descriptor->natts));
     for (int attribute_index = 0; attribute_index < tuple_descriptor->natts; ++attribute_index) {
-        Form_pg_attribute attribute = TupleDescAttr(tuple_descriptor, attribute_index);
+        Form_pg_attribute attribute = bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, attribute_index);
         if (!attribute->attisdropped && attribute->atttypid == sequence_type_oid) {
             cache.sequence_attribute_numbers.push_back(
                 static_cast<std::int16_t>(attribute_index + 1));

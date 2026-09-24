@@ -69,7 +69,7 @@ static bioseq::postgres::support::transaction_scoped_hash_table<
 static row_mask_row*
 allocate_row_mask_entry(uint64_t storage_id, bytea* mask)
 {
-	const Size mask_size = VARSIZE(mask);
+	const Size mask_size = bioseq::postgres::support::varlena_4byte_size(mask);
 	bytea* owned_mask = reinterpret_cast<bytea*>(palloc(mask_size));
 	memcpy(owned_mask, mask, mask_size);
 	void* storage = palloc(sizeof(row_mask_row));

@@ -27,6 +27,8 @@ extern "C" {
 
 export module bioseq.postgres.types.compact_sequence:view_session;
 
+import bioseq.postgres.support;
+
 import :flat_abi;
 import :source_abi;
 import :tree_types;
@@ -186,7 +188,7 @@ inline void validate_bound_flat(bioseq::pg_types::seq const& value)
                 * sizeof(typename traits::storage_unit);
             const std::size_t expected = bioseq::pg_types::seq::header_bytes()
                 + round_up_to_uint64(payload);
-            valid = VARSIZE(&value) == expected;
+            valid = bioseq::postgres::support::varlena_4byte_size(&value) == expected;
         });
     if (!valid) {
         invalid_flat_sequence("bound header, padding, or payload size mismatch");
@@ -252,7 +254,7 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
 
     auto const* flat = reinterpret_cast<bioseq::pg_types::seq const*>(
         DatumGetPointer(detoasted_or_expanded));
-    if (flat == nullptr || VARSIZE(flat) < bioseq::pg_types::seq::header_bytes()) {
+    if (flat == nullptr || bioseq::postgres::support::varlena_4byte_size(flat) < bioseq::pg_types::seq::header_bytes()) {
         invalid_flat_sequence("value is shorter than the pgseq header");
     }
     switch (classify_pg_sequence_flat(flat)) {
@@ -269,7 +271,7 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
             };
         case pg_sequence_flat_kind::unbound: {
             if (flat->padding_letters != 0u
-                || VARSIZE(flat) != expected_unbound_size(flat->bp_size)) {
+                || bioseq::postgres::support::varlena_4byte_size(flat) != expected_unbound_size(flat->bp_size)) {
                 invalid_flat_sequence("unbound tag, padding, or size mismatch");
             }
             const auto bytes = pgseq_unbound_ascii(*flat);
@@ -290,7 +292,7 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
             };
         }
         case pg_sequence_flat_kind::locator: {
-            if (VARSIZE(flat)
+            if (bioseq::postgres::support::varlena_4byte_size(flat)
                 != bioseq::pg_types::seq::header_bytes()
                     + sizeof(bioseq::storage::sequence_locator)) {
                 invalid_flat_sequence("locator framing size mismatch");

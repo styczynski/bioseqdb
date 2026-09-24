@@ -566,7 +566,8 @@ function(bioseq_add_codegen)
   set(_bioseq_codegen_host_stdlib_modules "")
   set(_bioseq_codegen_use_module_std ON)
   if(_bioseq_codegen_cxx_version_identity MATCHES "clang")
-    if(BIOSEQ_PACKAGE_BUILD OR _bioseq_codegen_clang_libstdcxx_abi)
+    if((BIOSEQ_PACKAGE_BUILD AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        OR _bioseq_codegen_clang_libstdcxx_abi)
       # The official LLVM release archives ship libclang-cpp with the host
       # libstdc++ ABI. Keep the host generator on that ABI while
       # the extension itself remains Clang/libc++. The generator sources do
@@ -739,7 +740,7 @@ function(bioseq_add_codegen)
   endif()
 
   set(_bioseq_codegen_package_cmake_args)
-  if(BIOSEQ_PACKAGE_BUILD)
+  if(BIOSEQ_PACKAGE_BUILD AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(NOT CMAKE_C_COMPILER_LAUNCHER OR NOT CMAKE_CXX_COMPILER_LAUNCHER)
       message(FATAL_ERROR
         "BIOSEQ_PACKAGE_BUILD requires compiler priority launchers for the isolated code generator")
@@ -778,7 +779,7 @@ function(bioseq_add_codegen)
   # choice from the authenticated module inventory rather than architecture or
   # a benchmark-specific preset.
   set(_bioseq_codegen_stdlib_cmake_args)
-  if(NOT BIOSEQ_PACKAGE_BUILD
+  if((NOT BIOSEQ_PACKAGE_BUILD OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
       AND BIOSEQ_CODEGEN_STDLIB_MODULES_JSON MATCHES
         "(^|/)libc\\+\\+\\.modules\\.json$")
     list(APPEND _bioseq_codegen_stdlib_cmake_args

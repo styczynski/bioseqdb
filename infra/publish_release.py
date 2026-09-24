@@ -62,10 +62,12 @@ DESCRIPTION = (
     'caching are enabled in the packaged defaults; the companion query cache '
     'is loaded automatically but remains disabled until explicitly enabled.\n\n'
     'This is an experimental alpha release for evaluation, not a production '
-    'stability guarantee. Native Linux packages are organized by distribution, '
+    'stability guarantee. Native Linux packages and macOS arm64 installers are organized by distribution, '
     'CPU architecture and PostgreSQL major version. Each published package '
-    'passed payload/ELF checks and installation plus SQL smoke checks in a '
-    'fresh matching-distribution environment. Packages are unsigned.\n\n'
+    'passed payload and ELF/Mach-O checks plus SQL checks in a fresh matching '
+    'PostgreSQL runtime. macOS acceptance uses an extracted installer payload in '
+    'a private Homebrew PostgreSQL prefix; Apple Installer system installation '
+    'is not claimed as tested. Packages are unsigned; macOS installers are not notarized.\n\n'
     'Documentation and SQL examples: https://bioseqdb.com/\n'
     'Source code: https://github.com/styczynski/bioseqdb\n'
     'Select the exact distribution, architecture and PostgreSQL major; '
@@ -179,7 +181,10 @@ def accepted_packages():
             distro=package['distro'], architecture=package['architecture'],
             package_version=package['validation']['package_version'],
             postgres_release_channel=package['postgres_release_channel'],
-            signed=bool(package.get('signed')), validation='ELF and fresh installed SQL passed'))
+            signed=bool(package.get('signed')),
+            validation=('Mach-O and extracted-payload private PostgreSQL SQL passed; unsigned/unnotarized installer'
+                        if package['validation'].get('format') == 'pkg'
+                        else 'ELF and fresh installed SQL passed')))
     if not accepted:
         raise RuntimeError('No accepted packages to publish')
     return accepted

@@ -368,7 +368,7 @@ export TupleTableSlot* create_vector_tuple_table_slot(TupleDesc tuple_desc) {
 
     for (int attribute_index = 0; attribute_index < slot_tuple_descriptor->natts;
          ++attribute_index) {
-        const Oid column_type_oid = TupleDescAttr(slot_tuple_descriptor, attribute_index)->atttypid;
+        const Oid column_type_oid = bioseq::postgres::support::tuple_descriptor_attribute(slot_tuple_descriptor, attribute_index)->atttypid;
 
         int16_t declared_type_width = 0;
         bool declared_stored_by_value = false;
@@ -409,7 +409,7 @@ export void extract_tuple_from_vector_slot(TupleTableSlot* output_slot,
     bioseq::postgres::support::pg_slot_datums_view{output_slot}.clear_all_to_null();
     output_slot->tts_nvalid = 0;
     foreach_int(attribute_number, attr_needed_list) {
-        if (!TupleDescAttr(output_slot->tts_tupleDescriptor, attribute_number)->attisdropped) {
+        if (!bioseq::postgres::support::tuple_descriptor_attribute(output_slot->tts_tupleDescriptor, attribute_number)->attisdropped) {
             vector_column_storage* column = reinterpret_cast<vector_column_storage*>(
                 vector_slot->virtual_slot.base.tts_values[attribute_number]);
             std::int8_t* raw_column_data =

@@ -26,6 +26,8 @@ extern "C" {
 
 export module bioseq.postgres.types.compact_sequence:array_string;
 
+import bioseq.postgres.support;
+
 import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
 import :tree_types;
@@ -736,8 +738,8 @@ ArrayType* to_array(
             trace, producer_value_id,
             materialization_mechanism::letter_array,
             materialization_reason::sql_conversion,
-            0u, 0u, static_cast<std::uint64_t>(VARSIZE(result)), false,
-            static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
+            0u, 0u, static_cast<std::uint64_t>(bioseq::postgres::support::varlena_4byte_size(result)), false,
+            static_cast<std::uint64_t>(bioseq::postgres::support::varlena_4byte_size(result)), trace_started);
         return result;
     }
     if (descriptor.bp_length >
@@ -787,14 +789,14 @@ ArrayType* to_array(
         values, count, letter_oid, 2, true, 's');
     const std::uint64_t peak_retained_bytes =
         static_cast<std::uint64_t>(values_bytes)
-        + static_cast<std::uint64_t>(VARSIZE(result));
+        + static_cast<std::uint64_t>(bioseq::postgres::support::varlena_4byte_size(result));
     pfree(values);
     record_slice_materialization_success(
         trace, producer_value_id,
         materialization_mechanism::letter_array,
         materialization_reason::sql_conversion,
         descriptor.bp_length, descriptor.bp_length,
-        static_cast<std::uint64_t>(VARSIZE(result)), false,
+        static_cast<std::uint64_t>(bioseq::postgres::support::varlena_4byte_size(result)), false,
         peak_retained_bytes, trace_started);
     return result;
 }

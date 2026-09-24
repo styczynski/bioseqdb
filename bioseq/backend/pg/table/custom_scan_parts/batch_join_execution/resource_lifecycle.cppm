@@ -264,9 +264,9 @@ export {
         const Oid sequence_type = get_cached_stub_oids().bioseq_seq_type_oid;
         const int32 expected_typmod =
             compact_sequence_stdc_type_params{alphabet_code, storage_unit_byte_width}.encode();
-        Form_pg_attribute sequence_attribute = TupleDescAttr(descriptor, sequence_resno - 1);
+        Form_pg_attribute sequence_attribute = bioseq::postgres::support::tuple_descriptor_attribute(descriptor, sequence_resno - 1);
         Form_pg_attribute rowno_attribute =
-            rowno_required ? TupleDescAttr(descriptor, rowno_resno - 1) : nullptr;
+            rowno_required ? bioseq::postgres::support::tuple_descriptor_attribute(descriptor, rowno_resno - 1) : nullptr;
         if (sequence_attribute->atttypid != sequence_type ||
             sequence_attribute->atttypmod != expected_typmod ||
             sequence_attribute->attcollation != get_typcollation(sequence_type) ||

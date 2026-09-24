@@ -705,7 +705,7 @@ namespace {
     const bool unbound = !descriptor.alphabet_bound;
     const std::size_t count = unbound
         ? static_cast<std::size_t>(descriptor.bp_length)
-        : static_cast<std::size_t>(VARSIZE(&flat)) - bioseq::pg_types::seq::header_bytes();
+        : static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(&flat)) - bioseq::pg_types::seq::header_bytes();
     const std::size_t allocation_bytes = std::max<std::size_t>(count, 1u);
     auto* bytes = allocate_piece_literal_storage(
         arena, allocation_bytes);

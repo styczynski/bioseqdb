@@ -7,6 +7,9 @@ module;
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#endif
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -20,6 +23,24 @@ import bioseq.parallelism.memory_admission;
 import std;
 
 export namespace bioseq::gpu::vulkan {
+
+#if defined(__APPLE__)
+/// @brief Resolve a packaged loader beside its owning image, or the build-owned loader.
+/// Only module initialization uses this path; shader and numerical kernels are unchanged.
+[[nodiscard]] std::filesystem::path selected_vulkan_loader_path(std::error_code& error) {
+    static const unsigned char image_anchor = 0;
+    Dl_info owner{};
+    if (::dladdr(&image_anchor, &owner) != 0 && owner.dli_fname != nullptr) {
+        const auto sibling = std::filesystem::path(owner.dli_fname).parent_path() /
+                             "bioseq_runtime" / "libvulkan.1.dylib";
+        if (std::filesystem::is_regular_file(sibling, error)) {
+            return std::filesystem::canonical(sibling, error);
+        }
+    }
+    error.clear();
+    return std::filesystem::canonical(BIOSEQ_RECEIPT_OWNED_VULKAN_LOADER_PATH, error);
+}
+#endif
 
 /// @brief Formats one shader-cache diagnostic without constraining argument types.
 /// @tparam p_argument_types Stream-insertable diagnostic argument types.

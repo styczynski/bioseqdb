@@ -109,7 +109,7 @@ export {
             }
             if (!bound)
                 continue;
-            if (TupleDescAttr(actual_descriptor, index)->atttypid != seq_oid) {
+            if (bioseq::postgres::support::tuple_descriptor_attribute(actual_descriptor, index)->atttypid != seq_oid) {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATATYPE_MISMATCH),
                          errmsg("BioseqSliceProject bound source is not a sequence"),
@@ -187,7 +187,7 @@ export {
         const int natts = relation_descriptor->natts;
         if (attno == 0) {
             for (int index = 0; index < natts; ++index) {
-                Form_pg_attribute attribute = TupleDescAttr(relation_descriptor, index);
+                Form_pg_attribute attribute = bioseq::postgres::support::tuple_descriptor_attribute(relation_descriptor, index);
                 if (attribute != nullptr && !attribute->attisdropped &&
                     attribute->atttypid == sequence_type_oid) {
                     roles[static_cast<std::size_t>(index + 1)] = 1u;
@@ -197,7 +197,7 @@ export {
         }
         if (attno <= 0 || attno > natts)
             return;
-        Form_pg_attribute attribute = TupleDescAttr(relation_descriptor, attno - 1);
+        Form_pg_attribute attribute = bioseq::postgres::support::tuple_descriptor_attribute(relation_descriptor, attno - 1);
         if (attribute != nullptr && !attribute->attisdropped &&
             attribute->atttypid == sequence_type_oid) {
             roles[static_cast<std::size_t>(attno)] = 1u;
@@ -378,13 +378,13 @@ export {
                 MemoryContextSwitchTo(previous);
                 throw;
             }
-            if (static_cast<std::size_t>(VARSIZE(flat)) < bioseq::pg_types::seq::header_bytes()) {
+            if (static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(flat)) < bioseq::pg_types::seq::header_bytes()) {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),
                          errmsg("buffered bioseq output source is truncated"),
                          errdetail("attribute=%d bytes=%zu",
                                    static_cast<int>(attno),
-                                   static_cast<std::size_t>(VARSIZE(flat)))));
+                                   static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(flat)))));
             }
             if (!bioseq::storage::is_locator_stub(flat))
                 continue;

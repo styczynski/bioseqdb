@@ -282,7 +282,7 @@ export {
         const std::array<int, 2> typmod_erased_flags{target_typmod_erased, query_typmod_erased};
         for (std::size_t index = 0u; index < operand_resnos.size(); ++index) {
             const AttrNumber resno = operand_resnos[index];
-            Form_pg_attribute attribute = TupleDescAttr(scan_desc, resno - 1);
+            Form_pg_attribute attribute = bioseq::postgres::support::tuple_descriptor_attribute(scan_desc, resno - 1);
             if (attribute->atttypid != get_cached_stub_oids().bioseq_seq_type_oid ||
                 attribute->atttypmod !=
                     (typmod_erased_flags[index] != 0
@@ -295,9 +295,9 @@ export {
         }
         if (source_identity_carried) {
             Form_pg_attribute target_source_tid_attribute =
-                TupleDescAttr(scan_desc, runtime->target_source_tid_resno - 1);
+                bioseq::postgres::support::tuple_descriptor_attribute(scan_desc, runtime->target_source_tid_resno - 1);
             Form_pg_attribute target_source_tableoid_attribute =
-                TupleDescAttr(scan_desc, runtime->target_source_tableoid_resno - 1);
+                bioseq::postgres::support::tuple_descriptor_attribute(scan_desc, runtime->target_source_tableoid_resno - 1);
             if (target_source_tid_attribute->attisdropped ||
                 target_source_tid_attribute->atttypid != TIDOID ||
                 target_source_tid_attribute->atttypmod != -1 ||
@@ -350,7 +350,7 @@ export {
                     intVal(list_nth(encoded, k_match_site_binding_kind))),
                 .stable_match_id = intVal(list_nth(encoded, k_match_site_stable_id)),
             };
-            Form_pg_attribute attribute = TupleDescAttr(scan_desc, site.resno - 1);
+            Form_pg_attribute attribute = bioseq::postgres::support::tuple_descriptor_attribute(scan_desc, site.resno - 1);
             if (!is_bioseq_projection_funcid(site.funcid, get_cached_stub_oids()) ||
                 attribute->atttypid != get_func_rettype(site.funcid) ||
                 attribute->atttypmod != site.typmod || attribute->attcollation != site.collation ||
@@ -450,7 +450,7 @@ export {
         Form_pg_attribute storage_attribute =
             target_storage_attno > relation_desc->natts
                 ? nullptr
-                : TupleDescAttr(relation_desc, target_storage_attno - 1);
+                : bioseq::postgres::support::tuple_descriptor_attribute(relation_desc, target_storage_attno - 1);
         if (storage_attribute == nullptr || storage_attribute->attisdropped ||
             storage_attribute->atttypid != get_cached_stub_oids().bioseq_seq_type_oid ||
             storage_attribute->atttypmod != expected_typmod) {

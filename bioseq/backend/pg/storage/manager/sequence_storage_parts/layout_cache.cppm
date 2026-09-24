@@ -139,10 +139,10 @@ inline sequence_locator decode_locator_from_stub(const bioseq::pg_types::seq* hd
                "is_locator_stub(hdr) first.",
                static_cast<unsigned>(hdr->storage_unit_byte_width));
     }
-    if (VARSIZE(hdr) != k_locator_stub_varlena_bytes) {
+    if (bioseq::postgres::support::varlena_4byte_size(hdr) != k_locator_stub_varlena_bytes) {
         bioseq_log<logging_level::error, logging_target::postgres>(
                "bioseq storage: locator stub size mismatch (got {}, expected {})",
-               static_cast<unsigned long long>(VARSIZE(hdr)),
+               static_cast<unsigned long long>(bioseq::postgres::support::varlena_4byte_size(hdr)),
                static_cast<unsigned long long>(k_locator_stub_varlena_bytes));
     }
     const auto payload = std::span<std::byte const>{

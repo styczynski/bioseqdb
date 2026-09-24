@@ -505,7 +505,7 @@ void begin_batch_sort_scan_impl(CustomScanState* node, EState* estate, int eflag
 
     TupleDesc descriptor = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
     if (descriptor == nullptr || rt->seq_attno > descriptor->natts ||
-        TupleDescAttr(descriptor, rt->seq_attno - 1)->atttypid !=
+        bioseq::postgres::support::tuple_descriptor_attribute(descriptor, rt->seq_attno - 1)->atttypid !=
             bioseq_seq_type_oid_missing_ok()) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATATYPE_MISMATCH),

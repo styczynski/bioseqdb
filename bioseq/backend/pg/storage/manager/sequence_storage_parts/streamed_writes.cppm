@@ -653,7 +653,7 @@ sequence_storage_manager<
     const std::uint8_t* const src_data =
         reinterpret_cast<const std::uint8_t*>(original_hdr->data);
     const std::size_t src_bytes =
-        static_cast<std::size_t>(VARSIZE(original_hdr)) - bioseq::pg_types::seq::header_bytes();
+        static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(original_hdr)) - bioseq::pg_types::seq::header_bytes();
 
     // Copy the flat payload slice and assign metadata for one fragment row.
     auto producer = [src_data, src_bytes, fragment_bytes, frag_bp, total_bp_size,

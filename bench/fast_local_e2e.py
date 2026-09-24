@@ -341,6 +341,9 @@ def main():
     out = document(); write_document(out)
     while True:
         maintenance = json.loads((ROOT / 'bench/e2e_fleet_maintenance.json').read_bytes())
+        if maintenance['hosts']['local'].get('owner') == 'package_release_fleet':
+            event('stopped', reason='User ended local measurements; native package builds own this host')
+            return
         assert maintenance['hosts']['local']['paused'], 'Standard local queue must remain paused'
         standard = load_yaml(ROOT / 'ALL_RESULTS_TUPLES.yaml')
         approved = {r['stable_key'] for r in standard['approved_results']} | {

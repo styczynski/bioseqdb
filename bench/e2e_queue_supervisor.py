@@ -37,6 +37,12 @@ def main():
         child = None
         while True:
             try:
+                if args.queue == 'fast_local':
+                    maintenance = json.loads((ROOT / 'bench/e2e_fleet_maintenance.json').read_bytes())
+                    if maintenance['hosts']['local'].get('owner') == 'package_release_fleet':
+                        if child is not None and child.poll() is None:
+                            child.terminate()  # Controller only; never its detached MCP job.
+                        return
                 if child is not None:
                     code = child.poll()
                     if code is None:

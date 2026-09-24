@@ -1640,8 +1640,7 @@ ensure_moltenvk_command_library_for_sealed_seed(const std::filesystem::path& cac
     }
 
     filesystem_error.clear();
-    const std::filesystem::path required_loader_path = std::filesystem::canonical(
-        BIOSEQ_RECEIPT_OWNED_VULKAN_LOADER_PATH, filesystem_error);
+    const std::filesystem::path required_loader_path = selected_vulkan_loader_path(filesystem_error);
     if (filesystem_error || !required_loader_path.is_absolute()) {
         return std::unexpected("receipt-owned Vulkan loader image path is not canonical");
     }

@@ -580,7 +580,7 @@ static void preflight_typmodless_letter_copy(Node* parsetree) {
             continue;
         }
         Form_pg_attribute attribute =
-            TupleDescAttr(RelationGetDescr(relation), attribute_number - 1);
+            bioseq::postgres::support::tuple_descriptor_attribute(RelationGetDescr(relation), attribute_number - 1);
         if (!attribute->attisdropped && attribute->atttypid == letter_oid &&
             attribute->atttypmod < 0) {
             char* attribute_name = pstrdup(NameStr(attribute->attname));

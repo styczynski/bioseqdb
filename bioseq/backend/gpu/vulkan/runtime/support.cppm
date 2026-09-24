@@ -22,6 +22,7 @@ module bioseq.gpu.vulkan.runtime:support;
 
 import :frontend_types;
 import :metal_archive;
+import bioseq.gpu.vulkan.shader_cache;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.parallelism.memory_admission;
@@ -374,8 +375,7 @@ void load_vulkan_runtime_functions(void* loader_handle) {
 void ensure_vulkan_loader_loaded_for_runtime() {
 #if defined(__APPLE__)
     std::error_code error;
-    const std::filesystem::path required_loader_path = std::filesystem::canonical(
-        BIOSEQ_RECEIPT_OWNED_VULKAN_LOADER_PATH, error);
+    const std::filesystem::path required_loader_path = selected_vulkan_loader_path(error);
     if (error || !required_loader_path.is_absolute()) {
         throw vulkan_runtime_error("receipt-owned Vulkan loader path is not canonical");
     }

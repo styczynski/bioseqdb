@@ -682,8 +682,8 @@ inline void exercise_bpchar_physical_lifetime(Oid relation_oid) {
 		if (relation->rd_rel->relkind != RELKIND_RELATION
 			|| descriptor == nullptr
 			|| descriptor->natts != 2
-			|| TupleDescAttr(descriptor, 0)->atttypid != INT4OID
-			|| TupleDescAttr(descriptor, 1)->atttypid != BPCHAROID) {
+			|| bioseq::postgres::support::tuple_descriptor_attribute(descriptor, 0)->atttypid != INT4OID
+			|| bioseq::postgres::support::tuple_descriptor_attribute(descriptor, 1)->atttypid != BPCHAROID) {
 			raise_bpchar_physical_contract_error(
 				"probe relation must be a two-column "
 				"(integer, bpchar) heap table");

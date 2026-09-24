@@ -69,7 +69,7 @@ void validate_row_descriptor(
 
     for (std::size_t index = 0; index < p_field_count; ++index) {
         const Form_pg_attribute attribute =
-            TupleDescAttr(tuple_descriptor, static_cast<int>(index));
+            bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, static_cast<int>(index));
         if (attribute->attnum != expected[index].attribute_number
             || attribute->attisdropped
             || attribute->atttypid != expected[index].type_oid

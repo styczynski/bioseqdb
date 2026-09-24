@@ -683,7 +683,7 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
         for (int i = 0; i < td->natts; ++i) {
             const bool needed = bioseq::postgres::support::invoke_pg_as_cpp(
                 [&attr_needed, i] { return attr_needed.has_member(i); });
-            if (!TupleDescAttr(td, i)->attisdropped && needed) {
+            if (!bioseq::postgres::support::tuple_descriptor_attribute(td, i)->attisdropped && needed) {
                 bioseq::postgres::support::invoke_pg_as_cpp(
                     [payload_mctx, &projected, i] {
                     MemoryContext previous = MemoryContextSwitchTo(payload_mctx);
@@ -759,7 +759,7 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
     bioseq::pg_types::seq* raw = bioseq::postgres::support::invoke_pg_as_cpp([&vals] {
         return reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(vals[0]));
     });
-    if (static_cast<std::size_t>(VARSIZE(raw)) < bioseq::pg_types::seq::header_bytes()) {
+    if (static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(raw)) < bioseq::pg_types::seq::header_bytes()) {
         bioseq::postgres::support::invoke_pg_as_cpp([row_no] {
             ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
@@ -786,7 +786,7 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
             typename p_sequence_instance::alphabet_type>();
     const bool is_last_fragment = fragment_no + 1u == fragment_count_;
     const std::size_t raw_payload_bytes =
-        static_cast<std::size_t>(VARSIZE(raw)) - bioseq::pg_types::seq::header_bytes();
+        static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(raw)) - bioseq::pg_types::seq::header_bytes();
     const std::uint64_t fragment_from =
         static_cast<std::uint64_t>(fragment_no) * letters_per_fragment;
     const bool fragment_geometry_valid = fragment_from < logical_length_
@@ -1003,7 +1003,7 @@ inline void postgres_sequence_scanner<p_sequence_instance>::copy_packed_to(
                 break;
             }
             const std::size_t raw_total_bytes =
-                static_cast<std::size_t>(VARSIZE(raw));
+                static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(raw));
             if (raw_total_bytes < bioseq::pg_types::seq::header_bytes()) {
                 state.status =
                     bulk_copy_status::payload_header_invalid;

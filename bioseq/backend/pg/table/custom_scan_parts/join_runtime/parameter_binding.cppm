@@ -241,7 +241,7 @@ export {
                                actual_alphabet,
                                actual_width)));
         }
-        const std::size_t query_total_bytes = static_cast<std::size_t>(VARSIZE(query_hdr));
+        const std::size_t query_total_bytes = static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(query_hdr));
         std::vector<char> query_varlena_bytes(query_total_bytes);
         std::memcpy(query_varlena_bytes.data(), query_hdr, query_total_bytes);
         const std::uint32_t bp_size = query_hdr->bp_size;
@@ -261,7 +261,7 @@ export {
                     (errcode(ERRCODE_DATATYPE_MISMATCH),
                      errmsg("bioseq mmsearch Param rewidth rejected an incompatible alphabet")));
             }
-            const std::size_t rewidthed_bytes = static_cast<std::size_t>(VARSIZE(rewidthed));
+            const std::size_t rewidthed_bytes = static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(rewidthed));
             rewidthed_query_varlena_bytes.assign(reinterpret_cast<const char*>(rewidthed),
                                                  reinterpret_cast<const char*>(rewidthed) +
                                                      rewidthed_bytes);

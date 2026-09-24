@@ -396,7 +396,7 @@ compress_column_buffer(StringInfo input_buffer,
 
 			if (compression_result)
 			{
-				output_buffer->len = VARSIZE(output_buffer->data);
+				output_buffer->len = bioseq::postgres::support::varlena_4byte_size(output_buffer->data);
 				output_buffer->data[output_buffer->len] = '\0';
 			}
 
@@ -520,7 +520,7 @@ decompress_column_buffer(StringInfo buffer,
 					"varlena header.");
 			}
 
-			const uint32_t encoded_size = VARSIZE(buffer->data);
+			const uint32_t encoded_size = bioseq::postgres::support::varlena_4byte_size(buffer->data);
 			if (encoded_size
 				< static_cast<uint32_t>(compressed_column_header_size())
 				|| encoded_size != static_cast<uint32_t>(buffer->len))

@@ -327,7 +327,7 @@ bool expanded_ownership_self_test() {
         reinterpret_cast<bioseq::pg_types::seq const *>(DatumGetPointer(copied));
     const bool copy_survived =
         !VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(copied)) &&
-        VARSIZE(copied_flat) >=
+        bioseq::postgres::support::varlena_4byte_size(copied_flat) >=
             bioseq::pg_types::seq::header_bytes() + transferred_text.size() &&
         copied_flat->alphabet_code == pgseq_unbound_alphabet_code &&
         copied_flat->storage_unit_byte_width == pgseq_unbound_width_tag &&

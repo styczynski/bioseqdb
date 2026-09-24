@@ -217,7 +217,7 @@ load_filtered_stripe_buffers(Relation relation, stripe_metadata *stripe_metadata
 		{
 			chunk_skip_node *chunk_skip_node =
 				selected_chunk_skip_list->chunk_skip_nodes[column_index];
-			Form_pg_attribute attribute_form = TupleDescAttr(tuple_descriptor, column_index);
+			Form_pg_attribute attribute_form = bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, column_index);
 			uint32_t chunk_count = selected_chunk_skip_list->chunk_count;
 
 			column_buffers *column_buffers = load_column_buffers(relation, chunk_skip_node,
@@ -258,7 +258,7 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 
 	for (column_index = 0; column_index < buffers->column_count; column_index++)
 	{
-		Form_pg_attribute attribute_form = TupleDescAttr(tuple_descriptor, column_index);
+		Form_pg_attribute attribute_form = bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, column_index);
 		column_buffers *column_buffers = buffers->columns[column_index];
 		bool column_added = false;
 

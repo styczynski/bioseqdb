@@ -9,6 +9,7 @@ extern "C" {
 
 #include "access/genam.h"
 #include "access/relation.h"
+#include "access/tupdesc.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/pg_list.h"
@@ -19,6 +20,7 @@ extern "C" {
 #include "utils/palloc.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
+#include "varatt.h"
 
 #include "common/hashfn.h"
 }
@@ -38,6 +40,30 @@ export import :nodes;
 export import :spi;
 
 export namespace bioseq::postgres::support {
+
+/**
+ * Read one PostgreSQL tuple attribute through a single module-owned call site.
+ *
+ * Clang can emit conflicting internal-linkage copies of PG18+'s TupleDescAttr
+ * when different imported module fragments call it. This adapter preserves
+ * PostgreSQL's accessor, bounds assertions and return type without copying data.
+ */
+[[nodiscard]] [[gnu::always_inline]] inline auto
+tuple_descriptor_attribute(TupleDesc descriptor, const int index) noexcept {
+    return TupleDescAttr(descriptor, index);
+}
+
+/**
+ * Read the size of an ordinary four-byte-header varlena without detoasting it.
+ *
+ * Delegate to PostgreSQL with one originating module for PG19+'s static-inline
+ * VARSIZE; preserve its result type and assertions. Packed/short/external
+ * varlenas still require the distinct native VARSIZE_ANY accessors as before.
+ */
+[[nodiscard]] [[gnu::always_inline]] inline auto
+varlena_4byte_size(const void* value) noexcept {
+    return VARSIZE(value);
+}
 
 /**
  * Cost a serial nested loop using the actual inner path's cache strategy.

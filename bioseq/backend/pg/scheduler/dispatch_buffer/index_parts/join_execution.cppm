@@ -179,7 +179,7 @@ namespace bioseq::scheduler {
                                  errmsg("bioseq batch join query rewidth rejected an incompatible "
                                         "alphabet")));
                     }
-                    const std::size_t rewidth_bytes = static_cast<std::size_t>(VARSIZE(rewidth));
+                    const std::size_t rewidth_bytes = static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(rewidth));
                     join_query_rewidth_varlenas[query_index].assign(
                         reinterpret_cast<const char*>(rewidth),
                         reinterpret_cast<const char*>(rewidth) + rewidth_bytes);

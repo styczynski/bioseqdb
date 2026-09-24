@@ -69,7 +69,7 @@ begin_column_write(RelFileLocator relation_file_locator,
 	for (uint32_t column_index = 0; column_index < column_count; column_index++)
 	{
 		FmgrInfo *comparison_function = NULL;
-		FormData_pg_attribute *attribute = TupleDescAttr(tuple_descriptor,
+		FormData_pg_attribute *attribute = bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor,
 															 column_index);
 
 		if (!attribute->attisdropped
@@ -166,7 +166,7 @@ write_column_row_pg_leaf(
 			}
 
 			Form_pg_attribute attribute =
-				TupleDescAttr(write_state->tuple_descriptor, column_index);
+				bioseq::postgres::support::tuple_descriptor_attribute(write_state->tuple_descriptor, column_index);
 
 			int column_type_length = attribute->attlen;
 			char column_type_alignment = attribute->attalign;
@@ -243,7 +243,7 @@ write_column_row_pg_leaf(
 			FmgrInfo *comparison_function =
 				write_state->comparison_functions[column_index];
 			Form_pg_attribute attribute =
-				TupleDescAttr(write_state->tuple_descriptor, column_index);
+				bioseq::postgres::support::tuple_descriptor_attribute(write_state->tuple_descriptor, column_index);
 			bool column_type_by_value = attribute->attbyval;
 			int column_type_length = attribute->attlen;
 			Oid column_collation = attribute->attcollation;

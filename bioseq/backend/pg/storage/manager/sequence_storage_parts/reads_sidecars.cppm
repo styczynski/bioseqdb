@@ -115,7 +115,7 @@ begin_sequence_payload_read(Relation shard,
         make_member_range(td->natts);
     bioseq::postgres::support::postgres_integer_list projected;
     for (int i = 0; i < td->natts; ++i) {
-        if (!TupleDescAttr(td, i)->attisdropped && attr_needed.has_member(i)) {
+        if (!bioseq::postgres::support::tuple_descriptor_attribute(td, i)->attisdropped && attr_needed.has_member(i)) {
             projected.append(static_cast<AttrNumber>(i + 1));
         }
     }
@@ -241,7 +241,7 @@ sequence_storage_manager<
                loc.first_fragment_row);
     }
     bioseq::pg_types::seq* first_raw = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(first_vals[0]));
-    const Size first_raw_bytes = static_cast<Size>(VARSIZE(first_raw));
+    const Size first_raw_bytes = static_cast<Size>(bioseq::postgres::support::varlena_4byte_size(first_raw));
     if (first_raw_bytes < bioseq::pg_types::seq::header_bytes()) {
         validate_sequence_fragment_frame(
             first_raw_bytes, bioseq::pg_types::seq::header_bytes(),
@@ -381,7 +381,7 @@ sequence_storage_manager<
             bioseq_log<logging_level::error, logging_target::postgres>( "bioseq storage: sub-table row {} is NULL", row_no);
         }
         bioseq::pg_types::seq* raw = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(vals[0]));
-        const Size raw_bytes = static_cast<Size>(VARSIZE(raw));
+        const Size raw_bytes = static_cast<Size>(bioseq::postgres::support::varlena_4byte_size(raw));
         if (raw_bytes < bioseq::pg_types::seq::header_bytes()) {
             validate_sequence_fragment_frame(
                 raw_bytes, bioseq::pg_types::seq::header_bytes(), row_no);

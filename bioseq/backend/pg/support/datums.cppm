@@ -22,6 +22,8 @@ module;
 
 export module bioseq.postgres.support.datums;
 
+import bioseq.postgres.support;
+
 export namespace bioseq::postgres::support {
 
 /** @brief Defines typed conversion hooks to and from PostgreSQL Datum values. */
@@ -948,7 +950,7 @@ detoast_values(TupleDesc tuple_desc, Datum *original_values, bool *nulls)
 	for (int attribute_index = 0; attribute_index < natts; ++attribute_index)
 	{
 		if (!nulls[attribute_index]
-			&& TupleDescAttr(tuple_desc, attribute_index)->attlen == -1
+			&& bioseq::postgres::support::tuple_descriptor_attribute(tuple_desc, attribute_index)->attlen == -1
 			&& VARATT_IS_EXTENDED(DatumGetPointer(values[attribute_index])))
 		{
 			if (values == original_values)

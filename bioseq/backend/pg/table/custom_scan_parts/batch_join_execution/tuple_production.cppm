@@ -220,13 +220,13 @@ export {
             bioseq::pg_types::seq* flat =
                 reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(source.datum));
             MemoryContextSwitchTo(previous);
-            if (static_cast<std::size_t>(VARSIZE(flat)) < bioseq::pg_types::seq::header_bytes()) {
+            if (static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(flat)) < bioseq::pg_types::seq::header_bytes()) {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),
                          errmsg("BioseqBatchJoin target source is truncated"),
                          errdetail("attribute=%d bytes=%zu",
                                    static_cast<int>(source.resno),
-                                   static_cast<std::size_t>(VARSIZE(flat)))));
+                                   static_cast<std::size_t>(bioseq::postgres::support::varlena_4byte_size(flat)))));
             }
             slot->tts_values[source.resno - 1] = PointerGetDatum(flat);
         }

@@ -50,6 +50,8 @@ extern "C" {
 
 export module bioseq.postgres.support.row_codec_runtime_test_support:contract_core;
 
+import bioseq.postgres.support;
+
 import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.indexing.sql_row_codecs;
 import bioseq.postgres.storage.indexing.sql_rows;
@@ -206,7 +208,7 @@ template <class p_codec> void validate_descriptor_mutations(TupleDesc descriptor
     expect_descriptor_failure<p_codec>(mutated, "wrong-arity");
     mutated->natts = original_natts;
 
-    Form_pg_attribute first = TupleDescAttr(mutated, 0);
+    Form_pg_attribute first = bioseq::postgres::support::tuple_descriptor_attribute(mutated, 0);
     const Oid original_type = first->atttypid;
     first->atttypid = original_type == INT8OID ? INT4OID : INT8OID;
     expect_descriptor_failure<p_codec>(mutated, "wrong-type");
@@ -244,9 +246,9 @@ template <class p_codec> void validate_descriptor_mutations(TupleDesc descriptor
                          " has no same-type descriptor reorder pair");
     }
     Form_pg_attribute left_attribute =
-        TupleDescAttr(mutated, static_cast<int>(reorder_pair->first));
+        bioseq::postgres::support::tuple_descriptor_attribute(mutated, static_cast<int>(reorder_pair->first));
     Form_pg_attribute right_attribute =
-        TupleDescAttr(mutated, static_cast<int>(reorder_pair->second));
+        bioseq::postgres::support::tuple_descriptor_attribute(mutated, static_cast<int>(reorder_pair->second));
     const NameData left_name = left_attribute->attname;
     const NameData right_name = right_attribute->attname;
     left_attribute->attname = right_name;

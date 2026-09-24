@@ -132,7 +132,7 @@ export {
             Form_pg_attribute attribute =
                 source != nullptr && source->varattno > 0 &&
                         source->varattno <= relation_descriptor->natts
-                    ? TupleDescAttr(relation_descriptor, source->varattno - 1)
+                    ? bioseq::postgres::support::tuple_descriptor_attribute(relation_descriptor, source->varattno - 1)
                     : nullptr;
             if (source == nullptr || source->varno != scan->scan.scanrelid ||
                 source->varattno <= 0 || source->varlevelsup != 0 ||

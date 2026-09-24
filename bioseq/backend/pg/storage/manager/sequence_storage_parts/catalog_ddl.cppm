@@ -131,7 +131,7 @@ sequence_column_type_parameters column_typmod_at(TupleDesc parent_tupdesc, std::
                 "bioseq storage: column_attno {} out of bounds (natts={})",
                 column_attno, parent_tupdesc->natts));
     }
-    Form_pg_attribute attr = TupleDescAttr(parent_tupdesc, column_attno - 1);
+    Form_pg_attribute attr = bioseq::postgres::support::tuple_descriptor_attribute(parent_tupdesc, column_attno - 1);
     const std::int32_t typmod = attr->atttypmod;
     if (typmod < 0) {
         storage_error_as_cpp(
@@ -852,7 +852,7 @@ inline void validate_catalog(
         contract_error("attribute count changed");
     }
     for (const attribute_contract& expected : k_attribute_contracts) {
-        const Form_pg_attribute attribute = TupleDescAttr(
+        const Form_pg_attribute attribute = bioseq::postgres::support::tuple_descriptor_attribute(
             descriptor, expected.attno - 1);
         if (attribute->attnum != expected.attno
             || attribute->attisdropped

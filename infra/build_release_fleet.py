@@ -171,17 +171,19 @@ def status_snapshot():
     with ThreadPoolExecutor(max_workers=len(PLAN)) as pool:
         workers = dict(pool.map(observe, PLAN))
     try:
-        local = worker_diagnostics(
-            json.loads(Path(fleet.monitor.STATE_PATH).read_text()).get("benchmark-e2e", {}),
-            "benchmark-e2e")
+        local_state = json.loads(Path(fleet.monitor.STATE_PATH).read_text())
+        local = worker_diagnostics(local_state.get("benchmark-e2e", {}), "benchmark-e2e")
+        local_package = worker_diagnostics(local_state.get("package-macos", {}), "package-macos")
     except (OSError, ValueError) as error:
         local = {"observation_error": str(error)}
+        local_package = dict(local)
     return {
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "accepted_packages": inventory.get("validated_package_count", 0),
         "expected_packages": inventory.get("expected_package_count"),
         "website_manifest_present": (OUTPUT / "website/site-manifest.json").is_file(),
         "local_benchmark": local,
+        "local_package": local_package,
         "workers": workers,
     }
 
@@ -223,6 +225,10 @@ def write_release_manifest():
                 for distro in matrix["distributions"]
                 for architecture in matrix["architectures"]
                 for major in matrix["postgresql_majors"]}
+    # The local Apple Silicon worker contributes native installers to the same
+    # delivery inventory, but never consumes a Linux fleet scheduling cell.
+    expected.update({("macos", "arm64", major): "pkg"
+                     for major in matrix["postgresql_majors"]})
     packages = {}
     for source in sorted(destination.glob("*-manifest.json")):
         manifest = json.loads(source.read_text())
@@ -258,7 +264,7 @@ def write_release_manifest():
                           if package["installed_sql_smoke"].get("default_insert_search") is not True]
     write_json_atomic(destination / "manifest.json", {
         "schema_revision": 1,
-        "description": "Consolidated native package delivery inventory. Only ELF/payload-validated "
+        "description": "Consolidated native package delivery inventory. Only ELF or Mach-O/payload-validated "
                        "and fresh-PostgreSQL-tested archives are listed; local bytes are SHA-256 "
                        "verified. Package paths are relative to this directory. Website acceptance "
                        "is separate; this inventory does not claim website completion.",
@@ -581,6 +587,25 @@ def main():
             except Exception as error:
                 event("monitor_error", host=host, error=str(error))
         state["local_benchmark"] = fleet.monitor._local_state()
+        state["local_package"] = json.loads(Path(fleet.monitor.STATE_PATH).read_text()).get("package-macos", {})
+        local_refresh = state.get("local_refresh_after_current_pid")
+        if local_refresh and state["local_package"].get("status") != "running":
+            state.pop("local_refresh_after_current_pid")
+            write_json_atomic(STATE, state)
+            if (state["local_package"].get("pid") == local_refresh
+                    and not state["local_package"].get("cleanup_unverified")):
+                # Explicit one-shot refresh of packaging scripts after an
+                # in-flight Python worker drains. Ninja retains compiled work.
+                result = rpc([sys.executable, str(ROOT / "build_mcp/server.py")],
+                             "start_build", {"mode": "package-macos"})
+                event("local_macos_package_refresh", previous_pid=local_refresh, result=result)
+        local_manifest = OUTPUT / "packages/local-macos-manifest.json"
+        if local_manifest.exists():
+            digest = hashlib.sha256(local_manifest.read_bytes()).hexdigest()
+            if state.get("local_package_manifest_digest") != digest:
+                write_release_manifest()
+                state["local_package_manifest_digest"] = digest
+                event("local_macos_packages_collected")
         if args.daemon:
             dispatch_available(state)
         if args.daemon and time.time() - state.get("last_hourly_log", 0) >= 3600:
@@ -597,7 +622,8 @@ def main():
                 f"{ready_packages}/{inventory['expected_package_count']} also passed current functional acceptance. "
                 f"Active workers: {', '.join(active_jobs) or 'none'}. "
                 f"Failed workers requiring investigation: {', '.join(failed_jobs) or 'none'}. "
-                f"Local benchmark: {state['local_benchmark'].get('status')}; "
+                f"Local benchmark intentionally retired by user; local macOS package: {state['local_package'].get('status', 'not started')}, "
+                f"{state['local_package'].get('step', '')}; "
                 "AWS tuple admission remains disabled. See reporting/package_release_fleet/state.json.",
                 title="Native release fleet hourly checkpoint")
             state["last_hourly_log"] = time.time()

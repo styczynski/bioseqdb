@@ -31,6 +31,8 @@ extern "C" {
 
 export module bioseq.postgres.sql_boundary:result_materialization;
 
+import bioseq.postgres.support;
+
 import :error_boundary;
 import :owning_values;
 import :scalar_conversion;
@@ -451,7 +453,7 @@ void validate_result_descriptor(
          index < expected_fields;
          ++index) {
         const Form_pg_attribute attribute =
-            TupleDescAttr(
+            bioseq::postgres::support::tuple_descriptor_attribute(
                 tuple_descriptor,
                 static_cast<int>(index));
         if (attribute->attnum

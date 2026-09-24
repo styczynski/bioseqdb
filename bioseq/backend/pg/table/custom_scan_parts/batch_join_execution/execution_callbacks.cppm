@@ -318,7 +318,7 @@ export {
                     Form_pg_attribute attribute =
                         scan_desc == nullptr || site.resno <= 0 || site.resno > scan_desc->natts
                             ? nullptr
-                            : TupleDescAttr(scan_desc, site.resno - 1);
+                            : bioseq::postgres::support::tuple_descriptor_attribute(scan_desc, site.resno - 1);
                     if (attribute == nullptr ||
                         !is_bioseq_projection_funcid(site.funcid, get_cached_stub_oids()) ||
                         attribute->atttypid != get_func_rettype(site.funcid) ||
@@ -598,7 +598,7 @@ export {
                     runtime->target_storage_seq_attno <= 0 ||
                             runtime->target_storage_seq_attno > relation_desc->natts
                         ? nullptr
-                        : TupleDescAttr(relation_desc, runtime->target_storage_seq_attno - 1);
+                        : bioseq::postgres::support::tuple_descriptor_attribute(relation_desc, runtime->target_storage_seq_attno - 1);
                 if (storage_sequence_attribute == nullptr ||
                     storage_sequence_attribute->attisdropped ||
                     storage_sequence_attribute->atttypid !=

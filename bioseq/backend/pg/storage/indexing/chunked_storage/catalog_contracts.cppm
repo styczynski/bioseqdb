@@ -700,7 +700,7 @@ inspect_minimizer_generation_schema(Relation relation,
          ++index) {
         const minimizer_generation_index_attribute_descriptor& expected =
             k_minimizer_generation_index_attribute_descriptors[index];
-        Form_pg_attribute attribute = TupleDescAttr(tuple_desc, static_cast<int>(index));
+        Form_pg_attribute attribute = bioseq::postgres::support::tuple_descriptor_attribute(tuple_desc, static_cast<int>(index));
         if (attribute->attnum != expected.attno) {
             return {.error = minimizer_generation_schema_error::attribute_number};
         }
@@ -874,7 +874,7 @@ inspect_bound_minimizer_generation_schema(Relation relation,
          ++index) {
         const minimizer_generation_index_attribute_descriptor& expected =
             k_minimizer_generation_index_attribute_descriptors[index];
-        Form_pg_attribute attribute = TupleDescAttr(tuple_desc, static_cast<int>(index));
+        Form_pg_attribute attribute = bioseq::postgres::support::tuple_descriptor_attribute(tuple_desc, static_cast<int>(index));
         if (attribute->attnum != expected.attno) {
             return {.error = minimizer_generation_schema_error::attribute_number};
         }

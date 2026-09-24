@@ -59,9 +59,9 @@ export void save_stripe_skip_list(RelFileLocator relfilelocator,
             std::optional<bytea*> maximum_value;
             if (chunk->has_min_max) {
                 minimum_value = bioseq::postgres::support::pg_datum::from_raw(chunk->minimum_value)
-                                    .to_bytea(TupleDescAttr(tuple_descriptor, column_index));
+                                    .to_bytea(bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, column_index));
                 maximum_value = bioseq::postgres::support::pg_datum::from_raw(chunk->maximum_value)
-                                    .to_bytea(TupleDescAttr(tuple_descriptor, column_index));
+                                    .to_bytea(bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, column_index));
             }
             chunk_codec::encoded_row encoded = chunk_codec::encode(
                 chunk_row{

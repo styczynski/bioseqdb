@@ -241,7 +241,7 @@ minimizer_generation_source_identity(Oid /*main_relfilenode*/,
         TupleDesc source_desc = RelationGetDescr(state->source_relation);
         if (source_tablespace != identity.tablespace_oid ||
             identity.column_attno > source_desc->natts ||
-            TupleDescAttr(source_desc, identity.column_attno - 1)->attisdropped) {
+            bioseq::postgres::support::tuple_descriptor_attribute(source_desc, identity.column_attno - 1)->attisdropped) {
             minimizer_generation_storage_error(
                 "authoritative source relation/column identity changed");
         }
@@ -397,7 +397,7 @@ minimizer_generation_source_identity(Oid /*main_relfilenode*/,
                     "authoritative source fragment storage incarnation changed");
             }
             TupleDesc fragment_desc = RelationGetDescr(fragment_relation);
-            if (fragment_desc->natts != 1 || TupleDescAttr(fragment_desc, 0)->attisdropped) {
+            if (fragment_desc->natts != 1 || bioseq::postgres::support::tuple_descriptor_attribute(fragment_desc, 0)->attisdropped) {
                 switch_context(previous_context);
                 minimizer_generation_storage_error(
                     "authoritative source fragment schema disagrees");
@@ -724,7 +724,7 @@ authorize_minimizer_generation_catalog_source_pg(
         TupleDesc source_desc = RelationGetDescr(state->source_relation);
         if (source_tablespace != identity.tablespace_oid ||
             identity.column_attno > source_desc->natts ||
-            TupleDescAttr(source_desc, identity.column_attno - 1)->attisdropped) {
+            bioseq::postgres::support::tuple_descriptor_attribute(source_desc, identity.column_attno - 1)->attisdropped) {
             minimizer_generation_storage_error("catalog source relation/column identity changed");
         }
 

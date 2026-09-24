@@ -216,10 +216,10 @@ export stripe_skip_list* read_stripe_skip_list(RelFileLocator relfilelocator,
             bytea* max_value = *row.maximum_value;
 
             chunk->minimum_value = bioseq::postgres::support::pg_datum::from_bytea(
-                                       min_value, TupleDescAttr(tuple_descriptor, column_index))
+                                       min_value, bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, column_index))
                                        .raw();
             chunk->maximum_value = bioseq::postgres::support::pg_datum::from_bytea(
-                                       max_value, TupleDescAttr(tuple_descriptor, column_index))
+                                       max_value, bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, column_index))
                                        .raw();
 
             chunk->has_min_max = true;

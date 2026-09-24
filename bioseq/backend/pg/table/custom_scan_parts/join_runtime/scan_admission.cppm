@@ -186,7 +186,7 @@ export {
                             : nullptr;
                     Form_pg_attribute relation_attribute =
                         column_attno > 0 && column_attno <= relation_natts
-                            ? TupleDescAttr(relation_descriptor, column_attno - 1)
+                            ? bioseq::postgres::support::tuple_descriptor_attribute(relation_descriptor, column_attno - 1)
                             : nullptr;
                     if (resno <= 0 || resno > projected_natts || producer_id < 0 ||
                         column_attno <= 0 || column_attno > relation_natts ||
@@ -646,7 +646,7 @@ export {
                 continue;
             }
             Form_pg_attribute attribute_form =
-                TupleDescAttr(tuple_descriptor, col_var->varattno - 1);
+                bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, col_var->varattno - 1);
             if (attribute_form->atttypid != scan_stub_oids.bioseq_seq_type_oid) {
                 bioseq_log<logging_level::debug>("[bioseq] pg: BeginCustomScan() mmsearch arg0 "
                                                  "column type is {}, expected bioseq.seq ({})",
@@ -719,7 +719,7 @@ export {
             if (primary_key_attno != InvalidAttrNumber &&
                 primary_key_attno <= tuple_descriptor->natts) {
                 Form_pg_attribute pk_attr_form =
-                    TupleDescAttr(tuple_descriptor, primary_key_attno - 1);
+                    bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, primary_key_attno - 1);
                 if (pk_attr_form->atttypid != INT4OID) {
                     bioseq_log<logging_level::debug>("[bioseq] pg: BeginCustomScan() primary "
                                                      "key column type is {} not INT4OID; "
@@ -781,7 +781,7 @@ export {
                                             "incompatible alphabet")));
                         }
                     }
-                    const size_t query_total_bytes = static_cast<size_t>(VARSIZE(normalized_query));
+                    const size_t query_total_bytes = static_cast<size_t>(bioseq::postgres::support::varlena_4byte_size(normalized_query));
                     std::vector<char> query_varlena_bytes(query_total_bytes);
                     std::memcpy(query_varlena_bytes.data(), normalized_query, query_total_bytes);
                     if (normalized_query != query_hdr)
@@ -819,7 +819,7 @@ export {
                         raise_mmsearch_alphabet_mismatch(
                             unpacked_typmod, mismatch, "literal binding");
                     }
-                    const size_t query_total_bytes = static_cast<size_t>(VARSIZE(query_hdr));
+                    const size_t query_total_bytes = static_cast<size_t>(bioseq::postgres::support::varlena_4byte_size(query_hdr));
                     std::vector<char> query_varlena_bytes(query_total_bytes);
                     std::memcpy(query_varlena_bytes.data(), query_hdr, query_total_bytes);
                     if (reinterpret_cast<void*>(query_hdr) !=
@@ -861,7 +861,7 @@ export {
                                             "incompatible alphabet")));
                         }
                         if (rewidthed != nullptr) {
-                            const size_t rewidthed_bytes = static_cast<size_t>(VARSIZE(rewidthed));
+                            const size_t rewidthed_bytes = static_cast<size_t>(bioseq::postgres::support::varlena_4byte_size(rewidthed));
                             std::vector<char> coalesced_bytes(rewidthed_bytes);
                             std::memcpy(coalesced_bytes.data(), rewidthed, rewidthed_bytes);
                             pfree(rewidthed);

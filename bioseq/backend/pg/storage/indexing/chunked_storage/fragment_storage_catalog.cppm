@@ -976,7 +976,7 @@ fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_
                     const minimizer_generation_index_attribute_descriptor* expected =
                         descriptors + attribute_index;
                     Form_pg_attribute attribute =
-                        TupleDescAttr(tuple_desc, static_cast<int>(attribute_index));
+                        bioseq::postgres::support::tuple_descriptor_attribute(tuple_desc, static_cast<int>(attribute_index));
                     if (attribute->attnum != expected->attno || attribute->attisdropped ||
                         std::strcmp(NameStr(attribute->attname), expected->name.data()) != 0 ||
                         attribute->atttypid != expected->type_oid || !attribute->attnotnull) {

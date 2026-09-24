@@ -247,7 +247,7 @@ validate_relation_shape(Relation relation,
         const bioseq::postgres::support::row_descriptor_field& expected = attributes[index];
         const default_kind expected_default_kind = defaults[index];
         const Form_pg_attribute attribute =
-            TupleDescAttr(descriptor, expected.attribute_number - 1);
+            bioseq::postgres::support::tuple_descriptor_attribute(descriptor, expected.attribute_number - 1);
         const bool expects_default = expected_default_kind != default_kind::none;
         if (attribute->attnum != expected.attribute_number || attribute->attisdropped ||
             attribute->attinhcount != 0 || !attribute->attislocal ||

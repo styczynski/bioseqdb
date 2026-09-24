@@ -151,7 +151,7 @@ void tuple_dispatch_buffer::capture_target_datum_(buffered_scan_entry& entry, Da
                     (errcode(ERRCODE_DATATYPE_MISMATCH),
                      errmsg("bioseq mmsearch target payload typmod changed after planning")));
         }
-        const size_t total_bytes = static_cast<size_t>(VARSIZE(header));
+        const size_t total_bytes = static_cast<size_t>(bioseq::postgres::support::varlena_4byte_size(header));
         entry.seq_varlena.assign(reinterpret_cast<const char*>(header),
                                  reinterpret_cast<const char*>(header) + total_bytes);
     }
@@ -205,7 +205,7 @@ void tuple_dispatch_buffer::capture_query_datum_(buffered_scan_entry& entry, Dat
         }
         dispatch_header = rewidth;
     }
-    const size_t total_bytes = static_cast<size_t>(VARSIZE(dispatch_header));
+    const size_t total_bytes = static_cast<size_t>(bioseq::postgres::support::varlena_4byte_size(dispatch_header));
     entry.per_row_query_varlena.assign(reinterpret_cast<const char*>(dispatch_header),
                                        reinterpret_cast<const char*>(dispatch_header) +
                                            total_bytes);
@@ -227,11 +227,11 @@ void tuple_dispatch_buffer::retain_expanded_sequence_output_attributes_(buffered
                  errmsg("bioseq dispatch output slot descriptor is invalid")));
     }
     const Oid sequence_type_oid =
-        TupleDescAttr(slot->tts_tupleDescriptor, mmsearch_state.seq_attno - 1)->atttypid;
+        bioseq::postgres::support::tuple_descriptor_attribute(slot->tts_tupleDescriptor, mmsearch_state.seq_attno - 1)->atttypid;
     entry.expanded_sequence_attributes.clear();
     for (int index = 0; index < slot->tts_tupleDescriptor->natts; ++index) {
         if (slot->tts_isnull[index] ||
-            TupleDescAttr(slot->tts_tupleDescriptor, index)->atttypid != sequence_type_oid) {
+            bioseq::postgres::support::tuple_descriptor_attribute(slot->tts_tupleDescriptor, index)->atttypid != sequence_type_oid) {
             continue;
         }
         const Datum value = slot->tts_values[index];

@@ -182,7 +182,7 @@ numeric_digits(const NumericData* numeric) noexcept {
 
 /** Returns the count of base-10000 digits in one Numeric value. */
 [[gnu::always_inline]] inline int numeric_digit_count(const NumericData* numeric) noexcept {
-    return static_cast<int>((VARSIZE(numeric) - numeric_header_size(numeric)) /
+    return static_cast<int>((bioseq::postgres::support::varlena_4byte_size(numeric) - numeric_header_size(numeric)) /
                             sizeof(numeric_digit));
 }
 

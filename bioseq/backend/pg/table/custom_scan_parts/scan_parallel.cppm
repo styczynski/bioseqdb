@@ -264,7 +264,7 @@ export {
 
             /* neededAttrSet already represents 0-indexed attribute numbers */
             Form_pg_attribute column_form =
-                TupleDescAttr(RelationGetDescr(bioseq_column_relation), bms_member);
+                bioseq::postgres::support::tuple_descriptor_attribute(RelationGetDescr(bioseq_column_relation), bms_member);
             if (column_form->attisdropped) {
                 bioseq_report<logging_level::error, logging_target::postgres>()
                     .with_sql_error_code(ERRCODE_UNDEFINED_COLUMN)

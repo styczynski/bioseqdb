@@ -36,6 +36,7 @@ from pathlib import Path
 
 
 import package_linux
+import package_macos
 
 _DEFAULT_REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
@@ -213,6 +214,7 @@ WEBSITE_DEBUG_BUILD_PRESET = _website_build_preset(
 POSTGRES_ERROR_SAFETY_MODE = "postgres-error-safety"
 
 PACKAGE_LINUX_MODE = package_linux.MODE
+PACKAGE_MACOS_MODE = package_macos.MODE
 
 LINT_FOCUSED_MODE = "lint-focused"
 
@@ -546,6 +548,19 @@ MODES: Dict[str, ModeDefinition] = {
         commands=[],
         preset_override=PACKAGE_LINUX_MODE,
         reporting_subdir_name=package_linux.REPORTING_SUBDIR,
+        hard_timeout_min=720.0,
+    ),
+    PACKAGE_MACOS_MODE: ModeDefinition(
+        lock_group=PACKAGE_MACOS_MODE,
+        expected_duration_min=240.0,
+        build_only_expected_duration_min=240.0,
+        label="Native macOS installer packages",
+        docs="Build optimized native macOS .pkg files, inspect Mach-O dependencies and validate extracted payloads in private PostgreSQL clusters; PG17 first.",
+        is_verb_plular=False,
+        targets=[],
+        commands=[],
+        preset_override=PACKAGE_MACOS_MODE,
+        reporting_subdir_name=package_macos.REPORTING_SUBDIR,
         hard_timeout_min=720.0,
     ),
     LINT_FOCUSED_MODE: ModeDefinition(
@@ -1034,6 +1049,7 @@ REMOTE_RUN_REJECTED_MODES: Set[str] = {
     "highway-gcc-canary",
     POSTGRES_ERROR_SAFETY_MODE,
     PACKAGE_LINUX_MODE,
+    PACKAGE_MACOS_MODE,
     *FIXED_BUILD_ONLY_MODES,
 }
 

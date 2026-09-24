@@ -137,7 +137,7 @@ export {
                 static_cast<std::size_t>(source->tts_tupleDescriptor->natts));
             for (int index = 0; index < source->tts_tupleDescriptor->natts; ++index) {
                 if (source->tts_isnull[index] ||
-                    TupleDescAttr(source->tts_tupleDescriptor, index)->atttypid != sequence_type) {
+                    bioseq::postgres::support::tuple_descriptor_attribute(source->tts_tupleDescriptor, index)->atttypid != sequence_type) {
                     continue;
                 }
                 const Datum attribute = source->tts_values[index];

@@ -23,6 +23,8 @@ extern "C" {
 
 export module bioseq.postgres.table:custom_scan_slice_execution_tuple_production;
 
+import bioseq.postgres.support;
+
 import std;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.storage.scanner;
@@ -95,7 +97,7 @@ export {
         for (std::uint32_t index = 0u; index < runtime.output_binding_count; ++index) {
             auto const& binding = runtime.output_bindings[index];
             if (binding.resno <= 0 || binding.resno > result->tts_tupleDescriptor->natts ||
-                TupleDescAttr(result->tts_tupleDescriptor, binding.resno - 1)->atttypid !=
+                bioseq::postgres::support::tuple_descriptor_attribute(result->tts_tupleDescriptor, binding.resno - 1)->atttypid !=
                     seq_oid) {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATA_CORRUPTED),

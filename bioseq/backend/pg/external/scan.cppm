@@ -35,6 +35,8 @@ extern "C" {
 
 export module bioseq.postgres.external.scan;
 
+import bioseq.postgres.support;
+
 import bioseq.postgres.external.relation;
 import bioseq.postgres.external.path_builder_slot;
 import bioseq.postgres.external.row_writer;
@@ -572,7 +574,7 @@ add_pushdown_clause(Node *clause, TupleDesc tuple_descriptor,
 		extracted->column->varattno > tuple_descriptor->natts)
         return;
 	const char *column_name = NameStr(
-		TupleDescAttr(tuple_descriptor, extracted->column->varattno - 1)->attname);
+		bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, extracted->column->varattno - 1)->attname);
 
 	if (std::strcmp(column_name, "provider") == 0)
     {

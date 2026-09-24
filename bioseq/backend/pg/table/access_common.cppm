@@ -175,7 +175,7 @@ build_needed_column_list(TupleDesc tuple_descriptor,
                          const bioseq::postgres::support::postgres_bitmapset& attributes_needed) {
     bioseq::postgres::support::postgres_integer_list columns;
     for (int attribute_index = 0; attribute_index < tuple_descriptor->natts; ++attribute_index) {
-        if (TupleDescAttr(tuple_descriptor, attribute_index)->attisdropped) {
+        if (bioseq::postgres::support::tuple_descriptor_attribute(tuple_descriptor, attribute_index)->attisdropped) {
             continue;
         }
         if (attributes_needed.has_member(attribute_index)) {

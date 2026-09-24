@@ -879,7 +879,7 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                                      errmsg("Bioseq locator passthrough row-number projection is "
                                             "invalid")));
                         }
-                        Form_pg_attribute rowno_attribute = TupleDescAttr(
+                        Form_pg_attribute rowno_attribute = bioseq::postgres::support::tuple_descriptor_attribute(
                             projected->tts_tupleDescriptor, runtime.locator_rowno_resno - 1);
                         if (rowno_attribute->atttypid != INT8OID) {
                             ereport(ERROR,

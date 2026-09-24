@@ -2,9 +2,9 @@
   "description": "Temporary queue ownership for targeted bug-fix build/verification; other workers continue measuring.",
   "hosts": {
     "local": {
-      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "reason": "User ended local tuple collection on 2026-09-24; native macOS package builds own this machine",
       "paused": true,
-      "owner": "fast_remote_e2e"
+      "owner": "package_release_fleet"
     },
     "test3-m4": {
       "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
