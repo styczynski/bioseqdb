@@ -186,22 +186,29 @@ started=true
 def build_one(repository, major, state, output, run, progress):
     pg_opt = Path(f'/opt/homebrew/opt/postgresql@{major}')
     pg_config = pg_opt / 'bin/pg_config'
+    formula = (f'petere/postgresql/postgresql@{major}' if major == 19
+               else f'postgresql@{major}')
     if not pg_config.is_file():
         progress(f'installing exact Homebrew PostgreSQL {major} SDK/runtime')
-        run(['/opt/homebrew/bin/brew', 'install', f'postgresql@{major}'])
+        # The versioned upstream-maintainer tap supplies PG19 beta alongside
+        # stable core formulae. Never install its HEAD as a different major.
+        run(['/opt/homebrew/bin/brew', 'install', formula])
     version = run([pg_config, '--version'], capture=True).strip()
     if re.search(rf'^PostgreSQL {major}(?:\D|$)', version) is None:
         raise RuntimeError(f'Wrong PostgreSQL SDK: {version}')
     pg_prefix = pg_opt.resolve()
-    # Stable Homebrew lib/share destinations, never versioned Cellar paths.
+    # Core formulae use global versioned lib/share directories. A third-party
+    # keg may keep these inside its Cellar prefix: retain that real prefix, not
+    # an opt symlink which Installer could replace with a payload directory.
     def stable_path(flag):
-        path = Path(run([pg_config, flag], capture=True).strip())
-        if path.is_relative_to(pg_prefix):
-            return pg_opt / path.relative_to(pg_prefix)
-        return path
+        return Path(run([pg_config, flag], capture=True).strip())
     libdir, sharedir = stable_path('--pkglibdir'), stable_path('--sharedir')
     if not all(p.is_relative_to('/opt/homebrew') for p in (libdir, sharedir)):
         raise RuntimeError('Unexpected Homebrew extension directories')
+    matching_keg = any(p.is_relative_to(pg_prefix) for p in (libdir, sharedir))
+    required_config = pg_prefix / 'bin/pg_config' if matching_keg else pg_config
+    runtime_requirement = (f'{version}; exact keg {pg_prefix}' if matching_keg
+                           else f'Homebrew PostgreSQL {major}')
     build = state / f'pg{major}'
     progress(f'configuring optimized native arm64 PostgreSQL {major} production modules')
     flags = '-O3 -DNDEBUG -fno-omit-frame-pointer'
@@ -263,9 +270,9 @@ def build_one(repository, major, state, output, run, progress):
     preinstall = scripts / 'preinstall'
     preinstall.write_text(f'''#!/bin/sh
 set -eu
-pg_config="{pg_opt}/bin/pg_config"
+pg_config="{required_config}"
 if [ ! -x "$pg_config" ] || ! "$pg_config" --version | /usr/bin/grep -Eq '^PostgreSQL {major}([^0-9]|$)'; then
-  echo 'Install Homebrew postgresql@{major} before this BioseqDB package.' >&2
+  echo 'Required runtime: {runtime_requirement}. Install {formula} before this package.' >&2
   exit 1
 fi
 if [ "$(/usr/bin/uname -m)" != arm64 ]; then
@@ -276,7 +283,10 @@ fi
     preinstall.chmod(0o755)
     readme = staged_share / f'bioseq-pg{major}-README.txt'
     readme.write_text(f'''BioseqDB {VERSION} — PostgreSQL {major}, native macOS arm64
-Unsigned and unnotarized alpha. Requires Homebrew postgresql@{major}.
+Unsigned and unnotarized alpha. Required runtime: {runtime_requirement}.
+SDK installation: brew install {formula}
+Required pg_config: {required_config}
+Prerelease PostgreSQL SDKs may change ABI; this package does not prove compatibility with another beta.
 Built with Clang, -O3 -DNDEBUG, all_alphabets_uint64; E2E instrumentation OFF.
 Quit/restart PostgreSQL when installing or upgrading loaded extension files.
 Add bioseq to shared_preload_libraries, restart PostgreSQL, then run:
@@ -315,6 +325,8 @@ This package is not qualified for Intel Macs or non-Homebrew PostgreSQL distribu
     os.replace(candidate, final)
     return dict(file=str(final.relative_to(output)), bytes=final.stat().st_size,
         sha256=sha256(final), distro='macos', postgres_major=major,
+        postgres_version=version, postgres_runtime_requirement=runtime_requirement,
+        postgres_sdk_formula=formula,
         validation=dict(passed=True, format='pkg', package_version=VERSION,
                         architecture='arm64', mach_o=mach_o, notarized=False,
                         code_signature='ad-hoc Mach-O only; installer unsigned'),
