@@ -11,9 +11,11 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -105,6 +107,83 @@ print(json.dumps(state))
         "status", "step", "pid", "active_pid", "log_file", "notes", "completed_at",
         "report_files", "build_dir", "bench_e2e_config", "cleanup_unverified",
         "package_manifest_digest")}
+
+
+def worker_diagnostics(state, mode):
+    """Read process identity and compiler errors; never change worker lifecycle.
+
+    Keep this helper self-contained: the status command sends its source over
+    SSH, so live workers do not need a source sync to expose diagnostics.
+    """
+    result = {key: state.get(key) for key in (
+        "status", "step", "pid", "log_file", "notes", "cleanup_unverified")}
+    result["pid_live"] = False
+    result["compiler_errors"] = []
+    pid = state.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        try:
+            process = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "args="], capture_output=True,
+                text=True, timeout=5)
+            result["pid_live"] = (process.returncode == 0
+                and "server.py" in process.stdout
+                and f"--run-build {mode} " in process.stdout + " ")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            result["process_observation_error"] = str(error)
+    if state.get("log_file"):
+        ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+        diagnostic = re.compile(
+            r":\d+:\d+: (?:fatal )?error:|^FAILED:|^ninja: build|"
+            r"^(?:clang(?:\+\+|-[0-9]+)?|ld(?:\.lld)?): (?:fatal )?error:")
+        try:
+            with Path(state["log_file"]).open(errors="replace") as lines:
+                for number, line in enumerate(lines, 1):
+                    line = ansi.sub("", line).strip()
+                    if diagnostic.search(line):
+                        result["compiler_errors"].append(
+                            {"line": number, "text": line[:450]})
+                        if len(result["compiler_errors"]) == 3:
+                            break
+        except OSError as error:
+            result["log_observation_error"] = str(error)
+    return result
+
+
+def status_snapshot():
+    """Observe the fleet without the controller lock, collection or admission."""
+    state = json.loads(STATE.read_text()) if STATE.exists() else {"jobs": {}}
+    manifest = OUTPUT / "packages/manifest.json"
+    inventory = json.loads(manifest.read_text()) if manifest.exists() else {}
+    # Sending the same helper used locally also permits offline mocked tests.
+    source = ("import json, re, subprocess\nfrom pathlib import Path\n"
+              + inspect.getsource(worker_diagnostics))
+    def observe(host):
+        job = state["jobs"].get(host, {})
+        mode = job_mode(host, job)
+        command = source + (
+            "\nstate=json.loads(Path('/tmp/bioseq_build_mcp_state.json').read_text())"
+            f".get({mode!r}, {{}})\nprint(json.dumps(worker_diagnostics(state, {mode!r})))\n")
+        try:
+            result = json.loads(remote(host, "python3 -c " + shlex.quote(command), timeout=40))
+        except Exception as error:
+            result = {"observation_error": str(error)}
+        return host, {"cell": job.get("cell"), "mode": mode, **result}
+    with ThreadPoolExecutor(max_workers=len(PLAN)) as pool:
+        workers = dict(pool.map(observe, PLAN))
+    try:
+        local = worker_diagnostics(
+            json.loads(Path(fleet.monitor.STATE_PATH).read_text()).get("benchmark-e2e", {}),
+            "benchmark-e2e")
+    except (OSError, ValueError) as error:
+        local = {"observation_error": str(error)}
+    return {
+        "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "accepted_packages": inventory.get("validated_package_count", 0),
+        "expected_packages": inventory.get("expected_package_count"),
+        "website_manifest_present": (OUTPUT / "website/site-manifest.json").is_file(),
+        "local_benchmark": local,
+        "workers": workers,
+    }
 
 
 def sync_source(host, roots=SOURCE_ROOTS):
@@ -391,6 +470,8 @@ def dispatch_available(state):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--status", action="store_true",
+                        help="Read-only JSON snapshot, including live PIDs and compiler diagnostics")
     parser.add_argument("--launch", action="store_true")
     parser.add_argument("--daemon", action="store_true")
     parser.add_argument("--retry", choices=list(PLAN))
@@ -402,6 +483,12 @@ def main():
                         help="Queue one source refresh after this exact MCP job drains, without interrupting it")
     parser.add_argument("--retry-failed", action="store_true")
     args = parser.parse_args()
+    if args.status:
+        if any((args.launch, args.daemon, args.retry, args.revalidate,
+                args.retry_after_failure, args.refresh_after_current, args.retry_failed)):
+            parser.error("--status cannot be combined with lifecycle actions")
+        print(json.dumps(status_snapshot(), indent=2))
+        return
     CONTROL.mkdir(parents=True, exist_ok=True)
     lock = (CONTROL / "controller.lock").open("a")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

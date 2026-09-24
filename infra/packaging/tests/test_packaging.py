@@ -103,6 +103,45 @@ def cell_context(
 
 
 class ReleaseFleetAssignmentTests(unittest.TestCase):
+    def test_worker_status_strips_colors_without_hiding_live_failed_compilation(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        diagnose = namespace["worker_diagnostics"]
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "compiler.log"
+            log.write_text(
+                "a.cppm:1:1: warning: harmless\n"
+                "\x1b[1ma.cppm:8:3: \x1b[31merror: \x1b[0munknown member\n"
+                "ld.lld: error: undefined symbol\n")
+            state = dict(pid=123, status="running", log_file=str(log))
+            with mock.patch.object(subprocess, "run", return_value=SimpleNamespace(
+                    returncode=0, stdout="python3 /repo/build_mcp/server.py --run-build package-linux --debug false")):
+                observed = diagnose(state, "package-linux")
+            self.assertTrue(observed["pid_live"])
+            self.assertEqual(observed["status"], "running")
+            self.assertEqual(observed["compiler_errors"], [
+                {"line": 2, "text": "a.cppm:8:3: error: unknown member"},
+                {"line": 3, "text": "ld.lld: error: undefined symbol"}])
+            with mock.patch.object(subprocess, "run", return_value=SimpleNamespace(
+                    returncode=0, stdout="python3 unrelated.py")):
+                self.assertFalse(diagnose(state, "package-linux")["pid_live"])
+
+    def test_status_cli_does_not_acquire_lifecycle_lock_or_collect(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        main = namespace["main"]
+        snapshot = mock.Mock(return_value={"accepted_packages": 10})
+        with mock.patch.dict(main.__globals__, {"status_snapshot": snapshot}), \
+                mock.patch.object(sys, "argv", ["build_release_fleet.py", "--status"]), \
+                mock.patch.object(Path, "mkdir", side_effect=AssertionError("status wrote a directory")), \
+                mock.patch.object(namespace["fcntl"], "flock", side_effect=AssertionError("status locked lifecycle")), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            main()
+        snapshot.assert_called_once_with()
+        self.assertEqual(json.loads(output.getvalue()), {"accepted_packages": 10})
+
     def test_former_website_host_keeps_dispatching_packages(self) -> None:
         # Load scheduler logic without importing live benchmark-fleet clients.
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
