@@ -32,6 +32,9 @@ extern "C" {
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
 #include "commands/explain.h"
+#if PG_VERSION_NUM >= 180000
+#include "commands/explain_format.h"
+#endif
 #include "executor/execdesc.h"
 #include "executor/executor.h"
 #include "executor/spi.h"

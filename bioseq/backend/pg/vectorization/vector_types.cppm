@@ -313,7 +313,13 @@ HeapTuple copy_vector_heap_tuple(TupleTableSlot*) {
 }
 
 /** Rejects conversion of a vector batch to a minimal tuple. */
-MinimalTuple copy_vector_minimal_tuple(TupleTableSlot*) {
+MinimalTuple copy_vector_minimal_tuple(TupleTableSlot*
+#if PG_VERSION_NUM >= 180000
+    // PG18 adds space before a copied tuple. Batch-to-scalar conversion is
+    // unsupported regardless of that space, exactly as on PG17.
+    , Size
+#endif
+) {
     ereport(ERROR,
             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
              errmsg("a vector batch slot cannot be converted to a minimal tuple")));

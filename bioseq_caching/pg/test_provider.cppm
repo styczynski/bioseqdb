@@ -17,6 +17,9 @@ extern "C" {
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_namespace_d.h"
 #include "commands/explain.h"
+#if PG_VERSION_NUM >= 180000
+#include "commands/explain_format.h"
+#endif
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "funcapi.h"

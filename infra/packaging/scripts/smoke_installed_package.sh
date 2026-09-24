@@ -79,8 +79,19 @@ install_debian_package() {
 }
 
 install_fedora_package() {
-  dnf install -y --allowerasing ca-certificates shadow-utils util-linux \
-    "postgresql${postgres_major}" "postgresql${postgres_major}-server"
+  dnf install -y --allowerasing ca-certificates curl shadow-utils util-linux
+  if ! dnf install -y --allowerasing \
+      "postgresql${postgres_major}" "postgresql${postgres_major}-server"; then
+    (( postgres_major >= 19 )) || die "requested Fedora PostgreSQL packages are unavailable"
+    local pgdg_url="https://download.postgresql.org/pub/repos/yum/testing/${postgres_major}/fedora/fedora-${VERSION_ID}-$(uname -m)"
+    curl -fsSL --retry 3 "${pgdg_url}/repodata/repomd.xml" >/dev/null \
+      || die "no native PGDG prerelease repository at ${pgdg_url}"
+    dnf -y --allowerasing \
+      --repofrompath="bioseq-pgdg,${pgdg_url}" \
+      --setopt=bioseq-pgdg.gpgcheck=1 \
+      --setopt=bioseq-pgdg.gpgkey=https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-Fedora \
+      install "postgresql${postgres_major}" "postgresql${postgres_major}-server"
+  fi
   dnf install -y --allowerasing --nogpgcheck "${package_path}"
   rpm -q "${package_name}"
 }
@@ -90,7 +101,7 @@ install_opensuse_package() {
       "postgresql${postgres_major}" "postgresql${postgres_major}-server" \
       libvulkan1 shadow util-linux; then
     zypper --non-interactive addrepo --refresh \
-      "https://download.opensuse.org/repositories/server:database:postgresql/${VERSION_ID}/server:database:postgresql.repo" \
+      "https://download.opensuse.org/repositories/server:/database:/postgresql/${VERSION_ID}/" \
       bioseq-postgresql
     zypper --gpg-auto-import-keys --non-interactive refresh
     zypper --non-interactive install -y --allow-vendor-change \

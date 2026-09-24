@@ -99,12 +99,23 @@ install_fedora_dependencies() {
     libXfixes-devel libXcursor-devel libXinerama-devel libxcb-devel \
     libxkbcommon-devel wayland-devel wayland-protocols-devel
 
-  # Fedora's versioned server headers and pg_config are supplied by the
-  # official server-devel package. Do not fall back to PGDG here: Fedora 44's
-  # PGDG repository does not publish the requested aarch64 repo RPM.
-  dnf install -y --allowerasing \
+  # Stable Fedora packages include both native architectures. Prerelease
+  # servers may instead be published by PGDG; use only a matching Fedora/
+  # architecture repository and retain RPM signature verification.
+  if dnf install -y --allowerasing \
     "postgresql${BIOSEQ_POSTGRES_MAJOR}-server-devel" \
-    "postgresql${BIOSEQ_POSTGRES_MAJOR}-server"
+    "postgresql${BIOSEQ_POSTGRES_MAJOR}-server"; then
+    return
+  fi
+  (( BIOSEQ_POSTGRES_MAJOR >= 19 )) || die "requested Fedora PostgreSQL packages are unavailable"
+  local pgdg_url="https://download.postgresql.org/pub/repos/yum/testing/${BIOSEQ_POSTGRES_MAJOR}/fedora/fedora-${VERSION_ID}-$(uname -m)"
+  curl -fsSL --retry 3 "${pgdg_url}/repodata/repomd.xml" >/dev/null \
+    || die "no native PGDG prerelease repository at ${pgdg_url}"
+  dnf -y --allowerasing \
+    --repofrompath="bioseq-pgdg,${pgdg_url}" \
+    --setopt=bioseq-pgdg.gpgcheck=1 \
+    --setopt=bioseq-pgdg.gpgkey=https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-Fedora \
+    install "postgresql${BIOSEQ_POSTGRES_MAJOR}-devel" "postgresql${BIOSEQ_POSTGRES_MAJOR}-server"
 }
 
 install_opensuse_dependencies() {
@@ -121,7 +132,7 @@ install_opensuse_dependencies() {
       "postgresql${BIOSEQ_POSTGRES_MAJOR}-server-devel" \
       "postgresql${BIOSEQ_POSTGRES_MAJOR}-server"; then
     zypper --non-interactive addrepo --refresh \
-      "https://download.opensuse.org/repositories/server:database:postgresql/${VERSION_ID}/server:database:postgresql.repo" \
+      "https://download.opensuse.org/repositories/server:/database:/postgresql/${VERSION_ID}/" \
       bioseq-postgresql
     zypper --gpg-auto-import-keys --non-interactive refresh
     zypper --non-interactive install -y --allow-vendor-change \
@@ -155,6 +166,12 @@ case "${distro_id}" in
   arch|archarm) install_arch_dependencies ;;
   *) die "unsupported distro ID ${distro_id}" ;;
 esac
+
+# Reject unavailable server majors before downloading compiler toolchains or
+# populating persistent caches. Never substitute the distro's current major.
+pg_config_path="$(BIOSEQ_POSTGRES_MAJOR="${BIOSEQ_POSTGRES_MAJOR}" \
+  python3 /source/infra/packaging/scripts/resolve_pg_config.py)"
+[[ -x "${pg_config_path}" ]] || die "resolved pg_config is not executable"
 
 # Arch's makepkg drops to an unprivileged user. Give only the ephemeral chrt
 # executable the capability it needs so the launcher can set SCHED_RR/1 and
@@ -321,10 +338,6 @@ install_vcpkg
 # writable before rpmbuild/dpkg-buildpackage/makepkg starts.
 mkdir -p "${cmake_cache_root}/build"
 chmod -R a+rwX "${cmake_cache_root}"
-
-pg_config_path="$(BIOSEQ_POSTGRES_MAJOR="${BIOSEQ_POSTGRES_MAJOR}" \
-  python3 /source/infra/packaging/scripts/resolve_pg_config.py)"
-[[ -x "${pg_config_path}" ]] || die "resolved pg_config is not executable"
 
 mkdir -p /opt/bioseq-package-toolchain/state
 printf '%s\n' "${pg_config_path}" \

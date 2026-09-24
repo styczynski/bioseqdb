@@ -58,13 +58,24 @@ namespace {
 void call_previous_or_standard_executor_run(
 		QueryDesc* query_desc,
 		ScanDirection direction,
-		uint64 count,
-		bool execute_once)
+		uint64 count
+#if PG_VERSION_NUM < PG_VERSION_18
+		, bool execute_once
+#endif
+)
 {
 	if (previous_executor_run_hook != nullptr) {
-		previous_executor_run_hook(query_desc, direction, count, execute_once);
+		previous_executor_run_hook(query_desc, direction, count
+#if PG_VERSION_NUM < PG_VERSION_18
+			, execute_once
+#endif
+		);
 	} else {
-		standard_ExecutorRun(query_desc, direction, count, execute_once);
+		standard_ExecutorRun(query_desc, direction, count
+#if PG_VERSION_NUM < PG_VERSION_18
+			, execute_once
+#endif
+		);
 	}
 }
 
@@ -75,18 +86,26 @@ void call_previous_or_standard_executor_run(
  * @param[in,out] query_desc PostgreSQL query descriptor for this executor invocation.
  * @param[in] direction Requested scan direction.
  * @param[in] count Maximum tuples to emit, or zero for an unbounded run.
- * @param[in] execute_once PostgreSQL execute-once hint forwarded unchanged.
+ * @param[in] execute_once PostgreSQL 17 execute-once hint forwarded unchanged;
+ * PostgreSQL 18 removed this argument from the executor hook ABI.
  */
 void bioseq_alignment_executor_run(
 		QueryDesc* query_desc,
 		ScanDirection direction,
-		uint64 count,
-		bool execute_once)
+		uint64 count
+#if PG_VERSION_NUM < PG_VERSION_18
+		, bool execute_once
+#endif
+)
 {
 	alignment_executor_frame* frame = find_alignment_frame(query_desc);
 	if (frame == nullptr) {
 		call_previous_or_standard_executor_run(
-			query_desc, direction, count, execute_once);
+			query_desc, direction, count
+#if PG_VERSION_NUM < PG_VERSION_18
+			, execute_once
+#endif
+		);
 		return;
 	}
 	alignment_current_run.push_back(frame);
@@ -94,7 +113,11 @@ void bioseq_alignment_executor_run(
 	PG_TRY();
 	{
 		call_previous_or_standard_executor_run(
-			query_desc, direction, count, execute_once);
+			query_desc, direction, count
+#if PG_VERSION_NUM < PG_VERSION_18
+			, execute_once
+#endif
+		);
 		frame->query_output_fully_drained =
 			query_desc != nullptr && query_desc->estate != nullptr
 			&& executor_run_output_fully_drained(
