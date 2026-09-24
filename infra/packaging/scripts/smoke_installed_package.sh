@@ -442,7 +442,6 @@ INSERT INTO bioseq_package_tableam_probe VALUES (1, 10), (2, 20), (3, 30);
 ALTER TABLE bioseq_package_tableam_probe ADD COLUMN wide_value bigint DEFAULT 1000000000000;
 EXPLAIN (ANALYZE, COSTS OFF)
 SELECT avg(value), avg(wide_value) FROM bioseq_package_tableam_probe;
-SELECT id, value, wide_value FROM bioseq_package_tableam_probe ORDER BY id;
 DO $$
 DECLARE observed record;
 BEGIN
