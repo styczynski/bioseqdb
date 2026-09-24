@@ -97,6 +97,11 @@ predicate. The second result contains the matching rows and their alignment
 coordinates. The runnable query uses the full first read rather than only its
 short shared motif so that it can pass the default alignment filters.
 
+> [!IMPORTANT]
+> Confirm that the plan selects `BioseqScan` for this single-table search.
+> Its custom execution supplies the alignment coordinates and CIGAR; do not
+> interpret an ordinary scan as proof that the sequence-aware path ran.
+
 The query can return more than one alignment for one stored row. `best_n` limits
 the secondary alignments retained for each target. The `pk` argument passed to
 each projection function is the result carrier that ties the projected value to
@@ -109,11 +114,11 @@ The CIGAR string uses run lengths. `M` consumes query and target symbols. `I`
 consumes query symbols. `D` consumes target symbols. For example, `29M` is an
 aligned run of 29 symbols.
 
-For this fixture, the filtered query returns five rows. Targets 1 and 2 each
-return one `29M` alignment. Target 5 returns three `29M` alignments starting at
-target positions 4, 38, and 84. That is a useful first check that the client
-keeps alignment rows separate instead of silently collapsing them by primary
-key.
+The full-read fixture returns target 1 with a `93M` alignment in the captured
+result above. The other targets share only shorter motifs and need not pass
+the default alignment filters. For queries that do produce multiple matches,
+keep alignment rows separate instead of silently collapsing them by primary
+key; the returned coordinates identify each match.
 
 ## Choose alignment projections for the caller
 

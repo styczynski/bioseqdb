@@ -410,8 +410,9 @@ same `dna4` type for stored-target and stored-query joins.
 ## Round-tripping sequence values
 
 Searchable sequence tables use the `bioseq` table access method. The example
-below creates a small table, keeps its indexes current during inserts, and reads
-the values back with their length in biological symbols using `bioseq.len`.
+below creates a small table with insert-time index maintenance disabled and
+reads the values back with their length in biological symbols using `bioseq.len`.
+This round-trip does not need a search index.
 
 ```sql runnable id=sequence_roundtrip timeout=10s entity="sql:function:bioseq.len(bioseq.seq)"
 -- bioseq:setup

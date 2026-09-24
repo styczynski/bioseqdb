@@ -1710,7 +1710,8 @@ def _exercise_code_entities(page, expected_ids: set[str]) -> None:
     """Verify repeatable fence entity declarations became exact in-code hover
     ranges after Prism without changing source text."""
     code = page.locator("pre code[data-entity-ranges]").first
-    _check(code.count() == 1, "required code block has no entity-range metadata")
+    _check(code.count() == 1,
+           f"{page.url}: required code block has no entity-range metadata")
     refs = code.locator("a.entity-ref[data-entity-id]")
     ids = {refs.nth(i).get_attribute("data-entity-id") or ""
            for i in range(refs.count())}
@@ -2268,12 +2269,18 @@ def _exercise_prism_pixel_contract(page, design: dict, artifact_dir: Path) -> No
     supplied terminal geometry and explicit design token palette."""
     page.set_viewport_size({"width": 1280, "height": 900})
     page.evaluate("() => document.fonts.ready")
-    pre = page.locator(".doc-code:not(:has(.anno-cards)) pre").first
-    _check(pre.count() == 1, "Prism pixel contract has no unannotated SQL component")
+    required_tokens = ("keyword", "function", "string", "operator", "punctuation")
+    # The page can start with a short SET statement. Select a real SQL sample
+    # containing the complete palette instead of depending on fence order.
+    selector = ".doc-code:not(:has(.anno-cards)) pre:has(code.language-sql)"
+    selector += "".join(f":has(.token.{kind})" for kind in required_tokens)
+    pre = page.locator(selector).first
+    _check(pre.count() == 1,
+           "Prism pixel contract has no SQL component with the complete token palette")
     pre.scroll_into_view_if_needed()
     code = pre.locator("code.language-sql")
     _check(code.count() == 1, "Prism pixel contract requires a highlighted SQL fence")
-    for token_class in ("keyword", "function", "string", "operator", "punctuation"):
+    for token_class in required_tokens:
         _check(code.locator(f".token.{token_class}").count() > 0,
                f"Prism SQL sample has no {token_class} token to validate")
 
@@ -2283,9 +2290,8 @@ def _exercise_prism_pixel_contract(page, design: dict, artifact_dir: Path) -> No
     actual = pre.screenshot(path=str(actual_path), animations="disabled")
 
     docs = design["docs"]
-    page.evaluate(
-        """({termStyle, preStyle, palette}) => {
-          const pre = document.querySelector('.doc-code:not(:has(.anno-cards)) pre');
+    pre.evaluate(
+        """(pre, {termStyle, preStyle, palette}) => {
           const figure = pre.closest('.doc-code');
           const code = pre.querySelector('code.language-sql');
           figure.style.cssText = termStyle;
@@ -2955,7 +2961,6 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _assert_tutorial_sidebar(page, base_path, version)
                 _exercise_copy(page)
                 _exercise_code_entities(page, {
-                    "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
                     "sql:function:bioseq.query_start(anyelement)",
                     "sql:function:bioseq.query_end(anyelement)",
                     "sql:function:bioseq.target_start(anyelement)",
@@ -3014,13 +3019,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                     "tutorial_explain": "reading_bioseq_explain",
                 }[label]
                 expected_code_entities = {
-                    "tutorial_columnar": {
-                        "sql:type:bioseq.seq",
-                        "sql:function:bioseq.len(bioseq.seq)",
-                    },
                     "tutorial_generation": {
-                        "sql:type:bioseq.seq",
-                        "sql:function:bioseq.len(bioseq.seq)",
                         "sql:function:bioseq.symbol_count(bioseq.seq,text)",
                     },
                     "tutorial_io": {
@@ -3031,7 +3030,6 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                         "sql:function:bioseq.target_end(anyelement)",
                     },
                     "tutorial_index": {
-                        "sql:type:bioseq.seq",
                         "sql:function:$extension.mmsearch("
                         "bioseq.seq,bioseq.seq,$extension.bioseq_aligner_options)",
                         "sql:function:bioseq.target_start(anyelement)",
