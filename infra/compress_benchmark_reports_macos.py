@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Reclaim disk with transparent macOS compression; preserve report paths/bytes.
+"""Reclaim disk with transparent macOS compression; preserve paths and bytes.
 
-Only retired benchmark JSON evidence is eligible. Each staged copy must have
+Only retired benchmark JSON evidence or explicitly selected retired generated
+compiler files are eligible. Active package build trees are never selected. Each copy must have
 the same SHA-256 and save allocated blocks before it atomically replaces the
 unchanged original. No result rows or raw evidence are deleted or rewritten.
 """
@@ -17,6 +18,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / 'reporting/bioseq_benchmark_e2e'
+RETIRED_GENERATED = ROOT / 'build/bench-e2e-opt/bioseq/generated'
 
 
 def sha256(path):
@@ -58,11 +60,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument('--scope', choices=('reports', 'retired-generated'), default='reports')
     args = parser.parse_args()
     if platform.system() != 'Darwin':
         parser.error('Apple ditto/APFS compression requires macOS')
-    files = sorted((p for p in EVIDENCE.rglob('*')
-                    if p.suffix in ('.json', '.jsonl') and p.is_file() and not p.is_symlink()
+    source = EVIDENCE
+    suffixes = {'.json', '.jsonl'}
+    if args.scope == 'retired-generated':
+        maintenance = json.loads((ROOT / 'bench/e2e_fleet_maintenance.json').read_text())
+        local = maintenance.get('hosts', {}).get('local', {})
+        if local.get('owner') != 'package_release_fleet' or local.get('paused') is not True:
+            parser.error('Generated-file compression requires the retired local benchmark queue')
+        probe = subprocess.run(['pgrep', '-x', 'bioseq_benchmark_e2e'],
+                               capture_output=True, text=True)
+        if probe.returncode != 1:
+            parser.error('Cannot confirm that the local benchmark client is absent')
+        source = RETIRED_GENERATED
+        suffixes = {'.cpp', '.cppm', '.hpp', '.h', '.json', '.jsonl', '.pcm'}
+    if source.is_symlink() or not source.is_dir():
+        parser.error('Compression scope must be an existing non-symlink directory')
+    files = sorted((p for p in source.rglob('*')
+                    if p.suffix in suffixes and p.is_file() and not p.is_symlink()
                     and p.stat().st_size >= 128 * 1024
                     and p.stat().st_blocks * 512 >= p.stat().st_size // 2),
                    key=lambda p: p.stat().st_size, reverse=True)
@@ -80,7 +98,8 @@ def main():
                                   saved_allocated_bytes=saved)), flush=True)
     print(json.dumps(dict(timestamp_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
         examined=examined, compressed=compressed, saved_allocated_bytes=saved,
-        applied=args.apply, evidence_paths_and_sha256_preserved=True)), flush=True)
+        applied=args.apply, scope=args.scope,
+        evidence_paths_and_sha256_preserved=True)), flush=True)
 
 
 if __name__ == '__main__':

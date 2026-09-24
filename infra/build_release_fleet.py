@@ -498,6 +498,27 @@ def dispatch_available(state):
         cell = next((c for c in candidates if cell_key(c) not in occupied), None)
         if cell is None:
             continue
+        # Match the native workspace preflight before consuming a matrix cell.
+        # A full disk is a host condition, not a compilation failure for every
+        # remaining distro/major. Recheck automatically after space is reclaimed.
+        try:
+            available = int(remote(host, "python3 -c " + shlex.quote(
+                "import shutil; from pathlib import Path; "
+                f"p=Path({(REMOTE + '/build/package-linux')!r}); "
+                "p=next(x for x in (p,*p.parents) if x.exists()); "
+                "print(shutil.disk_usage(p).free)"), timeout=25))
+        except Exception as error:
+            event("package_disk_observation_failed", host=host, error=str(error)[:400])
+            continue
+        disk_attention = state.setdefault("package_disk_attention", {})
+        if available < 80 * 1024**3:
+            if host not in disk_attention:
+                event("package_admission_waiting_for_disk", host=host,
+                      available_bytes=available, required_bytes=80 * 1024**3)
+            disk_attention[host] = dict(available_bytes=available, required_bytes=80 * 1024**3)
+            continue
+        if disk_attention.pop(host, None) is not None:
+            event("package_admission_disk_recovered", host=host, available_bytes=available)
         key = cell_key(cell)
         occupied.add(key)
         state.setdefault("attempted_cells", []).append(key)
