@@ -742,7 +742,9 @@ class index_storage_hash_major_minimizer_read_session {
                 RelationGetNamespace(heap_relation_) == bioseq_internal_ns() &&
                 std::string_view{RelationGetRelationName(heap_relation_)} == table_name_;
             const Oid primary_oid = bioseq::postgres::support::invoke_pg_as_cpp(
-                [this] { return RelationGetPrimaryKeyIndex(heap_relation_); });
+                [this] {
+                    return bioseq::postgres::support::relation_immediate_primary_key_index(heap_relation_);
+                });
             if (OidIsValid(primary_oid)) {
                 primary_index_relation_ = bioseq::postgres::support::invoke_pg_as_cpp(
                     [primary_oid] { return index_open(primary_oid, AccessShareLock); });

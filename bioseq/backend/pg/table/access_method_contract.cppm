@@ -93,7 +93,11 @@ Size bioseq_parallelscan_initialize(Relation relation, ParallelTableScanDesc sca
 void bioseq_parallelscan_reinitialize(Relation relation, ParallelTableScanDesc scan);
 
 /** Begin an exact-row fetch for an index scan. */
-IndexFetchTableData* bioseq_index_fetch_begin(Relation relation);
+IndexFetchTableData* bioseq_index_fetch_begin(Relation relation
+#if PG_VERSION_NUM >= 190000
+                                             , std::uint32_t flags
+#endif
+);
 
 /** Begin an exact-row fetch with an explicit projected-attribute bitmap. */
 export IndexFetchTableData* bioseq_index_fetch_begin_extended(
@@ -139,14 +143,22 @@ TransactionId bioseq_index_delete_tuples(Relation relation,
 void bioseq_tuple_insert(Relation relation,
                          TupleTableSlot* slot,
                          CommandId command_id,
+#if PG_VERSION_NUM >= 190000
+                         std::uint32_t options,
+#else
                          int options,
+#endif
                          BulkInsertState bulk_state);
 
 /** Insert one row while retaining speculative source authorities. */
 void bioseq_tuple_insert_speculative(Relation relation,
                                      TupleTableSlot* slot,
                                      CommandId command_id,
+#if PG_VERSION_NUM >= 190000
+                                     std::uint32_t options,
+#else
                                      int options,
+#endif
                                      BulkInsertState bulk_state,
                                      std::uint32_t speculative_token);
 
@@ -161,24 +173,37 @@ void bioseq_multi_insert(Relation relation,
                          TupleTableSlot** slots,
                          int tuple_count,
                          CommandId command_id,
+#if PG_VERSION_NUM >= 190000
+                         std::uint32_t options,
+#else
                          int options,
+#endif
                          BulkInsertState bulk_state);
 
 /** Delete one row by masking its virtual identity. */
 TM_Result bioseq_tuple_delete(Relation relation,
                               ItemPointer tuple_id,
                               CommandId command_id,
+#if PG_VERSION_NUM >= 190000
+                              std::uint32_t options,
+#endif
                               Snapshot snapshot,
                               Snapshot crosscheck,
                               bool wait,
-                              TM_FailureData* failure_data,
-                              bool changing_partition);
+                              TM_FailureData* failure_data
+#if PG_VERSION_NUM < 190000
+                              , bool changing_partition
+#endif
+);
 
 /** Replace one row and report whether indexes require updates. */
 TM_Result bioseq_tuple_update(Relation relation,
                               ItemPointer old_tuple_id,
                               TupleTableSlot* slot,
                               CommandId command_id,
+#if PG_VERSION_NUM >= 190000
+                              std::uint32_t options,
+#endif
                               Snapshot snapshot,
                               Snapshot crosscheck,
                               bool wait,
@@ -198,7 +223,12 @@ TM_Result bioseq_tuple_lock(Relation relation,
                             TM_FailureData* failure_data);
 
 /** Finish a bulk insert while retaining transaction-owned write state. */
-void bioseq_finish_bulk_insert(Relation relation, int options);
+void bioseq_finish_bulk_insert(Relation relation,
+#if PG_VERSION_NUM >= 190000
+                              std::uint32_t options);
+#else
+                              int options);
+#endif
 
 /** Build an index from all visible rows in a table scan. */
 double bioseq_index_build_range_scan(Relation relation,
@@ -240,6 +270,9 @@ void bioseq_relation_copy_for_cluster(Relation old_relation,
                                       Relation old_index,
                                       bool use_sort,
                                       TransactionId oldest_xmin,
+#if PG_VERSION_NUM >= 190000
+                                      Snapshot rewrite_snapshot,
+#endif
                                       TransactionId* xid_cutoff,
                                       MultiXactId* multi_cutoff,
                                       double* tuple_count,
@@ -248,7 +281,11 @@ void bioseq_relation_copy_for_cluster(Relation old_relation,
 
 /** Run Bioseq relation vacuum maintenance. */
 void bioseq_vacuum_rel(Relation relation,
+#if PG_VERSION_NUM >= 190000
+                       const VacuumParams* parameters,
+#else
                        VacuumParams* parameters,
+#endif
                        BufferAccessStrategy buffer_strategy);
 
 /** Select the next logical block for ANALYZE. */
@@ -256,7 +293,9 @@ bool bioseq_scan_analyze_next_block(TableScanDesc scan, ReadStream* stream);
 
 /** Feed the next visible row to ANALYZE. */
 bool bioseq_scan_analyze_next_tuple(TableScanDesc scan,
+#if PG_VERSION_NUM < 190000
                                     TransactionId oldest_xmin,
+#endif
                                     double* live_rows,
                                     double* dead_rows,
                                     TupleTableSlot* slot);

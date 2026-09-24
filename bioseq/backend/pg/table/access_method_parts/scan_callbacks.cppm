@@ -453,7 +453,11 @@ init_index_fetch_seq_cache(index_fetch_state* scan, Relation rel, MemoryContext 
 }
 
 /** Begin an index fetch before the executor supplies projected attributes. */
-IndexFetchTableData* bioseq_index_fetch_begin(Relation rel) {
+IndexFetchTableData* bioseq_index_fetch_begin(Relation rel
+#if PG_VERSION_NUM >= 190000
+                                             , std::uint32_t flags
+#endif
+) {
     Oid relfilelocator = rel->rd_locator.relNumber;
     if (writes_pending_in_parent_transactions(relfilelocator, GetCurrentSubTransactionId())) {
         /* Rejects index fetches while a parent transaction has pending writes. */
@@ -469,6 +473,9 @@ IndexFetchTableData* bioseq_index_fetch_begin(Relation rel) {
 
         scan = ::new (palloc0(sizeof(index_fetch_state))) index_fetch_state{};
         scan->fetch_base.rel = rel;
+#if PG_VERSION_NUM >= 190000
+        scan->fetch_base.flags = flags;
+#endif
         scan->read_state = nullptr;
         scan->stripe_metadata = {};
         scan->scan_context = scan_context;

@@ -383,7 +383,11 @@ inline void serial_scan_pg_leaf(Relation relation,
                                 Snapshot snapshot,
                                 parallel_scan_header* header,
                                 pg_atomic_uint64* seen_words) {
-    TableScanDesc scan = table_beginscan(relation, snapshot, 0, nullptr);
+    TableScanDesc scan = table_beginscan(relation, snapshot, 0, nullptr
+#if PG_VERSION_NUM >= 190000
+                                       , SO_NONE
+#endif
+    );
     scan_table_desc_pg_leaf(relation, scan, header, seen_words);
     table_endscan(scan);
 }
@@ -393,7 +397,11 @@ inline void parallel_scan_pg_leaf(Relation relation,
                                   ParallelTableScanDesc parallel_scan,
                                   parallel_scan_header* header,
                                   pg_atomic_uint64* seen_words) {
-    TableScanDesc scan = table_beginscan_parallel(relation, parallel_scan);
+    TableScanDesc scan = table_beginscan_parallel(relation, parallel_scan
+#if PG_VERSION_NUM >= 190000
+                                                , SO_NONE
+#endif
+    );
     scan_table_desc_pg_leaf(relation, scan, header, seen_words);
     table_endscan(scan);
 }

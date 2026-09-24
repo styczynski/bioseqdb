@@ -584,7 +584,11 @@ initialize_column_storage(SMgrRelation srel, uint64_t storage_id)
 				metadata_block_number, page, true);
 
 	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_storage() flushing metapage to disk");
+#if PG_VERSION_NUM >= 190000
+	PageSetChecksum(page, metadata_block_number);
+#else
 	PageSetChecksumInplace(page, metadata_block_number);
+#endif
 	smgrextend(srel, MAIN_FORKNUM, metadata_block_number, page, true);
 
 	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_storage() initialising empty page");
@@ -594,7 +598,11 @@ initialize_column_storage(SMgrRelation srel, uint64_t storage_id)
 				reserved_empty_block_number, page, true);
 
 	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_storage() flushing empty page to disk");
+#if PG_VERSION_NUM >= 190000
+	PageSetChecksum(page, reserved_empty_block_number);
+#else
 	PageSetChecksumInplace(page, reserved_empty_block_number);
+#endif
 	smgrextend(srel, MAIN_FORKNUM, reserved_empty_block_number, page, true);
 
 	/*

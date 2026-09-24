@@ -2996,7 +2996,8 @@ mint_coverage_dependency_ticket(const bioseq_cache_path_domain& contract,
         if (node == nullptr || !IsA(node, Integer)) {
             return ticket;
         }
-        const Oid relation_oid = static_cast<Oid>(static_cast<std::uint32_t>(intVal(node)));
+        const Oid relation_oid = static_cast<Oid>(
+            static_cast<std::uint32_t>(reinterpret_cast<const Integer*>(node)->ival));
         if (!OidIsValid(relation_oid)) {
             return ticket;
         }
@@ -6041,7 +6042,8 @@ static_assert(offsetof(bioseq_cache_state, css) == 0);
         return true;
     }
     const Node* marker = static_cast<const Node*>(list_nth(scan.custom_private, 2));
-    return marker == nullptr || !IsA(marker, Integer) || intVal(marker) != 0;
+    return marker == nullptr || !IsA(marker, Integer) ||
+           reinterpret_cast<const Integer*>(marker)->ival != 0;
 }
 
 [[nodiscard]] int private_force_bypass_marker(const CustomScan& scan) noexcept {
@@ -6049,7 +6051,8 @@ static_assert(offsetof(bioseq_cache_state, css) == 0);
         return -1;
     }
     const Node* marker = static_cast<const Node*>(list_nth(scan.custom_private, 2));
-    return marker != nullptr && IsA(marker, Integer) ? intVal(marker) : -1;
+    return marker != nullptr && IsA(marker, Integer)
+               ? reinterpret_cast<const Integer*>(marker)->ival : -1;
 }
 
 /** Mutate only the preallocated scalar; never reshape a finalized Plan. */
@@ -14793,7 +14796,7 @@ const CustomScanMethods& coverage_scan_methods() {
         if (node == nullptr || !IsA(node, Integer)) {
             return false;
         }
-        const int param_id = intVal(node);
+        const int param_id = static_cast<const Integer*>(node)->ival;
         if (param_id < 0 || param_id >= list_length(root->glob->paramExecTypes) ||
             list_nth_oid(root->glob->paramExecTypes, param_id) != BOOLOID) {
             return false;
@@ -15157,8 +15160,10 @@ struct reusable_coverage_path_probe {
             return contains(reinterpret_cast<const IncrementalSortPath*>(path)->spath.subpath);
         case T_GroupPath:
             return contains(reinterpret_cast<const GroupPath*>(path)->subpath);
+#if PG_VERSION_NUM < 190000
         case T_UpperUniquePath:
             return contains(reinterpret_cast<const UpperUniquePath*>(path)->subpath);
+#endif
         case T_AggPath:
             return contains(reinterpret_cast<const AggPath*>(path)->subpath);
         case T_GroupingSetsPath:
@@ -15322,8 +15327,10 @@ struct exact_path_dependency_collector {
             return collect(reinterpret_cast<const IncrementalSortPath*>(path)->spath.subpath, root);
         case T_GroupPath:
             return collect(reinterpret_cast<const GroupPath*>(path)->subpath, root);
+#if PG_VERSION_NUM < 190000
         case T_UpperUniquePath:
             return collect(reinterpret_cast<const UpperUniquePath*>(path)->subpath, root);
+#endif
         case T_AggPath:
             return collect(reinterpret_cast<const AggPath*>(path)->subpath, root);
         case T_GroupingSetsPath:
@@ -15502,7 +15509,9 @@ void cache_create_upper_paths(PlannerInfo* root,
     output_relation->pathlist = NIL;
     output_relation->cheapest_startup_path = nullptr;
     output_relation->cheapest_total_path = nullptr;
+#if PG_VERSION_NUM < 190000
     output_relation->cheapest_unique_path = nullptr;
+#endif
     output_relation->cheapest_parameterized_paths = NIL;
     foreach (path_cell, replacements) {
         add_path(output_relation, static_cast<Path*>(lfirst(path_cell)));
@@ -16166,13 +16175,23 @@ void observe_finalized_planned_statement(PlannedStmt* statement) noexcept {
 PlannedStmt* cache_planner(Query* query,
                            const char* query_string,
                            int cursor_options,
-                           ParamListInfo bound_parameters) {
+                           ParamListInfo bound_parameters
+#if PG_VERSION_NUM >= 190000
+                           , ExplainState* explain_state
+#endif
+                           ) {
     const planner_hook_type previous_planner = executor::lifecycle::previous_planner();
     if (g_internal_planning || g_producer_plan_capture_active ||
         guc::mode() == query_cache_mode::disabled || !shared_cache_ready()) {
+#if PG_VERSION_NUM >= 190000
+        return previous_planner != nullptr
+                   ? previous_planner(query, query_string, cursor_options, bound_parameters, explain_state)
+                   : standard_planner(query, query_string, cursor_options, bound_parameters, explain_state);
+#else
         return previous_planner != nullptr
                    ? previous_planner(query, query_string, cursor_options, bound_parameters)
                    : standard_planner(query, query_string, cursor_options, bound_parameters);
+#endif
     }
 
     MemoryContext planner_context = CurrentMemoryContext;
@@ -16235,9 +16254,15 @@ PlannedStmt* cache_planner(Query* query,
                 }
             }
         }
+#if PG_VERSION_NUM >= 190000
+        result = previous_planner != nullptr
+                     ? previous_planner(query, query_string, cursor_options, bound_parameters, explain_state)
+                     : standard_planner(query, query_string, cursor_options, bound_parameters, explain_state);
+#else
         result = previous_planner != nullptr
                      ? previous_planner(query, query_string, cursor_options, bound_parameters)
                      : standard_planner(query, query_string, cursor_options, bound_parameters);
+#endif
         if (result != nullptr && frame.bridge_finalized_statement != result) {
             finalize_cache_planned_statement(*result, planner_context);
         }
@@ -16258,9 +16283,14 @@ void mark_planned_result_relations(PlannedStmt& statement) {
         return;
     }
     bool precise = false;
+#if PG_VERSION_NUM >= 190000
+    int range_index = -1;
+    while ((range_index = bms_next_member(statement.resultRelationRelids, range_index)) >= 0) {
+#else
     ListCell* relation_cell = nullptr;
     foreach (relation_cell, statement.resultRelations) {
         const int range_index = lfirst_int(relation_cell);
+#endif
         if (range_index <= 0 || range_index > list_length(statement.rtable)) {
             mark_current_transaction_dirty();
             return;

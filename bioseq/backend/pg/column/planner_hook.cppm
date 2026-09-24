@@ -527,7 +527,11 @@ static PlannedStmt*
 column_planner_hook(Query* parse,
 					const char* query_string,
 					int cursor_options,
-					ParamListInfo bound_params)
+					ParamListInfo bound_params
+#if PG_VERSION_NUM >= 190000
+                    , ExplainState* explain_state
+#endif
+                    )
 {
 	bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() entered");
 
@@ -540,10 +544,18 @@ column_planner_hook(Query* parse,
 	PlannedStmt* stmt;
 	if (previous_planner_hook) {
 		bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() delegating to previous planner hook");
-		stmt = previous_planner_hook(parse, query_string, cursor_options, bound_params);
+		stmt = previous_planner_hook(parse, query_string, cursor_options, bound_params
+#if PG_VERSION_NUM >= 190000
+                                     , explain_state
+#endif
+        );
 	} else {
 		bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() delegating to standard_planner");
-		stmt = standard_planner(parse, query_string, cursor_options, bound_params);
+		stmt = standard_planner(parse, query_string, cursor_options, bound_params
+#if PG_VERSION_NUM >= 190000
+                                , explain_state
+#endif
+        );
 	}
 	bioseq_log<logging_level::debug>("[bioseq] pg: column_planner_hook() upstream planner returned");
 

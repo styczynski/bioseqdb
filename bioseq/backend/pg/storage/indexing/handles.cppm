@@ -245,7 +245,8 @@ resolve_minimizer_persistence_policy_implementation(Oid user_relid,
             const bool primary_valid =
                 primary_form != nullptr && ledger.primary->rd_rel->relam == BTREE_AM_OID &&
                 primary_form->indrelid == policy_oid &&
-                RelationGetPrimaryKeyIndex(ledger.relation) == primary_oid &&
+                bioseq::postgres::support::relation_immediate_primary_key_index(ledger.relation) ==
+                    primary_oid &&
                 primary_form->indisvalid && primary_form->indisready && primary_form->indislive &&
                 primary_form->indimmediate && primary_form->indisunique &&
                 primary_form->indisprimary && primary_form->indnatts == 4 &&

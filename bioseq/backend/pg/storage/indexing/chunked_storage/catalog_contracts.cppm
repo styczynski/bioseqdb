@@ -908,7 +908,8 @@ inspect_bound_minimizer_generation_schema(Relation relation,
         return {.error = minimizer_generation_schema_error::primary_index_count};
     }
     const bool exact_primary =
-        RelationGetPrimaryKeyIndex(relation) == RelationGetRelid(primary_index_relation);
+        bioseq::postgres::support::relation_immediate_primary_key_index(relation) ==
+            RelationGetRelid(primary_index_relation);
     if (!exact_primary ||
         primary_index_relation->rd_index->indrelid != RelationGetRelid(relation) ||
         !primary_index_relation->rd_index->indisprimary) {

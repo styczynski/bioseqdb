@@ -379,7 +379,13 @@ detoast_values_for_heap_tuple(TupleDesc tuple_desc, Datum* values, bool* nulls) 
 
 /** Insert one row and publish sequence sources only after its parent write. */
 void bioseq_tuple_insert(
-    Relation relation, TupleTableSlot* slot, CommandId cid, int options, BulkInsertState bistate) {
+    Relation relation, TupleTableSlot* slot, CommandId cid,
+#if PG_VERSION_NUM >= 190000
+    std::uint32_t options,
+#else
+    int options,
+#endif
+    BulkInsertState bistate) {
     column_write_state* write_state = nullptr;
     ordinary_insert_page_cache_restore cache_restore{
         .callback =
@@ -468,7 +474,11 @@ void bioseq_tuple_insert(
 void bioseq_tuple_insert_speculative(Relation relation,
                                      TupleTableSlot* slot,
                                      CommandId cid,
+#if PG_VERSION_NUM >= 190000
+                                     std::uint32_t options,
+#else
                                      int options,
+#endif
                                      BulkInsertState bistate,
                                      uint32_t spec_token) {
     previous_cache_enabled_state = bioseq::settings::column_cache::enabled;
@@ -632,7 +642,11 @@ void bioseq_multi_insert(Relation relation,
                          TupleTableSlot** slots,
                          int ntuples,
                          CommandId cid,
+#if PG_VERSION_NUM >= 190000
+                         std::uint32_t options,
+#else
                          int options,
+#endif
                          BulkInsertState bistate) {
     run_tableam_cpp_checked("bioseq multi insert", [relation, slots, ntuples] {
         if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP) {
@@ -795,11 +809,17 @@ static void invalidate_sequence_source_epochs_for_row(Relation relation,
 TM_Result bioseq_tuple_delete(Relation relation,
                               ItemPointer tid,
                               CommandId cid,
+#if PG_VERSION_NUM >= 190000
+                              std::uint32_t options,
+#endif
                               Snapshot snapshot,
                               Snapshot crosscheck,
                               bool wait,
-                              TM_FailureData* tmfd,
-                              bool changing_part) {
+                              TM_FailureData* tmfd
+#if PG_VERSION_NUM < 190000
+                              , bool changing_part
+#endif
+) {
     if (bioseq::storage::is_registered_sequence_fragment_relation(RelationGetRelid(relation))) {
         bioseq_log<logging_level::error, logging_target::postgres>(
             "bioseq storage: registered sequence fragments are immutable; DELETE is forbidden");
@@ -824,6 +844,9 @@ TM_Result bioseq_tuple_update(Relation relation,
                               ItemPointer otid,
                               TupleTableSlot* slot,
                               CommandId cid,
+#if PG_VERSION_NUM >= 190000
+                              std::uint32_t options,
+#endif
                               Snapshot snapshot,
                               Snapshot crosscheck,
                               bool wait,
@@ -897,7 +920,12 @@ TM_Result bioseq_tuple_lock(Relation relation,
 }
 
 /** Leave write states open for transaction-end flushing after bulk insertion. */
-void bioseq_finish_bulk_insert(Relation relation, int options) {
+void bioseq_finish_bulk_insert(Relation relation,
+#if PG_VERSION_NUM >= 190000
+                              std::uint32_t options) {
+#else
+                              int options) {
+#endif
     /*
      * Nothing to do here. We keep write states live until transaction end.
      */

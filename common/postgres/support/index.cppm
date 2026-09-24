@@ -37,6 +37,15 @@ export import :spi;
 
 export namespace bioseq::postgres::support {
 
+/** Return an immediate primary key, preserving the PG17 catalog contract. */
+[[nodiscard]] inline Oid relation_immediate_primary_key_index(Relation relation) {
+#if PG_VERSION_NUM >= 180000
+    return RelationGetPrimaryKeyIndex(relation, false);
+#else
+    return RelationGetPrimaryKeyIndex(relation);
+#endif
+}
+
 /** Restores the calling backend's PostgreSQL memory context at scope exit. */
 class memory_context_scope final {
   public:
