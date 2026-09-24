@@ -2267,6 +2267,44 @@ class ReleasePublisherTests(unittest.TestCase):
     def publisher(self):
         return runpy.run_path(str(REPOSITORY_ROOT / 'infra/publish_release.py'))
 
+    def test_sdk_support_files_keep_runtime_metadata_and_verified_bytes(self):
+        function = self.publisher()['accepted_packages']
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            output = root / 'bin_artifacts/packages'
+            output.mkdir(parents=True)
+            package = output / 'bioseq.pkg'
+            formula = output / 'postgresql@20.rb'
+            package.write_bytes(b'unit-test package fixture')
+            formula.write_text('# unit-test SDK fixture\n')
+            record = dict(file=package.name, bytes=package.stat().st_size,
+                          sha256=sha256(package), postgres_major=20, distro='macos',
+                          architecture='arm64', postgres_release_channel='development',
+                          postgres_version='PostgreSQL 20devel',
+                          postgres_runtime_requirement='exact development SDK',
+                          postgres_sdk_formula='bioseqdb/package-sdks/postgresql@20',
+                          validation=dict(passed=True, format='pkg', package_version='0.1.0-alpha.1'),
+                          installed_sql_smoke=dict(passed=True, default_insert_search=True,
+                                                   default_persisted_search=True),
+                          postgres_sdk_support_files=[dict(file=formula.name,
+                              bytes=formula.stat().st_size, sha256=sha256(formula))])
+            manifest = output / 'manifest.json'
+            manifest.write_text(json.dumps(dict(packages=[record])))
+            with mock.patch.dict(function.__globals__, {'ROOT': root}):
+                accepted = function()[0]
+                self.assertEqual(accepted['postgres_runtime_requirement'], 'exact development SDK')
+                companion = accepted['postgres_sdk_support_files'][0]
+                self.assertEqual(companion['source'], formula)
+                self.assertEqual(companion['sha256'], sha256(formula))
+                self.assertEqual(Path(companion['file']).parent, Path(accepted['file']).parent)
+                formula.write_text('# changed after acceptance\n')
+                with self.assertRaises(RuntimeError):
+                    function()
+                record['postgres_sdk_support_files'][0]['file'] = '../outside.rb'
+                manifest.write_text(json.dumps(dict(packages=[record])))
+                with self.assertRaises(RuntimeError):
+                    function()
+
     def site(self, root):
         root.mkdir()
         (root / 'index.html').write_text('new website')

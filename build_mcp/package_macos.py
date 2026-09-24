@@ -186,8 +186,20 @@ started=true
 def build_one(repository, major, state, output, run, progress):
     pg_opt = Path(f'/opt/homebrew/opt/postgresql@{major}')
     pg_config = pg_opt / 'bin/pg_config'
-    formula = (f'petere/postgresql/postgresql@{major}' if major == 19
-               else f'postgresql@{major}')
+    sdk_formula_source = None
+    formula = {19: 'petere/postgresql/postgresql@19',
+               20: 'bioseqdb/package-sdks/postgresql@20'}.get(major, f'postgresql@{major}')
+    if major == 20:
+        # A local-only tap with an immutable upstream archive pin. Installing a
+        # PG19 formula's moving HEAD would collide with the accepted beta SDK.
+        sdk_formula_source = repository / 'infra/packaging/homebrew/postgresql@20.rb'
+        run(['/usr/bin/ruby', '-c', sdk_formula_source])
+        tap = Path('/opt/homebrew/Library/Taps/bioseqdb/homebrew-package-sdks')
+        if not tap.is_dir():
+            run(['/opt/homebrew/bin/brew', 'tap-new', 'bioseqdb/package-sdks'])
+        formulas = tap / 'Formula'
+        formulas.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sdk_formula_source, formulas / sdk_formula_source.name)
     if not pg_config.is_file():
         progress(f'installing exact Homebrew PostgreSQL {major} SDK/runtime')
         # The versioned upstream-maintainer tap supplies PG19 beta alongside
@@ -299,6 +311,10 @@ Vulkan GPU use additionally requires a working MoltenVK ICD (brew install molten
 First-time Metal shader compilation requires Apple's xcrun/Metal toolchain.
 This package is not qualified for Intel Macs or non-Homebrew PostgreSQL distributions.
 ''')
+    if sdk_formula_source is not None:
+        with readme.open('a') as handle:
+            handle.write('The pinned PG20 formula and SDK_SETUP.txt accompany this installer. '
+                         'Set up that local tap before running brew install; this is not a public GitHub tap.\n')
     component = run_root / 'component.pkg'
     run(['/usr/bin/pkgbuild', '--root', payload, '--install-location', '/',
          '--identifier', f'com.bioseqdb.postgresql{major}.arm64', '--version', '0.1.0',
@@ -322,11 +338,36 @@ This package is not qualified for Intel Macs or non-Homebrew PostgreSQL distribu
     progress(f'validating final macOS PostgreSQL {major} package in private SQL runtime')
     smoke = smoke_payload(repository, extracted[0], payload, pg_prefix,
                           libdir, sharedir, run_root, run)
+    support_files = []
+    if sdk_formula_source is not None:
+        sdk_copy = directory / sdk_formula_source.name
+        shutil.copy2(sdk_formula_source, sdk_copy)
+        setup = directory / 'SDK_SETUP.txt'
+        setup.write_text(f'''Experimental PostgreSQL {major} SDK for BioseqDB {VERSION}
+Not a stable PostgreSQL release. Required runtime: {runtime_requirement}
+Use only for development; another snapshot is not asserted ABI-compatible.
+
+Download postgresql@20.rb from the same release directory as this file.
+Check its SHA-256: {sha256(sdk_copy)}
+Inspect the formula, then run in the directory containing that downloaded file:
+
+brew tap-new bioseqdb/package-sdks
+cp postgresql@20.rb "$(brew --repository bioseqdb/package-sdks)/Formula/postgresql@20.rb"
+brew install bioseqdb/package-sdks/postgresql@20
+
+If that local tap already exists, omit tap-new; retain any other formulae in it.
+The formula downloads an immutable upstream commit and verifies its archive SHA-256.
+It is keg-only: no service, database cluster, forced linking, or PG19 replacement.
+After the SDK is installed, install the accompanying BioseqDB .pkg.
+''')
+        support_files = [dict(file=str(path.relative_to(output)), bytes=path.stat().st_size,
+                              sha256=sha256(path)) for path in (sdk_copy, setup)]
     os.replace(candidate, final)
     return dict(file=str(final.relative_to(output)), bytes=final.stat().st_size,
         sha256=sha256(final), distro='macos', postgres_major=major,
         postgres_version=version, postgres_runtime_requirement=runtime_requirement,
         postgres_sdk_formula=formula,
+        postgres_sdk_support_files=support_files,
         validation=dict(passed=True, format='pkg', package_version=VERSION,
                         architecture='arm64', mach_o=mach_o, notarized=False,
                         code_signature='ad-hoc Mach-O only; installer unsigned'),

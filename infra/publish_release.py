@@ -176,12 +176,28 @@ def accepted_packages():
         seen.add(key)
         # Immutable revision folders preserve prior files when a cell is repaired.
         remote = f"pg{major}/{package['distro']}/{package['architecture']}/{digest[:16]}/{path.name}"
+        sdk_files = []
+        for companion in package.get('postgres_sdk_support_files', []):
+            companion_relative = PurePosixPath(companion['file'])
+            if (companion_relative.is_absolute() or '..' in companion_relative.parts
+                    or not companion_relative.parts or companion_relative.name == path.name):
+                raise RuntimeError('Unsafe SDK support file path')
+            companion_path = root.joinpath(*companion_relative.parts)
+            if (companion_path.is_symlink()
+                    or not companion_path.resolve().is_relative_to(root.resolve())
+                    or companion_path.stat().st_size != companion['bytes']
+                    or sha256(companion_path) != companion['sha256']):
+                raise RuntimeError('SDK support file differs from accepted package metadata')
+            sdk_files.append(dict(file=str(PurePosixPath(remote).parent / companion_relative.name),
+                                  source=companion_path, bytes=companion['bytes'],
+                                  sha256=companion['sha256']))
         accepted.append(dict(file=remote, source=path, sha256=digest,
             bytes=path.stat().st_size, postgres_major=major,
             distro=package['distro'], architecture=package['architecture'],
             package_version=package['validation']['package_version'],
             postgres_release_channel=package['postgres_release_channel'],
             signed=bool(package.get('signed')),
+            postgres_sdk_support_files=sdk_files,
             validation=('Mach-O and extracted-payload private PostgreSQL SQL passed; unsigned/unnotarized installer'
                         if package['validation'].get('format') == 'pkg'
                         else 'ELF and fresh installed SQL passed'),
@@ -335,7 +351,18 @@ def publish_packages(apply):
         shutil.copy2(package['source'], path)
         if sha256(path) != package['sha256']:
             raise RuntimeError('Package changed while taking publication snapshot')
-        records.append({k: v for k, v in package.items() if k != 'source'})
+        record = {k: v for k, v in package.items() if k not in ('source', 'postgres_sdk_support_files')}
+        companions = []
+        for companion in package['postgres_sdk_support_files']:
+            copied = stage / companion['file']
+            copied.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(companion['source'], copied)
+            if sha256(copied) != companion['sha256']:
+                raise RuntimeError('SDK support file changed during publication snapshot')
+            companions.append({k: v for k, v in companion.items() if k != 'source'})
+        if companions:
+            record['postgres_sdk_support_files'] = companions
+        records.append(record)
     save(stage / 'manifest.json', dict(release=RELEASE, packages=records,
          note='Release label differs from the retained embedded package version. '
               'Unsigned alpha packages; more accepted cells may be added to this same release.'))
@@ -350,6 +377,8 @@ def publish_packages(apply):
         readme += f"- PostgreSQL {p['postgres_major']} ({p['postgres_release_channel']}), {p['distro']}, {p['architecture']}: [{Path(p['file']).name}]({p['file']})\n"
         if p.get('postgres_runtime_requirement'):
             readme += f"  Runtime requirement: {p['postgres_runtime_requirement']}. SDK formula: `{p['postgres_sdk_formula']}`.\n"
+        for companion in p.get('postgres_sdk_support_files', []):
+            readme += f"  SDK support: [{PurePosixPath(companion['file']).name}]({companion['file']})\n"
     (stage / 'README.md').write_text(readme)
     shutil.copy2(ROOT / 'website/static/favicon.svg', stage / 'bioseqdb-logo.svg')
     (stage / 'SHA256SUMS').write_text(''.join(
@@ -366,7 +395,8 @@ def publish_packages(apply):
     state_path = CONTROL / 'sourceforge.json'
     old = json.loads(state_path.read_text()) if state_path.exists() else {}
     verified = old.get('verified_files', {})
-    for p in records:
+    uploads = records + [companion for p in records for companion in p.get('postgres_sdk_support_files', [])]
+    for p in uploads:
         relative = RELEASE + '/' + p['file']
         quoted = urllib.parse.quote(relative, safe='/')
         if verified.get(relative) != p['sha256']:
@@ -379,6 +409,9 @@ def publish_packages(apply):
             downloaded.unlink()
             verified[relative] = p['sha256']
             save(state_path, dict(release=RELEASE, verified_files=verified))
+        if 'postgres_major' not in p:
+            event('sdk_support_upload_verified', file=relative, sha256=p['sha256'])
+            continue
         label = f"BioseqDB {RELEASE} - PG{p['postgres_major']} {p['distro']} {p['architecture']}"
         # The canonical file resource ends in '/'; FRS redirects the bare
         # filename, and authenticated redirects are deliberately refused.
