@@ -460,8 +460,12 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
 
     MemoryContext scan_context = create_column_scan_memory_context();
     bool random_access = true;
+    // Row-mask metadata is MVCC: SnapshotAny can pick a superseded mask and
+    // resurrect deleted/updated rows during compaction. The active snapshot
+    // was pushed above and remains owned until this reader is closed.
     column_read_state* read_state = init_bioseq_read_state(
-        rel, tuple_desc, attr_needed, scan_qual, scan_context, SnapshotAny, random_access, nullptr);
+        rel, tuple_desc, attr_needed, scan_qual, scan_context,
+        GetActiveSnapshot(), random_access, nullptr);
 
     set_stripe_read_state(read_state,
                           static_cast<stripe_metadata*>(

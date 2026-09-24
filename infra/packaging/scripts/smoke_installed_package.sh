@@ -485,8 +485,17 @@ RESET enable_bitmapscan;
 RESET enable_indexonlyscan;
 VACUUM (ANALYZE) bioseq_package_tableam_probe;
 VACUUM (FULL, ANALYZE) bioseq_package_tableam_probe;
-SELECT count(*) AS row_count, sum(value) AS value_sum FROM bioseq_package_tableam_probe \gset
-SELECT 1 / (:row_count = 2 AND :value_sum = 51)::integer AS rewritten_rows_valid;
+DO $$
+DECLARE observed record;
+BEGIN
+  SELECT count(*) AS row_count, sum(value) AS value_sum
+    INTO observed FROM bioseq_package_tableam_probe;
+  IF observed.row_count IS DISTINCT FROM 2::bigint OR
+     observed.value_sum IS DISTINCT FROM 51::bigint THEN
+    RAISE EXCEPTION 'rewritten rows mismatch: count=%, sum=%',
+      observed.row_count, observed.value_sum;
+  END IF;
+END $$;
 DROP TABLE bioseq_package_tableam_probe;
 -- PG19 replaced CopyFormatOptions.binary with an explicit format enum.
 -- Binary input still carries its alphabet; untyped text input must fail before
