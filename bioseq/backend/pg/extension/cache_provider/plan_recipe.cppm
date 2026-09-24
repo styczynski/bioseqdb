@@ -148,7 +148,9 @@ void mix_digest_byte(
     if (node == nullptr || !IsA(node, Integer)) {
         return false;
     }
-    *output = intVal(node);
+    // Preserve constness after the tag check; assertion-build intVal expects
+    // mutable void* in newer PostgreSQL headers.
+    *output = reinterpret_cast<const Integer*>(node)->ival;
     return true;
 }
 

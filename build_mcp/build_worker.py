@@ -7021,7 +7021,8 @@ def _run_package_linux_worker(entry: Mapping[str, object]) -> int:
         f"# repository_root={REPOSITORY_ROOT}\n"
         f"# package_state_root={REPOSITORY_ROOT / 'build' / mode}\n"
         f"# distro_selection={os.environ.get('BIOSEQ_PACKAGE_DISTROS', 'debian_13')} "
-        "postgresql=17 template_profile=all_alphabets_uint64\n"
+        f"postgresql={os.environ.get('BIOSEQ_PACKAGE_POSTGRES_MAJORS', '17')} "
+        "template_profile=all_alphabets_uint64\n"
     )
     log_handle.flush()
     bootstrap_log_value = entry.get("bootstrap_log_file")

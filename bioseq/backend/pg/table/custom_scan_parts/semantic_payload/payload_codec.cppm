@@ -320,8 +320,14 @@ export {
             const List* list = reinterpret_cast<const List*>(candidate);
             const Node* name_node =
                 list == NIL ? nullptr : reinterpret_cast<const Node*>(linitial(list));
-            if (name_node == nullptr || !IsA(name_node, String) || strVal(name_node) == nullptr ||
-                std::strcmp(strVal(name_node), k_bioseq_semantic_payload_name.data()) != 0) {
+            if (name_node == nullptr || !IsA(name_node, String)) {
+                continue;
+            }
+            // The tag was checked above. PostgreSQL's assertion-build strVal
+            // macro requires mutable void*, but this decoder only reads data.
+            const char* name = reinterpret_cast<const String*>(name_node)->sval;
+            if (name == nullptr ||
+                std::strcmp(name, k_bioseq_semantic_payload_name.data()) != 0) {
                 continue;
             }
             if (found != nullptr)

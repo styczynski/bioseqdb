@@ -35,6 +35,21 @@ SF_HOST = 'frs.sourceforge.net'
 # https://sourceforge.net/p/forge/documentation/SSH%20Key%20Fingerprints/
 SF_ED25519 = '209BDmH3jsRyO9UeGPPgLWPSegKmYCBIya0nR/AWWCY'
 SUMMARY = 'Genomic sequence storage, indexing and alignment inside PostgreSQL'
+PROFILE_DESCRIPTION = (
+    'BioseqDB is a PostgreSQL extension for storing, indexing and searching biological '
+    'sequences with SQL. Combine genomic matches with relational data using compact '
+    'sequence types and columnar storage.\n\n'
+    'Choose bounded ntHash or other minimizers, SIMD-DP or RMQ chaining, and Block '
+    'Aligner or KSW2 alignment. Minimizer indexes cover fragments or whole sequences. '
+    'Packaged defaults enable vectorization and column caching; the automatically '
+    'loaded query cache is disabled until explicitly enabled.\n\n'
+    'Experimental, unsigned alpha packages are provided for ARM64 and x86-64 Linux. '
+    'Choose the matching distribution and PostgreSQL major. Published packages pass '
+    'payload checks and fresh installed-SQL checks. Prerelease/development PostgreSQL '
+    'packages are labelled separately.\n\n'
+    'Documentation: https://bioseqdb.com/\n'
+    'Source: https://github.com/styczynski/bioseqdb'
+)
 DESCRIPTION = (
     'BioseqDB is a PostgreSQL extension for storing, indexing and searching '
     'biological sequences with SQL. It brings compact sequence storage and '
@@ -333,7 +348,9 @@ def publish_packages(apply):
     import shlex
     shell = shlex.join(['ssh', *options])
     destination = f'{SF_USER}@{SF_HOST}:/home/frs/project/{PROJECT}/{RELEASE}/'
-    command(['rsync', '-rlt', '--checksum', '--delay-updates', '-e', shell,
+    # FRS acknowledged --delay-updates but exposed only empty directories in
+    # read-back. Ordinary per-file rsync renames were verified to publish bytes.
+    command(['rsync', '-rlt', '--checksum', '-e', shell,
              str(stage) + '/', destination], timeout=1800)
     state_path = CONTROL / 'sourceforge.json'
     old = json.loads(state_path.read_text()) if state_path.exists() else {}
@@ -352,7 +369,15 @@ def publish_packages(apply):
             verified[relative] = p['sha256']
             save(state_path, dict(release=RELEASE, verified_files=verified))
         label = f"BioseqDB {RELEASE} - PG{p['postgres_major']} {p['distro']} {p['architecture']}"
-        sf_api(f'/projects/{PROJECT}/files/{quoted}', method='PUT', fields={'download_label': label})
+        # The canonical file resource ends in '/'; FRS redirects the bare
+        # filename, and authenticated redirects are deliberately refused.
+        response = sf_api(f'/projects/{PROJECT}/files/{quoted}/', method='PUT',
+                          fields={'download_label': label})
+        metadata = response.get('result', {})
+        if (metadata.get('name') != Path(p['file']).name
+                or metadata.get('x_sf', {}).get('download_label') != label):
+            raise RuntimeError(f'SourceForge did not confirm the file label: {relative}')
+        event('package_upload_verified', file=relative, sha256=p['sha256'])
     event('packages_published', release=RELEASE, accepted=len(records),
           url=f'https://sourceforge.net/projects/{PROJECT}/files/{RELEASE}/')
 
@@ -360,7 +385,7 @@ def publish_packages(apply):
 def prepare_profile():
     """Save ready-to-use profile text; no undocumented metadata writes."""
     path = CONTROL / 'sourceforge-profile.json'
-    save(path, dict(name='BioseqDB', summary=SUMMARY, short_description=DESCRIPTION,
+    save(path, dict(name='BioseqDB', summary=SUMMARY, short_description=PROFILE_DESCRIPTION,
          external_homepage='https://bioseqdb.com/',
          labels=['bioinformatics', 'genomics', 'postgresql', 'dna', 'sequence-alignment',
                  'minimizers', 'simd', 'database-extension'],
