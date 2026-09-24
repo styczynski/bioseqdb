@@ -628,6 +628,26 @@ reinitialize_parallel_scan(Relation rel, ParallelTableScanDesc pscan)
 
 /* --- index fetch: external relations reject index DDL ------------------ */
 
+#if PG_VERSION_NUM >= 200000
+/** Rejects PG20 index-scan creation, as the external AM has no local indexes. */
+void begin_index_scan(IndexScanDesc scan, uint32 flags)
+{
+    raise_unsupported_operation("index scan");
+}
+
+/** Accepts cleanup after the index scan's creation was rejected. */
+void reset_index_scan(IndexScanDesc scan) {}
+
+/** Accepts final cleanup after the index scan's creation was rejected. */
+void end_index_scan(IndexScanDesc scan) {}
+
+/** Rejects constraint TID lookups on relations with no physical tuple IDs. */
+bool fetch_visible_tid(Relation relation, ItemPointer tid,
+                       Snapshot snapshot, bool *all_dead)
+{
+    raise_unsupported_operation("index scan");
+}
+#else
 /** @brief Rejects index fetch creation for external relations. */
 IndexFetchTableData *
 begin_index_fetch(Relation rel
@@ -661,6 +681,7 @@ fetch_index_tuple(IndexFetchTableData *scan, ItemPointer tid,
 {
 	raise_unsupported_operation("index scan");
 }
+#endif
 
 /* --- tuple fetch / tid / snapshot -------------------------------------- */
 
@@ -1002,10 +1023,17 @@ const TableAmRoutine table_access_methods = {
 	.parallelscan_initialize = initialize_parallel_scan,
 	.parallelscan_reinitialize = reinitialize_parallel_scan,
 
+#if PG_VERSION_NUM >= 200000
+    .index_scan_begin = begin_index_scan,
+    .index_scan_reset = reset_index_scan,
+    .index_scan_end = end_index_scan,
+    .fetch_tid = fetch_visible_tid,
+#else
 	.index_fetch_begin = begin_index_fetch,
 	.index_fetch_reset = reset_index_fetch,
 	.index_fetch_end = end_index_fetch,
 	.index_fetch_tuple = fetch_index_tuple,
+#endif
 
 	.tuple_fetch_row_version = fetch_row_version,
 	.tuple_tid_valid = tuple_identifier_is_valid,

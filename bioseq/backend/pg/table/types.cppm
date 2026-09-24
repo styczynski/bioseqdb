@@ -10,6 +10,7 @@ module;
 
 #include <bioseq/pg_compat.h>
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
 
 export module bioseq.postgres.table.types;
@@ -57,6 +58,18 @@ static_assert(offsetof(column_scan_descriptor, scan_base) == 0,
 /// @brief PostgreSQL table-scan handle reinterpreted as the Bioseq descriptor.
 export using column_scan_handle = column_scan_descriptor*;
 
+// PG20 owns index iteration through IndexScanDesc instead of an exported
+// IndexFetchTableData base. Retain the column reader's relation/flags record;
+// PG17-19 keep their exact callback ABI and memory layout.
+#if PG_VERSION_NUM >= 200000
+export struct column_index_fetch_base {
+    Relation rel;
+    std::uint32_t flags;
+};
+#else
+export using column_index_fetch_base = IndexFetchTableData;
+#endif
+
 /**
  * @brief Standard-layout state retained between PostgreSQL index-fetch callbacks.
  *
@@ -65,7 +78,7 @@ export using column_scan_handle = column_scan_descriptor*;
  */
 export struct index_fetch_state {
     /// @brief PostgreSQL index-fetch base that must remain the first member.
-    IndexFetchTableData fetch_base;
+    column_index_fetch_base fetch_base;
     /// @brief Lazily initialized column-store reader state.
     column_read_state* read_state;
     /// @brief Zero-based bitmap of physical attributes to materialize.
@@ -80,10 +93,14 @@ export struct index_fetch_state {
     bool defers_sequence_hydration;
     /// @brief Opaque pointer to fetch-owned `bioseq::storage::seq_caches`.
     void* sequence_cache;
+#if PG_VERSION_NUM >= 200000
+    /// @brief Relation-shaped slot used only to validate an index-only result.
+    TupleTableSlot* visibility_slot;
+#endif
 };
 
 static_assert(std::is_standard_layout_v<index_fetch_state>,
-              "index_fetch_state must remain standard-layout across IndexFetchTableData callbacks");
+              "index_fetch_state must remain standard-layout across index-fetch callbacks");
 static_assert(offsetof(index_fetch_state, fetch_base) == 0,
               "index_fetch_state::fetch_base must remain the first member");
 

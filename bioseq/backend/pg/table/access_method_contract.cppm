@@ -93,30 +93,50 @@ Size bioseq_parallelscan_initialize(Relation relation, ParallelTableScanDesc sca
 void bioseq_parallelscan_reinitialize(Relation relation, ParallelTableScanDesc scan);
 
 /** Begin an exact-row fetch for an index scan. */
-IndexFetchTableData* bioseq_index_fetch_begin(Relation relation
+column_index_fetch_base* bioseq_index_fetch_begin(Relation relation
 #if PG_VERSION_NUM >= 190000
                                              , std::uint32_t flags
 #endif
 );
 
 /** Begin an exact-row fetch with an explicit projected-attribute bitmap. */
-export IndexFetchTableData* bioseq_index_fetch_begin_extended(
+export column_index_fetch_base* bioseq_index_fetch_begin_extended(
     Relation relation,
     Bitmapset* attributes_needed);
 
 /** Reset an exact-row fetch before it is reused. */
-void bioseq_index_fetch_reset(IndexFetchTableData* scan);
+void bioseq_index_fetch_reset(column_index_fetch_base* scan);
 
 /** End an exact-row fetch and release its owned state. */
-void bioseq_index_fetch_end(IndexFetchTableData* scan);
+void bioseq_index_fetch_end(column_index_fetch_base* scan);
 
 /** Fetch one index-selected row under the supplied snapshot. */
-bool bioseq_index_fetch_tuple(IndexFetchTableData* scan,
+bool bioseq_index_fetch_tuple(column_index_fetch_base* scan,
                               ItemPointer tuple_id,
                               Snapshot snapshot,
                               TupleTableSlot* slot,
                               bool* call_again,
                               bool* all_dead);
+
+#if PG_VERSION_NUM >= 200000
+/** Attach the existing column reader to PostgreSQL's index scan descriptor. */
+void bioseq_index_scan_begin(IndexScanDesc scan, std::uint32_t flags);
+
+/** Attach a column reader while retaining a custom scan's projected columns. */
+export void bioseq_index_scan_begin_projected(IndexScanDesc scan,
+                                             std::uint32_t flags,
+                                             Bitmapset* attributes_needed);
+
+/** Reset the descriptor-owned column reader before index reuse. */
+void bioseq_index_scan_reset(IndexScanDesc scan);
+
+/** Release the descriptor-owned column reader and its memory context. */
+void bioseq_index_scan_end(IndexScanDesc scan);
+
+/** Check a virtual TID through the existing snapshot-aware row reader. */
+bool bioseq_fetch_tid(Relation relation, ItemPointer tuple_id,
+                      Snapshot snapshot, bool* all_dead);
+#endif
 
 /** Fetch one visible row version into a tuple slot. */
 bool bioseq_fetch_row_version(Relation relation,

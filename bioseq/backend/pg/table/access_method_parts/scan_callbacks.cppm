@@ -9,8 +9,12 @@ extern "C" {
 
 #include "access/skey.h"
 #include "access/tableam.h"
+#if PG_VERSION_NUM >= 200000
+#include "access/tableam_indexscan.h"
+#endif
 #include "access/xact.h"
 #include "executor/tuptable.h"
+#include "miscadmin.h"
 #include "nodes/bitmapset.h"
 #include "nodes/nodes.h"
 #include "nodes/pg_list.h"
@@ -453,7 +457,7 @@ init_index_fetch_seq_cache(index_fetch_state* scan, Relation rel, MemoryContext 
 }
 
 /** Begin an index fetch before the executor supplies projected attributes. */
-IndexFetchTableData* bioseq_index_fetch_begin(Relation rel
+column_index_fetch_base* bioseq_index_fetch_begin(Relation rel
 #if PG_VERSION_NUM >= 190000
                                              , std::uint32_t flags
 #endif
@@ -487,7 +491,7 @@ IndexFetchTableData* bioseq_index_fetch_begin(Relation rel
 }
 
 /** Begin an index fetch with an explicit projected-attribute bitmap. */
-export IndexFetchTableData* bioseq_index_fetch_begin_extended(Relation rel,
+export column_index_fetch_base* bioseq_index_fetch_begin_extended(Relation rel,
                                                               Bitmapset* attr_needed) {
     Oid relfilenode = rel->rd_locator.relNumber;
     if (writes_pending_in_parent_transactions(relfilenode, GetCurrentSubTransactionId())) {
@@ -518,15 +522,22 @@ export IndexFetchTableData* bioseq_index_fetch_begin_extended(Relation rel,
 }
 
 /** Reset an index fetch whose state is recreated lazily on the next tuple. */
-void bioseq_index_fetch_reset(IndexFetchTableData* sscan) {
+void bioseq_index_fetch_reset(column_index_fetch_base* sscan) {
     /* no-op */
 }
 
 /** End an index fetch and release its reader, caches, and memory context. */
-void bioseq_index_fetch_end(IndexFetchTableData* sscan) {
+void bioseq_index_fetch_end(column_index_fetch_base* sscan) {
     bioseq_index_fetch_reset(sscan);
 
     index_fetch_state* scan = reinterpret_cast<index_fetch_state*>(sscan);
+
+#if PG_VERSION_NUM >= 200000
+    if (scan->visibility_slot != nullptr) {
+        ExecDropSingleTupleTableSlot(scan->visibility_slot);
+        scan->visibility_slot = nullptr;
+    }
+#endif
 
     /* close per-fetch seq_cache. */
     if (scan->sequence_cache != nullptr) {
@@ -582,7 +593,7 @@ static stripe_metadata* find_stripe_metadata_by_row_number(index_fetch_state* sc
 }
 
 /** Fetch an index-selected row after MVCC and row-mask validation. */
-bool bioseq_index_fetch_tuple(IndexFetchTableData* sscan,
+bool bioseq_index_fetch_tuple(column_index_fetch_base* sscan,
                               ItemPointer tid,
                               Snapshot snapshot,
                               TupleTableSlot* slot,
@@ -721,6 +732,94 @@ bool bioseq_index_fetch_tuple(IndexFetchTableData* sscan,
 
     return true;
 }
+
+#if PG_VERSION_NUM >= 200000
+/** Advance the index AM, preserving column-store visibility and hydration. */
+template <bool p_index_only>
+static bool bioseq_index_next_slot(IndexScanDesc descriptor,
+                                   ScanDirection direction,
+                                   TupleTableSlot* slot) {
+    auto* scan = static_cast<index_fetch_state*>(descriptor->xs_table_opaque);
+    while (tableam_index_getnext_tid(descriptor, direction)) {
+        CHECK_FOR_INTERRUPTS();
+        bool call_again = false;
+        bool all_dead = false;
+        TupleTableSlot* row_slot = slot;
+        if constexpr (p_index_only) {
+            row_slot = scan->visibility_slot;
+            if (descriptor->instrument != nullptr)
+                ++descriptor->instrument->ntabletuplefetches;
+        }
+        if (!bioseq_index_fetch_tuple(&scan->fetch_base, &descriptor->xs_heaptid,
+                                       descriptor->xs_snapshot, row_slot,
+                                       &call_again, &all_dead))
+            continue;
+        // Column rows have no HOT chains. The existing reader deliberately
+        // never marks an invisible row globally dead, so do not kill its TID.
+        Assert(!call_again);
+        pgstat_count_heap_fetch(descriptor->indexRelation);
+        if constexpr (p_index_only)
+            tableam_index_fill_ios_slot(descriptor, slot);
+        return true;
+    }
+    ExecClearTuple(slot);
+    return false;
+}
+
+/** Attach an optional projected reader without changing index iteration. */
+export void bioseq_index_scan_begin_projected(IndexScanDesc descriptor,
+                                             std::uint32_t flags,
+                                             Bitmapset* attributes_needed) {
+    column_index_fetch_base* base = attributes_needed != nullptr
+        ? bioseq_index_fetch_begin_extended(descriptor->heapRelation, attributes_needed)
+        : bioseq_index_fetch_begin(descriptor->heapRelation, flags);
+    base->flags = flags;
+    auto* scan = reinterpret_cast<index_fetch_state*>(base);
+    descriptor->xs_table_opaque = scan;
+    if (descriptor->xs_want_itup) {
+        bioseq::postgres::support::memory_context_scope context{scan->scan_context};
+        scan->visibility_slot = table_slot_create(descriptor->heapRelation, nullptr);
+        descriptor->xs_getnext_slot = bioseq_index_next_slot<true>;
+    } else {
+        descriptor->xs_getnext_slot = bioseq_index_next_slot<false>;
+    }
+}
+
+/** Standard PostgreSQL index entry point, with no projected-column override. */
+void bioseq_index_scan_begin(IndexScanDesc descriptor, std::uint32_t flags) {
+    bioseq_index_scan_begin_projected(descriptor, flags, nullptr);
+}
+
+/** Preserve the existing reader's rescan policy and snapshot ownership. */
+void bioseq_index_scan_reset(IndexScanDesc descriptor) {
+    auto* scan = static_cast<index_fetch_state*>(descriptor->xs_table_opaque);
+    bioseq_index_fetch_reset(&scan->fetch_base);
+}
+
+/** Close the same caches and read state used by the pre-PG20 callback. */
+void bioseq_index_scan_end(IndexScanDesc descriptor) {
+    auto* scan = static_cast<index_fetch_state*>(descriptor->xs_table_opaque);
+    bioseq_index_fetch_end(&scan->fetch_base);
+    descriptor->xs_table_opaque = nullptr;
+}
+
+/** Preserve dirty-snapshot constraint checks through the existing TID reader. */
+bool bioseq_fetch_tid(Relation relation, ItemPointer tuple_id,
+                      Snapshot snapshot, bool* all_dead) {
+    column_index_fetch_base* base = bioseq_index_fetch_begin(relation, SO_NONE);
+    auto* scan = reinterpret_cast<index_fetch_state*>(base);
+    {
+        bioseq::postgres::support::memory_context_scope context{scan->scan_context};
+        scan->visibility_slot = table_slot_create(relation, nullptr);
+    }
+    bool call_again = false;
+    const bool found = bioseq_index_fetch_tuple(
+        base, tuple_id, snapshot, scan->visibility_slot, &call_again, all_dead);
+    Assert(!call_again);
+    bioseq_index_fetch_end(base);
+    return found;
+}
+#endif
 
 /** Fetch an exact visible row version into a caller-provided slot. */
 bool bioseq_fetch_row_version(Relation relation,

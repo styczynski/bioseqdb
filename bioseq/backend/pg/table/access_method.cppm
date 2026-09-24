@@ -166,10 +166,17 @@ std::int64_t get_storage_id([[bioseq_sql::param({
         .parallelscan_initialize = bioseq_parallelscan_initialize,
         .parallelscan_reinitialize = bioseq_parallelscan_reinitialize,
 
+#if PG_VERSION_NUM >= 200000
+        .index_scan_begin = bioseq_index_scan_begin,
+        .index_scan_reset = bioseq_index_scan_reset,
+        .index_scan_end = bioseq_index_scan_end,
+        .fetch_tid = bioseq_fetch_tid,
+#else
         .index_fetch_begin = bioseq_index_fetch_begin,
         .index_fetch_reset = bioseq_index_fetch_reset,
         .index_fetch_end = bioseq_index_fetch_end,
         .index_fetch_tuple = bioseq_index_fetch_tuple,
+#endif
 
         .tuple_fetch_row_version = bioseq_fetch_row_version,
         .tuple_tid_valid = bioseq_tuple_tid_valid,

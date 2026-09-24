@@ -353,6 +353,42 @@ DROP TABLE bioseq_package_observed;
 DROP TABLE bioseq_package_smoke;
 SQL
 
+# PG19 changed TableAM mutation/maintenance signatures; PG20 additionally moved
+# index iteration into the table AM. Exercise those interfaces in the installed
+# extension, without adding benchmark runs or rebuilding accepted PG17 packages.
+if (( postgres_major >= 19 )); then
+  run_pg "${psql_command[@]}" <<'SQL'
+SET statement_timeout = '60s';
+CREATE TABLE bioseq_package_tableam_probe (id integer PRIMARY KEY, value integer) USING bioseq;
+INSERT INTO bioseq_package_tableam_probe VALUES (1, 10), (2, 20), (3, 30);
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SET enable_indexonlyscan = off;
+EXPLAIN (COSTS OFF) SELECT value FROM bioseq_package_tableam_probe WHERE id = 2;
+SELECT value AS indexed_value FROM bioseq_package_tableam_probe WHERE id = 2 \gset
+SELECT 1 / (:indexed_value = 20)::integer AS index_fetch_valid;
+SET enable_indexonlyscan = on;
+EXPLAIN (COSTS OFF) SELECT id FROM bioseq_package_tableam_probe WHERE id = 2;
+SELECT id AS indexed_id FROM bioseq_package_tableam_probe WHERE id = 2 \gset
+SELECT 1 / (:indexed_id = 2)::integer AS projected_index_result_valid;
+DO $$
+BEGIN
+  INSERT INTO bioseq_package_tableam_probe VALUES (2, 999);
+  RAISE EXCEPTION 'duplicate primary key was accepted';
+EXCEPTION WHEN unique_violation THEN NULL;
+END $$;
+UPDATE bioseq_package_tableam_probe SET value = 21 WHERE id = 2;
+DELETE FROM bioseq_package_tableam_probe WHERE id = 1;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+RESET enable_indexonlyscan;
+VACUUM (FULL, ANALYZE) bioseq_package_tableam_probe;
+SELECT count(*) AS row_count, sum(value) AS value_sum FROM bioseq_package_tableam_probe \gset
+SELECT 1 / (:row_count = 2 AND :value_sum = 51)::integer AS rewritten_rows_valid;
+DROP TABLE bioseq_package_tableam_probe;
+SQL
+fi
+
 # Users can also load Bioseq without a server-wide preload. The companion must
 # still load automatically in that backend and remain disabled, without
 # claiming shared-memory query caching is available before a server restart.

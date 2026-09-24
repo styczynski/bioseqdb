@@ -248,8 +248,11 @@ def collect(host, observed, *, mode=None):
         source = REMOTE + "/bin_artifacts/packages/"
         if remote(host, "test -f " + source + "manifest.json && echo yes || true").strip() != "yes":
             return
+    # Only the package root inventory is consolidated locally. A website (and
+    # any nested package payload) must retain all of its own manifest assets.
+    exclusions = ["--exclude=/manifest.json"] if mode == "package-linux" else []
     result = subprocess.run(["rsync", "-a", "-e", shlex.join(ssh[:-1]),
-        "--exclude=manifest.json", endpoint + ":" + source, str(destination) + "/"],
+        *exclusions, endpoint + ":" + source, str(destination) + "/"],
         capture_output=True, text=True, timeout=1200)
     if result.returncode:
         raise RuntimeError(result.stderr[-1000:])
