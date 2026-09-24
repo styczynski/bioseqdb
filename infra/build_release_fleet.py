@@ -495,7 +495,12 @@ def dispatch_available(state):
                         key=lambda d: (d not in PLAN[host], d))
         candidates = [dict(postgres_major=major, distro=distro, architecture=architecture)
                       for major in sorted(matrix["postgresql_majors"]) for distro in distros]
-        cell = next((c for c in candidates if cell_key(c) not in occupied), None)
+        # Explicit, host-bound revalidation preserves an already built package
+        # after a smoke-environment repair. It never interrupts the live cell.
+        rechecks = state.get("validation_rechecks", {})
+        validation_only = host in rechecks
+        cell = rechecks.get(host) if validation_only else next(
+            (c for c in candidates if cell_key(c) not in occupied), None)
         if cell is None:
             continue
         # Match the native workspace preflight before consuming a matrix cell.
@@ -523,14 +528,18 @@ def dispatch_available(state):
         occupied.add(key)
         state.setdefault("attempted_cells", []).append(key)
         state.setdefault("history", []).append(dict(host=host, previous_job=job))
-        state["jobs"][host] = dict(launched=False, cell=cell, mode="package-linux", targets=[cell["distro"]])
-        pending.append((host, cell))
-        event("package_cell_reserved", host=host, cell=cell)
+        state["jobs"][host] = dict(launched=False, cell=cell, mode="package-linux",
+                                   targets=[cell["distro"]], validation_only=validation_only)
+        if validation_only:
+            rechecks.pop(host)
+        pending.append((host, cell, validation_only))
+        event("package_cell_reserved", host=host, cell=cell, validation_only=validation_only)
     write_json_atomic(STATE, state)
     def start(item):
-        host, cell = item
+        host, cell, validation_only = item
         try:
-            return host, dict(launched=True, observed=launch(host, cell=cell))
+            options = {"validate_existing_only": True} if validation_only else {}
+            return host, dict(launched=True, observed=launch(host, cell=cell, **options))
         except Exception as error:
             event("launch_failed", host=host, cell=cell, error=str(error))
             return host, dict(launched=False, error=str(error))

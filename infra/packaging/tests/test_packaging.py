@@ -182,10 +182,18 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
                 remote.return_value = str(100 * 1024**3)
                 dispatch(state)
                 self.assertNotIn(host, state["package_disk_attention"])
-            expected = dict(postgres_major=19, distro="debian_13", architecture="x64")
-            launch.assert_called_once_with(host, cell=expected)
-            self.assertEqual(state["jobs"][host]["cell"], expected)
-            self.assertEqual(state["jobs"][host]["observed"]["pid"], 3)
+                expected = dict(postgres_major=19, distro="debian_13", architecture="x64")
+                launch.assert_called_once_with(host, cell=expected)
+                self.assertEqual(state["jobs"][host]["cell"], expected)
+                self.assertEqual(state["jobs"][host]["observed"]["pid"], 3)
+                state["validation_rechecks"] = {host: previous_cell}
+                dispatch(state)
+                self.assertEqual(launch.call_count, 1)  # Never interrupt a running compile.
+                state["jobs"][host]["observed"]["status"] = "completed"
+                dispatch(state)
+                launch.assert_called_with(host, cell=previous_cell, validate_existing_only=True)
+                self.assertTrue(state["jobs"][host]["validation_only"])
+                self.assertFalse(state["validation_rechecks"])
 
 
 class PostgresHeaderIdentityTests(unittest.TestCase):
