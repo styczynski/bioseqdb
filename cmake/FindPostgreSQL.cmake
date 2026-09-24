@@ -185,6 +185,14 @@ if(PostgreSQL_FOUND)
     INTERFACE_INCLUDE_DIRECTORIES "${PostgreSQL_INCLUDE_DIRS}"
     INTERFACE_LINK_LIBRARIES "${PostgreSQL_SERVER_LINK_LIBRARIES}"
   )
+  if(BIOSEQ_PACKAGE_BUILD AND BIOSEQ_PACKAGE_POSTGRES_HEADER_IDENTITY)
+    # Package archives preserve old mtimes even after an SDK update. Include
+    # header content identity in PG consumers' command/cache keys, not in the
+    # numerical modules or isolated generator. Never disable cache validation.
+    set_property(TARGET PostgreSQL::ServerHeaders PROPERTY
+      INTERFACE_COMPILE_DEFINITIONS
+      "BIOSEQ_PACKAGE_POSTGRES_HEADER_IDENTITY=${BIOSEQ_PACKAGE_POSTGRES_HEADER_IDENTITY}")
+  endif()
 
   # When providing imported targets, these should be namespaced (hence the Foo:: prefix);
   # CMake will recognize that values passed to target_link_libraries() that contain :: in their name

@@ -101,6 +101,23 @@ def cell_context(
     return model.CellContext.from_spec(spec, paths)
 
 
+class PostgresHeaderIdentityTests(unittest.TestCase):
+    def test_content_changes_with_preserved_mtime_and_duplicate_roots(self) -> None:
+        identify = runpy.run_path(str(
+            PACKAGING_ROOT / "scripts" / "postgres_header_identity.py"
+        ))["header_identity"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            header = root / "postgres.h"
+            header.write_text("#define SDK_VALUE 1\n")
+            before = header.stat()
+            original = identify([root])
+            self.assertEqual(original, identify([root, root]))
+            header.write_text("#define SDK_VALUE 2\n")
+            os.utime(header, ns=(before.st_atime_ns, before.st_mtime_ns))
+            self.assertNotEqual(original, identify([root]))
+
+
 class RecordingContainers:
     def __init__(self, callback=None) -> None:
         self.calls: list[tuple[model.ContainerPlan, dict[str, str]]] = []

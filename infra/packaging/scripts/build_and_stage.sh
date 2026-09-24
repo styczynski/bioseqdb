@@ -70,6 +70,11 @@ actual_pg_major="$("${pg_config}" --version | sed -nE 's/^PostgreSQL ([0-9]+).*/
 [[ "${actual_pg_major}" == "${postgres_major}" ]] \
   || die "pg_config major ${actual_pg_major:-unknown} does not equal requested ${postgres_major}"
 
+postgres_header_identity="$(python3 \
+  "${persistent_source_dir}/infra/packaging/scripts/postgres_header_identity.py" \
+  "${pg_config}")"
+readonly postgres_header_identity
+
 case "$(uname -m)" in
   x86_64)
     readonly vcpkg_triplet=x64-linux-libcxx
@@ -152,6 +157,7 @@ package_cmake_invariants() {
     CMAKE_SKIP_RPATH ON \
     PostgreSQL_CONFIG "${pg_config}" \
     BIOSEQ_PACKAGE_BUILD ON \
+    BIOSEQ_PACKAGE_POSTGRES_HEADER_IDENTITY "${postgres_header_identity}" \
     BIOSEQ_CODEGEN_C_COMPILER "${llvm_root}/bin/clang" \
     BIOSEQ_CODEGEN_CXX_COMPILER "${llvm_root}/bin/clang++" \
     BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON "${libcxx_modules}" \
@@ -227,6 +233,7 @@ if [[ "${action}" == "build" ]]; then
       -DCMAKE_SKIP_RPATH=ON \
       -DPostgreSQL_CONFIG="${pg_config}" \
       -DBIOSEQ_PACKAGE_BUILD=ON \
+      -DBIOSEQ_PACKAGE_POSTGRES_HEADER_IDENTITY="${postgres_header_identity}" \
       -DBIOSEQ_CODEGEN_C_COMPILER="${llvm_root}/bin/clang" \
       -DBIOSEQ_CODEGEN_CXX_COMPILER="${llvm_root}/bin/clang++" \
       -DBIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON="${libcxx_modules}" \
