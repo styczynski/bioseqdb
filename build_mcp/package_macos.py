@@ -248,7 +248,14 @@ def build_one(repository, major, state, output, run, progress):
     loader = re.search(r'^Vulkan_LIBRARY:FILEPATH=(.+)$', cache, re.MULTILINE)
     if loader is None:
         raise RuntimeError('Configured Vulkan loader missing from package build cache')
-    mach_o = bundle_dylibs([staged_lib / 'bioseq.so', staged_lib / 'bioseq_cache.so'],
+    archive_helpers = list(payload.rglob('bioseq_gpu_archive_builder'))
+    if len(archive_helpers) != 1 or archive_helpers[0].is_symlink():
+        raise RuntimeError('Native Mac package must contain its installed Metal archive helper')
+    archive_helper = staged_lib / 'bioseq_gpu_archive_builder'
+    if archive_helpers[0] != archive_helper:
+        shutil.move(str(archive_helpers[0]), archive_helper)
+    archive_helper.chmod(0o755)
+    mach_o = bundle_dylibs([staged_lib / 'bioseq.so', staged_lib / 'bioseq_cache.so', archive_helper],
                           staged_lib / 'bioseq_runtime', pg_opt / 'bin', run,
                           [(loader.group(1), 'libvulkan.1.dylib')])
     scripts = run_root / 'scripts'
@@ -279,6 +286,7 @@ Default alignment is bounded ntHash SIMD + SIMD-DP + block aligner.
 The installer does not edit postgresql.conf, start services, or delete databases.
 Non-system Mach-O dependencies are bundled beside the extensions.
 Vulkan GPU use additionally requires a working MoltenVK ICD (brew install molten-vk).
+First-time Metal shader compilation requires Apple's xcrun/Metal toolchain.
 This package is not qualified for Intel Macs or non-Homebrew PostgreSQL distributions.
 ''')
     component = run_root / 'component.pkg'
@@ -301,6 +309,14 @@ This package is not qualified for Intel Macs or non-Homebrew PostgreSQL distribu
             copy = extracted[0] / path.relative_to(payload)
             if not copy.is_file() or sha256(copy) != sha256(path):
                 raise RuntimeError(f'Installer payload changed: {path.relative_to(payload)}')
+    # The GPU runtime stages this executable into a fresh invocation directory.
+    # Its ordinary no-argument usage exit (2) proves it can start there without
+    # accidentally relying on dylibs located beside the original build output.
+    with tempfile.TemporaryDirectory(prefix='helper-startup-', dir=run_root) as temporary:
+        staged_helper = Path(temporary) / archive_helper.name
+        shutil.copy2(extracted[0] / archive_helper.relative_to(payload), staged_helper)
+        run(['/bin/sh', '-c', '"$1"; helper_status=$?; test "$helper_status" -eq 2',
+             'bioseq-helper-startup', staged_helper])
     progress(f'validating final macOS PostgreSQL {major} package in private SQL runtime')
     smoke = smoke_payload(repository, extracted[0], payload, pg_prefix,
                           libdir, sharedir, run_root, run)
