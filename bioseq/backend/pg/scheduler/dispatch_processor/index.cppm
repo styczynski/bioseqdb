@@ -126,11 +126,18 @@ module;
 
 #include <stddef.h>
 #include <stdint.h>
+#include "pg_config.h"
 
 extern "C" {
 #include "postgres_ext.h"
 
+// Match PostgreSQL's lightweight ABI declaration without importing its heavy
+// server headers into this scheduler facade. PG19 makes Datum uint64_t.
+#if PG_VERSION_NUM >= 190000
+typedef uint64_t Datum;
+#else
 typedef uintptr_t Datum;
+#endif
 typedef struct MemoryContextData* MemoryContext;
 typedef struct SnapshotData* Snapshot;
 }

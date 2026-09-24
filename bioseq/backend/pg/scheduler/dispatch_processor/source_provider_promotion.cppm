@@ -5,6 +5,7 @@
 module;
 
 #include <stdint.h>
+#include "pg_config.h"
 
 extern "C" {
 #include "postgres_ext.h"
@@ -15,7 +16,12 @@ extern "C" {
      (PGSIXBIT(ch5) << 24))
 #include "utils/errcodes.h"
 
+// This narrow declaration must match postgres.h for the selected server SDK.
+#if PG_VERSION_NUM >= 190000
+typedef uint64_t Datum;
+#else
 typedef uintptr_t Datum;
+#endif
 typedef int16_t AttrNumber;
 typedef struct MemoryContextData* MemoryContext;
 typedef struct SnapshotData* Snapshot;
