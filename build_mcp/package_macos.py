@@ -385,6 +385,13 @@ After the SDK is installed, install the accompanying BioseqDB .pkg.
 ''')
         support_files = [dict(file=str(path.relative_to(output)), bytes=path.stat().st_size,
                               sha256=sha256(path)) for path in (sdk_copy, setup)]
+    if final.is_file() and sha256(final) != sha256(candidate):
+        previous = output / 'retired_revisions' / sha256(final) / final.name
+        previous.parent.mkdir(parents=True, exist_ok=True)
+        if not previous.exists():
+            shutil.copy2(final, previous)
+        if sha256(previous) != sha256(final):
+            raise RuntimeError('Cannot preserve the previous macOS installer revision')
     os.replace(candidate, final)
     return dict(file=str(final.relative_to(output)), bytes=final.stat().st_size,
         sha256=sha256(final), distro='macos', postgres_major=major,
@@ -452,7 +459,9 @@ def run_package_macos(*, repository_root, log_handle, deadline, progress):
     if not majors or not set(majors).issubset({17, 18, 19, 20}):
         raise RuntimeError('macOS PostgreSQL selection must be within the release matrix')
     for major in sorted(set(majors)):
-        if any(p['postgres_major'] == major and (output / p['file']).is_file()
+        if any(p['postgres_major'] == major
+               and p['installed_sql_smoke'].get('column_defaults_and_vacuum') is True
+               and (output / p['file']).is_file()
                and sha256(output / p['file']) == p['sha256'] for p in manifest['packages']):
             progress(f'reusing accepted macOS PostgreSQL {major} package')
             reclaim_accepted_compiler_cache(state, major, progress)

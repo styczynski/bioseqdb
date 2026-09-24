@@ -153,7 +153,8 @@ def accepted_packages():
         if (package.get('validation', {}).get('passed') is not True
                 or package.get('installed_sql_smoke', {}).get('passed') is not True
                 or package['installed_sql_smoke'].get('default_insert_search') is not True
-                or package['installed_sql_smoke'].get('default_persisted_search') is not True):
+                or package['installed_sql_smoke'].get('default_persisted_search') is not True
+                or package['installed_sql_smoke'].get('column_defaults_and_vacuum') is not True):
             continue
         relative = PurePosixPath(package['file'])
         if relative.is_absolute() or '..' in relative.parts or not relative.parts:
@@ -334,6 +335,10 @@ def sourceforge_access():
 
 
 def publish_packages(apply):
+    hold = CONTROL / 'package_publication_hold.json'
+    if apply and hold.exists() and json.loads(hold.read_text()).get('held') is True:
+        event('packages_publication_held', reason=json.loads(hold.read_text()).get('reason'))
+        return
     packages = accepted_packages()
     event('packages_preview', release=RELEASE, accepted=len(packages),
           package_versions=sorted({p['package_version'] for p in packages}),

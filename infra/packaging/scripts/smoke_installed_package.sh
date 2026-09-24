@@ -426,9 +426,7 @@ RESET bioseq.column_cache.enabled;
 SQL
 fi
 
-# PG19 changed TableAM mutation/maintenance signatures; PG20 additionally moved
-# index iteration into the table AM. Exercise those interfaces in the installed
-# extension, without adding benchmark runs or rebuilding accepted PG17 packages.
+# The planner-layout probe is specific to the PG19/20 boundary changes.
 if (( postgres_major >= 19 )); then
   run_pg "${psql_command[@]}" <<'SQL'
 SET statement_timeout = '60s';
@@ -437,21 +435,35 @@ SELECT 1 / (count(*) = 19 AND bool_and(field.value IS NOT DISTINCT FROM 'true'))
 AS match_helper_wrappers_valid
 FROM bioseq_internal.match_helper_wrapper_propagation_probe() AS probe
 CROSS JOIN LATERAL jsonb_each_text(to_jsonb(probe)) AS field;
+SQL
+fi
+
+# Defaults and MVCC row masks are shared TableAM code, not PG19-only behavior.
+# Qualify every released server major using the actual installed extension.
+run_pg "${psql_command[@]}" <<'SQL'
+SET statement_timeout = '60s';
 CREATE TABLE bioseq_package_tableam_probe (id integer PRIMARY KEY, value integer) USING bioseq;
 INSERT INTO bioseq_package_tableam_probe VALUES (1, 10), (2, 20), (3, 30);
 ALTER TABLE bioseq_package_tableam_probe ADD COLUMN wide_value bigint DEFAULT 1000000000000;
 EXPLAIN (ANALYZE, COSTS OFF)
 SELECT avg(value), avg(wide_value) FROM bioseq_package_tableam_probe;
 DO $$
-DECLARE observed record;
+DECLARE observed record; vector_setting text; cache_setting text;
 BEGIN
-  SELECT avg(value) AS integer_average, avg(wide_value) AS bigint_average
-    INTO observed FROM bioseq_package_tableam_probe;
-  IF observed.integer_average IS DISTINCT FROM 20::numeric OR
-     observed.bigint_average IS DISTINCT FROM 1000000000000::numeric THEN
-    RAISE EXCEPTION 'numeric average mismatch: integer=%, bigint=%',
-      observed.integer_average, observed.bigint_average;
-  END IF;
+  FOREACH vector_setting IN ARRAY ARRAY['on', 'off'] LOOP
+    FOREACH cache_setting IN ARRAY ARRAY['on', 'off'] LOOP
+      PERFORM set_config('bioseq.vectorization.enabled', vector_setting, true);
+      PERFORM set_config('bioseq.column_cache.enabled', cache_setting, true);
+      -- Replan after each GUC change rather than reuse a cached PL/pgSQL plan.
+      EXECUTE 'SELECT avg(value) AS integer_average, avg(wide_value) AS bigint_average
+               FROM bioseq_package_tableam_probe' INTO observed;
+      IF observed.integer_average IS DISTINCT FROM 20::numeric OR
+         observed.bigint_average IS DISTINCT FROM 1000000000000::numeric THEN
+        RAISE EXCEPTION 'numeric average mismatch: vector=%, cache=%, integer=%, bigint=%',
+          vector_setting, cache_setting, observed.integer_average, observed.bigint_average;
+      END IF;
+    END LOOP;
+  END LOOP;
 END $$;
 SET enable_seqscan = off;
 SET enable_bitmapscan = off;
@@ -484,6 +496,17 @@ RESET enable_seqscan;
 RESET enable_bitmapscan;
 RESET enable_indexonlyscan;
 VACUUM (ANALYZE) bioseq_package_tableam_probe;
+DO $$
+DECLARE observed record;
+BEGIN
+  SELECT count(*) AS row_count, sum(value) AS value_sum
+    INTO observed FROM bioseq_package_tableam_probe;
+  IF observed.row_count IS DISTINCT FROM 2::bigint OR
+     observed.value_sum IS DISTINCT FROM 51::bigint THEN
+    RAISE EXCEPTION 'vacuumed rows mismatch: count=%, sum=%',
+      observed.row_count, observed.value_sum;
+  END IF;
+END $$;
 VACUUM (FULL, ANALYZE) bioseq_package_tableam_probe;
 DO $$
 DECLARE observed record;
@@ -497,6 +520,11 @@ BEGIN
   END IF;
 END $$;
 DROP TABLE bioseq_package_tableam_probe;
+SQL
+
+if (( postgres_major >= 19 )); then
+  run_pg "${psql_command[@]}" <<'SQL'
+SET statement_timeout = '60s';
 -- PG19 replaced CopyFormatOptions.binary with an explicit format enum.
 -- Binary input still carries its alphabet; untyped text input must fail before
 -- PostgreSQL attempts to open the deliberately nonexistent input file.
@@ -556,5 +584,5 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     || die "staged Metal archive helper cannot start (exit ${helper_status})"
 fi
 
-printf '{"passed":true,"package_installed":true,"preload_active":true,"bioseq_extension_created":true,"bioseq_cache_extension_created":true,"nonempty_roundtrip":true,"roundtrip":"ACGT","dna5_roundtrip":true,"release_defaults":true,"default_insert_search":true,"default_persisted_search":true,"search_after_insert":true,"backend_only_cache_autoload":true,"distro":"%s","architecture":"%s","postgres_major":%s}\n' \
+printf '{"passed":true,"package_installed":true,"preload_active":true,"bioseq_extension_created":true,"bioseq_cache_extension_created":true,"nonempty_roundtrip":true,"roundtrip":"ACGT","dna5_roundtrip":true,"release_defaults":true,"default_insert_search":true,"default_persisted_search":true,"search_after_insert":true,"column_defaults_and_vacuum":true,"backend_only_cache_autoload":true,"distro":"%s","architecture":"%s","postgres_major":%s}\n' \
   "${distro}" "${requested_arch}" "${postgres_major}" >&3

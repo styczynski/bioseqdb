@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -307,7 +308,9 @@ def write_release_manifest():
                for distro, architecture, major in sorted(expected.keys() - packages.keys())]
     functional_pending = [dict(distro=key[0], architecture=key[1], postgres_major=key[2])
                           for key, package in sorted(packages.items())
-                          if package["installed_sql_smoke"].get("default_insert_search") is not True]
+                          if any(package["installed_sql_smoke"].get(field) is not True
+                                 for field in ("default_insert_search", "default_persisted_search",
+                                               "column_defaults_and_vacuum"))]
     write_json_atomic(destination / "manifest.json", {
         "schema_revision": 1,
         "description": "Consolidated native package delivery inventory. Only ELF or Mach-O/payload-validated "
@@ -416,6 +419,27 @@ def collect(host, observed, *, mode=None):
         source = REMOTE + "/bin_artifacts/packages/"
         if remote(host, "test -f " + source + "manifest.json && echo yes || true").strip() != "yes":
             return
+        # A qualified replacement may reuse the filename, never its content
+        # hash. Preserve earlier delivered bytes before rsync updates the cell.
+        manifest = json.loads(remote(host, "cat " + source + "manifest.json"))
+        manifest_path = destination / (host + "-manifest.json")
+        previous_packages = (json.loads(manifest_path.read_text()).get("packages", [])
+                             if manifest_path.exists() else [])
+        incoming = {p["file"]: p["sha256"] for p in manifest["packages"]}
+        for package in previous_packages:
+            if incoming.get(package["file"], package["sha256"]) == package["sha256"]:
+                continue
+            old = (destination / package["file"]).resolve()
+            if not old.is_relative_to(destination.resolve()) or not old.is_file():
+                raise RuntimeError("Previous package revision is missing or outside the collection")
+            if hashlib.sha256(old.read_bytes()).hexdigest() != package["sha256"]:
+                raise RuntimeError("Previous package revision differs from its recorded bytes")
+            archived = destination / "retired_revisions" / package["sha256"] / old.name
+            archived.parent.mkdir(parents=True, exist_ok=True)
+            if not archived.exists():
+                shutil.copy2(old, archived)
+            if hashlib.sha256(archived.read_bytes()).hexdigest() != package["sha256"]:
+                raise RuntimeError("Previous package revision archive failed verification")
     # Only the package root inventory is consolidated locally. A website (and
     # any nested package payload) must retain all of its own manifest assets.
     exclusions = ["--exclude=/manifest.json"] if mode == "package-linux" else []
@@ -427,7 +451,6 @@ def collect(host, observed, *, mode=None):
     if mode == "website":
         verify_website_delivery(destination)
     if mode == "package-linux":
-        manifest = json.loads(remote(host, "cat " + source + "manifest.json"))
         manifest_path = destination / (host + "-manifest.json")
         if manifest_path.exists():
             # A failed acceptance-only retry must not erase earlier accepted
@@ -465,8 +488,9 @@ def dispatch_available(state):
     """Reserve distinct native cells before concurrent launch; do not loop failed builds."""
     matrix = json.loads((ROOT / "infra/package_matrix.json").read_text())
     inventory = json.loads((OUTPUT / "packages/manifest.json").read_text())
-    occupied = {cell_key(p) for p in inventory["packages"]
-                if p["installed_sql_smoke"].get("default_insert_search") is True}
+    # Existing cells retain their original owner for any correction. Do not
+    # rebuild the same cell on another host just because its smoke is older.
+    occupied = {cell_key(p) for p in inventory["packages"]}
     occupied.update(state.get("attempted_cells", []))
     for host, job in state["jobs"].items():
         if job.get("cell"):
@@ -499,7 +523,22 @@ def dispatch_available(state):
         # after a smoke-environment repair. It never interrupts the live cell.
         rechecks = state.get("validation_rechecks", {})
         validation_only = host in rechecks
-        cell = rechecks.get(host) if validation_only else next(
+        repair = None
+        if state.get("qualify_shared_tableam"):
+            attempted = state.setdefault("tableam_qualification_attempted_cells", [])
+            repair = next((dict(postgres_major=p["postgres_major"], distro=p["distro"],
+                                architecture=p["architecture"])
+                           for p in sorted(inventory["packages"],
+                                           key=lambda p: (p["postgres_major"], p["distro"]))
+                           if p["build_host"] == host
+                           and p["installed_sql_smoke"].get("column_defaults_and_vacuum") is not True
+                           and cell_key(p) not in attempted), None)
+            # An older archive waiting for an environment-only recheck now
+            # needs the proven shared TableAM fixes too, on this same host.
+            if validation_only:
+                repair = rechecks[host]
+                validation_only = False
+        cell = (rechecks[host] if validation_only else repair) or next(
             (c for c in candidates if cell_key(c) not in occupied), None)
         if cell is None:
             continue
@@ -530,8 +569,11 @@ def dispatch_available(state):
         state.setdefault("history", []).append(dict(host=host, previous_job=job))
         state["jobs"][host] = dict(launched=False, cell=cell, mode="package-linux",
                                    targets=[cell["distro"]], validation_only=validation_only)
-        if validation_only:
-            rechecks.pop(host)
+        if validation_only or repair:
+            if repair:
+                state["tableam_qualification_attempted_cells"].append(cell_key(cell))
+                event("tableam_qualification_reserved", host=host, cell=cell)
+            rechecks.pop(host, None)
         pending.append((host, cell, validation_only))
         event("package_cell_reserved", host=host, cell=cell, validation_only=validation_only)
     write_json_atomic(STATE, state)

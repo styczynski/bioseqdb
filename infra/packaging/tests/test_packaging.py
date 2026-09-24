@@ -2301,13 +2301,20 @@ class ReleasePublisherTests(unittest.TestCase):
                           postgres_sdk_formula='bioseqdb/package-sdks/postgresql@20',
                           validation=dict(passed=True, format='pkg', package_version='0.1.0-alpha.1'),
                           installed_sql_smoke=dict(passed=True, default_insert_search=True,
-                                                   default_persisted_search=True),
+                                                   default_persisted_search=True,
+                                                   column_defaults_and_vacuum=True),
                           postgres_sdk_support_files=[dict(file=formula.name,
                               bytes=formula.stat().st_size, sha256=sha256(formula))])
             manifest = output / 'manifest.json'
             manifest.write_text(json.dumps(dict(packages=[record])))
             with mock.patch.dict(function.__globals__, {'ROOT': root}):
                 accepted = function()[0]
+                record['installed_sql_smoke'].pop('column_defaults_and_vacuum')
+                manifest.write_text(json.dumps(dict(packages=[record])))
+                with self.assertRaisesRegex(RuntimeError, 'No accepted packages'):
+                    function()
+                record['installed_sql_smoke']['column_defaults_and_vacuum'] = True
+                manifest.write_text(json.dumps(dict(packages=[record])))
                 self.assertEqual(accepted['postgres_runtime_requirement'], 'exact development SDK')
                 companion = accepted['postgres_sdk_support_files'][0]
                 self.assertEqual(companion['source'], formula)
