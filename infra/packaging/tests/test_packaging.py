@@ -167,13 +167,21 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
                 "observed": {"status": "failed", "pid": 1},
             }}}
             launch = mock.Mock(return_value={"status": "running", "pid": 3})
+            remote = mock.Mock(return_value=str(40 * 1024**3))
             with mock.patch.dict(dispatch.__globals__, {
                     "ROOT": root, "OUTPUT": root, "STATE": root / "state.json",
-                    "PLAN": {host: ["website"]}, "launch": launch, "event": mock.Mock()}):
+                    "PLAN": {host: ["website"]}, "launch": launch,
+                    "remote": remote, "event": mock.Mock()}):
                 dispatch(state)
                 launch.assert_not_called()  # An unaccepted website still takes priority.
                 state["jobs"][host].update(mode="package-linux", cell=previous_cell)
                 dispatch(state)
+                launch.assert_not_called()  # Host disk shortage must not consume a cell.
+                self.assertFalse(state.get("attempted_cells"))
+                self.assertIn(host, state["package_disk_attention"])
+                remote.return_value = str(100 * 1024**3)
+                dispatch(state)
+                self.assertNotIn(host, state["package_disk_attention"])
             expected = dict(postgres_major=19, distro="debian_13", architecture="x64")
             launch.assert_called_once_with(host, cell=expected)
             self.assertEqual(state["jobs"][host]["cell"], expected)
