@@ -370,6 +370,11 @@ SQL
 if (( postgres_major >= 19 )); then
   run_pg "${psql_command[@]}" <<'SQL'
 SET statement_timeout = '60s';
+-- Reuse the existing planner probe for the PG19 Unique/Memoize layouts.
+SELECT 1 / (count(*) = 19 AND bool_and(field.value IS NOT DISTINCT FROM 'true'))::integer
+AS match_helper_wrappers_valid
+FROM bioseq_internal.match_helper_wrapper_propagation_probe() AS probe
+CROSS JOIN LATERAL jsonb_each_text(to_jsonb(probe)) AS field;
 CREATE TABLE bioseq_package_tableam_probe (id integer PRIMARY KEY, value integer) USING bioseq;
 INSERT INTO bioseq_package_tableam_probe VALUES (1, 10), (2, 20), (3, 30);
 ALTER TABLE bioseq_package_tableam_probe ADD COLUMN wide_value bigint DEFAULT 1000000000000;
