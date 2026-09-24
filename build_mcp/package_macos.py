@@ -309,14 +309,6 @@ This package is not qualified for Intel Macs or non-Homebrew PostgreSQL distribu
             copy = extracted[0] / path.relative_to(payload)
             if not copy.is_file() or sha256(copy) != sha256(path):
                 raise RuntimeError(f'Installer payload changed: {path.relative_to(payload)}')
-    # The GPU runtime stages this executable into a fresh invocation directory.
-    # Its ordinary no-argument usage exit (2) proves it can start there without
-    # accidentally relying on dylibs located beside the original build output.
-    with tempfile.TemporaryDirectory(prefix='helper-startup-', dir=run_root) as temporary:
-        staged_helper = Path(temporary) / archive_helper.name
-        shutil.copy2(extracted[0] / archive_helper.relative_to(payload), staged_helper)
-        run(['/bin/sh', '-c', '"$1"; helper_status=$?; test "$helper_status" -eq 2',
-             'bioseq-helper-startup', staged_helper])
     progress(f'validating final macOS PostgreSQL {major} package in private SQL runtime')
     smoke = smoke_payload(repository, extracted[0], payload, pg_prefix,
                           libdir, sharedir, run_root, run)

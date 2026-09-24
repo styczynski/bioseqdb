@@ -500,5 +500,31 @@ backend_load="$(run_pg "${psql_command[@]}" -Atqc \
    AND current_setting('shared_preload_libraries') = ''")"
 [[ "${backend_load}" == "t" ]] || die "backend-only companion autoload failed"
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # The real GPU runtime stages only this executable into a fresh directory.
+  # Inspect and start the extracted/installed helper in that same arrangement;
+  # a dependency on this builder's Homebrew/Cellar paths is not portable.
+  helper_library_dir="$("${pg_bindir}/pg_config" --pkglibdir)"
+  helper_source="${helper_library_dir}/bioseq_gpu_archive_builder"
+  [[ -f "${helper_source}" && ! -L "${helper_source}" && -x "${helper_source}" ]] \
+    || die "installed Metal archive helper is missing or not executable"
+  while IFS= read -r helper_dependency; do
+    case "${helper_dependency}" in
+      /usr/lib/*|/System/Library/*) ;;
+      *) die "staged Metal helper needs a non-system runtime: ${helper_dependency}" ;;
+    esac
+  done < <(/usr/bin/otool -L "${helper_source}" | awk 'NR > 1 { print $1 }')
+  /usr/bin/codesign --verify --strict "${helper_source}"
+  helper_stage="$(mktemp -d "${socket_dir}/archive-helper.XXXXXX")"
+  cp -p "${helper_source}" "${helper_stage}/bioseq_gpu_archive_builder"
+  if "${helper_stage}/bioseq_gpu_archive_builder" >/dev/null 2>&1; then
+    helper_status=0
+  else
+    helper_status=$?
+  fi
+  [[ "${helper_status}" == 2 ]] \
+    || die "staged Metal archive helper cannot start (exit ${helper_status})"
+fi
+
 printf '{"passed":true,"package_installed":true,"preload_active":true,"bioseq_extension_created":true,"bioseq_cache_extension_created":true,"nonempty_roundtrip":true,"roundtrip":"ACGT","dna5_roundtrip":true,"release_defaults":true,"default_insert_search":true,"default_persisted_search":true,"search_after_insert":true,"backend_only_cache_autoload":true,"distro":"%s","architecture":"%s","postgres_major":%s}\n' \
   "${distro}" "${requested_arch}" "${postgres_major}" >&3
