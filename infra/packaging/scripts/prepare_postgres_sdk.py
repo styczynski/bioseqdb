@@ -86,6 +86,13 @@ def main():
             env.update(CC='/opt/bioseq-package-toolchain/llvm-22/bin/clang',
                        CXX='/opt/bioseq-package-toolchain/llvm-22/bin/clang++',
                        CFLAGS='-O3 -DNDEBUG')
+            # PostgreSQL's configure probes zlib.h/-lz directly, unlike its
+            # pkg-config-aware LZ4/ZSTD probes. Honor the selected zlib ABI
+            # provider's non-default paths (e.g. openSUSE zlib-ng-compat).
+            env['CPPFLAGS'] = subprocess.check_output(
+                ['pkg-config', '--cflags', 'zlib'], text=True, env=env).strip()
+            env['LDFLAGS'] = subprocess.check_output(
+                ['pkg-config', '--libs-only-L', 'zlib'], text=True, env=env).strip()
             run([source / 'configure', f'--prefix={prefix}', '--with-icu', '--with-openssl',
                  '--with-lz4', '--with-zstd'], cwd=source, environment=env)
             run(['make', '-j', os.environ.get('BIOSEQ_PACKAGE_PARALLELISM', '4')],
