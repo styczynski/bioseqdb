@@ -366,7 +366,7 @@ validate_check_expressions(Relation relation,
     const Node* node = static_cast<const Node*>(linitial(predicate));
     if (node == nullptr || !IsA(node, OpExpr))
         return false;
-    const auto* equality = castNode(OpExpr, node);
+    const auto* equality = reinterpret_cast<const OpExpr*>(node);
     if (equality->opresulttype != BOOLOID || list_length(equality->args) != 2 ||
         bioseq::postgres::support::invoke_pg_as_cpp(
             [equality] { return get_opcode(equality->opno); }) != F_INT2EQ) {
@@ -376,8 +376,8 @@ validate_check_expressions(Relation relation,
     const Node* right = static_cast<const Node*>(lsecond(equality->args));
     if (left == nullptr || right == nullptr || !IsA(left, Var) || !IsA(right, Const))
         return false;
-    const auto* variable = castNode(Var, left);
-    const auto* constant = castNode(Const, right);
+    const auto* variable = reinterpret_cast<const Var*>(left);
+    const auto* constant = reinterpret_cast<const Const*>(right);
     return variable->varattno == minimizer_generation_storage_codec::attribute_number<
                                      &minimizer_generation_storage_catalog_row::state>() &&
            variable->vartype == INT2OID && variable->varlevelsup == 0 &&

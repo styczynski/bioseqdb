@@ -614,10 +614,11 @@ void bioseq_letter_post_parse_analyze(
     ParseState* parse_state,
     Query* query,
 #if PG_VERSION_NUM >= 190000
-    const JumbleState* jumble_state)
+    const JumbleState* jumble_state
 #else
-    JumbleState* jumble_state)
+    JumbleState* jumble_state
 #endif
+)
 {
     /* Count this callback itself, not only the downstream hook.  PostgreSQL
      * invokes shared-preload libraries in configured order but their hooks

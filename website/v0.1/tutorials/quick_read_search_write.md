@@ -511,7 +511,7 @@ SELECT read_id,
 FROM quick_reads
 WHERE public.mmsearch(
     sequence,
-    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)
+    'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 32)
 )
 ORDER BY read_id, target_start;
 -- bioseq:teardown
@@ -521,8 +521,12 @@ RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 The first result confirms the three rows written and reports each stored length.
-The second result is the indexed search, including the match coordinates needed
-to locate each alignment in its stored target.
+The second result searches for the full first read, including the match
+coordinates needed to locate each alignment in its stored target. This longer
+query exercises the default alignment settings; a short shared motif alone can
+fall below the alignment filters even when that text occurs in a target. This
+example uses transient index preparation; explicitly publish an index after the
+load when persisted reuse is required.
 
 ## What to carry into an application
 

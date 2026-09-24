@@ -16285,10 +16285,13 @@ void mark_planned_result_relations(PlannedStmt& statement) {
     bool precise = false;
 #if PG_VERSION_NUM >= 190000
     int range_index = -1;
-    while ((range_index = bms_next_member(statement.resultRelationRelids, range_index)) >= 0) {
+    while ((range_index = bms_next_member(statement.resultRelationRelids, range_index)) >= 0)
 #else
     ListCell* relation_cell = nullptr;
-    foreach (relation_cell, statement.resultRelations) {
+    foreach (relation_cell, statement.resultRelations)
+#endif
+    {
+#if PG_VERSION_NUM < 190000
         const int range_index = lfirst_int(relation_cell);
 #endif
         if (range_index <= 0 || range_index > list_length(statement.rtable)) {

@@ -452,8 +452,8 @@ VALUES (
     'local-check',
     'region-1',
     1000,
-    1058,
-    'AAAATAGTCACTGTAGCCTGATCGTAGCTAGTCAACGTACGTACGTACGTACGTAAAA'
+    1101,
+    'AAAATCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAATTTT'
 );
 ```
 
@@ -468,7 +468,7 @@ WITH local_matches AS MATERIALIZED (
     FROM imported_provider_targets
     WHERE public.mmsearch(
         sequence,
-        'TAGTCACTGTAGCCTGATCGTAGCTAGTCA'::bioseq.seq('dna4', 64),
+        'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 64),
         aligner_options(best_n => 3)
     )
 )
@@ -481,7 +481,9 @@ FROM local_matches
 ORDER BY provider, accession, provider_start0;
 ```
 
-The row returns the exact match as `[1004, 1034)` with CIGAR `30M`.
+The expected exact match is `[1004, 1097)` with CIGAR `93M`. The query is
+long enough to exercise the default alignment filters, unlike a short motif
+that may be present in the text but rejected as an alignment.
 
 The runnable version records the installation's real external-provider
 capability before running the local search. It does not contact a remote
@@ -505,8 +507,8 @@ INSERT INTO remote_provider_stage VALUES (
     'local-check',
     'region-1',
     1000,
-    1058,
-    'AAAATAGTCACTGTAGCCTGATCGTAGCTAGTCAACGTACGTACGTACGTACGTAAAA'
+    1101,
+    'AAAATCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAATTTT'
 );
 -- bioseq:visible
 SELECT to_regnamespace('bioseq_external') IS NOT NULL AS schema_ready,
@@ -532,7 +534,7 @@ WITH local_matches AS MATERIALIZED (
     FROM remote_provider_stage
     WHERE public.mmsearch(
         sequence,
-        'TAGTCACTGTAGCCTGATCGTAGCTAGTCA'::bioseq.seq('dna4', 64),
+        'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 64),
         aligner_options(best_n => 3)
     )
 )

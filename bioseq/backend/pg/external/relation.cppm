@@ -823,10 +823,11 @@ lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
 void
 finish_bulk_insert(Relation relation,
 #if PG_VERSION_NUM >= 190000
-                   uint32 options)
+                   uint32 options
 #else
-                   int options)
+                   int options
 #endif
+)
 {
 	raise_read_only();
 }

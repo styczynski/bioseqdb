@@ -245,10 +245,11 @@ TM_Result bioseq_tuple_lock(Relation relation,
 /** Finish a bulk insert while retaining transaction-owned write state. */
 void bioseq_finish_bulk_insert(Relation relation,
 #if PG_VERSION_NUM >= 190000
-                              std::uint32_t options);
+                              std::uint32_t options
 #else
-                              int options);
+                              int options
 #endif
+);
 
 /** Build an index from all visible rows in a table scan. */
 double bioseq_index_build_range_scan(Relation relation,

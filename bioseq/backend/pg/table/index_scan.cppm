@@ -178,10 +178,11 @@ static TupleTableSlot* fetch_next_index_tuple(IndexScanState* node) {
 
     /* fetch the next tuple */
 #if PG_VERSION_NUM >= 200000
-    while (table_index_getnext_slot(scandesc, direction, slot)) {
+    while (table_index_getnext_slot(scandesc, direction, slot))
 #else
-    while (index_getnext_slot(scandesc, direction, slot)) {
+    while (index_getnext_slot(scandesc, direction, slot))
 #endif
+    {
         CHECK_FOR_INTERRUPTS();
 
         /*
@@ -382,10 +383,11 @@ static TupleTableSlot* fetch_next_reordered_index_tuple(IndexScanState* node) {
         /* Fetch next tuple from the index. */
     next_indextuple:
 #if PG_VERSION_NUM >= 200000
-        if (!table_index_getnext_slot(scandesc, ForwardScanDirection, slot)) {
+        if (!table_index_getnext_slot(scandesc, ForwardScanDirection, slot))
 #else
-        if (!index_getnext_slot(scandesc, ForwardScanDirection, slot)) {
+        if (!index_getnext_slot(scandesc, ForwardScanDirection, slot))
 #endif
+        {
             /*
              * No more tuples from the index.  But we still need to drain any
              * remaining tuples from the queue before we're done.

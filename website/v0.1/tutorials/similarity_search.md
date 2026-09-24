@@ -65,7 +65,7 @@ WHERE organism = 'Homo sapiens'
   AND collected_on >= DATE '2025-01-01'
   AND public.mmsearch(
         seq0,
-        'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32),
+        'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 32),
         aligner_options(best_n => 3)
       );
 
@@ -82,7 +82,7 @@ WHERE organism = 'Homo sapiens'
   AND collected_on >= DATE '2025-01-01'
   AND public.mmsearch(
         seq0,
-        'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32),
+        'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 32),
         aligner_options(best_n => 3)
       )
 ORDER BY pk, target_start, target_end;
@@ -94,7 +94,8 @@ RESET bioseq.index.insert_maintenance.enabled;
 
 The first result shows whether the planner selected `BioseqScan` for this exact
 predicate. The second result contains the matching rows and their alignment
-coordinates.
+coordinates. The runnable query uses the full first read rather than only its
+short shared motif so that it can pass the default alignment filters.
 
 The query can return more than one alignment for one stored row. `best_n` limits
 the secondary alignments retained for each target. The `pk` argument passed to
