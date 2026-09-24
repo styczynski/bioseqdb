@@ -22,14 +22,14 @@ exact PostgreSQL {{ postgres_major }} server ABI.
 %setup -q -n {{ source_folder_name }}
 
 %build
-export BIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64
+export BIOSEQ_TEMPLATE_FLATTEN_PROFILE={{ template_flatten_profile }}
 test "$BIOSEQ_TEMPLATE_FLATTEN_PROFILE" = "{{ template_flatten_profile }}"
 infra/packaging/scripts/build_and_stage.sh build \
   "%{_builddir}/{{ source_folder_name }}/_bioseq-package-build" \
   "{{ postgres_major }}"
 
 %install
-export BIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64
+export BIOSEQ_TEMPLATE_FLATTEN_PROFILE={{ template_flatten_profile }}
 test "$BIOSEQ_TEMPLATE_FLATTEN_PROFILE" = "{{ template_flatten_profile }}"
 infra/packaging/scripts/build_and_stage.sh install \
   "%{_builddir}/{{ source_folder_name }}/_bioseq-package-build" \

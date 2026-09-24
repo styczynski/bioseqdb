@@ -13,7 +13,7 @@ sha256sums=('SKIP')
 
 build() {
   cd "$srcdir/{{ source_folder_name }}"
-  export BIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64
+  export BIOSEQ_TEMPLATE_FLATTEN_PROFILE={{ template_flatten_profile }}
   test "$BIOSEQ_TEMPLATE_FLATTEN_PROFILE" = "{{ template_flatten_profile }}"
   infra/packaging/scripts/build_and_stage.sh build \
     "$srcdir/{{ source_folder_name }}/_bioseq-package-build" \
@@ -22,7 +22,7 @@ build() {
 
 package() {
   cd "$srcdir/{{ source_folder_name }}"
-  export BIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64
+  export BIOSEQ_TEMPLATE_FLATTEN_PROFILE={{ template_flatten_profile }}
   test "$BIOSEQ_TEMPLATE_FLATTEN_PROFILE" = "{{ template_flatten_profile }}"
   infra/packaging/scripts/build_and_stage.sh install \
     "$srcdir/{{ source_folder_name }}/_bioseq-package-build" \

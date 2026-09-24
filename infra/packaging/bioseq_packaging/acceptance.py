@@ -134,7 +134,7 @@ def _parse_validation(
         "postgres_major": cell.postgres_major,
         "postgres_runtime_dependency": expected_runtime[0],
         "vulkan_runtime_dependency": expected_runtime[1],
-        "template_flatten_profile": "dna4_uint64",
+        "template_flatten_profile": "all_alphabets_uint64",
         "package_architecture": _expected_package_architecture(
             cell.distro.package_format, cell.request.architecture
         ),

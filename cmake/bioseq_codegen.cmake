@@ -821,6 +821,27 @@ function(bioseq_add_codegen)
     endif()
   endforeach()
 
+  if(_enable_website AND _bioseq_codegen_clang_libstdcxx_abi)
+    # The host generator follows libclang's libstdc++ ABI, not the extension's
+    # libc++ ABI. Build its small website dependency closure independently;
+    # sharing the production installed tree would mix std::string ABIs.
+    string(APPEND _bioseq_codegen_nested_cache_suffix "-website-host-abi")
+    if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+      set(_bioseq_website_host_triplet arm64-linux)
+    else()
+      set(_bioseq_website_host_triplet x64-linux)
+    endif()
+    set(_bioseq_codegen_dependency_cmake_args
+      "-DCMAKE_TOOLCHAIN_FILE:FILEPATH=${CMAKE_TOOLCHAIN_FILE}"
+      "-DVCPKG_MANIFEST_INSTALL:BOOL=ON"
+      "-DVCPKG_MANIFEST_DIR:PATH=${_bioseq_repository_root}/codegen/website/dependencies"
+      "-DVCPKG_INSTALLED_DIR:PATH=${ARG_BINARY_DIR}/website-host-dependencies"
+      "-DVCPKG_TARGET_TRIPLET:STRING=${_bioseq_website_host_triplet}"
+      "-DVCPKG_HOST_TRIPLET:STRING=${_bioseq_website_host_triplet}"
+      "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE:FILEPATH=${_bioseq_repository_root}/cmake/triplets/aws-clang-toolchain.cmake"
+      "-DVCPKG_OVERLAY_PORTS:STRING=${_bioseq_repository_root}/overlays/jinja2cpp|${_bioseq_repository_root}/overlays/md4c")
+  endif()
+
   ExternalProject_Add(${ARG_PROJECT_TARGET}
     PREFIX
       "${ARG_BINARY_DIR}/generator-project${_bioseq_codegen_nested_cache_suffix}"

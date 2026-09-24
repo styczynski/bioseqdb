@@ -255,7 +255,7 @@ struct settings final {
 
         /** @brief Enables the column page cache. */
         [[bioseq_sql::guc]]
-        static inline bool enabled = false;
+        static inline bool enabled = true;
 
         /** @brief Sets the column page cache capacity in megabytes. */
         [[bioseq_sql::guc({
@@ -351,9 +351,16 @@ struct settings final {
         struct insert_maintenance final {
             insert_maintenance() = delete;
 
-            /** @brief Maintains indexes when sequence values are inserted. */
+            /**
+             * @brief Enables legacy insert-time index maintenance.
+             *
+             * The default grouped-SoA minimizer format is published after the
+             * source rows commit, through bioseq.update_index. It cannot use
+             * this scheme-untagged INSERT writer. Unindexed rows remain
+             * searchable through the selected algorithm's transient indexes.
+             */
             [[bioseq_sql::guc]]
-            static inline bool enabled = true;
+            static inline bool enabled = false;
         };
 
         /** Owns per-sequence index reads. */
@@ -371,9 +378,14 @@ struct settings final {
         struct async_persistence final {
             async_persistence() = delete;
 
-            /** @brief Persists opportunistically built indexes asynchronously. */
+            /**
+             * @brief Persists opportunistically built indexes asynchronously.
+             *
+             * Off by default because grouped-SoA generations require explicit
+             * publication; the legacy asynchronous writer cannot publish them.
+             */
             [[bioseq_sql::guc]]
-            static inline bool enabled = true;
+            static inline bool enabled = false;
         };
 
         /** Owns asynchronous persistence after recomputation. */

@@ -6571,11 +6571,30 @@ class module_edges_visitor final
     : public clang::RecursiveASTVisitor<module_edges_visitor> {
   public:
     explicit module_edges_visitor(
-        const clang::SourceManager& sources) noexcept
-        : sources_(sources) {
+        const clang::SourceManager& sources,
+        const clang::Module* current_module) noexcept
+        : sources_(sources), current_module_(current_module) {
     }
 
     module_graph_unit* output{};
+
+    // Imports are recorded only from the main file below. Prune foreign
+    // declaration subtrees before visiting them, rather than walking every
+    // imported library's AST just to discard its nodes in VisitImportDecl.
+    // Keep the translation-unit root and main-file export/namespace contexts.
+    bool TraverseDecl(clang::Decl* declaration) {
+        if (declaration != nullptr
+            && !llvm::isa<clang::TranslationUnitDecl>(declaration)) {
+            const clang::SourceLocation location =
+                sources_.getExpansionLoc(declaration->getLocation());
+            if (location.isInvalid()
+                || !sources_.isWrittenInMainFile(location)) {
+                return true;
+            }
+        }
+        return clang::RecursiveASTVisitor<module_edges_visitor>::TraverseDecl(
+            declaration);
+    }
 
     bool VisitImportDecl(clang::ImportDecl* declaration) {
         const clang::SourceLocation location =
@@ -6590,7 +6609,16 @@ class module_edges_visitor final
             return true;
         }
         std::string name = imported->getFullModuleName();
-        if (declaration->isInExportDeclContext()) {
+        // Clang stores `export import M;` in Module::Exports without wrapping
+        // the ImportDecl in an ExportDecl context. The context predicate alone
+        // recognizes export blocks but silently loses ordinary re-exports.
+        const bool module_reexport = current_module_ != nullptr
+            && std::ranges::any_of(
+                current_module_->Exports,
+                [imported](const clang::Module::ExportDecl& exported) {
+                    return exported.getPointer() == imported;
+                });
+        if (declaration->isInExportDeclContext() || module_reexport) {
             output->exported_imports.push_back(std::move(name));
         } else {
             output->internal_imports.push_back(std::move(name));
@@ -6600,6 +6628,7 @@ class module_edges_visitor final
 
   private:
     const clang::SourceManager& sources_;
+    const clang::Module* current_module_;
 };
 
 class module_edges_consumer final : public clang::ASTConsumer {
@@ -6623,7 +6652,7 @@ class module_edges_consumer final : public clang::ASTConsumer {
                 context.getCurrentNamedModule()) {
             unit.provided_module = module->getFullModuleName();
         }
-        module_edges_visitor visitor{sources};
+        module_edges_visitor visitor{sources, context.getCurrentNamedModule()};
         visitor.output = &unit;
         visitor.TraverseDecl(context.getTranslationUnitDecl());
         std::ranges::sort(unit.exported_imports);

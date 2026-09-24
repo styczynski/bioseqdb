@@ -31,7 +31,7 @@
       "executable_member": "doxygen-1.9.8/bin/doxygen",
       "executable_sha256": "d99783ad0f3e7f69e26a9a3f038d7450c5d5f94c3e81d8a3fa285de891fbf263",
       "executable_size_bytes": 148029744,
-      "version_output": "1.9.8"
+      "version_output": "1.9.8 (c2fe5c3e4986974eb2a97608b24086683502f07f)"
     }
   },
   "schema_revision": 1,

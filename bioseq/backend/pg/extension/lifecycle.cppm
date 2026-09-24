@@ -15,6 +15,7 @@ void bioseq_external_scan_init(void);
 
 extern "C" {
 #include "executor/executor.h"
+#include "fmgr.h"
 #include "utils/memutils.h"
 }
 
@@ -142,6 +143,15 @@ void initialize_extension()
 			"[bioseq] pg: _PG_init() skipped duplicate call");
 		return;
 	}
+
+	/* Load the companion library once through PostgreSQL's DSO registry.
+	 * Its query-cache GUC remains disabled. When bioseq itself is preloaded,
+	 * this also lets the companion reserve shared memory at the proper phase.
+	 * A backend-only LOAD does not pretend that shared memory was preloaded.
+	 */
+#if !defined(BIOSEQ_TEST_INDEXES)
+	load_file("bioseq_cache", false);
+#endif
 
 	/*
 	 * Resolve DSO ownership before registering GUCs, CustomScan methods, or

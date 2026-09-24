@@ -906,6 +906,26 @@ if(NOT "${BIOSEQ_PIPELINE_DISPATCH_OWNER_PROBED_IMPLEMENTATION_UNITS}"
     "alphabet x route topology")
 endif()
 
+# Define the target-neutral registry before passing its stamp to PREPARE.
+# Defining it later in the Highway target graph made this dependency expand
+# to an empty string on cold builds, so the generated provider was missing
+# when the pipeline-owner import closure was inspected.
+if(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
+  set(BIOSEQ_MINIMIZER_REGISTRY_PROFILE extended)
+else()
+  set(BIOSEQ_MINIMIZER_REGISTRY_PROFILE baseline)
+endif()
+set(BIOSEQ_MINIMIZER_REGISTRY_GENERATED_ROOT
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/minimizer_registry")
+bioseq_add_minimizer_registry_codegen(
+  TARGET bioseq_minimizer_registry_modules
+  OUTPUT_ROOT "${BIOSEQ_MINIMIZER_REGISTRY_GENERATED_ROOT}"
+  PROFILE "${BIOSEQ_MINIMIZER_REGISTRY_PROFILE}"
+  OUTPUT_RECORDS_MODULE BIOSEQ_MINIMIZER_PHYSICAL_RECORDS_MODULE
+  OUTPUT_VISITOR_MODULE BIOSEQ_MINIMIZER_PHYSICAL_VISITOR_MODULE
+  OUTPUT_MANIFEST BIOSEQ_MINIMIZER_REGISTRY_MANIFEST
+  OUTPUT_STAMP BIOSEQ_MINIMIZER_REGISTRY_STAMP)
+
 bioseq_add_template_flatten_codegen(
   NAME pipeline_pipe_owners
   SOURCE "${BIOSEQ_PIPELINE_DISPATCH_OWNER_TEMPLATE}"

@@ -26,7 +26,7 @@ into a sequence search that still projects normal metadata columns.
 
 ```sql runnable id=landing_hero_query timeout=10s
 -- bioseq:setup
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 CREATE TABLE landing_hero_sequences (
   id INT PRIMARY KEY,
   accession TEXT NOT NULL,
@@ -48,9 +48,10 @@ DROP TABLE landing_hero_sequences;
 ## Load and index
 
 This slot executes the supplied load/index story against a build-owned FASTA
-fixture. It creates the same kind of `USING bioseq` table, enables insert-time
-index maintenance, maps UniProt header fields into typed metadata columns with
-[[sql:bioseq.load]], inserts one manual record, then searches the combined data.
+fixture. It creates the same kind of `USING bioseq` table, leaves legacy insert-time
+maintenance disabled, maps UniProt header fields into typed metadata columns with
+[[sql:bioseq.load]], inserts one manual record, publishes the grouped index after
+those statements commit, then searches the combined data.
 
 ```sql runnable id=landing_sequence_storage timeout=20s
 -- bioseq:setup
@@ -64,7 +65,7 @@ CREATE TABLE run_reads (
   seq           bioseq.seq('dna4', 64)
 ) USING bioseq;
 
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 
 SELECT bioseq.load(
   'run_reads'::regclass,
@@ -83,6 +84,8 @@ VALUES (
   'run_042',
   'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64)
 );
+
+SELECT bioseq.update_index('run_reads'::regclass, 'minimizers_per_fragment');
 
 SELECT read_id,
        sample_id,
@@ -107,7 +110,7 @@ hidden `EXPLAIN` check confirms that the final predicate uses `BioseqScan`.
 
 ```sql runnable id=landing_similarity_search timeout=20s
 -- bioseq:setup
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 SET bioseq.vectorization.enabled = on;
 DO $$
 DECLARE

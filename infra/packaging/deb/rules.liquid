@@ -1,6 +1,6 @@
 #!/usr/bin/make -f
 
-export BIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64
+export BIOSEQ_TEMPLATE_FLATTEN_PROFILE={{ template_flatten_profile }}
 export DEB_BUILD_MAINT_OPTIONS=hardening=+all
 
 BUILD_DIR := $(CURDIR)/_bioseq-package-build

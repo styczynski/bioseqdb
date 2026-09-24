@@ -68,7 +68,7 @@ struct settings final {
         })]]
         static inline bioseq::postgres::support::postgres_enum_storage<minimizer_algorithm>
             algorithm = bioseq::postgres::support::postgres_enum_storage<minimizer_algorithm>{
-                minimizer_algorithm::scalar};
+                minimizer_algorithm::bounded_nthash_simd};
     };
 
     /** Owns seed-anchor chaining settings. */
@@ -162,7 +162,7 @@ struct settings final {
         })]]
         static inline bioseq::postgres::support::postgres_enum_storage<chaining_algorithm>
             algorithm = bioseq::postgres::support::postgres_enum_storage<chaining_algorithm>{
-                chaining_algorithm::scalar_minimap2};
+                chaining_algorithm::simd_minimap2};
     };
 
     /** Owns secondary-alignment selection settings. */
@@ -348,7 +348,7 @@ struct settings final {
         static inline bioseq::postgres::support::postgres_enum_storage<
             fragment_minimizer_lookup_route> lookup_route =
             bioseq::postgres::support::postgres_enum_storage<fragment_minimizer_lookup_route>{
-                fragment_minimizer_lookup_route::control_block_scan};
+                fragment_minimizer_lookup_route::direct_compact_hash_lookup};
     };
 
     /** Owns grouped-SoA generation selection. */
@@ -357,7 +357,7 @@ struct settings final {
 
         /** @brief Enables locator-backed grouped-SoA minimizer generations. */
         [[bioseq_sql::guc]]
-        static inline bool enabled = false;
+        static inline bool enabled = true;
     };
 
     /** Owns Vulkan-backed alignment settings. */

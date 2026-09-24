@@ -432,7 +432,7 @@ region contains only A, C, G, and T.
 Enable index maintenance for a small import:
 
 ```sql
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 ```
 
 You can rehearse the local half without contacting a provider. This checks the
@@ -491,7 +491,7 @@ provider response.
 
 ```sql runnable id=remote_provider_capability_and_search timeout=30s entity="sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)" entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 SET bioseq.vectorization.enabled = on;
 CREATE TABLE remote_provider_stage (
     provider text NOT NULL,

@@ -2,6 +2,7 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <boost/json.hpp>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -1748,6 +1749,42 @@ void configure_manifest_acl_targets(
     return node;
 }
 
+// Public EXPLAIN excerpts omit implementation-only diagnostics, never timings,
+// selected/executed algorithms, fallback counters, or result cardinalities.
+constexpr std::array<std::string_view, 8> private_explain_fields{
+    "Test-build-only", "DSM Test Fixture", "Fully Attested Alignment Jobs",
+    "Bioseq Batch ABI Version", "Bioseq Owned RestrictInfo Path Copies",
+    "Bioseq Match Placeholder Sites", "Bioseq CPU Prepared Target",
+    "Bioseq Requirement Executable"};
+
+[[nodiscard]] std::size_t omit_private_explain_fields(boost::json::value& value) {
+    std::size_t omitted = 0;
+    if (value.is_object()) {
+        for (const std::string_view field : private_explain_fields) {
+            omitted += value.as_object().erase(field);
+        }
+        for (auto& member : value.as_object()) {
+            omitted += omit_private_explain_fields(member.value());
+        }
+    } else if (value.is_array()) {
+        for (auto& child : value.as_array()) {
+            omitted += omit_private_explain_fields(child);
+        }
+    }
+    return omitted;
+}
+
+[[nodiscard]] bool is_private_explain_line(std::string_view line) {
+    const auto first = line.find_first_not_of(" \t*");
+    if (first == std::string_view::npos) return false;
+    line.remove_prefix(first);
+    for (const std::string_view field : private_explain_fields) {
+        if (line.starts_with(field) && line.size() > field.size()
+            && line[field.size()] == ':') return true;
+    }
+    return false;
+}
+
 // Renders one executed example's visible result model to owned document
 // nodes so the render stage emits result tables/notices/error admonitions without a
 // database. Multiple row result sets are labelled Result 1..N in order, a
@@ -1771,6 +1808,31 @@ void configure_manifest_acl_targets(
                 nodes.push_back(make_paragraph_node(
                     {make_emphasis_node("Result " + std::to_string(rows_index))}));
             }
+            auto display_rows = set.rows;
+            std::size_t omitted = 0;
+            if (set.columns.size() == 1 && set.columns.front().name == "QUERY PLAN") {
+                if (set.columns.front().type_name == "json"
+                    || set.columns.front().type_name == "jsonb") {
+                    for (auto& row : display_rows) {
+                        if (row.size() != 1 || row.front().is_null) continue;
+                        auto plan = boost::json::parse(row.front().text);
+                        const auto count = omit_private_explain_fields(plan);
+                        omitted += count;
+                        if (count != 0) row.front().text = boost::json::serialize(plan);
+                    }
+                } else {
+                    omitted = std::erase_if(display_rows, [](const auto& row) {
+                        return row.size() == 1 && !row.front().is_null
+                            && is_private_explain_line(row.front().text);
+                    });
+                }
+            }
+            if (omitted != 0) {
+                nodes.push_back(make_paragraph_node({make_emphasis_node(
+                    "EXPLAIN excerpt: " + std::to_string(omitted)
+                    + " internal implementation diagnostics omitted. Execution timings, "
+                      "algorithm selections and fallback counters are retained.")}));
+            }
             content_node table;
             table.kind = content_node_kind::table;
             table.attributes.emplace("class", "result-table");
@@ -1786,7 +1848,7 @@ void configure_manifest_acl_targets(
                 header_cells.push_back(std::move(header));
             }
             table.children.push_back(make_row_node(std::move(header_cells)));
-            for (const std::vector<sql_cell>& row : set.rows) {
+            for (const std::vector<sql_cell>& row : display_rows) {
                 std::vector<content_node> cells;
                 for (const sql_cell& cell : row) {
                     cells.push_back(cell.is_null
@@ -1854,6 +1916,7 @@ void inject_tutorial_results(
                 && info != node.attributes.end()) {
                 if (const auto fence = parse_runnable_sql_fence(info->second)) {
                     runnable_id = fence->local_id;
+                    node.attributes["runnable_id"] = *runnable_id;
                 }
             }
         }
@@ -2551,6 +2614,23 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
 /// stays addressable by its canonical id; the group page view lists each member's
 /// identity signature with its route.
 void verify_reference_pipeline() {
+    auto explain_probe = boost::json::parse(R"JSON([
+        {"Plan":{"Bioseq Batch ABI Version":1,"Plans":[
+            {"Fully Attested Alignment Jobs":2,"Scalar Fallbacks":3,
+             "Actual Rows":4,"Executed Architecture":"AVX2"}]}}
+    ])JSON");
+    expect(omit_private_explain_fields(explain_probe) == 2,
+           "public EXPLAIN removes only closed implementation fields recursively");
+    const auto excerpt = boost::json::serialize(explain_probe);
+    expect(excerpt.contains("\"Scalar Fallbacks\":3")
+               && excerpt.contains("\"Actual Rows\":4")
+               && excerpt.contains("\"Executed Architecture\":\"AVX2\"")
+               && !excerpt.contains("Fully Attested Alignment Jobs"),
+           "public EXPLAIN retains fallback, row-count and execution evidence");
+    expect(is_private_explain_line("  Bioseq CPU Prepared Target: true")
+               && !is_private_explain_line("  Scalar Fallbacks: 3")
+               && !is_private_explain_line("Output: Bioseq CPU Prepared Target"),
+           "text EXPLAIN filtering matches complete field names only");
     const sql_manifest_public_entity public_manifest_a{
         .stable_identity =
             "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
@@ -2784,6 +2864,10 @@ void verify_reference_pipeline() {
     terminal_code.kind = content_node_kind::code_block;
     terminal_code.text = "SELECT 1 AS value;";
     terminal_code.attributes["language"] = "sql";
+    terminal_code.attributes["runnable_id"] = "self_test_example";
+    expect(render_content_html({terminal_code}).contains(
+               "data-sql-example=\"self_test_example\""),
+           "runnable identity survives HTML rendering");
     content_node terminal_table;
     terminal_table.kind = content_node_kind::table;
     terminal_table.attributes["class"] = "result-table";

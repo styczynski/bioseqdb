@@ -10,6 +10,7 @@ from ..config import (
     PACKAGE_HOMEPAGE,
     PACKAGE_MAINTAINER,
     SOURCE_PROJECTION_EXCLUDES,
+    package_build_parallelism,
 )
 from ..model import (
     BindMount,
@@ -58,7 +59,7 @@ done <<< "${BIOSEQ_SOURCE_PROJECTION_EXCLUDES}"
 rsync "${rsync_arguments[@]}" /source/ "/root/rpmbuild/SOURCES/${BIOSEQ_SOURCE_FOLDER_NAME}/"
 
 cd /root/rpmbuild/SOURCES
-tar -cvzf "${BIOSEQ_SOURCE_FOLDER_NAME}.tar.gz" "${BIOSEQ_SOURCE_FOLDER_NAME}/"
+tar -czf "${BIOSEQ_SOURCE_FOLDER_NAME}.tar.gz" "${BIOSEQ_SOURCE_FOLDER_NAME}/"
 cd "/root/rpmbuild/SOURCES/${BIOSEQ_SOURCE_FOLDER_NAME}"
 QA_RPATHS=$(( 0x0001 | 0x0010 | 0x0002 | 0x0004 | 0x0008 | 0x0020 )) \
   rpmbuild --clean -bb "${BIOSEQ_RENDERED_SPEC}"
@@ -122,7 +123,7 @@ def template_variables(cell: CellContext) -> dict[str, object]:
         "homepage": PACKAGE_HOMEPAGE,
         "architecture": architecture,
         "postgres_major": cell.postgres_major,
-        "template_flatten_profile": "dna4_uint64",
+        "template_flatten_profile": "all_alphabets_uint64",
         "build_dependencies": list(cell.distro.build_dependencies),
         "runtime_dependencies": list(_runtime_dependencies(cell)),
     }
@@ -137,9 +138,9 @@ def build_environment(cell: CellContext) -> dict[str, str]:
             cell.distro.build_dependencies
         ),
         "BIOSEQ_DISTRO_ID": cell.distro.distro_id,
-        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
+        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
         "BIOSEQ_PACKAGE_NAME": cell.package_name,
-        "BIOSEQ_PACKAGE_PARALLELISM": "4",
+        "BIOSEQ_PACKAGE_PARALLELISM": str(package_build_parallelism()),
         "BIOSEQ_PACKAGE_VERSION": cell.package_version,
         "BIOSEQ_POSTGRES_MAJOR": str(cell.postgres_major),
         "BIOSEQ_RENDERED_SPEC": str(

@@ -17,7 +17,7 @@ This tutorial shows the boundary from SQL:
 
 1. Design a mixed scalar and sequence table
 2. Choose table storage settings before creating it
-3. Inspect sequence shard relations without reading private catalogs
+3. Understand the administrator-only sequence shard inspection boundary
 4. Run the exact aggregate shape that selects `VectorAggNode`
 5. Recognize plan shapes that stay on PostgreSQL's ordinary aggregate path
 
@@ -151,14 +151,18 @@ A predicate can be useful for chunk pruning without being a vectorized
 expression. A sequence conversion such as `forward_read::text` also forces
 payload work that a metadata-only projection avoids.
 
-Use ordinary `ANALYZE run_measurements` after a representative load. PostgreSQL
-statistics still guide scalar selectivity and join choices. Bioseq does not
-replace `ANALYZE` with a separate user-facing statistics command.
+PostgreSQL statistics guide scalar selectivity and join choices, but the current
+release has an `ANALYZE` limitation on Bioseq tables containing stored sequences:
+the sampling path can fail with `sequence hydration requires an explicit
+snapshot`. This tutorial omits `ANALYZE`; it does not claim that statistics
+collection on these tables is working. The scalar aggregate below does not
+require sequence hydration. This limitation needs a separate table-access-method
+snapshot-lifecycle fix, not a change to vector aggregate arithmetic.
 
 ## Cache decompressed columns within one scan
 
 `bioseq.column_cache.enabled` controls a backend-local cache of decompressed
-column chunks. It is off by default. When enabled, one Bioseq scan can reuse a
+column chunks. It is on by default. When enabled, one Bioseq scan can reuse a
 chunk that it reads again through the same relation, stripe, chunk group, and
 column. The cache is cleared when that scan ends, so it is not a result cache
 across SQL statements.
@@ -209,7 +213,7 @@ The following fixture is nonempty and uses no NULL aggregate inputs. It makes
 the current vector route easy to identify without relying on its known
 empty/all-NULL edge behavior.
 
-```sql runnable id=columnar_vector_aggregate timeout=20s entity="sql:type:bioseq.seq" entity="sql:function:bioseq.len(bioseq.seq)"
+```sql runnable id=columnar_vector_aggregate timeout=20s
 -- bioseq:setup
 SET max_parallel_workers_per_gather = 0;
 SET bioseq.vectorization.enabled = on;
@@ -227,7 +231,7 @@ INSERT INTO tutorial_columnar_runs VALUES
     (2, 'alpha', 20, 32, DATE '2026-01-03', 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTA', 'ACGTACGTACGTACGT'),
     (3, 'beta',  28, 32, DATE '2026-01-04', 'GGGGCCCCTTTTAAAAGGGGCCCCTTTTAAAA', NULL),
     (4, 'beta',  36, 32, DATE '2026-01-05', 'CTAGTCACTGTAGCCTGATCGTAGCTAGTCAA', 'AAAACCCCGGGGTTTT');
-ANALYZE tutorial_columnar_runs;
+-- ANALYZE is omitted: the current sequence sampling path lacks its snapshot.
 -- bioseq:visible
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)
 SELECT count(*) AS rows,
@@ -244,14 +248,6 @@ SELECT count(*) AS rows,
        max(collected_on) AS last_day
 FROM tutorial_columnar_runs;
 
-SELECT column_attno,
-       bucket_idx,
-       shard_idx,
-       bytes_written,
-       is_full
-FROM bioseq.list_seq_storage_shards(
-    'tutorial_columnar_runs'::regclass)
-ORDER BY column_attno, bucket_idx, shard_idx;
 -- bioseq:teardown
 DROP TABLE tutorial_columnar_runs;
 RESET bioseq.vectorization.enabled;
@@ -260,8 +256,7 @@ RESET max_parallel_workers_per_gather;
 
 The first result must contain `Custom Scan (VectorAggNode)` with a
 `BioseqScan` child. The second result is the aggregate value returned to the
-application. The third result lists the public shard view for both sequence
-columns. A NULL `seq1` does not remove the parent row and does not make the
+application. A NULL `seq1` does not remove the parent row and does not make the
 `seq0` payload part of the aggregate.
 
 ## Know why a query stays scalar
@@ -301,12 +296,28 @@ write a query shape that stays on PostgreSQL's aggregate path. The runnable
 example uses non-NULL inputs so it demonstrates the supported route without
 presenting the edge behavior as a contract.
 
-## Inspect storage without private catalogs
+## Administrator-only shard inspection
 
-Use `bioseq.list_seq_storage_shards` for shard and sidecar relation
-identity, column number, bucket, shard number, bytes written, and rollover
-state. Use PostgreSQL's `pg_relation_size` on a returned relation when an
-operator needs byte totals.
+`bioseq.list_seq_storage_shards` reports shard and sidecar relation identity,
+column number, bucket, shard number, bytes written, and rollover state. It
+currently runs with the caller's privileges and reads
+the private shard catalog. Owning the parent table or having EXECUTE on the
+function is not sufficient: an ordinary role without internal-catalog access
+receives `permission denied for table seq_sub_table`.
+
+The following is an administrator-only diagnostic, not part of the restricted
+role's runnable example above. It must be run against an existing table by an
+administrator with the necessary catalog access:
+
+```sql
+SELECT column_attno, bucket_idx, shard_idx, bytes_written, is_full
+FROM bioseq.list_seq_storage_shards('run_measurements'::regclass)
+ORDER BY column_attno, bucket_idx, shard_idx;
+```
+
+Do not grant broad internal-catalog access merely to enable this diagnostic.
+Use PostgreSQL's `pg_relation_size` on a returned relation when an appropriately
+privileged operator needs byte totals.
 
 Do not query private storage catalogs in application monitoring. Their schemas
 can change independently of the public tutorial surface.

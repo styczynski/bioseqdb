@@ -83,9 +83,9 @@ def _validate_context(variables: Mapping[str, Any]) -> dict[str, Any]:
         result["postgres_major"], int
     ) or result["postgres_major"] < 17:
         raise PackageBuildError("template PostgreSQL major must be an integer at least 17")
-    if result["template_flatten_profile"] != "dna4_uint64":
+    if result["template_flatten_profile"] != "all_alphabets_uint64":
         raise PackageBuildError(
-            "package templates must use the dna4_uint64 template-flatten profile"
+            "package templates must use the all_alphabets_uint64 template-flatten profile"
         )
     for name in ("build_dependencies", "runtime_dependencies"):
         values = result[name]

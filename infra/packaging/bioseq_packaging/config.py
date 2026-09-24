@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import os
 from pathlib import Path
 import platform
 import re
@@ -30,9 +31,33 @@ PINNED_SIGNING_FINGERPRINT = "452F34C5F1EF6D471EC041ADDD94780B0728F093"
 MINIMUM_POSTGRES_MAJOR = 17
 PACKAGING_ROOT = Path(__file__).resolve().parents[1]
 
+
+def package_build_parallelism() -> int:
+    """Bound Clang module working sets without changing generated code.
+
+    Four simultaneous all-alphabet compilations cause sustained page-cache
+    refaults on the 8 GiB native ARM workers. Budget 3 GiB per compiler, capped
+    at the retained four-job maximum; dependency builds keep their own limit.
+    """
+    try:
+        memory_bytes = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError):
+        return 1
+    return max(1, min(4, os.cpu_count() or 1, memory_bytes // (3 * 1024**3)))
+
 SOURCE_PROJECTION_EXCLUDES = (
     "/.git/",
     "/build/",
+    "/reporting/",
+    "/bin_artifacts/",
+    "/.agents/",
+    ".bioseq-*",
+    ".secrets/",
+    ".venv/",
+    "node_modules/",
+    ".cache/",
+    ".terraform/",
+    "*.tfstate*",
     "/DOCS/",
     "/main/papers/",
     "/website/",

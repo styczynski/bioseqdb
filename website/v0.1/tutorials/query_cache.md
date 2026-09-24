@@ -96,7 +96,7 @@ caused by those two statements.
 
 ```sql runnable id=cache_exact_query timeout=30s entity="sql:function:bioseq_cache.stats()"
 -- bioseq:setup
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 SET bioseq_cache.query_cache.mode = 'exact_query';
 CREATE TABLE cache_exact_reads (
   pk integer PRIMARY KEY,
@@ -270,7 +270,7 @@ names when you create or update an index.
 
 ```sql runnable id=cache_reusable_fragments timeout=30s entity="sql:function:bioseq_cache.stats()" entity="sql:function:bioseq_cache.entries()"
 -- bioseq:setup
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 SET bioseq_cache.query_cache.mode = 'reusable_fragments';
 CREATE TABLE cache_reusable_reads (
   pk integer PRIMARY KEY,
@@ -501,7 +501,7 @@ BEGIN;
 ```
 
 ```sql
-SET LOCAL bioseq.index.insert_maintenance.enabled = on;
+SET LOCAL bioseq.index.insert_maintenance.enabled = off;
 ```
 
 ```sql

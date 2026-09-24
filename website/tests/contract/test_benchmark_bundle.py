@@ -171,6 +171,7 @@ class BenchmarkBundleContract(unittest.TestCase):
         *,
         reporting: Path | None = None,
         output: Path | None = None,
+        build_root: Path | None = None,
         override: Path | None = None,
         expect_success: bool = True,
     ) -> subprocess.CompletedProcess[str]:
@@ -188,6 +189,8 @@ class BenchmarkBundleContract(unittest.TestCase):
         ]
         if override is not None:
             command.extend(("--manifest-override", str(override)))
+        if build_root is not None:
+            command.extend(("--build-root", str(build_root)))
         result = subprocess.run(
             command,
             check=False,
@@ -207,6 +210,101 @@ class BenchmarkBundleContract(unittest.TestCase):
         return json.loads(
             (self.output / "benchmarks-manifest.json").read_text(encoding="utf-8")
         )
+
+    def test_incomplete_evidence_is_excluded_not_published(self) -> None:
+        source = self.reporting / "interrupted.json"
+        document = _report(1_700_000_000)
+        empty_duration = {"count": 0, "min": None, "p50": None,
+                          "mean": None, "p95": None}
+        document["raw_evidence"] = {
+            "schema": 1, "path": "report_1.raw.jsonl", "run_id": "interrupted",
+            "complete": False, "record_count": 0, "prefix_bytes": 1,
+            "append_order_checksum": "0000000000000000",
+            "schedule_sorted_checksum": "0000000000000000",
+            "outer_e2e_ns": empty_duration, "index_and_map_ns": empty_duration,
+            "cells": [],
+        }
+        original = self._write_json(source, document)
+        summary = json.loads(self._run().stdout)
+        self.assertEqual(summary["report_count"], 0)
+        self.assertTrue(any("incomplete raw evidence" in item
+                            for item in summary["excluded"]))
+        self.assertNotIn("interrupted.json", "\n".join(self._manifest()["sources"]))
+        self.assertEqual(source.read_bytes(), original)
+        document["raw_evidence"]["complete"] = "false"
+        self._write_json(source, document)
+        self.assertIn("completion flag", self._run(expect_success=False).stderr)
+
+    def test_rejected_e2e_samples_are_excluded_without_relaxing_timings(self) -> None:
+        source = self.reporting / "rejected.json"
+        document = _report(1_700_000_000)
+        sample = {
+            "schema": 1, "benchmark": "bench_alpha", "test_case": "tiny",
+            "algorithm": "algo", "group_index": 0, "group_count": 1,
+            "tuple_index": 0, "repeat": 0, "params": {"mode": "x"},
+            "outer_e2e_ns": None, "raw_record_id": 0,
+            "record_checksum": "0000000000000000",
+            "payload_schema": "bioseq.e2e.raw-sample",
+            "tuple_status": {"accepted": 0},
+            "schedule": {
+                "benchmark_index": 0, "test_case_index": 0, "tuple_index": 0,
+                "group_index": 0, "repeat": 0, "mode": "item_major",
+                "configured_seed": "0000000000000000",
+                "shuffle_seed": "0000000000000000", "order_position": 0,
+            },
+        }
+        document["benchmarks"]["bench_alpha"]["raw_samples"] = [sample]
+        original = self._write_json(source, document)
+        summary = json.loads(self._run().stdout)
+        self.assertEqual(summary["report_count"], 0)
+        self.assertTrue(any("rejected E2E tuple" in item
+                            for item in summary["excluded"]))
+        self.assertEqual(source.read_bytes(), original)
+
+        # A supposedly accepted sample with an absent/negative duration still
+        # fails closed; exclusion is not a generic invalid-data escape hatch.
+        sample["tuple_status"]["accepted"] = 1
+        for duration in (None, -1):
+            sample["outer_e2e_ns"] = duration
+            self._write_json(source, document)
+            self.assertIn("outer_e2e_ns", self._run(expect_success=False).stderr)
+        sample["outer_e2e_ns"] = 100
+        self._write_json(source, document)
+        self.assertEqual(json.loads(self._run().stdout)["report_count"], 1)
+
+    def test_cmake_owned_build_subdirectory_is_not_authored_source(self) -> None:
+        build = self.repository / "build" / "website"
+        build.mkdir(parents=True)
+        cache = build / "CMakeCache.txt"
+        cache.write_text(f"CMAKE_HOME_DIRECTORY:INTERNAL={self.repository}\n")
+        output = build / "website" / "benchmark-bundle"
+        output.mkdir(parents=True)  # Ninja pre-creates BYPRODUCT parent directories.
+        unowned = output / "preserve-me"
+        unowned.write_text("authored content")
+        rejected = self._run(output=output, build_root=build, expect_success=False)
+        self.assertIn("ownership marker", rejected.stderr)
+        self.assertEqual(unowned.read_text(), "authored content")
+        unowned.unlink()
+        self._run(output=output, build_root=build)
+        first = (output / "benchmarks-manifest.json").read_bytes()
+        self._run(output=output, build_root=build)
+        self.assertEqual((output / "benchmarks-manifest.json").read_bytes(), first)
+
+        for unsafe in (build, self.repository / "website" / "authored-output"):
+            rejected = self._run(output=unsafe, build_root=build, expect_success=False)
+            self.assertIn("below the declared CMake build root", rejected.stderr)
+        rejected = self._run(output=output, build_root=self.repository, expect_success=False)
+        self.assertIn("below the declared CMake build root", rejected.stderr)
+        cache.write_text(f"CMAKE_HOME_DIRECTORY:INTERNAL={self.repository.parent}\n")
+        rejected = self._run(output=output, build_root=build, expect_success=False)
+        self.assertIn("different source tree", rejected.stderr)
+        cache.unlink()
+        outside_cache = self.repository.parent / "cache.txt"
+        outside_cache.write_text(f"CMAKE_HOME_DIRECTORY:INTERNAL={self.repository}\n")
+        cache.symlink_to(outside_cache)
+        rejected = self._run(output=output, build_root=build, expect_success=False)
+        self.assertIn("below the declared CMake build root", rejected.stderr)
+        self.assertEqual((output / "benchmarks-manifest.json").read_bytes(), first)
 
     def test_add_delete_metadata_order_deployment_paths_and_exact_bytes(self) -> None:
         older = self.reporting / "history" / "zeta.json"

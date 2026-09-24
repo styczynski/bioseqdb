@@ -49,7 +49,7 @@ EXPECTED_BASENAMES = frozenset({
 PACKAGE_CACHE_VALUES = {
     "CMAKE_BUILD_TYPE": "Release",
     "BIOSEQ_PACKAGE_BUILD": "ON",
-    "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
+    "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
     "BIOSEQ_BUILD_CORE": "ON",
     "BIOSEQ_BUILD_CACHE": "ON",
     "BIOSEQ_BUILD_PAPERS": "OFF",
@@ -1063,6 +1063,11 @@ def run_package_linux(
     """Build or reuse, then re-extract and qualify one fixed native DEB."""
 
     notify = progress or (lambda _step: None)
+    if platform.system() == "Linux":
+        from package_native import run_native_packages
+        return run_native_packages(repository_root=repository_root,
+                                   log_handle=log_handle, deadline=deadline,
+                                   progress=notify)
     base_environment = dict(os.environ if environment is None else environment)
     repository = repository_root.resolve(strict=True)
     state_root = repository / "build" / MODE
@@ -1142,7 +1147,7 @@ def run_package_linux(
             result_path = run_root / "build-result.json"
             internal_environment = dict(docker_environment)
             internal_environment.update({
-                "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
+                "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
                 "BIOSEQ_PACKAGE_DOCKER_IDENTITY": json.dumps(
                     docker_identity, sort_keys=True, separators=(",", ":")),
                 "SOURCE_DATE_EPOCH": _git(

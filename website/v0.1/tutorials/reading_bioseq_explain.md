@@ -68,7 +68,7 @@ explain:
 ```sql runnable id=reading_bioseq_explain timeout=40s entity="sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)" entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET max_parallel_workers_per_gather = 0;
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 SET bioseq.index.sequence_read.enabled = off;
 SET bioseq.vectorization.enabled = on;
 SET bioseq.aligner.vulkan.enabled = off;

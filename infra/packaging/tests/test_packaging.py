@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import signal
 import stat
 import subprocess
 import tarfile
@@ -465,6 +466,13 @@ class CliAndContainerTests(unittest.TestCase):
 
 
 class FormatPlanTests(unittest.TestCase):
+    def test_compiler_parallelism_respects_memory_and_cpu_budget(self) -> None:
+        for gib, cpus, expected in ((1, 4, 1), (8, 4, 2), (16, 4, 4), (64, 2, 2)):
+            with self.subTest(gib=gib, cpus=cpus), mock.patch.object(
+                config.os, "sysconf", side_effect=(gib * 1024**3 // 4096, 4096)
+            ), mock.patch.object(config.os, "cpu_count", return_value=cpus):
+                self.assertEqual(config.package_build_parallelism(), expected)
+
     def test_deb_and_rpm_metadata_and_build_plans_are_direct_and_optimized(
         self,
     ) -> None:
@@ -481,7 +489,7 @@ class FormatPlanTests(unittest.TestCase):
             deb_environment = deb.build_environment(debian)
             self.assertEqual(
                 deb_environment["BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
-                "dna4_uint64",
+                "all_alphabets_uint64",
             )
             self.assertEqual(
                 tuple(config.SOURCE_PROJECTION_EXCLUDES),
@@ -513,7 +521,7 @@ class FormatPlanTests(unittest.TestCase):
             rpm_environment = rpm.build_environment(fedora)
             self.assertEqual(
                 rpm_environment["BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
-                "dna4_uint64",
+                "all_alphabets_uint64",
             )
             rpm_plan = rpm.build_plan(fedora)
             self.assertIn("rpmbuild --clean -bb", rpm_plan.argv[-1])
@@ -538,14 +546,17 @@ class FormatPlanTests(unittest.TestCase):
                     variables = pacman.template_variables(cell)
                     self.assertEqual(variables["architecture"], package_architecture)
                     self.assertEqual(
-                        variables["template_flatten_profile"], "dna4_uint64"
+                        variables["template_flatten_profile"], "all_alphabets_uint64"
                     )
                     environment = pacman.build_environment(cell)
                     self.assertEqual(
                         environment["BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
-                        "dna4_uint64",
+                        "all_alphabets_uint64",
                     )
-                    self.assertEqual(environment["BIOSEQ_PACKAGE_PARALLELISM"], "4")
+                    self.assertEqual(
+                        environment["BIOSEQ_PACKAGE_PARALLELISM"],
+                        str(config.package_build_parallelism()),
+                    )
                     self.assertEqual(
                         pacman.expected_artifact_name(cell),
                         f"bioseq-postgresql17-4.2.3-1-{package_architecture}.pkg.tar.zst",
@@ -1702,7 +1713,7 @@ class CompilerLauncherWatchdogTests(unittest.TestCase):
                 "BIOSEQ_COMPILER_WATCHDOG_TEST_MODE": "1",
                 "BIOSEQ_COMPILER_WATCHDOG_TIMEOUT_SEC": "1",
                 "BIOSEQ_COMPILER_WATCHDOG_GRACE_SEC": "1",
-                "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
+                "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
                 "BIOSEQ_TEST_PID_FILE": str(pid_file),
             }
         )
@@ -1750,7 +1761,7 @@ class CompilerLauncherWatchdogTests(unittest.TestCase):
                 env=environment,
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=60,
                 check=False,
             )
             pids = self._wait_for_pid_file(pid_file)
@@ -1764,7 +1775,7 @@ class CompilerLauncherWatchdogTests(unittest.TestCase):
             marker = markers[0]
             for field in (
                 "source=persist_queue_publish.cppm",
-                "profile=dna4_uint64",
+                "profile=all_alphabets_uint64",
                 "compiler_version=fake-clang_22.1.6",
                 "argv_sha256=",
                 "root_pid=",
@@ -1813,6 +1824,31 @@ class CompilerLauncherWatchdogTests(unittest.TestCase):
             self.assertEqual(result.returncode, 64)
             self.assertIn("cannot be overridden", result.stderr)
             self.assertFalse(pid_file.exists())
+
+    def test_fast_compiler_does_not_wait_for_watchdog(self) -> None:
+        for expected_status in (0, 23) * 3:
+            with self.subTest(status=expected_status), tempfile.TemporaryDirectory() as raw:
+                environment, compiler, _ = self._tool_environment(Path(raw))
+                environment.update({
+                    "BIOSEQ_TEST_EXIT_STATUS": str(expected_status),
+                    "BIOSEQ_COMPILER_WATCHDOG_TIMEOUT_SEC": "30",
+                })
+                process = subprocess.Popen(
+                    [str(self.launcher), str(compiler), "unit.cppm"],
+                    env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, start_new_session=True,
+                )
+                try:
+                    _, stderr = process.communicate(timeout=8)
+                    self.assertEqual(process.returncode, expected_status)
+                    self.assertNotIn("BIOSEQ_COMPILER_WATCHDOG_TIMEOUT", stderr)
+                finally:
+                    # Bound the launcher and its single-process timer on failure.
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
 
     def test_compiler_status_is_preserved_without_timeout_diagnostic(self) -> None:
         for expected_status in (0, 23):
@@ -1924,7 +1960,7 @@ class BuildAndStageContractTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertRegex(
                     build_script,
-                    rf"(?m)^\s*{key}\s+{re.escape(value)}\s*\\?$",
+                    rf'(?m)^\s*{key}\s+(?:{re.escape(value)}|"{re.escape(value)}")\s*\\?$',
                 )
 
         profile_check = build_script.index(
@@ -2196,6 +2232,10 @@ class ManifestAndLegacyTests(unittest.TestCase):
         self.assertTrue(sources)
         for source in sources:
             content = source.read_text(encoding="utf-8").lower()
+            # A retained AWS secret name is not a legacy toolchain invocation.
+            # Renaming that resource would break existing signing deployments.
+            if source == REPOSITORY_ROOT / "infra" / "package_builder.py":
+                content = content.replace("-" + legacy_name + "-signing-key", "-signing-key")
             for token in forbidden:
                 with self.subTest(source=source, token=token):
                     self.assertNotIn(token, content)

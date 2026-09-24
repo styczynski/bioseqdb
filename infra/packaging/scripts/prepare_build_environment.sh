@@ -22,8 +22,8 @@ die() {
   exit 1
 }
 
-[[ "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE:-}" == "dna4_uint64" ]] \
-  || die "BIOSEQ_TEMPLATE_FLATTEN_PROFILE must be dna4_uint64"
+[[ "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE:-}" == "all_alphabets_uint64" ]] \
+  || die "BIOSEQ_TEMPLATE_FLATTEN_PROFILE must be all_alphabets_uint64"
 [[ "${BIOSEQ_POSTGRES_MAJOR:-}" =~ ^[0-9]+$ ]] \
   || die "BIOSEQ_POSTGRES_MAJOR must be a decimal major version"
 (( BIOSEQ_POSTGRES_MAJOR >= 17 )) \
@@ -61,7 +61,7 @@ install_debian_dependencies() {
   apt-get install -y --no-install-recommends \
     autoconf automake autoconf-archive bison build-essential ca-certificates \
     cpio curl flex gettext git gnupg libssl-dev libtool libltdl-dev m4 \
-    libcap2-bin ninja-build pkg-config python3 rsync tar unzip util-linux wget xz-utils \
+    libcap2-bin ninja-build pkg-config procps python3 rsync tar unzip util-linux wget xz-utils \
     zip zlib1g-dev binutils \
     libx11-dev libxext-dev libxrandr-dev libxrender-dev libxi-dev \
     libxfixes-dev libxcursor-dev libxinerama-dev libxcb1-dev \
@@ -85,7 +85,7 @@ install_fedora_dependencies() {
   dnf install -y --allowerasing \
     autoconf autoconf-archive automake bison binutils ca-certificates cpio curl findutils flex \
     gcc gcc-c++ gettext git gzip kernel-headers libcap libtool m4 make ninja-build openssl-devel \
-    patch perl pkgconf-pkg-config python3 rpm-build rsync tar unzip util-linux wget \
+    patch perl pkgconf-pkg-config procps-ng python3 rpm-build rsync tar unzip util-linux wget \
     xz zip zlib-devel \
     libX11-devel libXext-devel libXrandr-devel libXrender-devel libXi-devel \
     libXfixes-devel libXcursor-devel libXinerama-devel libxcb-devel \
@@ -103,7 +103,7 @@ install_opensuse_dependencies() {
   zypper --non-interactive install -y --allow-vendor-change \
     autoconf autoconf-archive automake bison binutils ca-certificates cpio curl flex gcc gcc-c++ \
     gettext-tools git gzip libcap-progs libopenssl-devel libtool m4 make ninja patch \
-    pkg-config python3 rpm-build rsync tar unzip util-linux wget xz zip \
+    pkg-config procps python3 rpm-build rsync tar unzip util-linux wget xz zip \
     libX11-devel libXext-devel libXrandr-devel libXrender-devel libXi-devel \
     libXfixes-devel libXcursor-devel libXinerama-devel libxcb-devel \
     libxkbcommon-devel wayland-devel wayland-protocols-devel
@@ -126,7 +126,7 @@ install_opensuse_dependencies() {
 install_arch_dependencies() {
   pacman -Syu --noconfirm --needed \
     autoconf autoconf-archive automake base-devel binutils bison ca-certificates cpio curl flex \
-    gettext git libcap libtool m4 ninja openssl patch pkgconf python rsync tar unzip \
+    gettext git libcap libtool m4 ninja openssl patch pkgconf procps-ng python rsync tar unzip \
     util-linux wget xz zip zlib libx11 libxext libxrandr libxrender libxi \
     libxfixes libxcursor libxinerama libxcb libxkbcommon wayland-protocols
 

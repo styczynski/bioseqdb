@@ -57,7 +57,7 @@ class PackageLinuxPureContractTests(unittest.TestCase):
         self.assertEqual(
             subject.PACKAGE_CACHE_VALUES[
                 "BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
-            "dna4_uint64",
+            "all_alphabets_uint64",
         )
 
     def test_only_generated_output_and_bytecode_noise_are_ignored(self) -> None:

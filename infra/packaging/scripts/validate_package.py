@@ -170,7 +170,7 @@ def validate_staged(
         "passed": True,
         "six_artifacts": True,
         "postgres_major": postgres_major,
-        "template_flatten_profile": "dna4_uint64",
+        "template_flatten_profile": "all_alphabets_uint64",
         "binaries": binaries,
     }
 
@@ -214,7 +214,9 @@ def package_paths(path: Path, fmt: str) -> list[str]:
     return safe_package_paths(run(["tar", "-tf", str(path)]).splitlines())
 
 
-def exact_package_payload_paths(paths: Sequence[str], fmt: str) -> tuple[str, ...]:
+def exact_package_payload_paths(
+    paths: Sequence[str], fmt: str, postgres_major: int
+) -> tuple[str, ...]:
     """Return the canonical six installed payload paths or fail closed."""
     try:
         metadata_paths = PACKAGE_METADATA_PATHS[fmt]
@@ -270,15 +272,22 @@ def exact_package_payload_paths(paths: Sequence[str], fmt: str) -> tuple[str, ..
         )
     dso_parent = next(iter(dso_parents))
     extension_parent = next(iter(extension_parents))
-    if (
-        not dso_parent.parts
-        or dso_parent.parts[0] != "usr"
-        or not extension_parent.parts
-        or extension_parent.parts[0] != "usr"
-        or extension_parent.name != "extension"
-    ):
+    usr_layout = (
+        dso_parent.parts and dso_parent.parts[0] == "usr"
+        and extension_parent.parts and extension_parent.parts[0] == "usr"
+        and extension_parent.name == "extension"
+    )
+    # Arch's postgresql-old-upgrade supplies older supported majors here.
+    # Match its exact versioned pair, not arbitrary payloads below /opt.
+    arch_prefix = PurePosixPath(f"opt/pgsql-{postgres_major}")
+    arch_old_major_layout = (
+        fmt == "pacman"
+        and dso_parent == arch_prefix / "lib"
+        and extension_parent == arch_prefix / "share" / "extension"
+    )
+    if not (usr_layout or arch_old_major_layout):
         raise ValidationError(
-            "extension payload is outside canonical PostgreSQL /usr install directories"
+            "extension payload is outside canonical PostgreSQL install directories"
         )
     return payload
 
@@ -380,7 +389,7 @@ def validate_artifact(
             f"artifact filename must contain PostgreSQL package marker {expected_name}"
         )
     listed_paths = package_paths(path, fmt)
-    payload_paths = exact_package_payload_paths(listed_paths, fmt)
+    payload_paths = exact_package_payload_paths(listed_paths, fmt, postgres_major)
 
     name, version, package_arch, dependencies = package_metadata(path, fmt)
     if name != expected_name:
@@ -439,7 +448,7 @@ def validate_artifact(
         "postgres_major": postgres_major,
         "postgres_runtime_dependency": postgres_runtime_package,
         "vulkan_runtime_dependency": vulkan_runtime_package,
-        "template_flatten_profile": "dna4_uint64",
+        "template_flatten_profile": "all_alphabets_uint64",
         "binaries": binaries,
     }
 

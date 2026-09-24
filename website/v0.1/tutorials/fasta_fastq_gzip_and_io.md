@@ -209,9 +209,10 @@ The load result is the number of parsed records. `bioseq.update_index`
 returns the number of sequence values rebuilt for that index family. The final
 plan and result group show the local search route and real match coordinates.
 
-For ordinary trickle inserts, leave insert maintenance on instead. The index
-lifecycle tutorial explains the three index families and the mutation rules in
-detail.
+For ordinary trickle inserts, the default transient search path can serve new
+rows until the next explicit grouped-index publication. Leave legacy insert
+maintenance off. The index lifecycle tutorial explains the three families and
+the mutation rules in detail.
 
 ## Understand streaming and memory
 
@@ -270,6 +271,7 @@ SELECT bioseq.load(
     'incoming_reads'::regclass,
     '/srv/import/run-042.fastq.gz'
 );
+COMMIT;
 
 SELECT bioseq.update_index(
     'incoming_reads'::regclass,
@@ -279,9 +281,12 @@ SELECT bioseq.update_index(
     'incoming_reads'::regclass,
     'symbol_counts'
 );
-ANALYZE incoming_reads;
-COMMIT;
+-- ANALYZE currently has a sequence-hydration snapshot limitation; see below.
 ```
+
+`ANALYZE` is omitted because the current sequence-bearing table sampling path
+can fail without an explicit hydration snapshot. See the
+[storage limitation](../columnar_storage_and_vectorized_aggregates/).
 
 The file path is resolved by the database server, not the SQL client. The
 server process must be able to open it, and the database role must be allowed

@@ -42,7 +42,7 @@ disabled, so both plans come from the current host.
 ```sql runnable id=highway_dispatch_explain timeout=30s
 -- bioseq:setup
 SET max_parallel_workers_per_gather = 0;
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 SET bioseq.index.sequence_read.enabled = off;
 SET bioseq.aligner.vulkan.enabled = off;
 SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';

@@ -205,7 +205,7 @@ cat >> "${data_dir}/postgresql.conf" <<'EOF'
 listen_addresses = ''
 port = 55432
 unix_socket_directories = '/tmp/bioseq-package-pgsocket'
-shared_preload_libraries = 'bioseq_cache'
+shared_preload_libraries = 'bioseq'
 EOF
 chown postgres:postgres "${data_dir}/postgresql.conf"
 run_pg "${pg_ctl}" -D "${data_dir}" -l "${log_file}" -w start
@@ -221,8 +221,26 @@ run_pg "${psql_command[@]}" -c 'CREATE EXTENSION bioseq_cache;'
 run_pg "${psql_command[@]}" -c 'CREATE EXTENSION bioseq;'
 
 preload="$(run_pg "${psql_command[@]}" -Atqc 'SHOW shared_preload_libraries')"
-[[ ",${preload}," == *",bioseq_cache,"* ]] \
-  || die "bioseq_cache is not active in shared_preload_libraries: ${preload}"
+[[ "${preload}" == "bioseq" ]] \
+  || die "bioseq is not the sole preload entry: ${preload}"
+defaults="$(run_pg "${psql_command[@]}" -Atqc "SELECT
+  current_setting('bioseq.aligner.minimizer.algorithm') = 'bounded_nthash_simd'
+  AND current_setting('bioseq.aligner.chaining.algorithm') = 'simd_minimap2'
+  AND current_setting('bioseq.aligner.base_alignment.algorithm') = 'block_aligner'
+  AND current_setting('bioseq.column_cache.enabled') = 'on'
+  AND current_setting('bioseq.vectorization.enabled') = 'on'
+  AND current_setting('bioseq.scheduler.pipeline.mode') = 'task_parallel'
+  AND current_setting('bioseq.aligner.grouped_soa_generation.enabled') = 'on'
+  AND current_setting('bioseq.aligner.fragment_minimizer.lookup_route') = 'direct_compact_hash_lookup'
+  AND current_setting('bioseq.index.insert_maintenance.enabled') = 'off'
+  AND current_setting('bioseq.index.async_persistence.enabled') = 'off'
+  AND current_setting('bioseq.index.recompute_async_persistence.enabled') = 'off'
+  AND current_setting('bioseq_cache.query_cache.mode') = 'disabled'")"
+[[ "${defaults}" == "t" ]] || die "package defaults or cache autoload do not match E2E policy"
+# A briefly enabled setting proves autoload happened during preload and
+# registered shared memory, rather than merely creating a placeholder GUC.
+run_pg "${psql_command[@]}" -c \
+  "SET bioseq_cache.query_cache.mode = 'exact_query'; RESET bioseq_cache.query_cache.mode;"
 extension_count="$(run_pg "${psql_command[@]}" -Atqc \
   "SELECT count(*) FROM pg_extension WHERE extname IN ('bioseq','bioseq_cache')")"
 [[ "${extension_count}" == "2" ]] || die "both extensions were not created"
@@ -230,6 +248,72 @@ roundtrip="$(run_pg "${psql_command[@]}" -Atqc \
   "SELECT 'ACGT'::bioseq.seq('dna4', 8)::text")"
 [[ -n "${roundtrip}" && "${roundtrip}" == "ACGT" ]] \
   || die "nonempty Bioseq roundtrip failed: ${roundtrip:-<empty>}"
+roundtrip_dna5="$(run_pg "${psql_command[@]}" -Atqc \
+  "SELECT 'ACGTN'::bioseq.seq('dna5', 8)::text")"
+[[ "${roundtrip_dna5}" == "ACGTN" ]] || die "DNA5 package roundtrip failed"
 
-printf '{"passed":true,"package_installed":true,"preload_active":true,"bioseq_extension_created":true,"bioseq_cache_extension_created":true,"nonempty_roundtrip":true,"roundtrip":"ACGT","distro":"%s","architecture":"%s","postgres_major":%s}\n' \
+# Exercise the default combination, not just each GUC in isolation. Each SQL
+# statement commits independently: grouped publication reopens committed rows.
+# A later INSERT must remain searchable without silently losing the new row.
+run_pg "${psql_command[@]}" <<'SQL'
+SET statement_timeout = '60s';
+SELECT string_agg(translate(md5(i::text), '0123456789abcdef', 'ACGTACGTACGTACGT'), '' ORDER BY i) AS smoke_query
+FROM generate_series(1, 32) AS i \gset
+CREATE TABLE bioseq_package_smoke (id integer PRIMARY KEY, seq bioseq.seq('dna4', 64)) USING bioseq;
+INSERT INTO bioseq_package_smoke VALUES (1, :'smoke_query'::bioseq.seq('dna4', 64));
+INSERT INTO bioseq_package_smoke VALUES (2, repeat('A', 1024)::bioseq.seq('dna4', 64));
+CREATE TEMP TABLE bioseq_package_observed AS
+SELECT id FROM bioseq_package_smoke WHERE public.mmsearch(seq, :'smoke_query'::bioseq.seq('dna4', 64));
+DO $$
+DECLARE found bigint;
+BEGIN
+  SELECT count(*) INTO found FROM bioseq_package_observed;
+  IF found <> 1 THEN RAISE EXCEPTION 'default transient search: expected 1 match, got %', found; END IF;
+END $$;
+DROP TABLE bioseq_package_observed;
+SELECT bioseq.update_index('bioseq_package_smoke'::regclass, 'minimizers_per_fragment');
+SELECT bioseq.set_active_read_index('bioseq_package_smoke'::regclass, 'minimizers_per_fragment');
+-- Native persisted readers are retained by BioseqBatchJoin. An ordinary
+-- column scan deliberately rejects index_read_requirement=2.
+CREATE TABLE bioseq_package_queries (id integer PRIMARY KEY, seq bioseq.seq('dna4', 64)) USING bioseq;
+INSERT INTO bioseq_package_queries SELECT id, seq FROM bioseq_package_smoke WHERE id = 1;
+CREATE TEMP TABLE bioseq_package_observed AS
+SELECT t.id FROM bioseq_package_queries AS q CROSS JOIN bioseq_package_smoke AS t
+WHERE public.mmsearch(t.seq, q.seq, aligner_options(index_read_requirement => 2));
+DO $$
+DECLARE found bigint;
+BEGIN
+  SELECT count(*) INTO found FROM bioseq_package_observed;
+  IF found <> 1 THEN RAISE EXCEPTION 'default persisted batch search: expected 1 match, got %', found; END IF;
+END $$;
+DROP TABLE bioseq_package_observed;
+DROP TABLE bioseq_package_queries;
+INSERT INTO bioseq_package_smoke SELECT 3, seq FROM bioseq_package_smoke WHERE id = 1;
+CREATE TEMP TABLE bioseq_package_observed AS
+SELECT id FROM bioseq_package_smoke WHERE public.mmsearch(seq, :'smoke_query'::bioseq.seq('dna4', 64));
+DO $$
+DECLARE found bigint;
+BEGIN
+  SELECT count(*) INTO found FROM bioseq_package_observed;
+  IF found <> 2 THEN RAISE EXCEPTION 'search after INSERT: expected 2 matches, got %', found; END IF;
+END $$;
+DROP TABLE bioseq_package_observed;
+DROP TABLE bioseq_package_smoke;
+SQL
+
+# Users can also load Bioseq without a server-wide preload. The companion must
+# still load automatically in that backend and remain disabled, without
+# claiming shared-memory query caching is available before a server restart.
+run_pg "${pg_ctl}" -D "${data_dir}" -m fast -w stop
+started=false
+printf "\nshared_preload_libraries = ''\n" >> "${data_dir}/postgresql.conf"
+run_pg "${pg_ctl}" -D "${data_dir}" -l "${log_file}" -w start
+started=true
+backend_load="$(run_pg "${psql_command[@]}" -Atqc \
+  "LOAD 'bioseq'; SELECT 'ACGTN'::bioseq.seq('dna5', 8)::text = 'ACGTN'
+   AND current_setting('bioseq_cache.query_cache.mode') = 'disabled'
+   AND current_setting('shared_preload_libraries') = ''")"
+[[ "${backend_load}" == "t" ]] || die "backend-only companion autoload failed"
+
+printf '{"passed":true,"package_installed":true,"preload_active":true,"bioseq_extension_created":true,"bioseq_cache_extension_created":true,"nonempty_roundtrip":true,"roundtrip":"ACGT","dna5_roundtrip":true,"release_defaults":true,"default_insert_search":true,"default_persisted_search":true,"search_after_insert":true,"backend_only_cache_autoload":true,"distro":"%s","architecture":"%s","postgres_major":%s}\n' \
   "${distro}" "${requested_arch}" "${postgres_major}" >&3

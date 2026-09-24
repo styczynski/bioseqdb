@@ -478,6 +478,21 @@ if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
   # publishes only its namespaced package target to current-standard consumers.
   find_package(jinja2cpp CONFIG REQUIRED)
 
+  # Jinja's reflection adapters use dynamic_cast. Keep their RTTI-enabled
+  # implementation in an independent named module outside the no-RTTI LLVM
+  # import graph, with the same standard-library ABI as the generator.
+  add_library(bioseq_website_template_bridge STATIC)
+  set_target_properties(bioseq_website_template_bridge PROPERTIES
+    CXX_STANDARD 26 CXX_STANDARD_REQUIRED ON CXX_MODULE_STD OFF
+    CXX_SCAN_FOR_MODULES ON)
+  target_sources(bioseq_website_template_bridge PRIVATE
+    FILE_SET CXX_MODULES FILES
+    "${_codegen_src}/website/template_renderer_runtime.cppm")
+  target_compile_options(bioseq_website_template_bridge PRIVATE
+    "$<$<CXX_COMPILER_ID:Clang,AppleClang,GNU>:-frtti>")
+  target_link_libraries(bioseq_website_template_bridge PRIVATE
+    jinja2cpp::jinja2cpp Boost::json)
+
   set(CMAKE_CXX_SCAN_FOR_MODULES "${_saved_scan}")
   set(CMAKE_CXX_MODULE_STD "${_saved_module_std}")
 
@@ -507,7 +522,7 @@ if(BIOSEQ_CODEGEN_ENABLE_WEBSITE)
     "${_codegen_src}/website/tests/contract/index.cppm"
     "${_codegen_src}/website/index.cppm")
   list(APPEND _codegen_link_libs
-    md4c::md4c pugixml::pugixml jinja2cpp::jinja2cpp Boost::json
+    md4c::md4c pugixml::pugixml bioseq_website_template_bridge
     PkgConfig::LIBPQ)
   string(APPEND _codegen_component_imports "import bioseq.codegen.website;\n")
   string(APPEND _codegen_component_entries

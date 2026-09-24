@@ -7,8 +7,8 @@ die() {
   exit 1
 }
 
-[[ "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE:-}" == "dna4_uint64" ]] \
-  || die "every package build must select dna4_uint64 template flattening"
+[[ "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE:-}" == "all_alphabets_uint64" ]] \
+  || die "every package build must select all_alphabets_uint64 template flattening"
 
 # RPM and DEB helpers export distro compiler selectors, optimization, LTO, and
 # linker flags and GNU Make jobserver state before invoking their build hooks.
@@ -152,11 +152,13 @@ package_cmake_invariants() {
     CMAKE_SKIP_RPATH ON \
     PostgreSQL_CONFIG "${pg_config}" \
     BIOSEQ_PACKAGE_BUILD ON \
+    BIOSEQ_CODEGEN_C_COMPILER "${llvm_root}/bin/clang" \
+    BIOSEQ_CODEGEN_CXX_COMPILER "${llvm_root}/bin/clang++" \
     BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON "${libcxx_modules}" \
     BIOSEQ_PACKAGE_LIBCXX_ARCHIVE "${libcxx_archive}" \
     BIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE "${libcxxabi_archive}" \
     BIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE "${libunwind_archive}" \
-    BIOSEQ_TEMPLATE_FLATTEN_PROFILE dna4_uint64 \
+    BIOSEQ_TEMPLATE_FLATTEN_PROFILE all_alphabets_uint64 \
     BIOSEQ_BUILD_CORE ON \
     BIOSEQ_BUILD_CACHE ON \
     BIOSEQ_BUILD_PAPERS OFF \
@@ -225,11 +227,13 @@ if [[ "${action}" == "build" ]]; then
       -DCMAKE_SKIP_RPATH=ON \
       -DPostgreSQL_CONFIG="${pg_config}" \
       -DBIOSEQ_PACKAGE_BUILD=ON \
+      -DBIOSEQ_CODEGEN_C_COMPILER="${llvm_root}/bin/clang" \
+      -DBIOSEQ_CODEGEN_CXX_COMPILER="${llvm_root}/bin/clang++" \
       -DBIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON="${libcxx_modules}" \
       -DBIOSEQ_PACKAGE_LIBCXX_ARCHIVE="${libcxx_archive}" \
       -DBIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE="${libcxxabi_archive}" \
       -DBIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE="${libunwind_archive}" \
-      -DBIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64 \
+      -DBIOSEQ_TEMPLATE_FLATTEN_PROFILE=all_alphabets_uint64 \
       -DBIOSEQ_BUILD_CORE=ON \
       -DBIOSEQ_BUILD_CACHE=ON \
       -DBIOSEQ_BUILD_PAPERS=OFF \
@@ -251,8 +255,16 @@ if [[ "${action}" == "build" ]]; then
   python3 "${persistent_source_dir}/infra/packaging/scripts/verify_compile_optimization.py" \
     "${build_dir}/compile_commands.json"
 
-  readonly parallelism="${BIOSEQ_PACKAGE_PARALLELISM:-$(nproc)}"
+  parallelism="${BIOSEQ_PACKAGE_PARALLELISM:-$(nproc)}"
   [[ "${parallelism}" =~ ^[1-9][0-9]*$ ]] || die "invalid package parallelism"
+  # Also enforce the budget here: a long-lived multi-distro worker may have
+  # imported an older environment planner before its next cell was staged.
+  memory_parallelism="$(PYTHONPATH="${persistent_source_dir}/infra/packaging" \
+    python3 -c 'from bioseq_packaging.config import package_build_parallelism; print(package_build_parallelism())')"
+  if (( parallelism > memory_parallelism )); then
+    parallelism="${memory_parallelism}"
+  fi
+  echo "package compile parallelism: ${parallelism} (memory budget ${memory_parallelism})"
   "${cmake_bin}" --build "${build_dir}" --parallel "${parallelism}" \
     --target postgresql_bioseq postgresql_bioseq_cache
 
