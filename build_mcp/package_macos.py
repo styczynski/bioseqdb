@@ -173,7 +173,15 @@ trap cleanup EXIT
 started=true
 ''' + checks)
     major = re.search(r'PostgreSQL (\d+)', run([pg_config, '--version'], capture=True)).group(1)
-    output = run(['/bin/bash', script, pg, data, sock, run_root / 'postgres.log', major], capture=True)
+    try:
+        output = run(['/bin/bash', script, pg, data, sock, run_root / 'postgres.log', major], capture=True)
+    finally:
+        # These databases contain only disposable package probes. The shell
+        # trap stops the private server before returning; keep all SQL/logs and
+        # package payloads, but do not retain a GiB of WAL on every SQL retry.
+        # A residual PID file is ambiguous ownership: preserve that cluster.
+        if data.is_dir() and not data.is_symlink() and not (data / 'postmaster.pid').exists():
+            shutil.rmtree(data)
     proof = next((json.loads(line) for line in reversed(output.splitlines())
                   if line.startswith('{"passed":true,')), None)
     if proof is None:

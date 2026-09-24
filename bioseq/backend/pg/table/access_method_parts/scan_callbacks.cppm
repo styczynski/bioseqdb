@@ -360,8 +360,16 @@ bioseq_getnextslot_impl(TableScanDesc sscan, ScanDirection direction, TupleTable
      */
     if (scan->read_state == nullptr) {
         bool random_access = false;
+        // Vector slots own a structural TupleDesc copy that deliberately drops
+        // column defaults. Physical stripes written before ADD COLUMN still
+        // need those defaults, so decode with the scan relation's descriptor.
+        // The relation remains locked/open for this reader's whole lifetime.
+        TupleDesc read_descriptor = scan->returns_vectorized_tuple
+                                        ? RelationGetDescr(scan->scan_base.rs_rd)
+                                        : slot->tts_tupleDescriptor;
+        Assert(read_descriptor->natts == slot->tts_tupleDescriptor->natts);
         scan->read_state = init_bioseq_read_state(scan->scan_base.rs_rd,
-                                                  slot->tts_tupleDescriptor,
+                                                  read_descriptor,
                                                   scan->attributes_needed,
                                                   scan->scan_qualifiers.get(),
                                                   scan->scan_context,
