@@ -241,6 +241,11 @@ export {
                     ? NIL
                     : effective_inner_pathkeys;
             filtered_extra.mergeclause_list = ordered_mergeclauses;
+#if PG_VERSION_NUM >= 180000
+            // Replacements may lose the incumbent's ordering. Preserve the
+            // explicit full-sort policy above; do not reuse its prefix count.
+            constexpr int outer_presorted_keys = 0;
+#endif
             initial_cost_mergejoin(root,
                                    &workspace,
                                    JOIN_INNER,
@@ -249,6 +254,9 @@ export {
                                    inner_path,
                                    outer_sortkeys,
                                    inner_sortkeys,
+#if PG_VERSION_NUM >= 180000
+                                   outer_presorted_keys,
+#endif
                                    &filtered_extra);
             Path* result = reinterpret_cast<Path*>(create_mergejoin_path(root,
                                                                          joinrel,
@@ -262,7 +270,11 @@ export {
                                                                          required_outer,
                                                                          ordered_mergeclauses,
                                                                          outer_sortkeys,
-                                                                         inner_sortkeys));
+                                                                         inner_sortkeys
+#if PG_VERSION_NUM >= 180000
+                                                                         , outer_presorted_keys
+#endif
+                                                                         ));
             if (result != nullptr)
                 ++rejects.reconstructed;
             return result;
