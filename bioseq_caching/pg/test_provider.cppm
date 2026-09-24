@@ -1916,7 +1916,11 @@ void emit_batch_failure_statuses(
     }
 
     TableScanDesc scan = table_beginscan(
-        relation, estate->es_snapshot, 0, nullptr);
+        relation, estate->es_snapshot, 0, nullptr
+#if PG_VERSION_NUM >= 190000
+        , SO_NONE
+#endif
+    );
     TupleTableSlot* slot = table_slot_create(relation, nullptr);
     while (table_scan_getnextslot(scan, ForwardScanDirection, slot)) {
         bool row_is_null = false;

@@ -364,6 +364,54 @@ DROP TABLE bioseq_package_observed;
 DROP TABLE bioseq_package_smoke;
 SQL
 
+# PG18 removed geterrlevel. Reuse the publication-rejection scenario from the
+# existing insert integration test to exercise the replacement ERROR boundary,
+# including speculative insertion and both initial column-cache states.
+if (( postgres_major >= 18 )); then
+  run_pg "${psql_command[@]}" <<'SQL'
+SET statement_timeout = '60s';
+CREATE TABLE bioseq_package_insert_cleanup (id integer PRIMARY KEY) USING bioseq;
+CREATE PUBLICATION bioseq_package_insert_publication FOR TABLE bioseq_package_insert_cleanup;
+DO $$
+DECLARE cache_setting text;
+BEGIN
+  FOREACH cache_setting IN ARRAY ARRAY['on', 'off'] LOOP
+    PERFORM set_config('bioseq.column_cache.enabled', cache_setting, false);
+    BEGIN
+      INSERT INTO bioseq_package_insert_cleanup VALUES (1);
+      RAISE EXCEPTION 'published columnar INSERT was accepted';
+    EXCEPTION WHEN feature_not_supported THEN
+      IF SQLERRM NOT LIKE 'cannot insert into columnar table that is a part of a publication%' THEN RAISE; END IF;
+    END;
+    IF current_setting('bioseq.column_cache.enabled') <> cache_setting THEN
+      RAISE EXCEPTION 'ordinary INSERT error changed column cache';
+    END IF;
+    BEGIN
+      INSERT INTO bioseq_package_insert_cleanup VALUES (2) ON CONFLICT (id) DO NOTHING;
+      RAISE EXCEPTION 'published speculative INSERT was accepted';
+    EXCEPTION WHEN feature_not_supported THEN
+      IF SQLERRM NOT LIKE 'cannot insert into columnar table that is a part of a publication%' THEN RAISE; END IF;
+    END;
+    IF current_setting('bioseq.column_cache.enabled') <> cache_setting THEN
+      RAISE EXCEPTION 'speculative INSERT error changed column cache';
+    END IF;
+  END LOOP;
+END $$;
+DROP PUBLICATION bioseq_package_insert_publication;
+SET bioseq.column_cache.enabled = on;
+INSERT INTO bioseq_package_insert_cleanup VALUES (1);
+INSERT INTO bioseq_package_insert_cleanup VALUES (2) ON CONFLICT (id) DO NOTHING;
+SELECT 1 / (current_setting('bioseq.column_cache.enabled') = 'on')::integer AS enabled_cache_restored;
+SET bioseq.column_cache.enabled = off;
+INSERT INTO bioseq_package_insert_cleanup VALUES (3);
+INSERT INTO bioseq_package_insert_cleanup VALUES (4) ON CONFLICT (id) DO NOTHING;
+SELECT 1 / (current_setting('bioseq.column_cache.enabled') = 'off')::integer AS disabled_cache_restored;
+SELECT 1 / (count(*) = 4)::integer AS insert_cleanup_rows_valid FROM bioseq_package_insert_cleanup;
+DROP TABLE bioseq_package_insert_cleanup;
+RESET bioseq.column_cache.enabled;
+SQL
+fi
+
 # PG19 changed TableAM mutation/maintenance signatures; PG20 additionally moved
 # index iteration into the table AM. Exercise those interfaces in the installed
 # extension, without adding benchmark runs or rebuilding accepted PG17 packages.
@@ -414,6 +462,7 @@ DELETE FROM bioseq_package_tableam_probe WHERE id = 1;
 RESET enable_seqscan;
 RESET enable_bitmapscan;
 RESET enable_indexonlyscan;
+VACUUM (ANALYZE) bioseq_package_tableam_probe;
 VACUUM (FULL, ANALYZE) bioseq_package_tableam_probe;
 SELECT count(*) AS row_count, sum(value) AS value_sum FROM bioseq_package_tableam_probe \gset
 SELECT 1 / (:row_count = 2 AND :value_sum = 51)::integer AS rewritten_rows_valid;

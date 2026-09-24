@@ -606,9 +606,15 @@ void bioseq_vacuum_rel(Relation rel,
 #endif
 
             /**
-             * PostgreSQL 18 requires a vacuum start time, where zero reports unknown.
+             * PostgreSQL 18 requires a start time (zero means unknown); PG19
+             * takes the open relation rather than its OID/shared flag.
              */
-#if PG_VERSION_NUM >= PG_VERSION_18
+#if PG_VERSION_NUM >= 190000
+            pgstat_report_vacuum(rel,
+                                 std::max<int64_t>(new_live_tuples, 0),
+                                 0,
+                                 0 /* starttime */);
+#elif PG_VERSION_NUM >= PG_VERSION_18
             pgstat_report_vacuum(RelationGetRelid(rel),
                                  rel->rd_rel->relisshared,
                                  std::max<int64_t>(new_live_tuples, 0),

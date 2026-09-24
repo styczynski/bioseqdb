@@ -508,9 +508,16 @@ extern "C" {
 
 /*
  * PG18 added optional index-scan instrumentation; PG19 added scan flags.
- * These custom scans request neither facility.
+ * PG20 also requires the index-only mode. These custom scans fetch table
+ * tuples and request neither instrumentation nor optional scan flags.
  */
-#if PG_VERSION_NUM >= 190000
+#if PG_VERSION_NUM >= 200000
+#define bioseq_begin_uninstrumented_parallel_index_scan(heap_relation, \
+                                                        index_relation, key_count, \
+                                                        order_by_count, parallel_scan) \
+    index_beginscan_parallel((heap_relation), (index_relation), false, NULL, \
+                            (key_count), (order_by_count), (parallel_scan), SO_NONE)
+#elif PG_VERSION_NUM >= 190000
 #define bioseq_begin_uninstrumented_parallel_index_scan(heap_relation, \
                                                         index_relation, key_count, \
                                                         order_by_count, parallel_scan) \

@@ -207,7 +207,8 @@ void handle_pending_speculative_subxact_event(
     }
 }
 
-/** PostgreSQL error-context record for restoring the page-cache setting. */
+#if PG_VERSION_NUM < PG_VERSION_18
+/** PG17 error-context record for restoring the page-cache setting. */
 struct ordinary_insert_page_cache_restore {
     ErrorContextCallback callback{};
     bool previous_value{};
@@ -225,6 +226,52 @@ static void restore_ordinary_insert_page_cache_on_error(void* argument) noexcept
     }
     bioseq::settings::column_cache::enabled = restore->previous_value;
     restore->armed = false;
+}
+#endif
+
+/**
+ * Run an insert boundary, restoring its prior page-cache setting on failure.
+ * Speculative insertion retains the disabled cache until its completion call.
+ * PG18 removed geterrlevel: catch ERROR only after the existing C++ boundary
+ * has unwound its owners, without copying ErrorData or reacting to warnings.
+ * The exception frame itself contains only trivially destructible state.
+ */
+template <bool restore_on_success, class p_function>
+inline void run_insert_with_page_cache_restore(
+    const char* operation, bool previous_value, p_function&& function) {
+    static_assert(std::is_trivially_destructible_v<std::remove_reference_t<p_function>>);
+#if PG_VERSION_NUM >= PG_VERSION_18
+    PG_TRY();
+    {
+        run_tableam_cpp_checked(operation, std::forward<p_function>(function));
+    }
+    PG_CATCH();
+    {
+        bioseq::settings::column_cache::enabled = previous_value;
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+#else
+    ordinary_insert_page_cache_restore cache_restore{
+        .callback =
+            {
+                .previous = error_context_stack,
+                .callback = &restore_ordinary_insert_page_cache_on_error,
+                .arg = nullptr,
+            },
+        .previous_value = previous_value,
+        .armed = true,
+    };
+    cache_restore.callback.arg = &cache_restore;
+    error_context_stack = &cache_restore.callback;
+    run_tableam_cpp_checked(operation, std::forward<p_function>(function));
+    Assert(error_context_stack == &cache_restore.callback);
+    cache_restore.armed = false;
+    error_context_stack = cache_restore.callback.previous;
+#endif
+    if constexpr (restore_on_success) {
+        bioseq::settings::column_cache::enabled = previous_value;
+    }
 }
 
 /**
@@ -387,20 +434,10 @@ void bioseq_tuple_insert(
 #endif
     BulkInsertState bistate) {
     column_write_state* write_state = nullptr;
-    ordinary_insert_page_cache_restore cache_restore{
-        .callback =
-            {
-                .previous = error_context_stack,
-                .callback = &restore_ordinary_insert_page_cache_on_error,
-                .arg = nullptr,
-            },
-        .previous_value = bioseq::settings::column_cache::enabled,
-        .armed = true,
-    };
-    cache_restore.callback.arg = &cache_restore;
-    error_context_stack = &cache_restore.callback;
+    const bool previous_cache_value = bioseq::settings::column_cache::enabled;
     bioseq::settings::column_cache::enabled = false;
-    run_tableam_cpp_checked("bioseq tuple insert", [relation, slot, &write_state] {
+    run_insert_with_page_cache_restore<true>(
+        "bioseq tuple insert", previous_cache_value, [relation, slot, &write_state] {
         if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP) {
             bioseq::postgres::support::invoke_pg_as_cpp([] {
                 bioseq_log<logging_level::error, logging_target::postgres>(
@@ -464,10 +501,6 @@ void bioseq_tuple_insert(
             [relation] { pgstat_count_heap_insert(relation, 1); });
     });
     Assert(write_state != nullptr);
-    Assert(error_context_stack == &cache_restore.callback);
-    bioseq::settings::column_cache::enabled = cache_restore.previous_value;
-    cache_restore.armed = false;
-    error_context_stack = cache_restore.callback.previous;
 }
 
 /** Insert one speculative row while retaining revocable source authorities. */
@@ -484,20 +517,10 @@ void bioseq_tuple_insert_speculative(Relation relation,
     previous_cache_enabled_state = bioseq::settings::column_cache::enabled;
     bioseq::settings::column_cache::enabled = false;
 
-    ordinary_insert_page_cache_restore cache_restore{
-        .callback =
-            {
-                .previous = error_context_stack,
-                .callback = &restore_ordinary_insert_page_cache_on_error,
-                .arg = nullptr,
-            },
-        .previous_value = previous_cache_enabled_state,
-        .armed = true,
-    };
-    cache_restore.callback.arg = &cache_restore;
-    error_context_stack = &cache_restore.callback;
     column_write_state* write_state = nullptr;
-    run_tableam_cpp_checked("bioseq speculative tuple insert", [relation, slot, &write_state] {
+    run_insert_with_page_cache_restore<false>(
+        "bioseq speculative tuple insert", previous_cache_enabled_state,
+        [relation, slot, &write_state] {
         if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP) {
             bioseq::postgres::support::invoke_pg_as_cpp([] {
                 bioseq_log<logging_level::error, logging_target::postgres>(
@@ -572,9 +595,6 @@ void bioseq_tuple_insert_speculative(Relation relation,
             [relation] { pgstat_count_heap_insert(relation, 1); });
     });
     Assert(write_state != nullptr);
-    Assert(error_context_stack == &cache_restore.callback);
-    cache_restore.armed = false;
-    error_context_stack = cache_restore.callback.previous;
 }
 
 /** Publish or invalidate the sequence sources attached to a speculative row. */
@@ -583,20 +603,9 @@ void bioseq_tuple_complete_speculative(Relation relation,
                                        uint32_t spec_token,
                                        bool succeeded) {
     (void)spec_token;
-    ordinary_insert_page_cache_restore cache_restore{
-        .callback =
-            {
-                .previous = error_context_stack,
-                .callback = &restore_ordinary_insert_page_cache_on_error,
-                .arg = nullptr,
-            },
-        .previous_value = previous_cache_enabled_state,
-        .armed = true,
-    };
-    cache_restore.callback.arg = &cache_restore;
-    error_context_stack = &cache_restore.callback;
-    run_tableam_cpp_checked(
-        "bioseq complete speculative tuple insert", [relation, slot, succeeded] {
+    run_insert_with_page_cache_restore<true>(
+        "bioseq complete speculative tuple insert", previous_cache_enabled_state,
+        [relation, slot, succeeded] {
             const uint64_t storage_id = bioseq::postgres::support::invoke_pg_as_cpp(
                 [relation] { return lookup_storage_id(relation->rd_locator); });
             /* Set lock for relation until transaction ends. */
@@ -631,10 +640,6 @@ void bioseq_tuple_complete_speculative(Relation relation,
             }
             access_pending_speculative_sources().erase(pending);
         });
-    Assert(error_context_stack == &cache_restore.callback);
-    bioseq::settings::column_cache::enabled = previous_cache_enabled_state;
-    cache_restore.armed = false;
-    error_context_stack = cache_restore.callback.previous;
 }
 
 /** Insert a batch of rows while preserving per-row source publication order. */

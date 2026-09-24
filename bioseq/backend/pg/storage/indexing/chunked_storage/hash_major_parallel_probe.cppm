@@ -363,7 +363,11 @@ inline void scan_table_desc_pg_leaf(Relation relation,
         ExecClearTuple(slot);
         if ((visited_rows & 1023u) == 0u) {
             if (!IsParallelWorker() && ParallelMessagePending) {
+#if PG_VERSION_NUM >= PG_VERSION_18
+                ProcessParallelMessages();
+#else
                 HandleParallelMessages();
+#endif
             }
             CHECK_FOR_INTERRUPTS();
         }
