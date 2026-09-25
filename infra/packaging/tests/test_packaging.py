@@ -818,7 +818,7 @@ class FormatPlanTests(unittest.TestCase):
         cleanup = script[script.index("cleanup() {"):script.index("trap cleanup EXIT")]
         with tempfile.TemporaryDirectory() as raw:
             log = Path(raw) / "postgres.log"
-            log.write_text("server failure detail\n")
+            log.write_text("TRAP: server failure detail\n" + "verbose shutdown detail\n" * 80)
             for status in (0, 3):
                 with self.subTest(status=status):
                     result = subprocess.run(
@@ -830,6 +830,8 @@ class FormatPlanTests(unittest.TestCase):
                     self.assertEqual(result.returncode, status)
                     self.assertEqual(result.stdout, "")
                     self.assertEqual("server failure detail" in result.stderr, status != 0)
+                    if status:
+                        self.assertTrue(result.stderr.endswith("TRAP: server failure detail\n"))
 
     def test_pacman_sandbox_adjustment_accepts_repeated_options_sections(self) -> None:
         def sandbox_prelude(script: str) -> str:
