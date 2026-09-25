@@ -261,6 +261,9 @@ listen_addresses = ''
 port = 55432
 unix_socket_directories = '/tmp/bioseq-package-pgsocket'
 shared_preload_libraries = 'bioseq'
+# Keep diagnostics in pg_ctl's retained log on distros that enable a collector.
+logging_collector = off
+log_destination = 'stderr'
 EOF
 chown postgres:postgres "${data_dir}/postgresql.conf"
 run_pg "${pg_ctl}" -D "${data_dir}" -l "${log_file}" -w start
