@@ -393,6 +393,40 @@ DROP TABLE bioseq_package_observed;
 DROP TABLE bioseq_package_smoke;
 SQL
 
+# Shard rollover must remove full shards from the partial active-shard index.
+# CatalogTupleInsert/Update cannot maintain partial indexes; assertion-enabled
+# servers abort, while non-assert builds can silently index excluded rows.
+run_pg "${psql_command[@]}" <<'SQL'
+SET statement_timeout = '60s';
+SET bioseq.storage.sequence_shard.max_size_gib = 0;
+CREATE TABLE bioseq_package_shard_probe (id integer, seq bioseq.seq('dna4', 64)) USING bioseq;
+INSERT INTO bioseq_package_shard_probe VALUES (1, repeat('ACGT', 256)::bioseq.seq('dna4', 64));
+INSERT INTO bioseq_package_shard_probe SELECT 2, seq FROM bioseq_package_shard_probe WHERE id = 1;
+SELECT pg_relation_filenode('bioseq_package_shard_probe'::regclass) AS shard_file \gset
+SET enable_indexscan = off;
+SET enable_bitmapscan = off;
+SELECT 1 / (count(*) = 2 AND count(*) FILTER (WHERE is_full) = 1)::integer AS shard_rollover_valid
+FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = :'shard_file'::oid;
+ANALYZE bioseq_internal.seq_sub_table;
+SET enable_indexscan = on;
+SET enable_seqscan = off;
+DO $$
+DECLARE plan json;
+BEGIN
+  EXECUTE 'EXPLAIN (FORMAT JSON, COSTS OFF) SELECT main_relfilenode FROM bioseq_internal.seq_sub_table WHERE is_full = false' INTO plan;
+  IF plan::text NOT LIKE '%seq_sub_table_active_shard_idx%' THEN
+    RAISE EXCEPTION 'active-shard index was not exercised: %', plan;
+  END IF;
+END $$;
+EXPLAIN (COSTS OFF) SELECT main_relfilenode FROM bioseq_internal.seq_sub_table WHERE is_full = false;
+SELECT 1 / (count(*) FILTER (WHERE main_relfilenode = :'shard_file'::oid) = 1)::integer AS active_shard_index_valid
+FROM bioseq_internal.seq_sub_table WHERE is_full = false;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
+DROP TABLE bioseq_package_shard_probe;
+RESET bioseq.storage.sequence_shard.max_size_gib;
+SQL
+
 # PG18 removed geterrlevel. Reuse the publication-rejection scenario from the
 # existing insert integration test to exercise the replacement ERROR boundary,
 # including speculative insertion and both initial column-cache states.

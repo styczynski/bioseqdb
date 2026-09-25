@@ -466,8 +466,14 @@ def run_package_macos(*, repository_root, log_handle, deadline, progress):
     majors = [int(v) for v in os.environ.get('BIOSEQ_PACKAGE_POSTGRES_MAJORS', '17,18,19,20').split(',')]
     if not majors or not set(majors).issubset({17, 18, 19, 20}):
         raise RuntimeError('macOS PostgreSQL selection must be within the release matrix')
+    # Explicit repairs may replace selected accepted packages; ordinary runs
+    # still reuse them regardless of later source edits or Git commits.
+    rebuild_majors = {int(v) for v in os.environ.get('BIOSEQ_PACKAGE_REBUILD_MAJORS', '').split(',') if v}
+    if not rebuild_majors.issubset(majors):
+        raise RuntimeError('Explicit macOS package repairs must be within the selected majors')
+    validation_only = os.environ.get('BIOSEQ_PACKAGE_VALIDATE_EXISTING_ONLY') == '1'
     for major in sorted(set(majors)):
-        if any(p['postgres_major'] == major
+        if major not in rebuild_majors and not validation_only and any(p['postgres_major'] == major
                and p['installed_sql_smoke'].get('column_defaults_and_vacuum') is True
                and (output / p['file']).is_file()
                and sha256(output / p['file']) == p['sha256'] for p in manifest['packages']):

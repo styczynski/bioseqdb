@@ -982,12 +982,17 @@ export struct sequence_sub_table_manager {
             .is_full = false,
             .total_payload_bytes = 0,
         };
-        HeapTuple heap_tuple = seq_sub_table_codec::encode(catalog_row, CurrentMemoryContext)
-                                   .form_tuple(tuple_descriptor);
-        CatalogTupleInsert(rel, heap_tuple);
-        heap_freetuple(heap_tuple);
+        // This registry has a partial active-shard index. PostgreSQL's system
+        // catalog helpers neither evaluate its predicate nor support it under
+        // assertions; use the existing executor-backed metadata writer.
+        auto encoded = seq_sub_table_codec::encode(catalog_row, CurrentMemoryContext);
+        const auto tuple_data = encoded.tuple_data(tuple_descriptor);
+        auto* modification =
+            bioseq::storage::metadata::tuple_ops::begin_relation_modification(rel);
+        bioseq::storage::metadata::tuple_ops::insert_catalog_tuple(
+            modification, tuple_data.values, tuple_data.nulls);
+        bioseq::storage::metadata::tuple_ops::finish_relation_modification(modification);
         table_close(rel, RowExclusiveLock);
-        CommandCounterIncrement();
 
         sequence_sub_table_row row;
         row.database_oid = database_oid;
@@ -1082,11 +1087,14 @@ export struct sequence_sub_table_manager {
             .set<&seq_sub_table_row::is_full>(now_full);
 
         HeapTuple new_tuple = update.modify(old_tuple, tuple_descriptor);
-        CatalogTupleUpdate(rel, &old_tuple->t_self, new_tuple);
+        auto* modification =
+            bioseq::storage::metadata::tuple_ops::begin_relation_modification(rel);
+        bioseq::storage::metadata::tuple_ops::update_catalog_tuple(
+            modification, old_tuple, new_tuple);
         systable_endscan(scan);
+        bioseq::storage::metadata::tuple_ops::finish_relation_modification(modification);
         heap_freetuple(new_tuple);
         table_close(rel, RowExclusiveLock);
-        CommandCounterIncrement();
 
         current.bytes_written = new_bytes_written;
         current.total_payload_bytes = new_total_payload;

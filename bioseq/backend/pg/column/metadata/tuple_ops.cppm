@@ -114,6 +114,46 @@ insert_catalog_tuple(relation_modification_state *state, Datum *values, bool *nu
 }
 
 /**
+ * @brief Updates an internal heap row, evaluating partial-index predicates.
+ * @param[in] state Active modification state with the relation's indexes open.
+ * @param[in] old_tuple Borrowed row identifying the version to replace.
+ * @param[in] new_tuple Borrowed replacement, whose self pointer is updated.
+ *
+ * Like CatalogTupleUpdate, this leaves row triggers to the caller. Unlike that
+ * system-catalog-only helper, the executor correctly evaluates index predicates
+ * and expressions. HOT and summarizing-index behavior remain PostgreSQL-owned.
+ */
+void
+update_catalog_tuple(relation_modification_state *state, HeapTuple old_tuple,
+                     HeapTuple new_tuple)
+{
+	TU_UpdateIndexes update_indexes = TU_All;
+	simple_heap_update(state->relation, &old_tuple->t_self, new_tuple, &update_indexes);
+	if (state->result_rel_info->ri_NumIndices == 0 || update_indexes == TU_None) {
+		return;
+	}
+	TupleTableSlot *slot = ExecInitExtraTupleSlot(
+		state->executor_state, RelationGetDescr(state->relation), &TTSOpsHeapTuple);
+	ExecStoreHeapTuple(new_tuple, slot, false);
+#if PG_VERSION_NUM >= 190000
+	// There is no planner updated-column bitmap for this direct metadata write.
+	// Preserve CatalogTupleUpdate's conservative indexUnchanged=false hint.
+	uint32 flags = 0;
+	if (update_indexes == TU_Summarizing) {
+		flags |= EIIT_ONLY_SUMMARIZING;
+	}
+	List *recheck_indexes = ExecInsertIndexTuples(
+		state->result_rel_info, state->executor_state, flags, slot, NIL, nullptr);
+#else
+	List *recheck_indexes = ExecInsertIndexTuples(
+		state->result_rel_info, slot, state->executor_state, false, false,
+		nullptr, NIL, update_indexes == TU_Summarizing);
+#endif
+	list_free(recheck_indexes);
+	ExecClearTuple(slot);
+}
+
+/**
  * @brief Deletes one catalog tuple and runs its row-delete triggers.
  * @param[in] state Active modification state for the owning relation.
  * @param[in] heap_tuple Borrowed tuple whose self pointer identifies the row to delete.
