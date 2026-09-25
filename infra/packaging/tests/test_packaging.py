@@ -235,6 +235,10 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
                 path.write_text("retained")
             for name in ("a.o", "a.pcm"):
                 (objects / name).write_text("intermediate")
+            generated = tree / "bioseq/generated/highway/pcm"
+            generated.mkdir(parents=True)
+            (generated / "a.pcm").write_text("intermediate")
+            (generated / "source.cpp").write_text("retained")
             (objects / "linked.o").symlink_to(retained[-1])
             outside = root / "outside"
             outside.mkdir()
@@ -244,8 +248,10 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
             with mock.patch.object(subprocess, "check_output", side_effect=[observer, ""]), \
                     mock.patch.object(namespace["shutil"], "disk_usage", return_value=SimpleNamespace(free=0)):
                 result = reclaim(root)
-            self.assertEqual(result["removed_files"], 2)
-            self.assertEqual(result["removed_file_bytes"], 24)
+            self.assertEqual(result["removed_files"], 3)
+            self.assertEqual(result["removed_file_bytes"], 36)
+            self.assertEqual(result["cleanup_revision"], 2)
+            self.assertEqual((generated / "source.cpp").read_text(), "retained")
             self.assertTrue(objects.is_dir())
             self.assertTrue((objects / "linked.o").is_symlink())
             self.assertTrue((outside / "protected.o").exists())

@@ -616,25 +616,26 @@ def reclaim_retired_benchmark_intermediates(repository):
     removed, removed_bytes = 0, 0
     touched = []
     for tree in trees:
-        objects = tree / "bioseq/CMakeFiles"
-        if not objects.is_dir() or objects.resolve() != objects:
-            continue
         if not (tree / "CMakeCache.txt").is_file():
             continue
-        touched.append(str(objects))
-        for directory, _, files in os.walk(objects, followlinks=False):
-            for filename in files:
-                path = Path(directory) / filename
-                if path.suffix not in (".o", ".pcm") or path.is_symlink() or not path.is_file():
-                    continue
-                size = path.stat().st_size
-                path.unlink()
-                removed += 1
-                removed_bytes += size
+        for relative in ("bioseq/CMakeFiles", "bioseq/generated"):
+            objects = tree / relative
+            if not objects.is_dir() or objects.resolve() != objects:
+                continue
+            touched.append(str(objects))
+            for directory, _, files in os.walk(objects, followlinks=False):
+                for filename in files:
+                    path = Path(directory) / filename
+                    if path.suffix not in (".o", ".pcm") or path.is_symlink() or not path.is_file():
+                        continue
+                    size = path.stat().st_size
+                    path.unlink()
+                    removed += 1
+                    removed_bytes += size
         if shutil.disk_usage(repository).free >= 100 * 1024**3:
             break
     available = shutil.disk_usage(repository).free
-    return dict(removed_files=removed, removed_file_bytes=removed_bytes,
+    return dict(cleanup_revision=2, removed_files=removed, removed_file_bytes=removed_bytes,
                 reclaimed_bytes=available - before, available_bytes=available, roots=touched)
 
 
@@ -744,7 +745,8 @@ def dispatch_available(state):
             continue
         disk_attention = state.setdefault("package_disk_attention", {})
         cleaned = state.setdefault("retired_intermediate_cleanup", {})
-        if available < 80 * 1024**3 and architecture == "x64" and host not in cleaned:
+        if (available < 80 * 1024**3 and architecture == "x64"
+                and cleaned.get(host, {}).get("cleanup_revision", 1) < 2):
             try:
                 source = ("import json, os, re, shutil, subprocess\nfrom pathlib import Path\n"
                           + inspect.getsource(reclaim_retired_benchmark_intermediates)
