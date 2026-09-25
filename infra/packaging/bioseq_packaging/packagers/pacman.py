@@ -53,6 +53,14 @@ fi
 
 pacman -Syu --noconfirm --needed \
   base-devel rsync shadow util-linux zstd "${build_dependencies[@]}"
+# The SDK preparation also invokes makepkg. Normalize compression before
+# either package is made; Arch ARM otherwise defaults to .pkg.tar.xz.
+sed -i -E '/^[[:space:]]*PKGEXT=/d' /etc/makepkg.conf
+printf '%s\n' 'OPTIONS+=(!debug !lto)' "PKGEXT='.pkg.tar.zst'" \
+  >> /etc/makepkg.conf
+grep -Fqx 'OPTIONS+=(!debug !lto)' /etc/makepkg.conf
+grep -Fqx "PKGEXT='.pkg.tar.zst'" /etc/makepkg.conf
+
 /source/infra/packaging/scripts/prepare_build_environment.sh
 
 package_root=/work/package
@@ -71,12 +79,6 @@ rsync "${rsync_arguments[@]}" /source/ "${source_root}/"
 cd "${package_root}"
 tar -czf "${BIOSEQ_SOURCE_FOLDER_NAME}.tar.gz" \
   "${BIOSEQ_SOURCE_FOLDER_NAME}/"
-
-sed -i -E '/^[[:space:]]*PKGEXT=/d' /etc/makepkg.conf
-printf '%s\n' 'OPTIONS+=(!debug !lto)' "PKGEXT='.pkg.tar.zst'" \
-  >> /etc/makepkg.conf
-grep -Fqx 'OPTIONS+=(!debug !lto)' /etc/makepkg.conf
-grep -Fqx "PKGEXT='.pkg.tar.zst'" /etc/makepkg.conf
 
 build_user=bioseqbuild
 if ! id -u "${build_user}" >/dev/null 2>&1; then

@@ -1078,6 +1078,10 @@ class FormatPlanTests(unittest.TestCase):
                         script.index("PKGEXT='.pkg.tar.zst'"),
                         script.index("makepkg --force --nodeps --noconfirm"),
                     )
+                    self.assertLess(
+                        script.index("PKGEXT='.pkg.tar.zst'"),
+                        script.index("/source/infra/packaging/scripts/prepare_build_environment.sh"),
+                    )
                     self.assertEqual(len(plan.mounts), 4)
                     self.assertEqual(
                         plan.capabilities,
