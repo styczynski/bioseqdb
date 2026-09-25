@@ -50,7 +50,7 @@ namespace {
 /** Assert the relcache invariants required before calling an index AM. */
 [[gnu::always_inline]] inline void relation_checks(Relation index_relation) noexcept {
     Assert(RelationIsValid(index_relation));
-    Assert(PointerIsValid(index_relation->rd_indam));
+    Assert(index_relation->rd_indam != nullptr);
     Assert(!ReindexIsProcessingIndex(RelationGetRelid(index_relation)));
 }
 
