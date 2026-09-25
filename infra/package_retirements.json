@@ -1,0 +1,9 @@
+{
+  "description": "Retiring hosts accept no new packages or retries. Existing work is evacuated before the user's irreversible account deletion deadline. Epochs are UTC.",
+  "hosts": {
+    "test2-c7g": {"profile": "test2", "account_id": "090072209895", "stop_polling_after_epoch": 1790328300, "deletion_deadline": "2026-09-25T11:30:00+02:00"},
+    "test2-m4": {"profile": "test2", "account_id": "090072209895", "stop_polling_after_epoch": 1790328300, "deletion_deadline": "2026-09-25T11:30:00+02:00"},
+    "test2-m7a": {"profile": "test2", "account_id": "090072209895", "stop_polling_after_epoch": 1790328300, "deletion_deadline": "2026-09-25T11:30:00+02:00"},
+    "test2-m7i": {"profile": "test2", "account_id": "090072209895", "stop_polling_after_epoch": 1790328300, "deletion_deadline": "2026-09-25T11:30:00+02:00"}
+  }
+}

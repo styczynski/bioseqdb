@@ -386,6 +386,14 @@ void read_chunk_group_row_counts(uint64_t storage_id,
                                  uint32_t** chunk_group_row_counts,
                                  uint32_t** chunk_group_deleted_rows,
                                  Snapshot snapshot) {
+    // VACUUM/statistics callers may supply GetTransactionSnapshot() without
+    // owning that exact snapshot. ResourceOwner releases this pin on ERROR;
+    // the normal path releases it immediately after ending the ordered scan.
+    const bool retain_snapshot = snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot) &&
+                                 snapshot->regd_count == 0 && snapshot->active_count == 0;
+    if (retain_snapshot) {
+        snapshot = RegisterSnapshot(snapshot);
+    }
     Oid bioseq_column_chunk_group_oid = column_chunk_group_relation_oid();
     Relation bioseq_column_chunk_group = table_open(bioseq_column_chunk_group_oid, AccessShareLock);
     Relation index = index_open(column_chunk_group_index_oid(), AccessShareLock);
@@ -440,6 +448,9 @@ void read_chunk_group_row_counts(uint64_t storage_id,
     }
 
     systable_endscan_ordered(scan_descriptor);
+    if (retain_snapshot) {
+        UnregisterSnapshot(snapshot);
+    }
     index_close(index, AccessShareLock);
     table_close(bioseq_column_chunk_group, AccessShareLock);
 }

@@ -106,8 +106,9 @@ export Size decompressed_length_for_stripe(RelFileLocator relfilelocator, uint64
     scan_keys[1] =
         chunk_codec::scan_key<&chunk_row::stripe_num>(static_cast<std::int64_t>(stripe_id));
 
+    Snapshot snapshot = RegisterSnapshot(GetTransactionSnapshot());
     SysScanDesc scan_descriptor = systable_beginscan_ordered(
-        bioseq_column_chunk, index, GetTransactionSnapshot(), 2, scan_keys);
+        bioseq_column_chunk, index, snapshot, 2, scan_keys);
 
     Size decompressed_chunk_size = 0;
 
@@ -119,6 +120,7 @@ export Size decompressed_length_for_stripe(RelFileLocator relfilelocator, uint64
     }
 
     systable_endscan_ordered(scan_descriptor);
+    UnregisterSnapshot(snapshot);
     index_close(index, AccessShareLock);
     table_close(bioseq_column_chunk, AccessShareLock);
 
@@ -287,6 +289,15 @@ update_stripe_metadata_row(uint64_t storage_id, uint64_t stripe_id, stripe_codec
  * in the given snapshot.
  */
 List* read_data_file_stripes(uint64_t storage_id, Snapshot snapshot, ScanDirection scan_direction) {
+    // A raw transaction snapshot is not the copied active statement snapshot.
+    // Ordered scans borrow the exact supplied object, so retain an unowned
+    // MVCC snapshot for the scan. Dirty snapshots and caller-owned snapshots
+    // keep their existing semantics and incur no registration work.
+    const bool retain_snapshot = snapshot != InvalidSnapshot && IsMVCCSnapshot(snapshot) &&
+                                 snapshot->regd_count == 0 && snapshot->active_count == 0;
+    if (retain_snapshot) {
+        snapshot = RegisterSnapshot(snapshot);
+    }
     bioseq::postgres::support::postgres_list<stripe_metadata> stripe_metadata_list;
     ScanKeyData scan_keys[1];
     HeapTuple heap_tuple;
@@ -309,6 +320,9 @@ List* read_data_file_stripes(uint64_t storage_id, Snapshot snapshot, ScanDirecti
     }
 
     systable_endscan_ordered(scan_descriptor);
+    if (retain_snapshot) {
+        UnregisterSnapshot(snapshot);
+    }
     index_close(index, AccessShareLock);
     table_close(bioseq_column_stripes, AccessShareLock);
 

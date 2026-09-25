@@ -54,6 +54,16 @@ SOURCE_ROOTS = (
 _SNAPSHOT_LOCK = threading.Lock()
 
 
+def retirement_policy(host):
+    path = ROOT / "infra/package_retirements.json"
+    return json.loads(path.read_text()).get("hosts", {}).get(host, {}) if path.exists() else {}
+
+
+def host_retired(host):
+    policy = retirement_policy(host)
+    return bool(policy and time.time() >= policy["stop_polling_after_epoch"])
+
+
 def committed_source_snapshot():
     """Freeze a complete local commit before copying a release batch.
 
@@ -236,6 +246,9 @@ def status_snapshot():
     def observe(host):
         job = state["jobs"].get(host, {})
         mode = job_mode(host, job)
+        if host_retired(host):
+            return host, {"cell": job.get("cell"), "mode": mode, "status": "retired",
+                          "retirement": retirement_policy(host)}
         command = source + (
             "\nstate=json.loads(Path('/tmp/bioseq_build_mcp_state.json').read_text())"
             f".get({mode!r}, {{}})\nprint(json.dumps(worker_diagnostics(state, {mode!r})))\n")
@@ -361,6 +374,8 @@ def write_release_manifest():
 
 
 def launch(host, *, validate_existing_only=False, cell=None, website_only_update=False):
+    if retirement_policy(host):
+        raise RuntimeError(f"{host}: admission disabled for account retirement")
     prior = state_on(host, "benchmark-e2e")
     if prior.get("status") == "running" or prior.get("cleanup_unverified"):
         raise RuntimeError("remote benchmark has not stopped cleanly; no package launch")
@@ -657,6 +672,8 @@ def dispatch_available(state):
                     architecture="arm64" if host.endswith("c7g") else "x64")))
     pending = []
     for host in PLAN:
+        if retirement_policy(host):
+            continue
         job = state["jobs"].get(host, {})
         observed = job.get("observed", {})
         if job.get("cell") and not job.get("launched") and not job.get("error"):
@@ -866,6 +883,8 @@ def main():
         # Inspect and collect the priority website before package transfers.
         for host, job in sorted(state["jobs"].items(), key=lambda item:
                 job_mode(*item) != "website"):
+            if host_retired(host):
+                continue
             if not job.get("launched"):
                 continue
             try:
@@ -901,7 +920,8 @@ def main():
                     # retrying, and do not cancel the still-running graph.
                     job.pop(pending_key)
                     STATE.write_text(json.dumps(state, indent=2) + "\n")
-                    if (observed.get("status") in (("failed", "completed") if refresh else ("failed",))
+                    if (not retirement_policy(host)
+                            and observed.get("status") in (("failed", "completed") if refresh else ("failed",))
                             and observed.get("pid") == pending_pid
                             and not observed.get("cleanup_unverified")):
                         event("repaired_retry_started", host=host, previous_pid=pending_pid)
