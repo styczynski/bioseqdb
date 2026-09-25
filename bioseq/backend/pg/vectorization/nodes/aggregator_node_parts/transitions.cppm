@@ -297,10 +297,17 @@ static void advance_transition_function(AggState* aggregate_state,
  * Evaluates the compiled transition expression for one input tuple.
  */
 export void advance_aggregates(AggState* aggregate_state) {
+#if PG_VERSION_NUM >= 190000
+    // PG19 transition programs end in EEOP_DONE_NO_RETURN, which requires
+    // a null result-is-null pointer; their result lives in the group state.
+    ExecEvalExprNoReturnSwitchContext(
+        aggregate_state->phase->evaltrans, aggregate_state->tmpcontext);
+#else
     bool transition_result_is_null;
 
     ExecEvalExprSwitchContext(
         aggregate_state->phase->evaltrans, aggregate_state->tmpcontext, &transition_result_is_null);
+#endif
 }
 
 /**
