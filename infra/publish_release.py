@@ -348,7 +348,14 @@ def publish_packages(apply):
     if not os.environ.get('SOURCE_FORGE_RELEASE_TOKEN'):
         raise RuntimeError('SOURCE_FORGE_RELEASE_TOKEN is not exported')
     options = sourceforge_access()
-    stage = Path(tempfile.mkdtemp(prefix='packages-', dir=CONTROL))
+    # Accepted archives and verification records live outside this scratch
+    # directory. Release every snapshot on both success and failure so the
+    # long-running watcher cannot consume the build host's disk over time.
+    with tempfile.TemporaryDirectory(prefix='packages-', dir=CONTROL) as raw:
+        publish_package_snapshot(Path(raw), packages, options)
+
+
+def publish_package_snapshot(stage, packages, options):
     records = []
     for package in packages:
         path = stage / package['file']

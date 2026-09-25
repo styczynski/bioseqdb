@@ -2608,6 +2608,35 @@ class ReleasePublisherTests(unittest.TestCase):
     def publisher(self):
         return runpy.run_path(str(REPOSITORY_ROOT / 'infra/publish_release.py'))
 
+    def test_upload_snapshot_is_removed_after_success_or_failure(self):
+        function = self.publisher()['publish_packages']
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as raw:
+                control = Path(raw)
+                visited = []
+
+                def publish(stage, packages, options):
+                    self.assertTrue(stage.is_dir())
+                    self.assertEqual(stage.parent, control)
+                    (stage / 'temporary-copy').write_bytes(b'upload snapshot')
+                    visited.append(stage)
+                    if fail:
+                        raise RuntimeError('simulated upload failure')
+
+                with mock.patch.dict(function.__globals__, {
+                        'CONTROL': control, 'event': mock.Mock(),
+                        'accepted_packages': lambda: [{'package_version': 'alpha'}],
+                        'sourceforge_access': lambda: [],
+                        'publish_package_snapshot': publish}), \
+                        mock.patch.dict(os.environ, {'SOURCE_FORGE_RELEASE_TOKEN': 'test-token'}):
+                    if fail:
+                        with self.assertRaisesRegex(RuntimeError, 'simulated upload failure'):
+                            function(True)
+                    else:
+                        function(True)
+                self.assertEqual(len(visited), 1)
+                self.assertFalse(visited[0].exists())
+
     def test_sdk_support_files_keep_runtime_metadata_and_verified_bytes(self):
         function = self.publisher()['accepted_packages']
         with tempfile.TemporaryDirectory() as raw:
