@@ -642,14 +642,12 @@ class index_storage_fragment_generation_row_sink {
             if (!IsMVCCSnapshot(active_snapshot)) {
                 minimizer_generation_storage_error("READY reread active snapshot is not MVCC");
             }
-            bioseq::postgres::support::invoke_pg_as_cpp([] { UpdateActiveSnapshotCommandId(); });
-            if (active_snapshot->curcid != bioseq::postgres::support::invoke_pg_as_cpp(
+            validation_snapshot_ = register_minimizer_reread_snapshot_pg(active_snapshot);
+            if (validation_snapshot_->curcid != bioseq::postgres::support::invoke_pg_as_cpp(
                                                [] { return GetCurrentCommandId(false); })) {
                 minimizer_generation_storage_error(
-                    "READY reread active command ID was not refreshed");
+                    "READY reread private command ID was not refreshed");
             }
-            validation_snapshot_ = bioseq::postgres::support::invoke_pg_as_cpp(
-                [active_snapshot] { return RegisterSnapshot(active_snapshot); });
             if (validation_snapshot_ == nullptr || validation_snapshot_->regd_count == 0) {
                 minimizer_generation_storage_error("READY reread snapshot was not registered");
             }

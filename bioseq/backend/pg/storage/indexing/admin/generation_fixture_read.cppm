@@ -1029,7 +1029,8 @@ void remove_sequence_fragment_impl(Oid rel_oid,
         state->registered_snapshot = nullptr;
         bioseq::postgres::support::invoke_pg_as_cpp([] {
             CommandCounterIncrement();
-            UpdateActiveSnapshotCommandId();
+            // There is no reread in this statement. The next command obtains
+            // its own snapshot; do not mutate an active snapshot held by others.
         });
         delete state;
         state = nullptr;

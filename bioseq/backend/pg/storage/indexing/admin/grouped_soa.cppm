@@ -619,11 +619,10 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
         result.replaced_generation_id = publication_receipt.replaced_generation_id;
 
         bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
-        bioseq::postgres::support::invoke_pg_as_cpp([] { UpdateActiveSnapshotCommandId(); });
         Snapshot verification_source =
             bioseq::postgres::support::invoke_pg_as_cpp([] { return GetActiveSnapshot(); });
-        Snapshot verification_snapshot = bioseq::postgres::support::invoke_pg_as_cpp(
-            [verification_source] { return RegisterSnapshot(verification_source); });
+        Snapshot verification_snapshot =
+            register_minimizer_reread_snapshot_pg(verification_source);
         const auto reread_expected =
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,

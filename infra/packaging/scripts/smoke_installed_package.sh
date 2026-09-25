@@ -379,6 +379,21 @@ BEGIN
   IF found <> 1 THEN RAISE EXCEPTION 'default persisted batch search: expected 1 match, got %', found; END IF;
 END $$;
 DROP TABLE bioseq_package_observed;
+-- Both publication layouts must refresh a private validation snapshot even
+-- while the source registry retains the original query snapshot.
+SELECT bioseq.update_index('bioseq_package_smoke'::regclass, 'minimizers_per_sequence');
+SELECT bioseq.set_active_read_index('bioseq_package_smoke'::regclass, 'minimizers_per_sequence');
+CREATE TEMP TABLE bioseq_package_observed AS
+SELECT t.id FROM bioseq_package_queries AS q CROSS JOIN bioseq_package_smoke AS t
+WHERE public.mmsearch(t.seq, q.seq, aligner_options(index_read_requirement => 2));
+DO $$
+DECLARE found bigint;
+BEGIN
+  SELECT count(*) INTO found FROM bioseq_package_observed;
+  IF found <> 1 THEN RAISE EXCEPTION 'persisted MPS batch search: expected 1 match, got %', found; END IF;
+END $$;
+DROP TABLE bioseq_package_observed;
+SELECT bioseq.set_active_read_index('bioseq_package_smoke'::regclass, 'minimizers_per_fragment');
 DROP TABLE bioseq_package_queries;
 INSERT INTO bioseq_package_smoke SELECT 3, seq FROM bioseq_package_smoke WHERE id = 1;
 CREATE TEMP TABLE bioseq_package_observed AS

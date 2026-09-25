@@ -19,6 +19,7 @@ extern "C" {
 #include "utils/errcodes.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "varatt.h"
 }
 
@@ -45,6 +46,29 @@ import :catalog_metadata;
 import :catalog_source_authorization;
 import :catalog_storage_descriptors;
 export namespace bioseq::storage::indexing {
+/// Register a private MVCC copy for rereading rows after CommandCounterIncrement.
+/// Source readers may retain the caller's active snapshot. Refresh only the
+/// copy, never their visibility boundary; the caller must unregister the result.
+[[nodiscard]] inline Snapshot register_minimizer_reread_snapshot_pg(Snapshot source) {
+    return bioseq::postgres::support::invoke_pg_as_cpp([source] {
+        PushCopiedSnapshot(source);
+        Snapshot volatile registered = nullptr;
+        PG_TRY();
+        {
+            UpdateActiveSnapshotCommandId();
+            registered = RegisterSnapshot(GetActiveSnapshot());
+        }
+        PG_CATCH();
+        {
+            PopActiveSnapshot();
+            PG_RE_THROW();
+        }
+        PG_END_TRY();
+        PopActiveSnapshot();
+        return registered;
+    });
+}
+
 /// Form one immutable current-generation payload/directory/manifest tuple. The caller
 /// transfers the tuple into a TTSOpsHeapTuple slot and flushes a bounded group
 /// with CatalogTuplesMultiInsertWithInfo, PostgreSQL 17's supported catalog

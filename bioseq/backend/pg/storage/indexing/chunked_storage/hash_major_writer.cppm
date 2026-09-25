@@ -815,9 +815,7 @@ class index_storage_hash_major_minimizer_writer {
             if (!IsMVCCSnapshot(active_snapshot)) {
                 fail_("hash-major validation snapshot is not MVCC");
             }
-            bioseq::postgres::support::invoke_pg_as_cpp([] { UpdateActiveSnapshotCommandId(); });
-            validation_snapshot_ = bioseq::postgres::support::invoke_pg_as_cpp(
-                [active_snapshot] { return RegisterSnapshot(active_snapshot); });
+            validation_snapshot_ = register_minimizer_reread_snapshot_pg(active_snapshot);
             const Oid primary_index_oid = bioseq::postgres::support::invoke_pg_as_cpp(
                 [this] {
                     return bioseq::postgres::support::relation_immediate_primary_key_index(relation_);

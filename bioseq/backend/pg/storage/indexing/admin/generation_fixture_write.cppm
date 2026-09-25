@@ -618,10 +618,10 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
         // fresh registered copy validates that the rows are visible
         // through PostgreSQL after the private READY token was consumed.
         bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
-        bioseq::postgres::support::invoke_pg_as_cpp([] { UpdateActiveSnapshotCommandId(); });
-        Snapshot verification_source = GetActiveSnapshot();
-        state->verification_snapshot = bioseq::postgres::support::invoke_pg_as_cpp(
-            [verification_source] { return RegisterSnapshot(verification_source); });
+        Snapshot verification_source =
+            bioseq::postgres::support::invoke_pg_as_cpp([] { return GetActiveSnapshot(); });
+        state->verification_snapshot =
+            register_minimizer_reread_snapshot_pg(verification_source);
         const auto expected =
             bioseq::indexing::expected_grouped_soa_generation_identity_for_backend(
                 bioseq::indexing::minimizer_generation_layout::grouped_soa_segment_local,
