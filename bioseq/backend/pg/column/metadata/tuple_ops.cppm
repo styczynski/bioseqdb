@@ -29,6 +29,7 @@ struct relation_modification_state
 	Relation relation;
 	EState *executor_state;
 	ResultRelInfo *result_rel_info;
+	Snapshot retained_snapshot;
 };
 
 /// @brief Creates executor state configured for catalog tuple modification.
@@ -64,6 +65,15 @@ create_relation_executor_state(Relation relation)
 relation_modification_state *
 begin_relation_modification(Relation relation)
 {
+	// Buffered metadata can be finalized by PRE_COMMIT after the statement's
+	// executor released its snapshot. Heap writes to TOAST-capable relations
+	// still need a registered snapshot to protect TOAST lifetime. Pin only when
+	// the caller supplies none; do not replace an existing visibility snapshot
+	// or add snapshot-stack work to ordinary statement-time metadata batches.
+	Snapshot retained_snapshot = InvalidSnapshot;
+	if (!HaveRegisteredOrActiveSnapshot()) {
+		retained_snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	}
 	EState *executor_state = create_relation_executor_state(relation);
 	ResultRelInfo *result_rel_info = makeNode(ResultRelInfo);
 
@@ -78,6 +88,7 @@ begin_relation_modification(Relation relation)
 	state->relation = relation;
 	state->executor_state = executor_state;
 	state->result_rel_info = result_rel_info;
+	state->retained_snapshot = retained_snapshot;
 
 	return state;
 }
@@ -190,6 +201,10 @@ finish_relation_modification(relation_modification_state *state)
 	FreeExecutorState(state->executor_state);
 
 	CommandCounterIncrement();
+	if (state->retained_snapshot != InvalidSnapshot) {
+		UnregisterSnapshot(state->retained_snapshot);
+		state->retained_snapshot = InvalidSnapshot;
+	}
 }
 
 } // namespace bioseq::storage::metadata::tuple_ops
