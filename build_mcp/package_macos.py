@@ -22,6 +22,7 @@ from package_linux import _run, _write_json_atomic
 MODE = 'package-macos'
 REPORTING_SUBDIR = 'bioseq_package_macos'
 VERSION = '0.1.0-alpha.1'
+MINIMUM_FREE_BYTES = 20 * 1024**3
 
 
 def sha256(path):
@@ -406,12 +407,19 @@ After the SDK is installed, install the accompanying BioseqDB .pkg.
 
 
 def reclaim_accepted_compiler_cache(state, major, progress):
-    """Discard only regenerable compiler intermediates after package verification.
+    """Reclaim verified-package intermediates only when the next build needs room.
 
     The caller has accepted and hashed the final installer; the MCP mode owns
     this build tree exclusively. Linked modules, CMake cache, generated source,
     extracted SQL proof and all benchmark data stay in place.
     """
+    # Keep useful incremental work while there is room for another major and
+    # its validation payload. Unconditional cleanup made small correctness
+    # repairs needlessly recompile every module of an already accepted major.
+    available = shutil.disk_usage(state).free
+    if available >= 2 * MINIMUM_FREE_BYTES:
+        progress(f'retaining PG{major} compiler cache; {available / 1024**3:.1f} GiB free')
+        return
     base = (state / f'pg{major}' / 'bioseq').resolve()
     if not base.is_relative_to(state.resolve()) or major not in (17, 18, 19, 20):
         raise RuntimeError('Unsafe accepted-package compiler cache root')
@@ -466,7 +474,7 @@ def run_package_macos(*, repository_root, log_handle, deadline, progress):
             progress(f'reusing accepted macOS PostgreSQL {major} package')
             reclaim_accepted_compiler_cache(state, major, progress)
             continue
-        if shutil.disk_usage(state).free < 20 * 1024**3:
+        if shutil.disk_usage(state).free < MINIMUM_FREE_BYTES:
             raise RuntimeError('macOS package build requires at least 20 GiB free; retained measurements are untouched')
         try:
             package = build_one(repository, major, state, output, run, progress)
