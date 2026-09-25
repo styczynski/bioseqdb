@@ -694,11 +694,21 @@ class CliAndContainerTests(unittest.TestCase):
 
 class FormatPlanTests(unittest.TestCase):
     def test_compiler_parallelism_respects_memory_and_cpu_budget(self) -> None:
-        for gib, cpus, expected in ((1, 4, 1), (8, 4, 2), (16, 4, 4), (64, 2, 2)):
-            with self.subTest(gib=gib, cpus=cpus), mock.patch.object(
-                config.os, "sysconf", side_effect=(gib * 1024**3 // 4096, 4096)
-            ), mock.patch.object(config.os, "cpu_count", return_value=cpus):
-                self.assertEqual(config.package_build_parallelism(), expected)
+        for gib, cpus, ordinary, heavy in (
+            (1, 4, 1, 1), (8, 4, 2, 1), (16, 4, 4, 2),
+            (32, 8, 4, 4), (64, 2, 2, 2), (16, 1, 1, 1), (8, None, 1, 1),
+        ):
+            for policy, expected in (
+                (config.package_build_parallelism, ordinary),
+                (config.package_heavy_build_parallelism, heavy),
+            ):
+                with self.subTest(gib=gib, cpus=cpus, policy=policy.__name__), mock.patch.object(
+                    config.os, "sysconf", side_effect=(gib * 1024**3 // 4096, 4096)
+                ), mock.patch.object(config.os, "cpu_count", return_value=cpus):
+                    self.assertEqual(policy(), expected)
+        with mock.patch.object(config.os, "sysconf", side_effect=OSError("unavailable")):
+            self.assertEqual(config.package_build_parallelism(), 1)
+            self.assertEqual(config.package_heavy_build_parallelism(), 1)
 
     def test_deb_and_rpm_metadata_and_build_plans_are_direct_and_optimized(
         self,
@@ -2129,6 +2139,8 @@ class BuildAndStageContractTests(unittest.TestCase):
 
         self.assertIn("cmake_cache_matches_package_profile", build_script)
         self.assertIn("require_package_cmake_profile", build_script)
+        self.assertIn("from bioseq_packaging.config import package_heavy_build_parallelism", build_script)
+        self.assertIn('-DBIOSEQ_HEAVY_JOBS="${heavy_parallelism}"', build_script)
         invariant_body = build_script.split(
             "package_cmake_invariants() {", maxsplit=1
         )[1].split("\n}", maxsplit=1)[0]
@@ -2178,6 +2190,7 @@ class BuildAndStageContractTests(unittest.TestCase):
                 "${libunwind_archive}",
             ),
             ("BIOSEQ_PACKAGE_BUILD", "ON"),
+            ("BIOSEQ_HEAVY_JOBS", "${heavy_parallelism}"),
             ("BIOSEQ_BUILD_CORE", "ON"),
             ("BIOSEQ_BUILD_CACHE", "ON"),
             ("BIOSEQ_TEST_INDEXES", "OFF"),

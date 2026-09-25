@@ -32,6 +32,15 @@ MINIMUM_POSTGRES_MAJOR = 17
 PACKAGING_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _memory_bounded_parallelism(gib_per_compiler: int) -> int:
+    try:
+        memory_bytes = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError):
+        return 1
+    return max(1, min(4, os.cpu_count() or 1,
+                      memory_bytes // (gib_per_compiler * 1024**3)))
+
+
 def package_build_parallelism() -> int:
     """Bound Clang module working sets without changing generated code.
 
@@ -39,11 +48,18 @@ def package_build_parallelism() -> int:
     refaults on the 8 GiB native ARM workers. Budget 3 GiB per compiler, capped
     at the retained four-job maximum; dependency builds keep their own limit.
     """
-    try:
-        memory_bytes = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-    except (OSError, ValueError):
-        return 1
-    return max(1, min(4, os.cpu_count() or 1, memory_bytes // (3 * 1024**3)))
+    return _memory_bounded_parallelism(3)
+
+
+def package_heavy_build_parallelism() -> int:
+    """Use the root CMake 6 GiB/TU heuristic for its heavy_compile pool.
+
+    Retain one heavy compile on 8 GiB ARM workers; allow two on 16 GiB
+    workers without the unbounded concurrency that causes swap thrashing.
+    This changes scheduling only, not compiler flags or generated code.
+    """
+    return _memory_bounded_parallelism(6)
+
 
 SOURCE_PROJECTION_EXCLUDES = (
     "/.git/",

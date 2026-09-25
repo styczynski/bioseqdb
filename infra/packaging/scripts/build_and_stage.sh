@@ -122,6 +122,14 @@ export VCPKG_DISABLE_METRICS=1
 export POSTGRESQL_VERSION="${postgres_major}"
 export PATH="${tool_root}/cmake/bin:${PATH}"
 
+# Match the root CMake memory guidance instead of serializing every module
+# on both the 8 GiB ARM and 16 GiB x64 workers. This only changes Ninja's pool;
+# existing object files and the package's compiler/optimization flags remain.
+heavy_parallelism="$(PYTHONPATH="${persistent_source_dir}/infra/packaging" \
+  python3 -c 'from bioseq_packaging.config import package_heavy_build_parallelism; print(package_heavy_build_parallelism())')"
+[[ "${heavy_parallelism}" =~ ^[1-9][0-9]*$ ]] || die "invalid heavy compile parallelism"
+readonly heavy_parallelism
+
 cmake_cache_value() {
   local key="$1"
   awk -v requested="${key}" '
@@ -175,7 +183,7 @@ package_cmake_invariants() {
     BIOSEQ_CACHE_TESTING OFF \
     BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST OFF \
     BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST OFF \
-    BIOSEQ_HEAVY_JOBS 1 \
+    BIOSEQ_HEAVY_JOBS "${heavy_parallelism}" \
     VCPKG_TARGET_TRIPLET "${vcpkg_triplet}" \
     VCPKG_TARGET_ARCHITECTURE "${vcpkg_arch}" \
     VCPKG_OVERLAY_TRIPLETS "${persistent_source_dir}/cmake/triplets" \
@@ -251,7 +259,7 @@ if [[ "${action}" == "build" ]]; then
       -DBIOSEQ_CACHE_TESTING=OFF \
       -DBIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST=OFF \
       -DBIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST=OFF \
-      -DBIOSEQ_HEAVY_JOBS=1 \
+      -DBIOSEQ_HEAVY_JOBS="${heavy_parallelism}" \
       -DVCPKG_TARGET_TRIPLET="${vcpkg_triplet}" \
       -DVCPKG_TARGET_ARCHITECTURE="${vcpkg_arch}" \
       -DVCPKG_OVERLAY_TRIPLETS="${persistent_source_dir}/cmake/triplets" \
@@ -271,7 +279,7 @@ if [[ "${action}" == "build" ]]; then
   if (( parallelism > memory_parallelism )); then
     parallelism="${memory_parallelism}"
   fi
-  echo "package compile parallelism: ${parallelism} (memory budget ${memory_parallelism})"
+  echo "package compile parallelism: ${parallelism} (memory budget ${memory_parallelism}, heavy pool ${heavy_parallelism})"
   "${cmake_bin}" --build "${build_dir}" --parallel "${parallelism}" \
     --target postgresql_bioseq postgresql_bioseq_cache
 
