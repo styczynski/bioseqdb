@@ -305,7 +305,7 @@ Panel~(d) shows how grouped MPF looks like:
     \item Each directory row $128B$ entry constains useful metadata like min(hash), max(hash) so some rows doesn't have to be read at all if they don't contain 
     hash values we are interested in.
     \item Using this \path{sub\_key}$\leftrightarrow$\path{fragment} mapping allows to potentially split fragment hash/start/count entry into multiple ones. 
-    However this is not used in the code currently and effectively $\path{sub\_key} = \path{fragment}$ for all entries.
+    However this is not used in the code currently and effectively \path{sub_key} $=$ \path{fragment} for all entries.
     \item The directory item also contains information that is redundant for example \path{controls\_first} is number of first chunk storing hash/start/count binary string.
     This is always $0$ as the binary strings are split into chunks, which are zero-indexed. The same logic applies to other fields and the entry size 
     could be massively reduced.

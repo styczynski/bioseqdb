@@ -21,6 +21,7 @@ HOSTS = ('Local', 'M7A', 'M7I', 'M4', 'C7G')
 FILES = dict(zip(HOSTS, ['ALL_RESULTS_TUPLES.yaml'] + [f'ALL_RESULTS_TUPLES_REMOTE_{h}.yaml' for h in HOSTS[1:]]))
 REMOTE_FALLBACKS = ('TEST3', 'TEST4', 'TEST7', 'TEST2')
 EXTERNAL_FILES = {h: f'ALL_RESULTS_TUPLES_E2E_EXTERNAL_REMOTE_{h}.yaml' for h in HOSTS[1:]}
+GPU_FILE = 'ALL_RESULTS_TUPLES_GPU_VASTAI.yaml'
 EXTERNAL_ALIGNERS = ('blastn', 'winnowmap', 'lexicmap')
 ALIGNER_ORDER = ('minimap2', 'bioseq', *EXTERNAL_ALIGNERS)
 BIOSEQ_COMPARISON = ('bioseq', 'minimizers_per_fragment', 'bounded_nthash_simd', 'simd_minimap2', 'block_aligner')
@@ -327,7 +328,7 @@ def hardware_table(snapshot):
     return out
 
 
-def header(configs, remote, first_labels='Engine & Execution'):
+def header(configs, remote, first_labels='Engine & Execution', compact_kw=False):
     """Render a contiguous hierarchy with machine separators in the lowest tier."""
     expanded = [(cfg, h) for cfg in configs for h in (HOSTS[1:] if remote else ('Local',))]
     levels = [lambda c, h: 'Index' if c[0] == 'just_index' else 'No index', lambda c, h: f'{c[1]} Gbp', lambda c, h: f'k={c[2][0]}, w={c[2][1]}', lambda c, h: c[3].upper()]
@@ -338,7 +339,11 @@ def header(configs, remote, first_labels='Engine & Execution'):
         labels = [(tuple(get(c, h) for get in levels[:level + 1]), getter(c, h)) for c, h in expanded]
         groups = [(key[1], len(list(group))) for key, group in itertools.groupby(labels)]
         left = first_labels if level == 0 else ' & '
-        out.append(left + ' & ' + ' & '.join(rf'\multicolumn{{{count}}}{{c|}}{{\textbf{{{tex(label)}}}}}' for label, count in groups) + r'\\')
+        def heading(label):
+            if compact_kw and level == 2:
+                return r'\shortstack{' + tex(label).replace(', ', r'\\') + '}'
+            return tex(label)
+        out.append(left + ' & ' + ' & '.join(rf'\multicolumn{{{count}}}{{c|}}{{\textbf{{{heading(label)}}}}}' for label, count in groups) + r'\\')
     return out
 
 
@@ -531,7 +536,7 @@ class ExternalComparison:
 def external_description(external):
     """Plain-language methods, explicitly distinguishing these campaign boundaries."""
     paragraphs = [r'\clearpage\subsection{Comparison with other aligners}\label{sec:external-aligner-results}',
-            r'The final table places minimap2 and one fixed BioseqDB configuration alongside blastn, Winnowmap and LexicMap. Both minimap2 and BioseqDB timings come from the corresponding machine\textquotesingle s non-external remote summary, matched by machine class, target size, alphabet, $(k,w)$ and index mode. External-campaign minimap2 timings are excluded. BioseqDB always uses minimizers per fragment (MPF), bounded ntHash SIMD minimizers, SIMD-DP chaining and Block Aligner. Missing observations are marked with a dot. Both rows select the lowest-A observation across default / TEST3 / TEST4 / TEST7 / TEST2 / FAST sources, retaining its B and sample count. Source order breaks exact A ties only. FAST entries carry a single-sample footnote. No other BioseqDB configuration or historical timing scope is substituted.',
+            r'The external-aligner table places minimap2 and one fixed BioseqDB configuration alongside blastn, Winnowmap and LexicMap. Both minimap2 and BioseqDB timings come from the corresponding machine\textquotesingle s non-external remote summary, matched by machine class, target size, alphabet, $(k,w)$ and index mode. External-campaign minimap2 timings are excluded. BioseqDB always uses minimizers per fragment (MPF), bounded ntHash SIMD minimizers, SIMD-DP chaining and Block Aligner. Missing observations are marked with a dot. Both rows select the lowest-A observation across default / TEST3 / TEST4 / TEST7 / TEST2 / FAST sources, retaining its B and sample count. Source order breaks exact A ties only. FAST entries carry a single-sample footnote. No other BioseqDB configuration or historical timing scope is substituted.',
             f'The table contains {len(external.rows)} distinct observations and {sum(r["run_count"] for r in external.rows.values()):,} accepted repeats. Only approved results are included. Qualification runs, interrupted attempts and the small-query checks used before the full runs are excluded.',
             r'\paragraph{Measurement procedure.}',
             r'\begin{itemize}',
@@ -584,7 +589,139 @@ def external_pages(external, letters):
     return out
 
 
-def render(snapshot, external):
+class GPUComparison:
+    """Keep same-host Vulkan timings and explicit terminal dispositions separate."""
+    def __init__(self, root):
+        self.raw = (root / GPU_FILE).read_bytes()
+        self.doc = yaml.safe_load(self.raw)
+        assert self.doc['schema'] == 'bioseq.gpu-approved-e2e-result-tuples'
+        assert self.doc['host_binding']['cloud_provider'] == 'vastai'
+        self.rows, self.dispositions, self.seen = {}, {}, set()
+        for row in self.doc['approved_results']:
+            execution = row_key(row)
+            if execution != BASELINE and not is_vulkan(execution):
+                continue
+            validate_row(row, fast_scope=FAST_REMOTE)
+            key = (execution, config_key(row))
+            assert key not in self.rows, f'duplicate GPU timing: {key}'
+            self.rows[key] = row
+        fields = ('campaign_id', 'dataset', 'alphabet', 'target_size_gbp', 'kmer_size',
+                  'window_size', 'index_mode', 'engine', 'bioseq_index_name',
+                  'requested_minimizer_algorithm', 'requested_chaining_algorithm',
+                  'requested_base_alignment_algorithm')
+        for section, status in (('rejected_results', 'rejected'), ('execution_failures', 'execution_failed')):
+            for row in self.doc.get(section, []):
+                identity = row['identity']
+                values = [identity[field] for field in fields]
+                assert row['stable_key'].startswith('bioseq-e2e-cell-v2:')
+                assert json.loads(row['stable_key'].split(':', 1)[1]) == values
+                execution = tuple(values[7:])
+                if execution != BASELINE and not is_vulkan(execution):
+                    continue
+                cfg = (values[6], values[3], (values[4], values[5]), values[2])
+                assert cfg in CONFIGS
+                assert values[0] == 'bioseq-e2e-algorithm-matrix-local-v1'
+                assert values[1] == f'matrix_{cfg[1]}gbp_{cfg[3]}_k{cfg[2][0]}_w{cfg[2][1]}'
+                assert row['status'] == status and row['a_ns'] is None and row['b_ns'] is None
+                if status == 'rejected':
+                    assert row['disposition'] == 'rejected_setup'
+                key = (execution, cfg)
+                assert key not in self.rows and key not in self.dispositions, f'conflicting GPU disposition: {key}'
+                self.dispositions[key] = row
+        executions = {key[0] for key in self.rows.keys() | self.dispositions.keys()} - {BASELINE}
+        def minimum(execution):
+            return min((row['metrics']['p50_a'] for (rk, cfg), row in self.rows.items()
+                        if rk == execution and cfg[0] == 'just_index'), default=float('inf'))
+        self.order = [BASELINE] + sorted(executions, key=lambda rk: (minimum(rk), rk))
+        self.ranks = {rk: rank for rank, rk in enumerate(self.order)}
+        # Crop only this table, retaining the original width of each surviving column.
+        self.configs = [cfg for cfg in CONFIGS
+                        if any(config == cfg and is_vulkan(rk) for rk, config in self.rows)]
+        self.display_keys = {key for key in self.rows.keys() | self.dispositions.keys()
+                             if key[1] in self.configs}
+        # Allocate notes from the actual source reasons, including future rejection types.
+        reasons = sorted({self.reason(row) for key, row in self.dispositions.items()
+                          if key in self.display_keys})
+        self.notes = {reason: str(n) for n, reason in enumerate(reasons, 1)}
+
+    @staticmethod
+    def reason(row):
+        reason = row.get('reason', row.get('diagnosed_cause', row.get('diagnostic', row.get('error', ''))))
+        if row['status'] == 'rejected' and 'alphabet "dna5" is not supported' in reason:
+            return 'Untimed setup rejected DNA5 because this Vulkan index path supports only DNA4.'
+        if 'maxStorageBufferRange' in reason:
+            return 'Execution failed before GPU query dispatch: the persisted MPS control buffer could not be admitted within the Vulkan storage-buffer limit.'
+        if 'GPU grouped-SoA resident admission rejected' in reason:
+            return 'Execution failed because the persisted GPU index could not be admitted for query execution.'
+        if 'did not stage complete per-job attestation' in reason:
+            return 'Execution failed because the Vulkan seeding stage did not produce complete per-query execution evidence.'
+        return reason
+
+    def cell(self, execution, cfg, show_best=True):
+        key = (execution, cfg)
+        if key in self.dispositions:
+            self.seen.add(key)
+            row = self.dispositions[key]
+            symbol = r'\bigcirc' if row['status'] == 'rejected' else r'\times'
+            return r'\textcolor{BrickRed}{\ensuremath{' + symbol + r'}}\textsuperscript{' + self.notes[self.reason(row)] + '}'
+        row = self.rows.get(key)
+        if row is None:
+            return r'\textcolor{gray}{\ensuremath{\cdot}}'
+        self.seen.add(key)
+        candidates = [(rk, r) for (rk, config), r in self.rows.items() if config == cfg]
+        parts = []
+        for metric in ('p50_a', 'p50_b'):
+            value = row['metrics'][metric]
+            refs = [r['metrics'][metric] for rk, r in candidates
+                    if (rk != BASELINE if execution == BASELINE else rk == BASELINE)]
+            winner = min(candidates, key=lambda item: (item[1]['metrics'][metric], self.ranks[item[0]]))[0]
+            timing = tex(duration(value)).replace(' ', r'\,')
+            if value >= 3_600_000_000_000:
+                timing = r'{\fontsize{6.2}{7}\selectfont ' + timing + '}'
+            if show_best and execution == winner:
+                timing = r'\colorbox{BenchBest}{\strut ' + timing + '}'
+            parts += [timing, r'{\fontsize{5.8}{6.4}\selectfont ' + comparison(value, min(refs) if refs else None) + r'\textsuperscript{s}}']
+        return measurement_cell(parts)
+
+
+def gpu_pages(gpu, letters):
+    host = gpu.doc['host_binding']
+    device = host['gpu']
+    out = [r'\clearpage\subsection{Vulkan on a Vast.ai GPU instance}\label{sec:vastai-gpu-results}',
+           tex(f"This separate campaign compares Vulkan configurations with minimap2 on the same Vast.ai instance. The machine has one {device['device']} ({device['vram_mib']:,} MiB VRAM) and an {host['cpu']}. The container has a {host['cpu_quota_cores']:g}-core CPU quota and {host['container_memory_limit_bytes'] / 2**30:.1f} GiB memory limit. It runs {host['os']} with NVIDIA driver {device['driver']} and Vulkan API {device['vulkan_device_api']}.") + r'\par',
+           r'Each accepted observation measures one batch of 1,024 queries. P50 is this single sample, with no estimate of repeat-to-repeat variability. PostgreSQL restarts before measurement, but operating-system caches are uncontrolled. Index preparation is untimed, and compatible validated persisted indexes can be reused. No-index A includes transient index construction. B subtracts the same-sample union of fused base-alignment/CIGAR and MAPQ intervals. It is not a pure seeding-and-chaining time.\par',
+           r'Measured statements retain correctness checks against the deterministic query truth and ordered match-count parity with same-host minimap2. Prefiltering is disabled. Physical GPU execution and timing evidence are required, while the additional plan and alternative-setting controls are omitted. Vulkan rows still include CPU work such as index handling, backtracking and base alignment. The measured build includes campaign-specific GPU memory-placement and native-Vulkan validation changes. These results therefore describe that build and host.\par',
+           tex(f"The source contains {len(gpu.rows)} approved observations ({sum(r['pipeline'] == 'bioseq' for r in gpu.rows.values())} Vulkan and {sum(r['pipeline'] == 'minimap2' for r in gpu.rows.values())} minimap2), {sum(r['status'] == 'rejected' for r in gpu.dispositions.values())} setup rejections and {sum(r['status'] == 'execution_failed' for r in gpu.dispositions.values())} execution failures. The table retains only workload columns with an approved Vulkan timing, displaying {sum(key in gpu.display_keys for key in gpu.rows)} timings and {sum(key in gpu.display_keys for key in gpu.dispositions)} rejection or failure markers. Empty columns and columns containing only baseline timings, failures or rejections are omitted. The remaining columns keep their original widths. Superseded timings and resolved failures are excluded.") + r'\par',
+           r'Red circles identify explicit setup rejections. Red crosses identify execution failures. Neither has an approved duration. Dots identify cells with no recorded outcome. Blue marks the lowest available A and B separately, and light gray identifies minimap2. Comparisons retain the earlier triangle directions, 5\% tie band and ratio notation above 30\%.\par',
+           r'\newgeometry{left=10mm,right=10mm,top=12mm,bottom=12mm}', r'\begin{landscape}', r'\refstepcounter{table}\label{tab:vastai-gpu}']
+    letter = next(letters)
+    keys = gpu.order[1:]
+    batches = [keys[i:i + 7] for i in range(0, len(keys), 7)] or [[]]
+    for page, batch in enumerate(batches, 1):
+        out += [r'\clearpage', rf'\noindent{{\large\bfseries ({letter}): Table \thetable: Vast.ai GPU, Vulkan vs minimap2\hfill {page}/{len(batches)}}}\par\smallskip',
+                r'{\fontsize{7.1}{8.1}\selectfont\setlength{\tabcolsep}{1pt}\setlength{\fboxsep}{2pt}\renewcommand{\arraystretch}{1.12}',
+                r'\noindent\begin{tabular}{@{}p{14mm}p{27mm}|' + ('p{13.55mm}|' * len(gpu.configs)) + r'@{}}\hline']
+        out += header(gpu.configs, False, compact_kw=True) + [r'\hline']
+        for execution in [BASELINE] + batch:
+            engine, label = execution_label(execution)
+            cells = [gpu.cell(execution, cfg, show_best=(execution != BASELINE or page == 1)) for cfg in gpu.configs]
+            out.append(row_tint(execution) + tex(engine) + ' & ' + label + ' & ' + ' & '.join(cells) + r'\\[3pt]\hline')
+        out += [r'\end{tabular}\par}',
+                r'\smallskip{\footnotesize\noindent Each cell: A, comparison, B, comparison. Light gray = minimap2 baseline. Blue = one lowest A and one lowest B per workload column across all rows. Exact ties select the first row. Repeated baselines are marked only on page 1.\par',
+                r'\noindent\textsuperscript{s}' + tex(FAST_NOTE) + r'\par',
+                r'\noindent Ratios compare with same-host minimap2. Minimap2 compares with the fastest measured Vulkan row separately for A and B. n/a = no measured counterpart.\par',
+                r'\noindent Only columns with an approved Vulkan timing are shown. Columns with only baseline timings, failures, rejections or no outcomes are omitted.\par',
+                r'\noindent MPF/MPS = minimizers per fragment/sequence. Labels give index representation / minimizer, then chaining / base alignment. Rows follow increasing minimum Index A across the displayed cases.\par',
+                r'\noindent $\cdot$ = no recorded outcome. \textcolor{BrickRed}{$\bigcirc$} = setup rejection. \textcolor{BrickRed}{$\times$} = execution failure. Neither marker is a timing.\par']
+        for reason, mark in gpu.notes.items():
+            out.append(r'\noindent\textsuperscript{' + mark + '}' + tex(reason) + r'\par')
+        out.append('}')
+    out += [r'\end{landscape}', r'\restoregeometry']
+    assert gpu.seen == gpu.display_keys, 'GPU outcomes omitted from retained columns'
+    return out
+
+
+def render(snapshot, external, gpu):
     out = ['% Generated by main/papers/scripts/generate_benchmark_results.py. Do not edit.', '% Source byte hashes (regenerate manually after approved results change).']
     for name, raw in snapshot.raw.items():
         out.append('% ' + name + ' sha256=' + hashlib.sha256(raw).hexdigest())
@@ -593,6 +730,7 @@ def render(snapshot, external):
         out.append(f'% {name}: available={snapshot.source_counts[name]}, selected={count}, not_selected={snapshot.source_counts[name] - count}')
     for host, raw in external.raw.items():
         out.append('% ' + EXTERNAL_FILES[host] + ' sha256=' + hashlib.sha256(raw).hexdigest())
+    out.append('% ' + GPU_FILE + ' sha256=' + hashlib.sha256(gpu.raw).hexdigest())
     for (remote, size, kw), order in snapshot.row_orders.items():
         for rank, execution in enumerate(order, 1):
             minimum, count = snapshot.index_minima[(remote, size, kw)].get(execution, (None, 0))
@@ -607,6 +745,7 @@ def render(snapshot, external):
         out += result_pages(snapshot, DISPLAY_SCOPE, True, configs, f'({next(letters)}): AWS: {size} Gbp, k={kw[0]}, w={kw[1]} (mapping interval)')
     out += [r'\end{landscape}', r'\restoregeometry', '']
     out += external_pages(external, letters)
+    out += gpu_pages(gpu, letters)
     assert {(key[0], snapshot.rows[key]['stable_key']) for key in snapshot.seen} == snapshot.expected_tuples, 'rendered tuples differ from deduplicated source union'
     assert snapshot.seen == set(snapshot.rows), f'unrendered observations: {set(snapshot.rows) - snapshot.seen}'
     return '\n'.join(out)
@@ -622,7 +761,8 @@ def main():
         parser.error('Do not run with -O: input validation uses assertions.')
     snapshot = Snapshot(args.root)
     external = ExternalComparison(snapshot, args.root)
-    result = render(snapshot, external)
+    gpu = GPUComparison(args.root)
+    result = render(snapshot, external, gpu)
     for name, raw in snapshot.raw.items():
         if (args.root / name).read_bytes() != raw:
             raise RuntimeError(f'{name} changed during generation. Rerun for a consistent snapshot.')
@@ -631,13 +771,15 @@ def main():
     for host, name in EXTERNAL_FILES.items():
         if (args.root / name).read_bytes() != external.raw[host]:
             raise RuntimeError(f'{name} changed during generation. Rerun for a consistent snapshot.')
+    if (args.root / GPU_FILE).read_bytes() != gpu.raw:
+        raise RuntimeError(f'{GPU_FILE} changed during generation. Rerun for a consistent snapshot.')
     if args.check:
         if not args.output.exists() or args.output.read_text() != result:
             print(f'Stale generated results: {args.output}', file=sys.stderr)
             return 1
     else:
         args.output.write_text(result)
-    print(f"{'Verified' if args.check else 'Generated'} {args.output}: {len(snapshot.rows)} observations, {sum(r['run_count'] for r in snapshot.rows.values())} repeats; final aligner table {len(external.rows)} observations; every selected observation rendered.")
+    print(f"{'Verified' if args.check else 'Generated'} {args.output}: {len(snapshot.rows)} observations, {sum(r['run_count'] for r in snapshot.rows.values())} repeats; aligner table {len(external.rows)} observations; GPU table {sum(key in gpu.display_keys for key in gpu.rows)} observations and {sum(key in gpu.display_keys for key in gpu.dispositions)} dispositions in {len(gpu.configs)} retained columns; every selected observation rendered.")
     for name in snapshot.raw:
         count = sum(source == name for source in snapshot.sources.values())
         print(f'  {name}: {snapshot.source_counts[name]} available, {count} selected, {snapshot.source_counts[name] - count} not selected')

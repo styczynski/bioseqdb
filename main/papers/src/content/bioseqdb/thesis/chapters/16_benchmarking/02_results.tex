@@ -3,7 +3,9 @@
 
 The following tables present the approved results available while the benchmark
 campaign is still running. They compare the BioseqDB mapping pipeline with
-minimap2 on one local Apple Silicon machine and four AWS machines. Each timing
+minimap2 on one local Apple Silicon machine and four AWS machines. A separate
+Vast.ai table compares Vulkan configurations with a same-host minimap2 baseline.
+Each timing
 covers a batch of 1,024 queries. A missing measurement remains visibly missing,
 so the tables describe completed observations rather than an estimated full
 matrix. The machine inventory precedes the result tables.
@@ -25,7 +27,7 @@ matrix. The machine inventory precedes the result tables.
   Standard observations use the current framework mapping-iteration interval.
   FAST fallbacks retain their distinct single-sample timing scope and carry
   an \textsuperscript{s} marker. They are never pooled with standard repeats.
-  The final external-aligner table identifies its separate timing boundary explicitly.
+  The external-aligner table identifies its separate timing boundary explicitly.
   In particular, ``mapping interval'' still includes transient construction in
   no-index mode.
   \item \textbf{Two measurements per cell.} The first duration, A, is the
@@ -153,8 +155,9 @@ All comparisons and minima use the original integer nanoseconds.
   A horizontal dash with \textsuperscript{g} identifies an explicitly recorded
   unavailable GPU configuration, which was not executed. Neither marker is a
   zero duration. The comparison reads n/a when no measured counterpart exists.
-  Only execution rows with an approved observation or an explicit unavailable
-  cell in a panel are printed. Entirely unmeasured row families remain omitted.
+  In the local and AWS tables, only execution rows with an approved observation
+  or an explicit unavailable cell in a panel are printed. Entirely unmeasured
+  row families remain omitted.
 \end{itemize}
 
 \paragraph{Limits of the comparison.}
@@ -177,9 +180,11 @@ there is no uniform per-repeat series of free-memory and free-disk measurements.
 Missing C7G BioseqDB timings cannot establish either a win or a loss.
 
 \paragraph{Reproducible table generation.}
-The standalone Python generator reads only the normative
+The standalone Python generator reads the normative
 \texttt{approved\_results} rows and the remote
 \texttt{hardware\_unavailable\_cells}, with their embedded machine metadata.
+The Vast.ai table also reads explicit setup rejections and execution failures,
+which receive distinct markers rather than timings.
 It validates identities and timing scopes, rejects duplicates within a source, and
 records the SHA-256 of each input in the generated LaTeX source. Coverage totals
 are recomputed from approved rows rather than copied from historical progress
@@ -197,8 +202,10 @@ establish that a slower observation suffered swapping. The generator checks that
 tuple in these sources is rendered once logically, excluding the historical
 mismeasurements and accounting for repeated baseline rows on continuation pages.
 Missing fallback files are skipped. This selection also supplies the minimap2
-and BioseqDB rows in the final comparison table.
-The final table additionally reads the four external-aligner
+and BioseqDB rows in the external-aligner comparison table.
+That table additionally reads the four external-aligner
 authorities and explains their separate timing and validation rules.
+The final GPU table reads the separate Vast.ai authority, including its own
+minimap2 baseline, and explains its single-sample procedure.
 
 \include{chapters/16_benchmarking/generated_results}
