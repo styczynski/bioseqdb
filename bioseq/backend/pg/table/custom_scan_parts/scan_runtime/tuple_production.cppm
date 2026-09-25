@@ -570,6 +570,23 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 std::exception_ptr projection_error;
                 MemoryContext saved_context = CurrentMemoryContext;
                 ErrorData* volatile projection_pg_error = nullptr;
+#if PG_VERSION_NUM >= 190000
+                // PG19 specializes simple projections for the advertised scan
+                // slot. The dispatch buffer owns a MinimalTuple, not the
+                // CustomScan's original virtual slot. Keep specialization,
+                // but compile it for the actual input and restore plan metadata
+                // on every exit, including PostgreSQL's non-C++ error path.
+                const auto saved_scan_ops = node->ps.scanops;
+                const auto saved_scan_desc = node->ps.scandesc;
+                const bool saved_scan_ops_set = node->ps.scanopsset;
+                const bool saved_scan_ops_fixed = node->ps.scanopsfixed;
+                const auto restore_scan_projection_metadata = [&] {
+                    node->ps.scanops = saved_scan_ops;
+                    node->ps.scandesc = saved_scan_desc;
+                    node->ps.scanopsset = saved_scan_ops_set;
+                    node->ps.scanopsfixed = saved_scan_ops_fixed;
+                };
+#endif
 
                 /* PostgreSQL ERROR skips C++ destructors. Keep the immutable restore
                  * snapshot outside the setjmp region and restore the locator slot on
@@ -590,15 +607,27 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                          * tuple so Var references resolve off the right row. */
                         econtext->ecxt_scantuple = next->scan_slot_copy;
 
+#if PG_VERSION_NUM >= 190000
+                        node->ps.scanops = next->scan_slot_copy->tts_ops;
+                        node->ps.scandesc = next->scan_slot_copy->tts_tupleDescriptor;
+                        node->ps.scanopsset = true;
+                        node->ps.scanopsfixed = true;
+#endif
                         ProjectionInfo* proj =
                             ExecBuildProjectionInfo(runtime.newtargetlist,
                                                     econtext,
                                                     node->ps.ps_ResultTupleSlot,
                                                     &(node->ps),
                                                     next->scan_slot_copy->tts_tupleDescriptor);
+#if PG_VERSION_NUM >= 190000
+                        restore_scan_projection_metadata();
+#endif
                         projected = ExecProject(proj);
                         restore_mmsearch_sources(next->scan_slot_copy, source_restore);
                     } catch (...) {
+#if PG_VERSION_NUM >= 190000
+                        restore_scan_projection_metadata();
+#endif
                         MemoryContextSwitchTo(saved_context);
                         restore_mmsearch_sources(next->scan_slot_copy, source_restore);
                         projection_error = std::current_exception();
@@ -606,6 +635,9 @@ evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                 }
                 PG_CATCH();
                 {
+#if PG_VERSION_NUM >= 190000
+                    restore_scan_projection_metadata();
+#endif
                     MemoryContextSwitchTo(saved_context);
                     restore_mmsearch_sources(next->scan_slot_copy, source_restore);
                     bioseq::storage::note_mmsearch_output_pg_error_restore_for_test(
