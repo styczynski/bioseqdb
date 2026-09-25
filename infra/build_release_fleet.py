@@ -671,7 +671,10 @@ def dispatch_available(state):
                 occupied.add(cell_key(dict(postgres_major=17, distro=distro,
                     architecture="arm64" if host.endswith("c7g") else "x64")))
     pending = []
-    for host in PLAN:
+    # Give queued repairs their existing compiler cache before an earlier idle
+    # PLAN entry borrows them. A busy, retiring, or disk-blocked owner still
+    # leaves its queue available for compatible workers below.
+    for host in sorted(PLAN, key=lambda h: not state.get("package_rebuilds", {}).get(h)):
         if retirement_policy(host):
             continue
         job = state["jobs"].get(host, {})

@@ -103,6 +103,45 @@ def cell_context(
 
 
 class ReleaseFleetAssignmentTests(unittest.TestCase):
+    def test_queued_repair_prefers_original_cache_unless_owner_is_retiring(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        dispatch = namespace["dispatch_available"]
+        borrower, owner = "test3-m4", "test4-m7i"
+        cell = dict(postgres_major=19, distro="fedora_44", architecture="x64")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "infra").mkdir()
+            (root / "packages").mkdir()
+            (root / "infra/package_matrix.json").write_text(json.dumps({
+                "postgresql_majors": [], "distributions": []}))
+            (root / "packages/manifest.json").write_text(json.dumps({"packages": []}))
+            for retiring in (False, True):
+                (root / "infra/package_retirements.json").write_text(json.dumps({
+                    "hosts": {owner: {"stop_polling_after_epoch": 0}} if retiring else {}}))
+                state = dict(jobs={h: dict(launched=True, observed=dict(status="completed"))
+                                   for h in (borrower, owner)}, package_rebuilds={owner: [cell]})
+                launch = mock.Mock(return_value=dict(status="running", pid=10))
+                with self.subTest(retiring=retiring), mock.patch.dict(dispatch.__globals__, {
+                        "ROOT": root, "OUTPUT": root, "STATE": root / "state.json",
+                        "PLAN": {borrower: ["debian_13"], owner: ["fedora_44"]},
+                        "launch": launch, "event": mock.Mock(),
+                        "remote": mock.Mock(return_value=str(100 * 1024**3))}):
+                    dispatch(state)
+                    launch.assert_called_once_with(borrower if retiring else owner, cell=cell)
+
+    def test_retirement_blocks_explicit_launch_before_remote_access(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        launch = namespace["launch"]
+        with mock.patch.dict(launch.__globals__, {
+                "retirement_policy": mock.Mock(return_value={"account_id": "retired"}),
+                "state_on": mock.Mock(side_effect=AssertionError("contacted retired host"))}):
+            with self.assertRaisesRegex(RuntimeError, "admission disabled"):
+                launch("test2-c7g")
+
     def test_idle_host_borrows_pending_qualification_once_in_major_order(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):
