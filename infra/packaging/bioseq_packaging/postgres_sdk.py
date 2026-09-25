@@ -9,8 +9,7 @@ from .model import CellContext, DistroId, PackageBuildError
 
 
 def required(cell: CellContext) -> bool:
-    return cell.postgres_major in (19, 20) and cell.distro.distro_id in (
-        DistroId.ARCH, DistroId.OPENSUSE_16_0)
+    return cell.distro.requires_postgres_sdk(cell.postgres_major, cell.request.architecture)
 
 
 def runtime_package(cell: CellContext) -> tuple[Path, dict]:
@@ -24,10 +23,12 @@ def runtime_package(cell: CellContext) -> tuple[Path, dict]:
     pin = json.loads((cell.request.source_dir / 'infra/packaging/postgres_sdks.json').read_text())[
         str(cell.postgres_major)]
     expected_arch = {'x64': 'x86_64', 'arm64': 'aarch64'}[cell.request.architecture.value]
+    expected_distro = {DistroId.ARCH: 'arch', DistroId.OPENSUSE_16_0: 'opensuse',
+                      DistroId.FEDORA_44: 'fedora'}[cell.distro.distro_id]
     if (metadata.get('source_sha256') != pin['sha256']
             or metadata.get('postgres_major') != cell.postgres_major
             or metadata.get('architecture') != expected_arch
-            or metadata.get('distro') != ('arch' if cell.distro.distro_id is DistroId.ARCH else 'opensuse')
+            or metadata.get('distro') != expected_distro
             or artifact.is_symlink() or not artifact.is_file()
             or artifact.stat().st_size != metadata['bytes']
             or sha256_file(artifact) != metadata['sha256']):

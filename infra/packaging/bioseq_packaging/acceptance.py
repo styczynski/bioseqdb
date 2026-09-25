@@ -122,7 +122,7 @@ def _parse_validation(
     cell: CellContext,
 ) -> dict[str, Any]:
     result = _json_mapping(output, operation="package validator")
-    expected_runtime = cell.distro.runtime_dependencies(cell.postgres_major)
+    expected_runtime = cell.distro.runtime_dependencies(cell.postgres_major, cell.request.architecture)
     if len(expected_runtime) != 2:
         raise PackageBuildError(
             f"{cell.distro.distro_id.value} must declare PostgreSQL and Vulkan runtime dependencies"
@@ -243,7 +243,7 @@ class AcceptanceService:
         )
         if not script.is_file():
             raise PackageBuildError(f"package validator script is missing: {script}")
-        runtime_dependencies = cell.distro.runtime_dependencies(cell.postgres_major)
+        runtime_dependencies = cell.distro.runtime_dependencies(cell.postgres_major, cell.request.architecture)
         if len(runtime_dependencies) != 2:
             raise PackageBuildError("package catalog must provide exactly two runtime dependencies")
         return Command(

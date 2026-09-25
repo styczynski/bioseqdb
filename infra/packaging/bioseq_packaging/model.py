@@ -100,10 +100,21 @@ class DistroSpec:
             )
         return image
 
-    def runtime_dependencies(self, postgres_major: int) -> tuple[str, ...]:
+    def requires_postgres_sdk(
+        self, postgres_major: int, architecture: Architecture = Architecture.X64
+    ) -> bool:
+        return postgres_major in (19, 20) and (
+            self.distro_id in (DistroId.ARCH, DistroId.OPENSUSE_16_0)
+            or (self.distro_id is DistroId.FEDORA_44
+                and Architecture(architecture) is Architecture.ARM64)
+        )
+
+    def runtime_dependencies(
+        self, postgres_major: int, architecture: Architecture = Architecture.X64
+    ) -> tuple[str, ...]:
         if isinstance(postgres_major, bool) or postgres_major < 17:
             raise PackageBuildError("PostgreSQL majors below 17 are unsupported")
-        if postgres_major in (19, 20) and self.distro_id in (DistroId.ARCH, DistroId.OPENSUSE_16_0):
+        if self.requires_postgres_sdk(postgres_major, architecture):
             pin = json.loads((Path(__file__).resolve().parents[1] / 'postgres_sdks.json').read_text())[
                 str(postgres_major)]
             equality = '=' if self.distro_id is DistroId.ARCH else ' = '

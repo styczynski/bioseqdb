@@ -94,6 +94,12 @@ install_debian_package() {
 
 install_fedora_package() {
   dnf install -y --allowerasing ca-certificates curl shadow-utils util-linux
+  if [[ -n "${BIOSEQ_POSTGRES_RUNTIME_PACKAGE:-}" ]]; then
+    dnf install -y --allowerasing --nogpgcheck \
+      "${BIOSEQ_POSTGRES_RUNTIME_PACKAGE}" "${package_path}"
+    rpm -q "${package_name}"
+    return
+  fi
   if ! dnf install -y --allowerasing \
       "postgresql${postgres_major}" "postgresql${postgres_major}-server"; then
     (( postgres_major >= 19 )) || die "requested Fedora PostgreSQL packages are unavailable"

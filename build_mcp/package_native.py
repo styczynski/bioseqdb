@@ -186,8 +186,9 @@ def collect(repository: Path, selection: str) -> int:
                 metadata_file.write_text(json.dumps(sdk, indent=2) + '\n')
                 setup = companions / 'SDK_SETUP.txt'
                 installer = ('sudo pacman -U' if cell.distro.package_format is PackageFormat.PACMAN
+                             else 'sudo dnf install --nogpgcheck' if str(cell.distro.distro_id) == 'fedora_44'
                              else 'sudo zypper --no-gpg-checks install')
-                requirement = cell.distro.runtime_dependencies(cell.postgres_major)[0]
+                requirement = cell.distro.runtime_dependencies(cell.postgres_major, cell.request.architecture)[0]
                 setup.write_text(f'''Experimental PostgreSQL SDK for BioseqDB
 Required runtime: {requirement}
 Source URL: {sdk['source_url']}

@@ -109,7 +109,7 @@ def _debian_architecture(cell: CellContext) -> str:
 def _runtime_dependencies(cell: CellContext) -> tuple[str, ...]:
     """Resolve runtime dependencies through the strict catalog API."""
 
-    dependencies = list(cell.distro.runtime_dependencies(cell.postgres_major))
+    dependencies = list(cell.distro.runtime_dependencies(cell.postgres_major, cell.request.architecture))
     if not dependencies:
         raise PackageBuildError(
             f"DEB runtime dependencies are empty for {cell.distro.distro_id}"

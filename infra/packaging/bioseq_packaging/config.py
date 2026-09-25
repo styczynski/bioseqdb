@@ -249,8 +249,11 @@ def distro_spec(distro_id: DistroId | str) -> DistroSpec:
         raise PackageBuildError(f"unsupported or unconfigured distro {distro_id!r}") from error
 
 
-def runtime_dependencies(distro_id: DistroId | str, postgres_major: int) -> tuple[str, ...]:
-    return distro_spec(distro_id).runtime_dependencies(postgres_major)
+def runtime_dependencies(
+    distro_id: DistroId | str, postgres_major: int,
+    architecture: Architecture = Architecture.X64,
+) -> tuple[str, ...]:
+    return distro_spec(distro_id).runtime_dependencies(postgres_major, architecture)
 
 
 def build_cells(request: WorkerRequest) -> tuple[CellSpec, ...]:

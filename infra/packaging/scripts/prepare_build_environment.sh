@@ -103,6 +103,14 @@ install_fedora_dependencies() {
     libXfixes-devel libXcursor-devel libXinerama-devel libxcb-devel \
     libxkbcommon-devel wayland-devel wayland-protocols-devel
 
+  # PGDG's Fedora prerelease repositories currently provide x64 only. Use the
+  # same pinned native SDK provider as openSUSE/Arch for the missing ARM cells.
+  if (( BIOSEQ_POSTGRES_MAJOR >= 19 )) && [[ "${native_arch}" == arm64 ]]; then
+    dnf install -y --allowerasing libicu-devel readline-devel lz4-devel libzstd-devel
+    export BIOSEQ_SDK_DISTRO=fedora
+    return
+  fi
+
   # Stable Fedora packages include both native architectures. Prerelease
   # servers may instead be published by PGDG; use only a matching Fedora/
   # architecture repository and retain RPM signature verification.

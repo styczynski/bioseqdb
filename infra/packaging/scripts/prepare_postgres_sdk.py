@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MCP-container-owned native prerelease SDK packages for Arch and openSUSE.
+"""MCP-container-owned native prerelease SDK packages where distro ones are missing.
 
 Install a separate /opt/pgsql-MAJOR prefix. Never create a database, start a
 service, replace the distro's server, or substitute a different major.
@@ -40,8 +40,8 @@ def main():
         raise RuntimeError('Run only inside the MCP-owned native package container')
     major = int(os.environ['BIOSEQ_POSTGRES_MAJOR'])
     distro = os.environ['BIOSEQ_SDK_DISTRO']
-    if distro not in ('arch', 'opensuse') or major not in (19, 20):
-        raise RuntimeError('This SDK provider is for missing Arch/openSUSE prerelease majors only')
+    if distro not in ('arch', 'opensuse', 'fedora') or major not in (19, 20):
+        raise RuntimeError('This SDK provider supports the selected missing prerelease majors only')
     pin_path = Path('/source/infra/packaging/postgres_sdks.json')
     pin = json.loads(pin_path.read_text())[str(major)]
     machine = platform.machine()
@@ -102,7 +102,7 @@ def main():
             docs.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source / 'COPYRIGHT', docs / 'COPYRIGHT')
             (docs / 'BIOSEQ_SDK.json').write_text(json.dumps(dict(pin, major=major), indent=2) + '\n')
-            if distro == 'opensuse':
+            if distro in ('opensuse', 'fedora'):
                 top = scratch / 'rpm'
                 for name in ('BUILD', 'BUILDROOT', 'RPMS', 'SOURCES', 'SPECS', 'SRPMS'):
                     (top / name).mkdir(parents=True, exist_ok=True)
@@ -167,6 +167,8 @@ package() {{
             temporary.replace(metadata_path)
     if distro == 'opensuse':
         run(['zypper', '--no-gpg-checks', '--non-interactive', 'install', '-y', str(artifact)])
+    elif distro == 'fedora':
+        run(['dnf', 'install', '-y', '--nogpgcheck', str(artifact)])
     else:
         run(['pacman', '-U', '--noconfirm', artifact])
     version = subprocess.check_output([str(prefix / 'bin/pg_config'), '--version'], text=True)

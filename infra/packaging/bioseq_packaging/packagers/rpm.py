@@ -81,7 +81,7 @@ def _enum_value(value: object) -> str:
 def _runtime_dependencies(cell: CellContext) -> tuple[str, ...]:
     """Resolve the catalog's PostgreSQL-major runtime dependency patterns."""
 
-    dependencies = cell.distro.runtime_dependencies(cell.postgres_major)
+    dependencies = cell.distro.runtime_dependencies(cell.postgres_major, cell.request.architecture)
     if not dependencies:
         raise PackageBuildError(
             f"RPM runtime dependencies are empty for {cell.distro.distro_id}"

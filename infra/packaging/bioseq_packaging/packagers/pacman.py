@@ -117,7 +117,7 @@ def _pacman_architecture(cell: CellContext) -> str:
 
 
 def _runtime_dependencies(cell: CellContext) -> tuple[str, ...]:
-    dependencies = tuple(cell.distro.runtime_dependencies(cell.postgres_major))
+    dependencies = tuple(cell.distro.runtime_dependencies(cell.postgres_major, cell.request.architecture))
     if not dependencies or any(not dependency.strip() for dependency in dependencies):
         raise PackageBuildError(
             f"PACMAN runtime dependencies are empty for {cell.distro.distro_id}"

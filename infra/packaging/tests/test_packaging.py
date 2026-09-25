@@ -760,6 +760,27 @@ class CatalogAndProvenanceTests(unittest.TestCase):
             ("bioseq-postgresql20-runtime = 20.0devel20260924-1", "libvulkan1"),
         )
 
+    def test_fedora_prerelease_sdk_is_arm_only_and_keeps_native_runtime_identity(self) -> None:
+        from bioseq_packaging import postgres_sdk
+
+        distro = config.distro_spec(model.DistroId.FEDORA_44)
+        for major in (17, 18, 19, 20):
+            for architecture in model.Architecture:
+                with self.subTest(major=major, architecture=architecture):
+                    needs_sdk = major >= 19 and architecture is model.Architecture.ARM64
+                    request = SimpleNamespace(architecture=architecture)
+                    cell = SimpleNamespace(distro=distro, postgres_major=major, request=request)
+                    self.assertEqual(postgres_sdk.required(cell), needs_sdk)
+                    dependencies = config.runtime_dependencies(distro.distro_id, major, architecture)
+                    self.assertEqual(rpm._runtime_dependencies(cell), dependencies)
+                    self.assertEqual(dependencies[1], "vulkan-loader")
+                    if needs_sdk:
+                        pin = json.loads((PACKAGING_ROOT / "postgres_sdks.json").read_text())[str(major)]
+                        self.assertEqual(dependencies[0],
+                                         f"bioseq-postgresql{major}-runtime = {pin['version']}-1")
+                    else:
+                        self.assertEqual(dependencies[0], f"postgresql{major}-server")
+
     def test_cells_preserve_requested_order_and_never_reduce_the_matrix(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             request = worker_request(
