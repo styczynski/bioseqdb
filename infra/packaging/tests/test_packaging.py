@@ -103,6 +103,120 @@ def cell_context(
 
 
 class ReleaseFleetAssignmentTests(unittest.TestCase):
+    def test_idle_host_borrows_pending_qualification_once_in_major_order(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        dispatch = namespace["dispatch_available"]
+        host, owner = "test4-m7a", "test2-m4"
+        candidates = [dict(postgres_major=major, distro="opensuse_16.0",
+                           architecture="x64", build_host=owner, installed_sql_smoke={})
+                      for major in (18, 17)]
+        cell = dict(postgres_major=17, distro="opensuse_16.0", architecture="x64")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "infra").mkdir()
+            (root / "packages").mkdir()
+            (root / "infra/package_matrix.json").write_text(json.dumps({
+                "postgresql_majors": [], "distributions": []}))
+            (root / "packages/manifest.json").write_text(json.dumps({"packages": candidates}))
+            state = dict(qualify_shared_tableam=True, jobs={
+                host: dict(launched=True, observed=dict(status="completed")),
+                owner: dict(launched=True, observed=dict(status="running"))})
+            launch = mock.Mock(return_value=dict(status="running", pid=10))
+            with mock.patch.dict(dispatch.__globals__, {
+                    "ROOT": root, "OUTPUT": root, "STATE": root / "state.json",
+                    "PLAN": {host: ["arch"], owner: ["opensuse_16.0"]},
+                    "launch": launch, "event": mock.Mock(),
+                    "remote": mock.Mock(return_value=str(100 * 1024**3))}):
+                dispatch(state)
+                launch.assert_called_once_with(host, cell=cell)
+                self.assertEqual(state["tableam_qualification_attempted_cells"],
+                                 ["pg17/opensuse_16.0/x64"])
+                # Original owner becomes free while the borrowed cell is active.
+                state["jobs"][owner]["observed"]["status"] = "completed"
+                dispatch(state)
+                launch.assert_called_with(owner, cell=dict(cell, postgres_major=18))
+                self.assertEqual(launch.call_count, 2)
+
+    def test_collection_whitelists_files_and_preserves_cross_host_revision(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        collect = namespace["collect_package_revision"]
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)
+            old = destination / "distro/bioseq.rpm"
+            old.parent.mkdir()
+            old.write_bytes(b"old revision")
+            prior = dict(postgres_major=17, distro="opensuse_16.0", file="distro/bioseq.rpm",
+                         bytes=old.stat().st_size, sha256=sha256(old), installed_sql_smoke={})
+            original_manifest = destination / "original-manifest.json"
+            original_manifest.write_text(json.dumps(dict(architecture="x64", packages=[prior])))
+            payloads = {"distro/bioseq.rpm": b"qualified replacement", "sdk/runtime.rpm": b"SDK"}
+            incoming = dict(prior, bytes=len(payloads[prior["file"]]),
+                sha256=hashlib.sha256(payloads[prior["file"]]).hexdigest(),
+                validation=dict(passed=True), installed_sql_smoke=dict(
+                    passed=True, default_insert_search=True, default_persisted_search=True,
+                    column_defaults_and_vacuum=True), postgres_sdk_support_files=[dict(
+                        file="sdk/runtime.rpm", bytes=3, sha256=hashlib.sha256(b"SDK").hexdigest())])
+
+            def transfer(command, **kwargs):
+                self.assertIn("--files-from=-", command)
+                self.assertIn("--from0", command)
+                self.assertEqual(set(kwargs["input"].rstrip("\0").split("\0")), set(payloads))
+                for name, data in payloads.items():
+                    target = Path(command[-1]) / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+                return SimpleNamespace(returncode=0)
+
+            with mock.patch.object(subprocess, "run", side_effect=transfer), \
+                    mock.patch.dict(collect.__globals__, {"write_release_manifest": mock.Mock()}):
+                collect("borrower", dict(architecture="x64", packages=[incoming]),
+                        "/remote/packages/", destination, ["ssh", "host"])
+            replaced = json.loads(original_manifest.read_text())
+            self.assertEqual(replaced["packages"], [])
+            self.assertEqual(replaced["retired_packages"][0]["sha256"], prior["sha256"])
+            self.assertEqual(old.read_bytes(), b"old revision")
+            accepted = json.loads((destination / "borrower-manifest.json").read_text())["packages"][0]
+            self.assertTrue(accepted["file"].startswith("collected_revisions/"))
+            self.assertEqual((destination / accepted["file"]).read_bytes(), b"qualified replacement")
+            self.assertEqual((destination / accepted["postgres_sdk_support_files"][0]["file"]).read_bytes(), b"SDK")
+            # Another worker cannot overwrite a now-qualified cell.
+            with mock.patch.object(subprocess, "run", side_effect=AssertionError("copied rejected files")):
+                with self.assertRaisesRegex(RuntimeError, "Cross-host replacement"):
+                    collect("other", dict(architecture="x64", packages=[dict(accepted)]),
+                            "/remote/packages/", destination, ["ssh", "host"])
+
+    def test_collection_rejects_bad_bytes_before_changing_manifest(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        collect = namespace["collect_package_revision"]
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)
+            prior = destination / "worker-manifest.json"
+            prior.write_text(json.dumps(dict(architecture="x64", packages=[])))
+            before = prior.read_bytes()
+            incoming = dict(postgres_major=17, distro="arch", file="bioseq.pkg",
+                            sha256=hashlib.sha256(b"good").hexdigest(), bytes=4)
+
+            def transfer(command, **kwargs):
+                (Path(command[-1]) / "bioseq.pkg").write_bytes(b"oops")
+                return SimpleNamespace(returncode=0)
+
+            with mock.patch.object(subprocess, "run", side_effect=transfer):
+                with self.assertRaisesRegex(RuntimeError, "checksum/size/path"):
+                    collect("worker", dict(architecture="x64", packages=[incoming]),
+                            "/remote/packages/", destination, ["ssh", "host"])
+            self.assertEqual(prior.read_bytes(), before)
+            self.assertFalse((destination / "collected_revisions").exists())
+            with mock.patch.object(subprocess, "run", side_effect=AssertionError("unsafe transfer")):
+                with self.assertRaisesRegex(RuntimeError, "Unsafe advertised"):
+                    collect("worker", dict(architecture="x64", packages=[dict(incoming, file="../outside")]),
+                            "/remote/packages/", destination, ["ssh", "host"])
+
     def test_idle_cleanup_keeps_build_metadata_binaries_and_package_cache(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):

@@ -437,6 +437,116 @@ def verify_website_delivery(destination):
                            f"missing={missing[:5]}, extra={extra[:5]}, changed={changed[:5]}")
 
 
+def package_release_ready(package):
+    return (package.get("validation", {}).get("passed") is True
+            and all(package.get("installed_sql_smoke", {}).get(field) is True
+                    for field in ("passed", "default_insert_search", "default_persisted_search",
+                                  "column_defaults_and_vacuum")))
+
+
+def collect_package_revision(host, manifest, source, destination, ssh):
+    """Import only advertised bytes, then move cell ownership without losing revisions.
+
+    Remote output directories retain earlier cells. Never rsync that whole tree:
+    another worker may since have repaired a same-named package. Content-addressed
+    local paths also keep the publisher's previous manifest snapshot valid.
+    """
+    manifest_path = destination / (host + "-manifest.json")
+    manifests = {path: json.loads(path.read_text())
+                 for path in destination.glob("*-manifest.json")}
+    previous = manifests.get(manifest_path, {})
+    def identity(package, owner):
+        return package["postgres_major"], package["distro"], owner["architecture"]
+
+    incoming = {identity(p, manifest): p for p in manifest["packages"]}
+    if len(incoming) != len(manifest["packages"]):
+        raise RuntimeError("Duplicate incoming package cell")
+    displaced = {}
+    for path, owner in manifests.items():
+        if path == manifest_path:
+            continue
+        for package in owner.get("packages", []):
+            replacement = incoming.get(identity(package, owner))
+            if replacement is None:
+                continue
+            if package_release_ready(package) or not package_release_ready(replacement):
+                raise RuntimeError("Cross-host replacement requires an unqualified old cell "
+                                   "and a qualified new cell")
+            displaced.setdefault(path, []).append(package)
+
+    files = {}
+    for package in manifest["packages"]:
+        for entry in [package, *package.get("postgres_sdk_support_files", [])]:
+            relative = Path(entry["file"])
+            if (relative.is_absolute() or not relative.parts or ".." in relative.parts
+                    or "\0" in entry["file"] or relative.as_posix() != entry["file"]
+                    or re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None
+                    or type(entry["bytes"]) is not int or entry["bytes"] < 0):
+                raise RuntimeError("Unsafe advertised package file")
+            prior = files.setdefault(entry["file"], entry)
+            if (prior["sha256"], prior["bytes"]) != (entry["sha256"], entry["bytes"]):
+                raise RuntimeError("Conflicting advertised package bytes")
+
+    def verify(path, entry, root):
+        if (path.is_symlink() or not path.resolve().is_relative_to(root.resolve())
+                or not path.is_file() or path.stat().st_size != entry["bytes"]
+                or hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]):
+            raise RuntimeError(f"Collected artifact checksum/size/path mismatch: {path}")
+
+    relocated = {}
+    with tempfile.TemporaryDirectory(prefix=".package-import-", dir=destination) as temporary:
+        staging = Path(temporary)
+        if files:
+            result = subprocess.run(["rsync", "-a", "--from0", "--files-from=-",
+                "-e", shlex.join(ssh[:-1]), ssh[-1] + ":" + source, str(staging) + "/"],
+                input="\0".join(sorted(files)) + "\0", capture_output=True, text=True, timeout=1200)
+            if result.returncode:
+                raise RuntimeError(result.stderr[-1000:])
+        # Verify the entire transfer before accepting any entry or ownership change.
+        for name, entry in files.items():
+            verify(staging / name, entry, staging)
+        for name, entry in files.items():
+            relative = Path("collected_revisions") / entry["sha256"] / name
+            target = destination / relative
+            if not target.resolve().is_relative_to(destination.resolve()):
+                raise RuntimeError("Revision path escapes the collection")
+            if target.exists():
+                verify(target, entry, destination)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staging / name, target)
+            relocated[name] = relative.as_posix()
+    for package in manifest["packages"]:
+        for entry in [package, *package.get("postgres_sdk_support_files", [])]:
+            entry["file"] = relocated[entry["file"]]
+
+    manifest["retired_packages"] = list(previous.get("retired_packages", []))
+    for package in previous.get("packages", []):
+        package = dict(package, git_revision_informational_only=package.get(
+            "git_revision_informational_only", previous.get("git_revision_informational_only")))
+        if identity(package, previous) not in incoming:
+            manifest["packages"].append(package)
+        elif package["sha256"] != incoming[identity(package, previous)]["sha256"]:
+            manifest["retired_packages"].append(package)
+    for package in manifest["packages"]:
+        for entry in [package, *package.get("postgres_sdk_support_files", [])]:
+            verify(destination / entry["file"], entry, destination)
+    for path, packages in displaced.items():
+        owner = manifests[path]
+        # Preserve both the old metadata and its untouched content-addressed (or
+        # legacy) file. A crash here can be retried; it cannot erase old bytes.
+        for package in packages:
+            for entry in [package, *package.get("postgres_sdk_support_files", [])]:
+                verify(destination / entry["file"], entry, destination)
+            owner.setdefault("retired_packages", []).append(dict(package,
+                superseded_by_host=host, git_revision_informational_only=package.get(
+                    "git_revision_informational_only", owner.get("git_revision_informational_only"))))
+        owner["packages"] = [p for p in owner["packages"] if identity(p, owner) not in incoming]
+        write_json_atomic(path, owner)
+    write_json_atomic(manifest_path, manifest)
+    write_release_manifest()
+
+
 def collect(host, observed, *, mode=None):
     ssh = fleet.ssh(host)
     endpoint = ssh[-1]
@@ -452,57 +562,15 @@ def collect(host, observed, *, mode=None):
         source = REMOTE + "/bin_artifacts/packages/"
         if remote(host, "test -f " + source + "manifest.json && echo yes || true").strip() != "yes":
             return
-        # A qualified replacement may reuse the filename, never its content
-        # hash. Preserve earlier delivered bytes before rsync updates the cell.
         manifest = json.loads(remote(host, "cat " + source + "manifest.json"))
-        manifest_path = destination / (host + "-manifest.json")
-        previous_packages = (json.loads(manifest_path.read_text()).get("packages", [])
-                             if manifest_path.exists() else [])
-        incoming = {p["file"]: p["sha256"] for p in manifest["packages"]}
-        for package in previous_packages:
-            if incoming.get(package["file"], package["sha256"]) == package["sha256"]:
-                continue
-            old = (destination / package["file"]).resolve()
-            if not old.is_relative_to(destination.resolve()) or not old.is_file():
-                raise RuntimeError("Previous package revision is missing or outside the collection")
-            if hashlib.sha256(old.read_bytes()).hexdigest() != package["sha256"]:
-                raise RuntimeError("Previous package revision differs from its recorded bytes")
-            archived = destination / "retired_revisions" / package["sha256"] / old.name
-            archived.parent.mkdir(parents=True, exist_ok=True)
-            if not archived.exists():
-                shutil.copy2(old, archived)
-            if hashlib.sha256(archived.read_bytes()).hexdigest() != package["sha256"]:
-                raise RuntimeError("Previous package revision archive failed verification")
-    # Only the package root inventory is consolidated locally. A website (and
-    # any nested package payload) must retain all of its own manifest assets.
-    exclusions = ["--exclude=/manifest.json"] if mode == "package-linux" else []
-    result = subprocess.run(["rsync", "-a", "-e", shlex.join(ssh[:-1]),
-        *exclusions, endpoint + ":" + source, str(destination) + "/"],
-        capture_output=True, text=True, timeout=1200)
-    if result.returncode:
-        raise RuntimeError(result.stderr[-1000:])
+        collect_package_revision(host, manifest, source, destination, ssh)
     if mode == "website":
+        result = subprocess.run(["rsync", "-a", "-e", shlex.join(ssh[:-1]),
+            endpoint + ":" + source, str(destination) + "/"],
+            capture_output=True, text=True, timeout=1200)
+        if result.returncode:
+            raise RuntimeError(result.stderr[-1000:])
         verify_website_delivery(destination)
-    if mode == "package-linux":
-        manifest_path = destination / (host + "-manifest.json")
-        if manifest_path.exists():
-            # A failed acceptance-only retry must not erase earlier accepted
-            # artifacts. Recheck their local bytes below before retaining them.
-            incoming = {entry["file"] for entry in manifest["packages"]}
-            previous = json.loads(manifest_path.read_text())
-            manifest["packages"].extend(dict(entry, git_revision_informational_only=
-                entry.get("git_revision_informational_only", previous.get("git_revision_informational_only")))
-                for entry in previous.get("packages", []) if entry["file"] not in incoming)
-        for package in manifest["packages"]:
-            target = destination / package["file"]
-            digest = hashlib.sha256()
-            with target.open("rb") as data:
-                for block in iter(lambda: data.read(1024 * 1024), b""):
-                    digest.update(block)
-            if digest.hexdigest() != package["sha256"]:
-                raise RuntimeError(f"local artifact checksum mismatch: {target}")
-        write_json_atomic(manifest_path, manifest)
-        write_release_manifest()
     event("artifacts_collected" if mode == "website" or manifest["packages"] else "manifest_collected",
           host=host, destination=str(destination))
 
@@ -574,8 +642,8 @@ def dispatch_available(state):
     """Reserve distinct native cells before concurrent launch; do not loop failed builds."""
     matrix = json.loads((ROOT / "infra/package_matrix.json").read_text())
     inventory = json.loads((OUTPUT / "packages/manifest.json").read_text())
-    # Existing cells retain their original owner for any correction. Do not
-    # rebuild the same cell on another host just because its smoke is older.
+    # Collected cells are not fresh work. Explicit pending qualification may
+    # migrate to an otherwise idle compatible host, once per cell.
     collected = {cell_key(p) for p in inventory["packages"]}
     occupied = set(collected)
     occupied.update(state.get("attempted_cells", []))
@@ -618,7 +686,7 @@ def dispatch_available(state):
                            for p in sorted(inventory["packages"],
                                            key=lambda p: (p["postgres_major"], p["distro"]))
                            if p["build_host"] == host
-                           and p["installed_sql_smoke"].get("column_defaults_and_vacuum") is not True
+                           and not package_release_ready(p)
                            and cell_key(p) not in attempted), None)
             # An older archive waiting for an environment-only recheck now
             # needs the proven shared TableAM fixes too, on this same host.
@@ -635,21 +703,31 @@ def dispatch_available(state):
         if cell is None:
             # Prefer the original cache, but don't strand a diagnosed missing
             # package behind a busy owner while a compatible host is idle.
-            # Collected revisions stay host-bound to avoid duplicate manifests.
             active = {cell_key(j["cell"]) for j in state["jobs"].values()
                       if j.get("cell") and (j.get("observed", {}).get("status") == "running"
                           or j.get("observed", {}).get("cleanup_unverified")
                           or (not j.get("launched") and not j.get("error")))}
-            available_retries = [(owner, candidate)
+            available_retries = [("rebuild", owner, candidate)
                                  for owner, queue in state.get("package_rebuilds", {}).items()
                                  for candidate in queue
                                  if owner != host and candidate["architecture"] == architecture
                                  and cell_key(candidate) not in collected | active]
+            if state.get("qualify_shared_tableam"):
+                available_retries.extend(("qualification", p["build_host"],
+                    dict(postgres_major=p["postgres_major"], distro=p["distro"],
+                         architecture=p["architecture"])) for p in inventory["packages"]
+                    if p["build_host"] != host and p["architecture"] == architecture
+                    and not package_release_ready(p)
+                    and cell_key(p) not in active
+                    and cell_key(p) not in state["tableam_qualification_attempted_cells"])
             if available_retries:
-                borrowed_from, cell = min(available_retries, key=lambda item: (
-                    item[1]["postgres_major"], item[1]["distro"], item[0]))
-                rebuilds = state["package_rebuilds"][borrowed_from]
-                rebuild = cell
+                kind, borrowed_from, cell = min(available_retries, key=lambda item: (
+                    item[2]["postgres_major"], item[2]["distro"], item[1]))
+                if kind == "qualification":
+                    repair = cell
+                else:
+                    rebuilds = state["package_rebuilds"][borrowed_from]
+                    rebuild = cell
         if cell is None:
             continue
         # Match the native workspace preflight before consuming a matrix cell.
@@ -697,7 +775,8 @@ def dispatch_available(state):
         if validation_only or repair:
             if repair:
                 state["tableam_qualification_attempted_cells"].append(cell_key(cell))
-                event("tableam_qualification_reserved", host=host, cell=cell)
+                event("tableam_qualification_reserved", host=host, cell=cell,
+                      previous_package_host=borrowed_from or host)
             rechecks.pop(host, None)
         if rebuild:
             rebuilds.remove(rebuild)
