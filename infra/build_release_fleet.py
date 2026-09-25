@@ -975,9 +975,9 @@ def main():
             completed_packages = inventory["validated_package_count"]
             ready_packages = inventory["release_ready_package_count"]
             active_jobs = [h for h, job in state["jobs"].items()
-                if job.get("observed", {}).get("status") == "running"]
+                if not host_retired(h) and job.get("observed", {}).get("status") == "running"]
             failed_jobs = [h for h, job in state["jobs"].items()
-                if job.get("observed", {}).get("status") == "failed"]
+                if not host_retired(h) and job.get("observed", {}).get("status") == "failed"]
             failed_cells = [cell_key(row["cell"]) +
                             (" (retry queued)" if row["retry_queued"] else " (needs review)")
                             for row in pending_package_failures(state, inventory)]

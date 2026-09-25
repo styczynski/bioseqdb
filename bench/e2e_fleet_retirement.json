@@ -1,8 +1,32 @@
 {
-  "description": "Permanently excluded workers. Original account 970376923108 was retired before its deletion deadline below; test7 account 872590157365 was subsequently confirmed closed by the user. Never contact or dispatch to hosts marked retired. Preserve locally collected results.",
+  "description": "Permanently excluded workers. Original account 970376923108 was retired before its deletion deadline below; test7 account 872590157365 was subsequently confirmed closed by the user. Test2 account 090072209895 was evacuated and stopped before its 2026-09-25 11:30 CEST deletion deadline. Never contact or dispatch to hosts marked retired. Preserve locally collected results.",
   "account_id": "970376923108",
   "deadline": "2026-09-22T13:30:00+02:00",
   "hosts": {
+    "test2-c7g": {
+      "account_id": "090072209895",
+      "draining": true,
+      "retired": true,
+      "reason": "Final artifacts archived and verified locally; stopped before the user's 2026-09-25 11:30 CEST resource deletion deadline."
+    },
+    "test2-m4": {
+      "account_id": "090072209895",
+      "draining": true,
+      "retired": true,
+      "reason": "Final artifacts archived and verified locally; stopped before the user's 2026-09-25 11:30 CEST resource deletion deadline."
+    },
+    "test2-m7a": {
+      "account_id": "090072209895",
+      "draining": true,
+      "retired": true,
+      "reason": "Final artifacts archived and verified locally; stopped before the user's 2026-09-25 11:30 CEST resource deletion deadline."
+    },
+    "test2-m7i": {
+      "account_id": "090072209895",
+      "draining": true,
+      "retired": true,
+      "reason": "Final artifacts archived and verified locally; stopped before the user's 2026-09-25 11:30 CEST resource deletion deadline."
+    },
     "test7-c7g": {
       "account_id": "872590157365",
       "draining": true,
