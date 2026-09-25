@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -32,6 +33,34 @@ def run(argv, *, cwd=None, environment=None):
     """Run one logged, checked SDK build command inside the owned container."""
     print('+ ' + shlex.join(map(str, argv)), flush=True)
     subprocess.run(list(map(str, argv)), cwd=cwd, env=environment, check=True)
+
+
+def private_runtime_rpm_environment(payload, prefix):
+    """Allow only the SDK's exact private lib directory in Fedora's RPM check.
+
+    The isolated PostgreSQL tools need their matching libpq under /opt rather
+    than the distribution's potentially different major. Validate every ELF
+    before granting RPM's nonstandard-absolute-path exception for this one
+    subprocess. Bioseq's extension packages retain their no-RPATH validator.
+    """
+    expected = str(prefix / 'lib')
+    for path in payload.rglob('*'):
+        if path.is_symlink() or not path.is_file():
+            continue
+        with path.open('rb') as stream:
+            if stream.read(4) != b'\x7fELF':
+                continue
+        dynamic = subprocess.check_output(['readelf', '-d', str(path)], text=True)
+        for line in dynamic.splitlines():
+            if re.search(r'\((?:RPATH|RUNPATH)\)', line):
+                match = re.search(r'\[([^]]*)\]', line)
+                if match is None or match.group(1) != expected:
+                    raise RuntimeError(f'Unexpected private SDK runtime path in {path}: {line}')
+    environment = dict(os.environ)
+    # Do not inherit broader QA_RPATHS exceptions or export this to the later
+    # extension build. All other RPM path error categories remain enabled.
+    environment['QA_RPATHS'] = '0x0002'
+    return environment
 
 
 def main():
@@ -127,8 +156,10 @@ cp -a {shlex.quote(str(payload))}/. %{{buildroot}}/
 %files
 {prefix}
 ''')
+                rpm_environment = (private_runtime_rpm_environment(payload, prefix)
+                                   if distro == 'fedora' else None)
                 run(['rpmbuild', '--define', f'_topdir {top}', '--define', '_build_id_links none',
-                     '-bb', spec])
+                     '-bb', spec], environment=rpm_environment)
                 built = list((top / 'RPMS').rglob('*.rpm'))
             else:
                 recipe = scratch / 'pacman'

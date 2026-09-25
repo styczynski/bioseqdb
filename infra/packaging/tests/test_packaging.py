@@ -781,6 +781,35 @@ class CatalogAndProvenanceTests(unittest.TestCase):
                     else:
                         self.assertEqual(dependencies[0], f"postgresql{major}-server")
 
+    def test_private_sdk_rpm_path_exception_is_exact_and_subprocess_scoped(self) -> None:
+        namespace = runpy.run_path(str(PACKAGING_ROOT / 'scripts/prepare_postgres_sdk.py'))
+        environment_for = namespace['private_runtime_rpm_environment']
+        with tempfile.TemporaryDirectory() as raw:
+            payload = Path(raw)
+            (payload / 'postgres').write_bytes(b'\x7fELFfixture')
+            (payload / 'COPYRIGHT').write_text('not an ELF')
+            (payload / 'postgres-link').symlink_to(payload / 'postgres')
+            for major in (19, 20):
+                prefix = Path(f'/opt/pgsql-{major}')
+                with self.subTest(major=major), \
+                        mock.patch.dict(os.environ, {'QA_RPATHS': '0xffff'}), \
+                        mock.patch('subprocess.check_output', return_value=(
+                            f' 0x000000001d (RUNPATH) Library runpath: [{prefix}/lib]\n')) as readelf:
+                    environment = environment_for(payload, prefix)
+                    self.assertEqual(environment['QA_RPATHS'], '0x0002')
+                    self.assertEqual(os.environ['QA_RPATHS'], '0xffff')
+                    readelf.assert_called_once_with(
+                        ['readelf', '-d', str(payload / 'postgres')], text=True)
+                for rejected in ('', '/tmp/build/lib', '$ORIGIN/../lib',
+                                 f'{prefix}/lib:/usr/lib', f'{prefix}/lib/../lib'):
+                    with self.subTest(major=major, rejected=rejected), \
+                            mock.patch('subprocess.check_output', return_value=(
+                                f' (RPATH) Library rpath: [{rejected}]\n')):
+                        with self.assertRaisesRegex(RuntimeError, 'Unexpected private SDK'):
+                            environment_for(payload, prefix)
+            with mock.patch('subprocess.check_output', return_value=' (NEEDED) [libc.so.6]\n'):
+                self.assertEqual(environment_for(payload, Path('/opt/pgsql-19'))['QA_RPATHS'], '0x0002')
+
     def test_cells_preserve_requested_order_and_never_reduce_the_matrix(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             request = worker_request(
