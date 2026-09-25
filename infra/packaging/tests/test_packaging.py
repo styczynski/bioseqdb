@@ -103,6 +103,19 @@ def cell_context(
 
 
 class ReleaseFleetAssignmentTests(unittest.TestCase):
+    def test_revalidation_preserves_binary_revision_without_a_reuse_gate(self) -> None:
+        namespace = runpy.run_path(str(REPOSITORY_ROOT / "build_mcp/package_native.py"))
+        revision = namespace["artifact_build_revision"]
+        previous = {"packages": [{"sha256": "unchanged-bytes",
+                                  "git_revision_informational_only": "original-build"}]}
+        self.assertEqual(revision(previous, "unchanged-bytes", "new-validator",
+                                  validation_only=True), "original-build")
+        self.assertIsNone(revision({}, "unchanged-bytes", "new-validator", validation_only=True))
+        self.assertIsNone(revision({"packages": None}, "unchanged-bytes", "new-validator",
+                                  validation_only=True))
+        self.assertEqual(revision(previous, "new-bytes", "new-build",
+                                  validation_only=False), "new-build")
+
     def test_queued_repair_prefers_original_cache_unless_owner_is_retiring(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):

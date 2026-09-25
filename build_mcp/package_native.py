@@ -17,6 +17,22 @@ import sys
 import time
 
 
+def artifact_build_revision(previous, sha256, revision, *, validation_only):
+    """Rechecking unchanged bytes cannot change their recorded build source.
+
+    Missing historical metadata remains unknown, never a rejection or rebuild
+    gate. The validation checkout is recorded separately from binary provenance.
+    """
+    if not validation_only:
+        return revision
+    packages = previous.get("packages", []) if isinstance(previous, dict) else []
+    if not isinstance(packages, list):
+        return None
+    return next((package.get("git_revision_informational_only")
+                 for package in packages
+                 if isinstance(package, dict) and package.get("sha256") == sha256), None)
+
+
 def run_native_packages(*, repository_root, log_handle, deadline, progress):
     repository = Path(repository_root).resolve()
     selection = os.environ.get("BIOSEQ_PACKAGE_DISTROS", "").strip()
@@ -112,9 +128,15 @@ def collect(repository: Path, selection: str) -> int:
     templates = TemplateRenderer()
     acceptance = AcceptanceService(runner, environment=os.environ)
     builders = {PackageFormat.DEB: deb, PackageFormat.RPM: rpm, PackageFormat.PACMAN: pacman}
+    previous = {}
+    try:
+        previous = json.loads(request.manifest_path.read_text())
+    except (OSError, ValueError):
+        # Optional historical attribution cannot reject otherwise valid bytes.
+        pass
     manifest = {"schema_revision": 1, "published": False, "signed": False,
                 "description": "Native packages validated in fresh matching distro containers; not uploaded or signed.",
-                "source": "rsynced local working tree, including uncommitted changes",
+                "source": "Synchronized local source snapshot; validation-only runs retain known binary build provenance.",
                 "git_revision_informational_only": revision,
                 "template_profile": "all_alphabets_uint64",
                 "optimization": "-O3 -DNDEBUG -fno-omit-frame-pointer",
@@ -191,7 +213,9 @@ The query cache remains disabled by default. Other prerelease ABIs are not inter
             manifest["packages"].append({"distro": str(cell.distro.distro_id),
                 "postgres_major": cell.postgres_major, "file": str(target.relative_to(output)),
                 "postgres_release_channel": channel,
-                "git_revision_informational_only": revision,
+                "git_revision_informational_only": artifact_build_revision(
+                    previous, record.sha256, revision, validation_only=validate_existing_only),
+                "validation_revision_informational_only": revision,
                 "bytes": record.size, "sha256": record.sha256,
                 "validation": validation, "installed_sql_smoke": smoke, **sdk_details})
             print(f"PACKAGE_CELL_COMPLETE pg{cell.postgres_major}/{cell.distro.distro_id}/{architecture}", flush=True)
