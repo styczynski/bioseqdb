@@ -523,7 +523,8 @@ def dispatch_available(state):
     inventory = json.loads((OUTPUT / "packages/manifest.json").read_text())
     # Existing cells retain their original owner for any correction. Do not
     # rebuild the same cell on another host just because its smoke is older.
-    occupied = {cell_key(p) for p in inventory["packages"]}
+    collected = {cell_key(p) for p in inventory["packages"]}
+    occupied = set(collected)
     occupied.update(state.get("attempted_cells", []))
     for host, job in state["jobs"].items():
         if job.get("cell"):
@@ -577,6 +578,25 @@ def dispatch_available(state):
         rebuild = rebuilds[0] if rebuilds and not validation_only and repair is None else None
         cell = (rechecks[host] if validation_only else repair or rebuild) or next(
             (c for c in candidates if cell_key(c) not in occupied), None)
+        borrowed_from = None
+        if cell is None:
+            # Prefer the original cache, but don't strand a diagnosed missing
+            # package behind a busy owner while a compatible host is idle.
+            # Collected revisions stay host-bound to avoid duplicate manifests.
+            active = {cell_key(j["cell"]) for j in state["jobs"].values()
+                      if j.get("cell") and (j.get("observed", {}).get("status") == "running"
+                          or j.get("observed", {}).get("cleanup_unverified")
+                          or (not j.get("launched") and not j.get("error")))}
+            available_retries = [(owner, candidate)
+                                 for owner, queue in state.get("package_rebuilds", {}).items()
+                                 for candidate in queue
+                                 if owner != host and candidate["architecture"] == architecture
+                                 and cell_key(candidate) not in collected | active]
+            if available_retries:
+                borrowed_from, cell = min(available_retries, key=lambda item: (
+                    item[1]["postgres_major"], item[1]["distro"], item[0]))
+                rebuilds = state["package_rebuilds"][borrowed_from]
+                rebuild = cell
         if cell is None:
             continue
         # Match the native workspace preflight before consuming a matrix cell.
@@ -612,8 +632,9 @@ def dispatch_available(state):
                 event("tableam_qualification_reserved", host=host, cell=cell)
             rechecks.pop(host, None)
         if rebuild:
-            rebuilds.pop(0)
-            event("diagnosed_package_rebuild_reserved", host=host, cell=cell)
+            rebuilds.remove(rebuild)
+            event("diagnosed_package_rebuild_reserved", host=host, cell=cell,
+                  previous_queue_host=borrowed_from or host)
         pending.append((host, cell, validation_only))
         event("package_cell_reserved", host=host, cell=cell, validation_only=validation_only)
     write_json_atomic(STATE, state)

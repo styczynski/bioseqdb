@@ -103,6 +103,39 @@ def cell_context(
 
 
 class ReleaseFleetAssignmentTests(unittest.TestCase):
+    def test_idle_host_takes_only_missing_inactive_compatible_retries(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        dispatch = namespace["dispatch_available"]
+        host, owner = "test4-m7i", "test2-m7a"
+        missing = dict(postgres_major=19, distro="fedora_44", architecture="x64")
+        running = dict(postgres_major=20, distro="arch", architecture="x64")
+        arm = dict(postgres_major=18, distro="arch", architecture="arm64")
+        accepted = dict(postgres_major=17, distro="fedora_44", architecture="x64")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "infra").mkdir()
+            (root / "packages").mkdir()
+            (root / "infra/package_matrix.json").write_text(json.dumps({
+                "postgresql_majors": [], "distributions": [{"id": "fedora_44"}]}))
+            (root / "packages/manifest.json").write_text(json.dumps({"packages": [accepted]}))
+            state = dict(jobs={
+                host: dict(launched=True, observed=dict(status="completed")),
+                owner: dict(launched=True, cell=running, observed=dict(status="running")),
+            }, package_rebuilds={owner: [arm, accepted, running, missing]})
+            launch = mock.Mock(return_value=dict(status="running", pid=10))
+            with mock.patch.dict(dispatch.__globals__, {
+                    "ROOT": root, "OUTPUT": root, "STATE": root / "state.json",
+                    "PLAN": {host: ["debian_13"], owner: ["fedora_44"]},
+                    "launch": launch, "event": mock.Mock(),
+                    "remote": mock.Mock(return_value=str(100 * 1024**3))}):
+                dispatch(state)
+                launch.assert_called_once_with(host, cell=missing)
+                self.assertEqual(state["package_rebuilds"][owner], [arm, accepted, running])
+                dispatch(state)
+                self.assertEqual(launch.call_count, 1)
+
     def test_failed_cells_remain_visible_after_hosts_move_on(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):
