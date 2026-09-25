@@ -249,7 +249,7 @@ cleanup() {
   # failure (including assertion/backtrace) in the MCP log before it does.
   if (( status != 0 )) && [[ -f "${log_file}" ]]; then
     printf '\nPostgreSQL server log after package smoke failure:\n' >&2
-    tail -n 60 "${log_file}" >&2 || true
+    cat "${log_file}" >&2 || true
     # Outer command wrappers retain only the error tail. Put root-cause lines
     # last so a long SQL statement or backtrace cannot push them out of it.
     grep -E 'TRAP:|FailedAssertion|failed Assert|FATAL:|PANIC:|ERROR:' "${log_file}" \

@@ -947,6 +947,19 @@ class FormatPlanTests(unittest.TestCase):
                     if status:
                         self.assertTrue(result.stderr.endswith("TRAP: server failure detail\n"))
 
+    def test_smoke_failure_retains_full_trace_outside_clipped_error(self) -> None:
+        namespace = runpy.run_path(str(PACKAGING_ROOT / "scripts/smoke_test_package.py"))
+        run_smoke = namespace["run_smoke"]
+        detail = "important first stack frame\n" + "stack frame\n" * 1000 + "assertion\n"
+        error = subprocess.CalledProcessError(1, ["docker"], output="SQL stage\n", stderr=detail)
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "smoke.log"
+            with mock.patch.object(subprocess, "run", side_effect=error):
+                with self.assertRaises(namespace["SmokeError"]) as caught:
+                    run_smoke(["docker"], diagnostic_path=path)
+            self.assertEqual(path.read_text(), "SQL stage\n" + detail)
+            self.assertTrue(str(caught.exception).endswith(str(path)))
+
     def test_pacman_sandbox_adjustment_accepts_repeated_options_sections(self) -> None:
         def sandbox_prelude(script: str) -> str:
             start = script.index("pacman_conf=/etc/pacman.conf")

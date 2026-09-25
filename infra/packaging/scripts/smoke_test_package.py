@@ -10,6 +10,7 @@ from pathlib import Path
 import platform
 import subprocess
 import sys
+import tempfile
 from typing import Sequence
 
 
@@ -103,7 +104,7 @@ def docker_command(
     return command, image
 
 
-def run_smoke(command: Sequence[str]) -> str:
+def run_smoke(command: Sequence[str], *, diagnostic_path: Path | None = None) -> str:
     try:
         completed = subprocess.run(
             list(command),
@@ -114,10 +115,15 @@ def run_smoke(command: Sequence[str]) -> str:
     except FileNotFoundError as error:
         raise SmokeError(f"container runtime is missing: {command[0]}") from error
     except subprocess.CalledProcessError as error:
+        if diagnostic_path is not None:
+            diagnostic_path.write_text((error.stdout or "") + (error.stderr or ""))
         detail = (error.stderr or error.stdout or "").strip()
         if len(detail) > 4000:
             detail = detail[-4000:]
-        raise SmokeError(f"fresh-container PostgreSQL smoke failed: {detail}") from error
+        location = f"\nFull package smoke log: {diagnostic_path}" if diagnostic_path else ""
+        raise SmokeError(f"fresh-container PostgreSQL smoke failed: {detail}{location}") from error
+    if diagnostic_path is not None:
+        diagnostic_path.write_text((completed.stdout or "") + (completed.stderr or ""))
     return completed.stdout
 
 
@@ -195,8 +201,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             arch_image=arguments.arch_image,
             postgres_runtime_artifact=arguments.postgres_runtime_artifact,
         )
+        diagnostics = arguments.source_dir.resolve() / "build/package-linux/smoke-diagnostics"
+        diagnostics.mkdir(parents=True, exist_ok=True)
+        descriptor, diagnostic_name = tempfile.mkstemp(
+            prefix=f"{arguments.distro}-pg{arguments.postgres_major}-{arguments.architecture}-",
+            suffix=".log", dir=diagnostics)
+        os.close(descriptor)
         result = parse_result(
-            run_smoke(command),
+            run_smoke(command, diagnostic_path=Path(diagnostic_name)),
             distro=arguments.distro,
             architecture=arguments.architecture,
             postgres_major=arguments.postgres_major,
