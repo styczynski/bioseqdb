@@ -517,6 +517,59 @@ def job_mode(host, job):
         "package-linux" if job.get("cell") or PLAN[host] != ["website"] else "website")
 
 
+def reclaim_retired_benchmark_intermediates(repository):
+    """Recover only old x64 benchmark objects on an idle host; retain binaries.
+
+    Self-contained for the controller's SSH invocation. Package caches, CMake
+    configuration, source, reports, and directories are never removed.
+    """
+    repository = Path(repository)
+    if not repository.is_absolute() or repository.resolve() != repository:
+        raise ValueError("Cleanup requires an explicit nonsymlink repository path")
+    if not (repository / "CMakeLists.txt").is_file():
+        raise ValueError("Cleanup repository marker is missing")
+    processes = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+    for line in processes.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit() and int(pid) not in (os.getpid(), os.getppid()):
+            if "server.py" in command and "--run-build " in command:
+                return {"skipped": "build worker is still live"}
+    if subprocess.check_output(["docker", "ps", "-q"], text=True).strip():
+        return {"skipped": "container is still live"}
+    names = ("aws-x64-linux-e2e", "native-x64-clang22-linux-e2e",
+             "test-native-x64-clang22-linux", "test-aws-x64-linux")
+    trees = [repository / "build" / name for name in names]
+    # Protect independently launched old binaries/compilers before any deletion.
+    if any(str(tree) in line and line.strip().split(" ", 1)[0]
+           not in (str(os.getpid()), str(os.getppid()))
+           for tree in trees for line in processes.splitlines()):
+        return {"skipped": "retired build is still referenced"}
+    before = shutil.disk_usage(repository).free
+    removed, removed_bytes = 0, 0
+    touched = []
+    for tree in trees:
+        objects = tree / "bioseq/CMakeFiles"
+        if not objects.is_dir() or objects.resolve() != objects:
+            continue
+        if not (tree / "CMakeCache.txt").is_file():
+            continue
+        touched.append(str(objects))
+        for directory, _, files in os.walk(objects, followlinks=False):
+            for filename in files:
+                path = Path(directory) / filename
+                if path.suffix not in (".o", ".pcm") or path.is_symlink() or not path.is_file():
+                    continue
+                size = path.stat().st_size
+                path.unlink()
+                removed += 1
+                removed_bytes += size
+        if shutil.disk_usage(repository).free >= 100 * 1024**3:
+            break
+    available = shutil.disk_usage(repository).free
+    return dict(removed_files=removed, removed_file_bytes=removed_bytes,
+                reclaimed_bytes=available - before, available_bytes=available, roots=touched)
+
+
 def dispatch_available(state):
     """Reserve distinct native cells before concurrent launch; do not loop failed builds."""
     matrix = json.loads((ROOT / "infra/package_matrix.json").read_text())
@@ -612,6 +665,21 @@ def dispatch_available(state):
             event("package_disk_observation_failed", host=host, error=str(error)[:400])
             continue
         disk_attention = state.setdefault("package_disk_attention", {})
+        cleaned = state.setdefault("retired_intermediate_cleanup", {})
+        if available < 80 * 1024**3 and architecture == "x64" and host not in cleaned:
+            try:
+                source = ("import json, os, shutil, subprocess\nfrom pathlib import Path\n"
+                          + inspect.getsource(reclaim_retired_benchmark_intermediates)
+                          + f"\nprint(json.dumps(reclaim_retired_benchmark_intermediates({REMOTE!r})))\n")
+                cleanup = json.loads(remote(host, "python3 -c " + shlex.quote(source), timeout=55))
+                if not cleanup.get("skipped"):
+                    cleaned[host] = cleanup
+                    available = cleanup["available_bytes"]
+                    event("retired_benchmark_intermediates_reclaimed", host=host, **cleanup)
+                else:
+                    event("retired_intermediate_cleanup_deferred", host=host, **cleanup)
+            except Exception as error:
+                event("retired_intermediate_cleanup_failed", host=host, error=str(error)[:400])
         if available < 80 * 1024**3:
             if host not in disk_attention:
                 event("package_admission_waiting_for_disk", host=host,

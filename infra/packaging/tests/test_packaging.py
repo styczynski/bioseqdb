@@ -103,6 +103,57 @@ def cell_context(
 
 
 class ReleaseFleetAssignmentTests(unittest.TestCase):
+    def test_idle_cleanup_keeps_build_metadata_binaries_and_package_cache(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        reclaim = namespace["reclaim_retired_benchmark_intermediates"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "CMakeLists.txt").write_text("project(test)")
+            tree = root / "build/aws-x64-linux-e2e"
+            objects = tree / "bioseq/CMakeFiles"
+            objects.mkdir(parents=True)
+            retained = [tree / "CMakeCache.txt", objects / "build.ninja", tree / "bioseq.dylib",
+                        root / "build/package-linux/current.o", root / "results.yaml"]
+            for path in retained:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("retained")
+            for name in ("a.o", "a.pcm"):
+                (objects / name).write_text("intermediate")
+            (objects / "linked.o").symlink_to(retained[-1])
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "protected.o").write_text("retained")
+            (objects / "symlinked_directory").symlink_to(outside, target_is_directory=True)
+            with mock.patch.object(subprocess, "check_output", return_value=""), \
+                    mock.patch.object(namespace["shutil"], "disk_usage", return_value=SimpleNamespace(free=0)):
+                result = reclaim(root)
+            self.assertEqual(result["removed_files"], 2)
+            self.assertEqual(result["removed_file_bytes"], 24)
+            self.assertTrue(objects.is_dir())
+            self.assertTrue((objects / "linked.o").is_symlink())
+            self.assertTrue((outside / "protected.o").exists())
+            for path in retained:
+                self.assertEqual(path.read_text(), "retained")
+
+    def test_retired_cleanup_refuses_live_workers_containers_or_build_references(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        reclaim = namespace["reclaim_retired_benchmark_intermediates"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "CMakeLists.txt").write_text("project(test)")
+            cases = [(["999999 python server.py --run-build package-linux\n"], "build worker"),
+                     (["", "container-id\n"], "container"),
+                     ([f"999999 clang++ {root}/build/aws-x64-linux-e2e/input.cpp\n", ""], "referenced")]
+            for outputs, reason in cases:
+                with self.subTest(reason=reason), \
+                        mock.patch.object(subprocess, "check_output", side_effect=outputs), \
+                        mock.patch.object(Path, "unlink", side_effect=AssertionError("deleted while busy")):
+                    self.assertIn(reason, reclaim(root)["skipped"])
+
     def test_idle_host_takes_only_missing_inactive_compatible_retries(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):
@@ -220,7 +271,7 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
             state = {"jobs": {host: {
                 "launched": True, "mode": "website", "collected": True,
                 "observed": {"status": "failed", "pid": 1},
-            }}}
+            }}, "retired_intermediate_cleanup": {host: {}}}
             launch = mock.Mock(return_value={"status": "running", "pid": 3})
             remote = mock.Mock(return_value=str(40 * 1024**3))
             with mock.patch.dict(dispatch.__globals__, {
