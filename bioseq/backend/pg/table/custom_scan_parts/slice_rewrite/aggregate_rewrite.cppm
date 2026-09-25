@@ -264,7 +264,9 @@ export {
         if (ordinary.changed) {
             output_rel->cheapest_startup_path = nullptr;
             output_rel->cheapest_total_path = nullptr;
+#if PG_VERSION_NUM < 190000
             output_rel->cheapest_unique_path = nullptr;
+#endif
             output_rel->cheapest_parameterized_paths = NIL;
             set_cheapest(output_rel);
         }

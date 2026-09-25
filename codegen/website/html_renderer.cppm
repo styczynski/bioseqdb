@@ -29,6 +29,10 @@ void append_escaped_text(std::string& out, std::string_view text) {
         case '&': out += "&amp;"; break;
         case '<': out += "&lt;"; break;
         case '>': out += "&gt;"; break;
+        // JSON/SQL examples may contain adjacent braces. Preserve their visible
+        // text while distinguishing it from unresolved template syntax.
+        case '{': out += "&#123;"; break;
+        case '}': out += "&#125;"; break;
         default: out.push_back(character); break;
         }
     }
@@ -410,8 +414,14 @@ struct html_content_writer {
                     --focus_end;
                 }
 
-                out += "<figure class=\"doc-code annotated-type\" data-annotated-type>"
-                       "<div class=\"annotated-type-expression\"><code id=\"";
+                out += "<figure class=\"doc-code annotated-type\" data-annotated-type";
+                if (const auto runnable = node.attributes.find("runnable_id");
+                    runnable != node.attributes.end()) {
+                    out += " data-sql-example=\"";
+                    append_escaped_attribute(out, runnable->second);
+                    out.push_back('"');
+                }
+                out += "><div class=\"annotated-type-expression\"><code id=\"";
                 append_escaped_attribute(out, id);
                 out += "\" data-code tabindex=\"0\" aria-label=\"Annotated type expression\">";
                 std::size_t cursor = focus_start;
@@ -476,7 +486,14 @@ struct html_content_writer {
                 break;
             }
 
-            out += "<figure class=\"doc-code\" data-term><figcaption class=\"doc-code-bar\">"
+            out += "<figure class=\"doc-code\" data-term";
+            if (const auto runnable = node.attributes.find("runnable_id");
+                runnable != node.attributes.end()) {
+                out += " data-sql-example=\"";
+                append_escaped_attribute(out, runnable->second);
+                out.push_back('"');
+            }
+            out += "><figcaption class=\"doc-code-bar\">"
                    "<span class=\"term-dot term-dot-red\" aria-hidden=\"true\"></span>"
                    "<span class=\"term-dot term-dot-amber\" aria-hidden=\"true\"></span>"
                    "<span class=\"term-dot term-dot-blue\" aria-hidden=\"true\"></span>"

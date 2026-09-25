@@ -6,6 +6,8 @@ module;
 
 extern "C" {
 #include "postgres.h"
+// Anchor PG18+ tuple-descriptor inline helpers before importing catalog modules.
+#include "access/tupdesc.h"
 #include "utils/errcodes.h"
 }
 

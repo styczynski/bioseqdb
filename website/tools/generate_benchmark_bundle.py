@@ -572,12 +572,12 @@ def _validate_duration_summary(value: object, context: str) -> None:
 
 
 def _validate_raw_evidence(value: object, context: str) -> None:
-    """Validate a complete durable raw-evidence manifest without staging JSONL."""
+    """Validate a durable raw-evidence manifest without staging JSONL."""
 
     if not isinstance(value, dict) or set(value) != _RAW_EVIDENCE_REQUIRED_KEYS:
         _fail(f"{context}: raw_evidence fields do not match the framework schema")
-    if value["schema"] != 1 or value["complete"] is not True:
-        _fail(f"{context}: raw_evidence is partial or has an unsupported schema")
+    if value["schema"] != 1 or not isinstance(value["complete"], bool):
+        _fail(f"{context}: raw_evidence has an unsupported schema or completion flag")
     if not isinstance(value["path"], str) or not _RAW_SIDECAR_PATTERN.fullmatch(
         value["path"]
     ):
@@ -894,6 +894,15 @@ def _validate_raw_sample(value: object, context: str) -> None:
     if not _is_integer(value["group_count"]) or value["group_count"] < 1:
         _fail(f"{context}.group_count: must be positive")
     _validate_param_object(value["params"], f"{context}.params")
+    status = value.get("tuple_status")
+    if (value.get("payload_schema") == "bioseq.e2e.raw-sample"
+            and isinstance(status, dict)
+            and _is_integer(status.get("accepted"))
+            and status["accepted"] == 0):
+        # Rejected E2E executions are durable diagnostic evidence, often with
+        # null timings after a connection failure. Do not publish the original
+        # report (or rewrite a mixed report to hide its rejected samples).
+        _unsupported_report(f"{context}: rejected E2E tuple; not a public result")
     if not _is_integer(value["outer_e2e_ns"]) or value["outer_e2e_ns"] < 0:
         _fail(f"{context}.outer_e2e_ns: must be non-negative")
     if not isinstance(value["record_checksum"], str) or not (
@@ -976,6 +985,10 @@ def _validate_report(
     raw_evidence = document["raw_evidence"]
     if raw_evidence is not None:
         _validate_raw_evidence(raw_evidence, display_path)
+        if not raw_evidence["complete"]:
+            _unsupported_report(
+                f"{display_path}: incomplete raw evidence; not a public result"
+            )
     finding_validators = {
         "paired_rule_evidence": _validate_paired_evidence,
         "rule_violations": _validate_violation,
@@ -1348,7 +1361,9 @@ def _validated_override(path: Path, repository_root: Path) -> bytes:
     return payload
 
 
-def _prepare_output_root(output_root: Path, repository_root: Path) -> tuple[Path, Path]:
+def _prepare_output_root(
+    output_root: Path, repository_root: Path, build_root: Path | None = None,
+) -> tuple[Path, Path]:
     """Validate the build-owned output root and return it with its parent."""
 
     lexical = output_root.expanduser()
@@ -1360,15 +1375,33 @@ def _prepare_output_root(output_root: Path, repository_root: Path) -> tuple[Path
     lexical.parent.mkdir(parents=True, exist_ok=True)
     parent = lexical.parent.resolve(strict=True)
     resolved = parent / lexical.name
+    configured_build_output = False
     try:
         resolved.relative_to(repository_root)
     except ValueError:
         pass
     else:
-        _fail("benchmark bundle output must remain outside the repository source tree")
+        if build_root is None:
+            _fail("benchmark bundle output must remain outside the repository source tree")
+        build = build_root.expanduser().resolve(strict=True)
+        cache = build / "CMakeCache.txt"
+        if (build == repository_root or resolved == build
+                or not resolved.is_relative_to(build)
+                or cache.is_symlink() or not cache.is_file()):
+            _fail("benchmark bundle output must be below the declared CMake build root")
+        owners = [line.split("=", 1)[1] for line in cache.read_text().splitlines()
+                  if line.startswith("CMAKE_HOME_DIRECTORY:INTERNAL=")]
+        if len(owners) != 1 or Path(owners[0]).resolve() != repository_root:
+            _fail("benchmark bundle CMake build root belongs to a different source tree")
+        configured_build_output = True
     if resolved.exists():
         if resolved.is_symlink() or not resolved.is_dir():
             _fail(f"benchmark bundle output is not a plain directory: {resolved}")
+        # Ninja creates parents for declared BYPRODUCTS before invoking us.
+        # Only an empty directory in the verified CMake binary tree is a safe
+        # first-use case; every nonempty replacement still needs our marker.
+        if configured_build_output and not any(resolved.iterdir()):
+            return resolved, parent
         owner = resolved / _OWNER_FILENAME
         if owner.is_symlink() or not owner.is_file():
             _fail(
@@ -1409,11 +1442,12 @@ def write_bundle(
     repository_root: Path,
     discovery: DiscoveryResult,
     override_path: Path | None,
+    build_root: Path | None = None,
 ) -> None:
     """Replace the generated bundle only after validated byte copies are ready."""
 
     resolved_output, output_parent = _prepare_output_root(
-        output_root, repository_root
+        output_root, repository_root, build_root
     )
     override_payload = (
         _validated_override(override_path, repository_root)
@@ -1467,6 +1501,7 @@ def write_bundle(
         (staged_root / _OWNER_FILENAME).write_bytes(_OWNER_PAYLOAD)
 
         if resolved_output.exists():
+            _prepare_output_root(resolved_output, repository_root, build_root)
             shutil.rmtree(resolved_output)
         os.replace(staged_root, resolved_output)
     finally:
@@ -1479,6 +1514,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository-root", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
+    parser.add_argument("--build-root", type=Path,
+                        help="Allow output below this configured CMake binary directory")
     parser.add_argument(
         "--reporting-root", required=True, action="append", type=Path
     )
@@ -1505,6 +1542,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             repository_root,
             discovery,
             args.manifest_override,
+            args.build_root,
         )
     except (BundleError, OSError) as error:
         print(f"generate_benchmark_bundle: {error}", file=sys.stderr)

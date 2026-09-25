@@ -173,6 +173,9 @@ void bioseq_relation_copy_for_cluster(Relation old_heap,
                                       Relation old_index,
                                       bool use_sort,
                                       TransactionId oldest_xmin,
+#if PG_VERSION_NUM >= 190000
+                                      Snapshot rewrite_snapshot,
+#endif
                                       TransactionId* xid_cutoff,
                                       MultiXactId* multi_cutoff,
                                       double* num_tuples,
@@ -220,7 +223,14 @@ void bioseq_relation_copy_for_cluster(Relation old_heap,
      * can therefore copy an UPDATE's dead version into the rewritten table.
      * Keep one registered transaction snapshot authoritative for the main row,
      * row mask, and sequence-source fragments throughout the rewrite. */
+#if PG_VERSION_NUM >= 190000
+    // PG19 supplies the MVCC horizon for concurrent relation rewrites. Keep
+    // that same horizon for rows, row masks and sequence fragments.
+    Snapshot snapshot = RegisterSnapshot(
+        rewrite_snapshot != nullptr ? rewrite_snapshot : GetTransactionSnapshot());
+#else
     Snapshot snapshot = RegisterSnapshot(GetTransactionSnapshot());
+#endif
 
     MemoryContext scan_context = create_column_scan_memory_context();
     bool random_access = false;
@@ -507,7 +517,13 @@ static uint64_t column_table_tuple_count(Relation relation) {
 }
 
 /** Run Bioseq's non-FULL VACUUM bookkeeping and optional tail truncation. */
-void bioseq_vacuum_rel(Relation rel, VacuumParams* params, BufferAccessStrategy bstrategy) {
+void bioseq_vacuum_rel(Relation rel,
+#if PG_VERSION_NUM >= 190000
+                       const VacuumParams* params,
+#else
+                       VacuumParams* params,
+#endif
+                       BufferAccessStrategy bstrategy) {
     static_cast<void>(bstrategy);
     run_tableam_cpp_checked("bioseq_vacuum_rel", [rel, params] {
         bioseq::postgres::support::page_cache_disable_scope cache_guard{
@@ -590,9 +606,15 @@ void bioseq_vacuum_rel(Relation rel, VacuumParams* params, BufferAccessStrategy 
 #endif
 
             /**
-             * PostgreSQL 18 requires a vacuum start time, where zero reports unknown.
+             * PostgreSQL 18 requires a start time (zero means unknown); PG19
+             * takes the open relation rather than its OID/shared flag.
              */
-#if PG_VERSION_NUM >= PG_VERSION_18
+#if PG_VERSION_NUM >= 190000
+            pgstat_report_vacuum(rel,
+                                 std::max<int64_t>(new_live_tuples, 0),
+                                 0,
+                                 0 /* starttime */);
+#elif PG_VERSION_NUM >= PG_VERSION_18
             pgstat_report_vacuum(RelationGetRelid(rel),
                                  rel->rd_rel->relisshared,
                                  std::max<int64_t>(new_live_tuples, 0),
@@ -861,7 +883,9 @@ bool bioseq_scan_analyze_next_block(TableScanDesc scan, ReadStream* stream) {
 
 /** Feed every visible row to PostgreSQL's ANALYZE reservoir sampler. */
 bool bioseq_scan_analyze_next_tuple(TableScanDesc scan,
+#if PG_VERSION_NUM < 190000
                                     TransactionId oldest_xmin,
+#endif
                                     double* liverows,
                                     double* deadrows,
                                     TupleTableSlot* slot) {

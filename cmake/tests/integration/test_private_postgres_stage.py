@@ -21,6 +21,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import traceback
 
 
 TOOLS = ("postgres", "initdb", "pg_ctl", "createdb", "dropdb", "psql")
@@ -412,13 +413,14 @@ def _compile_extension_fixture(
 
 
 def _write_pg_config(path: Path, bindir: Path, sharedir: Path,
-                     pkglibdir: Path) -> None:
+                     pkglibdir: Path, *,
+                     configure: str = "--with-private-runtime-fixture") -> None:
     values = {
         "--bindir": str(bindir),
         "--sharedir": str(sharedir),
         "--pkglibdir": str(pkglibdir),
         "--version": "PostgreSQL 17.fixture",
-        "--configure": "--with-private-runtime-fixture",
+        "--configure": configure,
     }
     _write(
         path,
@@ -1254,6 +1256,34 @@ def _run_layout_case(
             assert not manifest.exists() and not hash_path.exists()
             _write_artifact_spec(artifact_spec, artifacts)
             _run(command)
+        if layout == "nested-runtime":
+            # Distro builds can use OS tzdata instead of sharedir/timezone.
+            # Require the explicitly configured dependency; do not silently
+            # permit a missing timezone tree in ordinary bundled builds.
+            timezone = canonical_sharedir / "timezone"
+            saved_timezone = case_root / "saved-timezone"
+            timezone.rename(saved_timezone)
+            system_timezone = case_root / "system timezone"
+            _write(system_timezone / "UTC", "fixture UTC\n")
+            _write_pg_config(
+                pg_config, bindir, sharedir, pkglibdir,
+                configure=f"'--with-system-tzdata={system_timezone}'",
+            )
+            _run(command)
+            system_manifest = json.loads(manifest.read_text())
+            assert "timezone" not in system_manifest["runtime_closure"]["required_sentinels"]
+            (system_timezone / "UTC").unlink()
+            unavailable = subprocess.run(
+                command, check=False, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=60,
+            )
+            assert unavailable.returncode != 0
+            _assert_diagnostic_contains(
+                unavailable.stderr, "configured system tzdata is unavailable")
+            assert not manifest.exists() and not hash_path.exists()
+            saved_timezone.rename(timezone)
+            _write_pg_config(pg_config, bindir, sharedir, pkglibdir)
+            _run(command)
     else:
         _verify_stage_manifest(
             manifest,
@@ -1787,6 +1817,7 @@ def main() -> int:
                     f"not ok - {case_name}: "
                     f"{type(error).__name__}: {error}"
                 )
+                traceback.print_exc()
     print(
         f"{total - failures}/{total} private-stage relocation tests passed"
     )

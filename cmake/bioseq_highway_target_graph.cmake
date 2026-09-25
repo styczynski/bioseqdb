@@ -181,25 +181,9 @@ set(BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS
   "sequence_ops|${CMAKE_CURRENT_SOURCE_DIR}/backend/common/simd/highway_test_probes/sequence_ops.cppm.in"
   "simd_utils|${CMAKE_CURRENT_SOURCE_DIR}/backend/common/simd/highway_test_probes/simd_utils.cppm.in"
   "two_stack|${CMAKE_CURRENT_SOURCE_DIR}/backend/common/simd/highway_test_probes/two_stack.cppm.in")
-if(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
-  set(BIOSEQ_MINIMIZER_REGISTRY_PROFILE extended)
-else()
-  set(BIOSEQ_MINIMIZER_REGISTRY_PROFILE baseline)
-endif()
-
-# The early target-neutral modules are generated before representation.cppm is
-# compiled. The later visitor may import representation, while representation
-# imports only the records module, so the codegen-output graph stays acyclic.
-set(BIOSEQ_MINIMIZER_REGISTRY_GENERATED_ROOT
-  "${CMAKE_CURRENT_BINARY_DIR}/generated/minimizer_registry")
-bioseq_add_minimizer_registry_codegen(
-  TARGET bioseq_minimizer_registry_modules
-  OUTPUT_ROOT "${BIOSEQ_MINIMIZER_REGISTRY_GENERATED_ROOT}"
-  PROFILE "${BIOSEQ_MINIMIZER_REGISTRY_PROFILE}"
-  OUTPUT_RECORDS_MODULE BIOSEQ_MINIMIZER_PHYSICAL_RECORDS_MODULE
-  OUTPUT_VISITOR_MODULE BIOSEQ_MINIMIZER_PHYSICAL_VISITOR_MODULE
-  OUTPUT_MANIFEST BIOSEQ_MINIMIZER_REGISTRY_MANIFEST
-  OUTPUT_STAMP BIOSEQ_MINIMIZER_REGISTRY_STAMP)
+# The registry producer is defined before pipeline-owner PREPARE in the parent
+# CMakeLists. Attach its modules here once bioseq_modules_nopg exists. The
+# visitor imports representation; representation imports only the records.
 target_sources(bioseq_modules_nopg
   PUBLIC FILE_SET bioseq_minimizer_registry_modules
     TYPE CXX_MODULES

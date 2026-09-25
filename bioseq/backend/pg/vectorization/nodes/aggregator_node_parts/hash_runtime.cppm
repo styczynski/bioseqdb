@@ -6,6 +6,7 @@ module;
 #include <bioseq/pg_compat.h>
 extern "C" {
 #include "nodes/extensible.h"
+#include "port/pg_bitutils.h"
 }
 #include <algorithm>
 #include <cmath>
@@ -277,7 +278,11 @@ export void find_hash_columns(AggState* aggregate_state) {
                               &hash_state->eqfuncoids,
                               &hash_state->hashfunctions);
         hash_state->hashslot = ExecAllocTableSlot(
-            &executor_state->es_tupleTable, hash_descriptor, &TTSOpsMinimalTuple);
+            &executor_state->es_tupleTable, hash_descriptor, &TTSOpsMinimalTuple
+#if PG_VERSION_NUM >= 190000
+            , 0  // Keep the pre-PG19 slot flags for derived aggregate tuples.
+#endif
+        );
 
         list_free(hash_target_entries);
         bms_free(column_numbers);
@@ -401,7 +406,13 @@ static int choose_hash_partition_count(double input_groups,
     partition_count = static_cast<int>(estimated_partition_count);
 
     /* ceil(log2(partition_count)) */
+#if PG_VERSION_NUM >= 190000
+    // PG19 removed my_log2. The existing [4, 1024] cap makes its underlying
+    // ceil-log2 primitive equivalent, including at power-of-two boundaries.
+    partition_bits = pg_ceil_log2_32(static_cast<std::uint32_t>(partition_count));
+#else
     partition_bits = my_log2(partition_count);
+#endif
 
     /* make sure that we don't exhaust the hash bits */
     if (partition_bits + used_bits >= 32)

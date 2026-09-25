@@ -1701,7 +1701,11 @@ inline void request_shared_registry_resources(const shared_registry_preload_requ
         g_bootstrap->header_bytes = sizeof(*g_bootstrap);
         pg_atomic_init_u64(&g_bootstrap->boot_nonce, boot_nonce);
         g_bootstrap->layout = request.persistent;
-        g_bootstrap->dsa_tranche_id = static_cast<std::uint32_t>(LWLockNewTrancheId());
+        g_bootstrap->dsa_tranche_id = static_cast<std::uint32_t>(LWLockNewTrancheId(
+#if PG_VERSION_NUM >= 190000
+            k_dsa_tranche_name
+#endif
+        ));
         g_bootstrap->exact_directory_capacity = request.persistent.reusable_exact_capacity;
         g_bootstrap->coverage_directory_capacity = request.persistent.reusable_coverage_capacity;
         g_bootstrap->dependency_directory_capacity =
@@ -1737,7 +1741,9 @@ inline void request_shared_registry_resources(const shared_registry_preload_requ
     } else if (!bootstrap_matches(request, boot_nonce)) {
         return false;
     }
+#if PG_VERSION_NUM < 190000
     LWLockRegisterTranche(static_cast<int>(g_bootstrap->dsa_tranche_id), k_dsa_tranche_name);
+#endif
 
     bool transition_found = false;
     auto* transition_bytes = static_cast<std::byte*>(ShmemInitStruct(

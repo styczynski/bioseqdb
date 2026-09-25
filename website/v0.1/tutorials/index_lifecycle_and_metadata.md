@@ -87,7 +87,10 @@ There are two layers of write policy.
 on, INSERT maintains every family whose table policy is `UPDATE_ON_INSERT`.
 When it is off, inserts write the source sequence without those index rows.
 
-The per-table policy is changed by `bioseq.set_index_policy`:
+The per-table policy is changed by `bioseq.set_index_policy`. In this release,
+policy mutation uses the caller's internal `index_policy` catalog privileges;
+table ownership and function EXECUTE alone do not suffice. The following is an
+administrator/policy-manager operation, not an ordinary-role example:
 
 ```sql
 SELECT bioseq.set_index_policy(
@@ -100,8 +103,11 @@ SELECT bioseq.set_index_policy(
 The only policy spellings are `UPDATE_ON_INSERT` and `UPDATE_MANUALLY`.
 `minimizers_per_sequence` can opt into insert maintenance on the ordinary
 layout. When `bioseq.aligner.grouped_soa_generation.enabled` is on, insert-time
-minimizer publication is forbidden. Use maintenance off and one explicit
-`update_index` after the rows are visible instead.
+minimizer publication is forbidden. The optimized defaults therefore leave
+INSERT maintenance and asynchronous persistence off. Use one explicit
+`update_index` after the source transaction commits instead. Normal searches
+can prepare transient indexes before that publication; a required-persisted
+search cannot.
 
 For small steady writes, the defaults are a useful starting point. For a bulk
 file or large generated table, use this sequence:
@@ -111,6 +117,7 @@ BEGIN;
 SET LOCAL bioseq.index.insert_maintenance.enabled = off;
 
 -- COPY, INSERT batches, bioseq.load, or a generator runs here
+COMMIT;
 
 SELECT bioseq.update_index(
     'indexed_reads'::regclass,
@@ -120,15 +127,18 @@ SELECT bioseq.update_index(
     'indexed_reads'::regclass,
     'symbol_counts'
 );
-ANALYZE indexed_reads;
-COMMIT;
+-- ANALYZE currently has a sequence-hydration snapshot limitation; see below.
 ```
 
 `bioseq.update_index` rebuilds the named family and returns the number
 of sequence values indexed. It applies to every sequence column registered for
 the table. Run it again when the source or compatible index recipe changes.
 
-`ANALYZE` updates PostgreSQL statistics. `VACUUM` reclaims ordinary dead-row
+`ANALYZE` normally updates PostgreSQL statistics, but currently can fail on
+sequence-bearing Bioseq tables because its sampling path lacks an explicit
+hydration snapshot. It is omitted here; see the
+[storage limitation](../columnar_storage_and_vectorized_aggregates/).
+`VACUUM` reclaims ordinary dead-row
 storage according to PostgreSQL rules. Neither command substitutes for
 `bioseq.update_index`. Likewise, conventional `CREATE INDEX` or `REINDEX`
 manages PostgreSQL indexes on scalar keys, not these three sequence forms.
@@ -194,7 +204,9 @@ compatibility with the next search.
 ## Select the persisted read family
 
 Choose the active minimizer family explicitly with
-`bioseq.set_active_read_index` when an application depends on it:
+`bioseq.set_active_read_index` when an application depends on it. This mutation
+also requires an administrator/policy-manager with internal `index_policy`
+write access; it is not implied by owning the source table:
 
 ```sql
 SELECT bioseq.set_active_read_index(
@@ -219,13 +231,20 @@ Use value `2` for a readiness check whose success must mean that persisted data
 was accepted. Use value `0` for normal workloads that are allowed to recompute.
 Use value `1` only for controlled comparisons and transformed logical targets.
 
+The native compatible-persisted CPU reader is currently owned by `BioseqBatchJoin`.
+Use a query relation joined to the target table for value `2`, as below. Ordinary
+column scans reject value `2`; with value `0` they may prepare transient indexes
+instead. Do not infer a persisted read merely from having built an index.
+
 ## Build and verify a complete index lifecycle
 
 This block begins with maintenance off, shows the empty metadata state, builds
-all three forms, selects the fragment-native read index, and requires a
-compatible persisted index during the search.
+all three forms, retains the default fragment-native read index, and requires a
+compatible persisted index during the search. The isolated example role has the
+explicit publication privileges used by the website fixture, but no policy
+catalog write permission. It does not silently acquire administrator rights.
 
-```sql runnable id=index_lifecycle_metadata timeout=45s entity="sql:type:bioseq.seq" entity="sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq,$extension.bioseq_aligner_options)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)"
+```sql runnable id=index_lifecycle_metadata timeout=45s entity="sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq,$extension.bioseq_aligner_options)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)"
 -- bioseq:setup
 SET max_parallel_workers_per_gather = 0;
 SET bioseq.index.insert_maintenance.enabled = off;
@@ -243,9 +262,15 @@ CREATE TABLE tutorial_indexed_reads (
     seq0 bioseq.seq('dna4', 64) NOT NULL
 ) USING bioseq;
 INSERT INTO tutorial_indexed_reads VALUES
-    (1, 'alpha', (repeat('ACGT', 96) || 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' || repeat('TGCA', 32))::bioseq.seq('dna4', 64)),
-    (2, 'alpha', (repeat('TGCA', 72) || 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' || repeat('ACGT', 48))::bioseq.seq('dna4', 64)),
+    (1, 'alpha', (repeat('ACGT', 96) || repeat('TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA', 4) || repeat('TGCA', 32))::bioseq.seq('dna4', 64)),
+    (2, 'alpha', (repeat('TGCA', 72) || repeat('TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA', 4) || repeat('ACGT', 48))::bioseq.seq('dna4', 64)),
     (3, 'beta',  repeat('GATTACA', 80)::bioseq.seq('dna4', 64));
+CREATE TABLE tutorial_index_queries (
+    query_id integer PRIMARY KEY,
+    seq0 bioseq.seq('dna4', 64) NOT NULL
+) USING bioseq;
+INSERT INTO tutorial_index_queries VALUES
+    (1, repeat('TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA', 4)::bioseq.seq('dna4', 64));
 -- bioseq:visible
 SELECT column_name,
        index_name,
@@ -266,10 +291,8 @@ SELECT bioseq.update_index(
 SELECT bioseq.update_index(
     'tutorial_indexed_reads'::regclass,
     'symbol_counts') AS symbol_counts_indexed;
-SELECT bioseq.set_active_read_index(
-    'tutorial_indexed_reads'::regclass,
-    'minimizers_per_fragment');
-ANALYZE tutorial_indexed_reads;
+-- Keep the default MPF selection; changing policy requires administrator access.
+-- ANALYZE is omitted: the current sequence sampling path lacks its snapshot.
 
 SELECT index_name,
        update_policy,
@@ -293,10 +316,10 @@ EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)
 SELECT read_id,
        bioseq.target_start(read_id) AS target_start,
        bioseq.target_end(read_id) AS target_end
-FROM tutorial_indexed_reads
+FROM tutorial_index_queries AS q CROSS JOIN tutorial_indexed_reads AS t
 WHERE public.mmsearch(
-    seq0,
-    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64),
+    t.seq0,
+    q.seq0,
     aligner_options(index_read_requirement => 2)
 )
 ORDER BY read_id, target_start;
@@ -312,6 +335,7 @@ SELECT requested_target_index_source,
 FROM bioseq.last_alignment_execution_stats()
 WHERE stage = 'query_sketch';
 -- bioseq:teardown
+DROP TABLE tutorial_index_queries;
 DROP TABLE tutorial_indexed_reads;
 RESET bioseq.aligner.base_alignment.algorithm;
 RESET bioseq.aligner.chaining.algorithm;
@@ -329,13 +353,21 @@ The first result has three registered rows with zero storage. Each build returns
 three indexed sequences. The post-build table shows nonzero physical storage.
 The letter-count plan reports `Bioseq Fetched From Meta` for `seq0.symbol_count`.
 The analyzed plan must report `Bioseq Index Read Requirement` as
-`require_compatible_persisted` and `Actual Target Index Source` as `persisted`.
+`require_compatible_persisted`; the batch-join execution summary reports
+`actual_index_source=persisted`. Its query is 372 bases long so the demonstration
+uses the default minimizer recipe and clears the alignment filters.
 
 The final public `bioseq.last_alignment_execution_stats` snapshot supplies
-the accepted generation ID and source identity. `missing_persisted_index_rows`
+generation identity fields and persisted-read counts. `missing_persisted_index_rows`
 and `recomputed_target_index_rows` should be zero for this strict query. Read
 the snapshot immediately after the statement because it is backend-local
 last-run state.
+
+For a multi-target statement, inspect the execution summary's
+`persisted_identity_mixed` and `identity_conflict` flags before interpreting the
+aggregate identity fields as one unique generation. Persisted-read counts with
+zero missing/recomputed rows prove the index route; they do not by themselves
+prove one uniform backend or source identity for every alignment job.
 
 ## Verify readiness through public SQL
 
@@ -431,9 +463,9 @@ FROM bioseq.scheduler_stats();
 
 `bioseq.index.async_persistence.enabled` and
 `bioseq.index.recompute_async_persistence.enabled` control optional background
-publication after eligible work. Turn them off when a maintenance transaction
-needs one explicit synchronous boundary. Turn them on only after confirming
-that the asynchronous lifecycle matches the application's readiness rules.
+publication after eligible work. Both are off by default and must remain off
+with grouped-SoA publication. They belong to the legacy persistence path, not
+the optimized default index format.
 
 ## Safe operational checklist
 

@@ -333,7 +333,7 @@ struct unresolved_letter_query_context {
     if (node == nullptr || !IsA(node, Const)) {
         return false;
     }
-    auto const* value = castNode(Const, node);
+    auto const* value = reinterpret_cast<Const const*>(node);
     return !value->constisnull && value->consttype == letter_oid
         && datum_get_letter(value->constvalue).alphabet_code
             == unresolved_letter_alphabet_code;
@@ -367,7 +367,7 @@ struct unresolved_letter_query_context {
         || typmod_node == nullptr || !IsA(typmod_node, Const)) {
         return false;
     }
-    auto const* typmod = castNode(Const, typmod_node);
+    auto const* typmod = reinterpret_cast<Const const*>(typmod_node);
     return !typmod->constisnull && typmod->consttype == INT4OID
         && DatumGetInt32(typmod->constvalue) > 0;
 }
@@ -380,7 +380,7 @@ struct unresolved_letter_query_context {
         || !OidIsValid(context.typmod_cast_oid)) {
         return false;
     }
-    auto const* expression = castNode(FuncExpr, node);
+    auto const* expression = reinterpret_cast<FuncExpr const*>(node);
     if (expression->funcid != context.typmod_cast_oid
         || list_length(expression->args) != 3) {
         return false;
@@ -393,8 +393,8 @@ struct unresolved_letter_query_context {
         || explicit_node == nullptr || !IsA(explicit_node, Const)) {
         return false;
     }
-    auto const* typmod = castNode(Const, typmod_node);
-    auto const* explicit_cast = castNode(Const, explicit_node);
+    auto const* typmod = reinterpret_cast<Const const*>(typmod_node);
+    auto const* explicit_cast = reinterpret_cast<Const const*>(explicit_node);
     return !typmod->constisnull && typmod->consttype == INT4OID
         && DatumGetInt32(typmod->constvalue) < 0
         && !explicit_cast->constisnull
@@ -613,7 +613,12 @@ void validate_and_guard_letter_query(
 void bioseq_letter_post_parse_analyze(
     ParseState* parse_state,
     Query* query,
-    JumbleState* jumble_state)
+#if PG_VERSION_NUM >= 190000
+    const JumbleState* jumble_state
+#else
+    JumbleState* jumble_state
+#endif
+)
 {
     /* Count this callback itself, not only the downstream hook.  PostgreSQL
      * invokes shared-preload libraries in configured order but their hooks

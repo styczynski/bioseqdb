@@ -165,11 +165,13 @@ class WorkspaceManager:
             label="cell root",
         )
         cache_root = self.workspace_root / "caches"
+        # Reuse compiler/CMake/vcpkg tools across server majors at the existing
+        # pg17 location. PostgreSQL headers and Bioseq objects stay separate.
         toolchain = _resolved(
             cache_root
             / "package-toolchains"
             / spec.distro.distro_id.value
-            / f"postgresql{spec.postgres_major}"
+            / "postgresql17"
         )
         cmake = _resolved(
             cache_root

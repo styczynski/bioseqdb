@@ -122,7 +122,11 @@ accumulate_integer_average_state(
         bioseq::postgres::support::invoke_pg_as_cpp([sum] { return int64_to_numeric(sum); });
     Numeric quotient_numeric =
         bioseq::postgres::support::invoke_pg_as_cpp([sum_numeric, count_numeric] {
+#if PG_VERSION_NUM >= 190000
+            return numeric_div_safe(sum_numeric, count_numeric, nullptr);
+#else
             return numeric_div_opt_error(sum_numeric, count_numeric, nullptr);
+#endif
         });
     return bioseq::postgres::support::numeric_result::from_numeric(quotient_numeric);
 }
@@ -136,7 +140,11 @@ numeric_average(const int128_aggregate_state_storage& state) {
         [count = state.count] { return int128_to_numeric(count); });
     Numeric quotient_numeric =
         bioseq::postgres::support::invoke_pg_as_cpp([sum_numeric, count_numeric] {
+#if PG_VERSION_NUM >= 190000
+            return numeric_div_safe(sum_numeric, count_numeric, nullptr);
+#else
             return numeric_div_opt_error(sum_numeric, count_numeric, nullptr);
+#endif
         });
     return bioseq::postgres::support::numeric_result::from_numeric(quotient_numeric);
 }

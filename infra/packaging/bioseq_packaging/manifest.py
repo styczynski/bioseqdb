@@ -201,7 +201,7 @@ def _validate_validation(value: object, *, label: str) -> None:
         "six_artifacts": True,
         "rpath_absent": True,
         "compiler_runtime_safe": True,
-        "template_flatten_profile": "dna4_uint64",
+        "template_flatten_profile": "all_alphabets_uint64",
     }
     if any(validation.get(key) != expected for key, expected in required.items()):
         raise ManifestError(f"{label} did not pass every package assertion")

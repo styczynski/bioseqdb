@@ -87,7 +87,7 @@ void force_database_definition_guard() noexcept {
 }
 
 [[nodiscard]] bool stage_syscache_dependency(
-    int cache_id, Oid object_id) noexcept {
+    SysCacheIdentifier cache_id, Oid object_id) noexcept {
   const std::uint32_t hash_value = GetSysCacheHashValue1(
       cache_id, ObjectIdGetDatum(object_id));
   const object_definition_mutation mutation =

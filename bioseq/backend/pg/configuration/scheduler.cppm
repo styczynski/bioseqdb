@@ -45,7 +45,7 @@ struct settings final {
         [[bioseq_sql::guc]]
         static inline bioseq::postgres::support::postgres_enum_storage<pipeline_concurrency_mode>
             mode = bioseq::postgres::support::postgres_enum_storage<pipeline_concurrency_mode>{
-                pipeline_concurrency_mode::single_thread};
+                pipeline_concurrency_mode::task_parallel};
     };
 
     /** Owns PostgreSQL parallel-worker composition settings. */

@@ -308,7 +308,9 @@ export {
         rel->partial_pathlist = NIL;
         rel->cheapest_startup_path = nullptr;
         rel->cheapest_total_path = nullptr;
+#if PG_VERSION_NUM < 190000
         rel->cheapest_unique_path = nullptr;
+#endif
         rel->cheapest_parameterized_paths = NIL;
         for (Path* owner : owners)
             add_path(rel, owner);

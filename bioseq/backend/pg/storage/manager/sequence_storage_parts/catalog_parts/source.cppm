@@ -435,7 +435,8 @@ inline void validate_bound_read_catalog_contract(
     const bool exact =
         OidIsValid(expected_primary) && primary != nullptr &&
         RelationGetRelid(primary) == expected_primary &&
-        RelationGetPrimaryKeyIndex(relation) == expected_primary && index_form != nullptr &&
+        bioseq::postgres::support::relation_immediate_primary_key_index(relation) == expected_primary &&
+        index_form != nullptr &&
         index_form->indrelid == RelationGetRelid(relation) &&
         primary->rd_rel->relkind == RELKIND_INDEX && primary->rd_rel->relam == BTREE_AM_OID &&
         index_form->indisprimary && index_form->indisunique && index_form->indimmediate &&

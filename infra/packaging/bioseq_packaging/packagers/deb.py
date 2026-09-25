@@ -18,6 +18,7 @@ from ..config import (
     PACKAGE_HOMEPAGE,
     PACKAGE_MAINTAINER,
     SOURCE_PROJECTION_EXCLUDES,
+    package_build_parallelism,
 )
 from ..containers import native_container_plan
 from ..model import (
@@ -38,9 +39,19 @@ if (( ${#build_dependencies[@]} == 0 )); then
   exit 64
 fi
 
-apt-get update
-apt-get install -y --no-install-recommends \
-  build-essential ca-certificates debhelper rsync "${build_dependencies[@]}"
+# An updated security archive can remove a package while an intermediary still
+# serves the previous index. Refresh indexes before bounded download retries;
+# never restart compilation or hide a permanent dependency failure.
+for dependency_attempt in 1 2 3; do
+  apt-get -o Acquire::Retries=3 -o Acquire::http::No-Cache=true \
+    -o Acquire::https::No-Cache=true update
+  if apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+      build-essential ca-certificates debhelper rsync "${build_dependencies[@]}"; then
+    break
+  fi
+  if (( dependency_attempt == 3 )); then exit 100; fi
+  printf 'Refreshing package indexes after dependency download failure\n' >&2
+done
 
 /source/infra/packaging/scripts/prepare_build_environment.sh
 
@@ -126,7 +137,7 @@ def template_variables(cell: CellContext) -> dict[str, object]:
         "homepage": PACKAGE_HOMEPAGE,
         "architecture": _debian_architecture(cell),
         "postgres_major": cell.postgres_major,
-        "template_flatten_profile": "dna4_uint64",
+        "template_flatten_profile": "all_alphabets_uint64",
         "build_dependencies": list(cell.distro.build_dependencies),
         "runtime_dependencies": list(_runtime_dependencies(cell)),
     }
@@ -213,9 +224,9 @@ def build_environment(cell: CellContext) -> dict[str, str]:
         "BIOSEQ_ARCHITECTURE": _enum_value(cell.request.architecture),
         "BIOSEQ_BUILD_DEPENDENCIES": "\n".join(cell.distro.build_dependencies),
         "BIOSEQ_DISTRO_ID": cell.distro.distro_id,
-        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
+        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
         "BIOSEQ_PACKAGE_NAME": cell.package_name,
-        "BIOSEQ_PACKAGE_PARALLELISM": "4",
+        "BIOSEQ_PACKAGE_PARALLELISM": str(package_build_parallelism()),
         "BIOSEQ_PACKAGE_VERSION": cell.package_version,
         "BIOSEQ_POSTGRES_MAJOR": str(cell.postgres_major),
         "BIOSEQ_SOURCE_PROJECTION_EXCLUDES": "\n".join(

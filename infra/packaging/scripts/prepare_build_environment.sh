@@ -22,8 +22,8 @@ die() {
   exit 1
 }
 
-[[ "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE:-}" == "dna4_uint64" ]] \
-  || die "BIOSEQ_TEMPLATE_FLATTEN_PROFILE must be dna4_uint64"
+[[ "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE:-}" == "all_alphabets_uint64" ]] \
+  || die "BIOSEQ_TEMPLATE_FLATTEN_PROFILE must be all_alphabets_uint64"
 [[ "${BIOSEQ_POSTGRES_MAJOR:-}" =~ ^[0-9]+$ ]] \
   || die "BIOSEQ_POSTGRES_MAJOR must be a decimal major version"
 (( BIOSEQ_POSTGRES_MAJOR >= 17 )) \
@@ -61,7 +61,7 @@ install_debian_dependencies() {
   apt-get install -y --no-install-recommends \
     autoconf automake autoconf-archive bison build-essential ca-certificates \
     cpio curl flex gettext git gnupg libssl-dev libtool libltdl-dev m4 \
-    libcap2-bin ninja-build pkg-config python3 rsync tar unzip util-linux wget xz-utils \
+    libcap2-bin ninja-build pkg-config procps python3 rsync tar unzip util-linux wget xz-utils \
     zip zlib1g-dev binutils \
     libx11-dev libxext-dev libxrandr-dev libxrender-dev libxi-dev \
     libxfixes-dev libxcursor-dev libxinerama-dev libxcb1-dev \
@@ -72,11 +72,23 @@ install_debian_dependencies() {
     -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
   [[ -n "${VERSION_CODENAME:-}" ]] \
     || die "VERSION_CODENAME is required to configure the PostgreSQL repository"
+  local pgdg_suite="${VERSION_CODENAME}-pgdg"
+  local pgdg_components=main
+  local -a pgdg_install_options=()
+  if (( BIOSEQ_POSTGRES_MAJOR >= 19 )); then
+    pgdg_components="main ${BIOSEQ_POSTGRES_MAJOR}"
+  fi
+  if (( BIOSEQ_POSTGRES_MAJOR >= 20 )); then
+    pgdg_suite="${VERSION_CODENAME}-pgdg-snapshot"
+    # Snapshot packages have a lower default APT priority. Select their matching
+    # libpq runtime/development packages too, not the distro's older candidate.
+    pgdg_install_options=(-t "${pgdg_suite}")
+  fi
   printf '%s\n' \
-    "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+    "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${pgdg_suite} ${pgdg_components}" \
     > /etc/apt/sources.list.d/pgdg.list
   apt-get update
-  apt-get install -y --no-install-recommends \
+  apt-get install -y --no-install-recommends "${pgdg_install_options[@]}" \
     "postgresql-${BIOSEQ_POSTGRES_MAJOR}" \
     "postgresql-server-dev-${BIOSEQ_POSTGRES_MAJOR}" libpq-dev
 }
@@ -85,25 +97,36 @@ install_fedora_dependencies() {
   dnf install -y --allowerasing \
     autoconf autoconf-archive automake bison binutils ca-certificates cpio curl findutils flex \
     gcc gcc-c++ gettext git gzip kernel-headers libcap libtool m4 make ninja-build openssl-devel \
-    patch perl pkgconf-pkg-config python3 rpm-build rsync tar unzip util-linux wget \
+    patch perl pkgconf-pkg-config procps-ng python3 rpm-build rsync tar unzip util-linux wget \
     xz zip zlib-devel \
     libX11-devel libXext-devel libXrandr-devel libXrender-devel libXi-devel \
     libXfixes-devel libXcursor-devel libXinerama-devel libxcb-devel \
     libxkbcommon-devel wayland-devel wayland-protocols-devel
 
-  # Fedora's versioned server headers and pg_config are supplied by the
-  # official server-devel package. Do not fall back to PGDG here: Fedora 44's
-  # PGDG repository does not publish the requested aarch64 repo RPM.
-  dnf install -y --allowerasing \
+  # Stable Fedora packages include both native architectures. Prerelease
+  # servers may instead be published by PGDG; use only a matching Fedora/
+  # architecture repository and retain RPM signature verification.
+  if dnf install -y --allowerasing \
     "postgresql${BIOSEQ_POSTGRES_MAJOR}-server-devel" \
-    "postgresql${BIOSEQ_POSTGRES_MAJOR}-server"
+    "postgresql${BIOSEQ_POSTGRES_MAJOR}-server"; then
+    return
+  fi
+  (( BIOSEQ_POSTGRES_MAJOR >= 19 )) || die "requested Fedora PostgreSQL packages are unavailable"
+  local pgdg_url="https://download.postgresql.org/pub/repos/yum/testing/${BIOSEQ_POSTGRES_MAJOR}/fedora/fedora-${VERSION_ID}-$(uname -m)"
+  curl -fsSL --retry 3 "${pgdg_url}/repodata/repomd.xml" >/dev/null \
+    || die "no native PGDG prerelease repository at ${pgdg_url}"
+  dnf -y \
+    --repofrompath="bioseq-pgdg,${pgdg_url}" \
+    --setopt=bioseq-pgdg.gpgcheck=1 \
+    --setopt=bioseq-pgdg.gpgkey=https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-Fedora \
+    install --allowerasing "postgresql${BIOSEQ_POSTGRES_MAJOR}-devel" "postgresql${BIOSEQ_POSTGRES_MAJOR}-server"
 }
 
 install_opensuse_dependencies() {
   zypper --non-interactive install -y --allow-vendor-change \
     autoconf autoconf-archive automake bison binutils ca-certificates cpio curl flex gcc gcc-c++ \
     gettext-tools git gzip libcap-progs libopenssl-devel libtool m4 make ninja patch \
-    pkg-config python3 rpm-build rsync tar unzip util-linux wget xz zip \
+    pkg-config procps python3 rpm-build rsync tar unzip util-linux wget xz zip \
     libX11-devel libXext-devel libXrandr-devel libXrender-devel libXi-devel \
     libXfixes-devel libXcursor-devel libXinerama-devel libxcb-devel \
     libxkbcommon-devel wayland-devel wayland-protocols-devel
@@ -113,7 +136,7 @@ install_opensuse_dependencies() {
       "postgresql${BIOSEQ_POSTGRES_MAJOR}-server-devel" \
       "postgresql${BIOSEQ_POSTGRES_MAJOR}-server"; then
     zypper --non-interactive addrepo --refresh \
-      "https://download.opensuse.org/repositories/server:database:postgresql/${VERSION_ID}/server:database:postgresql.repo" \
+      "https://download.opensuse.org/repositories/server:/database:/postgresql/${VERSION_ID}/" \
       bioseq-postgresql
     zypper --gpg-auto-import-keys --non-interactive refresh
     zypper --non-interactive install -y --allow-vendor-change \
@@ -126,7 +149,7 @@ install_opensuse_dependencies() {
 install_arch_dependencies() {
   pacman -Syu --noconfirm --needed \
     autoconf autoconf-archive automake base-devel binutils bison ca-certificates cpio curl flex \
-    gettext git libcap libtool m4 ninja openssl patch pkgconf python rsync tar unzip \
+    gettext git libcap libtool m4 ninja openssl patch pkgconf procps-ng python rsync tar unzip \
     util-linux wget xz zip zlib libx11 libxext libxrandr libxrender libxi \
     libxfixes libxcursor libxinerama libxcb libxkbcommon wayland-protocols
 
@@ -147,6 +170,12 @@ case "${distro_id}" in
   arch|archarm) install_arch_dependencies ;;
   *) die "unsupported distro ID ${distro_id}" ;;
 esac
+
+# Reject unavailable server majors before downloading compiler toolchains or
+# populating persistent caches. Never substitute the distro's current major.
+pg_config_path="$(BIOSEQ_POSTGRES_MAJOR="${BIOSEQ_POSTGRES_MAJOR}" \
+  python3 /source/infra/packaging/scripts/resolve_pg_config.py)"
+[[ -x "${pg_config_path}" ]] || die "resolved pg_config is not executable"
 
 # Arch's makepkg drops to an unprivileged user. Give only the ephemeral chrt
 # executable the capability it needs so the launcher can set SCHED_RR/1 and
@@ -306,6 +335,16 @@ install_vcpkg() {
 
 install_cmake
 install_llvm
+
+# Catch removed PostgreSQL headers and C++ boundary declarations before the
+# expensive dependency/code-generator build. This runs inside the MCP-owned
+# native package cell against its exact selected server headers.
+"${llvm_root}/bin/clang++" -std=gnu++26 -stdlib=libc++ -x c++ -fsyntax-only \
+  -Wno-pragma-once-outside-header \
+  -I"$("${pg_config_path}" --includedir-server)" \
+  -I"$("${pg_config_path}" --includedir)" \
+  /source/bioseq/backend/pg/include/bioseq/pg_compat.h
+
 install_vcpkg
 
 # This bind mount lives on the builder's persistent EBS volume. Package tools
@@ -313,10 +352,6 @@ install_vcpkg
 # writable before rpmbuild/dpkg-buildpackage/makepkg starts.
 mkdir -p "${cmake_cache_root}/build"
 chmod -R a+rwX "${cmake_cache_root}"
-
-pg_config_path="$(BIOSEQ_POSTGRES_MAJOR="${BIOSEQ_POSTGRES_MAJOR}" \
-  python3 /source/infra/packaging/scripts/resolve_pg_config.py)"
-[[ -x "${pg_config_path}" ]] || die "resolved pg_config is not executable"
 
 mkdir -p /opt/bioseq-package-toolchain/state
 printf '%s\n' "${pg_config_path}" \

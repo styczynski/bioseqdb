@@ -572,13 +572,26 @@ def _assert_authored_content_contract(version: str) -> None:
            "cannot resolve canonical k_hoe_probe_sequence source")
 
     tutorial = tutorial_path.read_text(encoding="utf-8")
+    runnable_match = re.search(
+        r"```sql runnable id=canonical_mmsearch[^\n]*\n(.*?)\n```",
+        tutorial, re.S)
+    _check(runnable_match is not None,
+           "similarity tutorial has no canonical runnable search")
+    runnable_source = runnable_match.group(1)
+    fixture_insert = re.search(
+        r"INSERT INTO tutorial_mmsearch\b.*?;", runnable_source, re.S)
+    _check(fixture_insert is not None,
+           "similarity tutorial has no canonical target INSERT")
     for target, _secondary_probe in fixture_pairs:
-        _check(tutorial.count(target) == 1,
+        _check(fixture_insert.group(0).count(f"'{target}'") == 1,
                "similarity tutorial does not copy each canonical hoe target exactly once")
     probe = probe_match.group(1)
     _check(tutorial.count(f"'{probe}'") >= 2,
-           "similarity tutorial must use exact k_hoe_probe_sequence in its "
-           "executed and visible SQL")
+           "similarity tutorial must retain the canonical short-motif examples")
+    visible_query = runnable_source.split("-- bioseq:visible", 1)[-1].split(
+        "-- bioseq:teardown", 1)[0]
+    _check(visible_query.count(f"'{fixture_pairs[0][0]}'") == 2,
+           "similarity tutorial must explain and execute the same full-read query")
     for assertion in (
         "EXPLAIN (VERBOSE, COSTS OFF)", "public.mmsearch(",
         "The first result shows whether the planner selected `BioseqScan`",
@@ -631,6 +644,7 @@ def _assert_authored_content_contract(version: str) -> None:
         "bioseq.list_seq_storage_shards", "alter_bioseq_table_set",
         "alter_bioseq_table_reset", "bioseq.column_cache.capacity_mb",
         "bioseq.vacuum_seq_storage", "NULL and empty inputs",
+        "Administrator-only shard inspection",
     ):
         _check(spelling in columnar,
                f"columnar/vector tutorial is missing {spelling}")
@@ -656,8 +670,9 @@ def _assert_authored_content_contract(version: str) -> None:
         "minimizers_per_fragment", "minimizers_per_sequence", "symbol_counts",
         "UPDATE_ON_INSERT", "UPDATE_MANUALLY", "bioseq.list_metadata()",
         "Bioseq Fetched From Meta", "index_read_requirement => 2",
-        "Actual Target Index Source",
+        "actual_index_source=persisted",
         "bioseq.last_alignment_execution_stats()",
+        "bioseq.set_active_read_index", "administrator/policy-manager",
     ):
         _check(spelling in index_tutorial,
                f"index-lifecycle tutorial is missing {spelling}")
@@ -1136,8 +1151,9 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     ]["sql_examples"][0]
     _check("EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)"
            in columnar_example["visible_sql"]
-           and "bioseq.list_seq_storage_shards" in columnar_example["visible_sql"],
-           "columnar tutorial lost its analyzed aggregate or shard inspection")
+           and "bioseq.list_seq_storage_shards" not in columnar_example["visible_sql"],
+           "columnar tutorial must execute its analyzed aggregate without "
+           "administrator-only shard inspection")
     columnar_results = "\n".join(
         cell
         for table in _result_tables(by_slug[
@@ -1171,7 +1187,8 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     ]["sql_examples"][0]
     for spelling in (
         "bioseq.list_metadata()", "bioseq.update_index",
-        "bioseq.set_active_read_index", "index_read_requirement => 2",
+        "minimizers_per_fragment", "minimizers_per_sequence", "symbol_counts",
+        "index_read_requirement => 2",
         "bioseq.last_alignment_execution_stats()", "stage = 'query_sketch'",
     ):
         _check(spelling in index_example["visible_sql"],
@@ -1183,11 +1200,30 @@ def _load_static_contract(site: Path, base_path: str, version: str,
         for row in table
         for cell in row
     )
-    _check("Actual Target Index Source" in index_results
+    _check("Custom Scan (BioseqBatchJoin)" in index_results
+           and "require_compatible_persisted" in index_results
            and "Bioseq Fetched From Meta" in index_results
-           and "persisted" in index_results
-           and "persisted_generation_id" in index_results,
+           and "actual_index_source=persisted" in index_results,
            "index lifecycle did not capture public persisted-route evidence")
+    index_tables = _result_tables(
+        by_slug["index_lifecycle_and_metadata"].get("content", []))
+    stats_table = next((table for table in index_tables
+                        if table and table[0][0].startswith(
+                            "requested_target_index_source")), None)
+    _check(stats_table is not None and len(stats_table) == 2,
+           "index lifecycle needs one captured query-sketch statistics row")
+    stats = dict(zip(stats_table[0], stats_table[1]))
+    _check(stats.get("requested_target_index_sourcetext") == "persisted"
+           and stats.get("actual_target_index_sourcetext") == "persisted"
+           and int(stats.get("persisted_index_rowsbigint", "0")) > 0
+           and stats.get("missing_persisted_index_rowsbigint") == "0"
+           and stats.get("recomputed_target_index_rowsbigint") == "0"
+           and int(stats.get("persisted_generation_read_sessionsbigint", "0")) > 0,
+           "index lifecycle statistics do not prove persisted reads without recomputation")
+    batch_rows = re.search(
+        r"Custom Scan \(BioseqBatchJoin\).*\brows=([0-9]+)", index_results)
+    _check(batch_rows is not None and int(batch_rows.group(1)) > 0,
+           "index lifecycle must find matches through its persisted batch join")
 
     similarity_sql = by_slug["similarity_search"]["sql_examples"][0]["visible_sql"]
     required_sql = (
@@ -1245,12 +1281,17 @@ def _load_static_contract(site: Path, base_path: str, version: str,
            "EXPLAIN tutorial did not capture a formatted PostgreSQL plan table")
     explain_output = "\n".join(row[0] for row in explain_tables[0][1:])
     for label in (
-        "Custom Scan (BioseqScan)", "Bioseq Pipeline",
-        "Highway SIMD Dispatch", "Pipeline Stages",
-        "Bioseq Execution Statistics",
+        "Custom Scan (BioseqScan)", "One-to-many alignment:",
+        "Highway Compiled Targets", "Executed Architecture",
+        "| QuerySketchStage:", "| chain_stage:", "| align_stage:",
+        "* Execution statistics [", "* Index outcomes [",
     ):
         _check(label in explain_output,
                f"executed text plan is missing Bioseq section {label}")
+    scan_rows = re.search(
+        r"Custom Scan \(BioseqScan\).*\brows=([0-9]+)", explain_output)
+    _check(scan_rows is not None and int(scan_rows.group(1)) > 0,
+           "EXPLAIN tutorial must demonstrate a search that finds matches")
 
     remote_content = by_slug["remote_provider_to_search"].get("content", [])
     remote_table_nodes = [
@@ -1291,6 +1332,8 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     for slot, item in landing.items():
         _check(item.get("has_result") is True and isinstance(item.get("result"), dict),
                f"landing slot {slot} has no captured PostgreSQL result")
+        _check(bool(item["result"].get("rows")),
+               f"landing slot {slot} must demonstrate a nonempty search result")
         for column in item["result"].get("columns", []):
             _check("type_oid" not in column and bool(column.get("type_name")),
                    f"landing slot {slot} has an unresolved PostgreSQL column type")
@@ -1316,7 +1359,8 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     for spelling in (
         "CREATE TABLE run_reads", "row_no", "bigserial PRIMARY KEY",
         "run_name      name NOT NULL DEFAULT 'run_042'",
-        "SET bioseq.index.insert_maintenance.enabled = on",
+        "SET bioseq.index.insert_maintenance.enabled = off",
+        "bioseq.update_index", "minimizers_per_fragment",
         "bioseq.load", "landing_reads.fasta", "bioseq.column_mapping",
         "INSERT INTO run_reads", "public.mmsearch", "bioseq.target_start",
         "bioseq.target_end", "ORDER BY collected_on DESC, read_id",
@@ -1666,7 +1710,8 @@ def _exercise_code_entities(page, expected_ids: set[str]) -> None:
     """Verify repeatable fence entity declarations became exact in-code hover
     ranges after Prism without changing source text."""
     code = page.locator("pre code[data-entity-ranges]").first
-    _check(code.count() == 1, "required code block has no entity-range metadata")
+    _check(code.count() == 1,
+           f"{page.url}: required code block has no entity-range metadata")
     refs = code.locator("a.entity-ref[data-entity-id]")
     ids = {refs.nth(i).get_attribute("data-entity-id") or ""
            for i in range(refs.count())}
@@ -2224,12 +2269,18 @@ def _exercise_prism_pixel_contract(page, design: dict, artifact_dir: Path) -> No
     supplied terminal geometry and explicit design token palette."""
     page.set_viewport_size({"width": 1280, "height": 900})
     page.evaluate("() => document.fonts.ready")
-    pre = page.locator(".doc-code:not(:has(.anno-cards)) pre").first
-    _check(pre.count() == 1, "Prism pixel contract has no unannotated SQL component")
+    required_tokens = ("keyword", "function", "string", "operator", "punctuation")
+    # The page can start with a short SET statement. Select a real SQL sample
+    # containing the complete palette instead of depending on fence order.
+    selector = ".doc-code:not(:has(.anno-cards)) pre:has(code.language-sql)"
+    selector += "".join(f":has(.token.{kind})" for kind in required_tokens)
+    pre = page.locator(selector).first
+    _check(pre.count() == 1,
+           "Prism pixel contract has no SQL component with the complete token palette")
     pre.scroll_into_view_if_needed()
     code = pre.locator("code.language-sql")
     _check(code.count() == 1, "Prism pixel contract requires a highlighted SQL fence")
-    for token_class in ("keyword", "function", "string", "operator", "punctuation"):
+    for token_class in required_tokens:
         _check(code.locator(f".token.{token_class}").count() > 0,
                f"Prism SQL sample has no {token_class} token to validate")
 
@@ -2239,9 +2290,8 @@ def _exercise_prism_pixel_contract(page, design: dict, artifact_dir: Path) -> No
     actual = pre.screenshot(path=str(actual_path), animations="disabled")
 
     docs = design["docs"]
-    page.evaluate(
-        """({termStyle, preStyle, palette}) => {
-          const pre = document.querySelector('.doc-code:not(:has(.anno-cards)) pre');
+    pre.evaluate(
+        """(pre, {termStyle, preStyle, palette}) => {
           const figure = pre.closest('.doc-code');
           const code = pre.querySelector('code.language-sql');
           figure.style.cssText = termStyle;
@@ -2911,7 +2961,6 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _assert_tutorial_sidebar(page, base_path, version)
                 _exercise_copy(page)
                 _exercise_code_entities(page, {
-                    "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
                     "sql:function:bioseq.query_start(anyelement)",
                     "sql:function:bioseq.query_end(anyelement)",
                     "sql:function:bioseq.target_start(anyelement)",
@@ -2970,13 +3019,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                     "tutorial_explain": "reading_bioseq_explain",
                 }[label]
                 expected_code_entities = {
-                    "tutorial_columnar": {
-                        "sql:type:bioseq.seq",
-                        "sql:function:bioseq.len(bioseq.seq)",
-                    },
                     "tutorial_generation": {
-                        "sql:type:bioseq.seq",
-                        "sql:function:bioseq.len(bioseq.seq)",
                         "sql:function:bioseq.symbol_count(bioseq.seq,text)",
                     },
                     "tutorial_io": {
@@ -2987,7 +3030,6 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                         "sql:function:bioseq.target_end(anyelement)",
                     },
                     "tutorial_index": {
-                        "sql:type:bioseq.seq",
                         "sql:function:$extension.mmsearch("
                         "bioseq.seq,bioseq.seq,$extension.bioseq_aligner_options)",
                         "sql:function:bioseq.target_start(anyelement)",

@@ -423,7 +423,12 @@ next_pinned_minimizer_generation_projected_row_batch_or_error(
         for (std::size_t ordinal = 0; ordinal < slots.size(); ++ordinal) {
             TupleTableSlot* slot = slots[ordinal];
             HeapTuple tuple = nullptr;
-            if (index_getnext_slot(scan->iscan, ForwardScanDirection, slot)) {
+#if PG_VERSION_NUM >= 200000
+            if (table_index_getnext_slot(scan->iscan, ForwardScanDirection, slot))
+#else
+            if (index_getnext_slot(scan->iscan, ForwardScanDirection, slot))
+#endif
+            {
                 tuple = ExecFetchSlotHeapTuple(slot, false, nullptr);
             }
             if (HeapTupleIsValid(tuple) && scan->iscan->xs_recheck) {

@@ -2876,7 +2876,7 @@ inline int invoke() {
     const dependency_compilation_environment partition_prepared =
         prepare(
             toolchain,
-            {partition_consumer},
+            {partitioned_primary, partition_consumer},
             partition_database,
             partition_pcm_root);
     require(
@@ -2910,10 +2910,36 @@ inline int invoke() {
         partition_prepared,
         partition_owned_database,
         partition_manifest);
+    const module_graph partition_graph = scan_module_graph_from_database(
+        {partitioned_primary, partition_consumer},
+        partition_owned_database,
+        "production",
+        partition_pcm_root);
+    const auto primary_graph = std::ranges::find(
+        partition_graph.units,
+        std::string{"fixture.partitioned"},
+        &module_graph_unit::provided_module);
+    require(
+        primary_graph != partition_graph.units.end()
+            && primary_graph->exported_imports
+                == std::vector<std::string>{"fixture.partitioned:entities"}
+            && primary_graph->internal_imports
+                == std::vector<std::string>{"fixture.partitioned:implementation"},
+        "module graph lost an export-import partition or exported a private import");
+    const auto consumer_graph = std::ranges::find(
+        partition_graph.units,
+        std::string{"fixture.partition_consumer"},
+        &module_graph_unit::provided_module);
+    require(
+        consumer_graph != partition_graph.units.end()
+            && consumer_graph->exported_imports.empty()
+            && consumer_graph->internal_imports
+                == std::vector<std::string>{"fixture.partitioned"},
+        "module graph leaked transitive re-exports into the importing unit");
     const dependency_compilation_validation partition_validation =
         validate(
             toolchain,
-            {partition_consumer},
+            {partitioned_primary, partition_consumer},
             partition_owned_database,
             partition_pcm_root,
             partition_manifest);

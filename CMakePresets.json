@@ -482,7 +482,7 @@
         "name": "website-aws-x64-linux",
         "inherits": "aws-x64-linux",
         "displayName": "AWS Clang static documentation website build",
-        "description": "Clang-22 production Bioseq plus bioseq_cache tree that enables the static documentation website. The website structural pass consumes this tree's Clang-22 BMIs/compile database; the isolated code generator itself still builds with GCC 16.1 via bioseq_codegen.cmake. Papers are off; one private PostgreSQL cluster qualifies both production extensions for runnable SQL.",
+        "description": "Clang-22 production Bioseq, cache and isolated code generator for the static website. All E2E alphabets, O3, and a private PostgreSQL cluster for runnable SQL; papers are off.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "BIOSEQ_BUILD_CORE": "ON",
@@ -493,7 +493,13 @@
           "BIOSEQ_TEST_INDEXES": "OFF",
           "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
           "BIOSEQ_WEBSITE_VERSION": "v0.1",
-          "BIOSEQ_WEBSITE_VERSION_ARTIFACTS": ""
+          "BIOSEQ_WEBSITE_VERSION_ARTIFACTS": "",
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
+          "BIOSEQ_CODEGEN_C_COMPILER": "/opt/bioseq-package-toolchain/llvm-22/bin/clang",
+          "BIOSEQ_CODEGEN_CXX_COMPILER": "/opt/bioseq-package-toolchain/llvm-22/bin/clang++",
+          "BIOSEQ_CODEGEN_CLANG_BINARY": "/opt/bioseq-package-toolchain/llvm-22/bin/clang++",
+          "BIOSEQ_CODEGEN_LLVM_CONFIG": "/opt/bioseq-package-toolchain/llvm-22/bin/llvm-config",
+          "BIOSEQ_HEAVY_JOBS": "1"
         }
       },
       {

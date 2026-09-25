@@ -1,7 +1,7 @@
 [mcp_servers.bioseq-build]
 args = ["build_mcp/server.py"]
 command = "python3"
-cwd = "/home/ubuntu/bioseqdb"
+cwd = "/Users/styczynski/Code/bioseqdb"
 enabled = true
 
 [mcp_servers.bioseq-build.tools.doc_read]

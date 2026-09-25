@@ -410,12 +410,13 @@ same `dna4` type for stored-target and stored-query joins.
 ## Round-tripping sequence values
 
 Searchable sequence tables use the `bioseq` table access method. The example
-below creates a small table, keeps its indexes current during inserts, and reads
-the values back with their length in biological symbols using `bioseq.len`.
+below creates a small table with insert-time index maintenance disabled and
+reads the values back with their length in biological symbols using `bioseq.len`.
+This round-trip does not need a search index.
 
 ```sql runnable id=sequence_roundtrip timeout=10s entity="sql:function:bioseq.len(bioseq.seq)"
 -- bioseq:setup
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 CREATE TABLE tutorial_reads (
     id integer PRIMARY KEY,
     sequence bioseq.seq('dna4', 16)
@@ -449,7 +450,7 @@ CREATE TABLE tutorial_loaded_reads (
   seq bioseq.seq('dna4', 64)
 ) USING bioseq;
 
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 
 -- bioseq:visible
 SELECT bioseq.load(
@@ -485,9 +486,9 @@ The dedicated FASTA/FASTQ tutorial covers header dialects, gzip, transactions,
 and the distinction between the SQL streaming reader and the separate C++
 batch reader.
 
-For a large file, decide whether insert maintenance stays on during the load or
-whether one `bioseq.update_index` runs afterward. The fast read, search, and
-write tutorial shows both patterns.
+For a large file, leave legacy insert maintenance off and run one
+`bioseq.update_index` after the load commits. The fast read, search, and write
+tutorial explains transient searches and explicit grouped-index publication.
 
 ## Inspect metadata work with EXPLAIN
 

@@ -313,7 +313,13 @@ HeapTuple copy_vector_heap_tuple(TupleTableSlot*) {
 }
 
 /** Rejects conversion of a vector batch to a minimal tuple. */
-MinimalTuple copy_vector_minimal_tuple(TupleTableSlot*) {
+MinimalTuple copy_vector_minimal_tuple(TupleTableSlot*
+#if PG_VERSION_NUM >= 180000
+    // PG18 adds space before a copied tuple. Batch-to-scalar conversion is
+    // unsupported regardless of that space, exactly as on PG17.
+    , Size
+#endif
+) {
     ereport(ERROR,
             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
              errmsg("a vector batch slot cannot be converted to a minimal tuple")));
@@ -346,7 +352,11 @@ export [[nodiscard]] bool is_vector_tuple_table_slot(const TupleTableSlot* slot)
 /** Allocate a vector slot with one owned column per tuple attribute. */
 export TupleTableSlot* create_vector_tuple_table_slot(TupleDesc tuple_desc) {
     TupleTableSlot* slot =
-        MakeTupleTableSlot(CreateTupleDescCopy(tuple_desc), vector_tuple_slot_ops());
+        MakeTupleTableSlot(CreateTupleDescCopy(tuple_desc), vector_tuple_slot_ops()
+#if PG_VERSION_NUM >= 190000
+                           , 0  // Preserve the pre-PG19 slot flags.
+#endif
+        );
 
     TupleDesc slot_tuple_descriptor = slot->tts_tupleDescriptor;
 

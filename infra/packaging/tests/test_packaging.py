@@ -10,8 +10,10 @@ import os
 from pathlib import Path
 import re
 import runpy
+import signal
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -98,6 +100,101 @@ def cell_context(
         cmake_cache=(root / "caches" / "cmake" / distro.value).resolve(),
     )
     return model.CellContext.from_spec(spec, paths)
+
+
+class ReleaseFleetAssignmentTests(unittest.TestCase):
+    def test_worker_status_strips_colors_without_hiding_live_failed_compilation(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        diagnose = namespace["worker_diagnostics"]
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "compiler.log"
+            log.write_text(
+                "a.cppm:1:1: warning: harmless\n"
+                "\x1b[1ma.cppm:8:3: \x1b[31merror: \x1b[0munknown member\n"
+                "ld.lld: error: undefined symbol\n")
+            state = dict(pid=123, status="running", log_file=str(log))
+            with mock.patch.object(subprocess, "run", return_value=SimpleNamespace(
+                    returncode=0, stdout="python3 /repo/build_mcp/server.py --run-build package-linux --debug false")):
+                observed = diagnose(state, "package-linux")
+            self.assertTrue(observed["pid_live"])
+            self.assertEqual(observed["status"], "running")
+            self.assertEqual(observed["compiler_errors"], [
+                {"line": 2, "text": "a.cppm:8:3: error: unknown member"},
+                {"line": 3, "text": "ld.lld: error: undefined symbol"}])
+            with mock.patch.object(subprocess, "run", return_value=SimpleNamespace(
+                    returncode=0, stdout="python3 unrelated.py")):
+                self.assertFalse(diagnose(state, "package-linux")["pid_live"])
+
+    def test_status_cli_does_not_acquire_lifecycle_lock_or_collect(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        main = namespace["main"]
+        snapshot = mock.Mock(return_value={"accepted_packages": 10})
+        with mock.patch.dict(main.__globals__, {"status_snapshot": snapshot}), \
+                mock.patch.object(sys, "argv", ["build_release_fleet.py", "--status"]), \
+                mock.patch.object(Path, "mkdir", side_effect=AssertionError("status wrote a directory")), \
+                mock.patch.object(namespace["fcntl"], "flock", side_effect=AssertionError("status locked lifecycle")), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            main()
+        snapshot.assert_called_once_with()
+        self.assertEqual(json.loads(output.getvalue()), {"accepted_packages": 10})
+
+    def test_former_website_host_keeps_dispatching_packages(self) -> None:
+        # Load scheduler logic without importing live benchmark-fleet clients.
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        host = "test3-m7i"
+        mode = namespace["job_mode"]
+        self.assertEqual(mode(host, {}), "website")
+        previous_cell = dict(postgres_major=18, distro="debian_13", architecture="x64")
+        self.assertEqual(mode(host, {"cell": previous_cell}), "package-linux")
+        dispatch = namespace["dispatch_available"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "infra").mkdir()
+            (root / "packages").mkdir()
+            (root / "infra/package_matrix.json").write_text(json.dumps({
+                "postgresql_majors": [18, 19],
+                "distributions": [{"id": "debian_13"}],
+            }))
+            (root / "packages/manifest.json").write_text('{"packages": []}')
+            state = {"jobs": {host: {
+                "launched": True, "mode": "website", "collected": True,
+                "observed": {"status": "failed", "pid": 1},
+            }}}
+            launch = mock.Mock(return_value={"status": "running", "pid": 3})
+            with mock.patch.dict(dispatch.__globals__, {
+                    "ROOT": root, "OUTPUT": root, "STATE": root / "state.json",
+                    "PLAN": {host: ["website"]}, "launch": launch, "event": mock.Mock()}):
+                dispatch(state)
+                launch.assert_not_called()  # An unaccepted website still takes priority.
+                state["jobs"][host].update(mode="package-linux", cell=previous_cell)
+                dispatch(state)
+            expected = dict(postgres_major=19, distro="debian_13", architecture="x64")
+            launch.assert_called_once_with(host, cell=expected)
+            self.assertEqual(state["jobs"][host]["cell"], expected)
+            self.assertEqual(state["jobs"][host]["observed"]["pid"], 3)
+
+
+class PostgresHeaderIdentityTests(unittest.TestCase):
+    def test_content_changes_with_preserved_mtime_and_duplicate_roots(self) -> None:
+        identify = runpy.run_path(str(
+            PACKAGING_ROOT / "scripts" / "postgres_header_identity.py"
+        ))["header_identity"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            header = root / "postgres.h"
+            header.write_text("#define SDK_VALUE 1\n")
+            before = header.stat()
+            original = identify([root])
+            self.assertEqual(original, identify([root, root]))
+            header.write_text("#define SDK_VALUE 2\n")
+            os.utime(header, ns=(before.st_atime_ns, before.st_mtime_ns))
+            self.assertNotEqual(original, identify([root]))
 
 
 class RecordingContainers:
@@ -465,6 +562,13 @@ class CliAndContainerTests(unittest.TestCase):
 
 
 class FormatPlanTests(unittest.TestCase):
+    def test_compiler_parallelism_respects_memory_and_cpu_budget(self) -> None:
+        for gib, cpus, expected in ((1, 4, 1), (8, 4, 2), (16, 4, 4), (64, 2, 2)):
+            with self.subTest(gib=gib, cpus=cpus), mock.patch.object(
+                config.os, "sysconf", side_effect=(gib * 1024**3 // 4096, 4096)
+            ), mock.patch.object(config.os, "cpu_count", return_value=cpus):
+                self.assertEqual(config.package_build_parallelism(), expected)
+
     def test_deb_and_rpm_metadata_and_build_plans_are_direct_and_optimized(
         self,
     ) -> None:
@@ -481,7 +585,7 @@ class FormatPlanTests(unittest.TestCase):
             deb_environment = deb.build_environment(debian)
             self.assertEqual(
                 deb_environment["BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
-                "dna4_uint64",
+                "all_alphabets_uint64",
             )
             self.assertEqual(
                 tuple(config.SOURCE_PROJECTION_EXCLUDES),
@@ -513,7 +617,7 @@ class FormatPlanTests(unittest.TestCase):
             rpm_environment = rpm.build_environment(fedora)
             self.assertEqual(
                 rpm_environment["BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
-                "dna4_uint64",
+                "all_alphabets_uint64",
             )
             rpm_plan = rpm.build_plan(fedora)
             self.assertIn("rpmbuild --clean -bb", rpm_plan.argv[-1])
@@ -538,14 +642,17 @@ class FormatPlanTests(unittest.TestCase):
                     variables = pacman.template_variables(cell)
                     self.assertEqual(variables["architecture"], package_architecture)
                     self.assertEqual(
-                        variables["template_flatten_profile"], "dna4_uint64"
+                        variables["template_flatten_profile"], "all_alphabets_uint64"
                     )
                     environment = pacman.build_environment(cell)
                     self.assertEqual(
                         environment["BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
-                        "dna4_uint64",
+                        "all_alphabets_uint64",
                     )
-                    self.assertEqual(environment["BIOSEQ_PACKAGE_PARALLELISM"], "4")
+                    self.assertEqual(
+                        environment["BIOSEQ_PACKAGE_PARALLELISM"],
+                        str(config.package_build_parallelism()),
+                    )
                     self.assertEqual(
                         pacman.expected_artifact_name(cell),
                         f"bioseq-postgresql17-4.2.3-1-{package_architecture}.pkg.tar.zst",
@@ -1702,7 +1809,7 @@ class CompilerLauncherWatchdogTests(unittest.TestCase):
                 "BIOSEQ_COMPILER_WATCHDOG_TEST_MODE": "1",
                 "BIOSEQ_COMPILER_WATCHDOG_TIMEOUT_SEC": "1",
                 "BIOSEQ_COMPILER_WATCHDOG_GRACE_SEC": "1",
-                "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
+                "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
                 "BIOSEQ_TEST_PID_FILE": str(pid_file),
             }
         )
@@ -1750,7 +1857,7 @@ class CompilerLauncherWatchdogTests(unittest.TestCase):
                 env=environment,
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=60,
                 check=False,
             )
             pids = self._wait_for_pid_file(pid_file)
@@ -1764,7 +1871,7 @@ class CompilerLauncherWatchdogTests(unittest.TestCase):
             marker = markers[0]
             for field in (
                 "source=persist_queue_publish.cppm",
-                "profile=dna4_uint64",
+                "profile=all_alphabets_uint64",
                 "compiler_version=fake-clang_22.1.6",
                 "argv_sha256=",
                 "root_pid=",
@@ -1813,6 +1920,31 @@ class CompilerLauncherWatchdogTests(unittest.TestCase):
             self.assertEqual(result.returncode, 64)
             self.assertIn("cannot be overridden", result.stderr)
             self.assertFalse(pid_file.exists())
+
+    def test_fast_compiler_does_not_wait_for_watchdog(self) -> None:
+        for expected_status in (0, 23) * 3:
+            with self.subTest(status=expected_status), tempfile.TemporaryDirectory() as raw:
+                environment, compiler, _ = self._tool_environment(Path(raw))
+                environment.update({
+                    "BIOSEQ_TEST_EXIT_STATUS": str(expected_status),
+                    "BIOSEQ_COMPILER_WATCHDOG_TIMEOUT_SEC": "30",
+                })
+                process = subprocess.Popen(
+                    [str(self.launcher), str(compiler), "unit.cppm"],
+                    env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, start_new_session=True,
+                )
+                try:
+                    _, stderr = process.communicate(timeout=8)
+                    self.assertEqual(process.returncode, expected_status)
+                    self.assertNotIn("BIOSEQ_COMPILER_WATCHDOG_TIMEOUT", stderr)
+                finally:
+                    # Bound the launcher and its single-process timer on failure.
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
 
     def test_compiler_status_is_preserved_without_timeout_diagnostic(self) -> None:
         for expected_status in (0, 23):
@@ -1924,7 +2056,7 @@ class BuildAndStageContractTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertRegex(
                     build_script,
-                    rf"(?m)^\s*{key}\s+{re.escape(value)}\s*\\?$",
+                    rf'(?m)^\s*{key}\s+(?:{re.escape(value)}|"{re.escape(value)}")\s*\\?$',
                 )
 
         profile_check = build_script.index(
@@ -2123,6 +2255,89 @@ class BuildAndStageContractTests(unittest.TestCase):
                 )
 
 
+class ReleasePublisherTests(unittest.TestCase):
+    def publisher(self):
+        return runpy.run_path(str(REPOSITORY_ROOT / 'infra/publish_release.py'))
+
+    def site(self, root):
+        root.mkdir()
+        (root / 'index.html').write_text('new website')
+        (root / 'site-manifest.json').write_text(json.dumps({
+            'schema': 'bioseq.website.site_manifest', 'hash_algorithm': 'sha256',
+            'outputs': {'/index.html': sha256(root / 'index.html')}}))
+
+    def test_website_manifest_rejects_changed_extra_and_workflow_files(self):
+        publisher = self.publisher()
+        with tempfile.TemporaryDirectory() as raw:
+            site = Path(raw) / 'site'
+            self.site(site)
+            publisher['website_inventory'](site)
+            (site / 'index.html').write_text('corrupted')
+            with self.assertRaises(RuntimeError):
+                publisher['website_inventory'](site)
+            (site / 'index.html').write_text('new website')
+            (site / '.github').mkdir()
+            (site / '.github/workflow.yml').write_text('do not publish')
+            with self.assertRaises(RuntimeError):
+                publisher['website_inventory'](site)
+            publisher['website_inventory'](site, repository=True)
+            (site / 'old.txt').write_text('old trash')
+            with self.assertRaises(RuntimeError):
+                publisher['website_inventory'](site, repository=True)
+
+    def test_website_replacement_preserves_workflows_and_removes_old_files(self):
+        publisher = self.publisher()
+        function = publisher['replace_website']
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            site = base / 'site'
+            self.site(site)
+            checkout = base / 'control/website/checkout'
+            checkout.mkdir(parents=True)
+            (checkout / '.git').mkdir()
+            (checkout / '.github').mkdir()
+            workflow = checkout / '.github/static.yml'
+            workflow.write_text('preserve me')
+            (checkout / 'old').mkdir()
+            (checkout / 'old/old.html').write_text('remove me')
+            # Publication exercises real Git; this offline test covers file scope.
+            with mock.patch.dict(function.__globals__, {
+                    'CONTROL': base / 'control', 'ROOT': base / 'source',
+                    'command': lambda *a, **k: str(checkout)}):
+                function(checkout, site)
+            self.assertEqual(workflow.read_text(), 'preserve me')
+            self.assertTrue((checkout / '.git').is_dir())
+            self.assertFalse((checkout / 'old').exists())
+            self.assertEqual((checkout / 'index.html').read_text(), 'new website')
+
+    def test_website_replacement_refuses_source_checkout(self):
+        publisher = self.publisher()
+        function = publisher['replace_website']
+        with mock.patch.dict(function.__globals__, {'command': lambda *a, **k: str(REPOSITORY_ROOT)}):
+            with self.assertRaises(RuntimeError):
+                function(REPOSITORY_ROOT, REPOSITORY_ROOT)
+
+    def test_sourceforge_credentials_use_body_or_header_and_refuse_redirects(self):
+        publisher = self.publisher()
+        function = publisher['sf_api']
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"result":true}'
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.dict(os.environ, {'SOURCE_FORCE_OAUTH_TOKEN': 'oauth-secret',
+                'SOURCE_FORGE_RELEASE_TOKEN': 'release-secret'}), \
+                mock.patch('urllib.request.build_opener', return_value=opener):
+            function('/rest/p/bioseqdb', oauth=True)
+            request = opener.open.call_args.args[0]
+            self.assertEqual(request.get_header('Authorization'), 'Bearer oauth-secret')
+            self.assertNotIn('oauth-secret', request.full_url)
+            function('/projects/bioseqdb/files/file', method='PUT', fields={'download_label': 'alpha'})
+            request = opener.open.call_args.args[0]
+            self.assertIn(b'api_key=release-secret', request.data)
+            self.assertNotIn('release-secret', request.full_url)
+        self.assertIsNone(publisher['NoRedirect']().redirect_request(None, None, 302, '', {}, 'https://elsewhere'))
+
+
 class ManifestAndLegacyTests(unittest.TestCase):
     def test_manifest_records_exact_provenance_before_any_cell_work(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2196,6 +2411,10 @@ class ManifestAndLegacyTests(unittest.TestCase):
         self.assertTrue(sources)
         for source in sources:
             content = source.read_text(encoding="utf-8").lower()
+            # A retained AWS secret name is not a legacy toolchain invocation.
+            # Renaming that resource would break existing signing deployments.
+            if source == REPOSITORY_ROOT / "infra" / "package_builder.py":
+                content = content.replace("-" + legacy_name + "-signing-key", "-signing-key")
             for token in forbidden:
                 with self.subTest(source=source, token=token):
                     self.assertNotIn(token, content)

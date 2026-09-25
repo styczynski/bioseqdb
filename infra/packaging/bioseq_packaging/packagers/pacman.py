@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-from ..config import SOURCE_PROJECTION_EXCLUDES
+from ..config import SOURCE_PROJECTION_EXCLUDES, package_build_parallelism
 from ..containers import native_container_plan
 from ..model import (
     CellContext,
@@ -152,7 +152,7 @@ def template_variables(cell: CellContext) -> dict[str, object]:
         "homepage": "https://github.com/bioseq/bioseq",
         "architecture": _pacman_architecture(cell),
         "postgres_major": cell.postgres_major,
-        "template_flatten_profile": "dna4_uint64",
+        "template_flatten_profile": "all_alphabets_uint64",
         "build_dependencies": list(cell.distro.build_dependencies),
         "runtime_dependencies": list(_runtime_dependencies(cell)),
     }
@@ -165,9 +165,9 @@ def build_environment(cell: CellContext) -> dict[str, str]:
         "BIOSEQ_ARCHITECTURE": _enum_value(cell.request.architecture),
         "BIOSEQ_BUILD_DEPENDENCIES": "\n".join(cell.distro.build_dependencies),
         "BIOSEQ_DISTRO_ID": _enum_value(cell.distro.distro_id),
-        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
+        "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
         "BIOSEQ_PACKAGE_NAME": cell.package_name,
-        "BIOSEQ_PACKAGE_PARALLELISM": "4",
+        "BIOSEQ_PACKAGE_PARALLELISM": str(package_build_parallelism()),
         "BIOSEQ_PACKAGE_VERSION": cell.package_version,
         "BIOSEQ_POSTGRES_MAJOR": str(cell.postgres_major),
         "BIOSEQ_SOURCE_PROJECTION_EXCLUDES": "\n".join(

@@ -15,14 +15,16 @@ is a [[sql:bioseq.seq]] query value with the same alphabet.
 Prerequisite: [Index lifecycle, choices, and metadata](../index_lifecycle_and_metadata/)
 explains how to prepare and verify the persisted target form used here.
 
-Keep insert-time index maintenance enabled before loading rows:
+The optimized defaults use grouped-SoA indexes. Leave legacy insert-time
+maintenance disabled before loading rows:
 
 ```sql
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 ```
 
-If you disabled maintenance for a bulk import, rebuild the index before the
-search:
+After the load commits, publish the index for repeated searches. Without a
+compatible stored index, normal searches use transient preparation with the
+selected algorithm:
 
 ```sql
 SELECT bioseq.update_index(
@@ -39,9 +41,9 @@ coordinates and the alignment's CIGAR string. Those projections come from
 [[sql:bioseq.target_start]], [[sql:bioseq.target_end]], and
 [[sql:bioseq.cigar]].
 
-```sql runnable id=canonical_mmsearch timeout=15s entity="sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)" entity="sql:function:bioseq.query_start(anyelement)" entity="sql:function:bioseq.query_end(anyelement)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)" entity="sql:function:bioseq.cigar(anyelement)"
+```sql runnable id=canonical_mmsearch timeout=15s entity="sql:function:bioseq.query_start(anyelement)" entity="sql:function:bioseq.query_end(anyelement)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)" entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 SET bioseq.vectorization.enabled = on;
 CREATE TABLE tutorial_mmsearch (
   pk integer PRIMARY KEY,
@@ -63,7 +65,7 @@ WHERE organism = 'Homo sapiens'
   AND collected_on >= DATE '2025-01-01'
   AND public.mmsearch(
         seq0,
-        'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32),
+        'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 32),
         aligner_options(best_n => 3)
       );
 
@@ -80,7 +82,7 @@ WHERE organism = 'Homo sapiens'
   AND collected_on >= DATE '2025-01-01'
   AND public.mmsearch(
         seq0,
-        'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32),
+        'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 32),
         aligner_options(best_n => 3)
       )
 ORDER BY pk, target_start, target_end;
@@ -92,7 +94,13 @@ RESET bioseq.index.insert_maintenance.enabled;
 
 The first result shows whether the planner selected `BioseqScan` for this exact
 predicate. The second result contains the matching rows and their alignment
-coordinates.
+coordinates. The runnable query uses the full first read rather than only its
+short shared motif so that it can pass the default alignment filters.
+
+> [!IMPORTANT]
+> Confirm that the plan selects `BioseqScan` for this single-table search.
+> Its custom execution supplies the alignment coordinates and CIGAR; do not
+> interpret an ordinary scan as proof that the sequence-aware path ran.
 
 The query can return more than one alignment for one stored row. `best_n` limits
 the secondary alignments retained for each target. The `pk` argument passed to
@@ -106,11 +114,11 @@ The CIGAR string uses run lengths. `M` consumes query and target symbols. `I`
 consumes query symbols. `D` consumes target symbols. For example, `29M` is an
 aligned run of 29 symbols.
 
-For this fixture, the filtered query returns five rows. Targets 1 and 2 each
-return one `29M` alignment. Target 5 returns three `29M` alignments starting at
-target positions 4, 38, and 84. That is a useful first check that the client
-keeps alignment rows separate instead of silently collapsing them by primary
-key.
+The full-read fixture returns target 1 with a `93M` alignment in the captured
+result above. The other targets share only shorter motifs and need not pass
+the default alignment filters. For queries that do produce multiple matches,
+keep alignment rows separate instead of silently collapsing them by primary
+key; the returned coordinates identify each match.
 
 ## Choose alignment projections for the caller
 
@@ -201,20 +209,16 @@ PostgreSQL and Bioseq can assign the metadata and sequence work to their
 appropriate paths. Explain the final statement with representative parameter
 types and table statistics because selectivity affects plan choice.
 
-## Refresh planner statistics after a load
+## Planner statistics: current limitation
 
-Run PostgreSQL `ANALYZE` after a representative bulk load or a material change
-in row count and scalar distributions:
-
-```sql
-ANALYZE tutorial_mmsearch;
-```
-
-This updates PostgreSQL's relation and column statistics. It helps estimate
+PostgreSQL `ANALYZE` normally updates relation and column statistics to estimate
 ordinary predicates such as `organism`, dates, numeric ranges, joins, and
-scalar PostgreSQL indexes on a Bioseq table. It does not build a minimizer or
-symbol-count index. Use `bioseq.update_index` for those persisted sequence
-forms.
+scalar PostgreSQL indexes. In this release, the sequence-bearing Bioseq sampling
+path can fail with `sequence hydration requires an explicit snapshot`. Do not
+treat this tutorial as proof that `ANALYZE` is supported for that table shape;
+see [the storage limitation](../columnar_storage_and_vectorized_aggregates/).
+Statistics collection does not build a minimizer or symbol-count index. Use
+`bioseq.update_index` for those persisted sequence forms.
 
 Compare estimated and actual rows on the final combined query:
 
@@ -565,8 +569,8 @@ two independent searches.
 
 ## Refresh after maintenance-off writes
 
-If insert maintenance was off during a load or update, refresh the relation
-before searching the new data:
+After a load or update commits, refresh the relation to make subsequent searches
+use the persisted index for the new data:
 
 ```sql
 SELECT bioseq.update_index(
@@ -575,14 +579,15 @@ SELECT bioseq.update_index(
 );
 ```
 
-For steady application writes, enable maintenance in the writing transaction:
+For steady application writes, keep legacy maintenance off in the writing
+transaction, then publish the grouped index after commit when needed:
 
 ```sql
 BEGIN;
 ```
 
 ```sql
-SET LOCAL bioseq.index.insert_maintenance.enabled = on;
+SET LOCAL bioseq.index.insert_maintenance.enabled = off;
 ```
 
 ```sql

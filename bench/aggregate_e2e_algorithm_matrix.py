@@ -5716,6 +5716,8 @@ def _validate_selected_vulkan_stage_receipts(
         rows: dict[str, dict[str, Any]],
         vulkan_seed: bool,
         vulkan_chain: bool,
+        *,
+        persisted_mps: bool = False,
 ) -> None:
     """Validate existing physical GPU/cache counters, without an all-GPU suffix."""
     if not (vulkan_seed or vulkan_chain):
@@ -5786,6 +5788,10 @@ def _validate_selected_vulkan_stage_receipts(
         permitted_gpu_stage = (
             vulkan_seed and stage in {
                 "query_sketch", "target_sketch", "seed_lookup", "device_index_upload"}
+        ) or (
+            # Persisted grouped-SoA MPS selects partitions on the device as
+            # part of Vulkan seed lookup; this is not biological prefiltering.
+            vulkan_seed and persisted_mps and stage == "partition_selection"
         ) or (vulkan_chain and stage == "chain_score")
         if not permitted_gpu_stage and row["executed_vulkan_gpu_jobs"] != 0:
             raise ContractError(f"unselected GPU stage {stage} executed")
@@ -6416,7 +6422,10 @@ def _validate_accepted_attestation(
         record, attestation, requested, observed, expected_backend,
         expected_source, prefilter_stats, block_stats)
     if hybrid_vulkan:
-        _validate_selected_vulkan_stage_receipts(rows, vulkan_seed, vulkan_chain)
+        _validate_selected_vulkan_stage_receipts(
+            rows, vulkan_seed, vulkan_chain,
+            persisted_mps=(expected_source == "persisted"
+                           and identity["bioseq_index_name"] == "minimizers_per_sequence"))
     minimizer_engine = (
         "vulkan_gpu" if vulkan_seed else
         "scalar_cpu" if observed["minimizer_algorithm"] == "scalar" else
@@ -8975,6 +8984,14 @@ def _aggregate(records: list[dict[str, Any]], *, expected_repeats: int = MIN_ACC
             status = "accepted"
             accepted_comments = list(dict.fromkeys(
                 behavior + transition_comments))
+            if (identity["engine"] == "bioseq"
+                    and identity["index_mode"] == "just_index"
+                    and identity["bioseq_index_name"] == "minimizers_per_sequence"
+                    and identity["requested_minimizer_algorithm"] == "vulkan_minimap_integer"):
+                accepted_comments.append(
+                    "Persisted grouped-SoA MPS uses GPU partition selection within "
+                    "Vulkan seed lookup; this is an index operation, not prefiltering "
+                    "or a chaining/alignment fallback.")
             comments = "; ".join(accepted_comments) if accepted_comments else None
 
         accepted_for_timing = status == "accepted" and all(item["accepted"] for item in cell)

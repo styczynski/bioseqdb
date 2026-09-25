@@ -133,7 +133,10 @@ void publish_alignment_root(alignment_executor_frame* frame);
 void bioseq_alignment_executor_run(
 	QueryDesc* query_desc,
 	ScanDirection direction,
-	uint64 count,
-	bool execute_once);
+	uint64 count
+#if PG_VERSION_NUM < PG_VERSION_18
+	, bool execute_once
+#endif
+);
 
 } // namespace bioseq::pg::detail

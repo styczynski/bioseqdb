@@ -512,6 +512,7 @@ add_custom_command(
   COMMAND "${Python3_EXECUTABLE}" "${_benchmark_bundle_generator}"
           --repository-root "${CMAKE_SOURCE_DIR}"
           --output-root "${_benchmark_bundle_dir}"
+          --build-root "${CMAKE_BINARY_DIR}"
           --reporting-root "${_benchmark_reporting_root}"
           ${_benchmark_configuration_arguments}
           ${_benchmark_manifest_override_arguments}

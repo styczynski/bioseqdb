@@ -519,11 +519,11 @@ if(BIOSEQ_PACKAGE_BUILD)
   unset(_bioseq_package_language)
   unset(_bioseq_package_release_flags)
   if(NOT DEFINED ENV{BIOSEQ_TEMPLATE_FLATTEN_PROFILE}
-      OR NOT "$ENV{BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "dna4_uint64"
-      OR NOT "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "dna4_uint64")
+      OR NOT "$ENV{BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "all_alphabets_uint64"
+      OR NOT "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "all_alphabets_uint64")
     message(FATAL_ERROR
       "every package build must explicitly set "
-      "BIOSEQ_TEMPLATE_FLATTEN_PROFILE=dna4_uint64 in both the environment "
+      "BIOSEQ_TEMPLATE_FLATTEN_PROFILE=all_alphabets_uint64 in both the environment "
       "and CMake cache")
   endif()
 endif()

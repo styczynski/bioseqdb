@@ -177,7 +177,8 @@ resolve_active_read_index_outcome(
             const bool primary_valid =
                 primary_form != nullptr && primary->rd_rel->relam == BTREE_AM_OID &&
                 primary_form->indrelid == policy_oid &&
-                RelationGetPrimaryKeyIndex(relation) == primary_oid && primary_form->indisvalid &&
+                bioseq::postgres::support::relation_immediate_primary_key_index(relation) ==
+                    primary_oid && primary_form->indisvalid &&
                 primary_form->indisready && primary_form->indislive && primary_form->indimmediate &&
                 primary_form->indisunique && primary_form->indisprimary &&
                 primary_form->indnatts == 4 && primary_form->indnkeyatts == 4 &&

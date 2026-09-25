@@ -162,9 +162,9 @@ def _validate_provenance(
         raise PackageBuildError(
             "BIOSEQ_POETRY_VERSION must identify the locked Poetry 1.8 runtime"
         )
-    if os.environ.get("BIOSEQ_TEMPLATE_FLATTEN_PROFILE") != "dna4_uint64":
+    if os.environ.get("BIOSEQ_TEMPLATE_FLATTEN_PROFILE") != "all_alphabets_uint64":
         raise PackageBuildError(
-            "BIOSEQ_TEMPLATE_FLATTEN_PROFILE must be dna4_uint64 for package builds"
+            "BIOSEQ_TEMPLATE_FLATTEN_PROFILE must be all_alphabets_uint64 for package builds"
         )
 
     actual_architecture = native_architecture()

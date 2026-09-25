@@ -1,6 +1,6 @@
 /**
  * @file common/postgres/support/index.cppm
- * @brief PostgreSQL memory-context and transaction-scoped hash-table owners.
+ * @brief PostgreSQL planner adapters, memory contexts and transaction-scoped hash tables.
  */
 module;
 
@@ -13,6 +13,7 @@ extern "C" {
 #include "nodes/nodeFuncs.h"
 #include "nodes/pg_list.h"
 #include "nodes/plannodes.h"
+#include "optimizer/cost.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/palloc.h"
@@ -23,6 +24,7 @@ extern "C" {
 }
 
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
 #include <utility>
 
@@ -36,6 +38,50 @@ export import :nodes;
 export import :spi;
 
 export namespace bioseq::postgres::support {
+
+/**
+ * Cost a serial nested loop using the actual inner path's cache strategy.
+ *
+ * Required-variable projections do not turn Material/Memoize into plain loops.
+ * PG19 requires that strategy explicitly, together with the non-partial bit;
+ * PostgreSQL checks the caller's existing extra.pgs_mask without overriding it.
+ * Returns PostgreSQL's preliminary cost workspace for the final path constructor.
+ */
+[[nodiscard]] inline JoinCostWorkspace initial_cost_serial_nested_loop(PlannerInfo* root,
+                                                                      JoinType jointype,
+                                                                      Path* outer_path,
+                                                                      Path* inner_path,
+                                                                      JoinPathExtraData* extra) {
+    JoinCostWorkspace workspace{};
+#if PG_VERSION_NUM >= 190000
+    const Path* strategy_inner = inner_path;
+    while (strategy_inner != nullptr && IsA(strategy_inner, ProjectionPath))
+        strategy_inner = reinterpret_cast<const ProjectionPath*>(strategy_inner)->subpath;
+    const std::uint64_t strategy =
+        strategy_inner != nullptr && IsA(strategy_inner, MemoizePath) ? PGS_NESTLOOP_MEMOIZE
+        : strategy_inner != nullptr && IsA(strategy_inner, MaterialPath) ? PGS_NESTLOOP_MATERIALIZE
+                                                                       : PGS_NESTLOOP_PLAIN;
+#endif
+    initial_cost_nestloop(root,
+                         &workspace,
+                         jointype,
+#if PG_VERSION_NUM >= 190000
+                         strategy | PGS_CONSIDER_NONPARTIAL,
+#endif
+                         outer_path,
+                         inner_path,
+                         extra);
+    return workspace;
+}
+
+/** Return an immediate primary key, preserving the PG17 catalog contract. */
+[[nodiscard]] inline Oid relation_immediate_primary_key_index(Relation relation) {
+#if PG_VERSION_NUM >= 180000
+    return RelationGetPrimaryKeyIndex(relation, false);
+#else
+    return RelationGetPrimaryKeyIndex(relation);
+#endif
+}
 
 /** Restores the calling backend's PostgreSQL memory context at scope exit. */
 class memory_context_scope final {

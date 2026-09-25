@@ -271,12 +271,18 @@ export {
 
     /** @brief Marks the backend-local OID cache stale after procedure or type invalidation. */
     void
-    invalidate_cached_stub_oids_syscache(Datum /*arg*/, int /*cacheid*/, uint32 /*hashvalue*/) {
+    invalidate_cached_stub_oids_syscache(Datum /*arg*/,
+#if PG_VERSION_NUM >= 190000
+                                        SysCacheIdentifier /*cacheid*/,
+#else
+                                        int /*cacheid*/,
+#endif
+                                        uint32 /*hashvalue*/) {
         g_cached_stub_oids.initialised = false;
     }
 
     /** @brief Checks that an OID still names a row in the requested syscache. */
-    [[nodiscard]] bool oid_exists_in_syscache(int cache_id, Oid oid) {
+    [[nodiscard]] bool oid_exists_in_syscache(SysCacheIdentifier cache_id, Oid oid) {
         if (!OidIsValid(oid)) {
             return false;
         }

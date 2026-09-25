@@ -1121,14 +1121,21 @@ function(_runtime_relative_path _dependency _root _out)
   # manager's cellar.  Match the same file through a direct sibling-lib alias
   # so it is still staged at the loader-relative path.
   if(_relative STREQUAL "")
-    get_filename_component(_dependency_name "${_dependency}" NAME)
-    set(_alias "${_root}/${_dependency_name}")
-    if(EXISTS "${_alias}")
-      file(REAL_PATH "${_alias}" _alias_real)
-      if("${_alias_real}" STREQUAL "${_dependency_real}")
-        set(_relative "${_dependency_name}")
+    # ELF dependency discovery can retain the SONAME symlink (libfoo.so.1),
+    # while the package facade names its resolved file (libfoo.so.1.0).
+    # Both coordinates can name this same dependency; check both spellings
+    # before deciding that the facade has no loader/overlay intersection.
+    foreach(_alias_candidate "${_dependency}" "${_dependency_real}")
+      get_filename_component(_dependency_name "${_alias_candidate}" NAME)
+      set(_alias "${_root}/${_dependency_name}")
+      if(EXISTS "${_alias}")
+        file(REAL_PATH "${_alias}" _alias_real)
+        if("${_alias_real}" STREQUAL "${_dependency_real}")
+          set(_relative "${_dependency_name}")
+          break()
+        endif()
       endif()
-    endif()
+    endforeach()
   endif()
   set(${_out} "${_relative}" PARENT_SCOPE)
 endfunction()
@@ -1508,6 +1515,28 @@ set(_required_sentinel_specs
   "tsearch_data|sharedir|tsearch_data|dir"
   "extension|sharedir|extension|dir"
   "plpgsql|pkglibdir|plpgsql${_plpgsql_suffix}|file")
+# Distro PostgreSQL builds can intentionally use the OS tzdata package rather
+# than ship sharedir/timezone. Keep this explicit system dependency (recorded
+# verbatim in postgres.configure) instead of requiring a nonexistent PG file.
+# Other builds still require the materialized timezone directory as before.
+separate_arguments(_postgres_configure_flags UNIX_COMMAND "${PG_CONFIGURE}")
+foreach(_configure_flag IN LISTS _postgres_configure_flags)
+  if(_configure_flag MATCHES "^--with-system-tzdata=(.+)$")
+    set(_system_tzdata "${CMAKE_MATCH_1}")
+    if(NOT IS_ABSOLUTE "${_system_tzdata}"
+       OR NOT IS_DIRECTORY "${_system_tzdata}"
+       OR NOT EXISTS "${_system_tzdata}/UTC")
+      message(FATAL_ERROR
+        "stage_private_postgres: configured system tzdata is unavailable: "
+        "${_system_tzdata}")
+    endif()
+    if(NOT IS_DIRECTORY "${_canonical_sharedir}/timezone")
+      list(REMOVE_ITEM _required_sentinel_specs "timezone|sharedir|timezone|dir")
+      message(STATUS
+        "stage_private_postgres: using configured system tzdata: ${_system_tzdata}")
+    endif()
+  endif()
+endforeach()
 set(_required_sentinels_json "")
 get_property(_runtime_entry_keys GLOBAL PROPERTY BIOSEQ_RUNTIME_ENTRY_KEYS)
 foreach(_sentinel_spec IN LISTS _required_sentinel_specs)

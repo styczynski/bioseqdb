@@ -32,6 +32,9 @@ extern "C" {
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
 #include "commands/explain.h"
+#if PG_VERSION_NUM >= 180000
+#include "commands/explain_format.h"
+#endif
 #include "executor/execdesc.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
@@ -2993,7 +2996,8 @@ mint_coverage_dependency_ticket(const bioseq_cache_path_domain& contract,
         if (node == nullptr || !IsA(node, Integer)) {
             return ticket;
         }
-        const Oid relation_oid = static_cast<Oid>(static_cast<std::uint32_t>(intVal(node)));
+        const Oid relation_oid = static_cast<Oid>(
+            static_cast<std::uint32_t>(reinterpret_cast<const Integer*>(node)->ival));
         if (!OidIsValid(relation_oid)) {
             return ticket;
         }
@@ -6038,7 +6042,8 @@ static_assert(offsetof(bioseq_cache_state, css) == 0);
         return true;
     }
     const Node* marker = static_cast<const Node*>(list_nth(scan.custom_private, 2));
-    return marker == nullptr || !IsA(marker, Integer) || intVal(marker) != 0;
+    return marker == nullptr || !IsA(marker, Integer) ||
+           reinterpret_cast<const Integer*>(marker)->ival != 0;
 }
 
 [[nodiscard]] int private_force_bypass_marker(const CustomScan& scan) noexcept {
@@ -6046,7 +6051,8 @@ static_assert(offsetof(bioseq_cache_state, css) == 0);
         return -1;
     }
     const Node* marker = static_cast<const Node*>(list_nth(scan.custom_private, 2));
-    return marker != nullptr && IsA(marker, Integer) ? intVal(marker) : -1;
+    return marker != nullptr && IsA(marker, Integer)
+               ? reinterpret_cast<const Integer*>(marker)->ival : -1;
 }
 
 /** Mutate only the preallocated scalar; never reshape a finalized Plan. */
@@ -9461,6 +9467,10 @@ const CustomScanMethods& cache_scan_methods() {
 struct exact_provider_recipe_collector {
     PlannerInfo* root = nullptr;
     const List* finalized_subplans = NIL;
+#if PG_VERSION_NUM >= 180000
+    const PlannerInfo* partition_root = nullptr;
+    const List* finalized_partition_prune_infos = NIL;
+#endif
     MemoryContext planner_context = nullptr;
     provider_registry::provider_snapshot providers{};
     List* recipes = NIL;
@@ -9505,7 +9515,7 @@ struct exact_provider_recipe_collector {
     [[nodiscard]] bool collect_expression(Node* node) noexcept {
         return node == nullptr || !collect_exact_subplan_ids_walker(node, this);
     }
-    /** Collect every PG17 Plan field that can contain executable expressions. */
+    /** Collect every supported Plan field that can contain executable expressions. */
     [[nodiscard]] bool collect_plan_expressions(const Plan* plan) noexcept {
         if (plan == nullptr || !collect_expression(reinterpret_cast<Node*>(plan->targetlist)) ||
             !collect_expression(reinterpret_cast<Node*>(plan->qual)) ||
@@ -9555,11 +9565,21 @@ struct exact_provider_recipe_collector {
                    collect_expression(reinterpret_cast<Node*>(modify->mergeJoinConditions));
         }
         case T_Append:
+#if PG_VERSION_NUM >= 180000
+            return collect_partition_prune_index(
+                reinterpret_cast<const Append*>(plan)->part_prune_index);
+#else
             return collect_partition_prune_expressions(
                 reinterpret_cast<const Append*>(plan)->part_prune_info);
+#endif
         case T_MergeAppend:
+#if PG_VERSION_NUM >= 180000
+            return collect_partition_prune_index(
+                reinterpret_cast<const MergeAppend*>(plan)->part_prune_index);
+#else
             return collect_partition_prune_expressions(
                 reinterpret_cast<const MergeAppend*>(plan)->part_prune_info);
+#endif
         case T_SampleScan: {
             const auto* sample = reinterpret_cast<const SampleScan*>(plan);
             const auto* clause = sample->tablesample;
@@ -9699,6 +9719,21 @@ struct exact_provider_recipe_collector {
             return false;
         }
     }
+#if PG_VERSION_NUM >= 180000
+    /** PG18 stores pruning records in the query root, then in PlannedStmt. */
+    [[nodiscard]] bool collect_partition_prune_index(int index) noexcept {
+        if (index == -1) {
+            return true;
+        }
+        const List* infos = partition_root != nullptr
+            ? partition_root->partPruneInfos : finalized_partition_prune_infos;
+        if (index < 0 || index >= list_length(infos)) {
+            return false;
+        }
+        return collect_partition_prune_expressions(
+            static_cast<const PartitionPruneInfo*>(list_nth(infos, index)));
+    }
+#endif
     /** Collect executor expressions hidden outside common Plan fields. */
     [[nodiscard]] bool
     collect_partition_prune_expressions(const PartitionPruneInfo* prune_info) noexcept {
@@ -9834,6 +9869,24 @@ struct exact_provider_recipe_collector {
         }
         switch (nodeTag(plan)) {
         case T_SubqueryScan:
+#if PG_VERSION_NUM >= 180000
+            if (partition_root != nullptr) {
+                const auto* scan = reinterpret_cast<const SubqueryScan*>(plan);
+                const Index relation_id = scan->scan.scanrelid;
+                if (relation_id == 0 ||
+                    relation_id >= static_cast<Index>(partition_root->simple_rel_array_size) ||
+                    partition_root->simple_rel_array == nullptr ||
+                    partition_root->simple_rel_array[relation_id] == nullptr ||
+                    partition_root->simple_rel_array[relation_id]->subroot == nullptr) {
+                    return false;
+                }
+                const PlannerInfo* previous_root = partition_root;
+                partition_root = partition_root->simple_rel_array[relation_id]->subroot;
+                const bool collected = collect_plan(scan->subplan);
+                partition_root = previous_root;
+                return collected;
+            }
+#endif
             return collect_plan(reinterpret_cast<const SubqueryScan*>(plan)->subplan);
         case T_CustomScan:
             return collect_plan_list(reinterpret_cast<const CustomScan*>(plan)->custom_plans);
@@ -9912,6 +9965,9 @@ struct exact_provider_recipe_collector {
     }
     exact_provider_recipe_collector collector{
         .root = root,
+#if PG_VERSION_NUM >= 180000
+        .partition_root = root,
+#endif
         .planner_context = root->planner_cxt,
         .providers = provider_registry::snapshot_providers(),
     };
@@ -9937,6 +9993,17 @@ struct exact_provider_recipe_collector {
             }
             collector.visited_subplans[index] = true;
             progressed = true;
+#if PG_VERSION_NUM >= 180000
+            // Each pre-setrefs subplan uses its own query-local pruning IDs.
+            if (plan_id > list_length(root->glob->subroots)) {
+                return false;
+            }
+            collector.partition_root =
+                static_cast<const PlannerInfo*>(list_nth(root->glob->subroots, plan_id - 1));
+            if (collector.partition_root == nullptr) {
+                return false;
+            }
+#endif
             if (!collector.collect_plan(
                     static_cast<const Plan*>(list_nth(root->glob->subplans, plan_id - 1)))) {
                 return false;
@@ -9958,22 +10025,25 @@ struct exact_provider_recipe_collector {
  * every Plan and referenced subplan is already in its final executor shape.
  */
 [[nodiscard]] bool collect_finalized_exact_provider_recipes(const Plan* child,
-                                                            const List* finalized_subplans,
+                                                            const PlannedStmt& statement,
                                                             MemoryContext planner_context,
                                                             List** recipes,
                                                             std::uint32_t* recipe_count) {
     if (child == nullptr || planner_context == nullptr || recipes == nullptr ||
         recipe_count == nullptr ||
-        list_length(finalized_subplans) > static_cast<int>(k_maximum_exact_subplans)) {
+        list_length(statement.subplans) > static_cast<int>(k_maximum_exact_subplans)) {
         return false;
     }
     exact_provider_recipe_collector collector{
         .root = nullptr,
-        .finalized_subplans = finalized_subplans,
+        .finalized_subplans = statement.subplans,
+#if PG_VERSION_NUM >= 180000
+        .finalized_partition_prune_infos = statement.partPruneInfos,
+#endif
         .planner_context = planner_context,
         .providers = provider_registry::snapshot_providers(),
     };
-    if (!collector.collect_plan(child) || !collector.collect_plan_list(finalized_subplans) ||
+    if (!collector.collect_plan(child) || !collector.collect_plan_list(statement.subplans) ||
         !collector.valid) {
         return false;
     }
@@ -14726,7 +14796,7 @@ const CustomScanMethods& coverage_scan_methods() {
         if (node == nullptr || !IsA(node, Integer)) {
             return false;
         }
-        const int param_id = intVal(node);
+        const int param_id = static_cast<const Integer*>(node)->ival;
         if (param_id < 0 || param_id >= list_length(root->glob->paramExecTypes) ||
             list_nth_oid(root->glob->paramExecTypes, param_id) != BOOLOID) {
             return false;
@@ -14868,7 +14938,7 @@ make_coverage_scan_tlist(PlannerInfo* root, const CustomPath& best_path, const P
                  errmsg("BioseqReusableCoverageScan fallback projection is malformed")));
         pg_unreachable();
     }
-    List* expressions = list_make1(copyObject(list_nth(best_path.custom_private, 4)));
+    List* expressions = list_make1(copyObjectImpl(list_nth(best_path.custom_private, 4)));
     const auto* sources = static_cast<const List*>(list_nth(best_path.custom_private, 3));
     ListCell* cell = nullptr;
     foreach (cell, sources) {
@@ -14879,7 +14949,7 @@ make_coverage_scan_tlist(PlannerInfo* root, const CustomPath& best_path, const P
                      errmsg("BioseqReusableCoverageScan fallback source is malformed")));
             pg_unreachable();
         }
-        expressions = lappend(expressions, copyObject(list_nth(source, 6)));
+        expressions = lappend(expressions, copyObjectImpl(list_nth(source, 6)));
     }
 
     auto* scan = makeNode(CustomScan);
@@ -14998,7 +15068,7 @@ Plan* coverage_plan_custom_path(PlannerInfo* root,
     List* scan_tlist = make_coverage_scan_tlist(root, *best_path, *child);
     scan->custom_exprs = NIL;
     if (scan_tlist != NIL) {
-        scan->custom_exprs = list_make1(copyObject(list_nth(best_path->custom_private, 4)));
+        scan->custom_exprs = list_make1(copyObjectImpl(list_nth(best_path->custom_private, 4)));
         const auto* sources = static_cast<const List*>(list_nth(best_path->custom_private, 3));
         ListCell* cell = nullptr;
         foreach (cell, sources) {
@@ -15008,7 +15078,7 @@ Plan* coverage_plan_custom_path(PlannerInfo* root,
                 scan_tlist = NIL;
                 break;
             }
-            scan->custom_exprs = lappend(scan->custom_exprs, copyObject(list_nth(source, 6)));
+            scan->custom_exprs = lappend(scan->custom_exprs, copyObjectImpl(list_nth(source, 6)));
         }
     }
     if (scan_tlist == NIL) {
@@ -15090,8 +15160,10 @@ struct reusable_coverage_path_probe {
             return contains(reinterpret_cast<const IncrementalSortPath*>(path)->spath.subpath);
         case T_GroupPath:
             return contains(reinterpret_cast<const GroupPath*>(path)->subpath);
+#if PG_VERSION_NUM < 190000
         case T_UpperUniquePath:
             return contains(reinterpret_cast<const UpperUniquePath*>(path)->subpath);
+#endif
         case T_AggPath:
             return contains(reinterpret_cast<const AggPath*>(path)->subpath);
         case T_GroupingSetsPath:
@@ -15113,7 +15185,12 @@ struct reusable_coverage_path_probe {
         case T_WindowAggPath:
             return contains(reinterpret_cast<const WindowAggPath*>(path)->subpath);
         case T_SetOpPath:
+#if PG_VERSION_NUM >= 180000
+            return contains(reinterpret_cast<const SetOpPath*>(path)->leftpath) ||
+                   contains(reinterpret_cast<const SetOpPath*>(path)->rightpath);
+#else
             return contains(reinterpret_cast<const SetOpPath*>(path)->subpath);
+#endif
         case T_RecursiveUnionPath: {
             const auto* recursive = reinterpret_cast<const RecursiveUnionPath*>(path);
             return contains(recursive->leftpath) || contains(recursive->rightpath);
@@ -15250,8 +15327,10 @@ struct exact_path_dependency_collector {
             return collect(reinterpret_cast<const IncrementalSortPath*>(path)->spath.subpath, root);
         case T_GroupPath:
             return collect(reinterpret_cast<const GroupPath*>(path)->subpath, root);
+#if PG_VERSION_NUM < 190000
         case T_UpperUniquePath:
             return collect(reinterpret_cast<const UpperUniquePath*>(path)->subpath, root);
+#endif
         case T_AggPath:
             return collect(reinterpret_cast<const AggPath*>(path)->subpath, root);
         case T_GroupingSetsPath:
@@ -15270,7 +15349,12 @@ struct exact_path_dependency_collector {
         case T_WindowAggPath:
             return collect(reinterpret_cast<const WindowAggPath*>(path)->subpath, root);
         case T_SetOpPath:
+#if PG_VERSION_NUM >= 180000
+            return collect(reinterpret_cast<const SetOpPath*>(path)->leftpath, root) &&
+                   collect(reinterpret_cast<const SetOpPath*>(path)->rightpath, root);
+#else
             return collect(reinterpret_cast<const SetOpPath*>(path)->subpath, root);
+#endif
         case T_RecursiveUnionPath: {
             const auto* recursive = reinterpret_cast<const RecursiveUnionPath*>(path);
             return collect(recursive->leftpath, root) && collect(recursive->rightpath, root);
@@ -15425,7 +15509,9 @@ void cache_create_upper_paths(PlannerInfo* root,
     output_relation->pathlist = NIL;
     output_relation->cheapest_startup_path = nullptr;
     output_relation->cheapest_total_path = nullptr;
+#if PG_VERSION_NUM < 190000
     output_relation->cheapest_unique_path = nullptr;
+#endif
     output_relation->cheapest_parameterized_paths = NIL;
     foreach (path_cell, replacements) {
         add_path(output_relation, static_cast<Path*>(lfirst(path_cell)));
@@ -16011,7 +16097,7 @@ struct main_tree_coverage_marker_collector {
         std::uint32_t recipe_count = 0;
         if (!collect_finalized_exact_provider_recipes(
                 static_cast<const Plan*>(linitial(scan->custom_plans)),
-                statement.subplans,
+                statement,
                 planner_context,
                 &recipes,
                 &recipe_count)) {
@@ -16089,13 +16175,23 @@ void observe_finalized_planned_statement(PlannedStmt* statement) noexcept {
 PlannedStmt* cache_planner(Query* query,
                            const char* query_string,
                            int cursor_options,
-                           ParamListInfo bound_parameters) {
+                           ParamListInfo bound_parameters
+#if PG_VERSION_NUM >= 190000
+                           , ExplainState* explain_state
+#endif
+                           ) {
     const planner_hook_type previous_planner = executor::lifecycle::previous_planner();
     if (g_internal_planning || g_producer_plan_capture_active ||
         guc::mode() == query_cache_mode::disabled || !shared_cache_ready()) {
+#if PG_VERSION_NUM >= 190000
+        return previous_planner != nullptr
+                   ? previous_planner(query, query_string, cursor_options, bound_parameters, explain_state)
+                   : standard_planner(query, query_string, cursor_options, bound_parameters, explain_state);
+#else
         return previous_planner != nullptr
                    ? previous_planner(query, query_string, cursor_options, bound_parameters)
                    : standard_planner(query, query_string, cursor_options, bound_parameters);
+#endif
     }
 
     MemoryContext planner_context = CurrentMemoryContext;
@@ -16158,9 +16254,15 @@ PlannedStmt* cache_planner(Query* query,
                 }
             }
         }
+#if PG_VERSION_NUM >= 190000
+        result = previous_planner != nullptr
+                     ? previous_planner(query, query_string, cursor_options, bound_parameters, explain_state)
+                     : standard_planner(query, query_string, cursor_options, bound_parameters, explain_state);
+#else
         result = previous_planner != nullptr
                      ? previous_planner(query, query_string, cursor_options, bound_parameters)
                      : standard_planner(query, query_string, cursor_options, bound_parameters);
+#endif
         if (result != nullptr && frame.bridge_finalized_statement != result) {
             finalize_cache_planned_statement(*result, planner_context);
         }
@@ -16181,9 +16283,17 @@ void mark_planned_result_relations(PlannedStmt& statement) {
         return;
     }
     bool precise = false;
+#if PG_VERSION_NUM >= 190000
+    int range_index = -1;
+    while ((range_index = bms_next_member(statement.resultRelationRelids, range_index)) >= 0)
+#else
     ListCell* relation_cell = nullptr;
-    foreach (relation_cell, statement.resultRelations) {
+    foreach (relation_cell, statement.resultRelations)
+#endif
+    {
+#if PG_VERSION_NUM < 190000
         const int range_index = lfirst_int(relation_cell);
+#endif
         if (range_index <= 0 || range_index > list_length(statement.rtable)) {
             mark_current_transaction_dirty();
             return;
@@ -18003,7 +18113,13 @@ invalidate_reusable_registry(const std::optional<physical_identity>& identity_fi
 }
 
 /** Retire exact generations named by a PostgreSQL syscache invalidation. */
-void cache_exact_syscache_invalidation(Datum, int cache_id, std::uint32_t hash_value) noexcept {
+void cache_exact_syscache_invalidation(Datum,
+#if PG_VERSION_NUM >= 190000
+                                     SysCacheIdentifier cache_id,
+#else
+                                     int cache_id,
+#endif
+                                     std::uint32_t hash_value) noexcept {
     if (g_shared == nullptr || g_registry_lock == nullptr ||
         (cache_id != PROCOID && cache_id != AGGFNOID)) {
         return;

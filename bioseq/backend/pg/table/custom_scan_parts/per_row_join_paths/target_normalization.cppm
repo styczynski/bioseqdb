@@ -296,8 +296,21 @@ export {
             target_preserving = true;
         } else if (IsA(path, UniquePath)) {
             auto* unique = reinterpret_cast<UniquePath*>(path);
+#if PG_VERSION_NUM >= 190000
+            // PG19 represents uniqueness by a prefix of the sorted pathkeys,
+            // not uniq_exprs. Preserve the no-helper rule for those keys.
+            if (unique->numkeys < 0 || unique->numkeys > list_length(path->pathkeys))
+                return false;
+            List* const unique_keys = list_copy_head(path->pathkeys, unique->numkeys);
+            const bool keys_have_no_helper =
+                per_row_pathkeys_use_available_helpers(path, unique_keys, NIL);
+            list_free(unique_keys);
+            if (!keys_have_no_helper)
+                return false;
+#else
             if (!per_row_path_metadata_has_no_helper(reinterpret_cast<Node*>(unique->uniq_exprs)))
                 return false;
+#endif
             unary = unique->subpath;
             target_preserving = true;
         } else if (IsA(path, GatherPath)) {

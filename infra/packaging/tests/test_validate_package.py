@@ -99,6 +99,21 @@ class RenderedPackageExactnessTests(unittest.TestCase):
         self.assertTrue(validation["passed"])
         self.assertTrue(validation["six_artifacts"])
 
+    def test_arch_versioned_opt_layout(self) -> None:
+        paths = [
+            "opt/pgsql-17/lib/" + name if name.endswith(".so")
+            else "opt/pgsql-17/share/extension/" + name
+            for name in sorted(validate_package.REQUIRED_BASENAMES)
+        ]
+        self.assertEqual(
+            validate_package.exact_package_payload_paths(paths, "pacman", 17),
+            tuple(paths),
+        )
+        for fmt, major in (("deb", 17), ("rpm", 17), ("pacman", 18)):
+            with self.subTest(fmt=fmt, major=major):
+                with self.assertRaises(validate_package.ValidationError):
+                    validate_package.exact_package_payload_paths(paths, fmt, major)
+
     def test_extra_payload_is_rejected(self) -> None:
         listed_paths = [
             *self._CANONICAL_PATHS,

@@ -749,7 +749,7 @@ def site_level_checks(site: Path, pages: dict[Path, str],
             for token in (
                 "minimizers_per_fragment", "minimizers_per_sequence",
                 "symbol_counts", "require_compatible_persisted",
-                "Bioseq Fetched From Meta", "Actual Target Index Source",
+                "Bioseq Fetched From Meta", "actual_index_source=persisted",
                 "index_lifecycle_metadata",
             ):
                 if token not in index_text:

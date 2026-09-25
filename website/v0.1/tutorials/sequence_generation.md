@@ -170,7 +170,7 @@ different generated data set.
 The following block demonstrates same-seed equality for the simple generator and
 shows the complete truth shape produced by the pair generator.
 
-```sql runnable id=deterministic_sequence_generation timeout=25s entity="sql:type:bioseq.seq" entity="sql:function:bioseq.len(bioseq.seq)" entity="sql:function:bioseq.symbol_count(bioseq.seq,text)"
+```sql runnable id=deterministic_sequence_generation timeout=25s entity="sql:function:bioseq.symbol_count(bioseq.seq,text)"
 -- bioseq:setup
 SET max_parallel_workers_per_gather = 0;
 -- bioseq:visible

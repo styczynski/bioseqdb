@@ -628,9 +628,33 @@ reinitialize_parallel_scan(Relation rel, ParallelTableScanDesc pscan)
 
 /* --- index fetch: external relations reject index DDL ------------------ */
 
+#if PG_VERSION_NUM >= 200000
+/** Rejects PG20 index-scan creation, as the external AM has no local indexes. */
+void begin_index_scan(IndexScanDesc scan, uint32 flags)
+{
+    raise_unsupported_operation("index scan");
+}
+
+/** Accepts cleanup after the index scan's creation was rejected. */
+void reset_index_scan(IndexScanDesc scan) {}
+
+/** Accepts final cleanup after the index scan's creation was rejected. */
+void end_index_scan(IndexScanDesc scan) {}
+
+/** Rejects constraint TID lookups on relations with no physical tuple IDs. */
+bool fetch_visible_tid(Relation relation, ItemPointer tid,
+                       Snapshot snapshot, bool *all_dead)
+{
+    raise_unsupported_operation("index scan");
+}
+#else
 /** @brief Rejects index fetch creation for external relations. */
 IndexFetchTableData *
-begin_index_fetch(Relation rel)
+begin_index_fetch(Relation rel
+#if PG_VERSION_NUM >= 190000
+                  , uint32 flags
+#endif
+)
 {
 	raise_unsupported_operation("index scan");
 }
@@ -657,6 +681,7 @@ fetch_index_tuple(IndexFetchTableData *scan, ItemPointer tid,
 {
 	raise_unsupported_operation("index scan");
 }
+#endif
 
 /* --- tuple fetch / tid / snapshot -------------------------------------- */
 
@@ -707,7 +732,13 @@ delete_index_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 /** @brief Rejects insertion into a read-only external relation. */
 void
 insert_tuple(Relation relation, TupleTableSlot *slot,
-							 CommandId cid, int options, BulkInsertState bistate)
+			 CommandId cid,
+#if PG_VERSION_NUM >= 190000
+             uint32 options,
+#else
+             int options,
+#endif
+             BulkInsertState bistate)
 {
 	raise_read_only();
 }
@@ -715,7 +746,12 @@ insert_tuple(Relation relation, TupleTableSlot *slot,
 /** @brief Rejects speculative insertion into a read-only external relation. */
 void
 insert_speculative_tuple(Relation relation, TupleTableSlot *slot,
-										 CommandId cid, int options,
+										 CommandId cid,
+#if PG_VERSION_NUM >= 190000
+                                         uint32 options,
+#else
+                                         int options,
+#endif
 										 BulkInsertState bistate, uint32 specToken)
 {
 	raise_read_only();
@@ -732,7 +768,13 @@ complete_speculative_tuple(Relation relation, TupleTableSlot *slot,
 /** @brief Rejects batch insertion into a read-only external relation. */
 void
 insert_multiple_tuples(Relation relation, TupleTableSlot **slots, int ntuples,
-							 CommandId cid, int options, BulkInsertState bistate)
+                       CommandId cid,
+#if PG_VERSION_NUM >= 190000
+                       uint32 options,
+#else
+                       int options,
+#endif
+                       BulkInsertState bistate)
 {
 	raise_read_only();
 }
@@ -740,8 +782,15 @@ insert_multiple_tuples(Relation relation, TupleTableSlot **slots, int ntuples,
 /** @brief Rejects tuple deletion from a read-only external relation. */
 TM_Result
 delete_tuple(Relation relation, ItemPointer tid, CommandId cid,
+#if PG_VERSION_NUM >= 190000
+             uint32 options,
+#endif
 							 Snapshot snapshot, Snapshot crosscheck, bool wait,
-							 TM_FailureData *tmfd, bool changingPart)
+                             TM_FailureData *tmfd
+#if PG_VERSION_NUM < 190000
+                             , bool changingPart
+#endif
+)
 {
 	raise_read_only();
 }
@@ -749,7 +798,11 @@ delete_tuple(Relation relation, ItemPointer tid, CommandId cid,
 /** @brief Rejects tuple updates on a read-only external relation. */
 TM_Result
 update_tuple(Relation relation, ItemPointer otid, TupleTableSlot *slot,
-							 CommandId cid, Snapshot snapshot, Snapshot crosscheck,
+                             CommandId cid,
+#if PG_VERSION_NUM >= 190000
+                             uint32 options,
+#endif
+                             Snapshot snapshot, Snapshot crosscheck,
 							 bool wait, TM_FailureData *tmfd,
 							 LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes)
 {
@@ -768,7 +821,13 @@ lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
 
 /** @brief Rejects bulk-insert finalization for an external relation. */
 void
-finish_bulk_insert(Relation relation, int options)
+finish_bulk_insert(Relation relation,
+#if PG_VERSION_NUM >= 190000
+                   uint32 options
+#else
+                   int options
+#endif
+)
 {
 	raise_read_only();
 }
@@ -825,6 +884,9 @@ void
 copy_relation_for_cluster(Relation OldTable, Relation NewTable,
 										  Relation OldIndex, bool use_sort,
 										  TransactionId OldestXmin,
+#if PG_VERSION_NUM >= 190000
+                                          Snapshot snapshot,
+#endif
 										  TransactionId *xid_cutoff,
 										  MultiXactId *multi_cutoff,
 										  double *num_tuples,
@@ -836,7 +898,12 @@ copy_relation_for_cluster(Relation OldTable, Relation NewTable,
 
 /** @brief Accepts vacuum without local storage work. */
 void
-vacuum_relation(Relation rel, VacuumParams *params,
+vacuum_relation(Relation rel,
+#if PG_VERSION_NUM >= 190000
+                const VacuumParams *params,
+#else
+                VacuumParams *params,
+#endif
 								BufferAccessStrategy bstrategy)
 {
 	/* Safe no-op: external relations have zero physical pages, so VACUUM and
@@ -855,7 +922,10 @@ next_analyze_block(TableScanDesc scan, ReadStream *stream)
 
 /** @return False without contacting a provider or yielding a sample tuple. */
 bool
-next_analyze_tuple(TableScanDesc scan, TransactionId OldestXmin,
+next_analyze_tuple(TableScanDesc scan,
+#if PG_VERSION_NUM < 190000
+                  TransactionId OldestXmin,
+#endif
 										double *liverows, double *deadrows,
 										TupleTableSlot *slot)
 {
@@ -954,10 +1024,17 @@ const TableAmRoutine table_access_methods = {
 	.parallelscan_initialize = initialize_parallel_scan,
 	.parallelscan_reinitialize = reinitialize_parallel_scan,
 
+#if PG_VERSION_NUM >= 200000
+    .index_scan_begin = begin_index_scan,
+    .index_scan_reset = reset_index_scan,
+    .index_scan_end = end_index_scan,
+    .fetch_tid = fetch_visible_tid,
+#else
 	.index_fetch_begin = begin_index_fetch,
 	.index_fetch_reset = reset_index_fetch,
 	.index_fetch_end = end_index_fetch,
 	.index_fetch_tuple = fetch_index_tuple,
+#endif
 
 	.tuple_fetch_row_version = fetch_row_version,
 	.tuple_tid_valid = tuple_identifier_is_valid,

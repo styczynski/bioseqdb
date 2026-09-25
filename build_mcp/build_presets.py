@@ -536,16 +536,17 @@ MODES: Dict[str, ModeDefinition] = {
         lock_group=PACKAGE_LINUX_MODE,
         expected_duration_min=240.0,
         build_only_expected_duration_min=240.0,
-        label="Local Debian package qualification",
+        label="Native Linux package collection",
         docs=(
-            "Build and extract the fixed native ARM64 Debian 13/PostgreSQL 17 "
-            "DEB from clean committed source and seal its exact six-file payload"),
+            "Build native distro packages on Linux using BIOSEQ_PACKAGE_DISTROS; "
+            "validate ELF and installed SQL without publication. On macOS, "
+            "qualify the native ARM64 Debian 13/PostgreSQL 17 DEB."),
         is_verb_plular=False,
         targets=[],
         commands=[],
         preset_override=PACKAGE_LINUX_MODE,
         reporting_subdir_name=package_linux.REPORTING_SUBDIR,
-        hard_timeout_min=240.0,
+        hard_timeout_min=720.0,
     ),
     LINT_FOCUSED_MODE: ModeDefinition(
         lock_group="lint",

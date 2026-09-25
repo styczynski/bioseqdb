@@ -942,7 +942,7 @@ inline void run_guc_generator_contract_self_tests() {
             && minimizer.member == "minimizer_algorithm"
             && minimizer.enum_cpp_name
                 == "bioseq::aligner::minimizer_algorithm"
-            && minimizer.enum_default_name == "scalar"
+            && minimizer.enum_default_name == "bounded_nthash_simd"
             && guc_contract_detail::guc(
                    compiler_profile_inventory,
                    "bioseq.aligner.minimizer.algorithm")
@@ -959,7 +959,7 @@ inline void run_guc_generator_contract_self_tests() {
         fragment_lookup_route.enum_cpp_name
                 == "bioseq::aligner::fragment_minimizer_lookup_route"
             && fragment_lookup_route.enum_default_name
-                == "control_block_scan"
+                == "direct_compact_hash_lookup"
             && fragment_lookup_route.generated_live_authority
                     .visible_enum_values
                 == std::vector<std::string>{

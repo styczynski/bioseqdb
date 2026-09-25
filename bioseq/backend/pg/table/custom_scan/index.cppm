@@ -248,16 +248,24 @@ bioseq::postgres::support::named_output<bioseq::table::match_helper_wrapper_prop
     memoize->param_exprs = NIL;
     memoize->singlerow = false;
     memoize->binary_mode = false;
+#if PG_VERSION_NUM >= 190000
+    memoize->est_calls = 2.0;
+#else
     memoize->calls = 2.0;
+#endif
     memoize->est_entries = 1;
 
     auto* unique = makeNode(UniquePath);
     match_helper_wrapper_probe_init_path(
         &unique->path, T_Unique, join_rel, create_empty_pathtarget());
     unique->subpath = &memoize->path;
+#if PG_VERSION_NUM >= 190000
+    unique->numkeys = 0;
+#else
     unique->umethod = UNIQUE_PATH_SORT;
     unique->in_operators = NIL;
     unique->uniq_exprs = NIL;
+#endif
 
     auto* sibling = makeNode(Path);
     match_helper_wrapper_probe_init_path(

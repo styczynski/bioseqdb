@@ -778,6 +778,13 @@ private:
         (void)clone_admin.execute(
             "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
             "bioseq_internal.metadata_age_log TO " + quoted_role);
+        // Grouped-SoA publication uses SELECT ... FOR UPDATE followed by
+        // descriptor INSERT/UPDATE. Grant only those operations in this
+        // disposable per-example database, never extension ownership or
+        // blanket access to internal tables/sequences.
+        (void)clone_admin.execute(
+            "GRANT SELECT, INSERT, UPDATE ON TABLE "
+            "bioseq_internal.minimizer_generation_storage TO " + quoted_role);
         (void)clone_admin.execute(
             "GRANT pg_read_all_stats TO " + quoted_role);
         for (const std::string& schema :
@@ -912,6 +919,14 @@ private:
                 "pg_catalog.to_regclass('bioseq_internal.metadata_age_log'), 'UPDATE'), false) "
             "AND COALESCE(pg_catalog.has_table_privilege(current_user, "
                 "pg_catalog.to_regclass('bioseq_internal.metadata_age_log'), 'DELETE'), false) "
+            "AND COALESCE(pg_catalog.has_table_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.minimizer_generation_storage'), 'SELECT'), false) "
+            "AND COALESCE(pg_catalog.has_table_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.minimizer_generation_storage'), 'INSERT'), false) "
+            "AND COALESCE(pg_catalog.has_table_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.minimizer_generation_storage'), 'UPDATE'), false) "
+            "AND NOT COALESCE(pg_catalog.has_table_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.minimizer_generation_storage'), 'DELETE,TRUNCATE'), false) "
             "AND NOT COALESCE(pg_catalog.has_table_privilege(current_user, "
                 "pg_catalog.to_regclass('bioseq_internal.seq_sub_table'), 'SELECT'), false) "
             "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p "

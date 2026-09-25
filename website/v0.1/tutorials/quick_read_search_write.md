@@ -104,13 +104,14 @@ Check for `Access method: bioseq` in the output.
 Bioseq has two normal write patterns. Pick one for each load rather than
 switching in the middle without a reason.
 
-### Keep the search index current during ordinary writes
+### Search ordinary writes with the optimized defaults
 
-For interactive inserts and steady application traffic, enable insert
-maintenance in the session:
+The default bounded minimizer uses grouped-SoA publication, not the legacy
+insert-time writer. Leave insert maintenance off. Normal searches prepare
+transient indexes for rows without a compatible stored index:
 
 ```sql
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 ```
 
 Then insert rows through ordinary SQL:
@@ -143,7 +144,7 @@ BEGIN;
 ```
 
 ```sql
-SET LOCAL bioseq.index.insert_maintenance.enabled = on;
+SET LOCAL bioseq.index.insert_maintenance.enabled = off;
 ```
 
 ```sql
@@ -170,15 +171,15 @@ policy explicit without changing later work done through the same connection.
 
 ### Rebuild once after a bulk load
 
-For a large import, it can be cheaper to leave insert maintenance off while
-loading and build the sequence index once afterward:
+For repeated searches, leave insert maintenance off while loading and build the
+sequence index once after the source transaction commits:
 
 ```sql
 SET bioseq.index.insert_maintenance.enabled = off;
 ```
 
 Load the rows with `COPY`, application batches, or `bioseq.load`. When the
-load has completed, build the search index for the relation:
+load has completed and committed, build the search index for the relation:
 
 ```sql
 SELECT bioseq.update_index(
@@ -400,7 +401,7 @@ If PostgreSQL does not select `BioseqScan`, check these facts in order:
 1. The table was created with `USING bioseq`
 2. The first `mmsearch` argument is a stored sequence column
 3. The query value has a compatible alphabet
-4. Insert maintenance was enabled or `bioseq.update_index` ran after the load
+4. If the query requires a persisted index, `bioseq.update_index` ran after the load committed
 5. The predicate remains a top-level search condition
 6. The session has not disabled the required custom-scan plan
 
@@ -415,7 +416,7 @@ application.
 An update can change ordinary columns and the sequence value in the same row:
 
 ```sql
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 ```
 
 ```sql
@@ -425,8 +426,9 @@ SET passed_qc = true,
 WHERE read_id = 3;
 ```
 
-Keep insert maintenance on for application updates when subsequent searches
-must see the updated target through the maintained index.
+After the update commits, run `bioseq.update_index` when subsequent searches
+must use a persisted index for the updated target. Normal searches may use
+transient preparation before publication.
 
 Delete through ordinary SQL:
 
@@ -483,9 +485,9 @@ DEALLOCATE find_sample_reads;
 The block below is suitable for a scratch database. It creates a relation,
 writes targets, searches them, and cleans up:
 
-```sql runnable id=quick_read_search_write timeout=30s entity="sql:function:bioseq.len(bioseq.seq)" entity="sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)"
+```sql runnable id=quick_read_search_write timeout=30s entity="sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)"
 -- bioseq:setup
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 SET bioseq.vectorization.enabled = on;
 CREATE TABLE quick_reads (
     read_id integer PRIMARY KEY,
@@ -509,7 +511,7 @@ SELECT read_id,
 FROM quick_reads
 WHERE public.mmsearch(
     sequence,
-    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)
+    'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 32)
 )
 ORDER BY read_id, target_start;
 -- bioseq:teardown
@@ -519,14 +521,18 @@ RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 The first result confirms the three rows written and reports each stored length.
-The second result is the indexed search, including the match coordinates needed
-to locate each alignment in its stored target.
+The second result searches for the full first read, including the match
+coordinates needed to locate each alignment in its stored target. This longer
+query exercises the default alignment settings; a short shared motif alone can
+fall below the alignment filters even when that text occurs in a target. This
+example uses transient index preparation; explicitly publish an index after the
+load when persisted reuse is required.
 
 ## What to carry into an application
 
-For steady writes, set insert maintenance on in the transaction that changes
-sequence values. For bulk loads, keep maintenance off during the load and run
-one explicit `bioseq.update_index` afterward.
+Keep legacy insert maintenance off with the optimized grouped-SoA defaults.
+Commit the source writes, then run an explicit `bioseq.update_index` when a
+persisted index is required. Batch that publication after a bulk load.
 
 Record the relation name, index recipe, and returned `update_index` value in
 the import log. Publish the table only after that statement succeeds. This

@@ -17,6 +17,9 @@ extern "C" {
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_namespace_d.h"
 #include "commands/explain.h"
+#if PG_VERSION_NUM >= 180000
+#include "commands/explain_format.h"
+#endif
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "funcapi.h"
@@ -927,7 +930,7 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     }
     Expr* predicate = nullptr;
     if (list_length(clauses) == 1) {
-        predicate = static_cast<Expr*>(copyObject(linitial(clauses)));
+        predicate = static_cast<Expr*>(copyObjectImpl(linitial(clauses)));
     } else {
         predicate = make_andclause(
             static_cast<List*>(copyObject(clauses)));
@@ -1913,7 +1916,11 @@ void emit_batch_failure_statuses(
     }
 
     TableScanDesc scan = table_beginscan(
-        relation, estate->es_snapshot, 0, nullptr);
+        relation, estate->es_snapshot, 0, nullptr
+#if PG_VERSION_NUM >= 190000
+        , SO_NONE
+#endif
+    );
     TupleTableSlot* slot = table_slot_create(relation, nullptr);
     while (table_scan_getnextslot(scan, ForwardScanDirection, slot)) {
         bool row_is_null = false;

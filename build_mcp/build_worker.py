@@ -7020,7 +7020,9 @@ def _run_package_linux_worker(entry: Mapping[str, object]) -> int:
         f"started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started_at))}\n"
         f"# repository_root={REPOSITORY_ROOT}\n"
         f"# package_state_root={REPOSITORY_ROOT / 'build' / mode}\n"
-        "# profile=debian:trixie postgresql=17 architecture=arm64\n"
+        f"# distro_selection={os.environ.get('BIOSEQ_PACKAGE_DISTROS', 'debian_13')} "
+        f"postgresql={os.environ.get('BIOSEQ_PACKAGE_POSTGRES_MAJORS', '17')} "
+        "template_profile=all_alphabets_uint64\n"
     )
     log_handle.flush()
     bootstrap_log_value = entry.get("bootstrap_log_file")
@@ -9469,8 +9471,8 @@ def tool_start_build(mode: str, build_only: bool = False,
         or bench_e2e_config is not None
     ):
         return (
-            "package-linux owns one fixed local Debian 13/PostgreSQL 17/ARM64 "
-            "qualification and accepts no build_only, debug, filter, "
+            "package-linux owns native package qualification and accepts "
+            "no build_only, debug, filter, "
             "debug_report or bench_e2e_config inputs.")
     resolved_e2e_config, config_error = _validate_bench_e2e_config_override(
         mode, bench_e2e_config)
@@ -9621,9 +9623,18 @@ def tool_start_build(mode: str, build_only: bool = False,
             source_repository_root = REPOSITORY_ROOT
             source_repository_root = source_repository_root.resolve(
                 strict=True)
-            source_commit = _git_commit(source_repository_root)
-            source_graph_fingerprint = _source_graph_fingerprint(
-                source_repository_root)
+            if mode == PACKAGE_LINUX_MODE and sys.platform.startswith("linux"):
+                # Native release workers receive an rsynced working tree, not
+                # necessarily a Git checkout. Revision is provenance only.
+                source_commit = os.environ.get("BIOSEQ_PACKAGE_SOURCE_REVISION", "")
+                if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+                    source_commit = _git_commit(source_repository_root)
+                source_graph_fingerprint = hashlib.sha256(
+                    b"native-package-working-tree-no-admission-gate").hexdigest()
+            else:
+                source_commit = _git_commit(source_repository_root)
+                source_graph_fingerprint = _source_graph_fingerprint(
+                    source_repository_root)
             selected_build_dir = (
                 source_repository_root / "build" / "mcp" / run_token
                 / selected_preset

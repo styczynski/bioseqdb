@@ -138,7 +138,9 @@ extern "C" {
 #include "access/tableam.h"
 #include "catalog/pg_am.h"
 #include "catalog/index.h"
+#if PG_VERSION_NUM < 200000
 #include "executor/execdebug.h"
+#endif
 #include "executor/nodeIndexscan.h"
 #include "lib/pairingheap.h"
 #include "miscadmin.h"
@@ -226,7 +228,9 @@ extern "C" {
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
+#if PG_VERSION_NUM < 190000
 #include "utils/dynahash.h"
+#endif
 #include "utils/expandeddatum.h"
 #include "utils/logtape.h"
 #include "utils/lsyscache.h"
@@ -503,10 +507,23 @@ extern "C" {
 #endif
 
 /*
- * PG18 added optional index-scan instrumentation. These custom scans do not
- * request it.
+ * PG18 added optional index-scan instrumentation; PG19 added scan flags.
+ * PG20 also requires the index-only mode. These custom scans fetch table
+ * tuples and request neither instrumentation nor optional scan flags.
  */
-#if PG_VERSION_NUM >= PG_VERSION_18
+#if PG_VERSION_NUM >= 200000
+#define bioseq_begin_uninstrumented_parallel_index_scan(heap_relation, \
+                                                        index_relation, key_count, \
+                                                        order_by_count, parallel_scan) \
+    index_beginscan_parallel((heap_relation), (index_relation), false, NULL, \
+                            (key_count), (order_by_count), (parallel_scan), SO_NONE)
+#elif PG_VERSION_NUM >= 190000
+#define bioseq_begin_uninstrumented_parallel_index_scan(heap_relation, \
+                                                        index_relation, key_count, \
+                                                        order_by_count, parallel_scan) \
+    index_beginscan_parallel((heap_relation), (index_relation), NULL, \
+                            (key_count), (order_by_count), (parallel_scan), SO_NONE)
+#elif PG_VERSION_NUM >= PG_VERSION_18
 #define bioseq_begin_uninstrumented_parallel_index_scan(heap_relation, \
 														index_relation, key_count, \
 														order_by_count, parallel_scan) \
@@ -522,9 +539,9 @@ extern "C" {
 
 /*
  * PG18 expanded parallel-scan initialization with instrumentation and worker
- * bookkeeping. Bioseq initializes the descriptor without either facility.
+ * bookkeeping; PG19 moved it out again. Bioseq requests neither facility.
  */
-#if PG_VERSION_NUM >= PG_VERSION_18
+#if PG_VERSION_NUM >= PG_VERSION_18 && PG_VERSION_NUM < 190000
 #define bioseq_initialize_uninstrumented_parallel_index_scan(heap_relation, \
 															 index_relation, snapshot, target) \
 	index_parallelscan_initialize((heap_relation), (index_relation), (snapshot), \

@@ -225,7 +225,11 @@ void open_sample_relation_for_writes(
     context.slot =
         bioseq::postgres::support::invoke_pg_as_cpp([&context] {
             return MakeTupleTableSlot(
-                context.parent_td, &TTSOpsVirtual);
+                context.parent_td, &TTSOpsVirtual
+#if PG_VERSION_NUM >= 190000
+                , 0
+#endif
+            );
         });
     const SubTransactionId subtransaction =
         bioseq::postgres::support::invoke_pg_as_cpp([] {

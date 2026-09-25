@@ -68,7 +68,7 @@ explain:
 ```sql runnable id=reading_bioseq_explain timeout=40s entity="sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)" entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET max_parallel_workers_per_gather = 0;
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 SET bioseq.index.sequence_read.enabled = off;
 SET bioseq.vectorization.enabled = on;
 SET bioseq.aligner.vulkan.enabled = off;
@@ -89,7 +89,7 @@ SELECT pk,
 FROM tutorial_explain_reads
 WHERE public.mmsearch(
     seq0,
-    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)
+    'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 32)
 )
 ORDER BY pk, target_start;
 -- bioseq:teardown
@@ -104,6 +104,13 @@ RESET max_parallel_workers_per_gather;
 The result attached to this block is the real text plan. Keeping text format
 here preserves its indentation and makes the nested Bioseq sections readable
 without turning the plan into one large JSON cell.
+
+Text and JSON use different labels for the same detail. Text groups the
+pipeline under `One-to-many alignment`, lists stages with `|`, and prints
+`* Execution statistics`. JSON uses `Bioseq Pipeline`, `Pipeline Stages`, and
+`Bioseq Execution Statistics`. The five Highway dispatch fields appear in both;
+JSON groups them under `Highway SIMD Dispatch`. Do not search for JSON object
+names in a text plan.
 
 `EXPLAIN ANALYZE` runs the query. It can perform expensive alignments, contact
 remote providers, wait on cache producers, and execute any other work in the

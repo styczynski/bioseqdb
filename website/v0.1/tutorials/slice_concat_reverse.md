@@ -31,7 +31,7 @@ CREATE TABLE slice_reads (
 ```
 
 ```sql
-SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.insert_maintenance.enabled = off;
 ```
 
 ```sql
@@ -597,7 +597,7 @@ spelling alone.
 
 This example puts the core rules in one result:
 
-```sql runnable id=slice_concat_reverse timeout=20s entity="sql:function:bioseq.len(bioseq.seq)"
+```sql runnable id=slice_concat_reverse timeout=20s
 -- bioseq:setup
 CREATE TABLE slice_operation_reads (
     read_id integer PRIMARY KEY,
