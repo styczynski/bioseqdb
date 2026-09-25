@@ -103,6 +103,28 @@ def cell_context(
 
 
 class ReleaseFleetAssignmentTests(unittest.TestCase):
+    def test_failed_cells_remain_visible_after_hosts_move_on(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        cells = [dict(postgres_major=major, distro="fedora_44", architecture="x64")
+                 for major in (17, 18, 19, 20)]
+        history = [dict(host="test2-m7a", previous_job=dict(
+            cell=cell, observed=dict(status="failed", pid=number, log_file=f"/tmp/{number}.log")))
+            for number, cell in enumerate(cells, 1)]
+        history.append({"event": "unrelated_history_shape"})
+        state = dict(history=history, jobs={"test2-m7a": dict(
+            cell=cells[1], observed=dict(status="running", pid=5))},
+            package_rebuilds={"test2-m7i": [cells[0]]})
+        inventory = dict(packages=[dict(cells[2], installed_sql_smoke=dict(
+            column_defaults_and_vacuum=True))])
+        pending = namespace["pending_package_failures"](state, inventory)
+        self.assertEqual([row["cell"]["postgres_major"] for row in pending], [17, 20])
+        self.assertEqual([row["retry_queued"] for row in pending], [True, False])
+        self.assertEqual(pending[1]["log_file"], "/tmp/4.log")
+        state["jobs"]["test2-m7i"] = dict(cell=cells[3], observed=dict(status="completed"))
+        self.assertEqual(len(namespace["pending_package_failures"](state, inventory)), 1)
+
     def test_worker_status_strips_colors_without_hiding_live_failed_compilation(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):

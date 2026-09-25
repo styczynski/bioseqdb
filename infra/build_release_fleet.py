@@ -194,6 +194,37 @@ def worker_diagnostics(state, mode):
     return result
 
 
+def pending_package_failures(state, inventory):
+    """Keep failed cells visible after their host moves to another assignment."""
+    latest = {}
+    for entry in state.get("history", []):
+        job = entry.get("previous_job", {})
+        if job.get("cell"):
+            latest[cell_key(job["cell"])] = (entry.get("host"), job)
+    for host, job in state.get("jobs", {}).items():
+        if job.get("cell"):
+            latest[cell_key(job["cell"])] = (host, job)
+    running = {cell_key(job["cell"]) for job in state.get("jobs", {}).values()
+               if job.get("cell") and job.get("observed", {}).get("status") == "running"}
+    qualified = {cell_key(package) for package in inventory.get("packages", [])
+                 if package.get("installed_sql_smoke", {}).get("column_defaults_and_vacuum") is True}
+    queued = {cell_key(cell) for cells in state.get("package_rebuilds", {}).values()
+              for cell in cells}
+    queued.update(cell_key(cell) for cell in state.get("validation_rechecks", {}).values())
+    pending = []
+    for key, (host, job) in sorted(latest.items()):
+        observed = job.get("observed", {})
+        status = observed.get("status")
+        if key in qualified or key in running:
+            continue
+        if status not in ("failed", "aborted") and not job.get("error"):
+            continue
+        pending.append(dict(cell=job["cell"], host=host, status=status or "launch_failed",
+                            pid=observed.get("pid"), log_file=observed.get("log_file"),
+                            error=str(job.get("error", ""))[-400:], retry_queued=key in queued))
+    return pending
+
+
 def status_snapshot():
     """Observe the fleet without the controller lock, collection or admission."""
     state = json.loads(STATE.read_text()) if STATE.exists() else {"jobs": {}}
@@ -225,7 +256,9 @@ def status_snapshot():
     return {
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "accepted_packages": inventory.get("validated_package_count", 0),
+        "release_ready_packages": inventory.get("release_ready_package_count", 0),
         "expected_packages": inventory.get("expected_package_count"),
+        "pending_package_failures": pending_package_failures(state, inventory),
         "website_manifest_present": (OUTPUT / "website/site-manifest.json").is_file(),
         "local_benchmark": local,
         "local_package": local_package,
@@ -741,11 +774,15 @@ def main():
                 if job.get("observed", {}).get("status") == "running"]
             failed_jobs = [h for h, job in state["jobs"].items()
                 if job.get("observed", {}).get("status") == "failed"]
+            failed_cells = [cell_key(row["cell"]) +
+                            (" (retry queued)" if row["retry_queued"] else " (needs review)")
+                            for row in pending_package_failures(state, inventory)]
             append_progress_log(
                 f"Release fleet: {completed_packages}/{inventory['expected_package_count']} installation-validated packages collected; "
                 f"{ready_packages}/{inventory['expected_package_count']} also passed current functional acceptance. "
                 f"Active workers: {', '.join(active_jobs) or 'none'}. "
                 f"Failed workers requiring investigation: {', '.join(failed_jobs) or 'none'}. "
+                f"Unresolved package cells, including prior assignments: {', '.join(failed_cells) or 'none'}. "
                 f"Local benchmark intentionally retired by user; local macOS package: {state['local_package'].get('status', 'not started')}, "
                 f"{state['local_package'].get('step', '')}; "
                 "AWS tuple admission remains disabled. See reporting/package_release_fleet/state.json.",
