@@ -532,7 +532,7 @@ def reclaim_retired_benchmark_intermediates(repository):
     for line in processes.splitlines():
         pid, _, command = line.strip().partition(" ")
         if pid.isdigit() and int(pid) not in (os.getpid(), os.getppid()):
-            if "server.py" in command and "--run-build " in command:
+            if re.search(r"(?:^|\s)(?:\S*/)?server\.py\s+--run-build(?:\s|$)", command):
                 return {"skipped": "build worker is still live"}
     if subprocess.check_output(["docker", "ps", "-q"], text=True).strip():
         return {"skipped": "container is still live"}
@@ -668,7 +668,7 @@ def dispatch_available(state):
         cleaned = state.setdefault("retired_intermediate_cleanup", {})
         if available < 80 * 1024**3 and architecture == "x64" and host not in cleaned:
             try:
-                source = ("import json, os, shutil, subprocess\nfrom pathlib import Path\n"
+                source = ("import json, os, re, shutil, subprocess\nfrom pathlib import Path\n"
                           + inspect.getsource(reclaim_retired_benchmark_intermediates)
                           + f"\nprint(json.dumps(reclaim_retired_benchmark_intermediates({REMOTE!r})))\n")
                 cleanup = json.loads(remote(host, "python3 -c " + shlex.quote(source), timeout=55))

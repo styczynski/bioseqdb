@@ -126,7 +126,8 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
             outside.mkdir()
             (outside / "protected.o").write_text("retained")
             (objects / "symlinked_directory").symlink_to(outside, target_is_directory=True)
-            with mock.patch.object(subprocess, "check_output", return_value=""), \
+            observer = '999999 python -c \'print("server.py", "--run-build ")\'\n'
+            with mock.patch.object(subprocess, "check_output", side_effect=[observer, ""]), \
                     mock.patch.object(namespace["shutil"], "disk_usage", return_value=SimpleNamespace(free=0)):
                 result = reclaim(root)
             self.assertEqual(result["removed_files"], 2)
