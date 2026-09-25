@@ -241,9 +241,17 @@ run_pg() {
 
 started=false
 cleanup() {
+  local status=$?
   if [[ "${started}" == true ]]; then
     run_pg "${pg_ctl}" -D "${data_dir}" -m fast -w stop >/dev/null 2>&1 || true
   fi
+  # The disposable container disappears on exit. Keep the server's actual
+  # failure (including assertion/backtrace) in the MCP log before it does.
+  if (( status != 0 )) && [[ -f "${log_file}" ]]; then
+    printf '\nPostgreSQL server log after package smoke failure:\n' >&2
+    tail -n 60 "${log_file}" >&2 || true
+  fi
+  return "${status}"
 }
 trap cleanup EXIT
 

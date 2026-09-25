@@ -813,6 +813,24 @@ class FormatPlanTests(unittest.TestCase):
                         frozenset({model.ContainerCapability.SYS_NICE}),
                     )
 
+    def test_smoke_cleanup_preserves_failure_and_server_diagnostics(self) -> None:
+        script = (PACKAGING_ROOT / "scripts" / "smoke_installed_package.sh").read_text()
+        cleanup = script[script.index("cleanup() {"):script.index("trap cleanup EXIT")]
+        with tempfile.TemporaryDirectory() as raw:
+            log = Path(raw) / "postgres.log"
+            log.write_text("server failure detail\n")
+            for status in (0, 3):
+                with self.subTest(status=status):
+                    result = subprocess.run(
+                        ["bash", "-c", 'set -Eeuo pipefail\nstarted=false\n'
+                         'log_file="$1"\n' + cleanup + '\ntrap cleanup EXIT\nexit "$2"',
+                         "smoke-cleanup", str(log), str(status)],
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, status)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual("server failure detail" in result.stderr, status != 0)
+
     def test_pacman_sandbox_adjustment_accepts_repeated_options_sections(self) -> None:
         def sandbox_prelude(script: str) -> str:
             start = script.index("pacman_conf=/etc/pacman.conf")
