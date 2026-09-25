@@ -241,6 +241,55 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
                     collect("other", dict(architecture="x64", packages=[dict(accepted)]),
                             "/remote/packages/", destination, ["ssh", "host"])
 
+    def test_qualified_cross_host_repair_requires_exact_handoff(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        collect = namespace["collect_package_revision"]
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory)
+            old = destination / "old.pkg"
+            old.write_bytes(b"old")
+            cell = dict(postgres_major=19, distro="arch", architecture="x64")
+            prior = dict(postgres_major=19, distro="arch", file="old.pkg", bytes=3,
+                sha256=sha256(old), validation=dict(passed=True), installed_sql_smoke=dict(
+                    passed=True, default_insert_search=True, default_persisted_search=True,
+                    column_defaults_and_vacuum=True))
+            original = destination / "retired-host-manifest.json"
+            original.write_text(json.dumps(dict(architecture="x64", packages=[prior])))
+            incoming = dict(prior, file="new.pkg", sha256=hashlib.sha256(b"new").hexdigest())
+            authority = dict(target_host="replacement", previous_host="retired-host",
+                             previous_sha256=prior["sha256"], cell=cell)
+            invalid = [dict(authority, target_host="other"),
+                       dict(authority, previous_host="other"),
+                       dict(authority, previous_sha256="0" * 64),
+                       dict(authority, cell=dict(cell, postgres_major=20))]
+            with mock.patch.object(subprocess, "run", side_effect=AssertionError("unexpected transfer")):
+                for entry in invalid:
+                    with self.subTest(entry=entry), self.assertRaisesRegex(RuntimeError, "Cross-host replacement"):
+                        collect("replacement", dict(architecture="x64", packages=[dict(incoming)]),
+                            "/remote/", destination, ["ssh", "host"],
+                            replacement_authorizations=[entry])
+                with self.assertRaisesRegex(RuntimeError, "Cross-host replacement"):
+                    collect("replacement", dict(architecture="x64", packages=[
+                        dict(incoming, installed_sql_smoke={})]), "/remote/", destination,
+                        ["ssh", "host"], replacement_authorizations=[authority])
+
+            def transfer(command, **kwargs):
+                (Path(command[-1]) / "new.pkg").write_bytes(b"new")
+                return SimpleNamespace(returncode=0)
+
+            with mock.patch.object(subprocess, "run", side_effect=transfer), \
+                    mock.patch.dict(collect.__globals__, {"write_release_manifest": mock.Mock()}):
+                collect("replacement", dict(architecture="x64", packages=[incoming]),
+                    "/remote/", destination, ["ssh", "host"], replacement_authorizations=[authority])
+            retired = json.loads(original.read_text())
+            self.assertEqual(retired["packages"], [])
+            self.assertEqual(retired["retired_packages"][0]["sha256"], prior["sha256"])
+            self.assertEqual(old.read_bytes(), b"old")
+            accepted = json.loads((destination / "replacement-manifest.json").read_text())["packages"][0]
+            self.assertEqual((destination / accepted["file"]).read_bytes(), b"new")
+
     def test_collection_rejects_bad_bytes_before_changing_manifest(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):

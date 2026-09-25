@@ -459,7 +459,8 @@ def package_release_ready(package):
                                   "column_defaults_and_vacuum")))
 
 
-def collect_package_revision(host, manifest, source, destination, ssh):
+def collect_package_revision(host, manifest, source, destination, ssh, *,
+                             replacement_authorizations=()):
     """Import only advertised bytes, then move cell ownership without losing revisions.
 
     Remote output directories retain earlier cells. Never rsync that whole tree:
@@ -484,9 +485,17 @@ def collect_package_revision(host, manifest, source, destination, ssh):
             replacement = incoming.get(identity(package, owner))
             if replacement is None:
                 continue
-            if package_release_ready(package) or not package_release_ready(replacement):
-                raise RuntimeError("Cross-host replacement requires an unqualified old cell "
-                                   "and a qualified new cell")
+            authorized = any(
+                entry.get("target_host") == host
+                and entry.get("previous_host") == path.name.removesuffix("-manifest.json")
+                and entry.get("previous_sha256") == package["sha256"]
+                and entry.get("cell") == dict(postgres_major=package["postgres_major"],
+                    distro=package["distro"], architecture=owner["architecture"])
+                for entry in replacement_authorizations)
+            if (not package_release_ready(replacement)
+                    or (package_release_ready(package) and not authorized)):
+                raise RuntimeError("Cross-host replacement requires a qualified new cell "
+                                   "and an unqualified old cell or explicit checksum-bound handoff")
             displaced.setdefault(path, []).append(package)
 
     files = {}
@@ -578,7 +587,9 @@ def collect(host, observed, *, mode=None):
         if remote(host, "test -f " + source + "manifest.json && echo yes || true").strip() != "yes":
             return
         manifest = json.loads(remote(host, "cat " + source + "manifest.json"))
-        collect_package_revision(host, manifest, source, destination, ssh)
+        state = json.loads(STATE.read_text()) if STATE.exists() else {}
+        collect_package_revision(host, manifest, source, destination, ssh,
+            replacement_authorizations=state.get("package_replacement_authorizations", ()))
     if mode == "website":
         result = subprocess.run(["rsync", "-a", "-e", shlex.join(ssh[:-1]),
             endpoint + ":" + source, str(destination) + "/"],
