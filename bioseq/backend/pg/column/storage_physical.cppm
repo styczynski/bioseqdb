@@ -892,11 +892,14 @@ truncate_column_storage(Relation rel, uint64_t new_data_reservation)
 		raise_logical_storage_reservation_error(
 			rel, "truncate column storage at", new_data_reservation);
 	}
-	const physical_address final =
-		logical_to_physical_address(new_data_reservation - 1);
+	// An empty data reservation retains the metapage and reserved page, but
+	// has no valid final data byte to pass to logical_to_physical_address.
+	const BlockNumber final_block = new_data_reservation == first_logical_offset
+		? reserved_empty_block_number
+		: logical_to_physical_address(new_data_reservation - 1).block_number;
 	const std::optional<uint64_t> new_page_count =
 		bioseq::common::checked_add(
-			static_cast<uint64_t>(final.block_number),
+			static_cast<uint64_t>(final_block),
 			static_cast<uint64_t>(1));
 	if (!new_page_count.has_value()
 		|| *new_page_count > maximum_column_storage_page_count)

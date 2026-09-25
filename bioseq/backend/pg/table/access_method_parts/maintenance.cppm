@@ -484,7 +484,9 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
     if (list_length(stripe_metadata_list) > starting_stripe_list_position) {
         stripe_metadata* boundary_stripe = static_cast<stripe_metadata*>(
             list_nth(stripe_metadata_list, starting_stripe_list_position));
-        new_data_reservation = boundary_stripe->file_offset + boundary_stripe->data_length - 1;
+        // Reservations are exclusive ends: retain every byte of the last
+        // untouched stripe before rewriting the compacted tail.
+        new_data_reservation = boundary_stripe->file_offset + boundary_stripe->data_length;
     } else {
         stripe_metadata* boundary_stripe = static_cast<stripe_metadata*>(
             list_nth(stripe_metadata_list, starting_stripe_list_position - 1));

@@ -584,6 +584,15 @@ BEGIN
   END IF;
 END $$;
 DROP TABLE bioseq_package_tableam_probe;
+
+-- Empty storage still owns its metapage and reserved page after truncation.
+CREATE TABLE bioseq_package_empty_vacuum (value integer) USING bioseq;
+VACUUM (ANALYZE) bioseq_package_empty_vacuum;
+INSERT INTO bioseq_package_empty_vacuum VALUES (42);
+VACUUM (ANALYZE) bioseq_package_empty_vacuum;
+SELECT 1 / (count(*) = 1 AND sum(value) = 42)::integer AS empty_vacuum_reinsert_valid
+FROM bioseq_package_empty_vacuum;
+DROP TABLE bioseq_package_empty_vacuum;
 SQL
 
 if (( postgres_major >= 19 )); then
