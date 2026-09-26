@@ -50,8 +50,7 @@ COMMIT;
 An ordinary \texttt{BioseqScan} stores the defaults and overrides in its
 plan. A \texttt{BioseqBatchJoin} reads the defaults again when execution
 starts and reapplies the constant overrides. Changes to the corresponding
-alignment GUCs invalidate cached plans. The options reference in
-Section~\ref{sec:appendix-search-options} gives the complete mapping.
+alignment GUCs invalidate cached plans.
 The request also fixes the selected chaining policy:
 PostgreSQL SIMD chaining uses \texttt{bounded\_\allowbreak batch\_\allowbreak approximate}, whereas
 the C++ interface additionally permits \texttt{exact\_visited}. They are
@@ -153,7 +152,9 @@ Admission also limits acceleration:
 \begin{itemize}
   \item \textbf{CPU SIMD.} Selected kernels check their supported alphabet,
     representation, parameter range, and vector shape. Bounded ntHash
-    requires DNA4 with $k=15,w=10$. SIMD chaining requires a vector target
+    has registered DNA4 and DNA5 kernels with both specialized and generic
+    parameter handling, as summarized in
+    Section~\ref{sec:configured-cpu-minimizers}. SIMD chaining requires a vector target
     and valid limits for its selected policy. A rejected request is not
     retried with another chaining policy or a scalar implementation.
   \item \textbf{Biological Vulkan stages.} PostgreSQL requires the complete
@@ -171,10 +172,10 @@ Admission also limits acceleration:
 \end{itemize}
 
 These rules have specific exceptions and should not be reduced to a blanket
-ban on fallback. The reference SIMD minimizer explicitly uses scalar rescan
-for alphabets without its two-bit representation. A Vulkan rank prefilter
-can accompany CPU biological stages, as explained in
-Section~\ref{sec:prefilter-dispatch}. A permissive index policy can rebuild
+ban on fallback. Historical reference-SIMD measurements can explicitly record
+scalar execution, whereas current registered DNA5 profiles have a SIMD route.
+A Vulkan rank prefilter
+can accompany CPU biological stages. A permissive index policy can rebuild
 an absent or inapplicable lookup. Finally, a rejected parallel work split can
 run serially with the same algorithm. Each alternative belongs to a
 particular layer and preserves that layer's stated contract.

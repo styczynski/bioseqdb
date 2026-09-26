@@ -41,7 +41,7 @@ The alignment pipeline uses first two representations directly and as mentioned 
 However in some cases we need to convert the tuple into 3rd form. If user requests slice projection directly it goes through separate branch of BioseqDB handling where that conversion is performed:
 
 \begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-search-sql,caption={ParadeDB pg\_search examples},label={lst:paradedb-pg-search-examples}]
+\begin{lstlisting}[style=bioseq-search-sql,caption={Direct projection of a sequence slice.},label={lst:sequence-slice-projection}]
 SELECT seq[2:3] FROM table;
 \end{lstlisting}
 \end{minipage}

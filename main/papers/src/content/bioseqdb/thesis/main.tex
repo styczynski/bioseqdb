@@ -26,6 +26,30 @@
 %   - en-US
 % chapters:
 %   - !partial
+%     title: Biological foundations of sequence analysis
+%     path: chapters/01_biology
+%     description: introduces biological sequences and sequencing data. It explains variation and the computational questions that motivate database-resident sequence analysis.
+%   - !partial
+%     title: Sequence alignment and search strategies
+%     path: chapters/02_alignment_foundations
+%     description: develops exact dynamic programming and seed-and-extend mapping. It also presents graph-based approaches and the limits of existing tools.
+%   - !partial
+%     title: The BioSeqDB alignment pipeline
+%     path: chapters/04_pipeline
+%     description: presents the complete processing path with its stage contracts and CPU and accelerator routes.
+%   - !partial
+%     title: Minimizer extraction
+%     path: chapters/05_minimizers
+%     description: explains minimizer sketching and rolling hashing. It compares the SIMD and Vulkan implementations with minimap2 and SIMD-Minimizers.
+%   - !partial
+%     title: Chaining seed anchors
+%     path: chapters/06_chaining
+%     description: derives the chaining objective and compares its scalar RMQ SIMD and GPU forms. It then states the selection policy.
+%   - !partial
+%     title: Final alignment, prefiltering and postprocessing
+%     path: chapters/07_final_alignment_postprocessing_and_preprocessing
+%     description: describes affine-gap alignment with KSW2 and block-based SIMD extension. It also covers traceback and accelerator integration.
+%   - !partial
 %     title: Sequence representations and lazy evaluation
 %     path: chapters/09_sequence_abstractions
 %     description: develops compact sequence ranges and bit-level views. It then presents fragmented and lazy sequences with PostgreSQL-backed adapters and alphabet dispatch.

@@ -1,1 +1,564 @@
-There will be some content here.
+\begingroup
+\raggedbottom
+\subsection{What the results show}
+\label{sec:benchmark-interpretation}
+
+The results distinguish two ways of using the same reference:
+\begin{itemize}
+  \item \textbf{Index:} build the reference index first, restart PostgreSQL,
+  then measure the query, including access to the stored index.
+  \item \textbf{No index:} measure construction of a temporary reference index
+  and the query together. The query batch shares that temporary index.
+\end{itemize}
+
+\Needspace{13\baselineskip}
+\subsubsection{What an indexed minimizer comparison measures}
+\label{sec:bench-indexed-minimizers}
+
+Scalar and SIMD-ref have similar indexed times in this example, where they
+reuse the same kind of reference index and share most of the query pipeline.
+
+\BenchmarkSlice{aws-2-k15-w10}
+  {mpf-scalar-scalar-block,mpf-simdref-scalar-block}
+  {index-2-k15-w10-dna4-m7a,index-2-k15-w10-dna4-m7i}
+  {Two minimizer implementations with MPF, Scalar-DP and Block held fixed.}
+  {tab:bench-indexed-minimizers}
+
+\warn{An indexed row does not measure reference-index construction}{
+The benchmark requires a compatible persisted \emph{reference} index. It builds
+that index before restarting PostgreSQL, and does not rebuild its minimizers
+inside the measured query. The query sequences themselves have no persisted
+minimizer index: their minimizers are extracted to search the reference.
+Changing the minimizer therefore does not measure reference construction
+again, but it need not produce an identical query execution.}
+
+The distinction follows the reference-read policy and query-side preparation
+described in Section~\ref{sec:index-read-policy}.
+It is also checked by the campaign: the query fixture has no generated indexes,
+and accepted indexed records report query-sketch work alongside zero target-index
+recomputation. Scalar and SIMD-ref can share a persisted hash representation,
+whereas bounded ntHash can change both the query sketch and the reference
+lookup representation (Sections~\ref{sec:configured-cpu-minimizers}
+and~\ref{sec:packed-minimizer-representation}).
+Close timings are therefore consistent with substantial shared work, rather
+than proof that the complete execution was measured twice.
+
+In each small table, the upper duration is A, the complete query measurement,
+and the lower duration is B, the residual after removing the recorded CIGAR/MAPQ
+intervals. Cells, comparison symbols and colours are copied from the full table.
+The detailed timing definition and remaining markers are explained in
+Section~\ref{sec:benchmark-results}.
+
+\Needspace{13\baselineskip}
+\subsubsection{Paying for the reference once}
+\label{sec:bench-index-benefit}
+
+The preferred BioseqDB configuration beats minimap2 when the reference index
+is available, but loses when temporary construction is included in this example.
+
+\BenchmarkSlice{aws-2-k15-w10}
+  {minimap2,mpf-bounded-simd-block}
+  {index-2-k15-w10-dna4-m7i,noindex-2-k15-w10-dna4-m7i}
+  {The preferred configuration on M7I, with and without a prepared reference index.}
+  {tab:bench-index-benefit}
+
+A persistent index moves reference minimizer extraction and organization out of
+the query. BioseqDB can then read its prepared lookup structures, as shown in
+Figures~\ref{fig:index-join-read-paths} and~\ref{fig:index-control-data-plane}.
+Without that index it must construct a transient representation before the batch
+can use it. This is consistent with the database use case in
+Section~\ref{sec:index-storage-role}: preparation can be worthwhile when the
+same reference serves many later queries.
+
+The difference between these columns is not an isolated measurement of building
+the persistent index. Temporary construction and persisted lookup use different
+paths. Durable publication, described in Section~\ref{sec:index-file-consistency},
+is outside both query measurements. The result supports reuse of a prepared
+reference, but does not by itself give its construction cost or the number
+of queries needed to recover that cost.
+
+\Needspace{13\baselineskip}
+\subsubsection{A smaller reference can have a more expensive lookup path}
+\label{sec:bench-wide-hash}
+
+The scalar MPF configuration takes much longer on the smaller reference with
+longer k-mers than on the larger reference with shorter k-mers.
+
+\BenchmarkSlice{aws-4-k15-w10}
+  {mpf-scalar-scalar-block,mpf-bounded-simd-block}
+  {index-4-k15-w10-dna4-m7a,index-4-k15-w10-dna4-m7i}
+  {Indexed DNA4 with the shorter k-mer profile.}
+  {tab:bench-short-hash}
+\BenchmarkSlice{aws-2-k20-w15}
+  {mpf-scalar-scalar-block,mpf-bounded-simd-block}
+  {index-2-k20-w15-dna4-m7a,index-2-k20-w15-dna4-m7i}
+  {Indexed DNA4 with the longer k-mer profile, despite a smaller reference.}
+  {tab:bench-wide-hash}
+
+The current implementation offers a concrete explanation through the hash
+representation and its reader. The integer-hash profile for shorter k-mers fits
+the compact direct lookup described in Section~\ref{sec:index-direct-lookup}.
+The longer integer hashes require the wider representation and cannot use that
+compact reader. The alternative reader scans stored metadata to prepare and
+emit anchors. Successive groups of queries can revisit this metadata, as explained in
+Section~\ref{sec:index-control-scan-waves}. Mapping an index file therefore does
+not make every lookup equally cheap.
+
+The bounded configuration is a useful counterexample: its compact hash profile
+retains eligibility for direct lookup, and the longer-k-mer case remains fast here.
+The bounded sketcher has a specialised default-profile kernel and a runtime
+parameter path (Section~\ref{sec:configured-cpu-minimizers}), but a generic
+sketch loop alone does not explain a large delay in a query that already has
+its reference index. These measurements also span campaign builds, so
+current source identifies a credible mechanism rather than a measured breakdown
+of every historical run.
+
+A larger possible k-mer vocabulary does not mean an array of every possible
+k-mer is allocated. Index size depends on the observed minimizers, their stored
+width and their occurrence lists. Increasing the window can reduce minimizer
+density, while changing k also changes matches and repetition
+(Section~\ref{sec:minimizer-definition} and Equation~\ref{eq:minimizer-anchor-count}).
+Longer k-mers therefore do not imply either a larger index or swapping in every case.
+
+\Needspace{23\baselineskip}
+\subsubsection{SIMD and RMQ are workload-dependent choices}
+\label{sec:bench-chaining-choice}
+
+The preferred SIMD configuration is competitive, but the fastest chaining
+choice changes with the workload.
+
+\BenchmarkSlice[columns]{aws-2-k15-w10}
+  {mpf-bounded-scalar-block,mpf-bounded-simd-block,mpf-bounded-rmq-block}
+  {index-2-k15-w10-dna4-m7a,index-2-k15-w10-dna4-m7i}
+  {Chaining choices with MPF, bounded minimizers and Block fixed.}
+  {tab:bench-chaining-small}
+
+Here the complete-query times are close. Scalar chaining already avoids much
+unproductive work through bounded predecessor searches and stopping rules
+(Algorithm~\ref{alg:chaining-b1}). SIMD must also arrange coordinates and scores
+for vector processing, and its backtracking needs additional storage
+(Section~\ref{sec:chaining-simd-forward} and
+Algorithm~\ref{alg:chaining-simd-backtrack}). Those costs can offset a cheaper
+score calculation. Shared index access and anchor generation can also hide a
+change in chaining time. The totals do not establish which effect dominates,
+or prove that compiler autovectorization explains a scalar win.
+
+\BenchmarkSlice[columns]{aws-4-k15-w10}
+  {mpf-bounded-scalar-block,mpf-bounded-simd-block,mpf-bounded-rmq-block}
+  {index-4-k15-w10-dna4-m7a,index-4-k15-w10-dna4-m7i}
+  {The same choices on the larger DNA4 reference.}
+  {tab:bench-chaining-large}
+
+The larger case favours Scalar-DP. This is also a comparison of stopping
+policies: the SQL SIMD-DP choice uses bounded approximate batches, rather than
+the exact scalar predecessor traversal (Algorithm~\ref{alg:chaining-b5}).
+RMQ replaces predecessor scanning with tree maintenance and range queries.
+Its benefit depends on how much scanning it saves. Its current candidate
+selection also differs from minimap2 RMQ
+(Section~\ref{sec:chaining-bioseqdb-rmq-summary} and
+Table~\ref{tab:chaining-bioseqdb-rmq-differences}). These alternatives need not
+perform identical work or produce identical intermediate regions.
+
+\BenchmarkSlice[columns]{local}
+  {mpf-bounded-scalar-block,mpf-bounded-simd-block,mpf-bounded-rmq-block}
+  {index-2-k20-w15-dna4-local}
+  {A local case in which SIMD-DP wins and RMQ loses.}
+  {tab:bench-chaining-local}
+
+The local result prevents a general conclusion that SIMD helps less on the
+Apple machine than on AWS. For matched, complete five-repeat comparisons with
+MPF, bounded minimizers, Block and DNA4 fixed, the median AWS differences are
+small. Restricting the comparison to measurements from the same source file
+preserves that conclusion. The local coverage is too sparse for an equivalent
+aggregate. These slices support selecting a chaining method using matched
+workloads.
+
+\Needspace{13\baselineskip}
+\subsubsection{Vector width alone does not explain the CPU results}
+\label{sec:bench-vector-width}
+
+Scalar and reference SIMD minimizers can remain close on both the local
+machine and the AWS machines after reference construction is removed.
+
+\BenchmarkSlice[columns]{local}
+  {mps-scalar-simd-block,mps-simdref-simd-block}
+  {index-2-k15-w10-dna4-local}
+  {Local indexed minimizer choices with MPS, SIMD-DP and Block fixed. Both are single samples.}
+  {tab:bench-vector-width}
+
+The local cells are close single observations, not a repeatability estimate.
+An indexed query extracts minimizers from the queries rather than sketching
+the entire reference again. A faster sketcher can therefore have little effect
+on complete-query time. Moreover, the reference SIMD implementation has shared
+rescan work when lanes lose their minima. Vector width does not remove that
+cost (Section~\ref{sec:rewrite-naive-simd}). The bounded implementation uses
+different work organization, described in
+Section~\ref{sec:configured-cpu-minimizers}.
+
+The current bounded kernel also interleaves two streams on the four-lane path
+and one on the eight-lane path, keeping the number of logical streams the same
+(Section~\ref{sec:minimizer-width-and-query-work}). This changes instruction
+scheduling and register demand. It does not make the two processors equally
+fast. The earlier stream experiments in Section~\ref{sec:v11-v12} explain
+the motivation. They do not establish a universal SIMD speedup across the
+different CPUs, index readers and memory conditions in this campaign.
+
+\Needspace{13\baselineskip}
+\subsubsection{Ambiguous bases expose work beyond minimizer extraction}
+\label{sec:bench-dna5}
+
+The local DNA5 slowdown is much larger in the complete no-index measurement
+than in its residual measurement.
+
+\BenchmarkSlice{local}
+  {mpf-bounded-simd-block}
+  {index-2-k15-w10-dna4-local,index-2-k15-w10-dna5-local,noindex-2-k15-w10-dna4-local,noindex-2-k15-w10-dna5-local}
+  {The preferred local configuration on DNA4 and DNA5.}
+  {tab:bench-dna5}
+
+Ambiguous bases change the workload at several stages. The bounded DNA5
+sketcher includes N in the k-mers it hashes. It does not simply skip every k-mer
+containing N like the minimap2-style ambiguity rule. Its hashes and selected
+anchors can therefore change along with the alphabet
+(Section~\ref{sec:configured-cpu-minimizers}). The CPU kernel supports this
+profile, so these rows are not evidence of an unnoticed scalar replacement.
+DNA5 also uses a different packed representation
+(Section~\ref{sec:sequence-bit-layout}).
+
+However, the large gap that disappears from B points towards time covered by
+the alignment/CIGAR intervals, not solely towards an expensive N test in the
+sketcher. The fused alignment work described in
+Section~\ref{sec:final-alignment-fused-work} can change when anchors or exact
+matching runs change. The totals do not isolate that mechanism from
+other alignment work. They justify investigating the downstream alignment
+path before attributing the whole slowdown to DNA5 minimizer extraction.
+
+\Needspace{13\baselineskip}
+\subsubsection{A fast residual does not mean a fast complete query}
+\label{sec:bench-a-b}
+
+This MPS configuration loses to minimap2 on complete time even though its
+residual time is lower.
+
+\BenchmarkSlice{aws-2-k20-w15}
+  {minimap2,mps-scalar-simd-block}
+  {index-2-k20-w15-dna4-m7a,index-2-k20-w15-dna4-m7i}
+  {An indexed comparison whose direction changes between A and B.}
+  {tab:bench-a-b}
+
+The CIGAR interval includes base dynamic programming, trace storage, traceback
+and result construction, not just conversion of an existing alignment into
+text (Section~\ref{sec:final-alignment-fused-work}). A large A/B separation
+therefore identifies substantial wall time covered by that instrumented work.
+It is not evidence of a costly output copy alone.
+
+There is a further limit under parallel execution: one query can be aligning
+while another is still seeding or chaining
+(Section~\ref{sec:arch-work-distribution}). Removing the union of alignment
+intervals also removes wall time during which those other tasks ran. B is
+neither an isolated sum of early-stage costs nor a prediction of running the
+query with CIGAR and MAPQ disabled. Close A and B show little wall time covered
+by the removed intervals. They do not identify one remaining stage as the bottleneck.
+
+The historical divergence-sort problem in
+Section~\ref{sec:minimizer-divergence-history} is a different issue.
+B removes the recorded CIGAR and MAPQ intervals. It does not subtract a separate
+timer for divergence estimation, which precedes final alignment for each query.
+Divergence work can nevertheless overlap another query's alignment interval.
+The current estimator uses prefix counts
+(Section~\ref{sec:divergence-prefix-counts}). The reversal between A and B does
+not demonstrate a recurrence of the earlier sorting problem.
+
+\Needspace{13\baselineskip}
+\subsubsection{Block Aligner improves complete query time}
+\label{sec:bench-base-aligner}
+
+Block Aligner improves complete time in this matched comparison, while the
+residual changes are smaller.
+
+\BenchmarkSlice{aws-2-k15-w10}
+  {mpf-bounded-simd-block,mpf-bounded-simd-ksw2}
+  {index-2-k15-w10-dna4-m7a,index-2-k15-w10-dna4-m7i,index-2-k15-w10-dna4-m4}
+  {Changing only the requested base aligner in the preferred configuration.}
+  {tab:bench-base-aligner}
+
+This pattern is consistent with a benefit in the fused alignment work.
+Block Aligner follows an adaptive block through the scoring matrix, whereas
+KSW2 uses its banded dynamic programming and stopping rules. Their gap models
+and extension cutoffs differ
+(Section~\ref{sec:final-alignment-cpu-contracts}). Fewer computed cells can
+matter as much as the speed of one cell update.
+
+Matched five-repeat DNA4 comparisons favour Block on the shorter-k-mer AWS
+workload, but occasional reversals remain elsewhere. A reversal accompanied
+by a large change in B is weak evidence about the base aligner alone: residual
+wall time can change with concurrent overlap and execution conditions as well
+as other work. The current pipeline uses a small
+adaptive block range, described in
+Section~\ref{sec:final-alignment-cpu-contracts}. Changing that range may trade
+more score cells against less block-management work, but read length alone
+does not determine the best setting: the size and divergence of each region
+being extended matter. These tables do not contain a block-size sweep.
+
+\Needspace{13\baselineskip}
+\subsubsection{MPF and MPS change both lookup and downstream work}
+\label{sec:bench-index-layout}
+
+MPF is faster in this matched example, but the no-index comparison does not
+measure persistent-index construction in isolation.
+
+\BenchmarkSlice{aws-2-k15-w10}
+  {mpf-bounded-simd-block,mps-bounded-simd-block}
+  {index-2-k15-w10-dna4-m7a,noindex-2-k15-w10-dna4-m7a}
+  {MPF and MPS with the same minimizer, chaining and alignment choices.}
+  {tab:bench-index-layout}
+
+MPF retains fragment-oriented lookup data. MPS groups occurrences over the
+sequence (Figure~\ref{fig:index-mpf-mps}). Their readers expose different
+metadata, occurrence grouping and access patterns. The hash-major MPS reader
+can read selected streams rather than every stored position
+(Section~\ref{sec:index-mps-selective-reads}), but that advantage does not
+guarantee a cheaper complete query than MPF direct lookup. Matched five-repeat
+bounded DNA4 comparisons usually favour MPF for indexed execution. The
+no-index differences are smaller and are sometimes close.
+
+Persistent MPS construction includes sorting and may spill runs to temporary
+files (Figure~\ref{fig:index-mps-merge}). That explains a possible preparation
+cost, not a cost automatically charged to an indexed query. The sorter already
+keeps runs in memory when its memory budget allows and spills when needed.
+Temporary construction,
+persistent publication and later reading are different operations
+(Sections~\ref{sec:index-construction} and~\ref{sec:index-file-consistency}).
+An index/no-index subtraction cannot rank their durable build times.
+
+\BenchmarkSlice{aws-4-k20-w15}
+  {mpf-bounded-simd-block,mps-bounded-simd-block}
+  {index-4-k20-w15-dna5-m7a,index-4-k20-w15-dna5-m7i}
+  {The large DNA5 MPS slowdown appears on several machine classes.}
+  {tab:bench-mps-dna5}
+
+The MPS anomaly is not unique to M7A. Much of its additional elapsed time is
+covered by the intervals removed from B, so persistent spill sorting does not
+explain the gap. Current DNA5 MPS uses the grouped reader and a serial query
+loop with fragmented target access, whereas MPF can use a shared resident
+target and parallel batch (Section~\ref{sec:index-reader-execution}). Alignment
+requests through the PostgreSQL view copy ranks through cached fragment access
+and per-symbol extraction (Section~\ref{sec:sequence-pg-rank-copy}). This is
+different work from reading a shared resident target, and provides a possible
+connection between the index route and the fused alignment interval.
+The packed fragment slots are separate from the decompressed stripe cache,
+which was disabled in the original benchmark campaign
+(Section~\ref{sec:pg-storage-caches}).
+
+Each MPS cell comes from one measured batch in the FAST fallback procedure,
+whereas the MPF cells have five repeats. The current source provides a plausible
+explanation, but there is no stage trace from each historical binary.
+The table cannot assign the whole gap
+to fragmentation, serial execution or memory pressure separately.
+
+\Needspace{13\baselineskip}
+\subsubsection{Machine comparisons include memory and I/O pressure}
+\label{sec:bench-machine-pressure}
+
+The minimap2 baseline itself slows sharply on C7G, so its large BioseqDB
+comparison factors also reflect a stressed reference run.
+
+\BenchmarkSlice{aws-4-k20-w15}
+  {minimap2,mpf-bounded-simd-block}
+  {index-4-k20-w15-dna4-m7a,index-4-k20-w15-dna4-m7i,index-4-k20-w15-dna4-m4,index-4-k20-w15-dna4-c7g}
+  {The same indexed workload across the AWS machine classes.}
+  {tab:bench-machine-pressure}
+
+The C7G minimap2 record reports severe paging during measurement.
+Its available physical memory was nearly exhausted, and a large part of the
+helper's address space was swapped out. C7G also has less physical RAM than
+the other AWS classes in this campaign. The residency distinctions in
+Section~\ref{sec:index-residency} matter directly: accessing a stored index
+can wait for data even when no index is rebuilt.
+
+M4 is slower in many comparisons, but is not uniformly the slowest machine.
+Its older CPU and lower instance-level EBS bandwidth can both matter when
+working data must be fetched from disk. The common provisioned volume settings
+do not make the effective I/O paths equal.\autocite{aws_ebs_limits}
+Neither the inventory nor the elapsed times measure a universal swap penalty
+for each processor. The C7G baseline measures execution under severe memory
+pressure. Its large comparison factor should therefore not be presented as a
+BioseqDB speedup that applies independently of the machine and its memory
+conditions.
+
+\Needspace{13\baselineskip}
+\subsubsection{An indexed query can lose to temporary construction}
+\label{sec:bench-index-reversal}
+
+The C7G measurement is slower with a persisted index than without one.
+
+\BenchmarkSlice{aws-2-k20-w15}
+  {minimap2,mpf-simdref-simd-block}
+  {index-2-k20-w15-dna4-c7g,noindex-2-k20-w15-dna4-c7g}
+  {The apparently reversed index benefit for MPF and SIMD-ref.}
+  {tab:bench-index-reversal}
+
+The indexed record explicitly reports persisted MPF decoding and query-sketch
+jobs with no reference-index build or recomputation. Restarting PostgreSQL
+removes process-resident state. It does not remove the persisted index. The
+slow time must therefore be interpreted as querying and accessing that index,
+rather than silently constructing it again.
+
+The two modes need not perform identical lookup work. A temporary index can
+use an in-memory representation, whereas a wide-hash persisted reader can
+repeatedly traverse stored controls
+(Section~\ref{sec:index-control-scan-waves}). Memory residency adds another
+possible difference (Section~\ref{sec:index-residency}). These cells also come
+from different campaign replicas with different execution histories. The
+generator selects the lowest approved A independently for each cell. The
+table therefore shows a real recorded reversal, but does not establish a timing
+bug or show that removing the index repeatedly improves performance on one
+fixed deployment.
+
+\Needspace{13\baselineskip}
+\subsubsection{The longest runs need a resource explanation before a kernel ranking}
+\label{sec:bench-long-runs}
+
+Several wide-hash MPF observations remain extremely slow even after the
+alignment intervals are removed.
+
+\BenchmarkSlice[columns]{aws-4-k20-w15}
+  {mpf-scalar-scalar-block,mpf-simdref-rmq-block}
+  {index-4-k20-w15-dna4-c7g}
+  {Examples of the longest indexed observations. Superscript s denotes a single sample.}
+  {tab:bench-long-runs}
+
+Each of these very long measurements comes from a single FAST observation.
+Their close A and B place most of the delay outside the removed alignment intervals,
+but do not separate index traversal, anchor work, page faults and scheduling.
+The repeated control scans described in Section~\ref{sec:index-control-scan-waves}
+can amplify slow memory or storage access: the same large metadata region is
+visited for successive query waves. Changing the final base aligner cannot
+remove that preceding work.
+
+The campaign logs also contain a backend that appeared idle while its disk-read
+counter continued to advance and the kernel reported a page wait. That example
+occurred during untimed preparation. It explains why low CPU use alone is not
+evidence of a deadlock, but cannot diagnose these timed cells. The admission
+path in Section~\ref{sec:arch-admission} and
+Algorithm~\ref{alg:arch-wave-scheduling} returns a decision rather than
+sleeping until memory becomes available. A denied reservation makes the caller
+reduce, serialize or reject work. This rules out treating the admission API
+itself as a demonstrated indefinite memory wait.
+
+The available records contain no per-repeat trace proving a TBB deadlock in
+these completed runs, nor a uniform paging trace proving that every long cell had the same
+cause. A controlled repeat would need the actual reader, wave progress,
+page-fault/I/O counters and worker stacks together. Until then, these observations
+reveal a serious robustness limit of the measured path. They should not
+determine a general Scalar-DP versus RMQ ranking.
+
+\Needspace{13\baselineskip}
+\subsubsection{A larger GPU does not remove the host part of the pipeline}
+\label{sec:bench-gpu-performance}
+
+The local Vulkan route remains slower than minimap2 when the reference index
+is already available.
+
+\BenchmarkSlice{local}
+  {minimap2,mpf-vulkan-vulkan-block}
+  {index-2-k15-w10-dna4-local,index-2-k20-w15-dna4-local}
+  {The local integrated GPU with Vulkan seeding and chaining.}
+  {tab:bench-gpu-local}
+
+The local benchmark used unified CPU/GPU memory, so its result cannot be
+explained simply as using CPU RAM instead of separate GPU VRAM. The published
+route includes host work, GPU submissions and synchronization. Its selected
+base aligner runs on the CPU, and the longer-k-mer local record also identifies
+CPU backtracking (Section~\ref{sec:chaining-gpu-campaign-boundary}). The staged minimizer
+schedule in Algorithm~\ref{alg:vulkan-sketch-host-schedule} illustrates why
+fast device computation need not imply fast complete-query execution.
+
+\BenchmarkSlice{vastai}
+  {minimap2,mps-vulkan-vulkan-block}
+  {index-2-k15-w10-dna4-vastai,index-2-k20-w15-dna4-vastai}
+  {The MPS Vulkan route and the same-host minimap2 baseline on an RTX 5090.}
+  {tab:bench-gpu-vast}
+
+The discrete-GPU results are more mixed: the longer-k-mer MPS case approaches
+the baseline on complete time, while the other case remains much slower.
+These are single observations. They use a different host and software build
+from the local campaign, so they do not isolate the effect of replacing the GPU.
+The Vast.ai build places GPU working buffers in device-local memory but retains
+CPU-cached arrays for host consumers. The campaign diagnostics found that
+moving host-read chaining data towards the GPU could itself slow backtracking.
+The useful design rule is to place each array near the work that consumes it
+and reduce transfers between stages.
+
+G3SA targets long-read alignment too. Its results do not imply that GPUs are
+useful only for short reads. Its released pipeline uses multiple kernels and
+retains major intermediate arrays on the device, rather than placing the
+whole mapper in one kernel.\autocite{g3sa_paper,g3sa_implementation}
+Algorithm~\ref{alg:g3sa-sketch-kernel} describes one such stage. This suggests
+a direction for reducing host/device interaction, but its different pipeline
+does not predict the speedup of the hybrid PostgreSQL implementation measured here.
+
+\Needspace{13\baselineskip}
+\subsubsection{GPU capacity failures have more than one cause}
+\label{sec:bench-gpu-capacity}
+
+The larger MPS GPU cases fail even though the MPF cases complete on the same device.
+
+\BenchmarkSlice{vastai}
+  {mpf-vulkan-vulkan-block,mps-vulkan-vulkan-block}
+  {index-4-k15-w10-dna4-vastai,index-4-k20-w15-dna4-vastai}
+  {Completed MPF observations and MPS preparation failures on the RTX 5090.}
+  {tab:bench-gpu-capacity}
+
+The diagnosed MPS failure is a storage-buffer binding limit. Its combined
+hash/offset/count control array exceeds the device's allowed storage-buffer
+range, although the position buffer fits. These are index controls of the
+kind separated from position streams in Figure~\ref{fig:format6-streams},
+not just one raw sequence fragment. Available total GPU memory does not
+establish that one binding can represent the whole array. Splitting the work
+into bounded buffer windows is required even on a device with more VRAM.
+The table does not contain a successful full-workload measurement of that repair.
+
+For the longer-k-mer profile, the detailed buffer diagnostics come from a
+companion KSW2 run using the same MPS index profile. The displayed Block run
+records a more general admission failure.
+
+Other absent cells have different meanings. The measured Vast.ai build rejected
+the DNA5 sequence type during setup. Missing or failed execution evidence
+does not constitute a slow timing. These distinctions follow the admission
+principle in Section~\ref{sec:arch-route-admission}: a selected route must be
+supported and proved to have run before its elapsed time is compared.
+
+\Needspace{13\baselineskip}
+\subsubsection{Search dominates this BLAST measurement}
+\label{sec:bench-external}
+
+BLAST remains much slower than the mapping-oriented tools even when its native
+reference database is prepared beforehand.
+
+\BenchmarkSlice[columns]{external-2-k15-w10}
+  {minimap2,bioseq,winnowmap,lexicmap,blastn}
+  {index-2-k15-w10-dna4-m7a,noindex-2-k15-w10-dna4-m7a}
+  {The preferred BioseqDB tuple and the external aligners on M7A.}
+  {tab:bench-external}
+
+The external timing includes launching the process and producing its output,
+but the BLAST stage evidence places most elapsed time inside word
+finding and preliminary search. The long indexed time is therefore not well
+explained as executable startup alone. BLAST's seed search and extension
+strategy differs from the minimizer/chain pipeline introduced in
+Section~\ref{sec:seed-chain-extend}. Preparing a native database does not
+remove that query work. Increasing the word length can reduce it, so the
+longer-k-mer profile is not universally slower across tools.
+
+Winnowmap also benefits strongly from a prepared index in this slice, while
+LexicMap's indexed search remains slower than minimap2 on this workload.
+The comparison rules in Section~\ref{sec:external-aligner-results} remain
+important: native indexing, reference partitioning and ambiguity handling
+differ between tools. LexicMap has no equivalent minimizer-window parameter,
+and the B intervals do not all cover the
+same fused work as BioseqDB. The useful result is the complete time for the
+stated workload and validation rules. It does not establish interchangeable
+alignment semantics or an isolated kernel speed ranking.
+\clearpage
+\endgroup

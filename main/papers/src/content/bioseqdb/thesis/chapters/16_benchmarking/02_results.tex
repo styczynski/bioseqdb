@@ -1,9 +1,11 @@
-\subsection{End-to-end results and their interpretation}
+\subsection{Measurement procedure and reading the full tables}
 \label{sec:benchmark-results}
 
 The following tables present the approved results available while the benchmark
 campaign is still running. They compare the BioseqDB mapping pipeline with
-minimap2 on one local Apple Silicon machine and four AWS machines. Each timing
+minimap2 on one local Apple Silicon machine and four AWS machines. A separate
+Vast.ai table compares Vulkan configurations with a same-host minimap2 baseline.
+Each timing
 covers a batch of 1,024 queries. A missing measurement remains visibly missing,
 so the tables describe completed observations rather than an estimated full
 matrix. The machine inventory precedes the result tables.
@@ -25,7 +27,7 @@ matrix. The machine inventory precedes the result tables.
   Standard observations use the current framework mapping-iteration interval.
   FAST fallbacks retain their distinct single-sample timing scope and carry
   an \textsuperscript{s} marker. They are never pooled with standard repeats.
-  The final external-aligner table identifies its separate timing boundary explicitly.
+  The external-aligner table identifies its separate timing boundary explicitly.
   In particular, ``mapping interval'' still includes transient construction in
   no-index mode.
   \item \textbf{Two measurements per cell.} The first duration, A, is the
@@ -44,7 +46,23 @@ matrix. The machine inventory precedes the result tables.
   alignment, trace storage, traceback and result construction. B therefore does
   not universally represent seeding and chaining alone. Likewise,
   $A_{50}-B_{50}$ is not a measured median CIGAR/MAPQ cost.
+  MAPQ is mapping confidence, not seed-divergence estimation
+  (Section~\ref{sec:alignment-postprocessing}). The divergence estimator has
+  no dedicated interval subtracted here. With parallel queries, however,
+  one query's divergence or chaining work can overlap another query's
+  CIGAR/MAPQ interval and lie inside the removed wall-time union. B is
+  consequently residual elapsed time, not the runtime of an execution
+  with those stages disabled.
 \end{itemize}
+
+\paragraph{Cache configuration.}
+The original benchmark campaign disabled the optional cache of decompressed
+column and stripe chunks. Its setting must not be inferred from binary
+releases, where it is enabled by default. This cache is separate from the
+scanner's packed-fragment slots and the operating-system page cache
+(Table~\ref{tab:storage-cache-scopes}). The published summaries do not retain
+a per-observation snapshot of this GUC, so current source defaults cannot
+independently establish the setting of every historical build.
 
 \paragraph{Input sequences and repetitions.}
 The campaign configuration defines eight deterministic target fixtures, covering
@@ -93,9 +111,11 @@ BioseqDB uses task-parallel execution with prefiltering disabled and both CIGAR
 and MAPQ projection enabled. MPF and MPS denote minimizers per fragment and per
 sequence. Each row identifies the requested minimizer, chaining algorithm and
 base aligner in addition to this index representation. Scalar-DP and SIMD-DP
-refer to the scalar and literal SIMD minimap2 chaining routes. RMQ denotes the
+refer to scalar minimap2 chaining and the SQL route's bounded SIMD-DP mode
+(Algorithm~\ref{alg:chaining-b5}). RMQ denotes the
 separate range-minimum-query algorithm. SIMD-ref is the reference minimizer,
-Two-stack is the two-stack ntHash minimizer, and Bounded is bounded ntHash SIMD.
+Two-stack labels the \texttt{two\_stack\_nthash} setting described in
+Section~\ref{sec:configured-cpu-minimizers}, and Bounded is bounded ntHash SIMD.
 Block denotes Block Aligner. Vulkan rows can include CPU index handling,
 backtracking and base alignment, and do not imply an entirely GPU pipeline.
 If none of the Vulkan configurations has a measurement for the workloads and
@@ -153,8 +173,9 @@ All comparisons and minima use the original integer nanoseconds.
   A horizontal dash with \textsuperscript{g} identifies an explicitly recorded
   unavailable GPU configuration, which was not executed. Neither marker is a
   zero duration. The comparison reads n/a when no measured counterpart exists.
-  Only execution rows with an approved observation or an explicit unavailable
-  cell in a panel are printed. Entirely unmeasured row families remain omitted.
+  In the local and AWS tables, only execution rows with an approved observation
+  or an explicit unavailable cell in a panel are printed. Entirely unmeasured
+  row families remain omitted.
 \end{itemize}
 
 \paragraph{Limits of the comparison.}
@@ -176,10 +197,32 @@ storage capacity. Selected row comments contain sampled available memory, but
 there is no uniform per-repeat series of free-memory and free-disk measurements.
 Missing C7G BioseqDB timings cannot establish either a win or a loss.
 
+\paragraph{Matched configuration comparisons.}
+The interpretation compares configurations within a machine class, workload
+and index mode. Its chaining summary uses indexed workloads, holds MPF,
+bounded minimizers, Block and DNA4 fixed, and requires a selected five-repeat observation for all three
+chaining choices. Its index-layout summary holds bounded minimizers and DNA4
+fixed and pairs MPF with MPS at the same chaining and base-alignment settings.
+The base-aligner summary pairs Block with KSW2 for the same MPF DNA4 workload,
+CPU minimizer and chaining choice. Both sides of a pair must have five repeats
+and an exact requested CPU path. FAST observations and unsupported paths are
+excluded from these summaries; they remain visible in the source tables and
+are discussed separately when anomalous. Medians of matched elapsed-time
+ratios prevent a few extremely long observations from dominating a mean.
+No timing is discarded merely for being slow. Restricting chaining triples
+further to observations selected from the same YAML is a sensitivity check,
+not proof of identical binaries or cache conditions. Local coverage is reported
+separately from AWS coverage.
+The companion script \texttt{analyze\_benchmark\_results.py} reproduces these
+cohorts from the same selected observations and emits the paired values,
+source-file hashes and summary ratios.
+
 \paragraph{Reproducible table generation.}
-The standalone Python generator reads only the normative
+The standalone Python generator reads the normative
 \texttt{approved\_results} rows and the remote
 \texttt{hardware\_unavailable\_cells}, with their embedded machine metadata.
+The Vast.ai table also reads explicit setup rejections and execution failures,
+which receive distinct markers rather than timings.
 It validates identities and timing scopes, rejects duplicates within a source, and
 records the SHA-256 of each input in the generated LaTeX source. Coverage totals
 are recomputed from approved rows rather than copied from historical progress
@@ -197,8 +240,10 @@ establish that a slower observation suffered swapping. The generator checks that
 tuple in these sources is rendered once logically, excluding the historical
 mismeasurements and accounting for repeated baseline rows on continuation pages.
 Missing fallback files are skipped. This selection also supplies the minimap2
-and BioseqDB rows in the final comparison table.
-The final table additionally reads the four external-aligner
+and BioseqDB rows in the external-aligner comparison table.
+That table additionally reads the four external-aligner
 authorities and explains their separate timing and validation rules.
+The final GPU table reads the separate Vast.ai authority, including its own
+minimap2 baseline, and explains its single-sample procedure.
 
 \include{chapters/16_benchmarking/generated_results}

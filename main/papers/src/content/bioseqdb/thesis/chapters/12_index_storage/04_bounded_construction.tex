@@ -78,5 +78,9 @@ MPS does the following steps to build entire index:
 \label{fig:index-mps-merge}
 \end{figure}
 
-This file-spill algorithm implementation uses PostgreSQL's \texttt{BufFile} temporary-file
-interface. It's important to note that BioseqDB will try to use RAM whether possible to avoid using disk if merging can avoid it.
+The spill path uses PostgreSQL's \texttt{BufFile} temporary-file interface.
+The sorter retains sorted runs in RAM when memory admission succeeds and
+spills them when it cannot reserve that memory. It can also move a retained
+run to a temporary file to make room for later work. Thus the merge structure
+in Figure~\ref{fig:index-mps-merge} does not require every run to be written
+to disk.

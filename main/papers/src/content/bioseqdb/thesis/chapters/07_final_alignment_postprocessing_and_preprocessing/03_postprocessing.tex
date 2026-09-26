@@ -1,3 +1,23 @@
 \section{Postprocessing}
+\label{sec:alignment-postprocessing}
 
-\todo{Write something here?}
+The pipeline derives several different summaries from an alignment candidate.
+Seed divergence estimates how much sequence differs from the pattern of
+matching minimizers. An exact edit count instead comes from the selected
+base-level path. Mapping quality describes confidence in the chosen mapping
+relative to competing candidates. These values answer different questions;
+none can replace the other merely because they are all reported with a match.
+
+\subsection{Seed divergence and position order}
+\label{sec:divergence-prefix-counts}
+
+The current divergence estimator counts query minimizers at each position and
+forms cumulative counts. It can then test whether a position contains a
+minimizer and count minimizers in an interval without sorting the emitted
+positions. This matters because a SIMD sketch can emit positions in an order
+different from their order along the query, as the historical estimator
+problem in Section~\ref{sec:minimizer-divergence-history} illustrates. Building
+the count array takes work proportional to the query length plus the number
+of minimizers. The estimator runs before final alignment; it is separate from
+the fused alignment and CIGAR work described in
+Section~\ref{sec:final-alignment-cpu-contracts}.

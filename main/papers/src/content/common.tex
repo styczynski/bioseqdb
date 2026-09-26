@@ -59,6 +59,129 @@
 \usepackage{amsmath}
 \usepackage{stmaryrd}
 
+% Horizontal excerpts of generated benchmark tables. The generated registry
+% supplies the source labels and already-formatted cells; this command neither
+% recomputes comparisons nor chooses a new winner inside an excerpt.
+\makeatletter
+\newcommand{\BenchmarkSourceLabel}[2]{%
+  \begingroup\def\@currentlabel{#2}\phantomsection\label{#1}\endgroup}
+\makeatother
+\ExplSyntaxOn
+\clist_new:N \l__bench_rows_clist
+\clist_new:N \l__bench_columns_clist
+\clist_new:N \l__bench_references_clist
+\tl_new:N \l__bench_body_tl
+\tl_new:N \l__bench_caption_refs_tl
+\int_new:N \l__bench_width_int
+\msg_new:nnn { benchmark } { unknown }
+  { Unknown~benchmark~#1.~Regenerate~the~benchmark~registry~or~correct~the~slice~key. }
+\msg_new:nnn { benchmark } { orientation }
+  { Benchmark~slice~orientation~must~be~rows~or~columns. }
+\NewDocumentCommand{\BenchmarkDeclareTable}{m}
+  { \cs_new:cpn { bench@table@#1 } {} }
+\NewDocumentCommand{\BenchmarkDeclareRow}{m m m m}
+  {
+    \cs_new:cpn { bench@row@#1@#2 } {#3}
+    \cs_new:cpn { bench@tint@#1@#2 } {#4}
+  }
+\NewDocumentCommand{\BenchmarkDeclareColumn}{m m m}
+  { \cs_new:cpn { bench@column@#1@#2 } {#3} }
+\NewDocumentCommand{\BenchmarkDeclareCell}{m m m m}
+  { \cs_new:cpn { bench@cell@#1@#2@#3 } {#4} }
+\cs_new_protected:Npn \__bench_require:n #1
+  { \cs_if_exist:cF { bench@#1 } { \msg_fatal:nnn { benchmark } { unknown } {#1} } }
+\cs_new:Npn \__bench_row_tint:nn #1#2
+  {
+    \exp_args:Nf \tl_if_empty:nF { \use:c { bench@tint@#1@#2 } }
+      { \exp_args:Nf \rowcolor { \use:c { bench@tint@#1@#2 } } }
+  }
+\cs_new:Npn \__bench_cell_tint:nn #1#2
+  {
+    \exp_args:Nf \tl_if_empty:nF { \use:c { bench@tint@#1@#2 } }
+      { \exp_args:Nf \cellcolor { \use:c { bench@tint@#1@#2 } } }
+  }
+\cs_new_protected:Npn \__bench_rows:nn #1#2
+  {
+    \int_set:Nn \l__bench_width_int { \clist_count:N \l__bench_columns_clist }
+    \tl_set:Nn \l__bench_body_tl { \textbf{Configuration} }
+    \clist_map_inline:Nn \l__bench_columns_clist
+      { \tl_put_right:Nn \l__bench_body_tl { & \use:c { bench@column@#1@##1 } } }
+    \tl_put_right:Nn \l__bench_body_tl { \\ \hline }
+    \clist_map_inline:Nn \l__bench_rows_clist
+      {
+        \tl_put_right:Nn \l__bench_body_tl
+          { \__bench_row_tint:nn {#1}{##1} \use:c { bench@row@#1@##1 } }
+        \clist_map_inline:Nn \l__bench_columns_clist
+          { \tl_put_right:Nn \l__bench_body_tl { & \use:c { bench@cell@#1@##1@####1 } } }
+        \tl_put_right:Nn \l__bench_body_tl { \\[3pt] \hline }
+      }
+    \clist_set_eq:NN \l__bench_references_clist \l__bench_rows_clist
+  }
+\cs_new_protected:Npn \__bench_columns:nn #1#2
+  {
+    \int_set:Nn \l__bench_width_int { \clist_count:N \l__bench_rows_clist }
+    \tl_set:Nn \l__bench_body_tl { \textbf{Workload} }
+    \clist_map_inline:Nn \l__bench_rows_clist
+      { \tl_put_right:Nn \l__bench_body_tl
+          { & \__bench_cell_tint:nn {#1}{##1} \use:c { bench@row@#1@##1 } } }
+    \tl_put_right:Nn \l__bench_body_tl { \\ \hline }
+    \clist_map_inline:Nn \l__bench_columns_clist
+      {
+        \tl_put_right:Nn \l__bench_body_tl
+          { \vspace*{2pt}\noindent\use:c { bench@column@#1@##1 } }
+        \clist_map_inline:Nn \l__bench_rows_clist
+          { \tl_put_right:Nn \l__bench_body_tl
+              { & \__bench_cell_tint:nn {#1}{####1} \use:c { bench@cell@#1@####1@##1 } } }
+        \tl_put_right:Nn \l__bench_body_tl { \\[3pt] \hline }
+      }
+    \clist_set_eq:NN \l__bench_references_clist \l__bench_columns_clist
+  }
+\NewDocumentCommand{\BenchmarkSlice}{ O{rows} m m m m m }
+  {
+    \group_begin:
+    \__bench_require:n { table@#2 }
+    \clist_set:Nn \l__bench_rows_clist {#3}
+    \clist_set:Nn \l__bench_columns_clist {#4}
+    % The baseline keeps its first position even in a transposed excerpt.
+    \clist_if_in:NnT \l__bench_rows_clist { minimap2 }
+      { \clist_remove_all:Nn \l__bench_rows_clist { minimap2 }
+        \clist_put_left:Nn \l__bench_rows_clist { minimap2 } }
+    \clist_map_inline:Nn \l__bench_rows_clist
+      { \__bench_require:n { row@#2@##1 }
+        \clist_map_inline:Nn \l__bench_columns_clist
+          { \__bench_require:n { cell@#2@##1@####1 } } }
+    \clist_map_inline:Nn \l__bench_columns_clist { \__bench_require:n { column@#2@##1 } }
+    \str_case:nnF {#1}
+      { {rows}{\__bench_rows:nn {#2}{#1}} {columns}{\__bench_columns:nn {#2}{#1}} }
+      { \msg_fatal:nn { benchmark } { orientation } }
+    % Build references before caption: caption packages may copy its argument
+    % into another macro, where an inline mapper's parameter tokens are unsafe.
+    \tl_clear:N \l__bench_caption_refs_tl
+    \clist_map_inline:Nn \l__bench_references_clist
+      {
+        \tl_if_empty:NF \l__bench_caption_refs_tl
+          { \tl_put_right:Nn \l__bench_caption_refs_tl {,~} }
+        \str_if_eq:nnTF {#1}{rows}
+          { \tl_put_right:Nn \l__bench_caption_refs_tl {\ref{bench:#2:row:##1}} }
+          { \tl_put_right:Nn \l__bench_caption_refs_tl {\ref{bench:#2:column:##1}} }
+      }
+    \begin{table}[H]
+      \centering
+      \fontsize{8}{9.3}\selectfont
+      \setlength{\tabcolsep}{2pt}\setlength{\fboxsep}{2pt}
+      \renewcommand{\arraystretch}{1.15}
+      \begin{tabularx}{\linewidth}{@{}p{31mm}|*{\l__bench_width_int}{>{\centering\arraybackslash}X|}@{}}
+        \hline \tl_use:N \l__bench_body_tl
+      \end{tabularx}
+      \caption[#5]{#5~Source:~Table~\ref{tab:bench:#2},~
+        \str_if_eq:nnTF {#1}{rows}{row}{column}\int_compare:nNnT {\clist_count:N \l__bench_references_clist} > {1} {s}~
+        \tl_use:N \l__bench_caption_refs_tl.}
+      \label{#6}
+    \end{table}
+    \group_end:
+  }
+\ExplSyntaxOff
+
 % ---------------------------------------------------------------------------
 % Source-code references and authoring notices
 % ---------------------------------------------------------------------------

@@ -9,7 +9,6 @@ from threading import Thread
 
 DEFAULT_ARGS = [
     "--shell-escape",
-    "--enable-pipes",
     "--enable-write18",
     "-interaction", "nonstopmode",
     "-halt-on-error",
