@@ -779,8 +779,18 @@ def reclaim_collected_package_objects(cells, cache_root="/home/ubuntu/caches/pac
         if (re.fullmatch(r"[a-z][a-z0-9_.]*", cell["distro"]) is None
                 or type(cell["postgres_major"]) is not int or cell["postgres_major"] < 17):
             raise ValueError("Invalid package cache cell")
-        tree = root / cell["distro"] / f"postgresql{cell['postgres_major']}"
-        if not tree.is_dir() or tree.resolve() != tree or not (tree / "CMakeCache.txt").is_file():
+        cell_root = root / cell["distro"] / f"postgresql{cell['postgres_major']}"
+        if not cell_root.is_dir() or cell_root.resolve() != cell_root:
+            continue
+        # Current native packages keep sources beside build-repository-root;
+        # older caches used build/ or the cell root itself. Select only an
+        # actual CMake build tree, never walk the adjacent source checkout.
+        tree = next((candidate for candidate in (
+            cell_root / "build-repository-root", cell_root / "build", cell_root)
+            if candidate.is_dir() and candidate.resolve() == candidate
+            and (candidate / "CMakeCache.txt").is_file()
+            and not (candidate / "CMakeCache.txt").is_symlink()), None)
+        if tree is None:
             continue
         referenced = False
         for process in Path("/proc").iterdir():

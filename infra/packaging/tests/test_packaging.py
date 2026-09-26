@@ -135,6 +135,38 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Invalid package cache cell"):
                     cleanup([dict(cell, distro="../outside")], str(root))
 
+    def test_completed_package_cleanup_finds_nested_builds_without_touching_sources(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        cleanup = namespace["reclaim_collected_package_objects"]
+        for layout in ("build-repository-root", "build"):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                cell_root = root / "arch/postgresql19"
+                tree = cell_root / layout
+                tree.mkdir(parents=True)
+                (tree / "CMakeCache.txt").write_text("retained cache")
+                (tree / "one.o").write_text("regenerable object")
+                (tree / "two.pcm").write_text("regenerable module")
+                (tree / "bioseq.so").write_text("retained library")
+                source = cell_root / "source"
+                source.mkdir()
+                (source / "fixture.o").write_text("source fixture, not build output")
+                outside = root / "outside"
+                outside.mkdir()
+                (outside / "foreign.o").write_text("not owned by this cache")
+                (tree / "linked-directory").symlink_to(outside, target_is_directory=True)
+                with mock.patch.object(namespace["subprocess"], "check_output", return_value=""), \
+                        mock.patch.object(namespace["shutil"], "disk_usage",
+                                          return_value=SimpleNamespace(free=110 * 1024**3)):
+                    result = cleanup([dict(distro="arch", postgres_major=19)], str(root))
+                self.assertEqual(result["removed_files"], 2)
+                self.assertEqual(result["roots"], [str(tree)])
+                for retained in (tree / "CMakeCache.txt", tree / "bioseq.so",
+                                 source / "fixture.o", outside / "foreign.o"):
+                    self.assertTrue(retained.is_file())
+
     def test_coordinator_ip_refresh_only_changes_enrolled_narrow_rules(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):
