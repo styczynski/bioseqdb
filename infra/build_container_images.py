@@ -262,20 +262,47 @@ def collect_and_publish(job):
         remote_result = fleet.REMOTE + "/reporting/container_images/requests/" + result_path.name
         command(["rsync", "-a", "-e", shlex.join(ssh[:-1]), ssh[-1] + ":" + remote_result, str(result_path)])
     result = json.loads(result_path.read_text())
+    if image_key(result["package"]) != image_key(job["package"]) or not result.get("smoke",{}).get("passed"):
+        raise RuntimeError("Worker result does not match the reserved package or passed smoke")
     for item in result["files"]:
         target = destination / Path(item["path"]).name
-        if host == "local":
-            shutil.copy2(item["path"], target)
-        else:
-            command(["rsync", "-a", "-e", shlex.join(ssh[:-1]), ssh[-1] + ":" + item["path"], str(target)])
+        retained = target.is_file() and target.stat().st_size == item["bytes"] and digest(target) == item["sha256"]
+        if not retained:
+            if host == "local":
+                shutil.copy2(item["path"], target)
+            else:
+                command(["rsync", "-a", "-e", shlex.join(ssh[:-1]), ssh[-1] + ":" + item["path"], str(target)])
         if target.stat().st_size != item["bytes"] or digest(target) != item["sha256"]:
             raise RuntimeError("Image artifact transfer checksum mismatch")
         item["path"] = str(target)
     archive = next(Path(i["path"]) for i in result["files"] if i["path"].endswith(".image.tar"))
-    command(local_docker() + ["image", "load", "-i", str(archive)])
+    retained_image = subprocess.run(local_docker() + ["image", "inspect", result["tag"], "--format", "{{.Id}}"],
+                                    capture_output=True,text=True,timeout=30)
+    if retained_image.returncode or retained_image.stdout.strip() != result["image_id"]:
+        command(local_docker() + ["image", "load", "-i", str(archive)])
     command(local_docker() + ["push", result["tag"]])
-    registry = json.loads(command(local_docker() + ["buildx", "imagetools", "inspect", "--raw", result["tag"]], capture=True))
-    result["registry_manifest_sha256"] = hashlib.sha256(json.dumps(registry,sort_keys=True).encode()).hexdigest()
+    descriptor = json.loads(command(local_docker() + ["buildx", "imagetools", "inspect",
+        "--format", "{{json .Manifest}}", result["tag"]], capture=True))
+    result["registry_digest"] = descriptor["digest"]
+    registry_text = command(local_docker() + ["buildx", "imagetools", "inspect", "--raw", result["tag"]], capture=True)
+    registry = json.loads(registry_text)
+    if "manifests" in registry:
+        expected_arch = result["platform"].split("/")[1]
+        matches = [m for m in registry["manifests"] if m.get("platform",{}).get("os") == "linux"
+                   and m["platform"].get("architecture") == expected_arch]
+        if len(matches) != 1:
+            raise RuntimeError("Pushed image lacks its one expected native platform")
+        result["platform_digest"] = matches[0]["digest"]
+        registry_text = command(local_docker() + ["buildx", "imagetools", "inspect", "--raw",
+            REPOSITORY + "@" + result["platform_digest"]], capture=True)
+        registry = json.loads(registry_text)
+    else:
+        result["platform_digest"] = descriptor["digest"]
+    # Classic Docker reports the config digest as .Id; the containerd store
+    # reports the OCI index/manifest digest. Both identify immutable content.
+    if result["image_id"] not in {result["registry_digest"], result["platform_digest"],
+                                   registry.get("config",{}).get("digest")}:
+        raise RuntimeError("Registry content differs from the SQL-tested image identity")
     result["published"] = True
     fleet.write_json_atomic(destination / "result.json", result)
     event("image_published", tag=result["tag"], image_id=result["image_id"])
@@ -294,7 +321,7 @@ def publish_pairs(state):
         if state.setdefault("multi_platform", {}).get(tag) == identities:
             continue
         command(local_docker() + ["buildx", "imagetools", "create", "--tag", tag,
-                                 *[r["tag"] for r in variants.values()]])
+                                 *[REPOSITORY + "@" + r["platform_digest"] for r in variants.values()]])
         raw = json.loads(command(local_docker() + ["buildx", "imagetools", "inspect", "--raw", tag], capture=True))
         platforms = {m.get("platform",{}).get("os", "") + "/" + m.get("platform",{}).get("architecture", "") for m in raw["manifests"]}
         if platforms != set(variants):
@@ -319,8 +346,10 @@ def daemon():
                     result = collect_and_publish(job)
                     state["results"][image_key(job["package"])] = result
                     job["collected"] = True
+                    fleet.write_json_atomic(path,state)
                 elif observed.get("status") in ("failed", "killed_timeout", "aborted"):
                     state["failed"][image_key(job["package"])] = dict(host=host, observed=observed)
+                    fleet.write_json_atomic(path,state)
             except Exception as error:
                 event("image_monitor_error", host=host, error=str(error)[:1800])
         occupied = set(state["results"]) | set(state["failed"])
@@ -343,9 +372,23 @@ def daemon():
         with ThreadPoolExecutor(max_workers=7) as pool:
             for host, job, error in pool.map(start,pending):
                 if error:event("image_launch_error",host=host,error=error[:1800])
-                else:state["jobs"][host]=job
+                else:
+                    state["jobs"][host]=job
+                    fleet.write_json_atomic(path,state)
         try:publish_pairs(state)
         except Exception as error:event("image_manifest_error",error=str(error)[:1800])
+        if time.time() - state.get("last_hourly_log",0) >= 3600:
+            from e2e_tuple_progress import append_progress_log
+            published={fleet.cell_key(r["package"]) for r in state["results"].values() if r.get("published")}
+            active=[h for h,j in state["jobs"].items() if j.get("observed",{}).get("status")=="running"]
+            append_progress_log(f"Container images: {len(published)}/24 native platform images published, "
+                f"{len(state.get('multi_platform',{}))}/12 paired-platform tags. "
+                f"Active image workers: {', '.join(active) or 'none'}. "
+                f"Failed image requests: {len(state['failed'])}. All accepted images passed passwordless "
+                "postgres Unix-socket psql self-search, all alignment output helpers, EXPLAIN ANALYZE and restart. "
+                "Native package compilation continues independently; no benchmark restarted. See DOC0443.",
+                title="Runtime container image hourly checkpoint")
+            state["last_hourly_log"]=time.time()
         fleet.write_json_atomic(path,state)
         time.sleep(60)
 
