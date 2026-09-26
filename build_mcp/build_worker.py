@@ -45,6 +45,7 @@ from build_presets import (
     MODES,
     PACKAGE_LINUX_MODE,
     PACKAGE_MACOS_MODE,
+    CONTAINER_IMAGES_MODE,
     POSTGRES_ERROR_SAFETY_MODE,
     REPOSITORY_ROOT,
     VALID_MODES,
@@ -147,6 +148,7 @@ from publication import durable_replace_bytes, fsync_directory
 import bootstrap
 import package_linux
 import package_macos
+import container_images
 from inspect_tool import (
     run_inspect as _run_inspect_impl, MATCHES_WARN_THRESHOLD,
     MAX_INSPECT_MATCHES, MAX_INSPECT_SNIPPET_LINES,
@@ -7040,7 +7042,8 @@ def _run_package_linux_worker(entry: Mapping[str, object], mode: str = PACKAGE_L
         log_handle.flush()
 
     try:
-        package_runner = (package_macos.run_package_macos if mode == PACKAGE_MACOS_MODE
+        package_runner = (container_images.run_container_images if mode == CONTAINER_IMAGES_MODE
+                          else package_macos.run_package_macos if mode == PACKAGE_MACOS_MODE
                           else package_linux.run_package_linux)
         result = package_runner(
             repository_root=REPOSITORY_ROOT,
@@ -7869,7 +7872,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
             f"{mode} worker requires build_only=true and rejects every "
             "unsupported runtime-selection input")
         return 1
-    if mode in (PACKAGE_LINUX_MODE, PACKAGE_MACOS_MODE):
+    if mode in (PACKAGE_LINUX_MODE, PACKAGE_MACOS_MODE, CONTAINER_IMAGES_MODE):
         if (
             build_only or run_only or fresh or build_timeout_sec is not None
             or reuse_build_receipt is not None
@@ -9464,7 +9467,7 @@ def tool_start_build(mode: str, build_only: bool = False,
             "debug_report, build_timeout_sec, or bench_e2e_config inputs.")
     if mode == LINT_FOCUSED_MODE and not focused_lint_filter:
         return "lint-focused requires a nonempty filter.paths selection"
-    if mode in (PACKAGE_LINUX_MODE, PACKAGE_MACOS_MODE) and (
+    if mode in (PACKAGE_LINUX_MODE, PACKAGE_MACOS_MODE, CONTAINER_IMAGES_MODE) and (
         build_only
         or run_only or fresh or build_timeout_sec is not None
         or reuse_build_receipt is not None
@@ -9626,7 +9629,7 @@ def tool_start_build(mode: str, build_only: bool = False,
             source_repository_root = REPOSITORY_ROOT
             source_repository_root = source_repository_root.resolve(
                 strict=True)
-            if mode == PACKAGE_MACOS_MODE or (mode == PACKAGE_LINUX_MODE and sys.platform.startswith("linux")):
+            if mode in (PACKAGE_MACOS_MODE, CONTAINER_IMAGES_MODE) or (mode == PACKAGE_LINUX_MODE and sys.platform.startswith("linux")):
                 # Native release workers receive an rsynced working tree, not
                 # necessarily a Git checkout. Revision is provenance only.
                 source_commit = os.environ.get("BIOSEQ_PACKAGE_SOURCE_REVISION", "")
@@ -9734,7 +9737,7 @@ def tool_start_build(mode: str, build_only: bool = False,
         # validation and conflict detection.  The preflight creates one
         # short-lived unprivileged RR/1 probe; it never changes this persistent
         # MCP server's scheduling policy.
-        if mode in (PACKAGE_LINUX_MODE, PACKAGE_MACOS_MODE):
+        if mode in (PACKAGE_LINUX_MODE, PACKAGE_MACOS_MODE, CONTAINER_IMAGES_MODE):
             configured_rt_priority = None
         else:
             try:
@@ -10064,7 +10067,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
             f"--run-build-sync: {mode} requires build_only=true and "
             "rejects every runtime-selection input")
         return 2
-    if mode in (PACKAGE_LINUX_MODE, PACKAGE_MACOS_MODE) and (
+    if mode in (PACKAGE_LINUX_MODE, PACKAGE_MACOS_MODE, CONTAINER_IMAGES_MODE) and (
         build_only or debug or bench_flags or test_flags or bench_e2e_config
     ):
         _log(f"--run-build-sync: {mode} rejects variable inputs")
@@ -10110,7 +10113,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
                 f"refusing to start {mode}")
             return 3
 
-        if mode in (PACKAGE_LINUX_MODE, PACKAGE_MACOS_MODE):
+        if mode in (PACKAGE_LINUX_MODE, PACKAGE_MACOS_MODE, CONTAINER_IMAGES_MODE):
             configured_rt_priority = None
         else:
             try:

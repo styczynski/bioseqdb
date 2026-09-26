@@ -1,0 +1,24 @@
+FROM {{ entrypoint_image }} AS postgres_entrypoint
+FROM {{ base_image }}
+LABEL org.opencontainers.image.title="BioseqDB" \
+      org.opencontainers.image.version="{{ release }}" \
+      org.opencontainers.image.url="https://bioseqdb.com" \
+      org.opencontainers.image.description="BioseqDB {{ release }}; {{ distro }}; PostgreSQL {{ major }} ({{ channel }})" \
+      org.bioseq.package.sha256="{{ package_sha256 }}" \
+      org.bioseq.postgresql.major="{{ major }}"
+COPY packages/ /tmp/bioseq-packages/
+COPY install.sh /tmp/bioseq-install.sh
+RUN bash /tmp/bioseq-install.sh && rm /tmp/bioseq-install.sh && rm -rf /tmp/bioseq-packages
+COPY --from=postgres_entrypoint /usr/local/bin/docker-entrypoint.sh /usr/local/bin/
+COPY --from=postgres_entrypoint /usr/local/bin/gosu /usr/local/bin/
+COPY init.sql /docker-entrypoint-initdb.d/010-bioseq.sql
+ENV PG_MAJOR={{ major }} \
+    PGDATA=/var/lib/postgresql/{{ major }}/docker \
+    PATH=/opt/bioseq-postgres/bin:$PATH \
+    LD_LIBRARY_PATH=/opt/bioseq-postgres/lib \
+    LANG=C.UTF-8
+VOLUME /var/lib/postgresql
+EXPOSE 5432
+STOPSIGNAL SIGINT
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["postgres", "-c", "shared_preload_libraries=bioseq", "-c", "listen_addresses=*"]

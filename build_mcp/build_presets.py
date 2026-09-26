@@ -37,6 +37,7 @@ from pathlib import Path
 
 import package_linux
 import package_macos
+import container_images
 
 _DEFAULT_REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
@@ -215,6 +216,7 @@ POSTGRES_ERROR_SAFETY_MODE = "postgres-error-safety"
 
 PACKAGE_LINUX_MODE = package_linux.MODE
 PACKAGE_MACOS_MODE = package_macos.MODE
+CONTAINER_IMAGES_MODE = container_images.MODE
 
 LINT_FOCUSED_MODE = "lint-focused"
 
@@ -549,6 +551,17 @@ MODES: Dict[str, ModeDefinition] = {
         preset_override=PACKAGE_LINUX_MODE,
         reporting_subdir_name=package_linux.REPORTING_SUBDIR,
         hard_timeout_min=720.0,
+    ),
+    CONTAINER_IMAGES_MODE: ModeDefinition(
+        lock_group=CONTAINER_IMAGES_MODE,
+        expected_duration_min=20.0,
+        build_only_expected_duration_min=20.0,
+        label="Runtime container images",
+        docs="Render Jinja runtime images from existing native packages and require container psql smoke checks; no C++ compilation.",
+        is_verb_plular=False,
+        targets=[], commands=[], preset_override=CONTAINER_IMAGES_MODE,
+        reporting_subdir_name=container_images.REPORTING_SUBDIR,
+        hard_timeout_min=120.0,
     ),
     PACKAGE_MACOS_MODE: ModeDefinition(
         lock_group=PACKAGE_MACOS_MODE,
@@ -1050,6 +1063,7 @@ REMOTE_RUN_REJECTED_MODES: Set[str] = {
     POSTGRES_ERROR_SAFETY_MODE,
     PACKAGE_LINUX_MODE,
     PACKAGE_MACOS_MODE,
+    CONTAINER_IMAGES_MODE,
     *FIXED_BUILD_ONLY_MODES,
 }
 
