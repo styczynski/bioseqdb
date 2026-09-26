@@ -103,6 +103,38 @@ def cell_context(
 
 
 class ReleaseFleetAssignmentTests(unittest.TestCase):
+    def test_completed_package_cleanup_preserves_outputs_and_refuses_live_workers(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        cleanup = namespace["reclaim_collected_package_objects"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            tree = root / "debian_13/postgresql19"
+            tree.mkdir(parents=True)
+            for name in ("CMakeCache.txt", "one.o", "two.pcm", "bioseq.so", "report.json"):
+                (tree / name).write_text("retained fixture")
+            outside = root / "outside.o"
+            outside.write_text("not in requested tree")
+            (tree / "link.o").symlink_to(outside)
+            cell = dict(distro="debian_13", postgres_major=19)
+            with mock.patch.object(namespace["subprocess"], "check_output", return_value=(
+                    "999999 python build_mcp/server.py --run-build package-linux")):
+                self.assertIn("skipped", cleanup([cell], str(root)))
+                self.assertTrue((tree / "one.o").is_file())
+            with mock.patch.object(namespace["subprocess"], "check_output", return_value=""), \
+                    mock.patch.object(namespace["shutil"], "disk_usage",
+                                      return_value=SimpleNamespace(free=110 * 1024**3)):
+                result = cleanup([cell], str(root))
+                self.assertEqual(result["removed_files"], 2)
+                self.assertFalse((tree / "one.o").exists())
+                self.assertFalse((tree / "two.pcm").exists())
+                for name in ("CMakeCache.txt", "bioseq.so", "report.json", "link.o"):
+                    self.assertTrue((tree / name).exists())
+                self.assertTrue(outside.exists())
+                with self.assertRaisesRegex(ValueError, "Invalid package cache cell"):
+                    cleanup([dict(cell, distro="../outside")], str(root))
+
     def test_coordinator_ip_refresh_only_changes_enrolled_narrow_rules(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):

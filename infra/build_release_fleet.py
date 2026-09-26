@@ -717,6 +717,63 @@ def reclaim_retired_benchmark_intermediates(repository):
                 reclaimed_bytes=available - before, available_bytes=available, roots=touched)
 
 
+def reclaim_collected_package_objects(cells, cache_root="/home/ubuntu/caches/package-cmake"):
+    """Reclaim regenerable objects for copied packages on an idle native host.
+
+    The caller excludes pending repairs and verifies the local archive first.
+    Keep directories, CMake metadata, linked libraries, sources and all results.
+    This function is self-contained for the controller's SSH invocation.
+    """
+    root = Path(cache_root)
+    if not root.is_absolute() or root.resolve() != root or not root.is_dir():
+        raise ValueError("Package cache must be an explicit existing nonsymlink path")
+    processes = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+    for line in processes.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit() and int(pid) not in (os.getpid(), os.getppid()):
+            if re.search(r"(?:^|\s)(?:\S*/)?server\.py\s+--run-build(?:\s|$)", command):
+                return {"skipped": "build worker is still live"}
+    if subprocess.check_output(["docker", "ps", "-q"], text=True).strip():
+        return {"skipped": "container is still live"}
+    before = shutil.disk_usage(root).free
+    removed, removed_bytes, touched = 0, 0, []
+    for cell in cells:
+        if (re.fullmatch(r"[a-z][a-z0-9_.]*", cell["distro"]) is None
+                or type(cell["postgres_major"]) is not int or cell["postgres_major"] < 17):
+            raise ValueError("Invalid package cache cell")
+        tree = root / cell["distro"] / f"postgresql{cell['postgres_major']}"
+        if not tree.is_dir() or tree.resolve() != tree or not (tree / "CMakeCache.txt").is_file():
+            continue
+        referenced = False
+        for process in Path("/proc").iterdir():
+            if not process.name.isdigit():
+                continue
+            for link in [process / "cwd", *(process / "fd").glob("*")]:
+                try:
+                    target = os.readlink(link)
+                    referenced |= target == str(tree) or target.startswith(str(tree) + "/")
+                except OSError:
+                    pass
+        if referenced:
+            continue
+        touched.append(str(tree))
+        for directory, dirs, files in os.walk(tree, followlinks=False):
+            dirs[:] = [name for name in dirs if not (Path(directory) / name).is_symlink()]
+            for name in files:
+                path = Path(directory) / name
+                if path.suffix not in (".o", ".pcm") or path.is_symlink() or not path.is_file():
+                    continue
+                size = path.stat().st_size
+                path.unlink()
+                removed += 1
+                removed_bytes += size
+        if shutil.disk_usage(root).free >= 100 * 1024**3:
+            break
+    available = shutil.disk_usage(root).free
+    return dict(removed_files=removed, removed_file_bytes=removed_bytes,
+                reclaimed_bytes=available - before, available_bytes=available, roots=touched)
+
+
 def dispatch_available(state):
     """Reserve distinct native cells before concurrent launch; do not loop failed builds."""
     matrix = json.loads((ROOT / "infra/package_matrix.json").read_text())
@@ -854,6 +911,40 @@ def dispatch_available(state):
                     event("retired_intermediate_cleanup_deferred", host=host, **cleanup)
             except Exception as error:
                 event("retired_intermediate_cleanup_failed", host=host, error=str(error)[:400])
+        if available < 80 * 1024**3:
+            # Accepted packages do not need their compiler intermediates for
+            # publication. Preserve every explicitly pending repair's cache.
+            protected = {cell_key(cell)}
+            for queue_name in ("package_rebuilds", "deferred_package_rebuilds"):
+                protected.update(cell_key(c) for queue in state.get(queue_name, {}).values()
+                                 for c in queue)
+            protected.update(cell_key(c) for c in state.get("validation_rechecks", {}).values())
+            candidates = [p for p in inventory["packages"]
+                          if p.get("build_host") == host and package_release_ready(p)
+                          and cell_key(p) not in protected]
+            verified = []
+            for package in sorted(candidates, key=lambda p: -p["postgres_major"]):
+                path = OUTPUT / "packages" / package["file"]
+                if (path.is_file() and not path.is_symlink()
+                        and path.resolve().is_relative_to((OUTPUT / "packages").resolve())
+                        and path.stat().st_size == package["bytes"]
+                        and hashlib.sha256(path.read_bytes()).hexdigest() == package["sha256"]):
+                    verified.append(dict(distro=package["distro"], postgres_major=package["postgres_major"]))
+            if verified:
+                try:
+                    source = ("import json, os, re, shutil, subprocess\nfrom pathlib import Path\n"
+                              + inspect.getsource(reclaim_collected_package_objects)
+                              + f"\nprint(json.dumps(reclaim_collected_package_objects({verified!r})))\n")
+                    cleanup = json.loads(remote(host, "sudo -n python3 -c " + shlex.quote(source), timeout=55))
+                    if not cleanup.get("skipped"):
+                        available = cleanup["available_bytes"]
+                        if cleanup["removed_files"]:
+                            event("collected_package_objects_reclaimed", host=host,
+                                  recovery="regenerate by compilation; archives retained", **cleanup)
+                    else:
+                        event("collected_package_cleanup_deferred", host=host, **cleanup)
+                except Exception as error:
+                    event("collected_package_cleanup_failed", host=host, error=str(error)[:400])
         if available < 80 * 1024**3:
             if host not in disk_attention:
                 event("package_admission_waiting_for_disk", host=host,
