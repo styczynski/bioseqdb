@@ -1,0 +1,2262 @@
+{
+  "source_of_defaults": "authored GUC registrations",
+  "production_count": 75,
+  "test_only_count": 3,
+  "gucs": [
+    {
+      "name": "bioseq.diagnostics.logging.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 106,
+      "context": "superuser",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "diagnostics",
+      "purpose": "Controls extension diagnostic logging.",
+      "value_descriptions": {
+        "false": "Leave the diagnostic logger disabled.",
+        "true": "Enable diagnostic logging for troubleshooting."
+      }
+    },
+    {
+      "name": "bioseq.testing.chunked_scanner.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 123,
+      "context": "superuser",
+      "hidden": true,
+      "test_only": true,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "testing",
+      "purpose": "Selects a synthetic sequence scanner in test builds.",
+      "value_descriptions": {
+        "false": "Use the normal scanner selection.",
+        "true": "Force the synthetic chunked-input route where supported."
+      }
+    },
+    {
+      "name": "bioseq.testing.in_memory_scanner.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 135,
+      "context": "superuser",
+      "hidden": true,
+      "test_only": true,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "testing",
+      "purpose": "Selects an in-memory input scanner in test builds.",
+      "value_descriptions": {
+        "false": "Use the normal scanner selection.",
+        "true": "Materialize sequence input before scanner dispatch."
+      }
+    },
+    {
+      "name": "bioseq.testing.persisted_index.failure_mode",
+      "type": "enum",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 147,
+      "context": "superuser",
+      "hidden": true,
+      "test_only": true,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "values": [
+        {
+          "value": "none",
+          "ordinal": 0
+        },
+        {
+          "value": "unsupported_vector_shape",
+          "ordinal": 1
+        }
+      ],
+      "default": "none",
+      "unit": null,
+      "group": "testing",
+      "purpose": "Injects a persisted-index reader failure for tests.",
+      "value_descriptions": {
+        "none": "Do not inject a failure.",
+        "unsupported_vector_shape": "Make the adapter report an unsupported vector shape."
+      }
+    },
+    {
+      "name": "bioseq.storage.compression.algorithm",
+      "type": "enum",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 168,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "values": [
+        {
+          "value": "none",
+          "ordinal": 0
+        },
+        {
+          "value": "pglz",
+          "ordinal": 1
+        },
+        {
+          "value": "lz4",
+          "ordinal": 2,
+          "conditional": "requires compiled codec support"
+        },
+        {
+          "value": "zstd",
+          "ordinal": 3,
+          "conditional": "requires compiled codec support"
+        }
+      ],
+      "default": "zstd",
+      "conditional_default": "zstd if compiled, otherwise lz4 if compiled, otherwise pglz",
+      "unit": null,
+      "group": "storage",
+      "purpose": "Chooses the compression codec for newly created column-storage options.",
+      "value_descriptions": {
+        "zstd": "Use Zstandard when compiled in. This is the preferred build-time default.",
+        "lz4": "Use LZ4 when compiled in. This becomes the default when Zstandard is unavailable.",
+        "pglz": "Use PostgreSQL's PGLZ codec. This is the default when neither optional codec is compiled in.",
+        "none": "Store column chunks without compression."
+      },
+      "notes": "Changing the default does not rewrite existing table data."
+    },
+    {
+      "name": "bioseq.storage.compression.level",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 175,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": 3,
+      "minimum": 1,
+      "maximum": 19,
+      "unit": null,
+      "group": "storage",
+      "purpose": "Sets the Zstandard compression level for new storage options. The current PGLZ and LZ4 paths do not use this level."
+    },
+    {
+      "name": "bioseq.storage.stripe.row_limit",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 187,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": 150000,
+      "minimum": 1000,
+      "maximum": 100000000,
+      "unit": null,
+      "group": "storage",
+      "display_unit": "rows",
+      "purpose": "Sets the maximum rows in a new table's column stripe. Existing table options and stored stripes are unchanged."
+    },
+    {
+      "name": "bioseq.storage.chunk_group.row_limit",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 199,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": 10000,
+      "minimum": 1000,
+      "maximum": 100000000,
+      "unit": null,
+      "group": "storage",
+      "display_unit": "rows",
+      "purpose": "Sets the maximum rows in a new table's chunk group. Chunk groups divide a stripe into smaller column-reading units."
+    },
+    {
+      "name": "bioseq.storage.dml.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 211,
+      "context": "user",
+      "hidden": true,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": true,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "storage",
+      "purpose": "Controls whether reads apply deleted-row masks.",
+      "value_descriptions": {
+        "true": "Hide rows that have been deleted or replaced. Keep this enabled for ordinary queries.",
+        "false": "Bypass deletion-mask filtering. This is a diagnostic control, not a read-only mode."
+      }
+    },
+    {
+      "name": "bioseq.execution.parallel.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 227,
+      "context": "user",
+      "hidden": true,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": true,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "planning",
+      "purpose": "Controls PostgreSQL parallel-scan alternatives in the planner.",
+      "value_descriptions": {
+        "true": "Allow eligible parallel scan paths. Actual worker availability still depends on PostgreSQL.",
+        "false": "Do not add those parallel scan alternatives."
+      },
+      "notes": "This does not make alignment custom scans parallel-safe."
+    },
+    {
+      "name": "bioseq.execution.parallel.minimum_processes",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 233,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": 8,
+      "minimum": 1,
+      "maximum": 32,
+      "unit": null,
+      "group": "planning",
+      "purpose": "Requests the PostgreSQL worker count for eligible Bioseq parallel scan paths. Despite its name, this does not reserve or guarantee a minimum number of launched workers."
+    },
+    {
+      "name": "bioseq.vectorization.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 246,
+      "context": "user",
+      "hidden": true,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": true,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "planning",
+      "purpose": "Controls supported SQL filter and aggregate vectorization.",
+      "value_descriptions": {
+        "true": "Use supported vectorized SQL operations when the plan permits them.",
+        "false": "Use scalar SQL processing for those operations."
+      },
+      "notes": "Minimizer and chaining algorithms have separate selectors."
+    },
+    {
+      "name": "bioseq.column_cache.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 257,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": true,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "storage",
+      "purpose": "Controls the backend's decompressed column-chunk cache.",
+      "value_descriptions": {
+        "true": "Cache eligible decompressed buffers during scanning.",
+        "false": "Read and decompress without retaining buffers in this cache."
+      },
+      "notes": "Normal scan teardown clears this cache. It is distinct from the query-result cache."
+    },
+    {
+      "name": "bioseq.column_cache.capacity_mb",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 261,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": 200,
+      "minimum": 20,
+      "maximum": 20000,
+      "unit": "MiB",
+      "group": "storage",
+      "purpose": "Limits the decompressed column-chunk cache. Buffers in use remain protected, so this is not a limit on total backend memory."
+    },
+    {
+      "name": "bioseq.planner.index_scan.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 278,
+      "context": "user",
+      "hidden": true,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": true,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "planning",
+      "purpose": "Controls Bioseq's handling of PostgreSQL index-scan paths on table columns.",
+      "value_descriptions": {
+        "true": "Permit supported index-scan integration.",
+        "false": "Disable that planner integration."
+      },
+      "notes": "This does not control minimizer-index reuse."
+    },
+    {
+      "name": "bioseq.planner.custom_scan.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 289,
+      "context": "user",
+      "hidden": true,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": true,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "planning",
+      "purpose": "Controls Bioseq custom-scan paths.",
+      "value_descriptions": {
+        "true": "Allow the planner to install Bioseq custom scans.",
+        "false": "Disable their construction. Ordinary mmsearch has no slower standalone scalar-function fallback."
+      }
+    },
+    {
+      "name": "bioseq.planner.custom_scan.max_paths",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 295,
+      "context": "user",
+      "hidden": true,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": 64,
+      "minimum": 1,
+      "maximum": 1024,
+      "unit": null,
+      "group": "planning",
+      "purpose": "Bounds the custom-scan path alternatives explored for one relation, including parameterized predicate combinations."
+    },
+    {
+      "name": "bioseq.planner.qual_pushdown.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 308,
+      "context": "user",
+      "hidden": true,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": true,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "planning",
+      "purpose": "Controls supported predicate pushdown into custom scans.",
+      "value_descriptions": {
+        "true": "Consider moving eligible filters into the scan.",
+        "false": "Leave these filters outside the pushed-down scan work."
+      }
+    },
+    {
+      "name": "bioseq.planner.qual_pushdown.correlation_threshold",
+      "type": "real",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 315,
+      "context": "user",
+      "hidden": true,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": 0.4,
+      "minimum": 0,
+      "maximum": 1,
+      "unit": null,
+      "group": "planning",
+      "purpose": "Sets the minimum absolute column correlation used by the pushdown decision. Values closer to one demand stronger correlation."
+    },
+    {
+      "name": "bioseq.planner.diagnostics.log_level",
+      "type": "enum",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 328,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "values": [
+        {
+          "value": "debug5",
+          "ordinal": 10
+        },
+        {
+          "value": "debug4",
+          "ordinal": 11
+        },
+        {
+          "value": "debug3",
+          "ordinal": 12
+        },
+        {
+          "value": "debug2",
+          "ordinal": 13
+        },
+        {
+          "value": "debug1",
+          "ordinal": 14
+        },
+        {
+          "value": "log",
+          "ordinal": 15
+        },
+        {
+          "value": "info",
+          "ordinal": 17
+        },
+        {
+          "value": "notice",
+          "ordinal": 18
+        },
+        {
+          "value": "warning",
+          "ordinal": 19
+        }
+      ],
+      "default": "debug3",
+      "unit": null,
+      "group": "diagnostics",
+      "purpose": "Chooses the PostgreSQL severity for planner diagnostic messages.",
+      "value_descriptions": {
+        "debug3": "Emit them at DEBUG3 severity.",
+        "debug5": "Emit them at DEBUG5 severity.",
+        "debug4": "Emit them at DEBUG4 severity.",
+        "debug2": "Emit them at DEBUG2 severity.",
+        "debug1": "Emit them at DEBUG1 severity.",
+        "log": "Emit them at LOG severity.",
+        "info": "Emit them at INFO severity.",
+        "notice": "Emit them at NOTICE severity.",
+        "warning": "Emit them at WARNING severity."
+      },
+      "notes": "PostgreSQL's message thresholds determine where the messages appear."
+    },
+    {
+      "name": "bioseq.planner.sequence_sort_scan.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 339,
+      "context": "user",
+      "hidden": true,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "planning",
+      "purpose": "Controls the experimental sequence batch-sort scan.",
+      "value_descriptions": {
+        "false": "Leave ordinary sort planning in place.",
+        "true": "Consider the custom batch-sort path for eligible single sequence sort keys."
+      }
+    },
+    {
+      "name": "bioseq.index.insert_maintenance.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 362,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "index",
+      "purpose": "Gates automatic index maintenance requested by each stored index policy.",
+      "value_descriptions": {
+        "false": "Save new source rows without automatic index builds.",
+        "true": "Maintain enabled on-insert indexes. Ordinary INSERT rejects grouped minimizer maintenance. Streamed loading has a separate batched build path."
+      },
+      "notes": "Explicit update_index does not depend on this gate."
+    },
+    {
+      "name": "bioseq.index.sequence_read.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 371,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": true,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "index",
+      "purpose": "Controls optional persisted sequence-index reads.",
+      "value_descriptions": {
+        "true": "Permit compatible stored reads where the executor supports them.",
+        "false": "Skip optional persisted reads and compute needed data during execution."
+      },
+      "notes": "Per-search index_read_requirement codes 1 and 2 override this choice. It never builds an index."
+    },
+    {
+      "name": "bioseq.index.async_persistence.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 387,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "index",
+      "purpose": "Gates eligible deferred index persistence.",
+      "value_descriptions": {
+        "false": "Do not stage asynchronous persistence work.",
+        "true": "Allow the limited ordinary-MPS submission path when its other requirements are met."
+      },
+      "notes": "Grouped explicit builds require this setting off."
+    },
+    {
+      "name": "bioseq.index.recompute_async_persistence.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 396,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "index",
+      "purpose": "Controls deferred persistence requests after a query recomputes minimizers.",
+      "value_descriptions": {
+        "false": "Keep recomputation separate from deferred persistence.",
+        "true": "Allow eligible requests when async_persistence is also on. This does not promise that an index will be saved."
+      },
+      "notes": "Grouped explicit builds require this setting off."
+    },
+    {
+      "name": "bioseq.index.memory_cap_mb",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 405,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": 0,
+      "minimum": 0,
+      "maximum": 2147483647,
+      "unit": "MiB",
+      "group": "index",
+      "purpose": "Adds a cap on accounted resident-index reservations. Zero uses the common runtime memory budget. Other query buffers are outside this index count."
+    },
+    {
+      "name": "bioseq.index.sequence_minimizer_sort.algorithm",
+      "type": "enum",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 417,
+      "context": "user",
+      "hidden": true,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "values": [
+        {
+          "value": "std_sort",
+          "ordinal": 0
+        },
+        {
+          "value": "simd_u128_vqsort",
+          "ordinal": 1
+        },
+        {
+          "value": "simd_u128_vec_stream_1",
+          "ordinal": 2
+        },
+        {
+          "value": "simd_u128_vec_stream_2",
+          "ordinal": 3
+        },
+        {
+          "value": "simd_u128_vec_stream_4",
+          "ordinal": 4
+        }
+      ],
+      "default": "std_sort",
+      "unit": null,
+      "group": "index",
+      "purpose": "Chooses the pair sorter for ordinary MPS builds.",
+      "value_descriptions": {
+        "std_sort": "Use the standard-library comparison sorter.",
+        "simd_u128_vqsort": "Use Highway VQSort on packed 128-bit keys.",
+        "simd_u128_vec_stream_1": "Use the SIMD sorter with one vector stream.",
+        "simd_u128_vec_stream_2": "Use the SIMD sorter with two vector streams.",
+        "simd_u128_vec_stream_4": "Use the SIMD sorter with four vector streams."
+      }
+    },
+    {
+      "name": "bioseq.index_build.run_buffer_bytes",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 437,
+      "context": "superuser",
+      "hidden": true,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": 0,
+      "minimum": 0,
+      "maximum": 2147483647,
+      "unit": null,
+      "group": "index",
+      "display_unit": "bytes",
+      "purpose": "Overrides the external-sort run buffer size. Zero computes a size from the process memory budget and index cap. This is an administrative tuning control."
+    },
+    {
+      "name": "bioseq.load.write_overlap.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/core.cppm",
+      "line": 455,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "storage",
+      "purpose": "Controls overlap between input decoding and table writes during loading.",
+      "value_descriptions": {
+        "false": "Use the ordinary loading schedule.",
+        "true": "Overlap decoding with writing through a bounded queue. The PostgreSQL backend still performs table writes."
+      }
+    },
+    {
+      "name": "bioseq.aligner.minimizer.kmer_size",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 50,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 15,
+      "minimum": 1,
+      "maximum": 64,
+      "unit": null,
+      "aligner_options_field": "kmer_size",
+      "group": "minimizer",
+      "display_unit": "symbols",
+      "purpose": "Sets the number of sequence symbols in each k-mer. The selected algorithm and compiled profile impose additional restrictions."
+    },
+    {
+      "name": "bioseq.aligner.minimizer.window_size",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 58,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 10,
+      "minimum": 1,
+      "maximum": 1024,
+      "unit": null,
+      "aligner_options_field": "window_size",
+      "group": "minimizer",
+      "display_unit": "k-mers",
+      "purpose": "Sets the number of consecutive k-mers in one minimizer window. It does not count sequence symbols."
+    },
+    {
+      "name": "bioseq.aligner.minimizer.algorithm",
+      "type": "enum",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 66,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "values": [
+        {
+          "value": "scalar",
+          "ordinal": 0
+        },
+        {
+          "value": "simd_minimap2_reference",
+          "ordinal": 1
+        },
+        {
+          "value": "two_stack_nthash",
+          "ordinal": 2
+        },
+        {
+          "value": "vulkan_minimap_integer",
+          "ordinal": 3
+        },
+        {
+          "value": "bounded_nthash_simd",
+          "ordinal": 4
+        }
+      ],
+      "default": "bounded_nthash_simd",
+      "unit": null,
+      "aligner_options_field": "minimizer_algorithm",
+      "aligner_options_integer_codes": true,
+      "group": "minimizer",
+      "purpose": "Chooses how query and target minimizers are extracted.",
+      "value_descriptions": {
+        "bounded_nthash_simd": "Use the bounded SIMD ntHash implementation. Execution requires a supported generated profile.",
+        "scalar": "Use scalar minimap2-style integer-hash extraction.",
+        "simd_minimap2_reference": "Use the SIMD implementation of minimap2's integer-hash sketch semantics where supported.",
+        "two_stack_nthash": "Use rolling ntHash and two-stack window-minimum maintenance.",
+        "vulkan_minimap_integer": "Use Vulkan integer-hash minimizer extraction on a supported device and execution route."
+      },
+      "notes": "Changing the algorithm can invalidate compatibility with saved indexes."
+    },
+    {
+      "name": "bioseq.aligner.chaining.maximum_gap",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 79,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 5000,
+      "minimum": 1,
+      "maximum": 1073741824,
+      "unit": null,
+      "aligner_options_field": "max_gap",
+      "group": "chaining",
+      "display_unit": "positions",
+      "purpose": "Sets the requested maximum anchor gap used by chaining. Scalar chaining raises this limit to at least the bandwidth."
+    },
+    {
+      "name": "bioseq.aligner.chaining.maximum_reference_gap",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 88,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": -1,
+      "minimum": -1,
+      "maximum": 1073741824,
+      "unit": null,
+      "aligner_options_field": "max_gap_ref",
+      "group": "chaining",
+      "display_unit": "positions",
+      "purpose": "Stores a separate reference-gap request. This field currently has no execution consumer, so changing it does not add a separate reference-gap rule."
+    },
+    {
+      "name": "bioseq.aligner.chaining.bandwidth",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 96,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 500,
+      "minimum": 1,
+      "maximum": 1048576,
+      "unit": null,
+      "aligner_options_field": "bandwidth",
+      "group": "chaining",
+      "display_unit": "positions",
+      "purpose": "Bounds query-versus-target gap differences in chainers that use a diagonal band. Alignment paths also consume this parameter."
+    },
+    {
+      "name": "bioseq.aligner.chaining.long_join_bandwidth",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 104,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 0,
+      "minimum": 0,
+      "maximum": 1048576,
+      "unit": null,
+      "aligner_options_field": "bandwidth_long",
+      "group": "chaining",
+      "display_unit": "positions",
+      "purpose": "Stores a long-join bandwidth request. This field currently has no execution consumer and does not enable a long-join pass."
+    },
+    {
+      "name": "bioseq.aligner.chaining.maximum_skipped_anchors",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 112,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 25,
+      "minimum": 0,
+      "maximum": 1048576,
+      "unit": null,
+      "aligner_options_field": "max_chain_skip",
+      "group": "chaining",
+      "purpose": "Sets the selected chainer's early-stop limit for predecessor search. SQL SIMD chaining requires a positive value even though the GUC accepts zero."
+    },
+    {
+      "name": "bioseq.aligner.chaining.maximum_predecessors",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 120,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 5000,
+      "minimum": 1,
+      "maximum": 4194304,
+      "unit": null,
+      "aligner_options_field": "max_chain_iter",
+      "group": "chaining",
+      "purpose": "Bounds the predecessor window for scan-based chainers. Scalar chaining can examine one additional candidate. RMQ does not use this field."
+    },
+    {
+      "name": "bioseq.aligner.chaining.minimum_seed_count",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 128,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 3,
+      "minimum": 0,
+      "maximum": 1048576,
+      "unit": null,
+      "aligner_options_field": "min_seed_count",
+      "group": "chaining",
+      "purpose": "Sets the minimum seed count for an accepted chain. It is a chain threshold, not a required number of SQL result rows."
+    },
+    {
+      "name": "bioseq.aligner.chaining.minimum_score",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 136,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 40,
+      "minimum": 0,
+      "maximum": 1048576,
+      "unit": null,
+      "aligner_options_field": "min_chain_score",
+      "group": "chaining",
+      "purpose": "Sets the minimum accepted chain score. The score is computed by the selected chaining algorithm."
+    },
+    {
+      "name": "bioseq.aligner.chaining.gap_penalty_scale",
+      "type": "real",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 144,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 0.8,
+      "minimum": 0,
+      "maximum": 100,
+      "unit": null,
+      "aligner_options_field": "chain_gap_scale",
+      "group": "chaining",
+      "purpose": "Scales the gap penalty used by chaining. Larger values penalize that contribution more strongly."
+    },
+    {
+      "name": "bioseq.aligner.chaining.skip_penalty_scale",
+      "type": "real",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 152,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 0.0,
+      "minimum": 0,
+      "maximum": 100,
+      "unit": null,
+      "aligner_options_field": "chain_skip_scale",
+      "group": "chaining",
+      "purpose": "Scales the chaining skip-distance penalty. Zero removes this scaled contribution."
+    },
+    {
+      "name": "bioseq.aligner.chaining.algorithm",
+      "type": "enum",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 160,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "values": [
+        {
+          "value": "scalar_minimap2",
+          "ordinal": 0
+        },
+        {
+          "value": "simd_minimap2",
+          "ordinal": 1
+        },
+        {
+          "value": "range_minimum_query",
+          "ordinal": 2
+        },
+        {
+          "value": "vulkan_tiled_dynamic_programming",
+          "ordinal": 3
+        }
+      ],
+      "default": "simd_minimap2",
+      "unit": null,
+      "aligner_options_field": "chaining_algorithm",
+      "aligner_options_integer_codes": true,
+      "group": "chaining",
+      "purpose": "Chooses how matching seed anchors become chains.",
+      "value_descriptions": {
+        "simd_minimap2": "Use the bounded SIMD batch policy. Its approximation need not reproduce scalar chains exactly.",
+        "scalar_minimap2": "Use scalar minimap2-style dynamic-programming chaining.",
+        "range_minimum_query": "Use the range-minimum-query chainer instead of scanning the ordinary predecessor window.",
+        "vulkan_tiled_dynamic_programming": "Use tiled GPU dynamic-programming chaining on a supported Vulkan route."
+      },
+      "notes": "A valid selector does not make every hardware and input combination executable."
+    },
+    {
+      "name": "bioseq.aligner.secondary.overlap_threshold",
+      "type": "real",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 173,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 0.5,
+      "minimum": 0,
+      "maximum": 1,
+      "unit": null,
+      "aligner_options_field": "mask_level",
+      "group": "secondary",
+      "purpose": "Sets the primary/secondary classification threshold combining query-interval overlap with uncovered query length. It is not simply a percentage of shared bases."
+    },
+    {
+      "name": "bioseq.aligner.secondary.uncovered_length_limit",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 181,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 2147483647,
+      "minimum": 0,
+      "maximum": 2147483647,
+      "unit": null,
+      "aligner_options_field": "mask_len",
+      "group": "secondary",
+      "display_unit": "symbols",
+      "purpose": "Limits the uncovered query length used when classifying an alignment as secondary to an existing primary."
+    },
+    {
+      "name": "bioseq.aligner.secondary.score_ratio_threshold",
+      "type": "real",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 189,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 0.8,
+      "minimum": 0,
+      "maximum": 1,
+      "unit": null,
+      "aligner_options_field": "pri_ratio",
+      "group": "secondary",
+      "purpose": "Sets the secondary-to-primary score-ratio threshold. Zero bypasses this filtering step, including its secondary-count limit."
+    },
+    {
+      "name": "bioseq.aligner.secondary.maximum_count",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 198,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 5,
+      "minimum": 0,
+      "maximum": 1024,
+      "unit": null,
+      "aligner_options_field": "best_n",
+      "group": "secondary",
+      "purpose": "Limits retained secondary alignments across the complete list passed to the filtering stage. It is not a SQL LIMIT and is bypassed when the score-ratio threshold is zero."
+    },
+    {
+      "name": "bioseq.aligner.scoring.match_score",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 211,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 2,
+      "minimum": 1,
+      "maximum": 127,
+      "unit": null,
+      "aligner_options_field": "match_score",
+      "group": "scoring",
+      "purpose": "Sets the score added for an aligned matching symbol."
+    },
+    {
+      "name": "bioseq.aligner.scoring.mismatch_penalty",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 219,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 4,
+      "minimum": 1,
+      "maximum": 127,
+      "unit": null,
+      "aligner_options_field": "mismatch_pen",
+      "group": "scoring",
+      "purpose": "Sets the score penalty for an aligned mismatch."
+    },
+    {
+      "name": "bioseq.aligner.scoring.short_gap_open_penalty",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 227,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 4,
+      "minimum": 0,
+      "maximum": 127,
+      "unit": null,
+      "aligner_options_field": "gap_open1",
+      "group": "scoring",
+      "purpose": "Sets the first gap-opening penalty. KSW2 and BlockAligner use this pair. BlockAligner requires positive opening and extension penalties whose sum is at most 128."
+    },
+    {
+      "name": "bioseq.aligner.scoring.short_gap_extension_penalty",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 235,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 2,
+      "minimum": 0,
+      "maximum": 127,
+      "unit": null,
+      "aligner_options_field": "gap_ext1",
+      "group": "scoring",
+      "purpose": "Sets the first gap-extension penalty. BlockAligner requires it to be positive and its sum with the first opening penalty to be at most 128."
+    },
+    {
+      "name": "bioseq.aligner.scoring.long_gap_open_penalty",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 243,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 24,
+      "minimum": 0,
+      "maximum": 127,
+      "unit": null,
+      "aligner_options_field": "gap_open2",
+      "group": "scoring",
+      "purpose": "Sets KSW2's second gap-opening penalty. Native BlockAligner uses only the first gap-penalty pair."
+    },
+    {
+      "name": "bioseq.aligner.scoring.long_gap_extension_penalty",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 251,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 1,
+      "minimum": 0,
+      "maximum": 127,
+      "unit": null,
+      "aligner_options_field": "gap_ext2",
+      "group": "scoring",
+      "purpose": "Sets KSW2's second gap-extension penalty. Native BlockAligner does not use this second pair."
+    },
+    {
+      "name": "bioseq.aligner.scoring.ambiguous_base_penalty",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 259,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 1,
+      "minimum": 0,
+      "maximum": 127,
+      "unit": null,
+      "aligner_options_field": "sc_ambi",
+      "group": "scoring",
+      "purpose": "Sets the alignment penalty for ambiguous symbols on paths that support them."
+    },
+    {
+      "name": "bioseq.aligner.scoring.z_drop_threshold",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 267,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 400,
+      "minimum": -1,
+      "maximum": 1048576,
+      "unit": null,
+      "aligner_options_field": "zdrop",
+      "group": "scoring",
+      "purpose": "Sets KSW2's Z-drop threshold or BlockAligner's X-drop threshold for end extensions. BlockAligner extensions require a nonnegative value."
+    },
+    {
+      "name": "bioseq.aligner.scoring.end_bonus",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 275,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": -1,
+      "minimum": -1,
+      "maximum": 1048576,
+      "unit": null,
+      "aligner_options_field": "end_bonus",
+      "group": "scoring",
+      "purpose": "Sets KSW2's sequence-end bonus. Negative one disables the bonus. Native BlockAligner does not use it."
+    },
+    {
+      "name": "bioseq.aligner.seeding.maximum_occurrence",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 288,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 500,
+      "minimum": 1,
+      "maximum": 16777216,
+      "unit": null,
+      "aligner_options_field": "max_occ",
+      "group": "minimizer",
+      "display_unit": "positions",
+      "purpose": "Excludes minimizer keys with more target occurrences than this limit. A direct persisted reader also requires the request to fit its saved occurrence limit."
+    },
+    {
+      "name": "bioseq.aligner.seeding.intermediate_occurrence_threshold",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 296,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 500,
+      "minimum": 1,
+      "maximum": 16777216,
+      "unit": null,
+      "aligner_options_field": "mid_occ",
+      "group": "minimizer",
+      "display_unit": "positions",
+      "purpose": "Stores an intermediate seed-occurrence threshold. This field currently has no execution consumer, so it does not perform another filtering pass."
+    },
+    {
+      "name": "bioseq.aligner.block_alignment.minimum_block_size",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 309,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 32,
+      "minimum": 8,
+      "maximum": 4096,
+      "unit": null,
+      "aligner_options_field": "block_min_size",
+      "group": "scoring",
+      "purpose": "Sets BlockAligner's minimum adaptive block size. After widening to the active SIMD lane count, block sizes must be powers of two and the minimum cannot exceed the maximum."
+    },
+    {
+      "name": "bioseq.aligner.block_alignment.maximum_block_size",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 317,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 256,
+      "minimum": 8,
+      "maximum": 16384,
+      "unit": null,
+      "aligner_options_field": "block_max_size",
+      "group": "scoring",
+      "purpose": "Sets BlockAligner's maximum adaptive block size. Its effective size must be a power of two and at least the effective minimum."
+    },
+    {
+      "name": "bioseq.aligner.base_alignment.algorithm",
+      "type": "enum",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 330,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "values": [
+        {
+          "value": "ksw2",
+          "ordinal": 0
+        },
+        {
+          "value": "block_aligner",
+          "ordinal": 1
+        }
+      ],
+      "default": "block_aligner",
+      "unit": null,
+      "aligner_options_field": "base_alignment_algorithm",
+      "aligner_options_integer_codes": true,
+      "group": "scoring",
+      "purpose": "Chooses the base-alignment implementation when requested results need this stage.",
+      "value_descriptions": {
+        "block_aligner": "Use adaptive block alignment with the first gap-penalty pair.",
+        "ksw2": "Use KSW2 with its banded extension and two gap-penalty pairs."
+      },
+      "notes": "Selecting an implementation does not itself request CIGAR or base-alignment output."
+    },
+    {
+      "name": "bioseq.aligner.fragment_minimizer.lookup_route",
+      "type": "enum",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 347,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "values": [
+        {
+          "value": "control_block_scan",
+          "ordinal": 0
+        },
+        {
+          "value": "direct_compact_hash_lookup",
+          "ordinal": 1
+        }
+      ],
+      "default": "direct_compact_hash_lookup",
+      "unit": null,
+      "group": "index",
+      "purpose": "Chooses how a grouped MPF reader finds a query hash.",
+      "value_descriptions": {
+        "direct_compact_hash_lookup": "Use the saved direct section for supported 32-bit hash domains. Wider hashes use fragment controls.",
+        "control_block_scan": "Search the grouped controls in the mapped fragment arrays."
+      },
+      "notes": "The required compatible file must already exist. This is not a PostgreSQL hash index."
+    },
+    {
+      "name": "bioseq.aligner.grouped_soa_generation.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 359,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": true,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "index",
+      "purpose": "Selects the representation produced by explicit minimizer-index builds.",
+      "value_descriptions": {
+        "true": "Publish grouped generations. MPF also publishes its immutable reader file.",
+        "false": "Use the older ordinary representation where the chosen algorithm supports it."
+      },
+      "notes": "Changing this setting alone builds or converts nothing. Grouped builds require both asynchronous switches off."
+    },
+    {
+      "name": "bioseq.aligner.vulkan.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 368,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": true,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "aligner_options_field": "vulkan_enabled",
+      "group": "vulkan",
+      "purpose": "Permits execution of selected Vulkan algorithms.",
+      "value_descriptions": {
+        "true": "Allow supported GPU work. This does not select a GPU algorithm by itself.",
+        "false": "Disallow Vulkan execution. Explicit GPU requests fail instead of silently changing algorithms."
+      },
+      "notes": "An explicit per-search true value also requests a standalone GPU prefilter in an eligible scan."
+    },
+    {
+      "name": "bioseq.aligner.vulkan.seed_lookup.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 378,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "aligner_options_field": "vulkan_seed_hits_enabled",
+      "group": "vulkan",
+      "purpose": "Selects Vulkan seed-hit lookup.",
+      "value_descriptions": {
+        "false": "Do not select GPU seed lookup through this switch.",
+        "true": "Request GPU seed lookup subject to the supported route and device requirements."
+      }
+    },
+    {
+      "name": "bioseq.aligner.vulkan.index_cache.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 389,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": true,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "aligner_options_field": "vulkan_index_cache_enabled",
+      "group": "vulkan",
+      "purpose": "Controls reuse of GPU-resident minimizer-index uploads.",
+      "value_descriptions": {
+        "true": "Retain compatible device index data for reuse on a selected GPU seed route.",
+        "false": "Do not reuse uploads through this GPU index cache."
+      }
+    },
+    {
+      "name": "bioseq.aligner.vulkan.fused_frontend.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 400,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "vulkan",
+      "purpose": "Selects the resident fused Vulkan frontend.",
+      "value_descriptions": {
+        "false": "Leave this frontend unselected.",
+        "true": "Request fused device frontend work as part of a supported Vulkan execution route."
+      }
+    },
+    {
+      "name": "bioseq.aligner.vulkan.index_build.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 411,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "vulkan",
+      "purpose": "Selects GPU target-index construction.",
+      "value_descriptions": {
+        "false": "Do not request GPU construction through this switch.",
+        "true": "Request device target-index construction when the remaining Vulkan route requirements are met."
+      }
+    },
+    {
+      "name": "bioseq.aligner.vulkan.alignment_extension.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 422,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "vulkan",
+      "purpose": "Selects the GPU base-alignment extension stage.",
+      "value_descriptions": {
+        "false": "Do not request GPU extension.",
+        "true": "Permit the extension stage on a supported Vulkan route. GPU CIGAR output requires this stage."
+      }
+    },
+    {
+      "name": "bioseq.aligner.vulkan.ordered_sketch_tile_bp",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 429,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 2048,
+      "minimum": 1,
+      "maximum": 16777216,
+      "unit": null,
+      "group": "vulkan",
+      "display_unit": "symbols",
+      "purpose": "Stores an ordered-sketch tile-size request. It is copied into parameters but currently has no execution consumer."
+    },
+    {
+      "name": "bioseq.aligner.vulkan.radix_sort_digit_bits",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 437,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": true,
+      "default": 8,
+      "minimum": 1,
+      "maximum": 16,
+      "unit": null,
+      "group": "vulkan",
+      "display_unit": "bits",
+      "purpose": "Stores a device radix-sort digit width. It is copied into parameters but currently has no execution consumer."
+    },
+    {
+      "name": "bioseq.aligner.profiling.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/aligner.cppm",
+      "line": 450,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "diagnostics",
+      "purpose": "Controls aligner runtime profiling.",
+      "value_descriptions": {
+        "false": "Run without the optional profiling collection.",
+        "true": "Collect pipeline profiling information. Instrumentation can alter execution scheduling and measured cost."
+      }
+    },
+    {
+      "name": "bioseq.scheduler.backend.max_concurrency",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/scheduler.cppm",
+      "line": 32,
+      "context": "sighup",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": 0,
+      "minimum": 0,
+      "maximum": 1024,
+      "unit": null,
+      "group": "scheduler",
+      "purpose": "Caps participating task slots in each backend. Zero uses the available CPU count. The participating caller counts toward the cap. This is not a cluster-wide worker quota."
+    },
+    {
+      "name": "bioseq.scheduler.pipeline.mode",
+      "type": "enum",
+      "source": "bioseq/backend/pg/configuration/scheduler.cppm",
+      "line": 45,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "values": [
+        {
+          "value": "single_thread",
+          "ordinal": 0
+        },
+        {
+          "value": "parallel_dispatch",
+          "ordinal": 1
+        },
+        {
+          "value": "task_parallel",
+          "ordinal": 2
+        }
+      ],
+      "default": "task_parallel",
+      "unit": null,
+      "group": "scheduler",
+      "purpose": "Chooses where the task scheduler may run work concurrently.",
+      "value_descriptions": {
+        "task_parallel": "Allow eligible parallel regions inside the pipeline as well as parallel dispatch.",
+        "single_thread": "Run dispatch and coarse pipeline work on the caller.",
+        "parallel_dispatch": "Allow independent eligible dispatch jobs to overlap, without selecting internal task-parallel regions."
+      },
+      "notes": "Input access, batch size and memory admission can still limit parallelism."
+    },
+    {
+      "name": "bioseq.scheduler.postgres_parallel.enabled",
+      "type": "boolean",
+      "source": "bioseq/backend/pg/configuration/scheduler.cppm",
+      "line": 56,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": false,
+      "values": [
+        {
+          "value": true
+        },
+        {
+          "value": false
+        }
+      ],
+      "unit": null,
+      "group": "scheduler",
+      "purpose": "Controls task concurrency inside a PostgreSQL parallel-worker process.",
+      "value_descriptions": {
+        "false": "Restrict that process to one task slot.",
+        "true": "Allow it to use multiple task slots within the backend concurrency cap."
+      }
+    },
+    {
+      "name": "bioseq.storage.sequence_shard.max_size_gib",
+      "type": "integer",
+      "source": "bioseq/backend/pg/configuration/storage.cppm",
+      "line": 28,
+      "context": "superuser",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq",
+      "plan_cache_reset": false,
+      "default": 1024,
+      "minimum": 0,
+      "maximum": 2147483647,
+      "unit": null,
+      "group": "storage",
+      "display_unit": "GiB",
+      "purpose": "Sets the sequence-shard size limit. A positive limit must accommodate one complete sequence. Zero starts a new shard for each insertion. Existing sequences are not moved."
+    },
+    {
+      "name": "bioseq_cache.query_cache.mode",
+      "type": "enum",
+      "default": "disabled",
+      "source": "bioseq_caching/pg/guc.cppm",
+      "line": 100,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq_cache",
+      "unit": null,
+      "plan_cache_reset": true,
+      "values": [
+        {
+          "value": "disabled",
+          "ordinal": 0
+        },
+        {
+          "value": "exact_query",
+          "ordinal": 1
+        },
+        {
+          "value": "reusable_fragments",
+          "ordinal": 2
+        }
+      ],
+      "group": "cache",
+      "purpose": "Selects reuse by the optional query-result-cache extension.",
+      "value_descriptions": {
+        "disabled": "Do not use the query-result cache.",
+        "exact_query": "Reuse completed identical requests and coordinate concurrent identical computations.",
+        "reusable_fragments": "Permit completed-fragment reuse for providers that support it. The Bioseq alignment adapter currently supports exact reuse only."
+      },
+      "notes": "Non-disabled modes require shared preloading and a server restart."
+    },
+    {
+      "name": "bioseq_cache.query_cache.completed_result_ttl_ms",
+      "type": "integer",
+      "default": 3600000,
+      "source": "bioseq_caching/pg/guc.cppm",
+      "line": 111,
+      "context": "user",
+      "hidden": false,
+      "test_only": false,
+      "extension": "bioseq_cache",
+      "unit": "ms",
+      "plan_cache_reset": false,
+      "minimum": 0,
+      "maximum": 2147483647,
+      "group": "cache",
+      "purpose": "Limits the age of a completed cached result, measured from completion. Zero prevents ordinary later reuse. An already-registered waiter can still consume completion once. It is not a query timeout."
+    }
+  ],
+  "aligner_options": [
+    {
+      "field": "kmer_size",
+      "position": 1,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.minimizer.kmer_size",
+      "initial_resolved_default": 15
+    },
+    {
+      "field": "window_size",
+      "position": 2,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.minimizer.window_size",
+      "initial_resolved_default": 10
+    },
+    {
+      "field": "max_gap",
+      "position": 3,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.chaining.maximum_gap",
+      "initial_resolved_default": 5000
+    },
+    {
+      "field": "max_gap_ref",
+      "position": 4,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.chaining.maximum_reference_gap",
+      "initial_resolved_default": -1
+    },
+    {
+      "field": "bandwidth",
+      "position": 5,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.chaining.bandwidth",
+      "initial_resolved_default": 500
+    },
+    {
+      "field": "bandwidth_long",
+      "position": 6,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.chaining.long_join_bandwidth",
+      "initial_resolved_default": 0
+    },
+    {
+      "field": "max_chain_skip",
+      "position": 7,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.chaining.maximum_skipped_anchors",
+      "initial_resolved_default": 25
+    },
+    {
+      "field": "max_chain_iter",
+      "position": 8,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.chaining.maximum_predecessors",
+      "initial_resolved_default": 5000
+    },
+    {
+      "field": "min_seed_count",
+      "position": 9,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.chaining.minimum_seed_count",
+      "initial_resolved_default": 3
+    },
+    {
+      "field": "min_chain_score",
+      "position": 10,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.chaining.minimum_score",
+      "initial_resolved_default": 40
+    },
+    {
+      "field": "chain_gap_scale",
+      "position": 11,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "double precision",
+      "guc": "bioseq.aligner.chaining.gap_penalty_scale",
+      "initial_resolved_default": 0.8
+    },
+    {
+      "field": "chain_skip_scale",
+      "position": 12,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "double precision",
+      "guc": "bioseq.aligner.chaining.skip_penalty_scale",
+      "initial_resolved_default": 0.0
+    },
+    {
+      "field": "mask_level",
+      "position": 13,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "double precision",
+      "guc": "bioseq.aligner.secondary.overlap_threshold",
+      "initial_resolved_default": 0.5
+    },
+    {
+      "field": "mask_len",
+      "position": 14,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.secondary.uncovered_length_limit",
+      "initial_resolved_default": 2147483647
+    },
+    {
+      "field": "pri_ratio",
+      "position": 15,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "double precision",
+      "guc": "bioseq.aligner.secondary.score_ratio_threshold",
+      "initial_resolved_default": 0.8
+    },
+    {
+      "field": "best_n",
+      "position": 16,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.secondary.maximum_count",
+      "initial_resolved_default": 5
+    },
+    {
+      "field": "match_score",
+      "position": 17,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.scoring.match_score",
+      "initial_resolved_default": 2
+    },
+    {
+      "field": "mismatch_pen",
+      "position": 18,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.scoring.mismatch_penalty",
+      "initial_resolved_default": 4
+    },
+    {
+      "field": "gap_open1",
+      "position": 19,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.scoring.short_gap_open_penalty",
+      "initial_resolved_default": 4
+    },
+    {
+      "field": "gap_ext1",
+      "position": 20,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.scoring.short_gap_extension_penalty",
+      "initial_resolved_default": 2
+    },
+    {
+      "field": "gap_open2",
+      "position": 21,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.scoring.long_gap_open_penalty",
+      "initial_resolved_default": 24
+    },
+    {
+      "field": "gap_ext2",
+      "position": 22,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.scoring.long_gap_extension_penalty",
+      "initial_resolved_default": 1
+    },
+    {
+      "field": "sc_ambi",
+      "position": 23,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.scoring.ambiguous_base_penalty",
+      "initial_resolved_default": 1
+    },
+    {
+      "field": "zdrop",
+      "position": 24,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.scoring.z_drop_threshold",
+      "initial_resolved_default": 400
+    },
+    {
+      "field": "end_bonus",
+      "position": 25,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.scoring.end_bonus",
+      "initial_resolved_default": -1
+    },
+    {
+      "field": "max_occ",
+      "position": 26,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.seeding.maximum_occurrence",
+      "initial_resolved_default": 500
+    },
+    {
+      "field": "mid_occ",
+      "position": 27,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.seeding.intermediate_occurrence_threshold",
+      "initial_resolved_default": 500
+    },
+    {
+      "field": "block_min_size",
+      "position": 28,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.block_alignment.minimum_block_size",
+      "initial_resolved_default": 32
+    },
+    {
+      "field": "block_max_size",
+      "position": 29,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.block_alignment.maximum_block_size",
+      "initial_resolved_default": 256
+    },
+    {
+      "field": "chaining_algorithm",
+      "position": 30,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.chaining.algorithm",
+      "initial_resolved_default": 1,
+      "codes": [
+        {
+          "value": "scalar_minimap2",
+          "ordinal": 0
+        },
+        {
+          "value": "simd_minimap2",
+          "ordinal": 1
+        },
+        {
+          "value": "range_minimum_query",
+          "ordinal": 2
+        },
+        {
+          "value": "vulkan_tiled_dynamic_programming",
+          "ordinal": 3
+        }
+      ]
+    },
+    {
+      "field": "base_alignment_algorithm",
+      "position": 31,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.base_alignment.algorithm",
+      "initial_resolved_default": 1,
+      "codes": [
+        {
+          "value": "ksw2",
+          "ordinal": 0
+        },
+        {
+          "value": "block_aligner",
+          "ordinal": 1
+        }
+      ]
+    },
+    {
+      "field": "minimizer_algorithm",
+      "position": 32,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": "bioseq.aligner.minimizer.algorithm",
+      "initial_resolved_default": 4,
+      "codes": [
+        {
+          "value": "scalar",
+          "ordinal": 0
+        },
+        {
+          "value": "simd_minimap2_reference",
+          "ordinal": 1
+        },
+        {
+          "value": "two_stack_nthash",
+          "ordinal": 2
+        },
+        {
+          "value": "vulkan_minimap_integer",
+          "ordinal": 3
+        },
+        {
+          "value": "bounded_nthash_simd",
+          "ordinal": 4
+        }
+      ]
+    },
+    {
+      "field": "vulkan_enabled",
+      "position": 33,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "boolean",
+      "guc": "bioseq.aligner.vulkan.enabled",
+      "initial_resolved_default": true
+    },
+    {
+      "field": "vulkan_seed_hits_enabled",
+      "position": 34,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "boolean",
+      "guc": "bioseq.aligner.vulkan.seed_lookup.enabled",
+      "initial_resolved_default": false
+    },
+    {
+      "field": "vulkan_index_cache_enabled",
+      "position": 35,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "boolean",
+      "guc": "bioseq.aligner.vulkan.index_cache.enabled",
+      "initial_resolved_default": true
+    },
+    {
+      "field": "index_read_requirement",
+      "position": 36,
+      "nullable": true,
+      "constructor_default": null,
+      "type": "integer",
+      "guc": null,
+      "initial_resolved_default": 0,
+      "codes": [
+        {
+          "value": "allow",
+          "ordinal": 0
+        },
+        {
+          "value": "require_absent",
+          "ordinal": 1
+        },
+        {
+          "value": "require_compatible_persisted",
+          "ordinal": 2
+        }
+      ]
+    }
+  ]
+}

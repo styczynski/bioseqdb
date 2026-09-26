@@ -1,0 +1,102 @@
+\label{sec:appendix-configuration}
+\label{sec:configuration-reference}
+\label{app:configuration-reference}
+
+This appendix lists the configuration settings registered by BioseqDB.
+There are 73 production settings in the main extension and two in the
+optional \texttt{bioseq\_cache} extension. Three further controls are compiled
+only into test builds and appear in a separate table. The reference also
+identifies every field of \texttt{aligner\_options}, including the index-read
+requirement that has no configuration-setting equivalent.
+
+\section{Reading the reference}
+
+A PostgreSQL configuration setting is also called a \emph{GUC}. Each table
+uses its full name, so a row can be used directly with \texttt{SHOW} or
+\texttt{SET}. The built-in default is \textbf{bold} and appears first.
+For an enum or Boolean setting, each value has its own description.
+The default row also explains the setting's overall purpose.
+Compression depends on the compiled codecs. Its table puts Zstandard
+first because it is the preferred default when available. The LZ4 and
+PGLZ rows explain which default applies when it is unavailable.
+An integer or real row gives the inclusive range accepted by \texttt{SET}.
+The type abbreviations are \texttt{int} for integer, \texttt{real} for a
+fractional number, \texttt{bool} for Boolean and \texttt{enum} for a named choice.
+
+The three alignment algorithm GUCs use names in \texttt{SET}, but the
+corresponding \texttt{aligner\_options} fields use integer codes. Their value
+rows give both forms. Other GUC enum ordinals are implementation details and
+are not per-search option codes.
+
+The defaults describe a newly registered setting. Server configuration,
+database settings, role settings and earlier session commands can replace
+them. \texttt{RESET} restores the session's reset value, which need not be
+the built-in default. \texttt{SET LOCAL} changes a setting only until the
+current transaction ends. PostgreSQL documents these distinctions in its
+configuration and \texttt{SET} references
+\autocite{postgresql17_setting_parameters,postgresql17_set}.
+
+\begin{lstlisting}[style=bioseq-search-sql,
+  caption={Inspect a registered setting and compare its current and built-in values.},
+  label={lst:configuration-inspect}]
+SHOW bioseq.aligner.minimizer.algorithm;
+
+SELECT name, setting, boot_val, reset_val,
+       vartype, context, min_val, max_val, enumvals
+FROM pg_settings
+WHERE name = 'bioseq.aligner.minimizer.algorithm';
+\end{lstlisting}
+
+The extension library must have been loaded in the current backend before
+all its settings are visible. Settings marked \emph{hidden} are omitted
+from \texttt{SHOW ALL} and \texttt{pg\_settings}, but their exact names can
+still be read with \texttt{SHOW}. The source inventory therefore includes
+more rows than a query of \texttt{pg\_settings} alone
+\autocite{postgresql17_pg_settings,postgresql17_guc_functions}.
+
+Unmarked settings can be changed by an ordinary user. A \emph{superuser}
+setting requires superuser authority or a granted PostgreSQL permission to
+set that parameter. A \emph{reload} setting changes through server
+configuration and a configuration reload, rather than ordinary session
+\texttt{SET}. MiB means $2^{20}$ bytes and corresponds to PostgreSQL's
+\texttt{MB} unit. GiB means $2^{30}$ bytes. The shard limit takes a plain
+integer GiB count, not a GUC memory-unit suffix.
+
+An accepted setting is not a promise that every combination can execute.
+Algorithm support depends on the alphabet, compiled profiles, hardware and
+requested output. For example, disabling the custom scan does not turn
+\texttt{mmsearch} into an ordinary scalar search function. The tables identify
+controls whose values are stored but currently have no execution consumer.
+
+\section{Relationships between settings}
+
+Maintenance, reading and cache reuse are distinct operations.
+Section~\ref{sec:index-update-policy} explains the stored per-index
+maintenance policies. Section~\ref{sec:index-read-policy} explains why the
+per-search requirement takes precedence over optional index reading.
+The default grouped builder publishes an immutable generation explicitly.
+It cannot use ordinary insertion maintenance or the older asynchronous
+writer to maintain an MPF reader file.
+
+The asynchronous switches do not guarantee that a query leaves a saved
+index. The current code submits only ordinary MPS indexes. It requires
+$k=15,w=10$ and excludes default bounded ntHash. It needs an eligible
+on-insert policy and a worker queue. Its selection prefers MPF before MPS,
+but the submission path cannot persist MPF. Grouped explicit builds require
+both switches off. Section~\ref{sec:index-build-settings} gives the full
+distinction.
+
+Table options and process resources also have different lifetimes.
+Compression and stripe defaults are copied into newly created table options.
+Changing them does not rewrite an existing table. The decompressed column
+cache is local to a backend and is normally cleared at scan teardown.
+Index caches and the optional query-result cache hold different objects.
+A cache's capacity is not a limit on all the memory used by a query.
+
+For the optional result cache, a non-disabled mode requires
+\texttt{bioseq\_cache} in \nolinkurl{shared_preload_libraries} and a server
+restart. Completed-result age is measured from completion. Reuse applies
+the smaller of the producer's time-to-live and the current reader's limit.
+The Bioseq alignment adapter currently supports exact request reuse.
+Selecting \texttt{reusable\_fragments} does not add partial-range reuse to
+that adapter.

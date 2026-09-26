@@ -1,0 +1,12 @@
+Custom Scan (BioseqScan) on samples (actual time=0.010..0.015 rows=3 loops=1)
+  Bioseq Projected Columns: id, upload_date, patient_name, age
+  ->  Cache
+        Cache Hits: 0
+        Cache Misses: 4
+        Cache Evictions: 0
+        Cache Writes: 4
+        Cache Maximum Size: 60
+        Cache Ending Size: 60
+        Total Cache Entries: 4
+Planning Time: 0.028 ms
+Execution Time: 0.031 ms

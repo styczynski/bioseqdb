@@ -1,0 +1,407 @@
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/01_create.sql}{%
+\textbf{1. Create a sequence table.}
+The four ordinary columns hold patient metadata. The sequence column uses
+the DNA4 alphabet, which accepts A, C, G and T. The number 64 is the packed
+storage-unit width, not a sequence-length limit.
+
+\texttt{USING bioseq} selects BioSeqDB storage and search planning.
+Figure~\ref{fig:storage-heap-to-stripe} shows how its ordinary columns are
+stored. Section~\ref{sec:sequence-bit-layout} explains sequence packing.
+The first two lines tell \texttt{psql} to stop on errors and avoid paging.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/02_insert.sql}{%
+\textbf{2. Insert three related sequences.}
+The common expression makes a reproducible 2,048-base string by translating
+hexadecimal digits to DNA letters. This is synthetic data, not an MD5-based
+biological model.
+
+Anna receives two copies of that string, Ben a 512-base piece, and Cara one
+copy. Their lengths are 4,096, 512 and 2,048 bases. Ben's sequence occurs
+twice in Anna's sequence, which will make multiple alignment rows easy to see.
+PostgreSQL's text \texttt{substring} starts at 1, so position 257 here
+corresponds to BioSeqDB position 256.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/03_select.sql}{%
+\textbf{3. Read ordinary columns.}
+This returns all three patients. No sequence symbols are needed, because
+the projection contains only metadata.
+Without \texttt{ORDER BY}, SQL does not promise a row order.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/04_filter.sql}{%
+\textbf{4. Combine metadata conditions and a sequence preview.}
+This returns Ben and Anna, in that order. The age interval, date and name
+conditions must all hold.
+
+\texttt{len} reports sequence symbols. The slice \texttt{[:16]} returns
+the first sixteen symbols and the text cast makes them readable.
+BioSeqDB slices use zero-based, half-open bounds, as shown in
+Figure~\ref{fig:sequence-slice-coordinates}.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/05_explain_read.sql}{%
+\textbf{5. Explain the unfiltered read.}
+\texttt{ANALYZE} executes statement 3 and measures it.
+\texttt{COSTS OFF} hides planner estimates to keep this first plan small.
+It does not disable execution measurements.}
+
+\BioseqWalkRow{plan}{appendices/02_sql_walkthrough/plans/05_explain_read.plan}{%
+\texttt{BioseqScan} reads the table. \texttt{Projected Columns} lists
+exactly the four requested columns. \texttt{actual time} gives milliseconds
+to the first and last output row, averaged per loop. Here there are three
+rows and one loop. Planning and execution times describe the whole statement.
+
+The cache stores decompressed column chunks, as described in
+Table~\ref{tab:storage-cache-scopes}. Hits and misses count buffer lookups.
+Writes count buffers added or replaced, evictions count removed entries,
+and entries count current buffers. Maximum and ending sizes are peak and
+current payload bytes, not the configured cache capacity. These counters
+belong to the backend's cache state, not to a cache of SQL results.
+
+There is no chunk-skipping field here because there is no filter. The
+filtered search below shows that field.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/06_search.sql}{%
+\textbf{6. Search with a simple metadata filter.}
+\texttt{\textbackslash gset} saves Ben's DNA in the \texttt{psql} variable
+\texttt{probe}. The spelling \texttt{:'probe'} safely inserts it as an SQL
+string literal. The following constant-query searches reuse this
+512-base query.
+
+The stored target is the first \texttt{mmsearch} argument. This returns
+two matches for Anna and one for Ben. Each has score 1,024 and CIGAR
+\texttt{512M}.
+
+Requesting \texttt{cigar} enables base alignment. In this alpha version,
+\texttt{score} alone does not enable it and can return zero.
+Section~\ref{sec:final-alignment-role} explains that stage.
+For the misleading allocation error, see
+Warning~\ref{warn:walkthrough-alpha}.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/07_build.sql}{%
+\textbf{7. Build the MPF index explicitly.}
+This processes three sequence values and returns 3. It extracts minimizers
+using the current algorithm and $k,w$, groups their positions, and publishes
+the relation data and its reader files. See
+Algorithm~\ref{alg:index-image-lifecycle}.
+
+The default grouped format requires the two asynchronous-persistence
+settings to be off. They already are off, so this example needs no
+preparatory \texttt{SET} commands. Update policies appear in
+Table~\ref{tab:index-update-policy}.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/08_search_again.sql}{%
+\textbf{8. Repeat the search after construction.}
+The same three matches remain. A successful index build does not imply
+that every query reads its file. This ordinary constant-query scan
+recomputes target minimizers in the current default configuration.
+
+The two-table join later uses the required persisted-reader path.
+Figure~\ref{fig:index-join-read-paths} shows the distinction.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/09_options.sql}{%
+\textbf{Choose algorithms for one call.}
+These are the same defaults written explicitly to demonstrate
+\texttt{aligner\_options}, so the result still has three matches.
+The codes choose bounded ntHash SIMD minimizers (4), SIMD minimap2
+chaining (1), and BlockAligner (1). Each minimizer window contains ten
+consecutive 15-mers.
+
+Omitted options inherit session settings. Appendix~\ref{app:configuration-reference}
+lists the numeric codes beside their named GUC values.
+Section~\ref{sec:arch-request-settings} explains precedence.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/10_explain_search.sql}{%
+\textbf{9. Explain exactly that search.}
+The following consecutive blocks contain its complete text plan.
+Keeping the CIGAR projection matters, because removing it would also
+remove the request for base alignment.}
+
+\BioseqWalkRow[firstline=1,lastline=8]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
+\texttt{Result} projects the output from \texttt{BioseqScan}. Three
+alignment rows come from two qualifying patients.
+
+The scan reads the identifier, age and sequence. A chunk-group filter
+compares the age condition with stored minima and maxima. Zero groups
+were skipped here. The vectorized filter tests individual ages in the
+remaining batches. Listing~\ref{lst:storage-minmax-pruning} explains this
+difference.
+
+\texttt{allow} permits ordinary index reuse or recomputation.
+The planned share is 100\% recomputed. The actual counters below confirm
+it. See Table~\ref{tab:index-read-requirement}.}
+
+\BioseqWalkRow[firstline=9,lastline=18,gobble=8]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
+The scheduler line is a snapshot of the local task scheduler.
+It reports workers, processed/scheduled batches, waiting work and
+processed/waiting queries. The local supervisor leaves the query-rate
+field at zero. The last fields count pending persistence jobs and reserved
+index bytes. These are not timings for individual alignment stages.
+Section~\ref{sec:arch-work-distribution} explains its queues.
+
+Highway selects a CPU instruction set. Runnable targets are the intersection
+of compiled and CPU-supported targets. Planned and executed architectures
+agree here. Your CPU may show different names.
+\texttt{QuerySketchStage} extracts the query minimizers, and
+\texttt{Highway Function} names its selected kernel.
+See Section~\ref{sec:arch-hardware-selection}.}
+
+\BioseqWalkRow[firstline=19,lastline=27,gobble=12]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
+These are internal pipeline descriptions.
+The zero \texttt{cep.window\_len}, \texttt{cep.kmer\_len} and
+\texttt{query\_len} values are placeholders in that description.
+They do not mean that this query has length zero or uses $k=w=0$.
+\texttt{sequence\_len\_log2} is a compiled size category.
+
+\texttt{specialised: fallback} means a general parameter implementation,
+not a failed GPU request. \texttt{max\_occ} limits accepted occurrences
+of one minimizer hash. \texttt{reserved} is a planned anchor-buffer capacity
+in elements, not a byte count or the number of matches.}
+
+\BioseqWalkRow[firstline=28,lastline=41,gobble=12]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
+Chaining joins seed anchors into candidate regions.
+\texttt{min\_chain\_score} and \texttt{min\_seed\_count} reject weak
+chains. \texttt{max\_chain\_skip} and \texttt{max\_chain\_iter} limit
+predecessor exploration. Bandwidth and maximum gap constrain how far
+anchors may separate.
+
+This is the bounded SIMD approximation described in
+Section~\ref{sec:chaining-bioseqdb}. Its flags describe the vectorized implementation,
+whether a zero skip penalty is required, and the general specialization.
+The next stage makes regions from those chains.}
+
+\BioseqWalkRow[firstline=42,lastline=49,gobble=12]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
+Regions are classified as primary or secondary by their overlap.
+\texttt{mask\_level} is the overlap threshold and \texttt{mask\_len}
+limits uncovered query length. \texttt{sub\_diff} is the close-score
+margin used when counting competitors.
+
+Secondary filtering uses a score ratio, an absolute score margin
+(\texttt{min\_diff}), and \texttt{best\_n}. The last value limits retained
+secondary regions, not SQL result rows or primary matches.
+See Section~\ref{sec:alignment-postprocessing}.}
+
+\BioseqWalkRow[firstline=50,lastline=60,gobble=12]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
+BlockAligner computes the base-level alignment and CIGAR.
+Matching bases add 2 to the score, substitutions cost 4, and the displayed
+gap-opening and extension penalties define its single affine-gap scheme.
+Its adaptive block size ranges from 32 to 256.
+
+The vectorized and single-affine flags identify this implementation.
+The Highway line identifies its CPU kernel.
+See Section~\ref{sec:final-alignment-cpu-contracts}.}
+
+\BioseqWalkRow[firstline=61,lastline=69,gobble=12]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
+Primary/secondary classification and filtering run again after base
+alignment has refined the regions. Their parameters have the same meanings
+as above.
+
+\texttt{Submit results} reports two processed targets. Both used recomputed
+minimizers and neither used a persisted reader. This confirms why the
+preceding index build did not change this scan's chosen read path.}
+
+\BioseqWalkRow[firstline=70,lastline=72,gobble=12]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
+These diagnostics try to certify which implementations completed the work.
+\texttt{attempted}, \texttt{fully\_attested} and \texttt{unattested}
+count attempted and certified target/query jobs. The first uncertified
+target and query ordinal are printed below them.
+
+\texttt{mixed\_invalid} with two unattested targets means the current
+instrumentation did not certify a complete backend combination.
+It is not evidence of GPU execution or a scalar fallback.
+The flags report mixed environments, mixed persisted identities, conflicting
+identity evidence and saturated counters. All are false here.
+
+Requested and actual index sources differ. \texttt{missing\_persisted}
+means no suitable persisted reader was used for these targets, even though
+physical MPF data exists. The permissive policy allows recomputation.}
+
+\BioseqWalkRow[firstline=73,lastline=77,gobble=12]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
+GPU counters cover seed lookup, chaining, backtracking, coordinate voting
+and extension. Declines and fallbacks describe execution-route decisions.
+All are zero in this CPU example. Three counters are also printed under
+their longer names.
+
+Host statistics include query-sketch and target-build nanoseconds, hash
+readbacks, symbol-packing calls, alignment classification and CIGAR
+construction. Zeros in this incompletely attested execution do not mean
+that these operations took no time or that no CIGAR was produced.}
+
+\BioseqWalkRow[firstline=78,lastline=87,gobble=8]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
+The cache fields have the same meanings as in the first plan. This search
+needs sequence data as well as metadata, so the buffers and their sizes
+differ. Cache entries count column chunks, not matches.
+
+The final two lines give statement planning and execution time in
+milliseconds. They include work outside the alignment stages.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/11_self.sql}{%
+\textbf{10. Search each sequence within itself.}
+Each of the three rows produces a hit. With CIGAR requested, these exact
+self-alignments cover their complete sequences and score twice their length.
+
+This is a same-row search. It performs alignment rather than replacing
+\texttt{mmsearch(seq,seq)} with a constant Boolean value.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/12_self_join.sql}{%
+\textbf{Compare rows using a self-join.}
+The two aliases independently choose target and query rows. The result has
+13 alignments, including the three equal-ID pairs.
+Section~\ref{sec:mmsearch-join-ownership} explains these roles.
+
+For target 1 and query 2, score 1,024 occurs at both $[256,768)$ and
+$[2304,2816)$. These are different occurrences, even though both have
+\texttt{512M}. Keep positions as well as scores.
+All helper arguments name the target \texttt{t.seq}, including the query
+coordinate helpers. Figure~\ref{fig:scan-occurrences} explains why a stored
+row can produce several output rows.}
+
+\BioseqWalkRow[firstline=1,lastline=14]{sql}{appendices/02_sql_walkthrough/sql/13_fasta.sql}{%
+\textbf{11. Load a FASTA file into another table.}
+The first statement writes our three records as alternating header and
+sequence lines. This makes the exercise independent of external downloads.
+The server must be able to write and then read the named path.
+
+\texttt{load} returns 3. With one text column, one sequence column and no
+explicit mappings, its default \texttt{auto} mode keeps each full header
+without the leading \texttt{>}. It does not create an identity column or
+invent numeric IDs.}
+
+\BioseqWalkRow[firstline=15,lastline=16]{sql}{appendices/02_sql_walkthrough/sql/13_fasta.sql}{%
+\textbf{Header parsing options.}
+This call loads the file once. Running it again would append duplicate
+records.
+
+\texttt{header\_format} accepts \texttt{auto}, \texttt{plain},
+\texttt{uni\_prot}, \texttt{uni\_ref}, \texttt{uni\_parc},
+\texttt{uni\_mes}, \texttt{spd}, \texttt{ncbi}, \texttt{ncbi\_gi},
+\texttt{ncbi\_pdb}, \texttt{refseq}, \texttt{genbank}, \texttt{gisaid}
+and \texttt{imgt}. Auto can detect a dialect when field parsing is needed.
+Plain keeps an unsplit identifier.
+
+The fourth argument maps parsed fields to table columns using
+\texttt{bioseq.column\_mapping}, with destination first and source second.
+For example, \texttt{('accession','accession')} copies that parsed field.
+Section~\ref{sec:io-header-mapping} explains the mappings and loader limits.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/14_loaded_search.sql}{%
+\textbf{12. Inspect prefixes, then search a loaded slice.}
+The first query returns three headers, lengths and sixteen-base previews.
+The next saves a 256-base slice of the loaded Ben record as
+\texttt{short\_probe}.
+
+Searching it returns four alignments: two in Anna's sequence and one in
+each of the other records. The search query is still a typed DNA4 value.
+Taking its slice before the search avoids displaying a long literal.}
+
+\BioseqWalkRow[firstline=1,lastline=15]{sql}{appendices/02_sql_walkthrough/sql/15_all_fields.sql}{%
+\textbf{13. Return every alignment field.}
+This statement continues in the next block. Scores and coordinates describe
+the current match. \texttt{score} and \texttt{dp\_score} are aliases.
+On this CPU path, \texttt{dp\_max\_score} currently repeats that score.
+\texttt{chain\_score} describes the seed chain and the secondary score
+describes a competitor.
+
+Lengths count logical symbols. Both query and target coordinates use
+zero-based, half-open intervals. \texttt{block\_length} is the alignment
+block length.
+
+\texttt{num\_matches} is a reported aligned-residue count, not a result-row
+count. The current CPU code counts CIGAR \texttt{M} and \texttt{=} runs.
+Since \texttt{M} can include substitutions, this field is not a reliable
+count of identical bases for an imperfect alignment.}
+
+\BioseqWalkRow[firstline=16,lastline=23]{sql}{appendices/02_sql_walkthrough/sql/15_all_fields.sql}{%
+\texttt{edit} counts alignment edits. \texttt{mapq} estimates mapping
+quality, while \texttt{divergence} is estimated from seeds. Neither is a
+percentage identity. \texttt{seed\_count} counts chain anchors.
+
+The Boolean fields report reverse orientation, primary classification and
+whether CIGAR is present. CIGAR describes runs of alignment operations.
+\texttt{M} consumes both sequences and can include a substitution.
+\texttt{I} consumes the query, and
+\texttt{D} consumes the target.
+Section~\ref{sec:match-placeholder-injection} explains how these helpers
+receive the current match's values.}
+
+\BioseqWalkRow[firstline=24,lastline=28]{sql}{appendices/02_sql_walkthrough/sql/15_all_fields.sql}{%
+This join requires the compatible persisted target index built in step 7.
+Code 2 is a per-call read policy, not a GUC. It lets this supported
+\texttt{BioseqBatchJoin} use the grouped MPF reader files.
+A missing or incompatible reader is an error, as explained in
+Section~\ref{sec:index-read-policy}.
+
+The result has 13 alignments, ordered by descending score and then by
+identifiers and positions. The complete statement includes all 21 helpers.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/16_vector.sql}{%
+\textbf{14. Aggregate metadata in batches.}
+This returns two patients, minimum age 34, maximum age 52, sum 86 and
+average 43. The dates span 1--2 September.
+
+The eligible aggregate functions operate directly on ordinary integer and
+date columns. This query does not need sequence symbols or alignments.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/17_explain_vector.sql}{%
+Explain the same aggregate. The excerpt below keeps only the node and
+filter fields relevant to vectorization. The dots stand for the omitted
+cache and timing lines, not additional SQL to execute.}
+
+\BioseqWalkRow{plan}{appendices/02_sql_walkthrough/plans/vector_excerpt.plan}{%
+\texttt{VectorAggNode} is the vector aggregate. Its child supplies column
+batches and applies the vectorized age/date filter. Here the child reports
+one batch slot, while the aggregate returns one summary row. Neither
+\texttt{rows=1} means that only one patient was included.
+
+This node currently has no separate per-lane or SIMD-speedup counter.
+The analyzed node and its batch-reading child show the chosen execution
+path. Grouping or aggregating alignment results can select an ordinary
+aggregate instead.
+Section~\ref{sec:filter-placement} distinguishes batch filtering from
+other execution stages.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/18_write.sql}{%
+\textbf{15. Update, insert and rebuild.}
+Anna becomes 35 and Daria receives Ben's sequence. Both writes return their
+affected row. There are now four stored sequences.
+
+With insert maintenance off, these writes do not build new minimizer
+generations. Even a metadata update creates a replacement row version.
+The two explicit calls prepare MPF and symbol-count indexes for all four
+visible values. See Figure~\ref{fig:storage-update-snapshots} and
+Section~\ref{sec:index-file-consistency}.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/19_stats.sql}{%
+Inspect the three registered index families. MPF and symbol counts have
+stored data. MPS remains unbuilt because this exercise never requested it.
+
+\texttt{storage\_size} measures the index relations and excludes separate
+MPF reader files. Physical rows count internal index records, not patients.
+The update age is the time since the recorded build.
+\texttt{UPDATE\_ON\_INSERT} is the family's policy, which still needs the
+separate maintenance switch. See Table~\ref{tab:index-policy-defaults}.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/20_scalar.sql}{%
+\textbf{Try scalar minimizers, scalar chaining and KSW2.}
+The three algorithm codes are all 0. The query returns five matches,
+each scoring 1,024 with \texttt{512M}.
+
+Read requirement 1 forbids persisted target-index reads for this call.
+That matters because the stored index was built with a different minimizer
+algorithm. It remains stored for later compatible queries.
+This local override does not change session defaults.
+See Section~\ref{sec:index-compatibility}.}
+
+\BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/21_extras.sql}{%
+\textbf{Combine sequence operations and an edit filter.}
+This returns four alignment rows for Anna, Ben and Daria.
+It counts A bases, joins two eight-base slices, reads one letter, and
+reverses or reverse-complements a prefix. Reversing the reverse complement
+gives the ordinary complement. There is no separate SQL complement helper.
+
+The exact predicate \texttt{bioseq.edit(seq) < 5} permits an early edit
+prefilter and still checks the retained alignment's edit count.
+Use the target sequence column here, not its ID. Prefilter dispatch depends
+on the supported candidate shape, as explained in
+Section~\ref{sec:prefilter-role}.
+
+The four matches have zero edits. The sequence expressions remain typed
+until their final text casts, following Section~\ref{sec:sequence-sql-slicing}.}

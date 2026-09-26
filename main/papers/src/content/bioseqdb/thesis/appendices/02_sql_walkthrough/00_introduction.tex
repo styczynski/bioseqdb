@@ -1,0 +1,56 @@
+\label{app:sql-walkthrough}
+This appendix follows one small dataset from insertion to alignment and
+index maintenance. Read the left column from top to bottom. SQL statements
+are executable, while the differently coloured plan blocks are output from
+\texttt{EXPLAIN ANALYZE}. The right column explains each block.
+
+The accompanying \path{appendices/02_sql_walkthrough/run.sql} executes the
+same SQL files used to typeset this listing. Run it with
+\texttt{psql -X -d bioseq\_walkthrough -f run.sql} in a new, empty local
+database created with \texttt{createdb bioseq\_walkthrough}.
+The BioSeqDB library must already be installed on the server.
+Use a database administrator account for this exercise, since it installs
+the extension and writes a small FASTA fixture to
+\path{/tmp/bioseq-walkthrough.fasta} on the server.
+Each statement commits separately under the default \texttt{psql} behaviour.
+Do not wrap the whole script in one transaction.
+
+No alignment GUC is changed in this walkthrough. It uses the defaults
+listed in Appendix~\ref{app:configuration-reference}, with explicit
+per-call options where they are being demonstrated. Names and dates are
+fictional. The DNA is generated deterministically to keep long strings out
+of the listing.
+
+\warn{Alpha-version limitations}{%
+\label{warn:walkthrough-alpha}
+Please note that the current software is an alpha version and still has
+numerous issues. Its memory checks can be too restrictive. They keep at
+least 2~GiB available before admitting more work and also limit the
+process's memory use. Leave several GiB available when trying these examples,
+especially when building grouped MPF indexes.
+
+One error-reporting bug can turn a failed query-minimizer allocation into
+\texttt{transient query execution stats disagree with its generated backend}.
+Free memory and retry before assuming that an index is missing.
+Building a stored target index does not remove the need to generate query
+minimizers. The message does not establish that the query rejected that
+index. Warning~\ref{warn:index-query-minimizers} explains this distinction.
+
+Keep \path{bioseq.index.insert_maintenance.enabled} off, as it is by default.
+Ordinary per-row minimizer maintenance is unsupported with the default
+grouped format. Build it explicitly after inserting rows, as shown below.
+Turning maintenance off does not disable memory checks or repair an
+allocation failure.}
+
+A short exact substring need not produce an alignment. Minimizers must
+survive seeding and chaining before a hit is reported.
+For the fixture below, 30- and 40-base prefixes produce no hits under the
+default settings, whereas a 50-base prefix does. This is an example, not a
+universal length threshold. The walkthrough uses 256- and 512-base probes.
+The seeding and chaining requirements are described in
+Sections~\ref{sec:configured-cpu-minimizers} and~\ref{sec:chaining-bioseqdb}.
+
+The displayed plans are complete except for the explicitly marked vector
+aggregate excerpt. Times, cache counters, worker counts and CPU instruction
+names will vary between runs. They are illustrations of the fields, not
+performance benchmarks.

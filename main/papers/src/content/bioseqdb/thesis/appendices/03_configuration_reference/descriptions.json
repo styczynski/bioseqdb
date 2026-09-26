@@ -1,0 +1,316 @@
+{
+  "bioseq.diagnostics.logging.enabled": {
+    "group": "diagnostics",
+    "purpose": "Controls extension diagnostic logging.",
+    "value_descriptions": {"false": "Leave the diagnostic logger disabled.", "true": "Enable diagnostic logging for troubleshooting."}
+  },
+  "bioseq.testing.chunked_scanner.enabled": {
+    "group": "testing",
+    "purpose": "Selects a synthetic sequence scanner in test builds.",
+    "value_descriptions": {"false": "Use the normal scanner selection.", "true": "Force the synthetic chunked-input route where supported."}
+  },
+  "bioseq.testing.in_memory_scanner.enabled": {
+    "group": "testing",
+    "purpose": "Selects an in-memory input scanner in test builds.",
+    "value_descriptions": {"false": "Use the normal scanner selection.", "true": "Materialize sequence input before scanner dispatch."}
+  },
+  "bioseq.testing.persisted_index.failure_mode": {
+    "group": "testing",
+    "purpose": "Injects a persisted-index reader failure for tests.",
+    "value_descriptions": {"none": "Do not inject a failure.", "unsupported_vector_shape": "Make the adapter report an unsupported vector shape."}
+  },
+  "bioseq.storage.compression.algorithm": {
+    "group": "storage",
+    "purpose": "Chooses the compression codec for newly created column-storage options.",
+    "value_descriptions": {
+      "zstd": "Use Zstandard when compiled in. This is the preferred build-time default.",
+      "lz4": "Use LZ4 when compiled in. This becomes the default when Zstandard is unavailable.",
+      "pglz": "Use PostgreSQL's PGLZ codec. This is the default when neither optional codec is compiled in.",
+      "none": "Store column chunks without compression."
+    },
+    "notes": "Changing the default does not rewrite existing table data."
+  },
+  "bioseq.storage.compression.level": {
+    "group": "storage", "purpose": "Sets the Zstandard compression level for new storage options. The current PGLZ and LZ4 paths do not use this level."
+  },
+  "bioseq.storage.stripe.row_limit": {
+    "group": "storage", "display_unit": "rows", "purpose": "Sets the maximum rows in a new table's column stripe. Existing table options and stored stripes are unchanged."
+  },
+  "bioseq.storage.chunk_group.row_limit": {
+    "group": "storage", "display_unit": "rows", "purpose": "Sets the maximum rows in a new table's chunk group. Chunk groups divide a stripe into smaller column-reading units."
+  },
+  "bioseq.storage.dml.enabled": {
+    "group": "storage", "purpose": "Controls whether reads apply deleted-row masks.",
+    "value_descriptions": {"true": "Hide rows that have been deleted or replaced. Keep this enabled for ordinary queries.", "false": "Bypass deletion-mask filtering. This is a diagnostic control, not a read-only mode."}
+  },
+  "bioseq.execution.parallel.enabled": {
+    "group": "planning", "purpose": "Controls PostgreSQL parallel-scan alternatives in the planner.",
+    "value_descriptions": {"true": "Allow eligible parallel scan paths. Actual worker availability still depends on PostgreSQL.", "false": "Do not add those parallel scan alternatives."},
+    "notes": "This does not make alignment custom scans parallel-safe."
+  },
+  "bioseq.execution.parallel.minimum_processes": {
+    "group": "planning", "purpose": "Requests the PostgreSQL worker count for eligible Bioseq parallel scan paths. Despite its name, this does not reserve or guarantee a minimum number of launched workers."
+  },
+  "bioseq.vectorization.enabled": {
+    "group": "planning", "purpose": "Controls supported SQL filter and aggregate vectorization.",
+    "value_descriptions": {"true": "Use supported vectorized SQL operations when the plan permits them.", "false": "Use scalar SQL processing for those operations."},
+    "notes": "Minimizer and chaining algorithms have separate selectors."
+  },
+  "bioseq.column_cache.enabled": {
+    "group": "storage", "purpose": "Controls the backend's decompressed column-chunk cache.",
+    "value_descriptions": {"true": "Cache eligible decompressed buffers during scanning.", "false": "Read and decompress without retaining buffers in this cache."},
+    "notes": "Normal scan teardown clears this cache. It is distinct from the query-result cache."
+  },
+  "bioseq.column_cache.capacity_mb": {
+    "group": "storage", "purpose": "Limits the decompressed column-chunk cache. Buffers in use remain protected, so this is not a limit on total backend memory."
+  },
+  "bioseq.planner.index_scan.enabled": {
+    "group": "planning", "purpose": "Controls Bioseq's handling of PostgreSQL index-scan paths on table columns.",
+    "value_descriptions": {"true": "Permit supported index-scan integration.", "false": "Disable that planner integration."},
+    "notes": "This does not control minimizer-index reuse."
+  },
+  "bioseq.planner.custom_scan.enabled": {
+    "group": "planning", "purpose": "Controls Bioseq custom-scan paths.",
+    "value_descriptions": {"true": "Allow the planner to install Bioseq custom scans.", "false": "Disable their construction. Ordinary mmsearch has no slower standalone scalar-function fallback."}
+  },
+  "bioseq.planner.custom_scan.max_paths": {
+    "group": "planning", "purpose": "Bounds the custom-scan path alternatives explored for one relation, including parameterized predicate combinations."
+  },
+  "bioseq.planner.qual_pushdown.enabled": {
+    "group": "planning", "purpose": "Controls supported predicate pushdown into custom scans.",
+    "value_descriptions": {"true": "Consider moving eligible filters into the scan.", "false": "Leave these filters outside the pushed-down scan work."}
+  },
+  "bioseq.planner.qual_pushdown.correlation_threshold": {
+    "group": "planning", "purpose": "Sets the minimum absolute column correlation used by the pushdown decision. Values closer to one demand stronger correlation."
+  },
+  "bioseq.planner.diagnostics.log_level": {
+    "group": "diagnostics", "purpose": "Chooses the PostgreSQL severity for planner diagnostic messages.",
+    "value_descriptions": {
+      "debug3": "Emit them at DEBUG3 severity.", "debug5": "Emit them at DEBUG5 severity.",
+      "debug4": "Emit them at DEBUG4 severity.", "debug2": "Emit them at DEBUG2 severity.",
+      "debug1": "Emit them at DEBUG1 severity.", "log": "Emit them at LOG severity.",
+      "info": "Emit them at INFO severity.", "notice": "Emit them at NOTICE severity.",
+      "warning": "Emit them at WARNING severity."
+    },
+    "notes": "PostgreSQL's message thresholds determine where the messages appear."
+  },
+  "bioseq.planner.sequence_sort_scan.enabled": {
+    "group": "planning", "purpose": "Controls the experimental sequence batch-sort scan.",
+    "value_descriptions": {"false": "Leave ordinary sort planning in place.", "true": "Consider the custom batch-sort path for eligible single sequence sort keys."}
+  },
+  "bioseq.index.insert_maintenance.enabled": {
+    "group": "index", "purpose": "Gates automatic index maintenance requested by each stored index policy.",
+    "value_descriptions": {"false": "Save new source rows without automatic index builds.", "true": "Maintain enabled on-insert indexes. Ordinary INSERT rejects grouped minimizer maintenance. Streamed loading has a separate batched build path."},
+    "notes": "Explicit update_index does not depend on this gate."
+  },
+  "bioseq.index.sequence_read.enabled": {
+    "group": "index", "purpose": "Controls optional persisted sequence-index reads.",
+    "value_descriptions": {"true": "Permit compatible stored reads where the executor supports them.", "false": "Skip optional persisted reads and compute needed data during execution."},
+    "notes": "Per-search index_read_requirement codes 1 and 2 override this choice. It never builds an index."
+  },
+  "bioseq.index.async_persistence.enabled": {
+    "group": "index", "purpose": "Gates eligible deferred index persistence.",
+    "value_descriptions": {"false": "Do not stage asynchronous persistence work.", "true": "Allow the limited ordinary-MPS submission path when its other requirements are met."},
+    "notes": "Grouped explicit builds require this setting off."
+  },
+  "bioseq.index.recompute_async_persistence.enabled": {
+    "group": "index", "purpose": "Controls deferred persistence requests after a query recomputes minimizers.",
+    "value_descriptions": {"false": "Keep recomputation separate from deferred persistence.", "true": "Allow eligible requests when async_persistence is also on. This does not promise that an index will be saved."},
+    "notes": "Grouped explicit builds require this setting off."
+  },
+  "bioseq.index.memory_cap_mb": {
+    "group": "index", "purpose": "Adds a cap on accounted resident-index reservations. Zero uses the common runtime memory budget. Other query buffers are outside this index count."
+  },
+  "bioseq.index.sequence_minimizer_sort.algorithm": {
+    "group": "index", "purpose": "Chooses the pair sorter for ordinary MPS builds.",
+    "value_descriptions": {"std_sort": "Use the standard-library comparison sorter.", "simd_u128_vqsort": "Use Highway VQSort on packed 128-bit keys.", "simd_u128_vec_stream_1": "Use the SIMD sorter with one vector stream.", "simd_u128_vec_stream_2": "Use the SIMD sorter with two vector streams.", "simd_u128_vec_stream_4": "Use the SIMD sorter with four vector streams."}
+  },
+  "bioseq.index_build.run_buffer_bytes": {
+    "group": "index", "display_unit": "bytes", "purpose": "Overrides the external-sort run buffer size. Zero computes a size from the process memory budget and index cap. This is an administrative tuning control."
+  },
+  "bioseq.load.write_overlap.enabled": {
+    "group": "storage", "purpose": "Controls overlap between input decoding and table writes during loading.",
+    "value_descriptions": {"false": "Use the ordinary loading schedule.", "true": "Overlap decoding with writing through a bounded queue. The PostgreSQL backend still performs table writes."}
+  },
+  "bioseq.aligner.minimizer.kmer_size": {
+    "group": "minimizer", "display_unit": "symbols", "purpose": "Sets the number of sequence symbols in each k-mer. The selected algorithm and compiled profile impose additional restrictions."
+  },
+  "bioseq.aligner.minimizer.window_size": {
+    "group": "minimizer", "display_unit": "k-mers", "purpose": "Sets the number of consecutive k-mers in one minimizer window. It does not count sequence symbols."
+  },
+  "bioseq.aligner.minimizer.algorithm": {
+    "group": "minimizer", "purpose": "Chooses how query and target minimizers are extracted.",
+    "value_descriptions": {
+      "bounded_nthash_simd": "Use the bounded SIMD ntHash implementation. Execution requires a supported generated profile.",
+      "scalar": "Use scalar minimap2-style integer-hash extraction.",
+      "simd_minimap2_reference": "Use the SIMD implementation of minimap2's integer-hash sketch semantics where supported.",
+      "two_stack_nthash": "Use rolling ntHash and two-stack window-minimum maintenance.",
+      "vulkan_minimap_integer": "Use Vulkan integer-hash minimizer extraction on a supported device and execution route."
+    },
+    "notes": "Changing the algorithm can invalidate compatibility with saved indexes."
+  },
+  "bioseq.aligner.chaining.maximum_gap": {
+    "group": "chaining", "display_unit": "positions", "purpose": "Sets the requested maximum anchor gap used by chaining. Scalar chaining raises this limit to at least the bandwidth."
+  },
+  "bioseq.aligner.chaining.maximum_reference_gap": {
+    "group": "chaining", "display_unit": "positions", "purpose": "Stores a separate reference-gap request. This field currently has no execution consumer, so changing it does not add a separate reference-gap rule."
+  },
+  "bioseq.aligner.chaining.bandwidth": {
+    "group": "chaining", "display_unit": "positions", "purpose": "Bounds query-versus-target gap differences in chainers that use a diagonal band. Alignment paths also consume this parameter."
+  },
+  "bioseq.aligner.chaining.long_join_bandwidth": {
+    "group": "chaining", "display_unit": "positions", "purpose": "Stores a long-join bandwidth request. This field currently has no execution consumer and does not enable a long-join pass."
+  },
+  "bioseq.aligner.chaining.maximum_skipped_anchors": {
+    "group": "chaining", "purpose": "Sets the selected chainer's early-stop limit for predecessor search. SQL SIMD chaining requires a positive value even though the GUC accepts zero."
+  },
+  "bioseq.aligner.chaining.maximum_predecessors": {
+    "group": "chaining", "purpose": "Bounds the predecessor window for scan-based chainers. Scalar chaining can examine one additional candidate. RMQ does not use this field."
+  },
+  "bioseq.aligner.chaining.minimum_seed_count": {
+    "group": "chaining", "purpose": "Sets the minimum seed count for an accepted chain. It is a chain threshold, not a required number of SQL result rows."
+  },
+  "bioseq.aligner.chaining.minimum_score": {
+    "group": "chaining", "purpose": "Sets the minimum accepted chain score. The score is computed by the selected chaining algorithm."
+  },
+  "bioseq.aligner.chaining.gap_penalty_scale": {
+    "group": "chaining", "purpose": "Scales the gap penalty used by chaining. Larger values penalize that contribution more strongly."
+  },
+  "bioseq.aligner.chaining.skip_penalty_scale": {
+    "group": "chaining", "purpose": "Scales the chaining skip-distance penalty. Zero removes this scaled contribution."
+  },
+  "bioseq.aligner.chaining.algorithm": {
+    "group": "chaining", "purpose": "Chooses how matching seed anchors become chains.",
+    "value_descriptions": {
+      "simd_minimap2": "Use the bounded SIMD batch policy. Its approximation need not reproduce scalar chains exactly.",
+      "scalar_minimap2": "Use scalar minimap2-style dynamic-programming chaining.",
+      "range_minimum_query": "Use the range-minimum-query chainer instead of scanning the ordinary predecessor window.",
+      "vulkan_tiled_dynamic_programming": "Use tiled GPU dynamic-programming chaining on a supported Vulkan route."
+    },
+    "notes": "A valid selector does not make every hardware and input combination executable."
+  },
+  "bioseq.aligner.secondary.overlap_threshold": {
+    "group": "secondary", "purpose": "Sets the primary/secondary classification threshold combining query-interval overlap with uncovered query length. It is not simply a percentage of shared bases."
+  },
+  "bioseq.aligner.secondary.uncovered_length_limit": {
+    "group": "secondary", "display_unit": "symbols", "purpose": "Limits the uncovered query length used when classifying an alignment as secondary to an existing primary."
+  },
+  "bioseq.aligner.secondary.score_ratio_threshold": {
+    "group": "secondary", "purpose": "Sets the secondary-to-primary score-ratio threshold. Zero bypasses this filtering step, including its secondary-count limit."
+  },
+  "bioseq.aligner.secondary.maximum_count": {
+    "group": "secondary", "purpose": "Limits retained secondary alignments across the complete list passed to the filtering stage. It is not a SQL LIMIT and is bypassed when the score-ratio threshold is zero."
+  },
+  "bioseq.aligner.scoring.match_score": {
+    "group": "scoring", "purpose": "Sets the score added for an aligned matching symbol."
+  },
+  "bioseq.aligner.scoring.mismatch_penalty": {
+    "group": "scoring", "purpose": "Sets the score penalty for an aligned mismatch."
+  },
+  "bioseq.aligner.scoring.short_gap_open_penalty": {
+    "group": "scoring", "purpose": "Sets the first gap-opening penalty. KSW2 and BlockAligner use this pair. BlockAligner requires positive opening and extension penalties whose sum is at most 128."
+  },
+  "bioseq.aligner.scoring.short_gap_extension_penalty": {
+    "group": "scoring", "purpose": "Sets the first gap-extension penalty. BlockAligner requires it to be positive and its sum with the first opening penalty to be at most 128."
+  },
+  "bioseq.aligner.scoring.long_gap_open_penalty": {
+    "group": "scoring", "purpose": "Sets KSW2's second gap-opening penalty. Native BlockAligner uses only the first gap-penalty pair."
+  },
+  "bioseq.aligner.scoring.long_gap_extension_penalty": {
+    "group": "scoring", "purpose": "Sets KSW2's second gap-extension penalty. Native BlockAligner does not use this second pair."
+  },
+  "bioseq.aligner.scoring.ambiguous_base_penalty": {
+    "group": "scoring", "purpose": "Sets the alignment penalty for ambiguous symbols on paths that support them."
+  },
+  "bioseq.aligner.scoring.z_drop_threshold": {
+    "group": "scoring", "purpose": "Sets KSW2's Z-drop threshold or BlockAligner's X-drop threshold for end extensions. BlockAligner extensions require a nonnegative value."
+  },
+  "bioseq.aligner.scoring.end_bonus": {
+    "group": "scoring", "purpose": "Sets KSW2's sequence-end bonus. Negative one disables the bonus. Native BlockAligner does not use it."
+  },
+  "bioseq.aligner.seeding.maximum_occurrence": {
+    "group": "minimizer", "display_unit": "positions", "purpose": "Excludes minimizer keys with more target occurrences than this limit. A direct persisted reader also requires the request to fit its saved occurrence limit."
+  },
+  "bioseq.aligner.seeding.intermediate_occurrence_threshold": {
+    "group": "minimizer", "display_unit": "positions", "purpose": "Stores an intermediate seed-occurrence threshold. This field currently has no execution consumer, so it does not perform another filtering pass."
+  },
+  "bioseq.aligner.block_alignment.minimum_block_size": {
+    "group": "scoring", "purpose": "Sets BlockAligner's minimum adaptive block size. After widening to the active SIMD lane count, block sizes must be powers of two and the minimum cannot exceed the maximum."
+  },
+  "bioseq.aligner.block_alignment.maximum_block_size": {
+    "group": "scoring", "purpose": "Sets BlockAligner's maximum adaptive block size. Its effective size must be a power of two and at least the effective minimum."
+  },
+  "bioseq.aligner.base_alignment.algorithm": {
+    "group": "scoring", "purpose": "Chooses the base-alignment implementation when requested results need this stage.",
+    "value_descriptions": {"block_aligner": "Use adaptive block alignment with the first gap-penalty pair.", "ksw2": "Use KSW2 with its banded extension and two gap-penalty pairs."},
+    "notes": "Selecting an implementation does not itself request CIGAR or base-alignment output."
+  },
+  "bioseq.aligner.fragment_minimizer.lookup_route": {
+    "group": "index", "purpose": "Chooses how a grouped MPF reader finds a query hash.",
+    "value_descriptions": {"direct_compact_hash_lookup": "Use the saved direct section for supported 32-bit hash domains. Wider hashes use fragment controls.", "control_block_scan": "Search the grouped controls in the mapped fragment arrays."},
+    "notes": "The required compatible file must already exist. This is not a PostgreSQL hash index."
+  },
+  "bioseq.aligner.grouped_soa_generation.enabled": {
+    "group": "index", "purpose": "Selects the representation produced by explicit minimizer-index builds.",
+    "value_descriptions": {"true": "Publish grouped generations. MPF also publishes its immutable reader file.", "false": "Use the older ordinary representation where the chosen algorithm supports it."},
+    "notes": "Changing this setting alone builds or converts nothing. Grouped builds require both asynchronous switches off."
+  },
+  "bioseq.aligner.vulkan.enabled": {
+    "group": "vulkan", "purpose": "Permits execution of selected Vulkan algorithms.",
+    "value_descriptions": {"true": "Allow supported GPU work. This does not select a GPU algorithm by itself.", "false": "Disallow Vulkan execution. Explicit GPU requests fail instead of silently changing algorithms."},
+    "notes": "An explicit per-search true value also requests a standalone GPU prefilter in an eligible scan."
+  },
+  "bioseq.aligner.vulkan.seed_lookup.enabled": {
+    "group": "vulkan", "purpose": "Selects Vulkan seed-hit lookup.",
+    "value_descriptions": {"false": "Do not select GPU seed lookup through this switch.", "true": "Request GPU seed lookup subject to the supported route and device requirements."}
+  },
+  "bioseq.aligner.vulkan.index_cache.enabled": {
+    "group": "vulkan", "purpose": "Controls reuse of GPU-resident minimizer-index uploads.",
+    "value_descriptions": {"true": "Retain compatible device index data for reuse on a selected GPU seed route.", "false": "Do not reuse uploads through this GPU index cache."}
+  },
+  "bioseq.aligner.vulkan.fused_frontend.enabled": {
+    "group": "vulkan", "purpose": "Selects the resident fused Vulkan frontend.",
+    "value_descriptions": {"false": "Leave this frontend unselected.", "true": "Request fused device frontend work as part of a supported Vulkan execution route."}
+  },
+  "bioseq.aligner.vulkan.index_build.enabled": {
+    "group": "vulkan", "purpose": "Selects GPU target-index construction.",
+    "value_descriptions": {"false": "Do not request GPU construction through this switch.", "true": "Request device target-index construction when the remaining Vulkan route requirements are met."}
+  },
+  "bioseq.aligner.vulkan.alignment_extension.enabled": {
+    "group": "vulkan", "purpose": "Selects the GPU base-alignment extension stage.",
+    "value_descriptions": {"false": "Do not request GPU extension.", "true": "Permit the extension stage on a supported Vulkan route. GPU CIGAR output requires this stage."}
+  },
+  "bioseq.aligner.vulkan.ordered_sketch_tile_bp": {
+    "group": "vulkan", "display_unit": "symbols", "purpose": "Stores an ordered-sketch tile-size request. It is copied into parameters but currently has no execution consumer."
+  },
+  "bioseq.aligner.vulkan.radix_sort_digit_bits": {
+    "group": "vulkan", "display_unit": "bits", "purpose": "Stores a device radix-sort digit width. It is copied into parameters but currently has no execution consumer."
+  },
+  "bioseq.aligner.profiling.enabled": {
+    "group": "diagnostics", "purpose": "Controls aligner runtime profiling.",
+    "value_descriptions": {"false": "Run without the optional profiling collection.", "true": "Collect pipeline profiling information. Instrumentation can alter execution scheduling and measured cost."}
+  },
+  "bioseq.scheduler.backend.max_concurrency": {
+    "group": "scheduler", "purpose": "Caps participating task slots in each backend. Zero uses the available CPU count. The participating caller counts toward the cap. This is not a cluster-wide worker quota."
+  },
+  "bioseq.scheduler.pipeline.mode": {
+    "group": "scheduler", "purpose": "Chooses where the task scheduler may run work concurrently.",
+    "value_descriptions": {"task_parallel": "Allow eligible parallel regions inside the pipeline as well as parallel dispatch.", "single_thread": "Run dispatch and coarse pipeline work on the caller.", "parallel_dispatch": "Allow independent eligible dispatch jobs to overlap, without selecting internal task-parallel regions."},
+    "notes": "Input access, batch size and memory admission can still limit parallelism."
+  },
+  "bioseq.scheduler.postgres_parallel.enabled": {
+    "group": "scheduler", "purpose": "Controls task concurrency inside a PostgreSQL parallel-worker process.",
+    "value_descriptions": {"false": "Restrict that process to one task slot.", "true": "Allow it to use multiple task slots within the backend concurrency cap."}
+  },
+  "bioseq.storage.sequence_shard.max_size_gib": {
+    "group": "storage", "display_unit": "GiB", "purpose": "Sets the sequence-shard size limit. A positive limit must accommodate one complete sequence. Zero starts a new shard for each insertion. Existing sequences are not moved."
+  },
+  "bioseq_cache.query_cache.mode": {
+    "group": "cache", "purpose": "Selects reuse by the optional query-result-cache extension.",
+    "value_descriptions": {"disabled": "Do not use the query-result cache.", "exact_query": "Reuse completed identical requests and coordinate concurrent identical computations.", "reusable_fragments": "Permit completed-fragment reuse for providers that support it. The Bioseq alignment adapter currently supports exact reuse only."},
+    "notes": "Non-disabled modes require shared preloading and a server restart."
+  },
+  "bioseq_cache.query_cache.completed_result_ttl_ms": {
+    "group": "cache", "purpose": "Limits the age of a completed cached result, measured from completion. Zero prevents ordinary later reuse. An already-registered waiter can still consume completion once. It is not a query timeout."
+  }
+}

@@ -17,6 +17,7 @@
 \usepackage{fourier}
 \usepackage{heuristica}
 \usepackage{array}
+\usepackage{multirow}
 %usepackage{enumitem}   
 \usepackage{tabularray}   
 \UseTblrLibrary{booktabs, varwidth} 
@@ -649,6 +650,179 @@ depth .25\baselineskip height #1\baselineskip\relax}
 \lstnewenvironment{BioseqAsmSnippet}[1][]
   {\lstset{style=bioseq-asm,#1}}
   {}
+
+% A continuous, multipage walkthrough. Each row owns one source-file excerpt
+% and its explanation. Rows are indivisible, so a long plan should use adjacent
+% firstline/lastline excerpts rather than a smaller font or omitted fields.
+\lstdefinelanguage{BioseqExplain}{%
+  sensitive=true,
+  morekeywords={Aggregate,Append,Bitmap,CTE,Custom,Filter,Function,Group,Hash,
+    Index,Join,Limit,Loop,Materialize,Merge,Nested,Only,Parallel,Result,Scan,
+    Seq,Sort,Subquery,Unique,Values,WindowAgg},
+  morekeywords=[2]{BioseqScan,BioseqBatchJoin,BioseqPreparedPairScan,
+    BioseqVectorizedScan},
+  morekeywords=[3]{actual,batches,blocks,buffers,cost,dirtied,execution,hit,
+    loops,planning,read,removed,rows,time,width,written},
+  morestring=[b]'
+}
+\lstdefinestyle{bioseq-walk-base}{%
+  basicstyle=\fontsize{9}{11.2}\selectfont\ttfamily\color{BioseqCodeText},
+  keywordstyle=\bfseries\color{BioseqCodeKeyword},
+  keywordstyle=[2]\bfseries\color{BioseqCodeContext},
+  keywordstyle=[3]\color{BioseqCodeType},
+  commentstyle=\itshape\color{BioseqCodeComment},
+  stringstyle=\color{BioseqCodeString},
+  backgroundcolor={},
+  frame=none,
+  frameshape={}{}{}{},
+  numbers=none,
+  nolol=true,
+  xleftmargin=0pt,
+  xrightmargin=0pt,
+  aboveskip=0pt,
+  belowskip=0pt,
+  columns=fullflexible,
+  keepspaces=true,
+  showspaces=false,
+  showtabs=false,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=false,
+  breakautoindent=true,
+  breakindent=1em,
+  tabsize=2,
+  escapeinside={},
+  mathescape=false,
+  texcl=false,
+  caption={},
+  title={}
+}
+\lstdefinestyle{bioseq-walk-sql}{%
+  style=bioseq-walk-base,
+  language=SQL,
+  morekeywords={EXPLAIN,ANALYZE,BUFFERS,VERBOSE,FORMAT,LOCAL,LATERAL,
+    MATERIALIZED,RETURNING,EXTENSION,IF,EXISTS,CONFLICT,DO,NOTHING}
+}
+\lstdefinestyle{bioseq-walk-plan}{%
+  style=bioseq-walk-base,
+  language=BioseqExplain,
+  basicstyle=\fontsize{9}{11.2}\selectfont\sffamily\color{BioseqCodeText}
+}
+
+\newsavebox{\BioseqWalkCodeBox}
+\newsavebox{\BioseqWalkProseBox}
+\newlength{\BioseqWalkCodeWidth}
+\newlength{\BioseqWalkBracketWidth}
+\newlength{\BioseqWalkProseWidth}
+\newlength{\BioseqWalkCodeHeight}
+\newlength{\BioseqWalkRowHeight}
+\newlength{\BioseqWalkRowGap}
+\newlength{\BioseqWalkMaxRowHeight}
+
+% Draw at the measured code height, not the table row's height. The short
+% rightward tick points to the explanation even when that explanation is much
+% taller than its code. A zero-height top baseline aligns all three columns.
+\newcommand{\BioseqWalkBracket}{%
+  \begingroup
+    \let\tikzpicture\oldtikzpicture
+    \let\endtikzpicture\oldendtikzpicture
+    \begin{tikzpicture}[baseline=0pt]
+      \path[use as bounding box]
+        (0,0) rectangle (\BioseqWalkBracketWidth,-\BioseqWalkCodeHeight);
+      \draw[overlay,draw=BioseqCodeComment,line width=.5pt]
+        (1.2mm,0) -- (3.6mm,0) -- (3.6mm,-\BioseqWalkCodeHeight)
+        -- (1.2mm,-\BioseqWalkCodeHeight);
+      \draw[overlay,draw=BioseqCodeComment,line width=.5pt]
+        (3.6mm,-.5\BioseqWalkCodeHeight) -- (6.2mm,-.5\BioseqWalkCodeHeight);
+    \end{tikzpicture}%
+  \endgroup
+}
+
+\makeatletter
+\NewDocumentCommand{\BioseqWalkRow}{O{} m m +m}{%
+  \begingroup
+    \sbox{\BioseqWalkCodeBox}{%
+      \begin{minipage}[t]{\BioseqWalkCodeWidth}
+        \vspace{0pt}%
+        \setlength{\parindent}{0pt}%
+        \setlength{\parskip}{0pt}%
+        % The enclosing longtable owns the single listing caption. Caption's
+        % longtable integration otherwise leaves a blank caption in excerpts.
+        \let\lst@MakeCaption\@gobble
+        \lstinputlisting[style=bioseq-walk-#2,#1]{#3}%
+      \end{minipage}%
+    }%
+    \sbox{\BioseqWalkProseBox}{%
+      \begin{minipage}[t]{\BioseqWalkProseWidth}
+        \vspace{0pt}%
+        \normalfont\fontsize{9.5}{12}\selectfont
+        \raggedright
+        \setlength{\parindent}{0pt}%
+        \setlength{\parskip}{.45\baselineskip}%
+        \setlength{\emergencystretch}{1em}%
+        #4\par
+      \end{minipage}%
+    }%
+    \setlength{\BioseqWalkCodeHeight}{%
+      \dimexpr\ht\BioseqWalkCodeBox+\dp\BioseqWalkCodeBox\relax}%
+    \setlength{\BioseqWalkRowHeight}{\BioseqWalkCodeHeight}%
+    \ifdim\dimexpr\ht\BioseqWalkProseBox+\dp\BioseqWalkProseBox\relax>
+      \BioseqWalkRowHeight
+      \setlength{\BioseqWalkRowHeight}{%
+        \dimexpr\ht\BioseqWalkProseBox+\dp\BioseqWalkProseBox\relax}%
+    \fi
+    \ifdim\BioseqWalkRowHeight>\BioseqWalkMaxRowHeight
+      \PackageError{bioseq-common}{Walkthrough row is too tall: #3}{%
+        Split its source into consecutive firstline/lastline excerpts and
+        divide the explanation between those rows. Do not shrink the font.}%
+    \fi
+    \noindent\usebox{\BioseqWalkCodeBox}%
+    \BioseqWalkBracket%
+    \usebox{\BioseqWalkProseBox}%
+  \endgroup
+  \tabularnewline[\BioseqWalkRowGap]%
+}
+\makeatother
+
+\newcommand{\BioseqWalkHeader}{%
+  \makebox[\BioseqWalkCodeWidth][l]{\textbf{SQL or execution plan}}%
+  \hspace{\BioseqWalkBracketWidth}%
+  \makebox[\BioseqWalkProseWidth][l]{\textbf{Explanation}}%
+}
+
+\NewDocumentEnvironment{BioseqSQLWalkthrough}{m m}{%
+  \par\begingroup
+    \normalfont\small
+    \setlength{\BioseqWalkCodeWidth}{.54\linewidth}%
+    \setlength{\BioseqWalkBracketWidth}{8mm}%
+    \setlength{\BioseqWalkProseWidth}{%
+      \dimexpr\linewidth-\BioseqWalkCodeWidth-\BioseqWalkBracketWidth\relax}%
+    \setlength{\BioseqWalkRowGap}{1.2\baselineskip}%
+    \setlength{\BioseqWalkMaxRowHeight}{.88\textheight}%
+    \setlength{\LTleft}{0pt}%
+    \setlength{\LTright}{0pt}%
+    \setlength{\LTcapwidth}{\linewidth}%
+    \setlength{\tabcolsep}{0pt}%
+    \renewcommand{\arraystretch}{1}%
+    \renewcommand{\LTcaptype}{lstlisting}%
+    \begin{longtable}{@{}p{\linewidth}@{}}
+      \caption{#1}\label{#2}\\
+      \toprule
+      \BioseqWalkHeader\\
+      \midrule
+      \endfirsthead
+      \toprule
+      \BioseqWalkHeader\\
+      \midrule
+      \endhead
+      \bottomrule
+      \endfoot
+      \bottomrule
+      \endlastfoot
+}{%
+    \end{longtable}%
+  \endgroup\par
+}
 
 \definecolor{BioseqFastxHeader}{HTML}{0969DA}
 \definecolor{BioseqFastxSeparator}{HTML}{8250DF}
