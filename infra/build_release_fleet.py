@@ -756,6 +756,79 @@ def reclaim_retired_benchmark_intermediates(repository):
                 reclaimed_bytes=available - before, available_bytes=available, roots=touched)
 
 
+def reclaim_retired_package_source_data(repository):
+    """Drop only regenerable FASTA/source-archive copies from idle staging.
+
+    WorkspaceManager recreates each cell before its next build. Compiler caches,
+    toolchains, source code, package binaries, reports and the repository's own
+    data are outside this cleanup. Keep this helper self-contained for SSH.
+    """
+    repository = Path(repository)
+    root = repository / "build/package-linux/native/cells"
+    if (not repository.is_absolute() or repository.resolve() != repository
+            or not (repository / "CMakeLists.txt").is_file()
+            or root.resolve() != root):
+        raise ValueError("Cleanup requires an explicit nonsymlink package staging path")
+    if not root.is_dir():
+        return {"skipped": "package staging is absent"}
+    processes = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+    for line in processes.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit() and int(pid) not in (os.getpid(), os.getppid()):
+            if re.search(r"(?:^|\s)(?:\S*/)?server\.py\s+--run-build(?:\s|$)", command):
+                return {"skipped": "build worker is still live"}
+            if str(root) in command:
+                return {"skipped": "package staging is still referenced"}
+    if subprocess.check_output(["docker", "ps", "-q"], text=True).strip():
+        return {"skipped": "container is still live"}
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        for link in [process / "cwd", *(process / "fd").glob("*")]:
+            try:
+                target = os.readlink(link)
+                if target == str(root) or target.startswith(str(root) + "/"):
+                    return {"skipped": "package staging has an open reference"}
+            except OSError:
+                pass
+    before = shutil.disk_usage(root).free
+    removed, removed_bytes = [], 0
+    for major in sorted(root.iterdir()):
+        if not re.fullmatch(r"postgresql[0-9]+", major.name) or major.is_symlink() or not major.is_dir():
+            continue
+        for distro in sorted(major.iterdir()):
+            if (not re.fullmatch(r"[a-z][a-z0-9_.]*", distro.name)
+                    or distro.is_symlink() or not distro.is_dir()):
+                continue
+            for kind in ("source", "package"):
+                tree = distro / kind
+                if tree.is_symlink() or not tree.is_dir():
+                    continue
+                for directory, dirs, files in os.walk(tree, followlinks=False):
+                    dirs[:] = [name for name in dirs if not (Path(directory) / name).is_symlink()]
+                    for name in files:
+                        path = Path(directory) / name
+                        fasta = path.parent.name == "data" and name in (
+                            "homo_sapiens_GRCh38_dna4.fasta", "homo_sapiens_GRCh38_dna5.fasta")
+                        archive = kind == "package" and re.fullmatch(
+                            r"bioseq-postgresql[0-9]+-[0-9A-Za-z_.+-]+[.]tar[.]gz", name)
+                        if not (fasta or archive) or path.is_symlink() or not path.is_file():
+                            continue
+                        stat = path.stat()
+                        if stat.st_nlink != 1:
+                            continue
+                        path.unlink()
+                        removed.append(str(path))
+                        removed_bytes += stat.st_size
+            if shutil.disk_usage(root).free >= 100 * 1024**3:
+                break
+        if shutil.disk_usage(root).free >= 100 * 1024**3:
+            break
+    available = shutil.disk_usage(root).free
+    return dict(removed_files=removed, removed_file_bytes=removed_bytes,
+                reclaimed_bytes=available - before, available_bytes=available)
+
+
 def reclaim_collected_package_objects(cells, cache_root="/home/ubuntu/caches/package-cmake"):
     """Reclaim regenerable objects for copied packages on an idle native host.
 
@@ -994,6 +1067,22 @@ def dispatch_available(state):
                         event("collected_package_cleanup_deferred", host=host, **cleanup)
                 except Exception as error:
                     event("collected_package_cleanup_failed", host=host, error=str(error)[:400])
+        if available < 80 * 1024**3:
+            try:
+                source = ("import json, os, re, shutil, subprocess\nfrom pathlib import Path\n"
+                          + inspect.getsource(reclaim_retired_package_source_data)
+                          + f"\nprint(json.dumps(reclaim_retired_package_source_data({REMOTE!r})))\n")
+                cleanup = json.loads(remote(host, "sudo -n python3 -c " + shlex.quote(source), timeout=55))
+                if not cleanup.get("skipped"):
+                    available = cleanup["available_bytes"]
+                    if cleanup["removed_files"]:
+                        event("retired_package_source_data_reclaimed", host=host,
+                              recovery="recopy repository FASTA or regenerate source archive; binaries retained",
+                              **cleanup)
+                else:
+                    event("retired_package_source_cleanup_deferred", host=host, **cleanup)
+            except Exception as error:
+                event("retired_package_source_cleanup_failed", host=host, error=str(error)[:400])
         if available < 80 * 1024**3:
             if host not in disk_attention:
                 event("package_admission_waiting_for_disk", host=host,

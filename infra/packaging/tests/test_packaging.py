@@ -167,6 +167,43 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
                                  source / "fixture.o", outside / "foreign.o"):
                     self.assertTrue(retained.is_file())
 
+    def test_retired_package_data_cleanup_keeps_code_caches_and_binaries(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        cleanup = namespace["reclaim_retired_package_source_data"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "CMakeLists.txt").write_text("project(test)")
+            cell = root / "build/package-linux/native/cells/postgresql19/arch"
+            fasta_name = "homo_sapiens_GRCh38_dna4.fasta"
+            removed = [cell / "source/data" / fasta_name,
+                       cell / "package/bioseq-postgresql19-4.2.3.tar.gz"]
+            retained = [cell / "source/module.cppm", cell / "source/CMakeCache.txt",
+                        cell / "package/output/bioseq-postgresql19-4.2.3.pkg.tar.zst",
+                        cell / "package/result.json", cell / "source/data/other.fasta",
+                        root / "data" / fasta_name, root / "cache/one.o"]
+            for path in removed + retained:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture")
+            (cell / "package/linked-source").symlink_to(root / "data", target_is_directory=True)
+            (cell / "source/data/homo_sapiens_GRCh38_dna5.fasta").symlink_to(retained[-2])
+            for outputs, reason in ((["999999 python server.py --run-build package-linux\n"], "worker"),
+                                    (["", "container\n"], "container"),
+                                    ([f"999999 clang++ {cell}/source/module.cppm\n"], "referenced")):
+                with mock.patch.object(subprocess, "check_output", side_effect=outputs):
+                    self.assertIn(reason, cleanup(root)["skipped"])
+                self.assertTrue(removed[0].is_file())
+            with mock.patch.object(subprocess, "check_output", return_value=""), \
+                    mock.patch.object(namespace["shutil"], "disk_usage", return_value=SimpleNamespace(free=0)):
+                result = cleanup(root)
+            self.assertEqual(set(result["removed_files"]), set(map(str, removed)))
+            self.assertEqual(result["removed_file_bytes"], 14)
+            for path in retained:
+                self.assertEqual(path.read_text(), "fixture")
+            self.assertTrue((cell / "package/linked-source").is_symlink())
+            self.assertTrue((cell / "source/data/homo_sapiens_GRCh38_dna5.fasta").is_symlink())
+
     def test_coordinator_ip_refresh_only_changes_enrolled_narrow_rules(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):
