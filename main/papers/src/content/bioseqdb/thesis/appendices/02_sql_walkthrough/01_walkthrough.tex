@@ -58,7 +58,7 @@ If you encounter \texttt{"transient query execution stats disagree with its gene
 \BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/07_build.sql}{%
 \textbf{7. Trigger index rebuild}
 This processes three sequence values and returns 3 as the number of sequences in the index. It extracts minimizers
-using the current algorithm and $k,w$, groups their positions, and saves (publishes) the data. Section~\ref{sec:index-file-consistency} explains how the new index generation becomes available.
+using the current algorithm and $k,w$, groups their positions, and saves (publishes) the data. Table~\ref{tab:index-update-policy} summarizes when indexes are updated.
 
 The default uses grouped-MPF format~\ref{tab:index-update-policy}.}
 
@@ -241,7 +241,7 @@ Anna becomes 35 and Daria receives Ben's sequence. There are now four stored seq
 With insert maintenance off, these writes do not build new minimizer
 indices, so unfortunately you need to manually rebuild indices.
 The two explicit calls prepare MPF and symbol-count indexes. See Figure~\ref{fig:storage-update-snapshots} and
-Section~\ref{sec:index-file-consistency}.}
+Table~\ref{tab:index-update-policy}.}
 
 \BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/19_stats.sql}{%
 MPF and symbol counts have

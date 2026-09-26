@@ -8,212 +8,213 @@
 \input{chapters/06_chaining/07_gpu}
 \input{chapters/06_chaining/08_primary_secondary}
 
-\section{BioseqDB implementation}
-\label{sec:chaining-bioseqdb}
+% THIS SHOULD BE COMMENTED THIS IS NOT NECESSARY HERE
+% \section{BioseqDB implementation}
+% \label{sec:chaining-bioseqdb}
 
-BioseqDB exposes four chaining choices through C++ and PostgreSQL. The
-PostgreSQL setting is
-\begin{center}
-  \texttt{bioseq.aligner.chaining.algorithm}.
-\end{center}
-The \texttt{chaining\_algorithm} field inside per-call
-\texttt{aligner\_options} uses the same values \(0,\ldots,3\). Choice \(0\)
-is the default in both interfaces. The chosen value determines how
-\(f_i,p_i\) are calculated. In the generic C++ chain-stage implementation,
-backtracking runs on the CPU except for Vulkan queries that request
-coordinates only. PostgreSQL choice 3 uses the complete Vulkan pipeline
-described below.
+% BioseqDB exposes four chaining choices through C++ and PostgreSQL. The
+% PostgreSQL setting is
+% \begin{center}
+%   \texttt{bioseq.aligner.chaining.algorithm}.
+% \end{center}
+% The \texttt{chaining\_algorithm} field inside per-call
+% \texttt{aligner\_options} uses the same values \(0,\ldots,3\). Choice \(0\)
+% is the default in both interfaces. The chosen value determines how
+% \(f_i,p_i\) are calculated. In the generic C++ chain-stage implementation,
+% backtracking runs on the CPU except for Vulkan queries that request
+% coordinates only. PostgreSQL choice 3 uses the complete Vulkan pipeline
+% described below.
 
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
-  \node[font=\bfseries] at (2.00,7.55) {runtime choice};
-  \node[font=\bfseries] at (6.70,7.55) {forward calculation};
-  \node[font=\bfseries] at (12.03,7.55) {chain recovery};
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
+%   \node[font=\bfseries] at (2.00,7.55) {runtime choice};
+%   \node[font=\bfseries] at (6.70,7.55) {forward calculation};
+%   \node[font=\bfseries] at (12.03,7.55) {chain recovery};
 
-  \draw[fill=chainGray!10,draw=chainGray!85!black]
-    (.15,6.10) rectangle (3.85,7.05);
-  \node[align=center] at (2.00,6.58)
-    {0 \texttt{scalar\_minimap2}};
-  \draw[fill=chainBlue!11,draw=chainBlue!90!black]
-    (4.65,6.10) rectangle (8.75,7.05);
-  \node[align=center] at (6.70,6.58) {B1 scalar scan};
-  \draw[fill=chainGreen!12,draw=chainGreen!80!black]
-    (10.10,6.10) rectangle (13.95,7.05);
-  \node[align=center] at (12.03,6.58) {scalar CPU backtracking};
-  \draw[chain flow] (3.85,6.58)--(4.65,6.58);
-  \draw[chain flow] (8.75,6.58)--(10.10,6.58);
+%   \draw[fill=chainGray!10,draw=chainGray!85!black]
+%     (.15,6.10) rectangle (3.85,7.05);
+%   \node[align=center] at (2.00,6.58)
+%     {0 \texttt{scalar\_minimap2}};
+%   \draw[fill=chainBlue!11,draw=chainBlue!90!black]
+%     (4.65,6.10) rectangle (8.75,7.05);
+%   \node[align=center] at (6.70,6.58) {B1 scalar scan};
+%   \draw[fill=chainGreen!12,draw=chainGreen!80!black]
+%     (10.10,6.10) rectangle (13.95,7.05);
+%   \node[align=center] at (12.03,6.58) {scalar CPU backtracking};
+%   \draw[chain flow] (3.85,6.58)--(4.65,6.58);
+%   \draw[chain flow] (8.75,6.58)--(10.10,6.58);
 
-  \draw[fill=chainGray!10,draw=chainGray!85!black]
-    (.15,4.55) rectangle (3.85,5.50);
-  \node[align=center] at (2.00,5.03)
-    {1 \texttt{simd\_minimap2}};
-  \draw[fill=chainBlue!11,draw=chainBlue!90!black]
-    (4.65,4.40) rectangle (8.75,5.65);
-  \node[align=center] at (6.70,5.03)
-    {C++: exact or bounded\\SQL: bounded SIMD};
-  \draw[fill=chainGreen!12,draw=chainGreen!80!black]
-    (10.10,4.55) rectangle (13.95,5.50);
-  \node[align=center] at (12.03,5.03) {SIMD backtracking};
-  \draw[chain flow] (3.85,5.03)--(4.65,5.03);
-  \draw[chain flow] (8.75,5.03)--(10.10,5.03);
+%   \draw[fill=chainGray!10,draw=chainGray!85!black]
+%     (.15,4.55) rectangle (3.85,5.50);
+%   \node[align=center] at (2.00,5.03)
+%     {1 \texttt{simd\_minimap2}};
+%   \draw[fill=chainBlue!11,draw=chainBlue!90!black]
+%     (4.65,4.40) rectangle (8.75,5.65);
+%   \node[align=center] at (6.70,5.03)
+%     {C++: exact or bounded\\SQL: bounded SIMD};
+%   \draw[fill=chainGreen!12,draw=chainGreen!80!black]
+%     (10.10,4.55) rectangle (13.95,5.50);
+%   \node[align=center] at (12.03,5.03) {SIMD backtracking};
+%   \draw[chain flow] (3.85,5.03)--(4.65,5.03);
+%   \draw[chain flow] (8.75,5.03)--(10.10,5.03);
 
-  \draw[fill=chainGray!10,draw=chainGray!85!black]
-    (.15,3.00) rectangle (3.85,3.95);
-  \node[align=center] at (2.00,3.48)
-    {2 \texttt{range\_minimum\_query}};
-  \draw[fill=chainBlue!11,draw=chainBlue!90!black]
-    (4.65,3.00) rectangle (8.75,3.95);
-  \node[align=center] at (6.70,3.48)
-    {at most one AVL candidate};
-  \draw[fill=chainGreen!12,draw=chainGreen!80!black]
-    (10.10,3.00) rectangle (13.95,3.95);
-  \node[align=center] at (12.03,3.48) {scalar CPU backtracking};
-  \draw[chain flow] (3.85,3.48)--(4.65,3.48);
-  \draw[chain flow] (8.75,3.48)--(10.10,3.48);
+%   \draw[fill=chainGray!10,draw=chainGray!85!black]
+%     (.15,3.00) rectangle (3.85,3.95);
+%   \node[align=center] at (2.00,3.48)
+%     {2 \texttt{range\_minimum\_query}};
+%   \draw[fill=chainBlue!11,draw=chainBlue!90!black]
+%     (4.65,3.00) rectangle (8.75,3.95);
+%   \node[align=center] at (6.70,3.48)
+%     {at most one AVL candidate};
+%   \draw[fill=chainGreen!12,draw=chainGreen!80!black]
+%     (10.10,3.00) rectangle (13.95,3.95);
+%   \node[align=center] at (12.03,3.48) {scalar CPU backtracking};
+%   \draw[chain flow] (3.85,3.48)--(4.65,3.48);
+%   \draw[chain flow] (8.75,3.48)--(10.10,3.48);
 
-  \draw[fill=chainGray!10,draw=chainGray!85!black]
-    (.15,1.20) rectangle (3.85,2.40);
-  \node[align=center] at (2.00,1.80)
-    {3 \texttt{vulkan\_tiled\_}\\\texttt{dynamic\_programming}};
-  \draw[fill=chainBlue!11,draw=chainBlue!90!black]
-    (4.65,1.20) rectangle (8.75,2.40);
-  \node[align=center] at (6.70,1.80)
-    {32 predecessors per\\target batch};
-  \draw[fill=chainGreen!12,draw=chainGreen!80!black]
-    (10.10,1.05) rectangle (13.95,2.55);
-  \node[align=center] at (12.03,1.80)
-    {C++ full: CPU\\C++ coordinates: GPU\\SQL: GPU};
-  \draw[chain flow] (3.85,1.80)--(4.65,1.80);
-  \draw[chain flow] (8.75,1.80)--(10.10,1.80);
-\end{tikzpicture}
-\caption{The four BioseqDB chaining choices. Choice 1 has exact and bounded
-internal modes. PostgreSQL always uses its bounded mode. Choice 3 shows the
-generic C++ recovery route. PostgreSQL performs its chain recovery on the
-GPU.}
-\label{fig:chaining-bioseqdb-routes}
-\end{figure}
+%   \draw[fill=chainGray!10,draw=chainGray!85!black]
+%     (.15,1.20) rectangle (3.85,2.40);
+%   \node[align=center] at (2.00,1.80)
+%     {3 \texttt{vulkan\_tiled\_}\\\texttt{dynamic\_programming}};
+%   \draw[fill=chainBlue!11,draw=chainBlue!90!black]
+%     (4.65,1.20) rectangle (8.75,2.40);
+%   \node[align=center] at (6.70,1.80)
+%     {32 predecessors per\\target batch};
+%   \draw[fill=chainGreen!12,draw=chainGreen!80!black]
+%     (10.10,1.05) rectangle (13.95,2.55);
+%   \node[align=center] at (12.03,1.80)
+%     {C++ full: CPU\\C++ coordinates: GPU\\SQL: GPU};
+%   \draw[chain flow] (3.85,1.80)--(4.65,1.80);
+%   \draw[chain flow] (8.75,1.80)--(10.10,1.80);
+% \end{tikzpicture}
+% \caption{The four BioseqDB chaining choices. Choice 1 has exact and bounded
+% internal modes. PostgreSQL always uses its bounded mode. Choice 3 shows the
+% generic C++ recovery route. PostgreSQL performs its chain recovery on the
+% GPU.}
+% \label{fig:chaining-bioseqdb-routes}
+% \end{figure}
 
-\begin{description}
-  \item[\texttt{scalar\_minimap2}, value 0.]
-  This is the PostgreSQL and high-level C++ default. It runs the scalar B1
-  predecessor scan and BioseqDB scalar backtracking.
+% \begin{description}
+%   \item[\texttt{scalar\_minimap2}, value 0.]
+%   This is the PostgreSQL and high-level C++ default. It runs the scalar B1
+%   predecessor scan and BioseqDB scalar backtracking.
 
-  \item[\texttt{simd\_minimap2}, value 1.]
-  The C++ API lets a caller choose one of two internal modes:
-  \begin{itemize}
-    \item \texttt{exact\_visited} reproduces BioseqDB scalar B1 predecessor
-      choices.
-    \item \texttt{bounded\_batch\_approximate} is bounded SIMD B1. For SIMD
-      width \(L\), it may stop after
-      \(\lfloor\texttt{max\_chain\_skip}/L\rfloor+1\) consecutive batches in
-      which no lane improves its saved lane score.
-  \end{itemize}
-  PostgreSQL exposes choice 1 but not these two mode names. It always uses the
-  bounded mode. Both modes use the SIMD backtracker described above. Bounded
-  mode requires positive \texttt{max\_chain\_skip} and
-  \texttt{max\_chain\_iter}. Otherwise choice 1 returns an error.
+%   \item[\texttt{simd\_minimap2}, value 1.]
+%   The C++ API lets a caller choose one of two internal modes:
+%   \begin{itemize}
+%     \item \texttt{exact\_visited} reproduces BioseqDB scalar B1 predecessor
+%       choices.
+%     \item \texttt{bounded\_batch\_approximate} is bounded SIMD B1. For SIMD
+%       width \(L\), it may stop after
+%       \(\lfloor\texttt{max\_chain\_skip}/L\rfloor+1\) consecutive batches in
+%       which no lane improves its saved lane score.
+%   \end{itemize}
+%   PostgreSQL exposes choice 1 but not these two mode names. It always uses the
+%   bounded mode. Both modes use the SIMD backtracker described above. Bounded
+%   mode requires positive \texttt{max\_chain\_skip} and
+%   \texttt{max\_chain\_iter}. Otherwise choice 1 returns an error.
 
-  \item[\texttt{range\_minimum\_query}, value 2.]
-  This selects BioseqDB's CPU AVL implementation. The current route uses only
-  the primary tree. For each target, that tree returns at most one candidate.
-  If one exists, BioseqDB calculates \(f_j+E(j,i)\). Scalar CPU backtracking
-  follows.
+%   \item[\texttt{range\_minimum\_query}, value 2.]
+%   This selects BioseqDB's CPU AVL implementation. The current route uses only
+%   the primary tree. For each target, that tree returns at most one candidate.
+%   If one exists, BioseqDB calculates \(f_j+E(j,i)\). Scalar CPU backtracking
+%   follows.
 
-  \item[\texttt{vulkan\_tiled\_dynamic\_programming}, value 3.]
-  This selects the Vulkan implementation. Its work split and chain recovery
-  are described below.
-\end{description}
+%   \item[\texttt{vulkan\_tiled\_dynamic\_programming}, value 3.]
+%   This selects the Vulkan implementation. Its work split and chain recovery
+%   are described below.
+% \end{description}
 
-A selected SIMD or Vulkan algorithm does not silently change to scalar
-chaining when it cannot run. It returns an error. Dispatch ignores the
-internal field \texttt{chaining\_mode}. The four-value choice
-shown in Figure~\ref{fig:chaining-bioseqdb-routes} does. None of these choices
-runs G3SA's two-pass source sweep.
+% A selected SIMD or Vulkan algorithm does not silently change to scalar
+% chaining when it cannot run. It returns an error. Dispatch ignores the
+% internal field \texttt{chaining\_mode}. The four-value choice
+% shown in Figure~\ref{fig:chaining-bioseqdb-routes} does. None of these choices
+% runs G3SA's two-pass source sweep.
 
-\subsection{How BioseqDB RMQ differs from minimap2}
+% \subsection{How BioseqDB RMQ differs from minimap2}
 
-BioseqDB stores anchors in an AVL tree keyed by query coordinate and records
-the best \(h(j)\) in each subtree. The current choice-2 route leaves the
-optional local-repair distance at zero, so no repair scan runs. Neither
-\texttt{max\_chain\_skip} nor \texttt{max\_chain\_iter} changes this forward
-calculation.
+% BioseqDB stores anchors in an AVL tree keyed by query coordinate and records
+% the best \(h(j)\) in each subtree. The current choice-2 route leaves the
+% optional local-repair distance at zero, so no repair scan runs. Neither
+% \texttt{max\_chain\_skip} nor \texttt{max\_chain\_iter} changes this forward
+% calculation.
 
-For configured main distance \(D\), the BioseqDB query uses inclusive keys
-\[
-  K_{i,\mathrm{Bio}}^{\mathrm{lo}}=(q_i-D,\mathrm{INT64\_MIN}),
-  \qquad
-  K_{i,\mathrm{Bio}}^{\mathrm{hi}}=(q_i,\mathrm{INT64\_MAX}).
-\]
-These keys permit anchors on both query-coordinate boundaries.
-BioseqDB calculates the selected link's diagonal width but does not compare it
-with the configured bandwidth. It runs RMQ once and omits minimap2's optional
-wider second chaining pass.
+% For configured main distance \(D\), the BioseqDB query uses inclusive keys
+% \[
+%   K_{i,\mathrm{Bio}}^{\mathrm{lo}}=(q_i-D,\mathrm{INT64\_MIN}),
+%   \qquad
+%   K_{i,\mathrm{Bio}}^{\mathrm{hi}}=(q_i,\mathrm{INT64\_MAX}).
+% \]
+% These keys permit anchors on both query-coordinate boundaries.
+% BioseqDB calculates the selected link's diagonal width but does not compare it
+% with the configured bandwidth. It runs RMQ once and omits minimap2's optional
+% wider second chaining pass.
 
-Choice 2 therefore does not reproduce minimap2 RMQ.
+% Choice 2 therefore does not reproduce minimap2 RMQ.
 
-\subsection{BioseqDB Vulkan work split}
+% \subsection{BioseqDB Vulkan work split}
 
-Like minimap2, the Vulkan algorithm fixes one target \(i\) and tests earlier
-predecessors \(j\). It does not fix one source and update many targets as
-G3SA does. One contiguous anchor range assigned to the shader is handled by
-one 32-lane workgroup. After a workgroup finishes one range, it may advance
-by the total number of workgroups and process another range. Within one range,
-it finishes targets one after another. Its 32 lanes
-calculate up to 32 complete candidate scores. A
-reduction across the lanes selects the batch winner, then updates scalar
-\(f_i,p_i\). When \texttt{max\_chain\_skip} is positive, it stops after
-\[
-  \left\lfloor
-    \frac{\texttt{max\_chain\_skip}}{32}
-  \right\rfloor+1
-\]
-consecutive batches do not improve the target. A zero value disables this
-early stop. It also limits the predecessor
-scan to at most \(3{,}000\) anchors, even when
-\texttt{max\_chain\_iter} is larger. These are not the scalar B1 stopping
-rules.
+% Like minimap2, the Vulkan algorithm fixes one target \(i\) and tests earlier
+% predecessors \(j\). It does not fix one source and update many targets as
+% G3SA does. One contiguous anchor range assigned to the shader is handled by
+% one 32-lane workgroup. After a workgroup finishes one range, it may advance
+% by the total number of workgroups and process another range. Within one range,
+% it finishes targets one after another. Its 32 lanes
+% calculate up to 32 complete candidate scores. A
+% reduction across the lanes selects the batch winner, then updates scalar
+% \(f_i,p_i\). When \texttt{max\_chain\_skip} is positive, it stops after
+% \[
+%   \left\lfloor
+%     \frac{\texttt{max\_chain\_skip}}{32}
+%   \right\rfloor+1
+% \]
+% consecutive batches do not improve the target. A zero value disables this
+% early stop. It also limits the predecessor
+% scan to at most \(3{,}000\) anchors, even when
+% \texttt{max\_chain\_iter} is larger. These are not the scalar B1 stopping
+% rules.
 
-For a range with \(n>131{,}072\) anchors, the implementation sets
-\[
-  s_{\mathrm{thin}}=\left\lceil\frac{n}{65{,}536}\right\rceil,
-\]
-keeps anchors \(0,s_{\mathrm{thin}},2s_{\mathrm{thin}},\ldots\), and always
-keeps the last anchor. Chaining uses only this retained set. In the generic
-C++ entry point, full-result queries calculate \(f,p\) on Vulkan and
-backtrack on the CPU. Coordinate-only queries examine at most 16 unvisited
-chain ends in descending score-and-index order and return at most one accepted
-path.
+% For a range with \(n>131{,}072\) anchors, the implementation sets
+% \[
+%   s_{\mathrm{thin}}=\left\lceil\frac{n}{65{,}536}\right\rceil,
+% \]
+% keeps anchors \(0,s_{\mathrm{thin}},2s_{\mathrm{thin}},\ldots\), and always
+% keeps the last anchor. Chaining uses only this retained set. In the generic
+% C++ entry point, full-result queries calculate \(f,p\) on Vulkan and
+% backtrack on the CPU. Coordinate-only queries examine at most 16 unvisited
+% chain ends in descending score-and-index order and return at most one accepted
+% path.
 
-In the complete PostgreSQL Vulkan route, choice 3 performs chaining and trace
-selection on the GPU. This route can also keep a
-bounded CIGAR calculation on the GPU when Vulkan extension is enabled. It
-does not enter the generic CPU backtracker. If its requirements are not met,
-PostgreSQL returns an error rather than retrying with a CPU or SIMD algorithm.
+% In the complete PostgreSQL Vulkan route, choice 3 performs chaining and trace
+% selection on the GPU. This route can also keep a
+% bounded CIGAR calculation on the GPU when Vulkan extension is enabled. It
+% does not enter the generic CPU backtracker. If its requirements are not met,
+% PostgreSQL returns an error rather than retrying with a CPU or SIMD algorithm.
 
-\paragraph{The GPU route measured in the campaign.}
-\label{sec:chaining-gpu-campaign-boundary}
-The published GPU campaigns also contain hybrid routes. The local result
-annotations identify GPU sketching and chaining alongside host SIMD Block
-alignment. For the indexed local MPF case with $k=20,w=15$, they also explicitly
-identify CPU chain recovery. The published Vast.ai campaign likewise calculated
-chaining scores on the GPU, then recovered chains on the CPU and ran the
-selected CPU base aligner. These elapsed times therefore include host stages
-as well as GPU execution. The complete Vulkan route described above has a
-different execution boundary, so its design cannot be used to attribute all
-of the campaign time to GPU kernels.
-% Local evidence: ALL_RESULTS_TUPLES.yaml approved_results, 2-Gbp DNA4
-% just_index MPF / vulkan_minimap_integer / vulkan_tiled_dynamic_programming /
-% block_aligner, query_only_framework_iteration_v1. Both k15/w10 and k20/w15
-% comments explicitly identify host SIMD Block alignment; k20/w15 additionally
-% names scalar CPU chain backtracking. No inference about k15/w10 backtracking
-% is required by the paragraph.
-% Campaign evidence: ALL_RESULTS_TUPLES_GPU_VASTAI.yaml, native_build,
-% campaign_local_overrides: CPU-cached scores/predecessors for host backtracking;
-% DOC0440, 2026-09-23T06:38:33Z, CPU profiling of backtracking and Block alignment.
-% Hybrid implementation: bioseq/backend/sequences/chaining/vulkan.cppm,
-% make_chaining_buffer(cpu_readback), score/predecessor allocation and
-% backtrack_chains(). The campaign's frozen build is distinct from the current
-% complete PostgreSQL Vulkan route and its later scheduling changes.
+% \paragraph{The GPU route measured in the campaign.}
+% \label{sec:chaining-gpu-campaign-boundary}
+% The published GPU campaigns also contain hybrid routes. The local result
+% annotations identify GPU sketching and chaining alongside host SIMD Block
+% alignment. For the indexed local MPF case with $k=20,w=15$, they also explicitly
+% identify CPU chain recovery. The published Vast.ai campaign likewise calculated
+% chaining scores on the GPU, then recovered chains on the CPU and ran the
+% selected CPU base aligner. These elapsed times therefore include host stages
+% as well as GPU execution. The complete Vulkan route described above has a
+% different execution boundary, so its design cannot be used to attribute all
+% of the campaign time to GPU kernels.
+% % Local evidence: ALL_RESULTS_TUPLES.yaml approved_results, 2-Gbp DNA4
+% % just_index MPF / vulkan_minimap_integer / vulkan_tiled_dynamic_programming /
+% % block_aligner, query_only_framework_iteration_v1. Both k15/w10 and k20/w15
+% % comments explicitly identify host SIMD Block alignment; k20/w15 additionally
+% % names scalar CPU chain backtracking. No inference about k15/w10 backtracking
+% % is required by the paragraph.
+% % Campaign evidence: ALL_RESULTS_TUPLES_GPU_VASTAI.yaml, native_build,
+% % campaign_local_overrides: CPU-cached scores/predecessors for host backtracking;
+% % DOC0440, 2026-09-23T06:38:33Z, CPU profiling of backtracking and Block alignment.
+% % Hybrid implementation: bioseq/backend/sequences/chaining/vulkan.cppm,
+% % make_chaining_buffer(cpu_readback), score/predecessor allocation and
+% % backtrack_chains(). The campaign's frozen build is distinct from the current
+% % complete PostgreSQL Vulkan route and its later scheduling changes.
 
 \flushbottom
