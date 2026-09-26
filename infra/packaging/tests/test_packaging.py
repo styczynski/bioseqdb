@@ -234,7 +234,8 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
             (root / "packages").mkdir()
             (root / "infra/package_matrix.json").write_text(json.dumps({
                 "postgresql_majors": [19], "distributions": [{"id": "debian_13"}]}))
-            (root / "packages/manifest.json").write_text(json.dumps({"packages": [repair]}))
+            (root / "packages/manifest.json").write_text(json.dumps({
+                "packages": [dict(repair, sha256="previous-archive")]}))
             state = dict(jobs={host: dict(launched=True, observed=dict(status="completed"))},
                          deferred_package_rebuilds={host: [repair]})
             launch = mock.Mock(return_value=dict(status="running", pid=10))
@@ -258,6 +259,7 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
                 launch.assert_called_with(host, cell=repair)
                 self.assertEqual(launch.call_count, 2)
                 self.assertEqual(state["deferred_package_rebuilds"][host], [])
+                self.assertEqual(state["jobs"][host]["replaces_package_sha256"], "previous-archive")
 
     def test_retirement_blocks_explicit_launch_before_remote_access(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
@@ -277,7 +279,8 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
         dispatch = namespace["dispatch_available"]
         host, owner = "test4-m7a", "test2-m4"
         candidates = [dict(postgres_major=major, distro="opensuse_16.0",
-                           architecture="x64", build_host=owner, installed_sql_smoke={})
+                           architecture="x64", build_host=owner, installed_sql_smoke={},
+                           sha256=f"previous-pg{major}-archive")
                       for major in (18, 17)]
         cell = dict(postgres_major=17, distro="opensuse_16.0", architecture="x64")
         with tempfile.TemporaryDirectory() as directory:
@@ -537,8 +540,9 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
         state = dict(history=history, jobs={"test2-m7a": dict(
             cell=cells[1], observed=dict(status="running", pid=5))},
             package_rebuilds={"test2-m7i": [cells[0]]})
-        inventory = dict(packages=[dict(cells[2], installed_sql_smoke=dict(
-            column_defaults_and_vacuum=True))])
+        inventory = dict(packages=[dict(cells[2], validation=dict(passed=True),
+            installed_sql_smoke=dict(passed=True, default_insert_search=True,
+                default_persisted_search=True, column_defaults_and_vacuum=True))])
         pending = namespace["pending_package_failures"](state, inventory)
         self.assertEqual([row["cell"]["postgres_major"] for row in pending], [17, 20])
         self.assertEqual([row["retry_queued"] for row in pending], [True, False])

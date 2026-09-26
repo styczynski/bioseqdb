@@ -347,6 +347,11 @@ def daemon():
     state = json.loads(path.read_text()) if path.exists() else dict(jobs={}, results={}, failed={})
     while True:
         for host, job in list(state["jobs"].items()):
+            # The family MCP state can subsequently describe an automation-only
+            # check. A collected image already has its own immutable result;
+            # unrelated later checks must not overwrite its terminal status.
+            if job.get("collected"):
+                continue
             try:
                 observed = observation(host)
                 job["observed"] = observed
