@@ -103,6 +103,50 @@ def cell_context(
 
 
 class ReleaseFleetAssignmentTests(unittest.TestCase):
+    def test_coordinator_ip_refresh_only_changes_enrolled_narrow_rules(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        refresh = namespace["refresh_coordinator_ssh_ingress"]
+        target = dict(profile="test3", region="us-east-1", group_id="sg-owned", rule_id="sgr-owned",
+                      hosts=["test3-c7g"], current_cidr="192.0.2.1/32")
+        rule = dict(GroupId="sg-owned", IsEgress=False, IpProtocol="tcp", FromPort=22, ToPort=22,
+                    Description="Bioseq release coordinator current public IP", CidrIpv4="192.0.2.1/32")
+        for case in ("rotated", "unchanged", "retired", "foreign_rule", "broad_rule"):
+            state = dict(coordinator_ssh_ingress=[dict(target)])
+            current_rule = dict(rule)
+            if case == "unchanged":
+                state["coordinator_ssh_ingress"][0]["current_cidr"] = "192.0.2.2/32"
+            if case == "foreign_rule":
+                current_rule["Description"] = "Someone else's SSH"
+            if case == "broad_rule":
+                current_rule["CidrIpv4"] = "0.0.0.0/0"
+            run = mock.Mock(return_value=SimpleNamespace(stdout=json.dumps({
+                "SecurityGroupRules": [current_rule]})))
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = b"192.0.2.2\n"
+            with self.subTest(case=case), mock.patch.dict(refresh.__globals__, {
+                    "retirement_policy": mock.Mock(return_value=case == "retired"),
+                    "event": mock.Mock()}), \
+                    mock.patch.object(namespace["urllib"].request, "urlopen", return_value=response) as fetch, \
+                    mock.patch.object(namespace["subprocess"], "run", run):
+                refresh(state)
+                if case == "rotated":
+                    self.assertEqual(run.call_count, 2)
+                    command = run.call_args.args[0]
+                    self.assertEqual(command[:6], ["aws", "--profile", "test3", "--region", "us-east-1", "ec2"])
+                    self.assertEqual(json.loads(command[-1])[0]["SecurityGroupRule"]["CidrIpv4"], "192.0.2.2/32")
+                    self.assertEqual(state["coordinator_ssh_ingress"][0]["current_cidr"], "192.0.2.2/32")
+                    refresh(state)
+                    self.assertEqual(run.call_count, 2)
+                elif case in ("foreign_rule", "broad_rule"):
+                    self.assertEqual(run.call_count, 1)
+                    self.assertEqual(state["coordinator_ssh_ingress"][0]["current_cidr"], "192.0.2.1/32")
+                else:
+                    run.assert_not_called()
+                if case == "retired":
+                    fetch.assert_not_called()
+
     def test_revalidation_preserves_binary_revision_without_a_reuse_gate(self) -> None:
         namespace = runpy.run_path(str(REPOSITORY_ROOT / "build_mcp/package_native.py"))
         revision = namespace["artifact_build_revision"]

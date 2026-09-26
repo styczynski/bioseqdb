@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import hashlib
 import inspect
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bench"))
@@ -62,6 +64,56 @@ def retirement_policy(host):
 def host_retired(host):
     policy = retirement_policy(host)
     return bool(policy and time.time() >= policy["stop_polling_after_epoch"])
+
+
+def refresh_coordinator_ssh_ingress(state):
+    """Refresh explicitly enrolled SSH rules after a coordinator IP rotation.
+
+    Touch only the recorded rule ID, group and description, never arbitrary
+    ingress or instance lifecycle. Retired accounts are excluded before AWS
+    access. A five-minute check keeps automatic collection/admission reachable.
+    """
+    targets = [target for target in state.get("coordinator_ssh_ingress", [])
+               if any(host in PLAN and not retirement_policy(host)
+                      for host in target["hosts"])]
+    if not targets or time.time() - state.get("last_ssh_ingress_check", 0) < 300:
+        return
+    state["last_ssh_ingress_check"] = time.time()
+    try:
+        with urllib.request.urlopen("https://checkip.amazonaws.com", timeout=6) as response:
+            cidr = str(ipaddress.IPv4Address(response.read().decode().strip())) + "/32"
+    except Exception as error:
+        event("ssh_ingress_ip_observation_failed", error=str(error)[:400])
+        return
+    for target in targets:
+        if target.get("current_cidr") == cidr:
+            continue
+        try:
+            command = ["aws", "--profile", target["profile"], "--region", target["region"], "ec2"]
+            result = subprocess.run(command + ["describe-security-group-rules",
+                "--security-group-rule-ids", target["rule_id"], "--output", "json"],
+                check=True, capture_output=True, text=True, timeout=25)
+            rules = json.loads(result.stdout)["SecurityGroupRules"]
+            if (len(rules) != 1 or rules[0].get("GroupId") != target["group_id"]
+                    or rules[0].get("IsEgress") is not False
+                    or rules[0].get("IpProtocol") != "tcp"
+                    or rules[0].get("FromPort") != 22 or rules[0].get("ToPort") != 22
+                    or rules[0].get("Description") != "Bioseq release coordinator current public IP"
+                    or not rules[0].get("CidrIpv4", "").endswith("/32")):
+                raise RuntimeError("Enrolled SSH rule no longer matches its narrow ownership scope")
+            if rules[0]["CidrIpv4"] != cidr:
+                change = [{"SecurityGroupRuleId": target["rule_id"], "SecurityGroupRule": {
+                    "IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "CidrIpv4": cidr,
+                    "Description": rules[0]["Description"]}}]
+                subprocess.run(command + ["modify-security-group-rules", "--group-id",
+                    target["group_id"], "--security-group-rules", json.dumps(change)],
+                    check=True, capture_output=True, text=True, timeout=25)
+                event("coordinator_ssh_ingress_refreshed", profile=target["profile"],
+                      group_id=target["group_id"], previous_cidr=rules[0]["CidrIpv4"], cidr=cidr)
+            target["current_cidr"] = cidr
+        except Exception as error:
+            event("coordinator_ssh_ingress_refresh_failed", profile=target["profile"],
+                  error=str(error)[:400])
 
 
 def committed_source_snapshot():
@@ -905,6 +957,8 @@ def main():
                 state["jobs"][host] = value
                 STATE.write_text(json.dumps(state, indent=2) + "\n")
     while True:
+        if args.daemon:
+            refresh_coordinator_ssh_ingress(state)
         # Inspect and collect the priority website before package transfers.
         for host, job in sorted(state["jobs"].items(), key=lambda item:
                 job_mode(*item) != "website"):
