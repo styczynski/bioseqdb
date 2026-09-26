@@ -58,7 +58,7 @@ If you encounter \texttt{"transient query execution stats disagree with its gene
 \BioseqWalkRow{sql}{appendices/02_sql_walkthrough/sql/07_build.sql}{%
 \textbf{7. Trigger index rebuild}
 This processes three sequence values and returns 3 as the number of sequences in the index. It extracts minimizers
-using the current algorithm and $k,w$, groups their positions, and saves (publishes) the data. For more details check MPF index publishing code~\ref{alg:index-image-lifecycle}.
+using the current algorithm and $k,w$, groups their positions, and saves (publishes) the data. Section~\ref{sec:index-file-consistency} explains how the new index generation becomes available.
 
 The default uses grouped-MPF format~\ref{tab:index-update-policy}.}
 
@@ -89,7 +89,7 @@ compares the age condition with stored minima and maxima, but couldn't skip any 
 The vectorized filter tests individual ages in the
 remaining batches~\ref{lst:storage-minmax-pruning}.
 
-\texttt{allow} means that we can either read the index or recompute minimizers from scratch~\ref{tab:index-read-requirement}.
+\texttt{allow} means that we can either read the index or recompute minimizers from scratch~\ref{tab:configuration-index-requirement}.
 The planned share is 100\% recomputed - this is the estimate of how many minimziers in index do not have a corresponding minimizers stored. In this case 
 BioseqDB have buggy const-query implementation which causes index to always be rebuilt which significantly degrades performance. For better performance you should use join between query and target tables, so both 
 of query/target arguments are red from tables.}
@@ -98,13 +98,13 @@ of query/target arguments are red from tables.}
 This part is created by the Postgres process, which executes this query.
 It reports workers in thread pool, processed/scheduled batches, waiting work and
 processed/waiting queries. The local supervisor leaves the query-rate
-field at zero. You can find more about work distribution in Section~\ref{sec:arch-work-distribution}.
+field at zero. You can find more about work distribution in Section~\ref{sec:dispatch-buffer-api}.
 
 Below we have list of architectures for which the binary was compiled. Runnable targets are the intersection
 of compiled and CPU-supported targets (can be used only if built for this architecture and the current hardware supports it).
 \texttt{QuerySketchStage} lists used minimizer algorithm, and
 \texttt{Highway Function} lists the C++ function name.
-See Section~\ref{sec:arch-hardware-selection}.}
+See Section~\ref{sec:minimizer-hardware-selection}.}
 
 \BioseqWalkRow[firstline=19,lastline=27,gobble=12]{plan}{appendices/02_sql_walkthrough/plans/10_explain_search.plan}{%
 Internally BioseqDB is implemented as type-driven heavily-templated code, so CEP means "constant expression parameter".

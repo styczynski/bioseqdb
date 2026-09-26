@@ -1,23 +1,28 @@
-\section{Postprocessing}
+\section{What is returned after alignment?}
 \label{sec:alignment-postprocessing}
 
-The pipeline derives several different summaries from an alignment candidate.
-Seed divergence estimates how much sequence differs from the pattern of
-matching minimizers. An exact edit count instead comes from the selected
-base-level path. Mapping quality describes confidence in the chosen mapping
-relative to competing candidates. These values answer different questions;
-none can replace the other merely because they are all reported with a match.
+BioseqDB assembles the alignment coordinates, strand, score and CIGAR, then
+repeats primary and secondary selection
+(Section~\ref{sec:chaining-primary-secondary}). The following quantities
+answer different questions:
+\begin{itemize}
+  \item \textbf{Score and edit count.} The score uses the selected aligner's
+    match and gap penalties. The edit count is the number of substitutions,
+    inserted symbols and deleted symbols on its chosen path. A generic
+    CIGAR \texttt{M} operation can include both matches and mismatches, so
+    counting edits also requires comparing the corresponding symbols.
+  \item \textbf{Divergence.} Matching minimizers give an estimate of the
+    fraction of differing bases. This estimate is available before final
+    alignment and does not replace the edit count from the CIGAR.
+  \item \textbf{Mapping quality (MAPQ).} This estimates confidence in the
+    mapping location. Competing chains and repetitive seeds reduce it.
+    BioseqDB follows minimap2's estimate and bounds it to 0--60.
+    Secondary mappings receive zero. A high alignment score alone does not
+    imply high MAPQ when several locations match equally well.
+\end{itemize}
 
-\subsection{Seed divergence and position order}
-\label{sec:divergence-prefix-counts}
-
-The current divergence estimator counts query minimizers at each position and
-forms cumulative counts. It can then test whether a position contains a
-minimizer and count minimizers in an interval without sorting the emitted
-positions. This matters because a SIMD sketch can emit positions in an order
-different from their order along the query, as the historical estimator
-problem in Section~\ref{sec:minimizer-divergence-history} illustrates. Building
-the count array takes work proportional to the query length plus the number
-of minimizers. The estimator runs before final alignment; it is separate from
-the fused alignment and CIGAR work described in
-Section~\ref{sec:final-alignment-cpu-contracts}.
+\noindent\label{sec:divergence-prefix-counts}
+To estimate divergence, BioseqDB forms cumulative counts of query minimizers
+by position. Subtracting two counts gives the number in an interval without
+sorting the emitted minimizers. This avoids the extra sorting discussed in
+Section~\ref{sec:minimizer-divergence-history}.

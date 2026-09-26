@@ -30,20 +30,15 @@
 
 The first computational stage of the BioSeqDB aligner needs to compute
 \(\operatorname{Seed}(X)\).
-A target seed becomes a key in an index. A query seed is looked
-up in that index, and each compatible occurrence becomes an anchor for the
-chaining stage described in Section~\ref{sec:chaining-purpose}. The seed set
-must be sparse enough to reduce index and lookup costs, but dense enough that
-related sequences retain common seeds.
+A target seed becomes a key in an index and then query seed is looked
+up in that index, and each occurrence (so shared seed between query and target) becomes an anchor for the
+chaining stage described in Section~\ref{sec:chaining-purpose}. 
 
-BioSeqDB uses minimizers. A minimizer is the smallest by some score function
-$k$-mer in a window of consecutive $k$-mers
-\cite{roberts_minimizers_2004}.
+We expect the seed set to be sparse enough to reduce index and lookup costs, but dense enough that related sequences have common seeds.
+As described before minimap2 and BioseqDB operate on minimizers. I didn't specifically added support for "true" cannonical minimizers in a sense that I 
+adhered to the minimap2 approach i.e taking minimum of hashes of k-mer and its reverse complement.
 
-\subsection{Canonical $k$-mers and minimizer windows}
-\label{sec:minimizer-definition}
-
-Let $S=s_0s_1\ldots s_{n-1}$ be a nucleotide sequence. The $k$-mer beginning
+Formally, let $S=s_0s_1\ldots s_{n-1}$ be a nucleotide sequence. The $k$-mer beginning
 at zero-based position $i$ is
 \[
   K_i=S[i,i+k).
@@ -77,16 +72,16 @@ For a window of $w$ consecutive candidates,
   \qquad
   m_j=\min_{x\in W_j}h(x).
 \]
-Every identity attaining $m_j$ is a possible minimizer. We must define which equal minimum wins and whether different positions with the
-same minimum hash are emitted. We should lso avoid emitting the same hash
-again when that candidate remains minimal as the window moves. For independent
-random hashes, the expected density is approximately $2/(w+1)$ minimizers per
-candidate position.
+The expected density is theoretically $2/(w+1)$ minimizers per
+candidate position.~\cite{shur_minimum_density_2025}, however practically it might vary. Minimap2 for example uses 
+HPC (homopolymer-compressed) encoding which means that repeated letters are compressed so we don't extract repeated minimizers for sections that are larege single-letter segments.
+In BioseqDB I do not support HPC compression.
 
-Figure~\ref{fig:minimizer-walkthrough} follows one $k$-mer through hashing,
-window selection, and adjacent deduplication. The per-window minimum positions
-are calculated from the displayed hashes. In particular, the window beginning
-at hash position five has minimum position eight, not position five.
+There are also other practical and theoretical consideratiosn affecting minimizer extraction like different formulations of hashing functions or heuristics to avoid having very low minimizer density in 
+specific repeated regions, but I won't go into very specific details.
+
+Figure~\ref{fig:minimizer-walkthrough} shows what happens to one $k$-mer through hashing,
+selection of window that its belongs to and dedupliction of hashes.
 
 \begin{figure}[H]
 \centering
@@ -134,50 +129,11 @@ at hash position five has minimum position eight, not position five.
   \node[tracked] at (6,.25) {5};
   \draw[->,thick,orange!85!black] (s5.south) to[out=-90,in=90] (h5.north);
 \end{tikzpicture}
-\caption{Minimizer extraction for $k=5$ and $w=4$ with illustrative hashes.
-Positions in this walkthrough are zero-based $k$-mer starts. BioSeqDB's packed
-minimap-compatible record converts them to final-base positions. The
-highlighted candidate has hash 12 and remains minimal for three consecutive
-windows, so adjacent deduplication emits its position once.}
+\caption{Minimizer extraction for $k=5$ and $w=4$ with illustrative hashes.}
 \label{fig:minimizer-walkthrough}
 \end{figure}
 
-\subsubsection{Minimizer stochastic properties}
-
-Minimizer density counts selected positions in one sequence. Let
-\(N=L-k+1\) be the number of candidate \(k\)-mer starts in a fragment and let
-\(M_L^{(1)}\) be the number of distinct positions selected when every window
-chooses its leftmost minimum. Every full window of \(w\) candidates selects one position.
-Therefore, for \(N\geq w\),
-\begin{equation}
-  \left\lfloor\frac{N}{w}\right\rfloor
-  \leq M_L^{(1)}\leq N-w+1.
-  \label{eq:minimizer-finite-density-bounds}
-\end{equation}
-The lower bound follows by partitioning the candidates into disjoint windows.
-The upper bound equals the number of full windows. A sequence of strictly
-decreasing ranks attains it. An implementation that emits every tied minimum
-uses a different count \(M_L^{(\mathrm{all})}\), whose upper bound is \(N\).
-
-Fix an ordering rule and break ties by choosing the leftmost minimum. For an
-infinite sequence whose bases are sampled independently and uniformly from
-alphabet \(\Sigma\), the stochastic density is
-\[
-  \rho=\lim_{L\to\infty}
-  \frac{\mathbb E[M_L^{(1)}]}{L-k+1}.
-\]
-The general bounds are
-\begin{equation}
-  \max\!\left\{\frac{1}{w},\frac{1}{|\Sigma|^k}\right\}
-  \leq \rho\leq1.
-  \label{eq:minimizer-stochastic-density-bounds}
-\end{equation}
-Under independent continuous scores at candidate positions, the density is
-\(2/(w+1)\). For a random fixed order on \(k\)-mer values, the density also
-depends on \(k\), \(w\), and overlap between adjacent \(k\)-mers
-\cite{shur_minimum_density_2025}. The value \(2/(w+1)\) is not a universal
-bound for a fixed order or sequence.
-
+The hashing function can affect heavily minimizer desnity:
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[
@@ -287,26 +243,17 @@ bound for a fixed order or sequence.
 \end{tikzpicture}
 \caption{Two minimizer traces for \(w=4\). Thin brackets mark candidate
 windows, and orange dots mark their selected minima. The left trace reuses
-positions 3 and 7. The right trace selects a new position after each slide.}
+positions 3 and 7. The right trace selects a new position after each slide. Everything depends on numeric properties of used hashing scheme}
 \label{fig:minimizer-density-traces}
 \end{figure}
 
-Density alone does not determine the number of anchors. Let \(C_X(v)\) count
-the selected occurrences of canonical \(k\)-mer value \(v\) in fragment
-\(X\). The number of raw anchor pairs between fragments \(U\) and \(V\) is
-\begin{equation}
-  A(U,V)=\sum_v C_U(v)C_V(v).
-  \label{eq:minimizer-anchor-count}
-\end{equation}
-Two fragments can each contain \(\Theta(L)\) selected positions while their
-sets of selected values are disjoint. In that case they produce no anchors.
-Occurrence filters can only remove pairs from Equation~\ref{eq:minimizer-anchor-count}.
-\coderef{minimap2/sketch.c}{Minimap2 minimizer sketch}{mm_sketch}{77}
-
-\subsubsection{Anchor lookup and frequency filtering}
+I wanted to emphasize that the topic of seed-and-extend is largely based on measuring practical stochastic properties of minimizers distribution and properties and in BioseqDB I only focus
+on the simplest approaches where in most cases I use the same hashing scheme as minimap2 to guarantee almost exact sensitivity and in one case discussed later incorporate use of rolling hash (nthash).
 
 Figure~\ref{fig:seed-hash-table} uses fixed four-base seeds on both sides. The
-symbols $h_1$, $h_2$, and $h_3$ are some computed hashes.
+symbols $h_1$, $h_2$, and $h_3$ are some computed hashes. The picture shows that in general we want to build one 
+hash table, compare query to the hashes in the hash table and always filter out the most occuring hashes (as this means that this hash does not ultimately distinguish the part that we maching and will 
+cause lots of false positives not contributing to the final result)
 
 \begin{figure}[H]
 \centering
@@ -2370,6 +2317,13 @@ The PostgreSQL setting \texttt{bioseq.aligner.minimizer.algorithm} chooses the
 minimizer implementation. Its current default is \texttt{bounded\_nthash\_simd}. Table~\ref{tab:current-cpu-minimizers}
 maps the four CPU values to the algorithm families described earlier. Additionally we allow dispatching Vulkan kernel.
 
+\paragraph{CPU instruction-set selection.}
+\label{sec:minimizer-hardware-selection}
+Highway selects a CPU target that was compiled into the extension and is
+supported by the running processor. BioseqDB selects its kernel table once
+per alignment batch. This chooses an implementation of the requested
+algorithm, rather than changing the minimizer algorithm itself.
+
 \begin{table}[H]
   \centering
   \small
@@ -2427,7 +2381,7 @@ SIMD stage.
 Reusing a target index removes target sketch construction from a query.
 It does not remove sketching of the incoming query sequence. The selected
 minimizer scheme must agree on both sides, as explained in
-Section~\ref{sec:arch-route-admission}. Consequently, nearly equal indexed
+Section~\ref{sec:index-read-policy}. Consequently, nearly equal indexed
 times can mean that query sketching contributes little to the total; they
 do not establish that the selected kernels are identical.
 

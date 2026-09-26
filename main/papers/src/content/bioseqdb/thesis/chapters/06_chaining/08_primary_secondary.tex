@@ -1,0 +1,60 @@
+\clearpage
+\section{Selecting primary and secondary chains}
+\label{sec:chaining-primary-secondary}
+
+Several chains may match the same part of a query at different target positions.
+Minimap2 considers them from highest to lowest chaining score. A chain becomes
+\emph{secondary} when an already accepted \emph{primary} covers enough of the
+same query interval. Otherwise it becomes another primary. This allows
+different parts of a query to map to different places, as in a split
+alignment~\cite{minimap2_paper,minimap2_software}.
+
+Let \(I_c=[q_c^{\mathrm{start}},q_c^{\mathrm{end}})\) be the query interval
+of chain \(c\), and \(s_c\) its score. In
+Algorithm~\ref{alg:chaining-primary-secondary}, \(|I|\) counts query bases.
+The value \(u\) counts bases not covered by \emph{any} accepted primary.
+Subtracting this contribution makes a chain with substantial new coverage
+less likely to become secondary. The default overlap threshold is
+\(\lambda=0.5\). The uncovered-length limit is \(L=2^{31}-1\), so it
+normally adds no restriction.
+
+\begin{algorithm}[H]
+\caption{Minimap2 primary and secondary chain selection}
+\label{alg:chaining-primary-secondary}
+\small
+\begin{algorithmic}[1]
+  \Require chains \(C\), query intervals \(I_c\), scores \(s_c\), limits \(\lambda,L\)
+  \Ensure ordered primary list \(P\) and parent \(\pi(c)\) for every chain
+  \State \(P\gets[\,]\)
+  \For{\(c\in C\) in decreasing order of \(s_c\)}
+    \State \(u\gets\bigl|I_c\setminus\bigcup_{p\in P}I_p\bigr|,\quad \pi(c)\gets c\)
+      \Comment{initially primary}
+    \For{\(p\in P\) in acceptance order}
+      \State \(o\gets|I_c\cap I_p|\)
+      \State \(a\gets\min(|I_c|,|I_p|),\quad b\gets\max(|I_c|,|I_p|)\)
+      \If{\(o>0\land o/a-u/b>\lambda\land u\leq L\)}
+        \State \(\pi(c)\gets p\) \Comment{secondary alternative to \(p\)}
+        \State \textbf{break}
+      \EndIf
+    \EndFor
+    \If{\(\pi(c)=c\)}
+      \State append \(c\) to \(P\)
+    \EndIf
+  \EndFor
+\end{algorithmic}
+\end{algorithm}
+
+A separate filter retains all primaries and limits secondary alternatives.
+With the defaults, a secondary must score at least \(0.8s_{\pi(c)}\) or be
+within \(2k\) of its parent's score, where \(k\) is the seed length.
+Exact duplicates of the parent's coordinates are removed, and at most five
+secondaries survive across the list. BioseqDB follows these selection steps
+and repeats them after base alignment refines the regions
+(Section~\ref{sec:alignment-postprocessing}).
+
+Primary \emph{chains} should not be confused with primary SAM records.
+Minimap2 marks one surviving nonsecondary alignment as the primary SAM record.
+The other nonsecondary parts of a split mapping are \emph{supplementary}.
+Secondary records instead describe alternative mappings of the same query
+region.
+\clearpage

@@ -340,7 +340,7 @@ The scans that do not use alignment are marked parallel-safe. This means that ex
 Scans in details are covered in the next chapter~\ref{sec:postgres-custom-scan-scope} in detail.
 
 \noindent\begin{minipage}{\linewidth}
-\begin{lstlisting}[style=bioseq-search-sql,caption={Simple table read},label=code:simple-table-read-with-slice]
+\begin{lstlisting}[style=bioseq-search-sql,caption={Simple table read},label={code:simple-table-read-with-slice}]
   SELECT id, bioseq.to_text(s[0:8]) FROM t;
 \end{lstlisting}
 \end{minipage}
