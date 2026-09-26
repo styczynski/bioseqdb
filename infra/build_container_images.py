@@ -198,8 +198,7 @@ def observation(host):
 def eligible_packages():
     manifest = json.loads((ROOT / "bin_artifacts/packages/manifest.json").read_text())
     state = json.loads(fleet.STATE.read_text())
-    repair_keys = {fleet.cell_key(c) for name in ("package_rebuilds", "deferred_package_rebuilds")
-                   for queue in state.get(name, {}).values() for c in queue}
+    repair_keys = fleet.pending_package_repairs(state, manifest)
     for job in state["jobs"].values():
         if job.get("cell") and job.get("observed", {}).get("status") == "running":
             repair_keys.add(fleet.cell_key(job["cell"]))
@@ -416,7 +415,9 @@ def status_summary():
     path=CONTROL / "state.json"
     state=json.loads(path.read_text()) if path.exists() else dict(jobs={},results={},failed={})
     packages=json.loads((ROOT / "bin_artifacts/packages/manifest.json").read_text())
+    package_state=json.loads(fleet.STATE.read_text())
     return dict(native_packages_collected=packages["validated_package_count"],native_packages_expected=44,
+        **fleet.package_readiness_counts(package_state, packages),
         container_images_collected=len({fleet.cell_key(r["package"]) for r in state["results"].values()}),
         container_images_published=len({fleet.cell_key(r["package"]) for r in state["results"].values() if r.get("published")}),
         container_images_expected=24,multi_platform_tags_published=len(state.get("multi_platform",{})),

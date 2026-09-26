@@ -11,6 +11,30 @@ import build_container_images as images
 
 
 class ImageContracts(unittest.TestCase):
+    def test_diagnosed_repair_stays_pending_until_qualified_replacement(self):
+        cell=dict(postgres_major=17,distro='ubuntu_26.04',architecture='arm64')
+        smoke={k:True for k in ('passed','default_insert_search','default_persisted_search',
+                               'column_defaults_and_vacuum')}
+        package=dict(cell,sha256='old',validation={'passed':True},installed_sql_smoke=smoke)
+        inventory={'packages':[package],'missing_cells':[]}
+        key=images.fleet.cell_key(cell)
+        state={'package_rebuilds':{'owner':[cell]},'jobs':{},'history':[]}
+        self.assertEqual(images.fleet.pending_package_repairs(state,inventory),{key})
+        self.assertEqual(images.fleet.package_readiness_counts(state,inventory)['release_ready_packages'],0)
+        state['package_rebuilds']['owner'].clear()
+        for status in ('running','failed','completed'):
+            state['jobs']['owner']=dict(cell=cell,replaces_package_sha256='old',observed={'status':status})
+            self.assertEqual(images.fleet.pending_package_repairs(state,inventory),{key})
+        state['jobs']['owner']['observed']['status']='failed'
+        self.assertEqual(len(images.fleet.pending_package_failures(state,inventory)),1)
+        state['history'].append({'previous_job':state['jobs'].pop('owner')})
+        self.assertEqual(images.fleet.pending_package_repairs(state,inventory),{key})
+        inventory['packages'][0]=dict(package,sha256='new',installed_sql_smoke={})
+        self.assertEqual(images.fleet.pending_package_repairs(state,inventory),{key})
+        inventory['packages'][0]=dict(package,sha256='new')
+        self.assertEqual(images.fleet.pending_package_repairs(state,inventory),set())
+        self.assertEqual(images.fleet.package_readiness_counts(state,inventory)['release_ready_packages'],1)
+
     def test_matrix_has_matching_bases_versions_functions_and_distinct_tags(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)

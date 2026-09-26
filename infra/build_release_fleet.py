@@ -256,6 +256,40 @@ def worker_diagnostics(state, mode):
     return result
 
 
+def pending_package_repairs(state, inventory):
+    """Keep diagnosed archive repairs pending through admission and failures.
+
+    This tracks only explicit repairs, never Git age or compiled-input hashes.
+    A qualified replacement with different bytes releases the old archive hold.
+    History retains the hold even after a failed worker takes another cell.
+    """
+    packages = {cell_key(p): p for p in inventory.get("packages", [])}
+    pending = {cell_key(c) for name in ("package_rebuilds", "deferred_package_rebuilds")
+               for queue in state.get(name, {}).values() for c in queue}
+    jobs = [entry.get("previous_job", {}) for entry in state.get("history", [])]
+    jobs.extend(state.get("jobs", {}).values())
+    for job in jobs:
+        previous_sha = job.get("replaces_package_sha256")
+        if not job.get("cell") or not previous_sha:
+            continue
+        key = cell_key(job["cell"])
+        replacement = packages.get(key, {})
+        if replacement.get("sha256") == previous_sha or not package_release_ready(replacement):
+            pending.add(key)
+    return pending
+
+
+def package_readiness_counts(state, inventory):
+    packages = inventory.get("packages", [])
+    pending = pending_package_repairs(state, inventory)
+    return dict(
+        release_ready_packages=sum(package_release_ready(p) and cell_key(p) not in pending
+                                   for p in packages),
+        collected_packages_awaiting_repair=sum(cell_key(p) in pending for p in packages),
+        missing_packages=len(inventory.get("missing_cells", [])),
+    )
+
+
 def pending_package_failures(state, inventory):
     """Keep failed cells visible after their host moves to another assignment."""
     latest = {}
@@ -268,8 +302,9 @@ def pending_package_failures(state, inventory):
             latest[cell_key(job["cell"])] = (host, job)
     running = {cell_key(job["cell"]) for job in state.get("jobs", {}).values()
                if job.get("cell") and job.get("observed", {}).get("status") == "running"}
+    repairs = pending_package_repairs(state, inventory)
     qualified = {cell_key(package) for package in inventory.get("packages", [])
-                 if package.get("installed_sql_smoke", {}).get("column_defaults_and_vacuum") is True}
+                 if package_release_ready(package) and cell_key(package) not in repairs}
     queued = {cell_key(cell) for cells in state.get("package_rebuilds", {}).values()
               for cell in cells}
     queued.update(cell_key(cell) for cell in state.get("validation_rechecks", {}).values())
@@ -321,7 +356,7 @@ def status_snapshot():
     return {
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "accepted_packages": inventory.get("validated_package_count", 0),
-        "release_ready_packages": inventory.get("release_ready_package_count", 0),
+        **package_readiness_counts(state, inventory),
         "expected_packages": inventory.get("expected_package_count"),
         "pending_package_failures": pending_package_failures(state, inventory),
         "website_manifest_present": (OUTPUT / "website/site-manifest.json").is_file(),
@@ -404,9 +439,12 @@ def write_release_manifest():
                 published=manifest["published"], signed=manifest["signed"])
     missing = [{"distro": distro, "architecture": architecture, "postgres_major": major}
                for distro, architecture, major in sorted(expected.keys() - packages.keys())]
+    state = json.loads(STATE.read_text()) if STATE.exists() else {}
+    pending_repairs = pending_package_repairs(state, {"packages": list(packages.values())})
     functional_pending = [dict(distro=key[0], architecture=key[1], postgres_major=key[2])
                           for key, package in sorted(packages.items())
-                          if any(package["installed_sql_smoke"].get(field) is not True
+                          if cell_key(package) in pending_repairs
+                          or any(package["installed_sql_smoke"].get(field) is not True
                                  for field in ("default_insert_search", "default_persisted_search",
                                                "column_defaults_and_vacuum"))]
     write_json_atomic(destination / "manifest.json", {
@@ -959,6 +997,10 @@ def dispatch_available(state):
         state.setdefault("history", []).append(dict(host=host, previous_job=job))
         state["jobs"][host] = dict(launched=False, cell=cell, mode="package-linux",
                                    targets=[cell["distro"]], validation_only=validation_only)
+        if rebuild or repair:
+            previous = next((p for p in inventory["packages"] if cell_key(p) == key), None)
+            if previous:
+                state["jobs"][host]["replaces_package_sha256"] = previous["sha256"]
         if validation_only or repair:
             if repair:
                 state["tableam_qualification_attempted_cells"].append(cell_key(cell))
@@ -1129,7 +1171,8 @@ def main():
             from e2e_tuple_progress import append_progress_log
             inventory = json.loads((OUTPUT / "packages/manifest.json").read_text())
             completed_packages = inventory["validated_package_count"]
-            ready_packages = inventory["release_ready_package_count"]
+            readiness = package_readiness_counts(state, inventory)
+            ready_packages = readiness["release_ready_packages"]
             active_jobs = [h for h, job in state["jobs"].items()
                 if not host_retired(h) and job.get("observed", {}).get("status") == "running"]
             failed_jobs = [h for h, job in state["jobs"].items()
@@ -1140,6 +1183,8 @@ def main():
             append_progress_log(
                 f"Release fleet: {completed_packages}/{inventory['expected_package_count']} installation-validated packages collected; "
                 f"{ready_packages}/{inventory['expected_package_count']} also passed current functional acceptance. "
+                f"Collected packages awaiting diagnosed repair: {readiness['collected_packages_awaiting_repair']}; "
+                f"not yet collected: {readiness['missing_packages']}. "
                 f"Active workers: {', '.join(active_jobs) or 'none'}. "
                 f"Failed workers requiring investigation: {', '.join(failed_jobs) or 'none'}. "
                 f"Unresolved package cells, including prior assignments: {', '.join(failed_cells) or 'none'}. "
