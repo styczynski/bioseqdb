@@ -14,4 +14,23 @@ Additionally please \path{bioseq.index.insert_maintenance.enabled} set to off as
 You can disable grouped-MPF to allow automatic index update on insert.
 }
 
+Currently grouped-MPF which was measured in benchmarks for case of query/target table join doesn't work for single table queries correctly and causes minimizers to be always recomputed.
+To prevent this you need to change minimizer algorithm (the example below shows incremental automatic updates to index on inserts as well):
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={How to avoid index-read bug (always recompute minimizers)},label={lst:sql-index-read-bug-recompute}]
+-- Disabled grouped-MPF and change minimizer algorithm to something else not bounded SIMD
+SET bioseq.aligner.grouped_soa_generation.enabled = off;
+SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';
+-- Autmatic index update on each insert:
+SET bioseq.index.insert_maintenance.enabled = on;
+
+-- Your INSERT statements go here.
+-- No update_index() call is needed for these new rows.
+\end{lstlisting}
+\end{minipage}
+This code snippet avoid recomputing minimizer each time. Note that joins without these defaults (grouped-MPF for bounded SIMD) still require \texttt{aligner_options(index_read_requirement => 2)} to work correctly.
+
+
 Please note that in this example I use sequences longer than >30 bases. Due to how filtering works~\ref{sec:configured-cpu-minimizers}\ref{sec:chaining-bioseqdb} (also in minimap2) extremally short sequences might not produce any hits.
+
