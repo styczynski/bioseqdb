@@ -33,7 +33,8 @@ HISTORICAL = 'historical_outer_e2e_v1'
 FAST_LOCAL = 'query_only_framework_iteration_fast_local_single_sample_v1'
 FAST_REMOTE = 'query_only_framework_iteration_fast_remote_single_sample_v1'
 DISPLAY_SCOPE = 'mapping_comparison'  # Display grouping only; each row keeps its actual timing_scope.
-FAST_NOTE = 'FAST: one measured batch of 1,024 queries. The reported P50 is that single datapoint, not a five-repeat estimate. Samples are not pooled with standard runs.'
+BLUE_LEGEND = 'Blue = one lowest A and one lowest B measurement for each column for each configuration.'
+COLOR_LEGEND = 'Light gray = minimap2. Pale yellow = preferred MPF / Bounded / SIMD-DP / Block configuration.'
 STAGES = ('minimizer', 'chaining', 'base_alignment')
 MINIMIZERS = {'scalar': 'Scalar', 'simd_minimap2_reference': 'SIMD-ref', 'two_stack_nthash': 'Two-stack', 'bounded_nthash_simd': 'Bounded', 'vulkan_minimap_integer': 'Vulkan'}
 CHAINS = {'scalar_minimap2': 'Scalar-DP', 'simd_minimap2': 'SIMD-DP', 'range_minimum_query': 'RMQ', 'vulkan_tiled_dynamic_programming': 'Vulkan-DP'}
@@ -357,9 +358,7 @@ class Snapshot:
         if row is None:
             return r'\textcolor{gray}{---\textsuperscript{g}}' if key in self.unavailable else r'\textcolor{gray}{\ensuremath{\cdot}}'
         self.seen.add(key)
-        marker = r'\textsuperscript{f}' if row['execution_conformance'] == 'documented_scalar_minimizer_fallback' else (r'\textsuperscript{p}' if row['execution_conformance'] == 'exact_requested_path_user_preserved' else '')
-        if row['run_count'] == 1:
-            marker += r'\textsuperscript{s}'
+        marker = r'\textsuperscript{f}' if row['execution_conformance'] == 'documented_scalar_minimizer_fallback' else ''
         parts = []
         for metric in ('p50_a', 'p50_b'):
             value = row['metrics'][metric]
@@ -401,21 +400,11 @@ def hardware_table(snapshot):
         ('Storage', [local['physical_storage']['model']] + [f"EBS {h['storage']['volume_type']}" for h in remote]),
         ('Disk capacity', [f"{local['physical_storage']['capacity_bytes'] / 1e9:.2f} GB"] + [f"{h['storage']['capacity_gib']} GiB" for h in remote]),
         ('Provisioned disk I/O', ['Not recorded'] + [f"{h['storage']['provisioned_iops']:,} IOPS / {h['storage']['provisioned_throughput_mib_per_s']} MiB/s" for h in remote]),
-        ('Free disk / free RAM', ['No uniform per-repeat record'] * 5),
     ]
-    out = [r'\subsection{Recorded machines and completed coverage}', r'\begin{table}[H]\centering\small', r'\caption{Machine inventory captured with the benchmark summaries. Capacities are not free resources at execution time.}\label{tab:benchmark-machines}', r'\begin{tabularx}{\linewidth}{@{}p{24mm}*{5}{>{\raggedright\arraybackslash}X}@{}}\toprule', 'Property & ' + ' & '.join(HOSTS) + r'\\\midrule']
+    out = [r'\subsection{Complete raw results}', r'\begin{table}[H]\centering\small', r'\caption{Machine specs}\label{tab:benchmark-machines}', r'\begin{tabularx}{\linewidth}{@{}p{24mm}*{5}{>{\raggedright\arraybackslash}X}@{}}\toprule', 'Property & ' + ' & '.join(HOSTS) + r'\\\midrule']
     for title, values in rows:
         out.append(tex(title) + ' & ' + ' & '.join(tex(v) for v in values) + r'\\[3pt]')
-    out += [r'\bottomrule\end{tabularx}\end{table}', r'\noindent The AWS summaries record the Linux kernel but do not seal an OS distribution version. The local legacy capture does not seal the MoltenVK implementation identity. Unrecorded values are not inferred from the current machine.']
-    out += [r'\par Each cell selects the approved observation with the lowest A across its configured sources. Remote sources are the default summary, TEST3, TEST4, TEST7, TEST2 and FAST. Local sources are the default summary and FAST LOCAL. This source order breaks exact A ties only. B, repeat count and timing scope come from the same selected observation. These are best observed timings across campaigns, not estimates of typical execution time. The inventory describes the default hosts. Other measurements may come from different instances of the same machine class.\par']
-    out += [r'\begin{table}[H]\centering\small', r'\caption{Published snapshot coverage after excluding mismeasured historical timings.}\label{tab:benchmark-coverage}', r'\begin{tabular}{lrrrrr}\toprule Host & Logical tuples & Observations & Repeats & BioseqDB obs. & GPU unavailable\\\midrule']
-    for host in HOSTS:
-        rows = [r for (h, _, _, _), r in snapshot.rows.items() if h == host]
-        out.append(f"{host} & {len({r['stable_key'] for r in rows})} & {len(rows)} & {sum(r['run_count'] for r in rows)} & {sum(r['pipeline']=='bioseq' for r in rows)} & {sum(h == host for h, _, _, _ in snapshot.unavailable)}" + r'\\')
-    out += [r'\bottomrule\end{tabular}\end{table}']
-    total = len(snapshot.rows)
-    runs = sum(r['run_count'] for r in snapshot.rows.values())
-    out += [f'The published BioseqDB campaign snapshot contains {total} timing observations and {runs:,} accepted repeats. FAST entries retain their separate single-sample timing scope and are marked with a superscript s. The {snapshot.excluded_historical} historical outer-E2E observations are treated as mismeasurements and excluded from coverage and comparisons. Standard observations have five accepted repeats. FAST observations have one. The planned local matrix has 1,296 logical cells and 6,480 repeats. It remains incomplete. Unavailable-GPU counts refer only to the remote authorities\' recorded eligible subsets.']
+    out += [r'\bottomrule\end{tabularx}\end{table}']
     return out
 
 
@@ -449,7 +438,6 @@ def result_pages(snapshot, scope, remote, configs, title, registry):
     keys = [key for key in snapshot.row_orders[(remote, size, kw)] if key in relevant]
     column_count = len(configs) * len(hosts)
     column_width = '13.55'
-    order_scope = 'within this size/k/w group, across alphabets and all displayed machines' if remote else 'across all local sizes, k/w pairs and alphabets'
     vulkan_keys = {key for key in keys if is_vulkan(key)}
     has_vulkan_results = any(h in hosts and s == scope and cfg in configs and rk in vulkan_keys
                              for h, s, rk, cfg in snapshot.rows)
@@ -487,14 +475,16 @@ def result_pages(snapshot, scope, remote, configs, title, registry):
             row_id = rf'{{\color{{gray}}R{row_numbers[key]}}}'
             engine_label = r'\shortstack[l]{' + row_id + (r'\\' + engine_label if engine_label else '') + '}'
             out.append(row_tint(key) + anchor + engine_label + ' & ' + label + ' & ' + ' & '.join(cells) + r'\\[3pt]\hline')
-        out += [r'\end{tabular}\par}', r'\smallskip{\footnotesize\noindent Each cell: A, comparison, B, comparison. Times cover 1,024 queries. $\cdot$ = no approved observation. ---\textsuperscript{g} = GPU unavailable, not executed. n/a = no measured comparison.\par', r'\noindent \textsuperscript{f}SIMD-ref request observed as scalar, compared only as that effective path. \textsuperscript{p}Accepted by explicit preservation after wrapper postflight failure, no run receipt claimed.\par', r'\noindent MPF/MPS = minimizers per fragment/sequence. Labels: index representation / minimizer, then chaining / base alignment. SIMD-ref is the reference minimizer, Bounded is bounded ntHash.\par',
-                r'\noindent Minimap2 stays first. Other rows follow increasing minima of available Index A times ' + order_scope + r'. No Index results = last. Coverage varies.\par']
-        if any(r['run_count'] == 1 and h in hosts and cfg in configs and rk in [BASELINE] + batch
+        out += [r'\end{tabular}\par}',
+                r'\smallskip{\footnotesize\noindent Each cell: A, comparison, B, comparison. $\cdot$ = no measurement. ---\textsuperscript{g} = GPU unavailable. n/a = no comparison.\par',
+                r'\noindent ' + BLUE_LEGEND + r'\par',
+                r'\noindent ' + COLOR_LEGEND + r'\par',
+                r'\noindent MPF/MPS = minimizers per fragment/sequence. SIMD-ref = reference minimizer. Bounded = bounded ntHash.\par']
+        if any(r['execution_conformance'] == 'documented_scalar_minimizer_fallback'
+               and h in hosts and cfg in configs and rk in [BASELINE] + batch
                for (h, _, rk, cfg), r in snapshot.rows.items()):
-            out.append(r'\noindent\textsuperscript{s}' + tex(FAST_NOTE) + r'\par')
-        out += [r'\noindent Blue = one lowest A and one lowest B down each machine/workload column, across continuation pages. Exact ties select the first row. Repeated baselines are marked only on page 1.\par',
-                r'\noindent Light gray = minimap2 baseline. Pale yellow = preferred MPF / Bounded / SIMD-DP / Block configuration, not a claim of winning every column.\par',
-                r'\noindent When all Vulkan modes are unmeasured, they share one row. Baseline comparisons use the fastest measured BioseqDB effective path separately for A and B.\par}']
+            out.append(r'\noindent\textsuperscript{f}SIMD-ref ran as scalar.\par')
+        out.append('}')
     return out
 
 
@@ -536,14 +526,13 @@ def validate_external(row, host):
 
 
 EXTERNAL_NOTES = {
-    'a': 'BLAST DNA5 uses an N score of -3, compared with -1 in the baseline.',
-    'b': 'LexicMap stores reference N as A. Queries retain their bases, and edit-script checks use that native reference encoding.',
-    'c': 'External input uses two reference records for the 4 Gbp sequence to stay within signed 32-bit coordinates.',
-    'd': 'Winnowmap uses overlapping 250 Mb records and 499M index batches after an out-of-memory failure. Results are merged globally. This can affect MAPQ.',
-    'e': 'Winnowmap uses 1999M index batches and merges the results from multiple index parts.',
-    'f': 'Swap configuration was not recorded before this external measurement. Later host snapshots do not establish its earlier swap state.',
-    's': FAST_NOTE,
-    'g': 'Retained C7G minimap2 measurement comes from the earlier campaign with documented paging pressure.',
+    'a': 'BLAST scores N as -3, compared with -1 in minimap2.',
+    'b': 'LexicMap stores reference N as A.',
+    'c': 'The 4 Gbp reference is split into two input records.',
+    'd': 'Winnowmap uses overlapping 250 Mb records and 499M index batches. Merging results can affect MAPQ.',
+    'e': 'Winnowmap merges results from 1999M index batches.',
+    'f': 'Swap settings were not recorded.',
+    'g': 'Paging pressure was observed on C7G.',
 }
 
 
@@ -620,8 +609,6 @@ class ExternalComparison:
             return r'\textcolor{gray}{\ensuremath{\cdot}}'
         self.seen.add(key)
         marks = external_markers(row) if aligner in EXTERNAL_ALIGNERS else ({'g'} if host == 'C7G' and self.sources[key] == FILES[host] else set())
-        if row['run_count'] == 1:
-            marks.add('s')
         page_notes.update(marks)
         marker = r'\textsuperscript{' + ','.join(sorted(marks)) + '}' if marks else ''
         counterpart = self.rows.get((host, 'bioseq' if aligner == 'minimap2' else 'minimap2', cfg))
@@ -640,34 +627,24 @@ class ExternalComparison:
         return measurement_cell(parts)
 
 
-def external_description(external):
-    """Plain-language methods, explicitly distinguishing these campaign boundaries."""
-    paragraphs = [r'\clearpage\subsection{Comparison with other aligners}\label{sec:external-aligner-results}',
-            r'The external-aligner table places minimap2 and one fixed BioseqDB configuration alongside blastn, Winnowmap and LexicMap. Both minimap2 and BioseqDB timings come from the corresponding machine\textquotesingle s non-external remote summary, matched by machine class, target size, alphabet, $(k,w)$ and index mode. External-campaign minimap2 timings are excluded. BioseqDB always uses minimizers per fragment (MPF), bounded ntHash SIMD minimizers, SIMD-DP chaining and Block Aligner. Missing observations are marked with a dot. Both rows select the lowest-A observation across default / TEST3 / TEST4 / TEST7 / TEST2 / FAST sources, retaining its B and sample count. Source order breaks exact A ties only. FAST entries carry a single-sample footnote. No other BioseqDB configuration or historical timing scope is substituted.',
-            f'The table contains {len(external.rows)} distinct observations and {sum(r["run_count"] for r in external.rows.values()):,} accepted repeats. Only approved results are included. Qualification runs, interrupted attempts and the small-query checks used before the full runs are excluded.',
-            r'\paragraph{Measurement procedure.}',
+def external_description():
+    """Explain the adjustments needed to benchmark each tool on long references."""
+    # Verified against bench/e2e/index.cppm and bench/tool_{winnowmap,blastn,lexicmap}/adapter.py.
+    # Winnowmap index fixes are in bench/e2e_external/instrument_sources.py.
+    return [r'\clearpage\subsection{Comparison with other aligners}\label{sec:external-aligner-results}',
+            r'The following adjustments were needed to run the compared aligners:',
             r'\begin{itemize}',
-            r'\item Each external observation has five fresh-process repeats of 1,024 queries. A is the median wall time, including executable startup, index loading, mapping and writing output. Fixture generation and validation are outside the timer. The index mode prepares the native on-disk index beforehand. No-index mode creates it inside the measured interval, including tool-specific preparation such as counting frequent k-mers or partitioning the reference. Operating-system caches are not purged.',
-            r'\item The external campaign checks one primary occurrence per query, its position and strand, and an edit script reconstructed from the gapped output. These files include the five raw timing samples and returned-count vectors. This is additional evidence beyond the median-only summaries used for the earlier tables. MAPQ is checked only where the tool provides it. No MAPQ value is invented for blastn or LexicMap.',
-            r'\item B is computed separately in each repeat by subtracting the union of the tool\textquotesingle s instrumented alignment and available MAPQ intervals, then taking the median. BLAST subtracts traceback-search regions. LexicMap subtracts wavefront-alignment calls. Winnowmap subtracts its native alignment and MAPQ intervals. These are different boundaries, so B is a tool-specific remaining time, not the duration of a common seeding-and-chaining stage.',
-            r'\end{itemize}',
-            r'\paragraph{How the tools were configured.}',
-            r'\begin{itemize}',
-            r'\item \textbf{blastn 2.17.0+.} The word size equals the requested $k$. There is no minimizer-window setting, so $w$ labels the fixture only. Low-complexity masking is disabled, and each reported alignment must cover at least 80\% of the query to remove short chance matches. Match reward 2, mismatch penalty 4, gap-open penalty 4 and gap-extension penalty 2 reproduce the baseline\textquotesingle s first affine-gap branch. BLAST has no second branch. The default E-value threshold of 10 is retained. DNA5 cells are marked because BLAST scores N differently.',
-            r'\item \textbf{Winnowmap.} Both $k$ and $w$ are retained. Frequent k-mers are counted with Meryl to build weighted minimizers. This preparation is included in no-index time. Baseline scoring and first-stage bandwidth are retained, while Winnowmap\textquotesingle s additional structural-variant-aware stage keeps its native settings. Secondary alignments are suppressed. The benchmark build restores persisted-index output and reconstructs the weighting filter on loading. It also initializes a repeat-length variable to prevent undefined MAPQ/output behaviour. Memory-limited and multipart runs carry cell-specific notes.',
-            r'\item \textbf{LexicMap.} The requested $k$ is retained, but LexicHash masks replace minimizer windows, so $w$ is inapplicable. The native 20,000 masks, gap filling between sparsely seeded regions and low-complexity rejection remain enabled. Query coverage is at least 80\%. Its native wavefront-alignment costs are match 0, mismatch 4 and gap open/extension 6/2. Its separate reported-score calculation uses match 2, mismatch -3 and gaps 5/2. These settings are not rewritten to mimic minimap2. References are divided into records of at most 268,435,455 bases with overlap equal to the longest query, and output coordinates are restored to the logical reference. DNA5 cells are marked because its native reference encoding replaces N with A.',
-            r'\end{itemize}',
-            r'\paragraph{What the comparison establishes.}',
-            r'The external runs used new instances of the same EC2 types, not the physical instances used for the retained minimap2 and BioseqDB results. External volumes are 300 GiB unencrypted gp3, compared with 500 GiB encrypted gp3 in the earlier campaign. Both provision 6,000 IOPS and 500 MiB/s. The external host bindings record four benchmark threads, nice $-20$ and Clang 18.1.3, whereas the earlier campaign used Clang 22.1.8. Compressed-RAM swap is recorded for many external runs. Its presence does not prove how much swapping occurred during each measurement.',
-            r'The workload dimensions agree, but the timing boundaries, reference layouts, scoring and resource conditions are not identical. In particular, the retained framework timings exclude process-startup setup, and BioseqDB no-index mode constructs a transient index rather than the external tools\textquotesingle{} on-disk indexes. The summaries do not establish cross-campaign byte-for-byte fixture identity. Ratios therefore describe the published elapsed times under these qualified conditions, rather than an isolated causal effect of the aligner.',
-            r'The table retains the green/red/gray triangles, 5\% tie band and $\times$ notation above 30\%. Every non-baseline row compares with minimap2 in the same machine-class/workload column. Minimap2 compares only with the displayed fixed BioseqDB configuration, not another faster BioseqDB row. Blue marks one lowest reported A and one lowest reported B down the five rows in each column. Exact ties select the first displayed row. Light gray identifies the minimap2 baseline. Pale yellow identifies the preferred MPF / Bounded / SIMD-DP / Block configuration, independently of the measured winners. For B, both the ratio and the highlight compare native residual times with different work removed, and do not establish superiority at an equivalent processing stage. Dots mean no approved timing, not failure or hardware unavailability.']
-    return [line + (r'\par' if line and not line.startswith('\\') else '') for line in paragraphs]
+            r'\item \textbf{Minimap2.} A single FASTA record must fit within its signed 32-bit coordinate limit. We therefore split the 4 Gbp reference into two records of roughly 2 Gbp each. Returned positions are converted back to coordinates in the original reference. The 2 Gbp reference remains one record.',
+            r'\item \textbf{Winnowmap.} We re-enabled saving its native index and changed loading to rebuild the weighting Bloom filter from the saved list of frequent k-mers produced by Meryl. We also initialized a repeat-length variable that otherwise produced undefined MAPQ values. The 4 Gbp references used index batches of 1,999 million bases. Where memory was still insufficient, we split the reference into 250 Mb records, overlapping by the longest query plus 64 bases, and reduced index batches to 499 million bases. Results from the index parts are merged, which can affect MAPQ.',
+            r'\item \textbf{blastn.} We disabled low-complexity masking and required at least 80\% query coverage to remove short chance matches. Scoring uses match reward 2, mismatch penalty 4 and gap open/extension penalties 4/2, matching the first affine-gap branch of minimap2. BLAST has no second branch and scores N as $-3$ rather than $-1$. The default E-value threshold of 10 is retained.',
+            r'\item \textbf{LexicMap.} Its 28-bit coordinates require records of at most 268,435,455 bases. We split the reference accordingly, with overlap equal to the longest query, and restore original coordinates in the results. On machines with less than 10 GiB RAM, the 4 Gbp reference was indexed one record per batch. We kept its native 20,000 LexicHash masks and alignment scoring. Query coverage is at least 80\%. Its reference encoding replaces N with A, while query bases are unchanged.',
+            r'\end{itemize}']
 
 
 def external_pages(external, letters, registry):
-    out = external_description(external)
+    out = external_description()
     out += [r'\newgeometry{left=10mm,right=10mm,top=12mm,bottom=12mm}', r'\begin{landscape}']
-    labels = {'minimap2': ('minimap2', 'Retained baseline'), 'bioseq': ('BioseqDB', r'\begin{tabular}[t]{@{}l@{}}\rule{0pt}{12pt}MPF / Bounded\\SIMD-DP / Block\end{tabular}'),
+    labels = {'minimap2': ('minimap2', 'Baseline'), 'bioseq': ('BioseqDB', r'\begin{tabular}[t]{@{}l@{}}\rule{0pt}{12pt}MPF / Bounded\\SIMD-DP / Block\end{tabular}'),
               'blastn': ('blastn', r'Native\textsuperscript{*}'), 'winnowmap': ('winnowmap', r'Native\textsuperscript{*}'), 'lexicmap': ('lexicmap', r'Native\textsuperscript{*}')}
     for panel, (size, kw) in enumerate(itertools.product((4, 2), ((15, 10), (20, 15))), 1):
         letter = next(letters)
@@ -680,7 +657,6 @@ def external_pages(external, letters, registry):
                        [(column_id(cfg, host), column_label(cfg, host)) for cfg, host in columns])
         notes = set()
         out += [r'\clearpage', r'\refstepcounter{table}' + rf'\label{{tab:bench:{table}}}' + (r'\label{tab:external-aligners}' if panel == 1 else ''), rf'\noindent{{\large\bfseries ({letter}): Table \thetable: aligner comparison, {size} Gbp, k={kw[0]}, w={kw[1]}\hfill {panel}/4}}\par\smallskip',
-                r'\noindent{\footnotesize Different campaigns and native timing boundaries. A/B ratios are descriptive, subject to the measurement notes.}\par\smallskip',
                 r'{\fontsize{7.1}{8.1}\selectfont\setlength{\tabcolsep}{1pt}\setlength{\fboxsep}{2pt}\renewcommand{\arraystretch}{1.12}',
                 r'\noindent\begin{tabular}{@{}p{15mm}p{26mm}|' + ('p{13.55mm}|' * 16) + r'@{}}\hline']
         out += header(configs, True, 'Aligner & Configuration')
@@ -693,11 +669,12 @@ def external_pages(external, letters, registry):
                 registry.cell(table, aligner, column_id(cfg, host), cell)
             tint = row_tint(BASELINE if aligner == 'minimap2' else BIOSEQ_COMPARISON) if aligner in ('minimap2', 'bioseq') else ''
             out.append(tint + source_label(table, 'row', aligner, f'R{row_number}') + rf'\shortstack[l]{{{{\color{{gray}}R{row_number}}}\\' + tex(name) + '}' + ' & ' + label + ' & ' + ' & '.join(cells) + r'\\[3pt]\hline')
-        out += [r'\end{tabular}\par}', r'\smallskip{\footnotesize\noindent Each cell: A, comparison, B, comparison. Batches of 1,024 queries. Five repeats unless marked s (FAST: one sample). Blue = one lowest A and one lowest B down each machine/workload column.\par',
-                r'\noindent Light gray = minimap2 baseline. Pale yellow = preferred MPF / Bounded / SIMD-DP / Block configuration, not a claim of winning every column. Exact ties select the first row.\par',
-                r'\noindent Ratios use minimap2 as reference, except minimap2 itself uses the fixed BioseqDB row. $\cdot$ = no approved timing. n/a = no measured counterpart.\par',
-                r'\noindent Both minimap2 and BioseqDB use the matching non-external remote measurements.\par',
-                r'\noindent\textsuperscript{*}External A includes process startup and output. B removes different native stages and is not an equivalent-work comparison. BLAST and LexicMap have no $w$ or MAPQ equivalent.\par']
+        out += [r'\end{tabular}\par}',
+                r'\smallskip{\footnotesize\noindent Each cell: A, comparison, B, comparison. $\cdot$ = no measurement. n/a = no comparison.\par',
+                r'\noindent ' + BLUE_LEGEND + r'\par',
+                r'\noindent ' + COLOR_LEGEND + r'\par',
+                r'\noindent Comparisons use minimap2. The minimap2 row compares with BioseqDB.\par',
+                r'\noindent\textsuperscript{*}A includes startup and output. B removes different work for each tool.\par']
         for marker in sorted(notes):
             out.append(r'\noindent\textsuperscript{' + marker + '}' + tex(EXTERNAL_NOTES[marker]) + r'\par')
         out.append('}')
@@ -765,13 +742,13 @@ class GPUComparison:
     def reason(row):
         reason = row.get('reason', row.get('diagnosed_cause', row.get('diagnostic', row.get('error', ''))))
         if row['status'] == 'rejected' and 'alphabet "dna5" is not supported' in reason:
-            return 'Untimed setup rejected DNA5 because this Vulkan index path supports only DNA4.'
+            return 'This Vulkan index supports DNA4 only.'
         if 'maxStorageBufferRange' in reason:
-            return 'Execution failed before GPU query dispatch: the persisted MPS control buffer could not be admitted within the Vulkan storage-buffer limit.'
+            return 'The MPS control buffer exceeds the Vulkan buffer limit.'
         if 'GPU grouped-SoA resident admission rejected' in reason:
-            return 'Execution failed because the persisted GPU index could not be admitted for query execution.'
+            return 'The GPU index exceeds the available memory budget.'
         if 'did not stage complete per-job attestation' in reason:
-            return 'Execution failed because the Vulkan seeding stage did not produce complete per-query execution evidence.'
+            return 'Vulkan seeding did not confirm execution for every query.'
         return reason
 
     def cell(self, execution, cfg, show_best=True):
@@ -797,20 +774,32 @@ class GPUComparison:
                 timing = r'{\fontsize{5.6}{6.4}\selectfont ' + timing + '}'
             if show_best and execution == winner:
                 timing = r'\colorbox{BenchBest}{\strut ' + timing + '}'
-            parts += [timing, r'{\fontsize{5.8}{6.4}\selectfont ' + comparison(value, min(refs) if refs else None) + r'\textsuperscript{s}}']
+            parts += [timing, r'{\fontsize{5.8}{6.4}\selectfont ' + comparison(value, min(refs) if refs else None) + '}']
         return measurement_cell(parts)
 
 
 def gpu_pages(gpu, letters, registry):
     host = gpu.doc['host_binding']
     device = host['gpu']
+    specs = [
+        ('CPU', host['cpu']),
+        ('CPU quota', f"{host['cpu_quota_cores']:g} cores"),
+        ('Memory limit', f"{host['container_memory_limit_bytes'] / 2**30:.1f} GiB"),
+        ('GPU', device['device']),
+        ('GPU memory', f"{device['vram_mib']:,} MiB"),
+        ('OS', host['os']),
+        ('NVIDIA driver', device['driver']),
+        ('Vulkan API', device['vulkan_device_api']),
+    ]
     out = [r'\clearpage\subsection{Vulkan on a Vast.ai GPU instance}\label{sec:vastai-gpu-results}',
-           tex(f"This separate campaign compares Vulkan configurations with minimap2 on the same Vast.ai instance. The machine has one {device['device']} ({device['vram_mib']:,} MiB VRAM) and an {host['cpu']}. The container has a {host['cpu_quota_cores']:g}-core CPU quota and {host['container_memory_limit_bytes'] / 2**30:.1f} GiB memory limit. It runs {host['os']} with NVIDIA driver {device['driver']} and Vulkan API {device['vulkan_device_api']}.") + r'\par',
-           r'Each accepted observation measures one batch of 1,024 queries. P50 is this single sample, with no estimate of repeat-to-repeat variability. PostgreSQL restarts before measurement, but operating-system caches are uncontrolled. Index preparation is untimed, and compatible validated persisted indexes can be reused. No-index A includes transient index construction. B subtracts the same-sample union of fused base-alignment/CIGAR and MAPQ intervals. It is not a pure seeding-and-chaining time.\par',
-           r'Measured statements retain correctness checks against the deterministic query truth and ordered match-count parity with same-host minimap2. Prefiltering is disabled. Physical GPU execution and timing evidence are required, while the additional plan and alternative-setting controls are omitted. Vulkan rows still include CPU work such as index handling, backtracking and base alignment. The measured build includes campaign-specific GPU memory-placement and native-Vulkan validation changes. These results therefore describe that build and host.\par',
-           tex(f"The source contains {len(gpu.rows)} approved observations ({sum(r['pipeline'] == 'bioseq' for r in gpu.rows.values())} Vulkan and {sum(r['pipeline'] == 'minimap2' for r in gpu.rows.values())} minimap2), {sum(r['status'] == 'rejected' for r in gpu.dispositions.values())} setup rejections and {sum(r['status'] == 'execution_failed' for r in gpu.dispositions.values())} execution failures. The table retains only workload columns with an approved Vulkan timing, displaying {sum(key in gpu.display_keys for key in gpu.rows)} timings and {sum(key in gpu.display_keys for key in gpu.dispositions)} rejection or failure markers. Empty columns and columns containing only baseline timings, failures or rejections are omitted. The remaining columns keep their original widths. Superseded timings and resolved failures are excluded.") + r'\par',
-           r'Red circles identify explicit setup rejections. Red crosses identify execution failures. Neither has an approved duration. Dots identify cells with no recorded outcome. Blue marks the lowest available A and B separately, and light gray identifies minimap2. Comparisons retain the earlier triangle directions, 5\% tie band and ratio notation above 30\%.\par',
-           r'\newgeometry{left=10mm,right=10mm,top=12mm,bottom=12mm}', r'\begin{landscape}']
+           r'\begin{table}[H]\centering\small',
+           r'\caption{Vast.ai machine specs}\label{tab:vastai-machine}',
+           r'\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}X@{}}\toprule',
+           r'Property & Value\\\midrule']
+    for name, value in specs:
+        out.append(tex(name) + ' & ' + tex(value) + r'\\[3pt]')
+    out += [r'\bottomrule\end{tabularx}\end{table}',
+            r'\newgeometry{left=10mm,right=10mm,top=12mm,bottom=12mm}', r'\begin{landscape}']
     registry.table('vastai', [slice_row(key) for key in gpu.order],
                    [(column_id(cfg, 'Vastai'), column_label(cfg, 'Vast.ai')) for cfg in gpu.configs])
     letter = next(letters)
@@ -836,12 +825,10 @@ def gpu_pages(gpu, letters, registry):
             anchor = source_label('vastai', 'row', execution_id(execution), f'R{row_number}') if execution != BASELINE or page == 1 else ''
             out.append(row_tint(execution) + anchor + rf'\shortstack[l]{{{{\color{{gray}}R{row_number}}}\\' + tex(engine) + '}' + ' & ' + label + ' & ' + ' & '.join(cells) + r'\\[3pt]\hline')
         out += [r'\end{tabular}\par}',
-                r'\smallskip{\footnotesize\noindent Each cell: A, comparison, B, comparison. Light gray = minimap2 baseline. Blue = one lowest A and one lowest B per workload column across all rows. Exact ties select the first row. Repeated baselines are marked only on page 1.\par',
-                r'\noindent\textsuperscript{s}' + tex(FAST_NOTE) + r'\par',
-                r'\noindent Ratios compare with same-host minimap2. Minimap2 compares with the fastest measured Vulkan row separately for A and B. n/a = no measured counterpart.\par',
-                r'\noindent Only columns with an approved Vulkan timing are shown. Columns with only baseline timings, failures, rejections or no outcomes are omitted.\par',
-                r'\noindent MPF/MPS = minimizers per fragment/sequence. Labels give index representation / minimizer, then chaining / base alignment. Rows follow increasing minimum Index A across the displayed cases.\par',
-                r'\noindent $\cdot$ = no recorded outcome. \textcolor{BrickRed}{$\bigcirc$} = setup rejection. \textcolor{BrickRed}{$\times$} = execution failure. Neither marker is a timing.\par']
+                r'\smallskip{\footnotesize\noindent Each cell: A, comparison, B, comparison. Light gray = minimap2.\par',
+                r'\noindent ' + BLUE_LEGEND + r'\par',
+                r'\noindent MPF/MPS = minimizers per fragment/sequence. Vulkan rows compare with minimap2 on the same machine.\par',
+                r'\noindent $\cdot$ = no result. n/a = no comparison. \textcolor{BrickRed}{$\bigcirc$} = setup rejected. \textcolor{BrickRed}{$\times$} = execution failed.\par']
         for reason, mark in gpu.notes.items():
             out.append(r'\noindent\textsuperscript{' + mark + '}' + tex(reason) + r'\par')
         out.append('}')
@@ -869,10 +856,10 @@ def render(snapshot, external, gpu, registry=None):
     out += [r'\definecolor{BenchBest}{HTML}{DDECF8}', r'\definecolor{BenchBaseline}{HTML}{F4F4F4}', r'\definecolor{BenchPreferred}{HTML}{FFFBEA}', r'\newgeometry{left=10mm,right=10mm,top=12mm,bottom=12mm}', r'\begin{landscape}']
     out += hardware_table(snapshot)
     letters = iter('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
-    out += result_pages(snapshot, DISPLAY_SCOPE, False, CONFIGS, f'({next(letters)}): Local machine: mapping interval', registry)
+    out += result_pages(snapshot, DISPLAY_SCOPE, False, CONFIGS, f'({next(letters)}): Local machine', registry)
     for size, kw in itertools.product((4, 2), ((15, 10), (20, 15))):
         configs = [cfg for cfg in CONFIGS if cfg[1:3] == (size, kw)]
-        out += result_pages(snapshot, DISPLAY_SCOPE, True, configs, f'({next(letters)}): AWS: {size} Gbp, k={kw[0]}, w={kw[1]} (mapping interval)', registry)
+        out += result_pages(snapshot, DISPLAY_SCOPE, True, configs, f'({next(letters)}): AWS: {size} Gbp, k={kw[0]}, w={kw[1]}', registry)
     out += [r'\end{landscape}', r'\restoregeometry', '']
     out += external_pages(external, letters, registry)
     out += gpu_pages(gpu, letters, registry)
