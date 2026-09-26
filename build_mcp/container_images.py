@@ -46,8 +46,7 @@ def run_container_images(*, repository_root, log_handle, deadline, progress):
                 bootstrap = shutil.which("python3.13") or shutil.which("python3.12") or sys.executable
                 run([bootstrap, "-c", "import sys; assert sys.version_info >= (3,12)"])
                 run([bootstrap, "-m", "venv", str(package_venv)])
-            run([str(package_venv / "bin/python"), "-m", "pip", "install",
-                 "python-liquid==2.3.0", "PyYAML==6.0.2"])
+            run([str(package_venv / "bin/python"), "-m", "pip", "install", "python-liquid==2.3.0"])
             environment["PYTHONPATH"] = str(root / "infra/packaging")
             run([str(package_venv / "bin/python"), "-m", "unittest", "discover", "-s",
                  str(root / "infra/packaging/tests")])

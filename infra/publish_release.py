@@ -26,7 +26,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'infra'))
-import build_release_fleet as release_fleet
+import release_inventory as release_state
 
 CONTROL = ROOT / 'reporting/release_publish'
 RELEASE = '0.1.0-alpha.1'
@@ -151,7 +151,7 @@ def publication_inventory():
     manifest = json.loads((ROOT / 'bin_artifacts/packages/manifest.json').read_text())
     state_path = ROOT / 'reporting/package_release_fleet/state.json'
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
-    return manifest, release_fleet.pending_package_repairs(state, manifest)
+    return manifest, release_state.pending_package_repairs(state, manifest)
 
 
 def publication_signature():
@@ -168,8 +168,8 @@ def accepted_packages():
     accepted = []
     seen = set()
     for package in manifest['packages']:
-        if (release_fleet.cell_key(package) in pending
-                or not release_fleet.package_release_ready(package)):
+        if (release_state.cell_key(package) in pending
+                or not release_state.package_release_ready(package)):
             continue
         relative = PurePosixPath(package['file'])
         if relative.is_absolute() or '..' in relative.parts or not relative.parts:

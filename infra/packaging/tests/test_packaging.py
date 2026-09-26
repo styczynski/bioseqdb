@@ -2902,6 +2902,12 @@ class ReleasePublisherTests(unittest.TestCase):
     def publisher(self):
         return runpy.run_path(str(REPOSITORY_ROOT / 'infra/publish_release.py'))
 
+    def test_publisher_inventory_does_not_import_fleet_or_yaml(self):
+        with mock.patch.dict(sys.modules, {
+                'build_release_fleet': None, 'manage_e2e_fleet': None, 'yaml': None}):
+            publisher = self.publisher()
+            self.assertEqual(publisher['release_state'].pending_package_repairs({}, {'packages': []}), set())
+
     def test_current_publication_excludes_diagnosed_repairs_until_replaced(self):
         publisher = self.publisher()
         accepted = publisher['accepted_packages']
