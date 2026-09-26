@@ -411,6 +411,20 @@ def daemon():
         time.sleep(60)
 
 
+def status_summary():
+    """Print concise persisted counts; do not mistake stored state for live PIDs."""
+    path=CONTROL / "state.json"
+    state=json.loads(path.read_text()) if path.exists() else dict(jobs={},results={},failed={})
+    packages=json.loads((ROOT / "bin_artifacts/packages/manifest.json").read_text())
+    return dict(native_packages_collected=packages["validated_package_count"],native_packages_expected=44,
+        container_images_collected=len({fleet.cell_key(r["package"]) for r in state["results"].values()}),
+        container_images_published=len({fleet.cell_key(r["package"]) for r in state["results"].values() if r.get("published")}),
+        container_images_expected=24,multi_platform_tags_published=len(state.get("multi_platform",{})),
+        multi_platform_tags_expected=12,image_failures=state["failed"],
+        workers_last_observed={h:dict(cell=fleet.cell_key(j["package"]),status=j["observed"].get("status"),
+                                    collected=j.get("collected")) for h,j in state["jobs"].items()})
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("worker", "daemon", "status"))
@@ -418,4 +432,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.action == "worker":worker(args.request)
     elif args.action == "daemon":daemon()
-    else:print((CONTROL / "state.json").read_text() if (CONTROL / "state.json").exists() else "{}")
+    else:print(json.dumps(status_summary(),indent=2))
