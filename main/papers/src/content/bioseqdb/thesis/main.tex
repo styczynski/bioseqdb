@@ -77,6 +77,13 @@
 %     title: Conclusions
 %     path: chapters/17_conclusion
 %     description: answers the research questions and summarizes the final system. It identifies the principal limitations and possible extensions.
+% appendices:
+%   - !partial
+%     title: A runnable SQL walkthrough
+%     path: appendices/02_sql_walkthrough
+%   - !partial
+%     title: Configuration reference
+%     path: appendices/03_configuration_reference
 % xrenderonly: chapters/05_minimizers
 
 % Keep thesis hyperlinks legible on a white page.  `breaklinks` also permits
@@ -412,13 +419,15 @@
   \endgroup
 \fi
 
-% % Appendices follow the references and do not enter the chapter synopsis.
-% \if\dataeq{renderonly}{??}
-%   \appendix
-%   \renewcommand{\thechapter}{\arabic{chapter}}
-%   \renewcommand{\theHchapter}{appendix.\arabic{chapter}}
-%   \addtocontents{toc}{\protect\setcounter{tocdepth}{1}}
-%   \chapter{Configuration and SQL tutorials}
-%   \label{app:user-reference}
-%   \input{appendices/01_user_reference}
-% \fi
+% Appendices follow the references and do not enter the chapter synopsis.
+\if\dataeq{renderonly}{??}
+  \appendix
+  \renewcommand{\thechapter}{\arabic{chapter}}
+  \renewcommand{\theHchapter}{appendix.\arabic{chapter}}
+  \addtocontents{toc}{\protect\setcounter{tocdepth}{1}}
+  \foreachdata{appendices}{\appendixi} {
+    \chapter{\data{appendices.\appendixi.title}}
+    \label{r:\data{appendices.\appendixi.ref}}
+    \datapartial{appendices.\appendixi}
+  }
+\fi

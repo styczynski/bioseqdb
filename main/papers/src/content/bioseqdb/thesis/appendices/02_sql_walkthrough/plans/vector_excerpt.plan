@@ -1,0 +1,7 @@
+Custom Scan (VectorAggNode) (actual time=0.067..0.067 rows=1 loops=1)
+  ->  Custom Scan (BioseqScan) on samples (actual time=0.058..0.063 rows=1 loops=1)
+        Bioseq Projected Columns: upload_date, age
+        Bioseq Chunk Group Filters: ((age >= 30) AND (upload_date >= '2026-09-01'::date))
+        Bioseq Chunk Groups Removed by Filter: 0
+        Bioseq Vectorized Filter: ((age >= 30) AND (upload_date >= '2026-09-01'::date))
+...
