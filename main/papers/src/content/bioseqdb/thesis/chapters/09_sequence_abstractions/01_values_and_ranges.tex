@@ -186,7 +186,9 @@ The properties in traits type are either types or constexpr static expressions/f
   \item \path{storage_unit} - type of the underlying storage unit (usually \path{uint8_t}, \path{uint16_t}, \path{uint32_t}, \path{uint64_t})
   \item \path{alphabet_size} - number of symbols in the alphabet
   \item \path{unit_width} - width in bits of the storage unit: \(\text{sizeof(storage\_unit)} \times 8\)
-  \item \path{bits_per_char} - number of bits per symbol: \(\left\lfloor\log_2(\text{alphabet\_size})\right\rfloor\)
+  \item \path{bits_per_char} - stored bits per symbol. The default packed
+  representation uses \(\left\lceil\log_2(\text{alphabet\_size})\right\rceil\),
+  giving two bits for DNA4 and three for DNA5.
   \item \path{letters_per_unit} - number of symbols that can be packed into one storage unit: \(\left\lfloor\frac{\text{unit\_width}}{\text{bits\_per\_char}}\right\rfloor\)
   \item \path{unit_used_bits} - number of bits used in the storage unit (for alphabet sizes that are not a power of two, some bits must stay unassigned): \(\text{letters\_per\_unit} \times \text{bits\_per\_char}\)
   \item \path{unit_leftover_bits} - number of bits leftover in the storage unit: \(\text{unit\_width} - \text{unit\_used\_bits}\)

@@ -184,10 +184,35 @@ backtrack on the CPU. Coordinate-only queries examine at most 16 unvisited
 chain ends in descending score-and-index order and return at most one accepted
 path.
 
-PostgreSQL allows choice 3 only as part of the complete Vulkan pipeline. That
-pipeline performs chaining and trace selection on the GPU. It can also keep a
+In the complete PostgreSQL Vulkan route, choice 3 performs chaining and trace
+selection on the GPU. This route can also keep a
 bounded CIGAR calculation on the GPU when Vulkan extension is enabled. It
 does not enter the generic CPU backtracker. If its requirements are not met,
 PostgreSQL returns an error rather than retrying with a CPU or SIMD algorithm.
+
+\paragraph{The GPU route measured in the campaign.}
+\label{sec:chaining-gpu-campaign-boundary}
+The published GPU campaigns also contain hybrid routes. The local result
+annotations identify GPU sketching and chaining alongside host SIMD Block
+alignment. For the indexed local MPF case with $k=20,w=15$, they also explicitly
+identify CPU chain recovery. The published Vast.ai campaign likewise calculated
+chaining scores on the GPU, then recovered chains on the CPU and ran the
+selected CPU base aligner. These elapsed times therefore include host stages
+as well as GPU execution. The complete Vulkan route described above has a
+different execution boundary, so its design cannot be used to attribute all
+of the campaign time to GPU kernels.
+% Local evidence: ALL_RESULTS_TUPLES.yaml approved_results, 2-Gbp DNA4
+% just_index MPF / vulkan_minimap_integer / vulkan_tiled_dynamic_programming /
+% block_aligner, query_only_framework_iteration_v1. Both k15/w10 and k20/w15
+% comments explicitly identify host SIMD Block alignment; k20/w15 additionally
+% names scalar CPU chain backtracking. No inference about k15/w10 backtracking
+% is required by the paragraph.
+% Campaign evidence: ALL_RESULTS_TUPLES_GPU_VASTAI.yaml, native_build,
+% campaign_local_overrides: CPU-cached scores/predecessors for host backtracking;
+% DOC0440, 2026-09-23T06:38:33Z, CPU profiling of backtracking and Block alignment.
+% Hybrid implementation: bioseq/backend/sequences/chaining/vulkan.cppm,
+% make_chaining_buffer(cpu_readback), score/predecessor allocation and
+% backtrack_chains(). The campaign's frozen build is distinct from the current
+% complete PostgreSQL Vulkan route and its later scheduling changes.
 
 \flushbottom

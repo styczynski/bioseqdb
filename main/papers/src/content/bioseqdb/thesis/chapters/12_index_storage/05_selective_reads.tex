@@ -10,7 +10,7 @@ and using $min(hash)$ and $max(hash)$ values to decide if we should read certain
 The similar logic applies to grouped MPF index as well, but in case of grouped MPF we can also check count array and if the count is very high, then 
 we can abandon readind reparate position array at all (the most frequent minimizers should be filtered out as they are not good candiates for anchors). 
 
-The reader for grouped-MPS/MPS performs the following steps:
+The hash-major MPS reader performs the following steps:
 \begin{enumerate}
   \item Read and check the complete directory, then find hash ranges that intersect with query hashes.
   \item Read the selected controls to find each key's exact global occurrence count
@@ -54,4 +54,32 @@ its long list is loaded. Positions and thresholds are illustrative.}
 \label{fig:format6-streams}
 \end{figure}
 
+\subsection{The reader also determines query execution}
+\label{sec:index-reader-execution}
 
+The current CPU MPS builder uses the hash-major format for supported DNA4
+profiles. Other alphabets retain the grouped-SoA format. Its older reader
+reads and authenticates the complete stored payload, while retaining only the
+query's matching positions. The selective-read steps above therefore do not
+describe every MPS route.
+The native batch path can materialize a shared target for MPF and hash-major
+MPS, then run independent queries in parallel. Grouped MPS instead uses the
+PostgreSQL scanner path, whose query loop is serial. This follows the worker
+boundary in Section~\ref{sec:arch-process-boundary}: workers cannot fetch
+PostgreSQL tuples themselves. The choice therefore affects later sequence
+access and alignment, as well as index loading.
+
+\subsection{Repeated control scans in MPF}
+\label{sec:index-control-scan-waves}
+
+The mapped MPF reader has two lookup routes. Hashes in its supported compact
+domain can use direct lookup, described in Section~\ref{sec:index-direct-lookup}.
+Wider hashes use the stored control arrays instead. This route counts matching
+occurrences, prepares anchor ranges, and then emits anchors through separate
+passes over the controls. The current scheduler groups these scans into query
+waves limited by worker concurrency, so the controls are visited again for
+each wave. The direct route instead attempts to prepare the whole batch at
+once, reducing its wave size if memory admission fails
+(Section~\ref{sec:arch-admission}). Keeping the file mapped avoids rebuilding
+the index, but does not remove repeated traversal or guarantee that its pages
+remain in physical memory (Section~\ref{sec:index-residency}).

@@ -1470,6 +1470,7 @@ Figure~\ref{fig:phase-evolution} shows full evolution of the prototypes. The sca
 \end{figure}
 
 \subsection{Seeding prototype V13: Existmator fix}
+\label{sec:minimizer-divergence-history}
 
 For each chain, minimap2 estimates the per-base sequence divergence
 from a Poisson model on the minimizer-set
@@ -2232,7 +2233,7 @@ Minimap2's \texttt{mm\_sketch} emits each minimizer in an \texttt{mm128\_t},
 two \texttt{uint64\_t} words named \texttt{x} and \texttt{y}.  The C++26
 declaration below shows only interpretation of the fields, while minimap2's itself uses binary shifts and masks to set and extract specific values (which made its manual code analysis very challenging).
 
-\begin{BioseqCppSnippet}
+\begin{BioseqCppSnippet}[caption={Logical fields packed into a minimap2 minimizer.},label={lst:minimap-minimizer-cpp-decl}]
 struct MinimapSketchFields {
   std::uint64_t kmer_hash : 56; (*@\BioseqCodeNote{logical $k$-mer hash}@*)
   std::uint64_t span      :  8; (*@\BioseqCodeNote{input-base span}@*)
@@ -2240,7 +2241,6 @@ struct MinimapSketchFields {
   std::uint64_t last_pos  : 31; (*@\BioseqCodeNote{zero-based final-base position}@*)
   std::uint64_t rid       : 32; (*@\BioseqCodeNote{reference/query-segment ID}@*)
 };
-\label{lst:minimap-minimizer-cpp-decl}
 \end{BioseqCppSnippet}
 
 Minimap2's C code construction is done via:
@@ -2367,7 +2367,7 @@ The $\langle2,2\rangle$ on the figure is just the demonstrative example to show 
 \label{sec:configured-cpu-minimizers}
 
 The PostgreSQL setting \texttt{bioseq.aligner.minimizer.algorithm} chooses the
-minimizer implementation.  Its default value is \texttt{scalar}.  Table~\ref{tab:current-cpu-minimizers}
+minimizer implementation. Its current default is \texttt{bounded\_nthash\_simd}. Table~\ref{tab:current-cpu-minimizers}
 maps the four CPU values to the algorithm families described earlier. Additionally we allow dispatching Vulkan kernel.
 
 \begin{table}[H]
@@ -2380,11 +2380,11 @@ maps the four CPU values to the algorithm families described earlier. Additional
     \texttt{scalar}
       & Scalar rescan with the minimap2 integer hash. \\
     \texttt{simd\_minimap2\_reference}
-      & A1 with the minimap2 integer hash for DNA4.  Other alphabets use
-        scalar rescan. \\
+      & A1 with the minimap2 integer hash for DNA4 and a registered
+        rank-based SIMD route for DNA5. \\
     \texttt{bounded\_nthash\_simd}
-      & A2 with 32-bit ntHash.  The exposed route is limited to DNA4 with
-        $k=15$ and $w=10$. \\
+      & A2 with 32-bit ntHash for DNA4 and DNA5. A specialized
+        $k=15,w=10$ kernel accompanies the generic runtime kernel. \\
     \texttt{two\_stack\_nthash}
       & Normally A3 chronological SIMD with the minimap2 integer hash. \\
     \bottomrule
@@ -2393,13 +2393,43 @@ maps the four CPU values to the algorithm families described earlier. Additional
   \label{tab:current-cpu-minimizers}
 \end{table}
 
-\warn{Limitations}{
+\warn{Kernel selection}{
   \begin{itemize}
-    \item Scalar rescan with the minimap2 integer hash is the default algorithm.
-    \item Bounded ntHash SIMD is limited to DNA4 with $k=15$ and $w=10$.
-    \item We don't provide G3SA-style GPU algorithm or didn't measure performance difference between it and current rescan approach.
+    \item Bounded ntHash accepts $1\leq k\leq31$ and $1\leq w\leq64$
+      within a compatible registered representation. Changing $k,w$ does
+      not automatically select scalar code.
+    \item Older measurements can contain an explicitly recorded
+      SIMD-reference-to-scalar fallback. Such a row describes that historical
+      effective path, not the current DNA5 SIMD implementation.
+    \item The Vulkan implementation uses the rescan approach described in
+      Section~\ref{sec:vulkan-minimizer-scheduling}; it is not G3SA's kernel.
   \end{itemize}
 }
+
+In the bounded DNA5 kernel, \texttt{N} has its own registered ntHash seed
+and participates in rolling hashes like the other alphabet symbols.
+This differs from minimap2, which skips k-mers spanning an ambiguous base;
+DNA5 therefore changes seed semantics as well as packed storage.
+
+\subsection{Vector width and indexed queries}
+\label{sec:minimizer-width-and-query-work}
+
+A wider vector does not by itself predict the speed of a complete query.
+The bounded kernel maintains eight logical streams: it uses two four-lane
+vectors on NEON and one eight-lane vector where that shape is available.
+This applies the instruction-level parallelism idea from
+Section~\ref{sec:v11-v12}, while the cost of each vector operation still
+depends on the processor. The two-stack resident route also has a dual-stream
+implementation, but indexed queries require its chronological continuation
+route. These are separate implementations, not a universal doubling of every
+SIMD stage.
+
+Reusing a target index removes target sketch construction from a query.
+It does not remove sketching of the incoming query sequence. The selected
+minimizer scheme must agree on both sides, as explained in
+Section~\ref{sec:arch-route-admission}. Consequently, nearly equal indexed
+times can mean that query sketching contributes little to the total; they
+do not establish that the selected kernels are identical.
 
 \info{Position locality}{
   In case of generating minimizers we can operate on local coordinates meaning that our minimizer representation can just track position relative to the sequence fragment. Sequence fragmentation in storage is described in later chapters.

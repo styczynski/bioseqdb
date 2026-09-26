@@ -1,98 +1,227 @@
-\subsection{Index versioning}
-\label{sec:index-generations}
-\label{sec:index-physical-persistence}
-\label{sec:index-compatibility}
-
-
-
-\subsection{From stored index rows to a CPU reader file}
+\subsection{Why grouped MPF has a reader file}
 \label{sec:index-mpf5-sidecar}
 \label{sec:index-formats}
 
-The optional grouped MPF path keeps two stored copies of its index data.
-It first writes index rows in PostgreSQL, then creates a file for CPU reads.
-The motivation is repeated searches over a large target. Saving minimizers
-avoids computing them again, but a reader may still need to sort positions
-and rebuild a lookup structure. Grouped arrays make the saved layout usable
-directly. The additional file gives CPU workers stable array ranges without
-extracting heap tuples or copying the full payload into each reader.
-To understand why, distinguish three objects:
-\begin{itemize}
-  \item \textbf{The sequence.} The original packed symbols remain in the
-    sequence-storage relations from the previous chapter.
-  \item \textbf{The index relation.} Separate heap rows hold the computed
-    minimizer controls and positions, split into byte chunks, with generation
-    metadata. This is already an index, not another copy of the sequence.
-  \item \textbf{The reader file.} This file contains the index payload bytes
-    in consecutive ranges, their directory and metadata, and an additional
-    hash-to-positions section. We call this fixed layout a \emph{reader image}.
-    Once published, the image is read-only.
-\end{itemize}
+The reader file lets BioseqDB's CPU workers read a stored minimizer index
+without asking the PostgreSQL backend thread to fetch each index chunk.
+It is an experimental part of the batch-join implementation. There is a
+public SQL path to it, but an ordinary single-table \texttt{mmsearch} query
+does not use it. To explain the problem it addresses, consider this join:
 
-The conversion copies the encoded index payload out of the rows. It does
-not copy PostgreSQL pages or recompute the minimizers. Heap pages contain
-page headers, row headers and other fields around each stored value
-\autocite{postgresql17_storage_page_layout}. Mapping the heap file would
-still leave those fields between payload chunks. It would not expose one
-contiguous index array. The reader image removes that obstacle once during
-index construction.
+\begin{lstlisting}[style=bioseq-index-sql,
+  caption={Search every query sequence against stored reference sequences.},
+  label={lst:index-reader-join-motivation}]
+SELECT r.id AS reference_id, q.id AS query_id
+FROM refs AS r JOIN queries AS q
+  ON mmsearch(r.seq, q.seq);
+\end{lstlisting}
 
-\paragraph{Construction happens once per generation.}
-The current relation-backed builder takes these steps:
+Here \texttt{r.seq} is the target and \texttt{q.seq} is the query sequence.
+An eligible \texttt{BioseqBatchJoin} retains the query rows, prepares one
+target, searches the queries against it, and then moves to the next target.
+A target may have many fragments, each with index chunks in heap rows.
+Saving those chunks avoids computing the target minimizers again. However,
+reading them through PostgreSQL still requires tuple access and extraction
+of the \texttt{bytea} values. BioseqDB's CPU worker threads cannot perform
+that PostgreSQL work themselves. The backend must supply the bytes before
+those workers can use them.
+
+The reader file moves this work to index construction. The builder copies
+the index payloads from the heap rows into consecutive file ranges. A later
+query opens that file with \texttt{mmap}, which gives the process an address
+range backed by the file. Workers can then read the immutable arrays through
+ordinary memory accesses. They do not fetch heap tuples for every index
+chunk or reconstruct a complete private copy of the saved index.
+This concerns access to the minimizer index. The join still reads its input
+tables and fetches sequence symbols when alignment needs them.
+
+Listing~\ref{lst:index-reader-join-motivation} explains the workload, but
+its default read policy does not select the mapped CPU reader. That branch
+currently requires an explicit request for a compatible stored index.
+Section~\ref{sec:index-read-policy} explains this policy, and
+Listing~\ref{lst:index-mapped-user-path} adds the request to the same join.
+The target must also be a complete stored sequence with a compatible index
+generation. Sliced or transformed targets do not meet that requirement.
+Requiring an index on an unsupported query shape produces an error.
+
+Figure~\ref{fig:index-join-read-paths} shows what changes in target
+preparation. Ordinary MPF readers load stored fragment indexes and assemble
+a lookup for the hashes needed by the queries. The grouped reader uses the
+arrays in its file. Both reuse the prepared target across query batches.
+If the executor does not use a stored index, it instead computes a temporary
+lookup from the target sequence.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \foreach \shift/\mode/\heading in
+    {0/0/{(a) Ordinary MPF},7/1/{(b) Grouped MPF}} {
+    \begin{scope}[xshift=\shift cm]
+      \node[anchor=west,font=\bfseries] at (.1,10.65) {\heading};
+      \node at (4.1,10.15) {\texttt{refs}: targets};
+      \draw[fill=black!4,draw=black!55] (2.4,8.08) rectangle (5.8,9.88);
+      \draw[fill=indexGreen!16,draw=indexGreen] (2.4,8.68) rectangle (5.8,9.28);
+      \draw[black!55] (2.4,9.28)--(5.8,9.28);
+      \draw[black!55] (3.45,8.08)--(3.45,9.88);
+      \node at (2.925,9.58) {id};
+      \node at (4.625,9.58) {seq};
+      \node at (2.925,8.98) {$t_0$};
+      \node at (4.625,8.98) {$\cdots$};
+      \node[text=black!50] at (2.925,8.38) {$t_1$};
+      \node[text=black!50] at (4.625,8.38) {$\cdots$};
+      \draw[index arrow] (4.1,7.98)--(4.1,7.27);
+      \node[anchor=west] at (4.3,7.68) {index for $t_0$};
+
+      \ifnum\mode=0
+        \node at (4.1,7.04) {MPF index relation};
+        \foreach \yy in {6.6,6.23,5.86} {
+          \draw[fill=black!6,draw=black!55] (2.7,\yy-.12) rectangle (5.5,\yy+.12);
+          \draw[fill=indexOrange!25,draw=indexOrange] (3.25,\yy-.12) rectangle (5.5,\yy+.12);
+        }
+        \draw[index arrow,indexOrange] (4.1,5.59)--(4.1,4.75);
+        \node[anchor=west,align=left] at (4.32,5.18) {load and\\assemble};
+        \draw[fill=indexOrange!10,draw=indexOrange] (3.0,2.25) rectangle (6.15,4.65);
+        \node at (4.575,4.3) {private CPU lookup};
+      \else
+        \node at (4.1,7.04) {MPF reader image};
+        \draw[fill=indexGreen!7,draw=indexGreen]
+          (2.7,5.74)--(5.5,5.74)--(5.5,6.43)--(5.21,6.72)--(2.7,6.72)--cycle;
+        \draw[indexGreen] (5.21,6.72)--(5.21,6.43)--(5.5,6.43);
+        \foreach \yy in {6.47,6.2,5.93}
+          \draw[line width=3pt,indexGreen!45] (2.98,\yy)--(4.92,\yy);
+        \draw[index arrow,indexGreen] (4.1,5.59)--(4.1,4.75);
+        \node[anchor=west,align=left] at (4.32,5.18) {open and\\\texttt{mmap}};
+        \draw[dashed,fill=indexGreen!6,draw=indexGreen] (3.0,2.25) rectangle (6.15,4.65);
+        \node at (4.575,4.3) {mapped array view};
+      \fi
+      \node[align=center] at (4.575,3.36) {one reader\\for target $t_0$};
+
+      \node at (1.0,5.02) {\texttt{queries}};
+      \draw[fill=indexBlue!6,draw=indexBlue] (.1,2.25) rectangle (1.9,4.65);
+      \draw[indexBlue] (.75,2.25)--(.75,4.65);
+      \foreach \yy in {4.05,3.45,2.85}
+        \draw[indexBlue] (.1,\yy)--(1.9,\yy);
+      \node at (.425,4.35) {id};
+      \node at (1.325,4.35) {seq};
+      \foreach \yy/\q in {3.75/0,3.15/1,2.55/2} {
+        \node at (.425,\yy) {$q_{\q}$};
+        \node at (1.325,\yy) {$\cdots$};
+        \draw[index arrow,indexBlue] (1.98,\yy)--(2.9,\yy);
+      }
+      \node[align=center] at (1.0,1.72) {keep query\\rows};
+      \draw[index arrow] (4.575,2.14)--(4.575,1.55);
+      \node at (4.575,1.27) {target positions for anchors};
+      \draw[black!45] (3.1,.8)--(6.05,.8);
+      \foreach \xx in {3.32,4.02,5.7}
+        \fill[indexGreen] (\xx,.8) circle (2.2pt);
+    \end{scope}
+  }
+\end{tikzpicture}
+\caption{Two ways to prepare the target index for a batch join.
+Both read the query and target tables. For target $t_0$, ordinary MPF loads
+fragment indexes and assembles a private lookup. The grouped MPF reader maps
+an existing file and probes its arrays. The blue arrows represent searches
+for query hashes. Target $t_1$ is processed afterwards. The figure shows the
+reader alternatives, not a switch controlled by the construction setting
+alone. The mapped CPU route requires the read policy from
+Table~\ref{tab:index-read-requirement}.}
+\label{fig:index-join-read-paths}
+\end{figure}
+
+\subsubsection{Build the relation and file together}
+
+The extra file introduces a consistency problem. BioseqDB now stores index
+bytes in both a relation and a file. I handle this by publishing complete
+\emph{generations}, rather than modifying a file while queries read it.
+One generation describes one stored sequence version and one minimizer
+profile. The profile identifies the algorithm, its parameters and the
+representation of the saved minimizers.
+
+For grouped MPF, an explicit \texttt{bioseq.update\_index} call performs
+these steps for each sequence:
 \begin{enumerate}
-  \item \textbf{Build the index rows.} Compute the minimizers and save a new
-    generation's payload, directory and metadata in the index relation.
-  \item \textbf{Write the reader file.} Reread and check that generation's
-    rows in index order. Append their payload bytes to a private construction
-    file. Add the directory, metadata and hash-to-positions section, then finish
-    and check the file header.
-  \item \textbf{Finish the file before publishing the index.} Make the file
-    read-only, synchronize it, give it a new final name without replacing an
-    existing file, and remove the temporary name. Then update the database
-    descriptor and active-generation record in the transaction. Other
-    transactions can select the new generation after commit.
+  \item Compute the minimizers and write the new generation's index rows.
+  \item Read those rows back in index order and validate their contents.
+    Copy their payload bytes into a private construction file. Copying the
+    payload does not copy heap-page headers or recompute the minimizers.
+  \item Add the directory and generation metadata. Where the hash domain
+    supports it, also build the direct lookup described below.
+  \item Finish and validate the file. Make it read-only, synchronize it and
+    install a unique final name without replacing another generation's file.
+  \item Record that file's identity and replace the active-generation record
+    in the same database transaction. Other transactions can select the new
+    generation after commit.
 \end{enumerate}
-The index relation remains after this export. The extra copy costs disk space
-and a complete payload reread during construction. The hash-to-positions section
-also adds construction work and bytes. In the current writer this section is
-always built; the lookup setting chooses how a later query reads the image.
-Figure~\ref{fig:index-control-data-plane} shows generation $g$ and its
-completed file $F_g$.
+The relation remains in the database. Thus this approach pays for a second
+copy of the index bytes and a full reread during construction. In exchange,
+later readers can open the prepared file. A query does not repeat the export.
 
-\paragraph{Direct lookup uses a hash as a bit address.}
+Algorithm~\ref{alg:index-image-lifecycle} shows the construction and read
+operations separately. Here $s$ is the complete stored target sequence,
+$R_g$ is its index relation data for generation $g$, and $\sigma$ is the
+query snapshot. The procedure names are pseudocode.
+
+\begin{algorithm}[htbp]
+\caption{Publish a complete MPF generation, then open its reader file.}
+\label{alg:index-image-lifecycle}
+\small
+\begin{algorithmic}[1]
+  \Procedure{BuildMappedMPF}{$s$}
+    \State $g\gets$ a new generation number
+    \State $R_g\gets\Call{BuildAndStoreMPF}{s,g}$
+    \State $F\gets\Call{CreatePrivateFile}{}$
+    \ForAll{payload chunks $c$ of $R_g$, in stored index order}
+      \State \Call{CheckChunk}{$c$}
+      \State \Call{AppendPayload}{$F,c$}
+    \EndFor
+    \State \Call{AddDirectoryAndMetadata}{$F,R_g$}
+    \If{the hash domain supports direct lookup}
+      \State \Call{AddDirectLookup}{$F,R_g$}
+    \EndIf
+    \State $F_g\gets\Call{CheckAndPublishReadOnlyFile}{F,g}$
+    \State \Call{UpdateDescriptorAndActiveGeneration}{$s,g,F_g$}
+    \State \Return $g$ \Comment{the caller commits the transaction}
+  \EndProcedure
+  \Statex
+  \Procedure{OpenMappedMPF}{$s,\sigma$}
+    \State $D\gets\Call{ReadAndCheckVisibleDescriptor}{s,\sigma}$
+    \State $F_g\gets\Call{OpenAndCheckFileReadOnly}{D}$
+    \State $M\gets\Call{MapFileReadOnly}{F_g}$
+    \State \Call{CheckRequiredHeadersAndRanges}{$M,D$}
+    \State \Return a reader whose session keeps $M$ and $F_g$ open
+  \EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{What the reader finds in the file}
 \label{sec:index-direct-lookup}
-The extra section combines equal hashes from all fragments of one target
-sequence. It has three kinds of data:
+
+The file contains the grouped fragment arrays already described in
+Figure~\ref{fig:index-mpf-mps}, together with the metadata needed to locate
+them. A worker can search the fragment controls and then read the selected
+positions. This is the \texttt{control\_block\_scan} route.
+
+For supported 32-bit hash domains, the writer also adds a sequence-wide
+hash lookup. It combines equal hashes from the target's fragments, so the
+reader does not have to search every fragment for the same hash. This is
+the \texttt{direct\_compact\_hash\_lookup} route. It contains:
 \begin{itemize}
-  \item \textbf{Membership bits.} Bit $B[h]$ is one when hash $h$ has a
-    position list stored in this section. The hash is the bit's address, so it need not
-    be stored again as a key beside that list.
+  \item \textbf{Membership bits.} Bit $B[h]$ is one when hash $h$ has a saved
+    position list. The hash itself is the bit address.
   \item \textbf{List records.} Records follow increasing hash order. The
-    number of set bits before $h$, called its \emph{rank}, gives its record
-    number. Saved counts at each 256-hash boundary make this calculation
-    local: add the saved count to the number of set bits before $h$ in that group.
-    A record gives the list's start, total count, and number of strand-zero
-    positions. Strand-zero positions precede strand-one positions.
+    number of set bits before $h$, called its \emph{rank}, gives the record
+    number. A saved count at each 256-hash boundary avoids counting from the
+    start of the bitmap. Each record gives a list start, its total count and
+    the number of strand-zero positions.
   \item \textbf{Positions.} The list start is an entry number in a shared
-    position array, not a file-byte offset. Positions include a strand bit.
-    When a list has one 32-bit position, the record stores it directly.
+    position array. Strand-zero positions precede strand-one positions, and
+    each encoded position includes its strand bit. A single 32-bit position
+    can be stored directly in its list record.
 \end{itemize}
 
-In Figure~\ref{fig:index-control-data-plane}, hash 5 has one earlier set
-bit. Its rank is therefore 1. Record 1 gives start 2 and count 2, so the
-reader uses posting entries $[2,4)$, which contain positions 40 and 230.
-This is direct addressing followed by a short bit count, with no hash-table
-collision search or reconstruction of a target-wide C++ map.
-
-An unset bit means no list is retained in this extra section. It can mean
-either that the hash is absent or that its sequence-wide count exceeds the
-saved cap, currently 65,534. The original fragment payload remains stored.
-A query can impose a lower positive occurrence limit, but cannot exceed the
-saved cap on this direct route. The $k=15$ profile used below has $2^{30}$
-possible hash values. Its membership bitmap occupies 128~MiB and its saved counts occupy 16~MiB,
-before list records and positions. This fixed space cost favors large
-targets. It is a file-size cost, not a requirement to keep every mapped page
-in RAM at once.
+In Figure~\ref{fig:index-control-data-plane}, one set bit precedes hash 5.
+Its record number is therefore 1. Record 1 gives start 2 and count 2, which
+selects entries $[2,4)$ containing positions 40 and 230.
 
 \begin{figure}[htbp]
 \centering
@@ -162,373 +291,126 @@ in RAM at once.
     at (6.85,.85) {230};
   \draw[index arrow,indexGreen] (selectedrecord.south)--(6.65,2.1)--(6.175,2.1)--(6.175,1.22);
 \end{tikzpicture}
-\caption{Building the reader image and using its direct lookup. The upper
-panel copies chunk payloads and adds a lookup across the target's fragments.
-The lower panel uses illustrative hashes 2, 5 and 7, each with two positions.
-Only the bitmap's first eight bits are shown. Its first 256-hash group has
-saved count zero. Hash 5 selects bit 5, whose rank selects record 1; that
-record selects posting entries 2 and 3.
-Green marks this lookup. Positions are decoded sequence coordinates;
-all strands are zero, and the record's strand count is omitted here.}
+\caption{The reader file for an MPF generation with direct hash lookup.
+Panel~(a) shows the index bytes copied from heap rows into consecutive file
+ranges. The direct-lookup section is added for supported 32-bit hash domains.
+Panel~(b) looks up hash 5 in a small illustrative bitmap. One set bit precedes
+it, so its record number is 1. That record selects position entries 2 and 3.
+All illustrated positions have strand zero. The stored strand count is omitted.}
 \label{fig:index-control-data-plane}
 \end{figure}
 
-\paragraph{Queries open the file rather than exporting it again.}
-The CPU reader first validates the source and reads the generation descriptor
-under the query snapshot. It opens the matching file read-only, checks its
-identity and size, and maps it with \texttt{mmap}. Mapping gives the process
-an address range through which it can read the file. After header and range
-checks, the reader uses views of the mapped index arrays. It still allocates
-metadata and query work buffers, but does not copy the complete index
-payload into a new array. One prepared reader can serve several query
-sequences in a batch. A later prepared reader can reopen the same file.
+An unset bit can mean that the hash is absent or that its sequence-wide
+occurrence count exceeds the saved limit, currently 65,534. The original
+fragment payload remains in the file. A direct-lookup query can use a lower
+positive occurrence limit, but cannot recover a list omitted at construction
+by asking for a higher limit.
 
-Algorithm~\ref{alg:index-image-lifecycle} separates the two operations.
-Here $s$ is the complete, unchanged stored target sequence, $R_g$ denotes
-its index rows for generation $g$, and $\sigma$ is the query snapshot.
-The named operations are pseudocode, not an API.
-File and database errors stop the operation; registered cleanup releases
-partly opened resources. The build runs within the caller's transaction.
+Direct addressing has a substantial space cost. With the minimap2 integer
+hash and $k=15$, the bitmap covers $2^{30}$ hashes and occupies 128~MiB.
+The saved rank counts occupy another 16~MiB. The current default bounded
+ntHash profile uses a 32-bit hash domain, giving 512~MiB and 64~MiB instead.
+Both figures exclude list records and positions. The writer builds this
+section for supported domains even if a later query chooses fragment
+controls. Wider hashes use the fragment controls without this section.
 
-\begin{algorithm}[htbp]
-\caption{Build an MPF reader image once; open it for later queries.}
-\label{alg:index-image-lifecycle}
-\small
-\begin{algorithmic}[1]
-  \Procedure{BuildMappedMPF}{$s$}
-    \State $g\gets$ a new generation number
-    \State $R_g\gets\Call{BuildAndStoreMPF}{s,g}$
-    \State $F\gets\Call{CreatePrivateFile}{}$
-    \ForAll{payload chunks $c$ of $R_g$, in stored index order}
-      \State \Call{CheckChunk}{$c$}
-      \State \Call{AppendPayload}{$F,c$}
-    \EndFor
-    \State \Call{AddMetadataAndDirectLookup}{$F,R_g$}
-    \State $F_g\gets\Call{CheckAndPublishReadOnlyFile}{F,g}$
-    \State \Call{UpdateDescriptorAndActiveGeneration}{$s,g,F_g$}
-    \State \Return $g$ \Comment{the caller commits the transaction}
-  \EndProcedure
-  \Statex
-  \Procedure{OpenMappedMPF}{$s,\sigma$}
-    \State $D\gets\Call{ReadAndCheckVisibleDescriptor}{s,\sigma}$
-    \State $F_g\gets\Call{OpenAndCheckFileReadOnly}{D}$ \Comment{check identity and size}
-    \State $M\gets\Call{MapFileReadOnly}{F_g}$
-    \State \Call{CheckHeaderAndRanges}{$M,D$}
-    \State \Return a reader using $M$ while the read session owns the mapping and file
-  \EndProcedure
-\end{algorithmic}
-\end{algorithm}
-
-\paragraph{Which SQL queries use the image?}
-The public function \texttt{bioseq.update\_index} builds the file when grouped
-MPF construction is enabled. Later SQL can reach the mapped CPU reader
-through an eligible \texttt{BioseqBatchJoin}. This custom execution node
-handles an ordinary inner join whose \texttt{mmsearch} call compares a
-stored target column with a query column. The first argument names the
-target; the second supplies the queries. In the mapped MPF case, the executor:
-\begin{enumerate}
-  \item \textbf{Keeps the query rows.} These can include lazy sequence
-    values; retaining a row need not load all its symbols.
-  \item \textbf{Takes one target row.} Its stored locator identifies the
-    target whose compatible index generation must be opened.
-  \item \textbf{Opens the existing image.} The reader validates and maps
-    the file built earlier by \texttt{update\_index}. Search does not repeat
-    that construction.
-  \item \textbf{Searches the retained queries.} Query minimizer hashes
-    find target positions in the mapped arrays. Those positions supply
-    anchors for chaining and alignment. The same reader serves all query
-    groups for this target.
-  \item \textbf{Moves to the next target.} The target's reader is released,
-    while its file stays available for later SQL searches.
-\end{enumerate}
-A query input with one row is allowed. Two aliases of the same table can
-also supply the two inputs. Thus ``batch'' describes how the executor reuses
-target preparation, not a separate SQL interface or a requirement to search
-two different tables.
-
-The mapped branch currently requires a complete, unchanged stored target,
-a compatible CPU profile and generation, and
-\texttt{index\_read\_requirement = 2}: \emph{require a compatible stored index}.
-An ordinary single-table search such as
-\texttt{WHERE mmsearch(r.seq, 'ACGT...')} does not use this mapped reader.
-Requiring an index does not turn that scan into the two-input join; an
-unsupported required read fails. Even the \texttt{BioseqBatchJoin} name in
-\texttt{EXPLAIN} is insufficient, because a separate variant for transformed
-operands has the same name and rejects this requirement. The example below
-uses plain columns and returns identifiers, leaving the stored target in
-the form needed by the mapped reader.
-
-\paragraph{Both approaches still read the input tables.}
-Figure~\ref{fig:index-join-read-paths} compares two ways to prepare the
-target lookup inside a CPU batch join. In both, \texttt{queries} supplies
-query rows and \texttt{refs} supplies target rows. The difference is the
-source of the target's minimizer lookup:
-\begin{itemize}
-  \item \textbf{Ordinary MPF:} read and decode the stored fragment indexes,
-    then assemble a private lookup for this join, containing the hashes needed by the retained
-    queries. Reuse that lookup across the target's query groups. A cache of
-    stored byte chunks can help the reads, but this join still assembles its
-    own lookup.
-  \item \textbf{Grouped MPF:} open the saved image and use views of its
-    arrays. This avoids assembling the private target lookup above.
-\end{itemize}
-Both still fetch sequence symbols needed for base alignment from sequence
-storage. The mapped image supplies the seed index. If no compatible stored
-index is used, a third choice is to compute a transient lookup from the
-target sequence during the query.
-
-The figure assumes that the two indexes were built beforehand: ordinary
-construction with grouped generation disabled on the left, and grouped
-construction enabled on the right. The right-hand query must also select
-the supported mapped-reader path. Changing the construction setting alone does
-not switch the join's reader.
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
-  \foreach \shift/\mode/\heading in
-    {0/0/{(a) Ordinary MPF},7/1/{(b) Grouped MPF}} {
-    \begin{scope}[xshift=\shift cm]
-      \node[anchor=west,font=\bfseries] at (.1,10.65) {\heading};
-      \node at (4.1,10.15) {\texttt{refs}: targets};
-      \draw[fill=black!4,draw=black!55] (2.4,8.08) rectangle (5.8,9.88);
-      \draw[fill=indexGreen!16,draw=indexGreen] (2.4,8.68) rectangle (5.8,9.28);
-      \draw[black!55] (2.4,9.28)--(5.8,9.28);
-      \draw[black!55] (3.45,8.08)--(3.45,9.88);
-      \node at (2.925,9.58) {id};
-      \node at (4.625,9.58) {seq};
-      \node at (2.925,8.98) {$t_0$};
-      \node at (4.625,8.98) {$\cdots$};
-      \node[text=black!50] at (2.925,8.38) {$t_1$};
-      \node[text=black!50] at (4.625,8.38) {$\cdots$};
-      \draw[index arrow] (4.1,7.98)--(4.1,7.27);
-      \node[anchor=west] at (4.3,7.68) {index for $t_0$};
-
-      \ifnum\mode=0
-        \node at (4.1,7.04) {MPF index relation};
-        \foreach \yy in {6.6,6.23,5.86} {
-          \draw[fill=black!6,draw=black!55] (2.7,\yy-.12) rectangle (5.5,\yy+.12);
-          \draw[fill=indexOrange!25,draw=indexOrange] (3.25,\yy-.12) rectangle (5.5,\yy+.12);
-        }
-        \draw[index arrow,indexOrange] (4.1,5.59)--(4.1,4.75);
-        \node[anchor=west,align=left] at (4.32,5.18) {load and\\assemble};
-        \draw[fill=indexOrange!10,draw=indexOrange] (3.0,2.25) rectangle (6.15,4.65);
-        \node at (4.575,4.3) {private CPU lookup};
-      \else
-        \node at (4.1,7.04) {MPF reader image};
-        \draw[fill=indexGreen!7,draw=indexGreen]
-          (2.7,5.74)--(5.5,5.74)--(5.5,6.43)--(5.21,6.72)--(2.7,6.72)--cycle;
-        \draw[indexGreen] (5.21,6.72)--(5.21,6.43)--(5.5,6.43);
-        \foreach \yy in {6.47,6.2,5.93}
-          \draw[line width=3pt,indexGreen!45] (2.98,\yy)--(4.92,\yy);
-        \draw[index arrow,indexGreen] (4.1,5.59)--(4.1,4.75);
-        \node[anchor=west,align=left] at (4.32,5.18) {open and\\\texttt{mmap}};
-        \draw[dashed,fill=indexGreen!6,draw=indexGreen] (3.0,2.25) rectangle (6.15,4.65);
-        \node at (4.575,4.3) {mapped array view};
-      \fi
-      \node[align=center] at (4.575,3.36) {one reader\\for target $t_0$};
-
-      \node at (1.0,5.02) {\texttt{queries}};
-      \draw[fill=indexBlue!6,draw=indexBlue] (.1,2.25) rectangle (1.9,4.65);
-      \draw[indexBlue] (.75,2.25)--(.75,4.65);
-      \foreach \yy in {4.05,3.45,2.85}
-        \draw[indexBlue] (.1,\yy)--(1.9,\yy);
-      \node at (.425,4.35) {id};
-      \node at (1.325,4.35) {seq};
-      \foreach \yy/\q in {3.75/0,3.15/1,2.55/2} {
-        \node at (.425,\yy) {$q_{\q}$};
-        \node at (1.325,\yy) {$\cdots$};
-        \draw[index arrow,indexBlue] (1.98,\yy)--(2.9,\yy);
-      }
-      \node[align=center] at (1.0,1.72) {keep query\\rows};
-      \draw[index arrow] (4.575,2.14)--(4.575,1.55);
-      \node at (4.575,1.27) {target positions for anchors};
-      \draw[black!45] (3.1,.8)--(6.05,.8);
-      \foreach \xx in {3.32,4.02,5.7}
-        \fill[indexGreen] (\xx,.8) circle (2.2pt);
-    \end{scope}
-  }
-\end{tikzpicture}
-\caption{The same SQL inputs, with different target-index preparation.
-Target $t_0$ is selected while $t_1$ waits. The blue arrows represent query
-hash lookups through one reused reader. On the left, stored fragment
-indexes become a private CPU lookup. On the right, the dashed view refers
-to the file's existing arrays; it is not another complete payload copy.
-Both indexes were built before the query. Generation checks and later
-sequence-symbol reads are omitted.}
-\label{fig:index-join-read-paths}
-\end{figure}
-
-\paragraph{Construction settings and read settings have different jobs.}
+\subsubsection{Requesting the mapped reader from SQL}
 \label{sec:index-example-settings}
-A GUC is a PostgreSQL configuration setting changed with \texttt{SET}.
-Three settings control the construction choices used here:
-\begin{itemize}
-  \item \texttt{bioseq.aligner.grouped\_soa\_generation.enabled}\newline
-    Default: \texttt{off}. Makes \texttt{update\_index} build a grouped generation.
-    For MPF this writes both relation rows and the reader image. For MPS it
-    writes the separate relation streams. Turning the setting on does not
-    itself build an index, convert an older layout, or select a query reader.
-    Turning it off later does not remove a completed generation.
-  \item \texttt{bioseq.index.async\_persistence.enabled}\newline
-    Default: \texttt{on}. Permits eligible background persistence work. It does not
-    make an explicit \texttt{update\_index} call asynchronous.
-  \item \texttt{bioseq.index.recompute\_async\_persistence.enabled}\newline
-    Default: \texttt{off}. Additionally permits a query that recomputes a lookup to
-    request persistence for later queries. It needs the preceding setting
-    too. Turning it off does not stop a query from building a transient
-    lookup to answer the current search.
-\end{itemize}
 
-The current deferred implementation rebuilds eligible ordinary MPS indexes.
-It stages source identifiers and parameters, then attempts to submit work
-when the transaction commits. Abort discards the request. A background
-worker reopens the source and checks its policy before rebuilding it.
-Queue availability and these checks can prevent persistence, so enabling
-both settings does not promise that every recomputed lookup will be saved.
-This mechanism does not build the grouped MPF image. Explicit grouped
-construction rejects either asynchronous-persistence setting being on;
-both must therefore be off in the example.
+Listing~\ref{lst:index-mapped-user-path} assumes committed
+\texttt{refs(id,seq)} and \texttt{queries(id,seq)} tables using the
+\texttt{bioseq} table access method. Their sequence columns have type
+\texttt{bioseq.seq('dna4',32)}. The target table starts without an older
+ordinary MPF relation. The example uses the current defaults listed in
+Section~\ref{sec:index-runtime-selection}, including grouped construction
+and disabled insertion maintenance.
 
-Listing~\ref{lst:index-mapped-user-path} shows the public calls. It assumes
-committed DNA4 sequences with 32-bit packed units in a new permanent
-\texttt{refs(id,seq)} table using the Bioseq table access method, and query
-sequences with the same alphabet and packing in \texttt{queries(id,seq)}.
-Load \texttt{refs} with
-\texttt{bioseq.index.insert\_maintenance.enabled = off}. This setting
-disables insertion-time index maintenance, including symbol counts; it
-avoids creating an ordinary MPF relation during this load. It does not
-remove one that already exists. Grouped construction is not an automatic
-conversion of that older layout. Other settings not shown retain their
-ordinary defaults.
-
-The remaining settings select compatible algorithms and execution:
-\begin{itemize}
-  \raggedright
-  \item \texttt{bioseq.aligner.minimizer.algorithm = 'two\_stack\_nthash'}
-    \newline Selects the SIMD implementation with the minimap2 integer hash
-    listed in Table~\ref{tab:current-cpu-minimizers}. Construction and search
-    must agree on that implementation.
-    The accompanying \texttt{kmer\_size} and \texttt{window\_size} settings
-    set the query's $k$ and $w$.
-    The current grouped builder uses the fixed $k=15,w=10$ profile, so the
-    query must match it.
-  \item \texttt{bioseq.aligner.chaining.algorithm = 'simd\_minimap2'}
-    \newline Selects CPU chaining. Setting
-    \texttt{bioseq.aligner.base\_alignment.algorithm} to
-    \texttt{'block\_aligner'} selects base alignment. These choices govern later alignment stages;
-    they do not change the stored minimizer arrays.
-  \item \texttt{bioseq.aligner.vulkan.enabled = off}\newline
-    Marks Vulkan as
-    unavailable to the aligner. Together with the CPU algorithms and the other default
-    settings, this gives a CPU example. It does not rewrite any GPU
-    algorithm choices previously made in the session.
-  \item \texttt{max\_parallel\_workers\_per\_gather = 0}\newline
-    Prevents PostgreSQL
-    parallel query workers \autocite{postgresql17_parallel_resources}.
-    The current batch path needs an eligible serial query input. BioSeqDB
-    can still use its own CPU workers and SIMD instructions.
-  \item \texttt{bioseq.index.sequence\_read.enabled = on}\newline
-    Allows stored
-    reads for permissive searches. The per-call requirement 2 is stronger:
-    it forces stored reading and reports a missing compatible index as an
-    error. It is an \texttt{aligner\_options} argument, not a GUC.
-  \item \texttt{bioseq.aligner.fragment\_minimizer.lookup\_route}\newline
-    Selects
-    the grouped MPF lookup method. The default \texttt{control\_block\_scan}
-    reads fragment controls. The example selects
-    \texttt{direct\_compact\_hash\_lookup}, which uses the bitmap and records
-    in Figure~\ref{fig:index-control-data-plane}. Both methods map the same
-    image; changing between them does not require rebuilding it.
-\end{itemize}
+The default minimizer algorithm, $k=15$ and $w=10$ are sufficient and need
+no extra \texttt{SET} statements. Construction uses the configured profile
+when it is present in the compiled profile registry. A later query must
+match it.
 
 \noindent\begin{minipage}{\linewidth}
 \begin{lstlisting}[style=bioseq-index-sql,
-  caption={Explicitly build and use the mapped MPF path.},
+  caption={Build grouped MPF and request its persisted CPU reader.},
   label={lst:index-mapped-user-path}]
-BEGIN;
-SET max_parallel_workers_per_gather = 0;
-SET bioseq.aligner.vulkan.enabled = off;
-SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';
-SET bioseq.aligner.minimizer.kmer_size = 15;
-SET bioseq.aligner.minimizer.window_size = 10;
-SET bioseq.aligner.chaining.algorithm = 'simd_minimap2';
-SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';
-SET bioseq.index.async_persistence.enabled = off;
-SET bioseq.index.recompute_async_persistence.enabled = off;
-SET bioseq.aligner.grouped_soa_generation.enabled = on;
-
 SELECT bioseq.update_index('refs'::regclass,
                           'minimizers_per_fragment');
-COMMIT;
 
-SET bioseq.index.sequence_read.enabled = on;
-SET bioseq.aligner.fragment_minimizer.lookup_route =
-  'direct_compact_hash_lookup';
-SELECT bioseq.set_active_read_index('refs'::regclass,
-                                   'minimizers_per_fragment');
-SELECT r.id, q.id
+SELECT r.id AS reference_id, q.id AS query_id
 FROM refs AS r JOIN queries AS q
   ON mmsearch(r.seq, q.seq,
               aligner_options(index_read_requirement => 2));
 \end{lstlisting}
 \end{minipage}
 
-Plain \texttt{SET} survives a successful \texttt{COMMIT}, so the later query
-keeps the chosen algorithms and parameters. \texttt{SET LOCAL}, used in the
-MPS example below, instead restores the previous session value when the
-transaction ends \autocite{postgresql17_set}. The function
-\texttt{set\_active\_read\_index} records which index the column's searches
-should use; it is a catalog change, not a GUC or an index build.
+MPF is the default active read index. If the table previously selected MPS,
+\path{bioseq.set_active_read_index} must select MPF again. This catalog
+choice is separate from building the index. Table~\ref{tab:index-read-requirement}
+explains the value 2 in the listing.
 
-Grouped MPS reads its relation-backed streams. The grouped MPF GPU path
-reads the complete relation payload into device arrays. Neither uses this
-CPU reader file.
+The code path is concrete: the batch executor prepares a target through
+\path{prepare_cpu_persisted_native_target}, which calls
+\path{open_exact_minimizer_fragment_image_pg} for grouped MPF.
+The resulting reader remains available across query batches for that target.
+\texttt{EXPLAIN} can show an executable
+\texttt{require\_compatible\_persisted} plan. To establish that a particular
+query actually read the index, execution must also succeed and report
+persisted targets in \texttt{EXPLAIN ANALYZE}. The custom node's name alone
+is insufficient, since transformed-input variants share that name.
 
-The mapped path is implemented and callable through public SQL, but remains
-an optional, experimental path: construction is disabled by default,
-supported query shapes and profiles are restricted, and automatic removal
-of retired images and complete recovery support remain unfinished.
+Grouped MPS uses its relation-backed streams. The grouped MPF GPU reader
+also opens the mapped file, then prepares device data from it. The CPU
+worker access explained here is therefore one use of the file.
 
-\paragraph{RAM is an alternative, not the opposite of a mapped file.}
-An index kept in RAM can be fast while it remains available. BioSeqDB's
-ordinary index caches already retain prepared CPU objects. However, a new
-backend may have to read and reconstruct its own copy, and an index may be
-larger than the memory available for that copy.
+\subsubsection{What happens when the source changes?}
+\label{sec:index-file-consistency}
 
-A mapped file still uses RAM: the operating system keeps file pages in its
-page cache. Read-only mappings in different processes can use the same
-cached file pages. Pages can be loaded as needed and reclaimed under memory
-pressure without making each backend retain the whole index in a private
-array. This is the performance reason for the extra representation: avoid
-repeated tuple extraction and full-payload copies at query preparation.
-It is not a guarantee of faster search. A cold query can wait for page reads,
-and a broad lookup can touch much of the file. Building the image also costs
-an extra write, checks and synchronization. A warm in-memory index remains
-a useful comparison.
-
-\paragraph{Releasing a reader and deleting its file are different steps.}
-The file has the following lifecycle:
+There is no continuously updated file mirroring a mutable index relation.
+For grouped MPF, the relation rows and file are published as one immutable
+generation. The following cases explain what that means for SQL writes:
 \begin{itemize}
-  \item \textbf{During construction:} a private temporary name identifies
-    the unfinished file. Publication installs a distinct final name.
-  \item \textbf{On transaction abort:} registered file actions attempt to remove the
-    transaction's unfinished or newly published files after checking their
-    identity. On commit, the completed file is kept.
-  \item \textbf{When a reader finishes:} its PostgreSQL resource owner
-    unmaps the address range and closes the file descriptor. The file remains
-    available for another reader. Error cleanup releases these resources too.
-  \item \textbf{After replacement or source deletion:} visibility and source
-    checks decide whether a reader may use the old generation. The current
-    query and rebuild paths do not automatically reclaim its retired image.
+  \item \textbf{Insert a new row with the defaults.} The source row is saved,
+    but insertion maintenance is disabled, so no minimizer generation or
+    reader file is built for it. A later explicit \texttt{update\_index}
+    builds the missing index along with the table's other visible sequences.
+    An eligible query requiring persistence fails if it reaches an unindexed
+    target. A permissive query can compute its lookup during execution.
+  \item \textbf{Enable insertion maintenance.} Ordinary SQL insertion rejects
+    grouped minimizer maintenance when an enabled minimizer index has
+    \texttt{UPDATE\_ON\_INSERT} policy. It does not update the relation and
+    quietly leave the file behind. Section~\ref{sec:index-update-policy}
+    explains ordinary maintenance and the separate batched \texttt{bioseq.load}
+    path.
+  \item \textbf{Update a sequence.} BioseqDB writes a replacement source row.
+    Its index must describe that replacement. The old generation cannot serve
+    it because readers validate the source identity and visibility before
+    opening the file. With insertion maintenance disabled, rebuild after
+    committing the replacement.
+  \item \textbf{Rebuild the index.} A new generation and file replace the active
+    descriptor transactionally. An existing file is not overwritten.
+  \item \textbf{Abort the build.} The relation changes roll back. Registered
+    abort actions attempt to remove the build's new file after checking its
+    identity. A committed file remains available for later queries.
 \end{itemize}
 
-A missing or damaged image causes the required mapped read to fail. The
-query does not recreate it from the relation. An explicit rebuild produces a
-new generation and image. The file is derived data outside ordinary relation
-WAL. Synchronizing it does not establish a recovery protocol or ensure that
-a backup contains a matching file and database descriptor.
-Its relation-backed generation also uses unlogged payload
-relations. Crash recovery, backup and removal of orphaned files therefore
-need explicit support rather than an assumption that PostgreSQL manages the
-image like a heap relation.
+\subsubsection{Costs and unfinished work}
+
+A mapping still uses RAM. The operating system loads file pages when they
+are touched and can share those pages between read-only mappings. This
+avoids retaining a complete private payload copy in every backend. It does
+not remove disk reads for a cold file, the temporary buffers used by the
+query, or the cost of writing the extra representation.
+
+Closing a reader unmaps its address range and closes its file descriptor.
+It does not delete the file. Rebuilding retains retired generations, and
+deleting a source row does not remove its reader file. A required read of a missing or
+invalid file fails. It does not reconstruct that file during the search.
+An explicit rebuild is needed to publish another generation.
+
+These limits are why I treat the path as experimental even though grouped
+construction is now enabled by default. Automatic reclamation of retired
+files is unfinished. The file is outside PostgreSQL relation WAL, and its
+index payload relations are unlogged. File synchronization alone does not
+provide crash recovery or a backup protocol that keeps descriptors and
+files together.

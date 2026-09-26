@@ -2,7 +2,44 @@
 \section{From a seed chain to a base-level alignment}
 \label{sec:final-alignment-role}
 
-\todo{write!}
+Chaining identifies a plausible correspondence between query and target
+positions. Final alignment resolves the bases between the anchors: it assigns
+a score and, when requested, reconstructs the substitutions, insertions and
+deletions as a CIGAR. This is the dynamic-programming problem introduced in
+Section~\ref{sec:exact-dp}. BioseqDB divides a chained region into an extension
+on each flank and fills between selected anchors. Consequently, the number
+and geometry of these subproblems matter as well as the total read length.
+
+\subsection{The two CPU alignment contracts}
+\label{sec:final-alignment-cpu-contracts}
+
+KSW2 and Block Aligner both use SIMD, but they do not search the same set of
+matrix cells or implement the same scoring contract. KSW2 supports two affine
+gap penalties, a fixed band and Z-drop stopping. Z-drop allows extra score
+loss when the path moves away from its previous diagonal, so that a long gap
+need not stop an extension immediately. The ordinary gap-fill path also uses
+an approximate maximum; requests for an exact edit count disable its band
+and Z-drop restrictions.
+
+Block Aligner uses the first affine gap penalty and a block that moves,
+grows and shrinks through the matrix~\cite{block_aligner_paper}. Fills between
+anchors use its global mode; flanks use its own X-drop rule, which requires
+two consecutive low-scoring steps. The current pipeline supplies minimum
+and maximum block sizes of 16 and 32. Increasing these limits can explore
+more cells around gaps, at the cost of more work and trace storage. Neither
+the read length nor an end-to-end timing alone establishes which limits
+should be changed.
+
+\label{sec:final-alignment-fused-work}
+The implementation also tries to prove that an equal-length gap has a unique
+straight-diagonal optimum before running Block dynamic programming. A
+successful proof produces the score and trace directly; other gaps still use
+the adaptive recurrence. This shortcut has its own geometry, sequence-storage
+and scoring restrictions. Both aligners otherwise combine dynamic
+programming, trace storage, traceback and CIGAR construction in one invocation.
+A timer surrounding that invocation therefore measures more than output
+formatting. Equal match counts do not establish equal CIGARs, scores or
+search effort between the two contracts.
 
 % Chaining identifies an ordered set of anchors with plausible query and target
 % coordinates. It does not determine the substitutions, insertions, and

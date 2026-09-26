@@ -64,6 +64,23 @@ Internally I distinguish several access policies which are specified by the pipe
 
 \info{Borrowing}{Borrowing can fail if the region for example starts in the middle of storage unit in packed sequence, then we cannot reuse that memory chunk as it's misaligned}
 
+\subsection{Copying ranks from a PostgreSQL sequence}
+\label{sec:sequence-pg-rank-copy}
+
+The PostgreSQL source-provider view keeps its scanner and packed fragment
+slots in the read session. A rank request visits the requested symbols,
+looks up each symbol's fragment in that scanner and unpacks its rank.
+Repeated small requests can reuse packed fragments, but still repeat the
+callback and symbol-extraction work; they need not read the fragment again
+from disk or decode the whole fragment into ranks.
+Retaining a packed target for the alignment stage avoids these
+source-provider calls, although an algorithm requesting byte ranks must
+still unpack the selected interval.
+% Source: typed_support_parts/scanner_row.cppm -> source_provider_promotion.cppm
+% -> pg/types/compact_sequence/view_session.cppm: facade_ptr_at/emit_tree_range
+% -> pg/storage/scanner/source_scanner/entry.cppm: read_domain_ranks and
+% typed_scanner_read_ranks; fragment_scanner.cppm: load_fragment cache hits.
+
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[x=0.97cm,y=0.90cm,font=\footnotesize,

@@ -1,11 +1,14 @@
 \subsection{BioseqDB all cache layers}
 \label{sec:pg-storage-caches}
 
-As presented in previous figures as "chunk cache"~\ref{fig:sequence-scan-lifecycle}~\ref{lst:sequence-scan-lifecycle-steps} and as "column cache"~\ref{fig:execcustomscan-dispatch}, there's 
-cache for column decompression.
+The optional column cache stores decompressed stripe chunks. It is separate
+from the scanner-owned packed fragment slots in
+Figure~\ref{fig:sequence-scan-lifecycle}.
 
-The cache is disabled by default, but can be enabled by setting \path{bioseq.column_cache.enabled} to \path{true}.
-It stores decoded compressed chunks inside one PostgreSQL backend process. Its key contains relation, stripe, chunk
+The setting \path{bioseq.column_cache.enabled} controls the decompressed cache.
+The original benchmark campaign disabled it, whereas binary releases enable
+it by default. It stores decoded chunks inside one PostgreSQL backend process.
+Its key contains relation, stripe, chunk
 group, and column identifiers (the configured
 capacity when enabled defaults to 200~MiB)
 
@@ -23,7 +26,7 @@ As I discussed all methods of caching within BisoeqDB already, I present table w
 \midrule
 PostgreSQL buffer & Relation page bytes & Internal buffer manager in Postgres pins each page and loads/unloads pages on demand so multiple accesses to the same page are efficient \\
 Column cache~\ref{sec:pg-storage-caches} & Decoded column value buffer & Can cache decompressed chunks, so loading and decompression of the same chunks can be efficient \\
-Fragment slots~\ref{fig:sequence-scan-lifecycle} & Copy of one packed fragment & When pipeline runs sequence scanners collect fragments in available slots and loads/unloads fragments on demand so multiple accesses to the same fragment are efficient (disabled by default)\\
+Fragment slots~\ref{fig:sequence-scan-lifecycle} & Copy of one packed fragment & Scanner-owned packed copies reused within a read session, independently of the column-cache setting.\\
 Query-result cache~\ref{sec:seq-results-cache} & Completed SQL result rows & Separate \path{bioseq_cache} subextension can store and share results after pipeline execution is finished so same or similar queries can be efficient (experimental and disabled by default) \\
 \bottomrule
 \end{tabularx}

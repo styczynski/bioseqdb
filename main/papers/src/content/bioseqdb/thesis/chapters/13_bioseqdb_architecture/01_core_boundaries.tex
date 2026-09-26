@@ -212,7 +212,7 @@ adapters borrow them within the statement's lifetime. A lazy sequence view
 can therefore be PostgreSQL-free as a C++ interface while still requesting
 data through a PostgreSQL-backed source. The source rejects calls from the
 wrong thread before entering PostgreSQL error-handling machinery. The
-sharing rules in Section~\ref{sec:sequence-author-contract} apply here:
+sharing rules in Section~\ref{sec:sequence-materialization} apply here:
 worker eligibility and source lifetime are separate requirements. Depending
 on the route, preparation may copy data into admitted resident storage or
 retain an immutable mapped index until its readers finish.

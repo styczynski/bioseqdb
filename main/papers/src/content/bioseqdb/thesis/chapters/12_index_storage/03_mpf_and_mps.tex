@@ -630,6 +630,7 @@ unrelated hash ranges, while MPF just keeps smaller hashmaps based on fragments.
 The current default BioseqDB active minimizer index is MPF.
 
 \subsection{Index versioning}
+\label{sec:index-compatibility}
 
 Internal sequence storage tables use \path{epoch} to provide sequence versioning~\ref{lst:storage-sequence-locator}, indexes don't have to use separate versioning field.
 I decided not to store epoch in the index table~\ref{tab:fields-in-grouped-mpf-directory-entry}, but instead \path{query_key} is number of the row inside the 

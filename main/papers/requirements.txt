@@ -4,6 +4,8 @@ pymoment==0.0.6
 python-dateutil==2.9.0.post0
 Pygments==2.19.1
 numpy==2.2.5
-matplotlib==3.10.1
-latexminted==0.5.1
+# Includes the Path.__deepcopy__ fix needed by Python 3.14.
+matplotlib==3.10.7
+# Accepts the argparse subparser keywords added in Python 3.14.
+latexminted==0.7.1
 click==8.1.8

@@ -1,4 +1,4 @@
-\subsection{End-to-end results and their interpretation}
+\subsection{Measurement procedure and reading the full tables}
 \label{sec:benchmark-results}
 
 The following tables present the approved results available while the benchmark
@@ -46,7 +46,23 @@ matrix. The machine inventory precedes the result tables.
   alignment, trace storage, traceback and result construction. B therefore does
   not universally represent seeding and chaining alone. Likewise,
   $A_{50}-B_{50}$ is not a measured median CIGAR/MAPQ cost.
+  MAPQ is mapping confidence, not seed-divergence estimation
+  (Section~\ref{sec:alignment-postprocessing}). The divergence estimator has
+  no dedicated interval subtracted here. With parallel queries, however,
+  one query's divergence or chaining work can overlap another query's
+  CIGAR/MAPQ interval and lie inside the removed wall-time union. B is
+  consequently residual elapsed time, not the runtime of an execution
+  with those stages disabled.
 \end{itemize}
+
+\paragraph{Cache configuration.}
+The original benchmark campaign disabled the optional cache of decompressed
+column and stripe chunks. Its setting must not be inferred from binary
+releases, where it is enabled by default. This cache is separate from the
+scanner's packed-fragment slots and the operating-system page cache
+(Table~\ref{tab:storage-cache-scopes}). The published summaries do not retain
+a per-observation snapshot of this GUC, so current source defaults cannot
+independently establish the setting of every historical build.
 
 \paragraph{Input sequences and repetitions.}
 The campaign configuration defines eight deterministic target fixtures, covering
@@ -95,9 +111,11 @@ BioseqDB uses task-parallel execution with prefiltering disabled and both CIGAR
 and MAPQ projection enabled. MPF and MPS denote minimizers per fragment and per
 sequence. Each row identifies the requested minimizer, chaining algorithm and
 base aligner in addition to this index representation. Scalar-DP and SIMD-DP
-refer to the scalar and literal SIMD minimap2 chaining routes. RMQ denotes the
+refer to scalar minimap2 chaining and the SQL route's bounded SIMD-DP mode
+(Algorithm~\ref{alg:chaining-b5}). RMQ denotes the
 separate range-minimum-query algorithm. SIMD-ref is the reference minimizer,
-Two-stack is the two-stack ntHash minimizer, and Bounded is bounded ntHash SIMD.
+Two-stack labels the \texttt{two\_stack\_nthash} setting described in
+Section~\ref{sec:configured-cpu-minimizers}, and Bounded is bounded ntHash SIMD.
 Block denotes Block Aligner. Vulkan rows can include CPU index handling,
 backtracking and base alignment, and do not imply an entirely GPU pipeline.
 If none of the Vulkan configurations has a measurement for the workloads and
@@ -178,6 +196,26 @@ of instruction-set performance. The table records physical RAM and provisioned
 storage capacity. Selected row comments contain sampled available memory, but
 there is no uniform per-repeat series of free-memory and free-disk measurements.
 Missing C7G BioseqDB timings cannot establish either a win or a loss.
+
+\paragraph{Matched configuration comparisons.}
+The interpretation compares configurations within a machine class, workload
+and index mode. Its chaining summary uses indexed workloads, holds MPF,
+bounded minimizers, Block and DNA4 fixed, and requires a selected five-repeat observation for all three
+chaining choices. Its index-layout summary holds bounded minimizers and DNA4
+fixed and pairs MPF with MPS at the same chaining and base-alignment settings.
+The base-aligner summary pairs Block with KSW2 for the same MPF DNA4 workload,
+CPU minimizer and chaining choice. Both sides of a pair must have five repeats
+and an exact requested CPU path. FAST observations and unsupported paths are
+excluded from these summaries; they remain visible in the source tables and
+are discussed separately when anomalous. Medians of matched elapsed-time
+ratios prevent a few extremely long observations from dominating a mean.
+No timing is discarded merely for being slow. Restricting chaining triples
+further to observations selected from the same YAML is a sensitivity check,
+not proof of identical binaries or cache conditions. Local coverage is reported
+separately from AWS coverage.
+The companion script \texttt{analyze\_benchmark\_results.py} reproduces these
+cohorts from the same selected observations and emits the paired values,
+source-file hashes and summary ratios.
 
 \paragraph{Reproducible table generation.}
 The standalone Python generator reads the normative

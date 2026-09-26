@@ -347,8 +347,8 @@ The worker runs the permitted computation and returns results or a failure
 to that thread. For explicitly tracked asynchronous tasks, the owner registers
 cleanup resources before submission. A bounded error record carries worker
 failure, and completion is published before joining can release the borrowed
-storage. The CustomScan lifetime rules in
-Section~\ref{sec:customscan-batch-state-machine} supply the enclosing
+storage. The dispatch-buffer cleanup methods in
+Table~\ref{tab:dispatch-buffer-api} supply the enclosing
 statement cleanup. They need not be implemented again by every numeric
 algorithm.
 
