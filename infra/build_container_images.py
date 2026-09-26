@@ -251,7 +251,8 @@ def launch(host, package):
     return dict(host=host, package=package, request=str(path), observed=observed, collected=False)
 
 
-def collect_and_publish(job):
+def collect_image(job):
+    """Durably collect a SQL-tested image before returning its worker to the queue."""
     host = job["host"]
     request = Path(job["request"])
     result_path = request.with_suffix(".result.json")
@@ -275,7 +276,15 @@ def collect_and_publish(job):
         if target.stat().st_size != item["bytes"] or digest(target) != item["sha256"]:
             raise RuntimeError("Image artifact transfer checksum mismatch")
         item["path"] = str(target)
+    result["published"] = False
+    fleet.write_json_atomic(destination / "result.json", result)
+    return result
+
+
+def publish_collected(result):
+    """Publish local artifacts independently of build-worker admission."""
     archive = next(Path(i["path"]) for i in result["files"] if i["path"].endswith(".image.tar"))
+    destination = archive.parent
     retained_image = subprocess.run(local_docker() + ["image", "inspect", result["tag"], "--format", "{{.Id}}"],
                                     capture_output=True,text=True,timeout=30)
     if retained_image.returncode or retained_image.stdout.strip() != result["image_id"]:
@@ -343,7 +352,7 @@ def daemon():
                 observed = observation(host)
                 job["observed"] = observed
                 if observed.get("status") == "completed" and not job.get("collected"):
-                    result = collect_and_publish(job)
+                    result = collect_image(job)
                     state["results"][image_key(job["package"])] = result
                     job["collected"] = True
                     fleet.write_json_atomic(path,state)
@@ -375,6 +384,15 @@ def daemon():
                 else:
                     state["jobs"][host]=job
                     fleet.write_json_atomic(path,state)
+        # Refill builders before uploads; a slow registry must not hold all
+        # native workers idle. Bound each cycle to two publication attempts.
+        unpublished = [r for r in state["results"].values() if not r.get("published")]
+        for result in unpublished[:2]:
+            try:
+                publish_collected(result)
+                fleet.write_json_atomic(path,state)
+            except Exception as error:
+                event("image_publish_error",tag=result["tag"],error=str(error)[:1800])
         try:publish_pairs(state)
         except Exception as error:event("image_manifest_error",error=str(error)[:1800])
         if time.time() - state.get("last_hourly_log",0) >= 3600:
