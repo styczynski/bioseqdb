@@ -760,6 +760,17 @@ def dispatch_available(state):
                 else:
                     rebuilds = state["package_rebuilds"][borrowed_from]
                     rebuild = cell
+            if cell is None:
+                # Finish fresh native coverage and missing-cell retries before
+                # refreshing already collected packages with a diagnosed fix.
+                # Keep these lower-priority repairs on their assigned caches.
+                deferred = state.get("deferred_package_rebuilds", {}).get(host, [])
+                rebuild = next((candidate for candidate in deferred
+                                if candidate["architecture"] == architecture
+                                and cell_key(candidate) not in active), None)
+                if rebuild is not None:
+                    rebuilds = deferred
+                    cell = rebuild
         if cell is None:
             continue
         # Match the native workspace preflight before consuming a matrix cell.

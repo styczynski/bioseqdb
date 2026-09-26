@@ -144,6 +144,45 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
                     dispatch(state)
                     launch.assert_called_once_with(borrower if retiring else owner, cell=cell)
 
+    def test_deferred_repairs_wait_for_fresh_coverage_and_never_duplicate_live_cells(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        dispatch = namespace["dispatch_available"]
+        host = "test3-c7g"
+        fresh = dict(postgres_major=19, distro="debian_13", architecture="arm64")
+        repair = dict(fresh, postgres_major=17)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "infra").mkdir()
+            (root / "packages").mkdir()
+            (root / "infra/package_matrix.json").write_text(json.dumps({
+                "postgresql_majors": [19], "distributions": [{"id": "debian_13"}]}))
+            (root / "packages/manifest.json").write_text(json.dumps({"packages": [repair]}))
+            state = dict(jobs={host: dict(launched=True, observed=dict(status="completed"))},
+                         deferred_package_rebuilds={host: [repair]})
+            launch = mock.Mock(return_value=dict(status="running", pid=10))
+            with mock.patch.dict(dispatch.__globals__, {
+                    "ROOT": root, "OUTPUT": root, "STATE": root / "state.json",
+                    "PLAN": {host: ["debian_13"]}, "launch": launch, "event": mock.Mock(),
+                    "remote": mock.Mock(return_value=str(100 * 1024**3))}):
+                dispatch(state)
+                launch.assert_called_once_with(host, cell=fresh)
+                self.assertEqual(state["deferred_package_rebuilds"][host], [repair])
+                dispatch(state)
+                self.assertEqual(launch.call_count, 1)
+                state["jobs"][host]["observed"]["status"] = "completed"
+                state["jobs"]["peer-c7g"] = dict(
+                    launched=True, cell=repair, observed=dict(status="running"))
+                dispatch(state)
+                self.assertEqual(launch.call_count, 1)
+                self.assertEqual(state["deferred_package_rebuilds"][host], [repair])
+                del state["jobs"]["peer-c7g"]
+                dispatch(state)
+                launch.assert_called_with(host, cell=repair)
+                self.assertEqual(launch.call_count, 2)
+                self.assertEqual(state["deferred_package_rebuilds"][host], [])
+
     def test_retirement_blocks_explicit_launch_before_remote_access(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):
