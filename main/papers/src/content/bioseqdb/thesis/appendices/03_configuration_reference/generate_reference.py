@@ -254,7 +254,7 @@ def option_table(options):
              r"\begin{longtable}{@{}>{\raggedright\arraybackslash}p{.28\linewidth}"
              r">{\raggedright\arraybackslash}p{.10\linewidth}"
              r">{\raggedright\arraybackslash}p{\dimexpr.62\linewidth-4\tabcolsep\relax}@{}}",
-             r"\caption{All nullable alignment options in constructor order.}\label{tab:configuration-options}\\",
+             r"\caption{All nullable alignment options (for \texttt{aligner\_options} call) in the order as specified in the SQL API}\label{tab:configuration-options}\\",
              r"\toprule", r"\textbf{Options field} & \textbf{SQL type} & \textbf{Inherited GUC or independent policy}\\",
              r"\midrule", r"\endfirsthead", r"\toprule",
              r"\textbf{Options field} & \textbf{SQL type} & \textbf{Inherited GUC or independent policy}\\",
@@ -265,7 +265,7 @@ def option_table(options):
         kind = {"integer": "int", "double precision": "double", "boolean": "bool"}[option["type"]]
         target = code(option["guc"]) if option["guc"] else r"No GUC. See Table~\ref{tab:configuration-index-requirement}."
         if option["guc"] and "codes" in option:
-            target += r"\par Integer codes appear beside the enum values in its GUC table."
+            target += r"\par Integer codes should be checked in the GUC table."
         lines.append(code(option["field"]) + " & " + kind + " & " + target + r"\\[3pt]")
     lines.extend((r"\end{longtable}", r"\endgroup", ""))
     return "\n".join(lines)

@@ -4,7 +4,7 @@
 \setlength{\tabcolsep}{3pt}
 \renewcommand{\arraystretch}{1.12}
 \begin{longtable}{@{}>{\raggedright\arraybackslash}p{.28\linewidth}>{\raggedright\arraybackslash}p{.10\linewidth}>{\raggedright\arraybackslash}p{\dimexpr.62\linewidth-4\tabcolsep\relax}@{}}
-\caption{All nullable alignment options in constructor order.}\label{tab:configuration-options}\\
+\caption{All nullable alignment options (for \texttt{aligner\_options} call) in the order as specified in the SQL API}\label{tab:configuration-options}\\
 \toprule
 \textbf{Options field} & \textbf{SQL type} & \textbf{Inherited GUC or independent policy}\\
 \midrule
@@ -47,9 +47,9 @@
 \nolinkurl{mid_occ} & int & \nolinkurl{bioseq.aligner.seeding.intermediate_occurrence_threshold}\\[3pt]
 \nolinkurl{block_min_size} & int & \nolinkurl{bioseq.aligner.block_alignment.minimum_block_size}\\[3pt]
 \nolinkurl{block_max_size} & int & \nolinkurl{bioseq.aligner.block_alignment.maximum_block_size}\\[3pt]
-\nolinkurl{chaining_algorithm} & int & \nolinkurl{bioseq.aligner.chaining.algorithm}\par Integer codes appear beside the enum values in its GUC table.\\[3pt]
-\nolinkurl{base_alignment_algorithm} & int & \nolinkurl{bioseq.aligner.base_alignment.algorithm}\par Integer codes appear beside the enum values in its GUC table.\\[3pt]
-\nolinkurl{minimizer_algorithm} & int & \nolinkurl{bioseq.aligner.minimizer.algorithm}\par Integer codes appear beside the enum values in its GUC table.\\[3pt]
+\nolinkurl{chaining_algorithm} & int & \nolinkurl{bioseq.aligner.chaining.algorithm}\par Integer codes should be checked in the GUC table.\\[3pt]
+\nolinkurl{base_alignment_algorithm} & int & \nolinkurl{bioseq.aligner.base_alignment.algorithm}\par Integer codes should be checked in the GUC table.\\[3pt]
+\nolinkurl{minimizer_algorithm} & int & \nolinkurl{bioseq.aligner.minimizer.algorithm}\par Integer codes should be checked in the GUC table.\\[3pt]
 \nolinkurl{vulkan_enabled} & bool & \nolinkurl{bioseq.aligner.vulkan.enabled}\\[3pt]
 \nolinkurl{vulkan_seed_hits_enabled} & bool & \nolinkurl{bioseq.aligner.vulkan.seed_lookup.enabled}\\[3pt]
 \nolinkurl{vulkan_index_cache_enabled} & bool & \nolinkurl{bioseq.aligner.vulkan.index_cache.enabled}\\[3pt]
