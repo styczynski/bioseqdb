@@ -305,8 +305,9 @@ def pending_package_failures(state, inventory):
     repairs = pending_package_repairs(state, inventory)
     qualified = {cell_key(package) for package in inventory.get("packages", [])
                  if package_release_ready(package) and cell_key(package) not in repairs}
-    queued = {cell_key(cell) for cells in state.get("package_rebuilds", {}).values()
-              for cell in cells}
+    queued = {cell_key(cell)
+              for queue_name in ("package_rebuilds", "deferred_package_rebuilds")
+              for cells in state.get(queue_name, {}).values() for cell in cells}
     queued.update(cell_key(cell) for cell in state.get("validation_rechecks", {}).values())
     pending = []
     for key, (host, job) in sorted(latest.items()):

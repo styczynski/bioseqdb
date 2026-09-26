@@ -579,6 +579,9 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
         self.assertEqual([row["cell"]["postgres_major"] for row in pending], [17, 20])
         self.assertEqual([row["retry_queued"] for row in pending], [True, False])
         self.assertEqual(pending[1]["log_file"], "/tmp/4.log")
+        state["deferred_package_rebuilds"] = {"test2-m7i": [cells[3]]}
+        pending = namespace["pending_package_failures"](state, inventory)
+        self.assertEqual([row["retry_queued"] for row in pending], [True, True])
         state["jobs"]["test2-m7i"] = dict(cell=cells[3], observed=dict(status="completed"))
         self.assertEqual(len(namespace["pending_package_failures"](state, inventory)), 1)
 
