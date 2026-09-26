@@ -2902,6 +2902,58 @@ class ReleasePublisherTests(unittest.TestCase):
     def publisher(self):
         return runpy.run_path(str(REPOSITORY_ROOT / 'infra/publish_release.py'))
 
+    def test_current_publication_excludes_diagnosed_repairs_until_replaced(self):
+        publisher = self.publisher()
+        accepted = publisher['accepted_packages']
+        signature = publisher['publication_signature']
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            output = root / 'bin_artifacts/packages'
+            output.mkdir(parents=True)
+            records = []
+            for major in (17, 18):
+                artifact = output / f'bioseq{major}.deb'
+                artifact.write_bytes(f'qualified fixture {major}'.encode())
+                records.append(dict(file=artifact.name, bytes=artifact.stat().st_size,
+                    sha256=sha256(artifact), postgres_major=major, distro='debian_13',
+                    architecture='arm64', postgres_release_channel='stable',
+                    validation=dict(passed=True, format='deb', package_version='4.2.3'),
+                    installed_sql_smoke={key: True for key in ('passed', 'default_insert_search',
+                        'default_persisted_search', 'column_defaults_and_vacuum')}))
+            manifest = output / 'manifest.json'
+            manifest.write_text(json.dumps(dict(packages=records)))
+            state_path = root / 'reporting/package_release_fleet/state.json'
+            state_path.parent.mkdir(parents=True)
+            cell = {key: records[0][key] for key in ('postgres_major', 'distro', 'architecture')}
+            state = dict(package_rebuilds={'worker': [cell]}, jobs={})
+            state_path.write_text(json.dumps(state))
+            with mock.patch.dict(accepted.__globals__, {'ROOT': root}):
+                self.assertEqual([p['postgres_major'] for p in accepted()], [18])
+                held_signature = signature()
+                state = dict(jobs={'worker': dict(cell=cell,
+                    replaces_package_sha256=records[0]['sha256'], observed={'status': 'running'})})
+                state_path.write_text(json.dumps(state))
+                self.assertEqual(signature(), held_signature)
+                state['jobs']['worker']['observed']['status'] = 'failed'
+                state['last_hourly_log'] = 123
+                state_path.write_text(json.dumps(state))
+                self.assertEqual(signature(), held_signature)
+                self.assertEqual([p['postgres_major'] for p in accepted()], [18])
+                state = dict(history=[dict(previous_job=state['jobs']['worker'])], jobs={})
+                state_path.write_text(json.dumps(state))
+                self.assertEqual([p['postgres_major'] for p in accepted()], [18])
+                artifact = output / records[0]['file']
+                artifact.write_bytes(b'repaired qualified fixture')
+                records[0].update(bytes=artifact.stat().st_size, sha256=sha256(artifact))
+                manifest.write_text(json.dumps(dict(packages=records)))
+                self.assertNotEqual(signature(), held_signature)
+                self.assertEqual([p['postgres_major'] for p in accepted()], [17, 18])
+                unheld_signature = signature()
+                state['package_rebuilds'] = {'worker': [cell]}
+                state_path.write_text(json.dumps(state))
+                self.assertNotEqual(signature(), unheld_signature)
+                self.assertEqual([p['postgres_major'] for p in accepted()], [18])
+
     def test_upload_snapshot_is_removed_after_success_or_failure(self):
         function = self.publisher()['publish_packages']
         for fail in (False, True):

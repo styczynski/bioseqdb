@@ -25,6 +25,9 @@ import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'infra'))
+import build_release_fleet as release_fleet
+
 CONTROL = ROOT / 'reporting/release_publish'
 RELEASE = '0.1.0-alpha.1'
 PROJECT = 'bioseqdb'
@@ -143,18 +146,30 @@ def sf_api(path, *, method='GET', fields=None, oauth=False):
     return result
 
 
+def publication_inventory():
+    """Read collected bytes and existing diagnosed-repair holds, not Git age."""
+    manifest = json.loads((ROOT / 'bin_artifacts/packages/manifest.json').read_text())
+    state_path = ROOT / 'reporting/package_release_fleet/state.json'
+    state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    return manifest, release_fleet.pending_package_repairs(state, manifest)
+
+
+def publication_signature():
+    """Refresh the listing for archive/repair changes, not routine worker polling."""
+    manifest, pending = publication_inventory()
+    return (hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest(),
+            tuple(sorted(pending)))
+
+
 def accepted_packages():
     """Snapshot the atomic collection manifest and verify only approved bytes."""
     root = ROOT / 'bin_artifacts/packages'
-    manifest = json.loads((root / 'manifest.json').read_text())
+    manifest, pending = publication_inventory()
     accepted = []
     seen = set()
     for package in manifest['packages']:
-        if (package.get('validation', {}).get('passed') is not True
-                or package.get('installed_sql_smoke', {}).get('passed') is not True
-                or package['installed_sql_smoke'].get('default_insert_search') is not True
-                or package['installed_sql_smoke'].get('default_persisted_search') is not True
-                or package['installed_sql_smoke'].get('column_defaults_and_vacuum') is not True):
+        if (release_fleet.cell_key(package) in pending
+                or not release_fleet.package_release_ready(package)):
             continue
         relative = PurePosixPath(package['file'])
         if relative.is_absolute() or '..' in relative.parts or not relative.parts:
@@ -383,7 +398,10 @@ def publish_package_snapshot(stage, packages, options):
                'their embedded package version 4.2.3; they have not been relabelled or rebuilt. '
                'macOS installers use package version 0.1.0-alpha.1. '
                'This folder grows as additional distro/PostgreSQL packages pass acceptance. '
-               'Checksums and the current exact cell list are in manifest.json and SHA256SUMS.\n\n'
+               'Checksums and the current exact cell list are in manifest.json and SHA256SUMS. '
+               'Older immutable revision folders are preserved for history; only packages listed '
+               'here and in the current manifest are current. Archives awaiting a diagnosed repair '
+               'are excluded until their qualified replacement is collected.\n\n'
                '## Available packages\n\n')
     for p in records:
         readme += f"- PostgreSQL {p['postgres_major']} ({p['postgres_release_channel']}), {p['distro']}, {p['architecture']}: [{Path(p['file']).name}]({p['file']})\n"
@@ -483,7 +501,7 @@ def main():
         if args.target in ('packages', 'all'):
             previous = None
             while True:
-                digest = sha256(ROOT / 'bin_artifacts/packages/manifest.json')
+                digest = publication_signature()
                 if digest != previous:
                     publish_packages(args.apply)
                     previous = digest
