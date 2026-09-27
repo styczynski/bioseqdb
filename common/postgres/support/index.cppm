@@ -1,6 +1,6 @@
 /**
  * @file common/postgres/support/index.cppm
- * @brief PostgreSQL planner adapters, memory contexts and transaction-scoped hash tables.
+ * @brief Helpers for PostgreSQL plans, memory contexts and transaction hash tables.
  */
 module;
 
@@ -42,11 +42,10 @@ export import :spi;
 export namespace bioseq::postgres::support {
 
 /**
- * Read one PostgreSQL tuple attribute through a single module-owned call site.
- *
- * Clang can emit conflicting internal-linkage copies of PG18+'s TupleDescAttr
- * when different imported module fragments call it. This adapter preserves
- * PostgreSQL's accessor, bounds assertions and return type without copying data.
+ * Read a tuple attribute without copying it.
+ * Keep the TupleDescAttr call in one module because Clang can emit conflicting
+ * copies of PostgreSQL 18's inline accessor when several modules use it.
+ * PostgreSQL's bounds assertions still apply to the zero-based attribute index.
  */
 [[nodiscard]] [[gnu::always_inline]] inline auto
 tuple_descriptor_attribute(TupleDesc descriptor, const int index) noexcept {
@@ -54,11 +53,9 @@ tuple_descriptor_attribute(TupleDesc descriptor, const int index) noexcept {
 }
 
 /**
- * Read the size of an ordinary four-byte-header varlena without detoasting it.
- *
- * Delegate to PostgreSQL with one originating module for PG19+'s static-inline
- * VARSIZE; preserve its result type and assertions. Packed/short/external
- * varlenas still require the distinct native VARSIZE_ANY accessors as before.
+ * Read the size of a varlena with a four-byte header, without detoasting it.
+ * Keep the VARSIZE call in one module to avoid conflicting copies of the
+ * PostgreSQL 19 inline function. Short or external values need VARSIZE_ANY.
  */
 [[nodiscard]] [[gnu::always_inline]] inline auto
 varlena_4byte_size(const void* value) noexcept {
@@ -66,12 +63,11 @@ varlena_4byte_size(const void* value) noexcept {
 }
 
 /**
- * Cost a serial nested loop using the actual inner path's cache strategy.
- *
- * Required-variable projections do not turn Material/Memoize into plain loops.
- * PG19 requires that strategy explicitly, together with the non-partial bit;
- * PostgreSQL checks the caller's existing extra.pgs_mask without overriding it.
- * Returns PostgreSQL's preliminary cost workspace for the final path constructor.
+ * Get PostgreSQL's preliminary cost estimate for a serial nested loop.
+ * In PostgreSQL 19, unwrap inner projections to check whether the loop uses
+ * Material or Memoize and pass that choice to the cost function. Keep the
+ * caller's extra.pgs_mask for PostgreSQL to check. The final path constructor
+ * uses the returned workspace.
  */
 [[nodiscard]] inline JoinCostWorkspace initial_cost_serial_nested_loop(PlannerInfo* root,
                                                                       JoinType jointype,
@@ -100,7 +96,7 @@ varlena_4byte_size(const void* value) noexcept {
     return workspace;
 }
 
-/** Return an immediate primary key, preserving the PG17 catalog contract. */
+/** Return the index for an immediate, non-deferrable primary key. */
 [[nodiscard]] inline Oid relation_immediate_primary_key_index(Relation relation) {
 #if PG_VERSION_NUM >= 180000
     return RelationGetPrimaryKeyIndex(relation, false);
@@ -109,7 +105,7 @@ varlena_4byte_size(const void* value) noexcept {
 #endif
 }
 
-/** Restores the calling backend's PostgreSQL memory context at scope exit. */
+/** Switch PostgreSQL memory contexts for a C++ scope and restore on destruction. */
 class memory_context_scope final {
   public:
     /** Switches to @p target until this owner is destroyed. */
@@ -140,12 +136,13 @@ template <class p_entry> struct transaction_hash_insert_result {
 };
 
 /**
- * Lazily owns an OID-keyed PostgreSQL hash table for the current transaction.
+ * Create an OID-keyed hash table on first insertion in a transaction.
+ * PostgreSQL frees the table with its transaction memory context. A reset
+ * callback clears this wrapper's pointers so it can be used in a later
+ * transaction. Keep the wrapper alive until that callback has run.
  *
- * @tparam p_entry Standard-layout entry whose first bytes contain its OID key.
- * The table and its memory context are invalidated by PostgreSQL's transaction
- * context reset callback. The wrapper itself owns no separately allocated C++
- * object and may therefore live for the backend process lifetime.
+ * @tparam p_entry Standard-layout, trivially destructible entry with its OID
+ * key in the first bytes.
  */
 template <class p_entry> class transaction_scoped_hash_table final {
     static_assert(std::is_standard_layout_v<p_entry>);
@@ -153,7 +150,7 @@ template <class p_entry> class transaction_scoped_hash_table final {
     static_assert(sizeof(p_entry) >= sizeof(Oid));
 
   public:
-    /** Binds the lazy table to a process-lifetime PostgreSQL diagnostic name. */
+    /** Save the table name, which must stay valid for this wrapper's lifetime. */
     explicit constexpr transaction_scoped_hash_table(const char* debug_name) noexcept
         : name_(debug_name) {}
 
@@ -162,7 +159,7 @@ template <class p_entry> class transaction_scoped_hash_table final {
     transaction_scoped_hash_table(transaction_scoped_hash_table&&) = delete;
     transaction_scoped_hash_table& operator=(transaction_scoped_hash_table&&) = delete;
 
-    /** Returns whether the current transaction has materialized the table. */
+    /** Return whether this transaction has created the table. */
     [[nodiscard]] bool is_initialized() const noexcept {
         return table_ != nullptr;
     }
@@ -172,7 +169,7 @@ template <class p_entry> class transaction_scoped_hash_table final {
         return context_;
     }
 
-    /** Returns the raw PostgreSQL table for narrow C-API adapters. */
+    /** Return the PostgreSQL hash-table pointer, or null before initialization. */
     [[nodiscard]] HTAB* get_table() const noexcept {
         return table_;
     }
@@ -186,10 +183,10 @@ template <class p_entry> class transaction_scoped_hash_table final {
     }
 
     /**
-     * Finds or inserts one entry and reports whether it was already present.
+     * Find or insert an entry, creating the table if needed.
      *
-     * @param key Address of an OID key accepted by PostgreSQL dynahash.
-     * @return The stored entry and its pre-operation presence state.
+     * @param key Address of the OID key.
+     * @return Entry pointer and a flag saying whether the entry already existed.
      */
     [[nodiscard]] transaction_hash_insert_result<p_entry> find_or_insert(const void* key) {
         return invoke_pg_as_cpp([this, key] {
@@ -211,7 +208,7 @@ template <class p_entry> class transaction_scoped_hash_table final {
         }
     }
 
-    /** Visits each live entry without allocating or changing table ownership. */
+    /** Call the visitor for every entry in the current table. */
     template <class p_callback> void for_each(p_callback&& callback) {
         if (table_ == nullptr) {
             return;
@@ -224,7 +221,7 @@ template <class p_entry> class transaction_scoped_hash_table final {
         }
     }
 
-    /** Allocates one zeroed trivial frame in the table's transaction context. */
+    /** Allocate zeroed storage for a trivial frame in the table's memory context. */
     template <class p_frame> [[nodiscard]] p_frame* allocate_in_context() {
         static_assert(std::is_trivially_destructible_v<p_frame>);
         return invoke_pg_as_cpp([this] {
@@ -234,14 +231,14 @@ template <class p_entry> class transaction_scoped_hash_table final {
     }
 
   private:
-    /** Clears non-owning pointers after PostgreSQL resets the owner context. */
+    /** Clear the saved pointers when PostgreSQL resets the table's memory context. */
     static void reset_callback(void* argument) noexcept {
         auto* self = static_cast<transaction_scoped_hash_table*>(argument);
         self->table_ = nullptr;
         self->context_ = nullptr;
     }
 
-    /** Materializes the context and hash table for the current transaction. */
+    /** Create this transaction's memory context and OID-keyed hash table. */
     void ensure_initialized() {
         if (table_ != nullptr) {
             return;
@@ -271,10 +268,9 @@ template <class p_entry> class transaction_scoped_hash_table final {
 static_assert(std::is_nothrow_destructible_v<memory_context_scope>);
 
 /**
- * Temporarily disables a page-cache flag and restores its prior value.
- *
- * The referenced flag must outlive this scope. Destruction records the
- * completed restoration when runtime safety instrumentation is active.
+ * Disable a page-cache flag for a C++ scope, then restore its saved value.
+ * The flag must outlive this object. When runtime safety tracing is enabled,
+ * destruction records the restoration.
  */
 class page_cache_disable_scope final {
   public:
@@ -315,9 +311,10 @@ static_assert([] consteval {
 }());
 
 /**
- * Allocates one zero-initialized object in the current PostgreSQL context.
+ * Allocate zeroed storage for one value in the current PostgreSQL memory
+ * context. This does not call a C++ constructor.
  *
- * @tparam p_value_type Object type represented by the returned storage.
+ * @tparam p_value_type Type whose size determines the allocation.
  */
 template <class p_value_type>
 [[nodiscard, gnu::always_inline]] inline p_value_type* allocate_zeroed_object() {
@@ -325,10 +322,10 @@ template <class p_value_type>
 }
 
 /**
- * Allocates @p byte_count zero-initialized bytes in the current PostgreSQL
- * context and returns typed storage.
+ * Allocate zeroed bytes in the current PostgreSQL memory context and return
+ * a typed pointer.
  *
- * @tparam p_value_type Object type represented by the returned storage.
+ * @tparam p_value_type Pointer target type.
  * @param byte_count Number of bytes to allocate.
  */
 template <class p_value_type>
@@ -338,7 +335,8 @@ allocate_zeroed_storage(std::size_t byte_count) {
 }
 
 /**
- * Allocates a zero-initialized array in the current PostgreSQL context.
+ * Allocate zeroed storage for an array in the current PostgreSQL memory
+ * context. This does not call element constructors.
  *
  * @tparam p_element_type Array element type.
  * @param element_count Number of elements to allocate.
@@ -385,7 +383,7 @@ allocate_zeroed_array(std::size_t element_count) {
     return primary_key_index_oid;
 }
 
-/** Copies PostgreSQL planner cost fields from @p source to @p destination. */
+/** Copy cost, row-count and width estimates and the parallel-aware flag. */
 inline void copy_plan_costs(Plan* destination, const Plan* source) noexcept {
     destination->parallel_aware = source->parallel_aware;
     destination->startup_cost = source->startup_cost;
@@ -395,10 +393,12 @@ inline void copy_plan_costs(Plan* destination, const Plan* source) noexcept {
 }
 
 /**
- * Rebuilds a target list with fresh Var nodes referencing one range table.
+ * Build a target list whose columns refer to one input relation.
+ * Each new Var keeps its source column number and SQL type. The new entries
+ * keep the column names and junk flags.
  *
- * @param source_target_list Source TargetEntry list.
- * @param target_variable_number Range-table index assigned to every Var.
+ * @param source_target_list Columns to reference.
+ * @param target_variable_number Range-table index used by the new Vars.
  * @return Newly allocated PostgreSQL target list.
  */
 [[nodiscard]] inline List* build_custom_target_list(List* source_target_list,

@@ -1,11 +1,10 @@
 /**
  * @file common/postgres/support/nodes.cppm
- * @brief Zero-copy typed views and traversal adapters for PostgreSQL nodes.
+ * @brief Check PostgreSQL node types and walk or rewrite expression and plan trees.
  *
- * PostgreSQL owns every viewed node. The pointer-sized standard-layout views
- * never copy, relocate, or own node storage. Traversal delegates to
- * PostgreSQL's expression and plan walkers, and no C++ exception crosses a
- * PostgreSQL callback boundary.
+ * Node views borrow PostgreSQL pointers without copying or freeing nodes.
+ * Expression traversal uses PostgreSQL's walker and mutator callbacks. Plan
+ * traversal handles left and right children and CustomScan::custom_plans.
  */
 module;
 
@@ -38,35 +37,32 @@ export module bioseq.postgres.support:nodes;
 import :lists;
 
 /**
- * PG version boundary. The node API here is PG16+-shaped (it calls the
- * expression_tree_walker_impl / expression_tree_mutator_impl entry points
- * and uses PG16+ node tags directly). The project build still rejects
- * anything below PG17 in pg_compat.h; this assert is the module-local
- * floor and documents the minimum the code itself relies on.
+ * These node tags and expression walker entry points require PostgreSQL 16.
+ * The full extension requires PostgreSQL 17 or newer, as checked in pg_compat.h.
  */
 static_assert(PG_VERSION_NUM >= 160000,
               "bioseq.postgres.support:nodes requires PostgreSQL 16 or newer");
 
 export namespace bioseq::postgres::support {
 
-/** PostgreSQL's externally defined node-tag enumeration. */
+/** PostgreSQL's enumeration of node types. */
 using pg_node_tag = ::NodeTag;
 
-// Trait registry.
+// Node types and their tags.
 
 /**
- * A raw PostgreSQL node struct: standard-layout (its first member is a
- * NodeTag, so the struct can be reinterpret_cast to Node*). Used only for
- * static assertions; the views themselves constrain on registered_postgres_node.
+ * Check standard layout and conversion to Node* for the static assertions
+ * below. Registered PostgreSQL structs supply the required leading node tag.
+ * The views use registered_postgres_node to check that a type has a tag mapping.
  */
 template <class p_node>
 concept postgres_node_storage_compatible =
     std::is_standard_layout_v<p_node> && requires(p_node* node) { reinterpret_cast<Node*>(node); };
 
-/** Maps an externally defined PostgreSQL node type to its tag. */
+/** Map a PostgreSQL node struct to its tag. */
 template <class p_raw_node> struct pg_node_traits;
 
-/** Maps a PostgreSQL node tag to its externally defined storage type. */
+/** Map a PostgreSQL node tag to its struct type. */
 template <pg_node_tag p_tag> struct pg_node_tag_traits;
 
 /** A PostgreSQL node type registered in pg_node_traits. */
@@ -84,13 +80,10 @@ concept registered_postgres_node_tag = requires {
 };
 
 /**
- * Type-to-tag specializations for every node storage type consumed by Bioseq
- * walkers, mutators, and dispatch sites. Plan and Expr are
- * intentionally absent: they are abstract base structs with no NodeTag of
- * their own (a concrete plan node carries T_Agg/T_CustomScan/... instead),
- * so they cannot be tag-mapped. DistinctExpr and NullIfExpr are typedefs
- * of OpExpr (same C++ type), so they only appear in the tag -> type table
- * below, never here.
+ * Map supported C++ node types to PostgreSQL tags.
+ * Plan and Expr have no tag of their own. Their concrete types, such as Agg
+ * and CustomScan, supply the tag. DistinctExpr and NullIfExpr are aliases
+ * of OpExpr, so their separate tags appear only in the reverse mapping below.
  */
 template <> struct pg_node_traits<Agg> {
     using raw_type = Agg;
@@ -218,10 +211,10 @@ template <> struct pg_node_traits<WindowAggState> {
 };
 
 /**
- * Tag-to-type specializations for every node tag consumed by Bioseq. The
- * registry additionally maps T_DistinctExpr and T_NullIfExpr to OpExpr storage:
- * those two share OpExpr's layout but carry their own semantic tag, so a
- * tag-specific view is the only way to recover the distinction.
+ * Map supported tags to C++ node types.
+ * T_DistinctExpr and T_NullIfExpr both use OpExpr storage. Keeping their tags
+ * separate lets callers distinguish these expressions even though their C++
+ * types are identical.
  */
 template <> struct pg_node_tag_traits<T_Agg> {
     using raw_type = Agg;
@@ -359,11 +352,10 @@ template <> struct pg_node_tag_traits<T_WindowAggState> {
 // Pointer views.
 
 /**
- * pg_node_ref<p_raw_node, p_tag> is a typed, pointer-sized view of a node that is
- * known (by an earlier tag test) to be of storage type p_raw_node and semantic
- * tag p_tag. It owns nothing. p_tag defaults to the canonical tag for p_raw_node
- * but can be given explicitly for the OpExpr-family aliases (T_DistinctExpr /
- * T_NullIfExpr over OpExpr storage).
+ * Borrow a typed PostgreSQL node pointer whose tag the caller has checked.
+ * The constructor does no tag check. By default p_tag comes from p_raw_node's
+ * registered tag. Supply T_DistinctExpr or T_NullIfExpr explicitly when using
+ * their shared OpExpr storage.
  */
 template <class p_raw_node, pg_node_tag p_tag = pg_node_traits<std::remove_cv_t<p_raw_node>>::k_tag>
 class pg_node_ref {
@@ -406,12 +398,12 @@ class pg_node_ref {
 };
 
 /**
- * pg_unknown_node_ref is the payload handed to a dispatch visitor when a
- * node's tag is outside the mapped registry: the raw pointer plus its
- * actual tag, so the visitor can log or fall back without a typed view.
+ * Pass a node and its tag to the visitor's fallback overload.
+ * The fallback also handles registered tags when the visitor has no matching
+ * typed overload.
  */
 struct pg_unknown_node_ref {
-    /** Raw PostgreSQL node that could not be mapped. */
+    /** Node passed to the fallback visitor. */
     Node* node = nullptr;
 
     /** Actual PostgreSQL tag read from @ref node. */
@@ -419,9 +411,8 @@ struct pg_unknown_node_ref {
 };
 
 /**
- * pg_node_view is the untyped entry point: a single Node* with tag-test
- * and checked-cast helpers. It is the direct replacement for IsA() /
- * castNode() / reinterpret_cast sites. Pointer-sized, owns nothing.
+ * Borrow a Node pointer and check its tag before converting to a typed
+ * pointer. Empty views are allowed and fail type checks.
  */
 class pg_node_view {
   private:
@@ -453,24 +444,23 @@ class pg_node_view {
         return pointer_ == nullptr ? T_Invalid : nodeTag(pointer_);
     }
 
-    /** True iff the node is non-null and has p_raw_node's canonical tag. */
+    /** Return whether this node has the tag registered for p_raw_node. */
     template <registered_postgres_node p_raw_node>
     [[nodiscard, gnu::always_inline]] bool is_type() const noexcept {
         return pointer_ != nullptr &&
                nodeTag(pointer_) == pg_node_traits<std::remove_cv_t<p_raw_node>>::k_tag;
     }
 
-    /** p_raw_node* if the tag matches, else nullptr (the IsA + castNode idiom).
-     */
+    /** Return the typed pointer when its tag matches, or nullptr otherwise. */
     template <registered_postgres_node p_raw_node>
     [[nodiscard, gnu::always_inline]] p_raw_node* try_cast() const noexcept {
         return is_type<p_raw_node>() ? reinterpret_cast<p_raw_node*>(pointer_) : nullptr;
     }
 
     /**
-     * Typed view keyed by tag, for the OpExpr-family aliases where the C++
-     * storage type alone cannot distinguish T_DistinctExpr / T_NullIfExpr
-     * from T_OpExpr. Returns an empty ref on mismatch.
+     * Check a specific tag and return a typed view, or an empty view on mismatch.
+     * Use this to distinguish T_DistinctExpr and T_NullIfExpr from T_OpExpr,
+     * since all three use the same C++ struct.
      */
     template <pg_node_tag p_tag>
         requires registered_postgres_node_tag<p_tag>
@@ -492,9 +482,9 @@ template <registered_postgres_node p_raw_node>
 }
 
 /**
- * Unchecked typed cast guarded by an Assert in debug builds. Use when the
- * tag is already known from context (mirrors a raw reinterpret_cast at a
- * site that previously relied on an upstream invariant or a prior IsA).
+ * Cast a node whose type the caller already knows.
+ * Assertion builds check the tag of non-null nodes. Other builds leave the
+ * check to the caller. A null pointer stays null.
  */
 template <registered_postgres_node p_raw_node>
 [[nodiscard, gnu::always_inline]] p_raw_node* expect_pg_node(Node* node) noexcept {
@@ -503,10 +493,8 @@ template <registered_postgres_node p_raw_node>
 }
 
 /**
- * Returns the node as OpExpr* when it is any member of the OpExpr family
- * (OpExpr, DistinctExpr, NullIfExpr) -- all three share OpExpr storage --
- * else nullptr. This is the single grouping helper for the tag triples in
- * the vectorization and planner rewrite paths.
+ * Return OpExpr storage for OpExpr, DistinctExpr or NullIfExpr.
+ * Return nullptr for an empty node or any other tag.
  */
 [[nodiscard, gnu::always_inline]] inline OpExpr*
 try_cast_pg_operator_expression(Node* node) noexcept {
@@ -523,24 +511,24 @@ try_cast_pg_operator_expression(Node* node) noexcept {
     }
 }
 
-/** reinterpret a mapped pointer as a generic Node*. */
+/** Cast a pointer to Node*. The caller must supply a compatible node. */
 [[nodiscard, gnu::always_inline]] inline Node* to_pg_node(auto* node) noexcept {
     return reinterpret_cast<Node*>(node);
 }
 
-/** reinterpret a mapped pointer as a generic Expr*. */
+/** Cast a pointer to Expr*. The caller must supply a compatible expression. */
 [[nodiscard, gnu::always_inline]] inline Expr* to_pg_expression(auto* node) noexcept {
     return reinterpret_cast<Expr*>(node);
 }
 
-/** Tag of a (possibly null) node; T_Invalid for null. */
+/** Return the node tag, or T_Invalid for nullptr. */
 [[nodiscard, gnu::always_inline]] inline pg_node_tag get_pg_node_tag(const Node* node) noexcept {
     return node == nullptr ? T_Invalid : nodeTag(node);
 }
 
 /**
- * Symbolic name for a mapped tag, "unknown" otherwise. Never throws;
- * intended for diagnostic logging in place of raw nodeTag integers.
+ * Return the registered name for a tag, or "unknown".
+ * Use the name in diagnostics instead of a numeric NodeTag value.
  */
 [[nodiscard]] inline std::string_view get_pg_node_tag_name(pg_node_tag tag) noexcept {
     switch (tag) {
@@ -615,16 +603,13 @@ try_cast_pg_operator_expression(Node* node) noexcept {
     }
 }
 
-/** -----------------------------------------------------------------------
- * Deep-copy helper
- * --------------------------------------------------------------------- */
+/** Deep copying. */
 
 /**
- * Typed wrapper over PostgreSQL's deep copyObject. Use only where the
- * existing code performs a deep copyObject (e.g. copy-before-write in a
- * reparameterize mutator). It must NOT be used to replace shallow
- * palloc+memcpy clones such as FlatCopyPlan, nor extension-owned scan
- * state allocators.
+ * Deep-copy a PostgreSQL node, or return nullptr for an empty input.
+ * Use this when children must be copied too, such as before rewriting an
+ * expression. Shallow plan copies and extension scan-state allocation need
+ * their own helpers.
  */
 template <registered_postgres_node p_raw_node>
 [[nodiscard]] p_raw_node* copy_pg_node(const p_raw_node* node) {
@@ -633,7 +618,7 @@ template <registered_postgres_node p_raw_node>
 
 // List and argument adapters.
 
-/** A node struct that exposes an `args` List* member (FuncExpr, OpExpr...). */
+/** A type with an args member, used by the argument-list helpers. */
 template <class p_raw_node>
 concept postgres_node_with_arguments = requires(p_raw_node& node) { node.args; };
 
@@ -644,7 +629,7 @@ get_pg_node_arguments(p_raw_node& node) noexcept {
     return postgres_list<Node>{node.args};
 }
 
-/** The two arguments of a strictly-binary node, or {nullptr, nullptr}. */
+/** Two node arguments, with null pointers for an absent result. */
 struct pg_binary_node_arguments {
     /** First node argument. */
     Node* first_argument = nullptr;
@@ -659,9 +644,9 @@ struct pg_binary_node_arguments {
 };
 
 /**
- * Returns the two args of a node only when it has exactly two; otherwise
- * an absent result. For strict binary expressions (binary OpExpr, the
- * two-arg symbol_count shape).
+ * Read the arguments of an expression with exactly two arguments.
+ * Return empty pointers for any other count. This checks binary operators
+ * and the two-argument symbol_count form.
  */
 template <postgres_node_with_arguments p_raw_node>
 [[nodiscard, gnu::always_inline]] pg_binary_node_arguments
@@ -673,7 +658,7 @@ get_pg_binary_arguments(p_raw_node& node) noexcept {
     return {arguments.get_first(), arguments.get_second()};
 }
 
-/** The first two args plus the true arity, for variable-arity shapes. */
+/** The first two arguments and the full argument count. */
 struct pg_first_two_node_arguments {
     /** First node argument. */
     Node* first_argument = nullptr;
@@ -691,10 +676,10 @@ struct pg_first_two_node_arguments {
 };
 
 /**
- * Returns the first two args plus the arity when the arity is within
- * [min_count, max_count]; otherwise an absent result. For call sites that
- * accept an optional trailing argument (e.g. mmsearch(seq, query[, opts]),
- * checked with min=2, max=3).
+ * Read the first two arguments when the total count is in the inclusive
+ * range [min_count, max_count]. Otherwise return empty pointers and count zero.
+ * The range must start at two or higher. For mmsearch with optional options,
+ * use the range [2, 3].
  */
 template <postgres_node_with_arguments p_raw_node>
 [[nodiscard, gnu::always_inline]] pg_first_two_node_arguments
@@ -717,25 +702,23 @@ get_pg_first_two_arguments_if_arity_between(p_raw_node& node,
 
 // Typed dispatch for planning and setup traversal.
 
-/** A visitor accepting the unknown-node fallback and returning bool. */
+/** A visitor that accepts the fallback node view and returns a bool-like value. */
 template <class p_visitor>
 concept visits_unknown_postgres_node = requires(p_visitor& visitor, pg_unknown_node_ref unknown) {
     { visitor(unknown) } -> std::convertible_to<bool>;
 };
 
-/** A visitor accepting a specific typed pg_node_ref and returning bool. */
+/** A visitor that accepts this typed node view and returns a bool-like value. */
 template <class p_visitor, class p_reference>
 concept visits_typed_postgres_node = requires(p_visitor& visitor, p_reference ref) {
     { visitor(ref) } -> std::convertible_to<bool>;
 };
 
 /**
- * Dispatches one node to the most specific overload the visitor provides:
- * a typed pg_node_ref overload when the tag is in the mapped registry
- * and the visitor accepts that type, else the pg_unknown_node_ref overload
- * if present. Returns false for a null node or an unhandled tag. This is a
- * single switch(nodeTag) equivalent to the hand-written dispatch sites; it
- * is for planning/setup paths, never per-row execution.
+ * Call the visitor overload for this node's tag.
+ * If no typed overload accepts it, call the fallback overload when available.
+ * Return the visitor's result, or false for a null node or an unhandled tag.
+ * This dispatch helper is intended for planning and setup.
  */
 template <class p_visitor> [[nodiscard]] bool visit_pg_node(Node* node, p_visitor& visitor) {
     if (node == nullptr) {
@@ -953,17 +936,16 @@ template <class p_visitor> [[nodiscard]] bool visit_pg_node(Node* node, p_visito
 // Expression walker.
 
 /**
- * What a walker visitor asks the cursor to do after inspecting a node:
- *   descend      - recurse into the node's children (PG default walk)
- *   skip_subtree - do not recurse into this node, keep walking siblings
- *   stop         - abort the whole walk, returning true to PostgreSQL
+ * Choose how to continue after visiting a node.
+ * descend walks its children. skip_subtree continues with siblings, and stop
+ * ends the walk with a true result.
  */
 enum class pg_walk_step : std::uint8_t { descend, skip_subtree, stop };
 
 /**
- * Handle a walker visitor can use to recurse into the current node's
- * children through PostgreSQL's own expression_tree_walker_impl, threading
- * the same adapter context. Stores only raw pointers; owns nothing.
+ * Let a visitor walk the current expression's children with PostgreSQL's
+ * expression_tree_walker_impl. The same visitor and state are passed to
+ * each callback. This cursor borrows the adapter.
  */
 class pg_expression_walk_cursor {
   private:
@@ -971,20 +953,20 @@ class pg_expression_walk_cursor {
     tree_walker_callback trampoline_ = nullptr;
 
   public:
-    /** Binds PostgreSQL's callback context and walker trampoline. */
+    /** Save the walker callback and its context. */
     constexpr pg_expression_walk_cursor(void* adapter, tree_walker_callback trampoline) noexcept
         : adapter_(adapter), trampoline_(trampoline) {}
 
-    /** Recurse into node's children; returns PG's walker bool result. */
+    /** Walk the node's children and return whether traversal stopped. */
     [[nodiscard]] bool descend(Node* node) const {
         return expression_tree_walker_impl(node, trampoline_, adapter_);
     }
 };
 
 /**
- * Adapter that bridges a typed walker visitor to PostgreSQL's
- * (Node*, void*) -> bool callback ABI. The void* context is the adapter
- * itself (carrying p_state* and p_visitor*), not the bare user state.
+ * Pass PostgreSQL walker callbacks to a typed C++ visitor.
+ * The callback context points to this adapter, which holds the visitor and
+ * the caller's state.
  */
 template <class p_state, class p_visitor> struct pg_expression_walk_adapter {
     /** Caller-owned traversal state. */
@@ -993,7 +975,7 @@ template <class p_state, class p_visitor> struct pg_expression_walk_adapter {
     /** Caller-owned visitor. */
     p_visitor* visitor = nullptr;
 
-    /** Adapts PostgreSQL's C callback ABI to the typed visitor. */
+    /** Visit this node and follow the visitor's walk decision. */
     static bool callback(Node* node, void* raw_context) {
         if (node == nullptr) {
             return false;
@@ -1014,11 +996,9 @@ template <class p_state, class p_visitor> struct pg_expression_walk_adapter {
 };
 
 /**
- * Walk an expression tree, invoking the visitor on the ROOT first and then
- * on every descendant the visitor chooses to descend into. This preserves
- * the "inspect current node, then maybe recurse" contract that the bare
- * expression_tree_walker callbacks implement by hand. Returns true iff the
- * walk was stopped (a visitor returned pg_walk_step::stop).
+ * Visit the root expression first, then the children the visitor chooses
+ * to inspect. Return true when a visitor stops the walk, or false when it
+ * finishes or the root is null.
  */
 template <class p_state, class p_visitor>
 bool walk_pg_expression_including_root(Node* root, p_state& state, p_visitor& visitor) {
@@ -1029,9 +1009,9 @@ bool walk_pg_expression_including_root(Node* root, p_state& state, p_visitor& vi
 // Expression mutator.
 
 /**
- * A mutator visitor's decision for the current node. `should_replace ==
- * false` requests ordinary descent. A true value uses `replacement`, which
- * may legitimately be null.
+ * Choose a replacement for this expression or request a walk through its
+ * children. A replacement may be nullptr. should_replace distinguishes that
+ * choice from ordinary descent.
  */
 struct pg_node_mutation {
     /** Replacement returned when @ref should_replace is true. */
@@ -1052,9 +1032,8 @@ struct pg_node_mutation {
 };
 
 /**
- * Handle a mutator visitor can use to recurse into the current node's
- * children through PostgreSQL's expression_tree_mutator_impl, threading
- * the same adapter context.
+ * Let a visitor rebuild an expression's children with PostgreSQL's mutator.
+ * Recursive calls use the same visitor and state.
  */
 class pg_expression_mutation_cursor {
   private:
@@ -1066,17 +1045,16 @@ class pg_expression_mutation_cursor {
                                             tree_mutator_callback trampoline) noexcept
         : adapter_(adapter), trampoline_(trampoline) {}
 
-    /** Recurse into node's children, returning the rebuilt node. */
+    /** Rebuild the expression with its mutated children. */
     [[nodiscard]] Node* descend(Node* node) const {
         return expression_tree_mutator_impl(node, trampoline_, adapter_);
     }
 };
 
 /**
- * Adapter bridging a typed mutator visitor to PostgreSQL's
- * (Node*, void*) -> Node* callback ABI. On a non-replace decision the
- * adapter recurses into children via the cursor; on a replace decision it
- * returns the replacement verbatim.
+ * Pass PostgreSQL mutator callbacks to a typed C++ visitor.
+ * Return its replacement when requested. Otherwise use PostgreSQL's mutator
+ * to rebuild the node from its children.
  */
 template <class p_state, class p_mutator> struct pg_expression_mutation_adapter {
     /** Caller-owned mutation state. */
@@ -1085,7 +1063,7 @@ template <class p_state, class p_mutator> struct pg_expression_mutation_adapter 
     /** Caller-owned mutator. */
     p_mutator* mutator = nullptr;
 
-    /** Adapts PostgreSQL's C callback ABI to the typed mutator. */
+    /** Visit this expression and return its replacement or the rebuilt expression. */
     static Node* callback(Node* node, void* raw_context) {
         if (node == nullptr) {
             return nullptr;
@@ -1099,9 +1077,9 @@ template <class p_state, class p_mutator> struct pg_expression_mutation_adapter 
 };
 
 /**
- * Mutate an expression tree, invoking the mutator on the ROOT first. The
- * mutator either replaces the node or asks to descend (default rebuild of
- * children). Returns the rebuilt root.
+ * Rewrite an expression tree starting at the root.
+ * For each visited node, the mutator supplies a replacement or asks to rebuild
+ * its children. Return the resulting root.
  */
 template <class p_state, class p_mutator>
 Node* mutate_pg_expression(Node* root, p_state& state, p_mutator& mutator) {
@@ -1112,10 +1090,9 @@ Node* mutate_pg_expression(Node* root, p_state& state, p_mutator& mutator) {
 // Plan-tree mutator.
 
 /**
- * Handle a plan mutator visitor uses to recurse into every executable child,
- * reassigning it in place. CustomScan children live in custom_plans rather
- * than lefttree/righttree, so omitting that list silently skipped BatchJoin,
- * BatchSort, and future SliceProject subtrees.
+ * Let a plan visitor rewrite lefttree, righttree and CustomScan::custom_plans
+ * children in place. The custom_plans list contains children of Bioseq custom
+ * scans that ordinary left/right traversal would miss.
  */
 class pg_plan_mutation_cursor {
   private:
@@ -1123,12 +1100,14 @@ class pg_plan_mutation_cursor {
     Plan* (*trampoline_)(Plan*, void*) = nullptr;
 
   public:
-    /** Binds PostgreSQL's callback context and plan trampoline. */
+    /** Save the plan callback and its context. */
     constexpr pg_plan_mutation_cursor(void* adapter, Plan* (*trampoline)(Plan*, void*)) noexcept
         : adapter_(adapter), trampoline_(trampoline) {}
 
-    /** Recurse into and reassign CustomScan::custom_plans plus ordinary
-     * plan->lefttree / plan->righttree children. */
+    /**
+     * Rewrite and reassign the left and right children and any CustomScan
+     * custom_plans entries. Return the same parent plan.
+     */
     Plan* descend_children(Plan* plan) const {
         if (plan == nullptr) {
             return nullptr;
@@ -1148,11 +1127,10 @@ class pg_plan_mutation_cursor {
 };
 
 /**
- * A plan mutator's decision for the current plan node:
- *   descend()                       - keep node, recurse into children
- *   skip()                          - keep node, do NOT recurse children
- *   replace_with(replacement)       - replace, do not recurse children
- *   replace_with(replacement, true) - replace, then recurse its children
+ * Choose how to rewrite a plan node.
+ * descend() keeps it and rewrites its children. skip() keeps the whole subtree.
+ * replace_with() uses the supplied plan and walks its children only when the
+ * second argument is true.
  */
 struct pg_plan_mutation {
     /** Replacement returned when @ref should_replace is true. */
@@ -1161,7 +1139,7 @@ struct pg_plan_mutation {
     /** Whether the current plan node must be replaced. */
     bool should_replace = false;
 
-    /** Whether the selected node's executable children must be traversed. */
+    /** Whether to visit the selected node's left, right and custom-scan children. */
     bool should_descend_children = true;
 
     /** Keeps the current node and recursively mutates its children. */
@@ -1182,9 +1160,9 @@ struct pg_plan_mutation {
 };
 
 /**
- * Adapter for a typed plan mutator visitor. Calls check_stack_depth() once
- * per node (matching the hand-written plan rewrite), invokes the visitor,
- * and resolves its pg_plan_mutation per the documented behavior.
+ * Call the plan visitor after checking PostgreSQL's stack-depth limit.
+ * Apply its decision to keep or replace the node, then visit children when
+ * requested.
  */
 template <class p_state, class p_mutator> struct pg_plan_mutation_adapter {
     /** Caller-owned mutation state. */
@@ -1193,7 +1171,7 @@ template <class p_state, class p_mutator> struct pg_plan_mutation_adapter {
     /** Caller-owned mutator. */
     p_mutator* mutator = nullptr;
 
-    /** Adapts the internal plan callback ABI to the typed mutator. */
+    /** Visit this plan node and apply the mutator's decision. */
     static Plan* callback(Plan* plan, void* raw_context) {
         if (plan == nullptr) {
             return nullptr;
@@ -1206,7 +1184,7 @@ template <class p_state, class p_mutator> struct pg_plan_mutation_adapter {
             (*self->mutator)(cursor, pg_node_view{reinterpret_cast<Node*>(plan)}, *self->state);
 
         if (!result.should_replace && !result.should_descend_children) {
-            return plan; // skip: original node, no child recursion
+            return plan; // Keep this subtree unchanged.
         }
         if (!result.should_replace) {
             return cursor.descend_children(plan);
@@ -1219,8 +1197,9 @@ template <class p_state, class p_mutator> struct pg_plan_mutation_adapter {
 };
 
 /**
- * Mutate a plan tree from the root. The mutator inspects each plan node
- * and returns a pg_plan_mutation. Returns the rebuilt root.
+ * Rewrite a plan tree starting at its root and return the resulting plan.
+ * The mutator controls replacement and descent through left, right and
+ * custom-scan children.
  */
 template <class p_state, class p_mutator>
 Plan* mutate_pg_plan_tree(Plan* root, p_state& state, p_mutator& mutator) {
@@ -1252,7 +1231,7 @@ Plan* mutate_pg_plan_tree(Plan* root, p_state& state, p_mutator& mutator) {
     return seen_const && seen_var;
 }
 
-/** True iff node is any member of the OpExpr family. */
+/** Return whether this is an OpExpr, DistinctExpr or NullIfExpr node. */
 [[nodiscard]] inline bool is_pg_node_op_expr_family(Node* node) noexcept {
     return try_cast_pg_operator_expression(node) != nullptr;
 }
@@ -1260,11 +1239,10 @@ Plan* mutate_pg_plan_tree(Plan* root, p_state& state, p_mutator& mutator) {
 } // namespace bioseq::postgres::support
 
 /**
- * Layout / reinterpretability invariants. Kept in a non-export namespace
- * block (static_assert is not an exportable declaration) but still inside
- * bioseq::postgres::support so the unqualified names resolve. The views must be
- * pointer-sized and standard-layout, and the representative raw node
- * structs must be reinterpretable to Node*.
+ * Check that node views have pointer size and alignment and use standard
+ * layout. Check representative PostgreSQL structs with the storage concept.
+ * These assertions stay outside the export block because static_assert
+ * cannot be exported.
  */
 namespace bioseq::postgres::support {
 
