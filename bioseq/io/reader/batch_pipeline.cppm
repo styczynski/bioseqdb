@@ -1,6 +1,6 @@
 /**
  * @file batch_pipeline.cppm
- * @brief Batch parsing, mapped-file sharding, and dispatch.
+ * @brief Reads sequence batches using input buffers or mapped file regions.
  */
 module;
 
@@ -62,7 +62,7 @@ run_sync_pipeline(p_source source,
     std::string captured_error;
     std::size_t global_offset_base = 0;
 
-    // Retain and report only the first terminal pipeline error.
+    // Save and report only the first terminal pipeline error.
     auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
         if (!aborted) {
             captured_error = msg;
@@ -79,8 +79,7 @@ run_sync_pipeline(p_source source,
     // Prime offsets and reserve storage for the next output batch.
     auto prepare_fresh_batch = [&batch, &flush_record_threshold]() {
         batch.prepare(flush_record_threshold, is_fastq_format);
-        // Reserve for approximately 256 bases per record. Larger batches grow
-        // geometrically beyond the hint.
+        // Reserve an initial batch estimate. The vectors can grow for longer records.
         batch.reserve_storage(
             /*header_bytes*/ flush_record_threshold * 32,
             /*seq_words*/ flush_record_threshold * 8,
@@ -146,9 +145,8 @@ run_sync_pipeline(p_source source,
 
             bool need_refill = false;
             while (!aborted) {
-                // The FSM updates `parser_state` and the batch storage
-                // directly. The emit_record callback only needs to record
-                // the (header_offset, seq_offset, padding) triple.
+                // The parser appends to the batch buffers. Its callback records the
+                // completed record's offsets and padding.
                 parser_state.attach_to_batch(batch.header_storage(), batch.sequence_storage());
                 const auto step = parse_one_fasta_record<p_alphabet, std::uint64_t>(
                     parser_state,
@@ -278,30 +276,10 @@ run_sync_pipeline(p_source source,
     }
 }
 
-/// Synchronous pipeline specialised for `mmap_source`. The whole file
-/// is already in contiguous virtual memory. The parser receives a
-/// single span over the mapped region instead of cycling 64 KiB slabs
-/// through `read(2)` + `memmove`. Wins:
-///
-///   * Zero memcpy on the fast path. The slab in `run_sync_pipeline`
-///     copies every byte once via `mmap_source::read_into`'s
-///     `std::memcpy(dst, _addr + _cursor, copy_size)`. That's pure
-///     overhead — the parser only reads bytes, never writes them.
-///   * No `make_room` memmove. For a single-record file (e.g. the
-///     bench's 234 MiB human-genome corpus), the slab path slides a
-///     ~48 KiB tail back to the slab's start every refill cycle. The
-///     direct path skips this entirely.
-///   * No slab grow. The slab's geometric grow chain (64 KiB → 128 KiB
-///     → … → ~8 MiB) is irrelevant when the file's already mapped.
-///   * The parser sees `is_eof = true` on the first call, so the FSM
-///     emits the trailing record cleanly without a "wait for more"
-///     dance.
-///
-/// The reservation hint for the batch's `_sequence_storage` uses the file
-/// size: dna4 packs 4 letters per byte, so ~`file_size / 32` u64
-/// words bound the storage requirement. Pre-reserving this avoids
-/// the ~9 geometric reallocs that would otherwise fire while encoding
-/// a 234 MiB body.
+/// Parses a mapped file directly on the calling thread. The parser reads
+/// the complete mapping, so input does not need copying into refill buffers.
+/// Parsed headers and packed sequences still go into owned batch storage.
+/// File-size estimates reserve that storage before parsing.
 template <sequence_alphabet p_alphabet,
           sequence_file_format p_file_format,
           typename p_handler,
@@ -327,7 +305,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
     bool aborted = false;
     std::string captured_error;
 
-    // Retain and report only the first terminal direct-path error.
+    // Save and report only the first terminal direct-path error.
     auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
         if (!aborted) {
             captured_error = msg;
@@ -340,10 +318,8 @@ run_sync_pipeline_mmap_direct(mmap_source source,
                                                    ? options.concurrency.batch_target_record_count
                                                    : 4096;
 
-    // Reservation: dna4 packs 4 letters per byte, so each input byte
-    // produces ~1/16 of a 64-bit word. For the bench's 234 MiB human
-    // case this is ~58 M words / 464 MiB. Pre-reserving avoids the 9
-    // geometric reallocations during encoding.
+    // Estimate batch storage from the input size. These are capacity hints,
+    // and the vectors can grow if the encoded records need more room.
     const std::size_t sequence_words_hint =
         std::max<std::size_t>(file_size / 16, flush_record_threshold * 8);
     const std::size_t header_bytes_hint =
@@ -407,9 +383,8 @@ run_sync_pipeline_mmap_direct(mmap_source source,
             if (step.outcome == parse_outcome::abort) {
                 return std::unexpected(captured_error);
             }
-            // INCOMPLETE on `is_eof=true` means the FSM still wants
-            // more bytes — that's a malformed-file diagnostic, not a
-            // refill hint. Bail out.
+            // The full mapping is already available. Stop if the parser still
+            // requests more input.
             break;
         }
         flush_batch();
@@ -470,15 +445,10 @@ run_sync_pipeline_mmap_direct(mmap_source source,
     }
 }
 
-/// Find the position of the next FASTA record boundary at or after
-/// `target` — i.e. the next `>` character that follows a `\n`. If
-/// `target == 0` the file's first byte is the boundary (the parser
-/// expects `>` at the head). Returns `view_size` when no record
-/// boundary is found in the remaining bytes (the trailing region is
-/// part of the previous record).
-///
-/// SIMD-accelerated: reuses `simd::scan_first_byte('\n', ...)` to skip
-/// long body lines in one pass, then peeks the byte after each newline.
+/// Finds a FASTA header following a newline found from `target` onward.
+/// Returns zero for `target == 0`, or `view_size` if no later boundary exists.
+/// A header exactly at a nonzero target is skipped because its preceding
+/// newline lies before the search.
 [[nodiscard]] inline std::size_t find_fasta_record_boundary(const std::uint8_t* base,
                                                             std::size_t view_size,
                                                             std::size_t target) noexcept {
@@ -487,9 +457,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
     if (target >= view_size)
         return view_size;
     std::size_t cursor = target;
-    // Greedy: scan to next '\n', check if next byte is '>'. If not,
-    // advance past the newline and continue. simd::scan_first_byte is
-    // 4×-unrolled NEON so this loop runs at near-memory bandwidth.
+    // Scan whole lines and check whether the following byte starts a header.
     while (cursor < view_size) {
         const std::size_t remaining = view_size - cursor;
         const std::size_t newline_offset = simd::scan_first_byte('\n', base + cursor, remaining);
@@ -505,22 +473,10 @@ run_sync_pipeline_mmap_direct(mmap_source source,
     return view_size;
 }
 
-/// Find the position of the next FASTQ record boundary at or after
-/// `target`. FASTQ is harder than FASTA because `@` is a valid Phred
-/// quality character (Q31), so a leading `@` after a newline isn't a
-/// guaranteed record start. We use a four-line verification:
-///
-///   1. Find candidate at position P (`base[P-1] == '\n' && base[P] == '@'`).
-///   2. Skip the header line: find next `\n` after P → P + h_size + 1.
-///   3. Skip the sequence line: find next `\n` → P + h_size + 1 + s_size + 1.
-///   4. The next byte MUST be `+` for this to be a valid FASTQ record start.
-///   5. Skip the `+`-line and verify qual length == seq length when
-///      possible.
-///
-/// On verification failure, advance past the candidate and retry. For
-/// canonical FASTQ this converges within 1-2 candidates. For FASTQ
-/// with `@`-rich quality strings it may take a few tries but the SIMD
-/// scan keeps the per-candidate cost low.
+/// Finds a possible FASTQ header following a newline from `target` onward.
+/// It accepts an '@' line followed by one sequence line and a '+' line.
+/// Quality length is not checked, and this boundary test assumes single-line
+/// sequence bodies. Zero selects the file start. `view_size` means no match.
 [[nodiscard]] inline std::size_t find_fastq_record_boundary(const std::uint8_t* base,
                                                             std::size_t view_size,
                                                             std::size_t target) noexcept {
@@ -542,9 +498,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
             cursor = at_header;
             continue;
         }
-        // Candidate at `at_header`. Verify by walking 3 more lines:
-        // header → seq → '+' separator. If the byte after the seq line
-        // is '+', this is a real record start.
+        // Check for a header line, one sequence line, and then a separator.
         const std::size_t hdr_remaining = view_size - at_header;
         const std::size_t hdr_newline =
             simd::scan_first_byte('\n', base + at_header, hdr_remaining);
@@ -563,38 +517,17 @@ run_sync_pipeline_mmap_direct(mmap_source source,
         if (base[at_sep] == '+') {
             return at_header;
         }
-        // False positive: '@' was inside a qual line. Advance past the
-        // newline that produced this candidate and try again.
+        // This candidate lacks the expected separator. Continue at its next line.
         cursor = at_header;
     }
     return view_size;
 }
 
-/// Run a parallel sharded mmap pipeline. The mapped region is split
-/// into N shards. Each shard finds its actual start by walking forward
-/// to the next record boundary, then parses its region with a private
-/// per-shard batch. Batches are emitted to the user handler via a
-/// mutex-guarded callback (the lock is on the cold path — one
-/// acquisition per ~4 K records).
-///
-/// Wins over the sequential mmap-direct path:
-///   * **Encoder parallelism** — the SIMD pack pipeline (~5 SIMD ops
-///     per 16 bytes) saturates a single core's NEON ports. N cores in
-///     parallel scale near-linearly until memory bandwidth bites.
-///   * **Page-fault parallelism** — the OS demand-zeroes 117 MiB of
-///     `_sequence_storage` on the human-genome cell. Spreading those faults
-///     across N cores cuts the demand-zero latency by N.
-///   * **OS prefetcher win** — N concurrent sequential readers trip
-///     the kernel page-cache prefetcher in N regions instead of 1.
-///
-/// Correctness: shard boundaries are at record starts, so each shard
-/// parses complete records with `is_eof = true` (the FSM emits the
-/// trailing record cleanly). Shard 0 starts at byte 0. Shard N-1 ends
-/// at file end. Records are emitted in within-shard order. Across
-/// shards order is not strictly preserved. The bench's accumulator
-/// uses atomic counters so order doesn't matter for the metric, and
-/// real handlers (alignment, indexing) consume per-batch with no
-/// cross-batch ordering requirement.
+/// Parses separate mapped regions in parallel, each with its own batch buffers.
+/// Region starts are adjusted by the format's boundary finder. FASTQ splitting
+/// uses the single-line sequence pattern documented by that helper. Handler
+/// calls are serialized, with records kept in order within each region.
+/// The order between regions is unspecified.
 template <sequence_alphabet p_alphabet,
           sequence_file_format p_file_format,
           typename p_handler,
@@ -644,9 +577,7 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
         std::size_t actual = p_file_format == sequence_file_format::fasta
                                  ? find_fasta_record_boundary(base_ptr, view_size, target)
                                  : find_fastq_record_boundary(base_ptr, view_size, target);
-        // Monotonicity: if a shard's adjusted start lands past the
-        // previous shard's start, keep it. Otherwise this shard is
-        // empty (huge single-record file or skewed records).
+        // Keep boundaries ordered. Equal boundaries leave an empty region.
         if (actual < boundaries.back())
             actual = boundaries.back();
         if (actual > view_size)
@@ -655,13 +586,12 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
     }
     boundaries.push_back(view_size);
 
-    // Small per-shard hints avoid serial page faults from large anonymous
-    // mappings on macOS. Each vector grows geometrically after one batch.
+    // Use the configured number of records per batch, or the default count.
     const std::size_t flush_record_threshold = (options.concurrency.batch_target_record_count > 0)
                                                    ? options.concurrency.batch_target_record_count
                                                    : 4096;
 
-    // Concurrency state.
+    // Shared record count, stop flag, and callback locks.
     std::mutex emit_mutex;
     std::atomic<std::size_t> total_records{0};
     std::atomic<bool> aborted{false};
@@ -695,23 +625,8 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
             return;
         const std::size_t shard_size = shard_end - shard_start;
 
-        // Shard-private batch and parser state. The reservation
-        // sizes are scaled to the SHARD (rather than the whole file)
-        // so a single batch absorbs the bulk of the shard's output
-        // without geometric grows during parse — geometric grows on
-        // the FASTQ qual buffer for a 750 MiB shard would otherwise
-        // memcpy ~750 MiB per shard × 8 shards = 6 GiB of memcpy per
-        // iteration, a memory-bandwidth bottleneck.
-        //
-        // dna4 packs 32 letters / uint64, so seq words = body bytes
-        // / 32. We use /16 (= 2× the precise factor) to leave headroom
-        // for header bytes that don't pack. FASTQ qual is one byte
-        // per BP, ~46 % of the shard size for canonical 200-bp reads.
-        // /4 = 256 MiB per 1 GiB shard is a safe upper bound.
-        //
-        // The `flush_record_threshold * X` floors handle the SHORT
-        // synthetic cells that fall below the parallel threshold but
-        // would otherwise reserve too little for one batch.
+        // Reserve each region's output buffers using its size, with a minimum
+        // estimate for short records. The buffers can grow beyond these hints.
         batch_type batch;
         const std::size_t shard_seq_words_hint =
             std::max<std::size_t>(shard_size / 16, flush_record_threshold * 8);
@@ -739,10 +654,7 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
         auto flush_batch = [&batch, &emit_mutex, &handler_fn, &prepare_fresh_batch]() {
             if (batch.empty())
                 return;
-            // Hand the batch to the user handler under a mutex. The
-            // handler call rate is one per ~4 K records (roughly once
-            // per millisecond at 5 GB/s), so the lock cost is invisible
-            // against per-byte SIMD throughput.
+            // Serialize handler calls from different regions.
             {
                 std::lock_guard guard{emit_mutex};
                 handler_fn(std::move(batch));
@@ -791,7 +703,7 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
                     break;
                 if (step.outcome == parse_outcome::abort)
                     return;
-                break; // INCOMPLETE on is_eof=true → diagnostic
+                break; // no further input is available in this region
             }
             flush_batch();
         } else {
@@ -863,9 +775,10 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
     return total_records.load(std::memory_order_relaxed);
 }
 
-/// Mode-aware dispatcher. Routes to the sync pipeline when no workers
-/// are configured, otherwise to the async pipeline. mmap source goes
-/// through the zero-copy direct path when sync.
+/// Selects batch parsing and delivery from the reader options. Nonzero
+/// `worker_count` sends batches to worker handlers. Otherwise, mapped input
+/// can use direct sequential or parallel parsing, and other sources use
+/// the buffered synchronous loop.
 template <sequence_alphabet p_alphabet,
           sequence_file_format p_file_format,
           io_source p_source,
@@ -881,8 +794,8 @@ run_pipeline_for_source(p_source source,
     if (options.concurrency.worker_count == 0) {
         if constexpr (std::is_same_v<p_source, mmap_source>) {
             if (options.io.mmap_zero_copy) {
-                // Pick shard count: explicit option wins, else
-                // hardware_concurrency capped at mmap_parallel_max_shards.
+                // Use the requested parser count, or choose from available pool workers.
+                // The automatic choice is capped by mmap_parallel_max_shards.
                 std::size_t requested_shards = options.concurrency.parser_count;
                 if (requested_shards == 0) {
                     auto& pool = bioseq::parallelism::global_pool::instance();

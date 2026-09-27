@@ -1,9 +1,9 @@
 /**
  * @file simd.cppm
- * @brief Highway byte scanning and compression kernels for I/O.
+ * @brief SIMD helpers for reading sequence files and decompressing gzip data.
  *
- * The module provides delimiter scans, marker resolution, Huffman decoding,
- * and CRC folding. Sequence encoding remains owned by `bioseq.sequences.simd`.
+ * Provides delimiter searches, DEFLATE marker replacement, Huffman decoding,
+ * and CRC calculation. Sequence encoding is in `bioseq.sequences.simd`.
  */
 module;
 
@@ -25,14 +25,10 @@ export {
     namespace bioseq::io::simd::HWY_NAMESPACE {
     namespace hn = hwy::HWY_NAMESPACE;
 
-    // =====================================================================
-    // Scan kernels
-    // =====================================================================
+    // Byte searches.
 
-    /// Build a Highway mask "byte equals any of `needles`". For p_needle_count==1
-    /// the expression collapses to a single Eq. For N=2,3 the Eq results
-    /// are OR'd. Lifted out of the scan loops because the same expression
-    /// is reused at each unroll position.
+    /// Builds a mask of bytes that match any needle.
+    /// The scan loops reuse this comparison at each vector position.
     template <std::size_t p_needle_count, class p_descriptor>
     HWY_INLINE hn::Mask<p_descriptor>
     any_needle_match(p_descriptor simd_tag,
@@ -56,10 +52,7 @@ export {
         }
     }
 
-    /// Per-target unroll factor for the aligned-body scan loop. AVX-512
-    /// lanes already process 64 B per chunk so a 2× unroll already
-    /// achieves the 128 B / iteration target. AVX2 and NEON benefit from 4×
-    /// because each chunk is shorter (32 B / 16 B).
+    /// Uses fewer unrolled loads when one vector already holds 64 bytes.
     template <class p_descriptor> constexpr std::size_t scan_unroll_factor() noexcept {
         if constexpr (hn::MaxLanes(p_descriptor{}) >= 64)
             return 2;
@@ -214,13 +207,10 @@ export {
         }
     }
 
-    // =====================================================================
-    // Compression kernels share this Highway dispatch owner.
-    // =====================================================================
+    // Compression helpers use the same Highway target as the byte searches.
 
-    /// Resolve marker lanes in `buffer` against the preceding window.
-    /// Values below `0x8000` keep their low byte. Other values replace it with
-    /// `window[v - 0x8000]`.
+    /// Replaces markers with bytes from the preceding 32 KiB window.
+    /// A marker is `0x8000 + window_offset`. Other values stay unchanged.
     template <class p_u16_descriptor>
     HWY_INLINE void replace_markers_inplace_one_chunk(p_u16_descriptor uint16_simd_tag,
                                                       std::uint16_t* HWY_RESTRICT buffer,
@@ -257,15 +247,9 @@ export {
         }
     }
 
-    /// `dst[i] = static_cast<uint8_t>(src[i])` — drop the high byte of
-    /// each `uint16_t`. 4×-unrolled `DemoteTo` per main-loop iteration.
-    ///
-    /// `Rebind<u8, p_u16_descriptor>` keeps the same lane count as the u16 tag (so
-    /// `DemoteTo` produces a vector with the same lane count, just half
-    /// the byte width), letting `StoreU` write `lanes_u16` contiguous
-    /// bytes in one op. (`Repartition` would double the lane count to
-    /// fill the same byte-width register, which doesn't match what
-    /// `DemoteTo` produces from a single u16 vector.)
+    /// Copies resolved DEFLATE output from 16-bit storage to bytes.
+    /// Every input value must fit in a byte. `Rebind` keeps the lane count,
+    /// so each demoted vector stores one byte per input value.
     template <class p_u16_descriptor>
     HWY_INLINE void narrow_lower_bytes_to_dst_inner(p_u16_descriptor uint16_simd_tag,
                                                     const std::uint16_t* HWY_RESTRICT src,
@@ -302,10 +286,7 @@ export {
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Huffman fast loop — decode `huffman_fast_loop_unroll` literal-only
-    // symbols per call from a shared bit buffer. Caller refills first.
-    // ---------------------------------------------------------------------
+    // Decode a short run of Huffman literals from a buffer the caller has refilled.
 
     inline constexpr std::size_t huffman_fast_loop_unroll = 3;
 
@@ -347,10 +328,7 @@ export {
         }
     }
 
-    // ---------------------------------------------------------------------
-    // CRC-32/ISO-HDLC reflected-mode Highway kernel. The `cmul_*` helpers map
-    // polynomial folds to Highway carry-less multiplication operations.
-    // ---------------------------------------------------------------------
+    // CRC-32/ISO-HDLC calculation with carry-less multiplication.
 
     /// Carry-less multiply of the low polynomial lanes.
     template <class p_descriptor>
@@ -377,8 +355,7 @@ export {
         return hn::CLMulLower(hn::Shuffle01(lhs), rhs);
     }
 
-    /// Build a coefficient vector. `high_lane` lands in lane 1. `low_lane`
-    /// in lane 0.
+    /// Places the coefficients in low-lane, high-lane order.
     template <class p_descriptor>
     [[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> make_clmul_coeff(
         p_descriptor simd_tag, std::uint64_t high_lane, std::uint64_t low_lane) noexcept {
@@ -398,7 +375,7 @@ export {
         return hn::Xor(hn::Xor(high_product, low_product), data_to_xor);
     }
 
-    /// Build the coefficient sequence used to collapse eight folded lanes.
+    /// Coefficients for combining eight partial CRC states into one.
     template <class p_descriptor>
     [[nodiscard]] HWY_INLINE std::array<hn::Vec<p_descriptor>, 7>
     crc32_collapse_coefficients(p_descriptor simd_tag,
@@ -480,7 +457,7 @@ export {
         running_state = folded_state;
     }
 
-    /// Local helper: forward to zlib's `crc32_z` for the tail / fallback.
+    /// Uses zlib for input shorter than a SIMD block and for remaining bytes.
     [[nodiscard]] HWY_INLINE std::uint32_t
     crc32_z_scalar(std::uint32_t running, const std::uint8_t* data, std::size_t size) noexcept {
         return static_cast<std::uint32_t>(::crc32_z(static_cast<uLong>(running),
@@ -524,22 +501,9 @@ export {
 
     HWY_AFTER_NAMESPACE();
 
-    // =====================================================================
-    // Non-inline wrappers — entry points for non-Highway-aware modules.
-    // =====================================================================
-    //
-    // Modules like `bioseq.io.fasta` / `bioseq.io.fastq` need a "find next
-    // '\n'" primitive but do not include `<hwy/highway.h>` in their GMF
-    // (doing so re-emits Highway's per-target inline operator overloads
-    // into every importer's BMI and trips clang's "definition with same
-    // mangled name" check on AArch64). The wrappers below take plain
-    // `std::uint8_t` arguments and have their bodies emitted once in
-    // `simd.cppm.o`. Importers see only the declaration.
-    //
-    // The wrappers are deliberately NOT inline. C++26 module interface
-    // units define non-inline functions exactly once — perfect for this
-    // "expose a Highway-backed primitive but hide the templates" use
-    // case.
+    // These non-inline wrappers let parsers call Highway code without including
+    // Highway headers themselves. Their definitions stay in this module, which
+    // avoids duplicate Highway template definitions in importing modules.
 
     namespace bioseq::io::simd {
 
@@ -554,21 +518,17 @@ export {
                                                    const std::uint8_t* data,
                                                    std::size_t size) noexcept;
 
-    /// Find the first byte in `[data, data+size)` matching ANY of the
-    /// (up to 3) needles in the array. Returns `size` if no match. The
-    /// 4-needle pack is exposed via this single-arity wrapper for the
-    /// FASTA FSM's `\n`-or-`>` body-end scan. It bypasses the per-call
-    /// arity dispatch in `scan_first_byte_pair` so the body scan loop
-    /// goes through one inline body.
+    /// Finds the first byte matching any of the three needles.
+    /// Returns `size` when none matches.
     [[nodiscard]] std::size_t scan_first_byte_dispatch3(std::uint8_t needle_0,
                                                         std::uint8_t needle_1,
                                                         std::uint8_t needle_2,
                                                         const std::uint8_t* data,
                                                         std::size_t size) noexcept;
 
-    /// Visit every offset whose byte equals one of four delimiters, in ascending
-    /// order. The erased callback keeps the wrapper non-templated so the header
-    /// lexer does not import Highway templates.
+    /// Calls `visit` for every byte matching one of the four delimiters, in order.
+    /// The function-pointer callback lets the header lexer use this scan without
+    /// including Highway headers.
     void scan_for_each_delim4(std::uint8_t d0,
                               std::uint8_t d1,
                               std::uint8_t d2,
@@ -578,22 +538,17 @@ export {
                               void* ctx,
                               void (*visit)(void* ctx, std::size_t offset)) noexcept;
 
-    // ---------------------------------------------------------------------
-    // Compression-pipeline wrappers (declarations).
-    // ---------------------------------------------------------------------
+    // Compression helper declarations.
 
-    /// In-place marker resolution. Buffer is `uint16_t[]` (the
-    /// chunk arena's storage). On entry, lanes with `value < 0x8000` are
-    /// already-resolved literals. Lanes with `value >= 0x8000` reference
-    /// `window[value - 0x8000]`. After the call, every lane's low byte is
-    /// the resolved 8-bit byte.
+    /// Replaces DEFLATE markers in place using the preceding 32 KiB window.
+    /// Input values are literal bytes or `0x8000 + window_offset`.
+    /// On return, all values are resolved bytes stored in 16-bit slots.
     void replace_markers_inplace(std::uint16_t* buffer,
                                  std::size_t buffer_size,
                                  const std::uint8_t* window /* exactly 32 KiB */) noexcept;
 
-    /// `dst[i] = static_cast<uint8_t>(src[i])` over `count`
-    /// elements. Each iteration uses a 4×-unrolled SIMD demote. The tail handles
-    /// trailing lanes-1 elements via scalar.
+    /// Copies `count` resolved bytes from 16-bit storage into `dst`.
+    /// All input values must be in the range 0 to 255.
     void narrow_lower_bytes_to_dst(const std::uint16_t* src,
                                    std::uint8_t* dst,
                                    std::size_t count) noexcept;
@@ -601,8 +556,8 @@ export {
     /// Maximum literals decoded by one Huffman fast-loop iteration.
     inline constexpr std::size_t huffman_fast_loop_unroll = 3;
 
-    /// Result of one Huffman fast-loop iteration. A short result signals
-    /// that the caller must decode the breaking symbol through the scalar path.
+    /// Literals decoded before the first nonliteral or primary-table miss.
+    /// A short result leaves that next symbol for the caller to decode.
     struct huffman_fast_loop_result {
         std::array<std::uint16_t, huffman_fast_loop_unroll> symbols;
         std::size_t symbols_emitted;
@@ -615,14 +570,12 @@ export {
     [[nodiscard]] huffman_fast_loop_result
     huffman_fast_loop(std::uint64_t bit_buffer, const std::uint16_t* primary_table) noexcept;
 
-    /// Drain the fast-loop result into the `_window16[]` ring. Scalar
-    /// store. Vectorising over `symbols_emitted` would clobber later lanes
-    /// on the partial-emit path.
+    /// Stores only the emitted literals into the DEFLATE window.
+    /// Leaves the following slots unchanged when the fast loop stops early.
     void huffman_fast_loop_store(const huffman_fast_loop_result& result,
                                  std::uint16_t* window_cursor) noexcept;
 
-    /// Highway CRC-32/ISO-HDLC update with zlib-compatible running-state
-    /// semantics.
+    /// Updates the CRC state using 128-byte Highway blocks and zlib for the tail.
     [[nodiscard]] std::uint32_t crc32_iso_hdlc_simd(std::uint32_t running,
                                                     const std::uint8_t* bytes,
                                                     std::size_t size) noexcept;
@@ -631,10 +584,7 @@ export {
 
 } // export
 
-// =====================================================================
-// Wrapper definitions — module purview, non-inline. Lives in this TU
-// only. No other BMI inherits Highway template instantiations.
-// =====================================================================
+// Definitions of the non-inline wrappers declared above.
 
 namespace bioseq::io::simd {
 
@@ -682,9 +632,7 @@ void scan_for_each_delim4(std::uint8_t d0,
         byte_tag, needles, data, size, [&ctx, &visit](std::size_t offset) { visit(ctx, offset); });
 }
 
-// ---------------------------------------------------------------------
-// Compression-pipeline wrapper definitions.
-// ---------------------------------------------------------------------
+// Compression helper definitions.
 
 void replace_markers_inplace(std::uint16_t* buffer,
                              std::size_t buffer_size,
@@ -725,8 +673,7 @@ std::uint32_t
 crc32_iso_hdlc_simd(std::uint32_t running, const std::uint8_t* bytes, std::size_t size) noexcept {
     namespace hn = hwy::HWY_NAMESPACE;
     const hn::Full128<std::uint64_t> uint64_simd_tag;
-    // Inline the constant key-table here so simd_kernels doesn't have
-    // to import the compression module (avoids circular module deps).
+    // Keep these CRC constants here to avoid a circular import of the compression module.
     static constexpr std::array<std::uint64_t, 23> iso_hdlc_reflected_keys = {
         0x0000000000000000ULL, 0x00000000ccaa009eULL, 0x00000001751997d0ULL, 0x000000014a7fe880ULL,
         0x00000001e88ef372ULL, 0x00000000ccaa009eULL, 0x0000000163cd6124ULL, 0x00000001f7011641ULL,
