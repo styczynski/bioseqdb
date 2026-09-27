@@ -1,10 +1,9 @@
 /**
  * @file index.cppm
- * @brief Type-generic comparison and Boolean-mask operations for column vectors.
+ * @brief Compares column values with a scalar and combines Boolean result masks.
  *
- * The comparison kernel relies on the language's usual arithmetic conversions
- * so mixed-width integer comparisons retain PostgreSQL-compatible semantics.
- * Mask composition is implemented in the target-specific implementation unit.
+ * Comparisons use C++ operators and their usual type conversions. Mask AND and
+ * OR use the Highway implementation.
  */
 module;
 
@@ -21,19 +20,15 @@ enum class comparison_operation : std::uint8_t {
     not_equal,      ///< Tests inequality.
     greater,        ///< Tests whether the column value is greater.
     less,           ///< Tests whether the column value is less.
-    less_equal,     ///< Tests whether the column value is not greater.
-    greater_equal,  ///< Tests whether the column value is not less.
+    less_equal,     ///< Tests whether the column value is less than or equal to the operand.
+    greater_equal,  ///< Tests whether the column value is greater than or equal to the operand.
 };
 
 /**
- * @brief Applies a comparison after the usual arithmetic conversions.
+ * Applies the comparison selected by p_operation.
  *
- * @tparam p_operation Comparison selected at compile time.
- * @tparam p_left_type Column element type.
- * @tparam p_right_type Scalar operand type.
- * @param[in] left Column value.
- * @param[in] right Scalar comparison operand.
- * @return Result of the selected comparison.
+ * Uses the C++ operator for the supplied types, including its usual arithmetic
+ * conversions. Callers must choose types with the comparison semantics they need.
  */
 template <
     comparison_operation p_operation,
@@ -58,12 +53,10 @@ template <
 }
 
 /**
- * @brief Accepts writable result sinks used by the comparison kernel.
+ * Result sink providing writable Boolean value and null masks.
  *
- * Plain pointers intentionally cross the module boundary: allocation is
- * performed once per batch and the kernel writes both value and null masks.
- *
- * @tparam p_sink Candidate sink type.
+ * compare_column allocates once for the batch, then fills both masks through
+ * the pointers returned by value_data() and null_data().
  */
 template <class p_sink>
 concept compare_result_sink = requires(
@@ -75,17 +68,15 @@ concept compare_result_sink = requires(
 };
 
 /**
- * @brief Compares each non-null column value with a scalar operand.
+ * Compares each non-null column value with the scalar constant.
  *
- * @tparam p_operation Comparison selected at compile time.
- * @tparam p_value_type Column element type.
- * @tparam p_constant_type Scalar operand type.
- * @tparam p_sink Writable mask sink.
- * @param[in] values Column values containing `element_count` entries.
- * @param[in] nulls Null flags parallel to `values`.
- * @param[in] element_count Number of values and null flags.
- * @param[in] constant Scalar compared with every non-null value.
- * @param[out] sink Receives value and null masks for the complete batch.
+ * Copies input null flags to the result. Null entries have a false value bit
+ * and are skipped by the comparison.
+ * @param values Array of element_count column values.
+ * @param nulls Matching null flags.
+ * @param element_count Batch length.
+ * @param constant Scalar comparison operand.
+ * @param sink Allocates and receives the result value and null masks.
  */
 template <
     comparison_operation p_operation,
