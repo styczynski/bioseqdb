@@ -1,6 +1,6 @@
 /**
  * @file common/memory_budget/index.cppm
- * @brief Dependency-free operating-system memory probes and budget policy.
+ * @brief Read operating-system memory usage and estimate room for allocations.
  */
 module;
 
@@ -39,7 +39,7 @@ export module bioseq.common.memory_budget;
 
 export namespace bioseq::common::memory {
 
-/** A single coherent sample used by pure admission arithmetic. */
+/** Memory readings used together to calculate an allocation budget. */
 struct memory_snapshot {
     std::uint64_t process_footprint_bytes = 0;
     std::uint64_t system_available_bytes = 0;
@@ -47,11 +47,10 @@ struct memory_snapshot {
 };
 
 /**
- * Convert Darwin's disjoint free and inactive page queues to bytes.
- *
- * `vm_statistics64_data_t::speculative_count` is already included in
- * `free_count`; accepting it here would double-count reclaimable capacity.
- * A missing value is a fail-closed arithmetic or page-size observation.
+ * Convert Darwin's free and inactive page counts to bytes.
+ * free_count already includes speculative pages, so counting them separately
+ * would overestimate available memory. Return no value if the page size is
+ * zero or the calculation would overflow.
  */
 [[nodiscard]] inline std::optional<std::uint64_t>
 darwin_conservative_available_page_bytes(
@@ -74,7 +73,7 @@ darwin_conservative_available_page_bytes(
     return available_pages * bytes_per_page;
 }
 
-/** Return the operating-system page size, or a conservative fallback. */
+/** Read the OS page size, using 4096 bytes if it cannot be read on this platform. */
 [[nodiscard]] inline std::size_t page_size() noexcept {
 #if defined(__APPLE__) || defined(__linux__)
     const long value = ::sysconf(_SC_PAGESIZE);
@@ -89,17 +88,14 @@ darwin_conservative_available_page_bytes(
 }
 
 /**
- * Parse Linux's non-file process charge from one /proc/self/status sample.
+ * Read the memory charged to this process from /proc/self/status.
  *
- * File-backed RSS is reclaimable through the OS page cache and must not also
- * consume the process's allocation cap: a read-only index larger than RAM can
- * otherwise prevent even a small heap allocation despite ample MemAvailable.
- * Keep resident anonymous/shared memory, swapped private memory and huge pages
- * charged. In particular, swapping private pages must not manufacture capacity.
- * System-wide availability remains an independent admission constraint.
+ * Count anonymous and shared resident memory, swapped private pages and huge
+ * pages. Exclude file-backed RSS so a large mapped index leaves room for heap
+ * allocations. Swapping private memory still consumes the budget.
  *
- * Missing, duplicated, malformed or overflowing fields return no observation;
- * the live caller then retains the former, conservative full-RSS behavior.
+ * Missing, duplicate, malformed or overflowing fields return no value. The
+ * caller then uses full RSS. Available system memory is checked separately.
  */
 [[nodiscard]] inline std::optional<std::uint64_t>
 linux_process_charge_bytes(std::string_view status) noexcept {
@@ -139,7 +135,7 @@ linux_process_charge_bytes(std::string_view status) noexcept {
         : std::nullopt;
 }
 
-/** Return the process's allocation charge/physical footprint, or zero if unavailable. */
+/** Read the process memory usage charged by this policy, or zero if unavailable. */
 [[nodiscard]] inline std::uint64_t process_footprint_bytes() noexcept {
 #if defined(__APPLE__)
     task_vm_info_data_t info{};
@@ -160,9 +156,8 @@ linux_process_charge_bytes(std::string_view status) noexcept {
     }
     return 0;
 #elif defined(__linux__)
-    // One bounded, allocation-free proc read. Very large status files (for
-    // example, unusually long supplementary-group lists) fall back to RSS
-    // unless all required memory fields fit in this sample.
+    // Read a bounded prefix without a heap buffer. If required fields lie beyond
+    // it, for example after a long group list, use the RSS fallback below.
     if (std::FILE* status_file = std::fopen("/proc/self/status", "r")) {
         std::array<char, 4096> status{};
         const auto bytes = std::fread(status.data(), 1u, status.size(), status_file);
@@ -222,7 +217,7 @@ linux_process_charge_bytes(std::string_view status) noexcept {
 #endif
 }
 
-/** Return a conservative OS-specific availability sample, or zero. */
+/** Estimate available system memory, returning zero if the probe fails. */
 [[nodiscard]] inline std::uint64_t system_available_bytes() noexcept {
 #if defined(__APPLE__)
     const mach_port_t host = ::mach_host_self();
@@ -272,12 +267,12 @@ linux_process_charge_bytes(std::string_view status) noexcept {
 #endif
 }
 
-/** Policy governing process memory growth against live system memory. */
+/** Limit process memory usage while leaving some memory free for the system. */
 struct memory_budget {
     double cap_fraction = 0.80;
     std::uint64_t min_free_bytes = std::uint64_t{2} << 30;
 
-    /** Obtain a coherent best-effort snapshot from the operating system. */
+    /** Sample process usage, available memory and total memory with separate OS calls. */
     [[nodiscard]] memory_snapshot snapshot() const noexcept {
         return memory_snapshot{
             .process_footprint_bytes = process_footprint_bytes(),
@@ -286,22 +281,22 @@ struct memory_budget {
         };
     }
 
-    /** Return this process's current footprint. */
+    /** Read this process's charged memory usage, or zero if unavailable. */
     [[nodiscard]] std::uint64_t footprint_bytes() const noexcept {
         return process_footprint_bytes();
     }
 
-    /** Return currently available system memory. */
+    /** Estimate available system memory, or return zero if unavailable. */
     [[nodiscard]] std::uint64_t available_bytes() const noexcept {
         return system_available_bytes();
     }
 
-    /** Return total system memory. */
+    /** Read total physical memory, or return zero if unavailable. */
     [[nodiscard]] std::uint64_t total_bytes() const noexcept {
         return system_total_bytes();
     }
 
-    /** Compute the footprint ceiling for a known total. */
+    /** Compute the process memory limit as a fraction of the supplied total. */
     [[nodiscard]] std::uint64_t soft_cap_bytes(
         std::uint64_t total) const noexcept {
         if (total == 0) {
@@ -312,12 +307,16 @@ struct memory_budget {
             static_cast<double>(total) * bounded_fraction);
     }
 
-    /** Compute the footprint ceiling from a live sample. */
+    /** Compute the process memory limit from a fresh total-memory reading. */
     [[nodiscard]] std::uint64_t soft_cap_bytes() const noexcept {
         return soft_cap_bytes(total_bytes());
     }
 
-    /** Compute allocatable bytes from a coherent snapshot. */
+    /**
+     * Estimate how many more bytes fit within the process cap and free-memory
+     * reserve. Return UINT64_MAX if total or available memory is unknown. This
+     * calculation does not reserve the bytes.
+     */
     [[nodiscard]] std::uint64_t allocatable_bytes(
         const memory_snapshot& sample) const noexcept {
         if (sample.system_total_bytes == 0
@@ -335,12 +334,15 @@ struct memory_budget {
         return std::min(by_cap, by_free);
     }
 
-    /** Compute currently allocatable bytes, treating unavailable probes as unbounded. */
+    /** Sample memory and estimate room for allocations. Unknown total or available memory removes the limit. */
     [[nodiscard]] std::uint64_t allocatable_bytes() const noexcept {
         return allocatable_bytes(snapshot());
     }
 
-    /** Report whether the supplied snapshot is beyond either safety boundary. */
+    /**
+     * Check whether process usage exceeds its cap or available memory is below
+     * the reserve. Return false if total or available memory is unknown.
+     */
     [[nodiscard]] bool under_pressure(
         const memory_snapshot& sample) const noexcept {
         if (sample.system_total_bytes == 0
@@ -352,12 +354,15 @@ struct memory_budget {
             || sample.system_available_bytes < min_free_bytes;
     }
 
-    /** Report whether the live system is beyond either safety boundary. */
+    /** Take fresh memory readings and check whether either limit is exceeded. */
     [[nodiscard]] bool under_pressure() const noexcept {
         return under_pressure(snapshot());
     }
 
-    /** Clamp a requested working set while preserving a progress floor. */
+    /**
+     * Clamp the request to the current budget and ceiling, then allow at least
+     * floor bytes. The floor can exceed the request, budget or ceiling.
+     */
     [[nodiscard]] std::uint64_t clamp_working_set(
         std::uint64_t desired,
         std::uint64_t floor,
@@ -370,7 +375,7 @@ struct memory_budget {
     }
 };
 
-/** Return the process-wide default memory-budget policy. */
+/** Return the shared, mutable memory-budget policy for this process. */
 [[nodiscard]] inline memory_budget& default_budget() noexcept {
     static memory_budget budget{};
     return budget;

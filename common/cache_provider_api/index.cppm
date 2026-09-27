@@ -1,6 +1,9 @@
 /**
  * @file common/cache_provider_api/index.cppm
- * @brief Module-native rendezvous ABI shared by cache providers.
+ * @brief Shared interface between the query cache and its providers.
+ *
+ * Extensions find this interface through PostgreSQL rendezvous variables.
+ * The structs and callbacks use a versioned C-compatible layout.
  */
 module;
 
@@ -44,12 +47,11 @@ enum bioseq_cache_provider_flags : uint32_t {
 };
 
 /**
- * Revision of the fixed-width provider security namespace digest.
+ * Format version for a provider's security-state digest.
  *
- * A provider that has no provider-specific security state still writes this
- * revision and leaves all digest bytes zero. Revision zero means the provider
- * omitted the contract and is rejected; it is not the provider-independent
- * sentinel.
+ * A provider with no extra security state uses this version and an all-zero
+ * digest. Version zero is rejected because it leaves the security state
+ * unspecified.
  */
 enum bioseq_cache_provider_security_digest_format : uint32_t {
     bioseq_cache_provider_security_digest_format_canonical = 1,
@@ -284,11 +286,11 @@ struct bioseq_cache_planner_bridge {
         RangeTblEntry* rte,
         const bioseq_cache_provider* provider);
     /**
-     * Rebuild cache-owned exact recipes after the provider's outer planner
-     * hook has completed every post-setrefs Plan mutation.
+     * Refresh exact-cache plan descriptions after the provider finishes changing
+     * the plan, including changes made after PostgreSQL resolves plan references.
      *
-     * The callback is idempotent for one PlannedStmt and never initializes
-     * executor state or a retained child Plan.
+     * Calling this again for the same PlannedStmt is allowed. It updates planning
+     * metadata without starting the executor or the saved child plan.
      */
     void (*after_planned_statement)(PlannedStmt* statement);
 };
@@ -366,7 +368,7 @@ using bioseq_cache_provider_directory =
     ::bioseq_cache_provider_directory;
 using bioseq_cache_api = ::bioseq_cache_api;
 
-/** Validate the common fixed-width prefix of a public ABI object. */
+/** Check the pointer, struct size, interface version and PostgreSQL major version. */
 template <class p_public_struct>
 [[nodiscard]] constexpr bool provider_abi_prefix_valid(
     const p_public_struct* value,
@@ -379,7 +381,7 @@ template <class p_public_struct>
         && abi_revision == k_provider_abi_revision;
 }
 
-/** Validate that a declared ABI tail field is present before reading it. */
+/** Check that struct_size includes the whole field before reading it. */
 template <class p_public_struct, class p_field>
 [[nodiscard]] constexpr bool provider_abi_field_present(
     const p_public_struct* value,
