@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Verifies minimap pipeline parity across resident and chunked sequence views.
+ * @brief Compare minimap results from resident sequences and chunked views.
  */
 
 #include <fmt/format.h>
@@ -27,9 +27,8 @@ using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_t = compact_sequence_range<dna4_u64>;
 
 /**
- * @brief Builds pipeline parameters bound to the generated fixed Highway target.
- * @return Parameters carrying a complete DNA4 kernel identity.
- * @throws std::logic_error If the generated binding lacks its DNA4 identity.
+ * @brief Bind pipeline parameters to this test's Highway target and DNA4 kernels.
+ * @throws std::logic_error If the binding has no valid DNA4 identity.
  */
 [[nodiscard]] minimap2_parameters fixed_highway_params() {
     minimap2_parameters params;
@@ -48,10 +47,9 @@ using range_t = compact_sequence_range<dna4_u64>;
 }
 
 /**
- * @brief Generates deterministic DNA4 symbols from a linear-congruential stream.
- * @param[in] n Number of symbols to generate.
+ * @brief Generate reproducible DNA4 bases.
+ * @param[in] n Number of bases.
  * @param[in] seed Initial generator state.
- * @return Generated DNA4 sequence.
  */
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed) {
     std::vector<seq::dna4> v(n);
@@ -66,9 +64,8 @@ using range_t = compact_sequence_range<dna4_u64>;
 }
 
 /**
- * @brief Canonicalizes matches into sorted strings with all compared fields.
- * @param[in] collection Match collection to serialize.
- * @return Stable strings ordered independently of emission order.
+ * @brief Serialize selected match fields and CIGAR operations for comparison.
+ * @return Sorted strings, so result emission order does not affect the check.
  */
 [[nodiscard]] std::vector<std::string> canon(const match_result_collection& collection) {
     std::vector<std::string> out;
@@ -93,17 +90,17 @@ using range_t = compact_sequence_range<dna4_u64>;
 }
 
 /**
- * @brief Compares one chunked pipeline execution with its resident baseline.
- * @tparam p_fragment_units Storage units exposed by each scanner fragment.
- * @param[in] qn Query length in symbols.
- * @param[in] tn Target length in symbols.
- * @param[in] seed Deterministic fixture seed.
+ * @brief Compare a chunked pipeline run with the same resident sequences.
+ * @tparam p_fragment_units Packed words per scanner fragment.
+ * @param[in] qn Query length in bases.
+ * @param[in] tn Target length in bases.
+ * @param[in] seed Input generator seed.
  */
 template <std::size_t p_fragment_units>
 void check_pipeline_parity(std::size_t qn, std::size_t tn, std::uint64_t seed) {
     auto qd = make_dna4(qn, seed);
     auto td = make_dna4(tn, seed ^ 0x5555);
-    // Embed the query inside the target so a real alignment exists.
+    // Put the query in the target to provide a known match.
     const std::size_t embed = (tn > qn) ? (tn - qn) / 2 : 0;
     for (std::size_t i = 0; i < qn && embed + i < tn; ++i)
         td[embed + i] = qd[i];
@@ -115,8 +112,8 @@ void check_pipeline_parity(std::size_t qn, std::size_t tn, std::uint64_t seed) {
                                              bioseq::storage::make_lazy_sequence_view(t_range),
                                              fixed_highway_params()));
 
-    // Fragmented — exercise the same storage-owned facade callback used by
-    // bioseq.testing.chunked_scanner.enabled, including the requested boundaries.
+    // Run through the storage helper that exposes the requested fragment
+    // boundaries, and check that these views cannot be shared with worker threads.
     std::vector<std::string> fragmented;
     bioseq::storage::with_chunked_lazy_sequence<p_fragment_units>(
         q_range, t_range, [&fragmented](auto query_view, auto target_view) {
@@ -128,7 +125,7 @@ void check_pipeline_parity(std::size_t qn, std::size_t tn, std::uint64_t seed) {
     INFO("qn=" << qn << " tn=" << tn << " frag_units=" << p_fragment_units << " baseline_matches="
                << baseline.size() << " fragmented_matches=" << fragmented.size());
     REQUIRE(baseline == fragmented);
-    // Load-bearing: the alignment is non-trivial (not both-empty).
+    // Require a match so two empty result sets cannot make this test pass.
     REQUIRE_FALSE(baseline.empty());
 }
 
@@ -136,9 +133,9 @@ void check_pipeline_parity(std::size_t qn, std::size_t tn, std::uint64_t seed) {
 
 TEST_CASE("full minimap_port pipeline is bit-identical under a chunked scanner",
           "[component:bioseq][layer:unit][feature:pipeline][resource:highway]") {
-    check_pipeline_parity<1>(120, 300, 0x1234);  // 32 letters / fragment (worst case)
-    check_pipeline_parity<2>(120, 300, 0x1234);  // 64 letters / fragment
-    check_pipeline_parity<32>(200, 600, 0xBEEF); // 1024 letters / fragment (production size)
+    check_pipeline_parity<1>(120, 300, 0x1234);  // 32 bases per fragment.
+    check_pipeline_parity<2>(120, 300, 0x1234);  // 64 bases per fragment.
+    check_pipeline_parity<32>(200, 600, 0xBEEF); // 1024 bases per fragment.
     check_pipeline_parity<32>(400, 1200, 0xC0DE);
 }
 
