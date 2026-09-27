@@ -1,10 +1,11 @@
 /**
  * @file bioseq_caching/pg/shared_registry.cppm
- * @brief Lazy pinned-DSA bootstrap for the PostgreSQL cache shared root.
+ * @brief Creates and shares the PostgreSQL cache registry on first use.
  *
- * Main shared memory contains only the bounded bootstrap header and explicitly
- * requested fixed sidecars.  The reusable exact/coverage registry, dependency
- * directory, and optional adapter metadata live in one normal DSA area.
+ * Startup reserves a fixed header, transition records and optional test
+ * controls in PostgreSQL shared memory. The first initializer creates a
+ * dynamic shared-memory area (DSA) for cache indexes, dependency records
+ * and adapter metadata. A pin keeps that area alive across backend exits.
  */
 module;
 
@@ -191,7 +192,7 @@ struct shared_registry_preload_request {
     }
 };
 
-/** Immutable root plus shared counters; every address is a DSA relative value. */
+/** Shared layout and DSA offsets, with counters that change during use. */
 struct shared_registry_root {
     std::uint32_t magic = 0;
     std::uint32_t abi_revision = 0;
@@ -207,7 +208,7 @@ struct shared_registry_root {
     pg_atomic_uint64 hot_allocation_failures{};
 };
 
-/** Bounded main-shmem publication and recovery record. */
+/** Shared initialization state, published DSA handles and recovery information. */
 struct shared_registry_bootstrap_header {
     std::uint32_t magic = 0;
     std::uint32_t abi_revision = 0;
@@ -290,7 +291,7 @@ struct shared_registry_callbacks {
     bool (*validate_extension)(void*, std::span<std::byte>, std::uint64_t) noexcept = nullptr;
 };
 
-/** Process-local attachment.  None of these addresses enters shared memory. */
+/** Pointers and mapped views valid only in the attached process. */
 struct shared_registry_attachment {
     dsa_area* area = nullptr;
     shared_registry_root* root = nullptr;
@@ -383,7 +384,7 @@ enum class shared_registry_test_manifest_corruption : std::uint32_t {
 };
 #endif
 
-/** Process-local typed view of the preallocated emergency dependency. */
+/** Local pointers to the shared emergency-dependency state. */
 struct shared_registry_emergency_access {
     pg_atomic_uint64* write_epoch = nullptr;
     pg_atomic_uint64* change_generation = nullptr;
@@ -396,7 +397,7 @@ struct shared_registry_emergency_access {
     }
 };
 
-/** Process-local typed view of bounded bootstrap accounting counters. */
+/** Local pointers to shared cache size and activity counters. */
 struct shared_registry_accounting_access {
     pg_atomic_uint64* reserved_dsa_bytes = nullptr;
     pg_atomic_uint64* reserved_file_bytes = nullptr;
@@ -536,9 +537,9 @@ backend_nonce(std::uint32_t proc_number, std::int32_t pid, std::int64_t started_
     }
     volatile PgBackendStatus* status =
         pgstat_get_beentry_by_proc_number(static_cast<ProcNumber>(owner.proc_number));
-    /* A matching PGPROC is live until a stable activity record proves that
-     * its full start-token belongs to another backend.  Missing/unstable
-     * statistics are never evidence of death. */
+    /* Treat the matching PGPROC as alive while activity statistics are
+     * missing or changing. Only a stable record can show that its start
+     * token belongs to a different backend. */
     if (status == nullptr) {
         return true;
     }
@@ -781,7 +782,7 @@ void release_dependency_partition(void*, std::uint32_t partition) noexcept {
     return nullptr;
 }
 
-/** Arm a pre-postmaster test fault before the janitor can initialize DSA. */
+/** Reads the bootstrap fault requested by the test environment before DSA initialization. */
 void configure_test_control_from_environment(shared_registry_test_control& control) noexcept {
 #ifdef BIOSEQ_CACHE_TESTING
     const char* fault = std::getenv("BIOSEQ_CACHE_TEST_BOOTSTRAP_FAULT");
@@ -819,7 +820,7 @@ void configure_test_control_from_environment(shared_registry_test_control& contr
 #endif
 }
 
-/** Keep the janitor from consuming a backend-targeted one-shot pause. */
+/** Keeps background workers from consuming a pause intended for a test backend. */
 [[nodiscard]] bool defer_background_initializer() noexcept {
 #ifdef BIOSEQ_CACHE_TESTING
     shared_registry_test_control* control = test_control();
@@ -1022,7 +1023,7 @@ struct unpublished_area_cleanup {
     bool released = true;
 };
 
-/** Record cleanup evidence from the real DSM handle. */
+/** Saves the cleaned-up handle and release-check result for tests. */
 void record_test_cleanup(const unpublished_area_cleanup& cleanup) noexcept {
 #ifdef BIOSEQ_CACHE_TESTING
     shared_registry_test_control* control = test_control();
@@ -1037,7 +1038,7 @@ void record_test_cleanup(const unpublished_area_cleanup& cleanup) noexcept {
 #endif
 }
 
-/** Probe whether a released DSA handle can still be attached. */
+/** Returns true when the handle is invalid or a test attachment fails. */
 [[nodiscard]] bool area_handle_released_once(dsa_handle handle) noexcept {
     if (handle == DSA_HANDLE_INVALID) {
         return true;
@@ -1050,7 +1051,7 @@ void record_test_cleanup(const unpublished_area_cleanup& cleanup) noexcept {
     return false;
 }
 
-/** Wait boundedly for a dead owner's ResourceOwner/DSM cleanup. */
+/** Waits a limited time for the old DSA handle to stop accepting attachments after owner cleanup. */
 [[nodiscard]] bool wait_for_area_handle_release(dsa_handle handle) {
     if (area_handle_released_once(handle)) {
         return true;
@@ -1075,7 +1076,7 @@ void record_test_cleanup(const unpublished_area_cleanup& cleanup) noexcept {
     return false;
 }
 
-/** Remove this initializer's pin and mapping, optionally probing release. */
+/** Tries to unpin and detach an unpublished area, then optionally checks its release. */
 [[nodiscard]] unpublished_area_cleanup
 cleanup_local_unpublished_area(dsa_area* area, bool pinned, bool verify_release) noexcept {
     unpublished_area_cleanup result{
@@ -1095,8 +1096,8 @@ void shared_registry_backend_exit(int, Datum) noexcept {
     const shared_registry_owner_token owner = g_initializing_owner;
     const bool unpublished = g_initializing_area != nullptr;
     const bool pinned = g_initializing_area_pinned;
-    /* A release probe calls dsa_attach(), which can raise FATAL once process
-     * exit has begun.  Publish the unpinned handle for takeover verification. */
+    /* Attaching a DSA area during process exit can raise FATAL. Leave the
+     * handle and pin status for the next initializer to check. */
     const unpublished_area_cleanup cleanup =
         unpublished ? cleanup_local_unpublished_area(area, pinned, false)
                     : unpublished_area_cleanup{};
@@ -1431,7 +1432,7 @@ initialize_claimed_area(const shared_registry_preload_request& request,
     return validated;
 }
 
-/** A READY root that fails immutable-manifest validation is boot-fatal. */
+/** Marks the shared registry failed when a published root fails validation. */
 void fail_published_validation(dsa_handle handle,
                                dsa_pointer root_pointer,
                                shared_registry_error error) noexcept {
@@ -1528,7 +1529,7 @@ void timed_initialization_wait() {
 
 } // namespace shared_registry_detail
 
-/** Normalize every exact core layout before shared memory is requested. */
+/** Checks configuration and calculates the shared-memory layouts and DSA reservation. */
 [[nodiscard]] inline shared_registry_preload_request
 make_shared_registry_preload_request(shared_registry_config config = {}) noexcept {
     shared_registry_preload_request result{};
@@ -1650,7 +1651,7 @@ make_shared_registry_preload_request(shared_registry_config config = {}) noexcep
     return result;
 }
 
-/** Request only the bounded bootstrap/sidecars and their named locks. */
+/** Reserves startup shared memory and the locks used by the registry. */
 inline void request_shared_registry_resources(const shared_registry_preload_request& request) {
     using namespace shared_registry_detail;
     g_requested = request;
@@ -1673,7 +1674,7 @@ inline void request_shared_registry_resources(const shared_registry_preload_requ
                               request.reusable.coverage_partition_lock_count);
 }
 
-/** Initialize bounded postmaster shmem; never create or attach the DSA here. */
+/** Initializes the startup header and fixed shared records. DSA creation happens on first use. */
 [[nodiscard]] inline bool startup_shared_registry(const shared_registry_preload_request& request,
                                                   std::uint64_t boot_nonce) noexcept {
     using namespace shared_registry_detail;
@@ -1811,12 +1812,17 @@ inline void request_shared_registry_resources(const shared_registry_preload_requ
     return load_state() != bootstrap_state::failed;
 }
 
-/** Register this first so later storage/transition cleanup runs before detach. */
+/** Registers detach cleanup early so later storage callbacks run before it. */
 inline void register_shared_registry_exit_callback() noexcept {
     shared_registry_detail::ensure_exit_callback_registered();
 }
 
-/** Lazy first initializer, timed wait, or one dead-owner takeover. */
+/**
+ * Attaches this process to the cache registry, creating the DSA area if
+ * initialization is allowed and nobody has claimed it. Other callers wait
+ * for publication. If the initializer dies, one caller may take over after
+ * cleaning up the unfinished area. Waiting and takeover attempts are limited.
+ */
 [[nodiscard]] inline shared_registry_attach_result
 attach_shared_registry(const shared_registry_preload_request& request,
                        const shared_registry_callbacks& callbacks = {},
@@ -1893,7 +1899,7 @@ attach_shared_registry(const shared_registry_preload_request& request,
             return result;
         }
 
-        /* Both full-token liveness probes happen outside every shared lock. */
+        /* Check owner liveness twice while no registry lock is held. */
         const bool first_alive = owner_is_alive(callbacks, observed_owner);
         CHECK_FOR_INTERRUPTS();
         const bool second_alive = owner_is_alive(callbacks, observed_owner);
@@ -1964,7 +1970,7 @@ attach_shared_registry(const shared_registry_preload_request& request,
     return result;
 }
 
-/** Observe boot-wide publication state without attaching or taking a lock. */
+/** Reads the shared initialization state without attaching to DSA or taking a lock. */
 [[nodiscard]] inline bootstrap_state shared_registry_bootstrap_state() noexcept {
     return shared_registry_detail::load_state();
 }
@@ -1979,7 +1985,7 @@ current_shared_registry_attachment() noexcept {
     return shared_registry_ready() ? &shared_registry_detail::g_attachment : nullptr;
 }
 
-/** Detach only this process mapping; the boot-wide DSA pin remains owned. */
+/** Detaches this process from the published area while keeping its shared lifetime pin. */
 inline void detach_shared_registry_local_mapping() noexcept {
     using namespace shared_registry_detail;
     if (g_initializing_area != nullptr) {
@@ -2058,7 +2064,7 @@ inline void detach_shared_registry_local_mapping() noexcept {
     return nonce == 0 ? 1 : nonce;
 }
 
-/** Allocate one globally monotonic mutation sequence without wrapping. */
+/** Returns a new claim sequence for this server run, or zero when unavailable or exhausted. */
 [[nodiscard]] inline std::uint64_t next_shared_registry_claim_sequence() noexcept {
     using namespace shared_registry_detail;
     if (g_bootstrap == nullptr) {
@@ -2134,7 +2140,7 @@ backend_identity_alive(const shared_registry_owner_token& owner) noexcept {
     return result;
 }
 
-/** Called only by the orderly janitor stop path; backend exit never unpins. */
+/** Releases the published area's lifetime pin during orderly janitor shutdown. */
 [[nodiscard]] inline bool orderly_unpin_shared_registry() noexcept {
     using namespace shared_registry_detail;
     if (!g_attachment || g_bootstrap == nullptr || g_bootstrap_lock == nullptr) {
@@ -2217,7 +2223,7 @@ inject_shared_registry_allocation_failure(std::uint32_t ordinal) noexcept {
     return true;
 }
 
-/** Corrupt one immutable ready-root field for attach rejection testing. */
+/** Changes a published root field so tests can check rejection during attachment. */
 [[nodiscard]] inline bool corrupt_shared_registry_manifest_for_test(
     shared_registry_test_manifest_corruption corruption) noexcept {
     using namespace shared_registry_detail;

@@ -1,15 +1,12 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file
+ * @brief Calls cache providers from PostgreSQL planning and execution.
  *
- * provider/reusable_adapter.cppm
- *     PostgreSQL planner/executor adapters for provider-neutral reuse.
- *
- * Provider callbacks run in disposable child contexts. Explicit provider
- * status failures reject an optional candidate; every PostgreSQL ERROR is
- * rethrown with its original SQLSTATE after callback/reference cleanup. No
- * C++ destructor is relied upon for a reference, gate, or MemoryContext
- * correctness action.
- *
- *-------------------------------------------------------------------------
+ * Callbacks use child memory contexts so rejected output can be discarded.
+ * Provider status failures reject optional cache reuse. PostgreSQL errors are
+ * saved and rethrown after explicit callback and reference cleanup, preserving
+ * their SQLSTATE when error capture succeeds. Cleanup does not rely on C++
+ * destructors running across PostgreSQL error jumps.
  */
 module;
 
@@ -71,7 +68,7 @@ struct provider_call_diagnostic {
     int sqlstate = 0;
 };
 
-/** Identity of the sole raw callback selected inside the cache trampoline. */
+/** Selects the provider callback to invoke. */
 enum class provider_callback_identity : std::uint32_t {
     analyze_query = 0,
     describe_path = 1,
@@ -90,7 +87,7 @@ using provider_call_prepare = bool (*)(void* opaque);
 using provider_call_accept = bool (*)(
     void* opaque, bioseq_cache_status status);
 
-/** Trivial call description consumed by the single callback trampoline. */
+/** Inputs and preparation callbacks for one provider call. */
 struct provider_call_pod {
     const provider_registry::provider* provider = nullptr;
     const provider_registry::provider_lease* lease = nullptr;
@@ -102,7 +99,7 @@ struct provider_call_pod {
     planner_candidate_cleanup_record* candidate_reference = nullptr;
 };
 
-/** Result of one contained provider callback and output transaction. */
+/** Provider status and the memory context holding accepted output. */
 struct provider_call_result {
     bool accepted = false;
     bioseq_cache_status provider_status = bioseq_cache_status_error;
@@ -111,16 +108,15 @@ struct provider_call_result {
 };
 
 /**
- * Invoke exactly one provider callback behind the PostgreSQL/C++ boundary.
- *
- * Successful output remains owned by output_context.  All other output is
- * discarded and caller-visible sinks remain unchanged.
+ * Call the selected provider inside a child memory context and a PostgreSQL error handler.
+ * Accepted output stays in `output_context`. Rejected temporary output is freed.
+ * Callback and candidate references are released before a PostgreSQL error is rethrown.
  */
 [[nodiscard]] provider_call_result invoke_provider_callback(
     provider_callback_identity callback,
     const provider_call_pod& input) noexcept;
 
-/** Accepted data lives in this child until its parent planner context dies. */
+/** Keeps accepted query intent in a child of the planner memory context. */
 struct planner_owned_intent {
     MemoryContext owner_context = nullptr;
     bioseq_cache_query_intent value{};
@@ -164,7 +160,7 @@ enum class semantic_digest_kind : std::uint8_t {
     generation = 2,
 };
 
-/** Register this before a provisional reference is activated. */
+/** Register this cleanup callback before acquiring a candidate reference. */
 struct candidate_context_cleanup_registration {
     MemoryContextCallback callback{};
     planner_candidate_cleanup_record* record = nullptr;
@@ -217,7 +213,7 @@ struct candidate_context_cleanup_registration {
     planner_owned_digest_recipe* out,
     provider_call_diagnostic* diagnostic) noexcept;
 
-/** Capture provider-defined canonical semantic bytes under a PG error boundary. */
+/** Copy the provider's domain or generation digest bytes after a successful callback. */
 [[nodiscard]] bool invoke_semantic_digest_fail_open(
     const provider_registry::provider* provider,
     const bioseq_cache_path_domain* domain,
@@ -227,7 +223,7 @@ struct candidate_context_cleanup_registration {
     MemoryContext parent_context,
     provider_call_diagnostic* diagnostic) noexcept;
 
-/** Validate runtime bytes before any coverage registry action or child init. */
+/** Check that the provider's runtime digest matches the digest saved in the plan recipe. */
 [[nodiscard]] bool validate_runtime_recipe_fail_open(
     const provider_registry::provider* provider,
     const provider_registry::provider_lease* lease,
@@ -236,7 +232,7 @@ struct candidate_context_cleanup_registration {
     MemoryContext executor_context,
     provider_call_diagnostic* diagnostic) noexcept;
 
-/** Extract one occurrence through the execution lease and trampoline. */
+/** Read the provider's occurrence identifier from a tuple using its active execution reference. */
 [[nodiscard]] bool invoke_extract_occurrence_fail_open(
     const provider_registry::provider* provider,
     const provider_registry::provider_lease* lease,
@@ -246,9 +242,7 @@ struct candidate_context_cleanup_registration {
     MemoryContext executor_context,
     provider_call_diagnostic* diagnostic) noexcept;
 
-/**
- * Stage a complete late-fetch batch and publish it only after provider OK.
- */
+/** Fetch a batch into temporary storage and publish it after all values and statuses pass validation. */
 [[nodiscard]] bool invoke_late_fetch_batch_fail_open(
     const provider_registry::provider* provider,
     const provider_registry::provider_lease* lease,
@@ -266,7 +260,7 @@ struct candidate_context_cleanup_registration {
     MemoryContext executor_context,
     provider_call_diagnostic* diagnostic) noexcept;
 
-/** Stage provider EXPLAIN properties, then commit them behind the boundary. */
+/** Collect provider EXPLAIN properties and emit them after the callback succeeds. */
 [[nodiscard]] bool invoke_explain_domain_fail_open(
     const provider_registry::provider* provider,
     const provider_registry::provider_lease* lease,
@@ -275,7 +269,11 @@ struct candidate_context_cleanup_registration {
     MemoryContext executor_context,
     provider_call_diagnostic* diagnostic) noexcept;
 
-/** Allocate one PostgreSQL-owned Boolean PARAM_EXEC and its 3VL fail-open OR. */
+/**
+ * Build a Boolean execution parameter that controls skipping cached rows.
+ * The residual predicate keeps rows when reuse is invalid or the source
+ * predicate is not true. NULL therefore leaves those rows in the residual scan.
+ */
 [[nodiscard]] bool build_planner_gate_nodes(
     PlannerInfo* root,
     Expr* residual_source_predicate,
@@ -285,7 +283,7 @@ struct candidate_context_cleanup_registration {
     const Plan* plan,
     const provider_registry::provider* provider) noexcept;
 
-/** Build a serial, unordered wrapper around one already-decorated residual. */
+/** Wrap the decorated residual path in a cache scan with no parallel execution or ordering guarantee. */
 [[nodiscard]] CustomPath* make_coverage_cache_path(
     RelOptInfo* rel,
     Path* original_provider_path,
@@ -294,7 +292,7 @@ struct candidate_context_cleanup_registration {
     const CustomPathMethods* methods,
     coverage_path_costs costs);
 
-/** Remove the exact original pointer before ordinary add_path dominance. */
+/** Remove the original provider path, then let PostgreSQL compare the wrapper with the remaining paths. */
 [[nodiscard]] bool replace_provider_path(
     RelOptInfo* rel,
     Path* original_provider_path,
@@ -305,7 +303,7 @@ register_candidate_context_cleanup(
     MemoryContext planner_context,
     planner_candidate_cleanup_record* record);
 
-/** Validate every target first, then publish the frozen gate vector. */
+/** Check all execution parameters before writing the fixed reuse decisions into them. */
 [[nodiscard]] bool publish_frozen_gates(
     EState* estate,
     std::span<const int> gate_param_ids,
@@ -327,7 +325,7 @@ void set_diagnostic(
     }
 }
 
-/** Classify a provider's explicit non-OK status before inspecting its output. */
+/** Turn a failed provider status into a diagnostic before reading its output. */
 [[nodiscard]] constexpr provider_call_failure provider_status_failure(
         bioseq_cache_status status) noexcept {
     return status == bioseq_cache_status_unsupported
@@ -335,7 +333,7 @@ void set_diagnostic(
         : provider_call_failure::callback_error;
 }
 
-/** Zero one imported C ABI record without Clang aggregate-assignment codegen. */
+/** Clear a C API record with memset to avoid Clang's aggregate-assignment code generation. */
 template<class p_value>
 void reset_abi_pod(p_value& value) noexcept {
     static_assert(std::is_trivially_copyable_v<p_value>);
@@ -371,7 +369,7 @@ void reset_abi_pod(p_value& value) noexcept {
     return true;
 }
 
-/** Mapping-private nodes are NIL or a bounded opaque list with a revision head. */
+/** Accept an empty private-node list, or a list within the size limit with the expected revision first. */
 [[nodiscard]] bool mapping_private_nodes_valid(
         const List* nodes,
         std::uint32_t expected_revision) noexcept {
@@ -958,9 +956,9 @@ struct late_fetch_body {
 };
 
 /**
- * Consume provider Datums synchronously while slot-owned by-reference storage
- * is still valid. The copies remain private to the disposable callback
- * context until the provider reports OK and every terminal is validated.
+ * Copy each provider value while its tuple slot still owns valid storage.
+ * Keep the copy in the temporary callback context until the whole batch
+ * succeeds and every requested row has a valid final status.
  */
 [[nodiscard]] bioseq_cache_status stage_late_fetch_value(
         void* opaque,
@@ -1009,7 +1007,7 @@ struct late_fetch_body {
     return bioseq_cache_status_ok;
 }
 
-/** Record one terminal against the same private staging ledger. */
+/** Save the final status for one requested row in the temporary batch. */
 void stage_late_fetch_reference_status(
         void* opaque,
         std::size_t reference_index,

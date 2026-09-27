@@ -1,9 +1,4 @@
-/*-------------------------------------------------------------------------
- *
- * Annotated public bioseq_cache diagnostics.
- *
- *-------------------------------------------------------------------------
- */
+/* SQL functions for the cache version, counters and entry diagnostics. */
 module;
 
 #include <string>
@@ -49,7 +44,7 @@ export namespace bioseq::cache::pg::sql_catalog {
     .to = "pg_read_all_stats",
 })]]
 /**
- * @brief Return process-wide cache counters visible to the calling role.
+ * @brief Read the shared cache counters after checking diagnostic access.
  * @ingroup bioseq_sql_public_api
  */
 [[nodiscard]] inline bioseq::postgres::support::table_rows<sql_rows::stats_row>
@@ -71,7 +66,8 @@ stats(bioseq::postgres::support::function_call_context call) {
     .to = "pg_read_all_stats",
 })]]
 /**
- * @brief Return exact and reusable cache generations visible to the calling role.
+ * @brief Describe exact and reusable cache generations.
+ * The caller's role determines which identifying fields and SQL text are shown.
  * @ingroup bioseq_sql_public_api
  */
 [[nodiscard]] inline

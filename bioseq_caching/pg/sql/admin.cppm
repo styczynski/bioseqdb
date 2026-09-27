@@ -1,9 +1,4 @@
-/*-------------------------------------------------------------------------
- *
- * Annotated privileged bioseq_cache administration routines.
- *
- *-------------------------------------------------------------------------
- */
+/* SQL functions for superusers to invalidate cache entries and reset counters. */
 module;
 
 #include <cstdint>
@@ -24,7 +19,8 @@ export namespace bioseq::cache::pg::sql_catalog {
     .from = bioseq::sql::public_role,
 })]]
 /**
- * @brief Retire every exact and reusable cache generation.
+ * @brief Retire all exact and reusable cache generations.
+ * Requires a PostgreSQL superuser.
  * @ingroup bioseq_sql_public_api
  */
 [[nodiscard]] inline std::int64_t invalidate_all() {
@@ -40,7 +36,8 @@ export namespace bioseq::cache::pg::sql_catalog {
     .from = bioseq::sql::public_role,
 })]]
 /**
- * @brief Retire generations that depend on one PostgreSQL relation.
+ * @brief Retire cache generations that depend on the given relation.
+ * Requires a PostgreSQL superuser.
  * @ingroup bioseq_sql_public_api
  */
 [[nodiscard]] inline std::int64_t invalidate_relation(
@@ -60,7 +57,8 @@ export namespace bioseq::cache::pg::sql_catalog {
     .from = bioseq::sql::public_role,
 })]]
 /**
- * @brief Reset all public cache counters.
+ * @brief Reset the shared public cache counters.
+ * Requires a PostgreSQL superuser.
  * @ingroup bioseq_sql_public_api
  */
 inline void reset_stats() {
