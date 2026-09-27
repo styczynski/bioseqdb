@@ -169,7 +169,7 @@ baseline_for_query(const std::vector<minimap_sketch_data>& whole,
         if (out.count(kmer)) continue;
         auto it = per_kmer.find(kmer);
         std::vector<std::uint64_t> v = (it == per_kmer.end()) ? std::vector<std::uint64_t>{} : it->second;
-        if (v.size() > max_occ) v.clear();   
+        if (v.size() > max_occ) v.clear();
         out.emplace(kmer, std::move(v));
     }
     return out;

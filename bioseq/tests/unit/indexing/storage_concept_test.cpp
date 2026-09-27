@@ -117,7 +117,7 @@ TEST_CASE("fresh-table defaults set the cheap on-insert indexes",
     REQUIRE(r.set_policy(bioseq::indexing::k_minimizers_per_sequence_index_name,
                          bioseq::indexing::index_update_policy::update_on_insert)
             == reg::set_policy_status::applied);
-    
+
     REQUIRE(r.set_policy("does_not_exist", bioseq::indexing::index_update_policy::manual)
             == reg::set_policy_status::unknown_index);
 }
@@ -137,7 +137,7 @@ TEST_CASE("fake_sequence_storage INLINE resize round-trips a valid plan",
         for (std::size_t i = 0; i < cap; ++i) {
             buf[i] = static_cast<std::int64_t>(100u + i);
         }
-        return c;   
+        return c;
     });
 
     REQUIRE(storage.number_of_chunks() == 1u);

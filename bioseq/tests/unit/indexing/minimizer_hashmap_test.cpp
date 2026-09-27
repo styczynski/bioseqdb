@@ -38,7 +38,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; 
+import bioseq.common.hashing;
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -502,14 +502,14 @@ TEST_CASE("assemble_segment over fragmented storage equals whole-sequence build"
           "[component:bioseq][layer:unit][feature:index]") {
     // The 40,000-base sequence crosses two 32,768-base fragments.
     constexpr std::size_t fragment_units = 1024;
-    constexpr std::size_t frag_bp = fragment_units * 32; 
+    constexpr std::size_t frag_bp = fragment_units * 32;
     using chunked = chunked_span_sequence_scanner<std::uint64_t, fragment_units>;
 
     auto data = make_dna4(40000, 0xABC123);
     range_t range(data);
     const auto total_bp = range.bp_size();
     const std::size_t nfrag = static_cast<std::size_t>((total_bp + frag_bp - 1) / frag_bp);
-    REQUIRE(nfrag >= 2u); 
+    REQUIRE(nfrag >= 2u);
 
     fake_fragment_storage<> storage;
     lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
