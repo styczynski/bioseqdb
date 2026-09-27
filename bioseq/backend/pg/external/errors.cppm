@@ -1,6 +1,6 @@
 /**
  * @file errors.cppm
- * @brief Translates external-provider failures at the PostgreSQL error boundary.
+ * @brief Reports external provider failures as PostgreSQL errors.
  */
 module;
 
@@ -17,21 +17,19 @@ namespace provider = bioseq::external::provider;
 export namespace bioseq::postgres::external {
 
 /**
- * @brief Maps a provider error to the SQLSTATE exposed by the scan boundary.
+ * @brief Chooses the SQLSTATE for a provider failure.
  *
- * Unsupported provider capabilities remain SQL feature errors. Every other
- * provider failure remains an external-routine error, matching the established
- * SQL contract of the CustomScan implementation.
+ * Missing provider capabilities use FEATURE_NOT_SUPPORTED. Other failures
+ * use EXTERNAL_ROUTINE_EXCEPTION.
  */
 [[nodiscard]] int provider_error_sqlstate(
     provider::external_error_kind kind) noexcept;
 
 /**
- * @brief Raises the SQL error for a failed provider request.
+ * @brief Raises a PostgreSQL error for a failed provider request.
  *
- * Both strings must already reside in PostgreSQL-managed storage. This
- * function never creates a C++ owner that could be skipped by PostgreSQL's
- * long jump.
+ * Copy the strings into PostgreSQL memory before calling. PostgreSQL error
+ * handling jumps out of this function without running C++ destructors.
  */
 [[noreturn]] void raise_provider_request_error(
     int sqlstate, const char *provider_label, const char *detail);

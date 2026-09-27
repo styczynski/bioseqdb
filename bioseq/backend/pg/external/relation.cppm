@@ -52,7 +52,7 @@ PGDLLEXPORT Datum bioseq_external_handler(
 
 export namespace bioseq::postgres::external {
 
-/** @brief Logical row shape selected by a relation's required `entity` option. */
+/** @brief Type of rows returned by the table, selected by its entity option. */
 enum class relation_entity : int
 {
 	unspecified = 0,
@@ -65,11 +65,10 @@ enum class relation_entity : int
 };
 
 /**
- * @brief PostgreSQL varlena payload for external-relation options.
+ * @brief Parsed PostgreSQL relation options.
  *
- * Field order and representation are PostgreSQL reloptions ABI: `vl_len_`
- * remains first, string values are offsets into trailing storage, and numeric
- * values are stored inline.
+ * PostgreSQL requires vl_len_ first. The alphabet field stores an offset to
+ * its string in the trailing bytes. The other options store their values inline.
  */
 struct relation_options
 {
@@ -97,19 +96,23 @@ struct create_relation_options
 [[nodiscard]] bool is_external_create_statement(
 	const CreateStmt *statement) noexcept;
 
-/** Removes and validates this AM's four private CREATE TABLE options. */
+/** Removes and parses the external table options before PostgreSQL runs CREATE TABLE. */
 [[nodiscard]] create_relation_options consume_create_relation_options(
 	CreateStmt *statement);
 
-/** Inserts or replaces the typed option row for a successfully created table. */
+/** Saves the external table options in bioseq_internal.external_relation_options. */
 void persist_create_relation_options(
 	Oid relation_oid, const create_relation_options& options);
 
-/** Deletes a typed external-option row, optionally tolerating absence. */
+/**
+ * Deletes the saved options for a table and returns whether a row was removed.
+ * A missing catalog returns false. If only the row is missing, missing_ok
+ * decides whether to return false or raise an error.
+ */
 [[nodiscard]] bool delete_relation_options(
 	Oid relation_oid, bool missing_ok);
 
-/** @brief Returns the required logical entity or raises a PostgreSQL error. */
+/** @brief Reads the saved entity option, raising an error if it is missing or invalid. */
 [[nodiscard]] relation_entity entity_from_options(Relation relation);
 
 /** @brief Returns the stable `TableAmRoutine` registered for external tables. */
@@ -118,7 +121,7 @@ void persist_create_relation_options(
 /** @brief Tests whether a relation uses the external table access method. */
 [[nodiscard]] bool uses_table_access_method(Relation relation) noexcept;
 
-/** @brief Returns the SQL option spelling for a logical relation entity. */
+/** @brief Returns the entity name used in SQL table options. */
 [[nodiscard]] const char *to_string(relation_entity entity) noexcept;
 
 } // namespace bioseq::postgres::external
@@ -134,7 +137,7 @@ namespace bioseq::postgres::external {
 
 namespace {
 
-/* Allocated in bioseq_external_tableam_init(); 0 until then. */
+/* Assigned during bioseq_external_tableam_init(). Zero means uninitialized. */
 relopt_kind relation_option_kind = static_cast<relopt_kind>(0);
 
 /* Acceptable `entity` values, null-terminated as the API requires. */
@@ -158,11 +161,10 @@ const relopt_parse_elt relation_option_fields[] = {
 };
 
 /*
- * PostgreSQL invokes string validators for both the null default and supplied
- * values. Alphabet interpretation belongs to sequence materialization, so the
- * relation boundary accepts the stored spelling without changing it.
+ * PostgreSQL calls this validator for supplied strings and the null default.
+ * This callback accepts both and leaves the alphabet spelling unchanged.
  */
-/** @brief Accepts the stored alphabet spelling for later sequence validation. */
+/** @brief Accepts the alphabet option without checking or changing its spelling. */
 void
 accept_alphabet_option(const char *value)
 {
@@ -203,7 +205,7 @@ is_private_relation_option(const DefElem *option) noexcept
 		|| std::strcmp(option->defname, "chunk_bases") == 0;
 }
 
-/** @return The typed relation-options catalog OID or `InvalidOid` when allowed. */
+/** @return The options catalog OID, or InvalidOid if it is missing and missing_ok is true. */
 [[nodiscard]] Oid
 relation_options_catalog_oid(bool missing_ok)
 {
@@ -515,7 +517,7 @@ entity_from_options(Relation relation)
 
 namespace {
 
-/** @brief Rejects a physical table scan that bypassed the required CustomScan. */
+/** @brief Reports that external rows must be read through BioseqExternalScan. */
 [[noreturn]] void
 raise_custom_scan_required()
 {
@@ -539,7 +541,7 @@ raise_read_only()
 	pg_unreachable();
 }
 
-/** @brief Rejects a physical capability not supported by external relations. */
+/** @brief Reports an operation that external tables do not support. */
 [[noreturn]] void
 raise_unsupported_operation(const char *feature)
 {
@@ -552,13 +554,13 @@ raise_unsupported_operation(const char *feature)
 } // namespace
 
 /* ======================================================================== */
-/* TableAmRoutine callbacks (PG17). Signatures mirror                        */
-/* backend/pg/table/access_method.cppm's bioseq_am_methods exactly.          */
+/* TableAmRoutine callbacks for the supported PostgreSQL versions. */
+/* Version checks below select the signatures required by PostgreSQL. */
 /* ======================================================================== */
 
 namespace {
 
-/* --- slot ops: virtual slots, as the CustomScan produces --------------- */
+/* Virtual tuple slots for rows returned by the custom scan. */
 
 /** @return Virtual slot operations used by provider-produced rows. */
 const TupleTableSlotOps *
@@ -567,9 +569,9 @@ slot_callbacks(Relation relation)
 	return &TTSOpsVirtual;
 }
 
-/* --- sequential scan: owned by the CustomScan -------------------------- */
+/* Sequential reads go through the custom scan. */
 
-/** @brief Rejects physical scan creation in favor of the CustomScan route. */
+/** @brief Rejects a physical scan because external rows require the custom scan. */
 TableScanDesc
 begin_physical_scan(Relation relation, Snapshot snapshot,
 						   int nkeys, ScanKey key,
@@ -579,12 +581,11 @@ begin_physical_scan(Relation relation, Snapshot snapshot,
 	raise_custom_scan_required();
 }
 
-/** @brief Accepts cleanup after a physical scan creation failure. */
+/** @brief Does nothing because physical scan creation always fails. */
 void
 end_physical_scan(TableScanDesc scan)
 {
-	/* Idempotent no-op: scan_begin never returns a descriptor, so there is
-	 * nothing to tear down. Safe to call regardless. */
+	/* begin_physical_scan never returns a descriptor to free. */
 }
 
 /** @brief Rejects rescan through the physical table callback. */
@@ -603,7 +604,7 @@ next_physical_tuple(TableScanDesc scan, ScanDirection direction,
 	raise_custom_scan_required();
 }
 
-/* --- parallel scan: external paths are always non-parallel ------------- */
+/* External scans do not support PostgreSQL parallel workers. */
 
 /** @brief Rejects parallel-scan size estimation for external relations. */
 Size
@@ -626,7 +627,7 @@ reinitialize_parallel_scan(Relation rel, ParallelTableScanDesc pscan)
 	raise_unsupported_operation("parallel scan");
 }
 
-/* --- index fetch: external relations reject index DDL ------------------ */
+/* External tables have no local indexes. */
 
 #if PG_VERSION_NUM >= 200000
 /** Rejects PG20 index-scan creation, as the external AM has no local indexes. */
@@ -641,7 +642,7 @@ void reset_index_scan(IndexScanDesc scan) {}
 /** Accepts final cleanup after the index scan's creation was rejected. */
 void end_index_scan(IndexScanDesc scan) {}
 
-/** Rejects constraint TID lookups on relations with no physical tuple IDs. */
+/** Rejects constraint checks that look up rows by a physical tuple ID. */
 bool fetch_visible_tid(Relation relation, ItemPointer tid,
                        Snapshot snapshot, bool *all_dead)
 {
@@ -663,14 +664,14 @@ begin_index_fetch(Relation rel
 void
 reset_index_fetch(IndexFetchTableData *scan)
 {
-	/* no-op: index_fetch_begin never returns a handle */
+	/* begin_index_fetch never returns a handle to reset. */
 }
 
 /** @brief Accepts final cleanup after index fetch creation was rejected. */
 void
 end_index_fetch(IndexFetchTableData *scan)
 {
-	/* no-op: index_fetch_begin never returns a handle */
+	/* begin_index_fetch never returns a handle to free. */
 }
 
 /** @brief Rejects tuple retrieval through a local index. */
@@ -683,7 +684,7 @@ fetch_index_tuple(IndexFetchTableData *scan, ItemPointer tid,
 }
 #endif
 
-/* --- tuple fetch / tid / snapshot -------------------------------------- */
+/* Physical row identifiers and snapshot checks. */
 
 /** @brief Rejects physical tuple-version retrieval. */
 bool
@@ -697,8 +698,7 @@ fetch_row_version(Relation relation, ItemPointer tid,
 bool
 tuple_identifier_is_valid(TableScanDesc scan, ItemPointer tid)
 {
-	/* No physical tuples exist; a tid is never valid. Returning false (rather
-	 * than raising) keeps predicate-style callers well-behaved. */
+	/* A physical tuple ID cannot identify an external row. */
 	return false;
 }
 
@@ -718,16 +718,16 @@ tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	return false;
 }
 
-/** @return `InvalidTransactionId` after clearing the empty delete batch. */
+/** @return InvalidTransactionId, with the number of index entries to delete set to zero. */
 TransactionId
 delete_index_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 {
-	/* External relations have no indexes; nothing to delete. */
+	/* External tables have no local index entries to delete. */
 	delstate->ndeltids = 0;
 	return InvalidTransactionId;
 }
 
-/* --- all DML is rejected (read-only) ----------------------------------- */
+/* External tables are read-only. */
 
 /** @brief Rejects insertion into a read-only external relation. */
 void
@@ -832,9 +832,9 @@ finish_bulk_insert(Relation relation,
 	raise_read_only();
 }
 
-/* --- storage lifecycle: validate, but create no physical storage ------- */
+/* External tables do not create local storage files. */
 
-/** @brief Initializes storage horizons without creating relation files. */
+/** @brief Rejects temporary tables and marks transaction freeze limits as unused. */
 void
 set_new_file_locator(Relation rel,
 											 const RelFileLocator *newrlocator,
@@ -850,16 +850,14 @@ set_new_file_locator(Relation rel,
 	}
 
 	/*
-	 * The ProcessUtility owner validates and removes private options before
-	 * core reaches this callback, then persists them after CREATE succeeds.
-	 * A new relation is not catalog-visible here, so the required entity check
-	 * remains deferred until entity_from_options() performs runtime routing.
+	 * The ProcessUtility hook removes these options before CREATE TABLE and
+	 * saves them after it succeeds. This table is not yet visible in the
+	 * catalog, so entity_from_options checks the required entity at scan time.
 	 */
 
 	/*
-	 * External relations are non-materialised: no heap/init fork is created.
-	 * relation_size() therefore reports zero and never touches smgr. Set the
-	 * freeze horizons to "not tracked", matching a relation with no tuples.
+	 * External tables have no local rows or storage files. Their size is zero,
+	 * and transaction freezing has nothing to track.
 	 */
 	*freezeXid = InvalidTransactionId;
 	*minmulti = InvalidMultiXactId;
@@ -896,7 +894,7 @@ copy_relation_for_cluster(Relation OldTable, Relation NewTable,
 	raise_unsupported_operation("CLUSTER / VACUUM FULL");
 }
 
-/** @brief Accepts vacuum without local storage work. */
+/** @brief Does nothing because external tables have no local pages to vacuum. */
 void
 vacuum_relation(Relation rel,
 #if PG_VERSION_NUM >= 190000
@@ -906,11 +904,10 @@ vacuum_relation(Relation rel,
 #endif
 								BufferAccessStrategy bstrategy)
 {
-	/* Safe no-op: external relations have zero physical pages, so VACUUM and
-	 * autovacuum have nothing to do. */
+	/* VACUUM and autovacuum have no local pages to clean. */
 }
 
-/* --- analyze: no local rows, no remote I/O ----------------------------- */
+/* ANALYZE has no local rows to sample and makes no provider requests. */
 
 /** @return False because external relations expose no local blocks to analyze. */
 bool
@@ -929,11 +926,11 @@ next_analyze_tuple(TableScanDesc scan,
 										double *liverows, double *deadrows,
 										TupleTableSlot *slot)
 {
-	/* Never contacts a provider; yields no sample tuples. */
+	/* Return no sample rows and make no provider request. */
 	return false;
 }
 
-/* --- index build/validate: external relations reject index DDL --------- */
+/* Local index creation and validation are unsupported. */
 
 /** @brief Rejects local index construction for external relations. */
 double
@@ -957,9 +954,9 @@ validate_index_scan(Relation table_rel, Relation index_rel,
 	raise_unsupported_operation("index validate");
 }
 
-/* --- size / toast / estimate: zero physical footprint ------------------ */
+/* Local storage size and planner estimates. */
 
-/** @return Zero because external relations own no PostgreSQL forks. */
+/** @return Zero because external tables have no local storage files. */
 uint64
 relation_size(Relation rel, ForkNumber forkNumber)
 {
@@ -975,10 +972,10 @@ relation_needs_toast_table(Relation rel)
 	return false;
 }
 
-/* Provider-free estimate: fixed cardinality and local type widths only. */
+/* Default row estimate used without contacting the provider. */
 constexpr double k_default_estimated_rows = 1000.0;
 
-/** @brief Publishes provider-free relation size estimates to the planner. */
+/** @brief Estimates table size from a fixed row count and local column widths. */
 void
 estimate_relation_size(Relation rel, int32 *attr_widths,
 								  BlockNumber *pages, double *tuples,
@@ -988,11 +985,11 @@ estimate_relation_size(Relation rel, int32 *attr_widths,
 	*tuples = k_default_estimated_rows;
 	*allvisfrac = 0.0;
 
-	/* Local (statistics/type) column widths only — no remote I/O. */
+	/* Read column widths from local statistics or types. */
 	get_rel_data_width(rel, attr_widths);
 }
 
-/* --- sample scan: rejected (also blocked at plan time) ----------------- */
+/* TABLESAMPLE is unsupported. */
 
 /** @brief Rejects block sampling for external relations. */
 bool
@@ -1009,7 +1006,7 @@ next_sample_tuple(TableScanDesc scan, SampleScanState *scanstate,
 	raise_unsupported_operation("TABLESAMPLE");
 }
 
-/** @brief Stable callback table with bitmap paths disabled. */
+/** @brief External table callbacks, with bitmap scanning disabled. */
 const TableAmRoutine table_access_methods = {
 	.type = T_TableAmRoutine,
 
