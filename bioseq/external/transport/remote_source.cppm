@@ -1,6 +1,6 @@
 /**
  * @file external/transport/remote_source.cppm
- * @brief Pull-based bounded remote byte source backed by libcurl.
+ * @brief Read a remote response through a bounded libcurl buffer.
  */
 module;
 
@@ -20,10 +20,10 @@ export module bioseq.external.transport.remote_source;
 import bioseq.io.sources;                 // io_source concept, source_read_result
 import bioseq.external.transport.locator; // validated_transfer_request
 
-/// Bounded libcurl pull source over a validated remote request.
+/// Read remote response bytes through libcurl with a limit on unread data.
 export namespace bioseq::external::transport {
 
-/// Initializes process-wide libcurl state once.
+/// Call libcurl's process-wide initialization once.
 inline void ensure_curl_global() {
     static std::once_flag once;
     std::call_once(once, [] { ::curl_global_init(CURL_GLOBAL_DEFAULT); });
@@ -33,22 +33,22 @@ inline void ensure_curl_global() {
 struct remote_source_options {
     std::size_t carry_buffer_bytes = 256 * 1024;
     std::uint64_t maximum_wire_bytes = 0;    // 0 = unbounded
-    std::uint64_t maximum_decoded_bytes = 0; // reserved for post-decode layers
+    std::uint64_t maximum_decoded_bytes = 0; // Unused by this source.
     long connect_timeout_milliseconds = 15000;
-    long total_timeout_milliseconds = 0; // 0 = bounded by idle detection.
+    long total_timeout_milliseconds = 0; // 0 disables the total timeout. Low-speed limits still apply.
     long minimum_transfer_rate_bytes_per_second = 1;
     long low_speed_timeout_seconds = 120;
     int poll_timeout_milliseconds = 1000;
     std::string user_agent = "bioseq-external-stream";
 };
 
-/// Pull-based remote source backed by a bounded libcurl carry buffer.
+/// Pull remote bytes, pausing libcurl while the unread buffer is full.
 class remote_byte_source {
   public:
     remote_byte_source(const remote_byte_source&) = delete;
     remote_byte_source& operator=(const remote_byte_source&) = delete;
 
-    /// Starts a transfer for one validated request.
+    /// Prepare a transfer for a validated URL. read_into drives the request.
     remote_byte_source(validated_transfer_request request,
                        remote_source_options options,
                        std::stop_token stop)
@@ -85,7 +85,7 @@ class remote_byte_source {
         return *this;
     }
 
-    /// Releases all retained transfer resources.
+    /// Release all transfer resources.
     ~remote_byte_source() {
         release_curl_resources();
     }
@@ -166,16 +166,16 @@ class remote_byte_source {
         return error_message_;
     }
 
-    /// Returns peak bytes retained by the carry buffer.
+    /// Return the largest number of unread bytes held in the carry buffer.
     [[nodiscard]] std::size_t measure_peak_carry_bytes() const noexcept {
         return peak_carry_byte_count_;
     }
-    /// Returns the configured carry-buffer capacity.
+    /// Return the unread-byte limit, at least CURL_MAX_WRITE_SIZE.
     [[nodiscard]] std::size_t get_carry_capacity_bytes() const noexcept {
         return maximum_carry_bytes_;
     }
 
-    // Transfer statistics (available after the stream completes or fails).
+    // Byte counts so far and final transfer status.
     /// Returns bytes accepted by the libcurl write callback.
     [[nodiscard]] std::uint64_t count_wire_bytes() const noexcept {
         return wire_byte_count_;
@@ -184,7 +184,7 @@ class remote_byte_source {
     [[nodiscard]] std::uint64_t count_decoded_bytes() const noexcept {
         return decoded_byte_count_;
     }
-    /// Returns the received HTTP status code.
+    /// Return the HTTP status collected when the transfer finishes.
     [[nodiscard]] long get_status_code() const noexcept {
         return status_code_;
     }
@@ -194,7 +194,7 @@ class remote_byte_source {
     }
 
   private:
-    /// Returns unread bytes retained in the carry buffer.
+    /// Return the unread byte count in the carry buffer.
     [[nodiscard]] std::size_t count_available_bytes() const noexcept {
         return carry_.size() - carry_read_offset_;
     }
@@ -207,18 +207,18 @@ class remote_byte_source {
         }
     }
 
-    /// Adapts libcurl's write callback to this source.
+    /// Pass libcurl's response bytes to this source.
     static std::size_t write_thunk(char* pointer, std::size_t size, std::size_t count, void* user) {
         return static_cast<remote_byte_source*>(user)->on_write(pointer, size * count);
     }
 
-    /// Accepts a bounded libcurl payload chunk or pauses the transfer.
+    /// Buffer a response chunk, or pause until the consumer makes room.
     std::size_t on_write(const char* pointer, std::size_t length) {
         if (length == 0) {
             return 0;
         }
-        // Compact consumed prefix so the live window (not total capacity) is
-        // what the carry cap bounds.
+        // Remove consumed bytes before checking space for the next chunk.
+        // The limit applies to unread data.
         if (carry_read_offset_ != 0) {
             carry_.erase(carry_.begin(),
                          carry_.begin() + static_cast<std::ptrdiff_t>(carry_read_offset_));
@@ -242,7 +242,7 @@ class remote_byte_source {
         return length;
     }
 
-    /// Collects terminal multi-handle status and response metadata.
+    /// Read completion status and turn failed responses into source errors.
     void reap_completions() {
         CURLMsg* message = nullptr;
         int remaining_message_count = 0;
@@ -259,14 +259,14 @@ class remote_byte_source {
                 record_failure("remote endpoint returned HTTP status " +
                                std::to_string(status_code_));
             } else if (status_code_ >= 300) {
-                // Automatic redirects are disabled. A 3xx response is a policy stop.
+                // Treat redirects as errors because this source does not follow them.
                 record_failure("remote endpoint returned an unfollowed redirect (" +
                                std::to_string(status_code_) + ")");
             }
         }
     }
 
-    /// Applies the validated request and bounded transport options to libcurl.
+    /// Set the URL, saved addresses, timeouts, and TLS checks on libcurl.
     void configure_handle() {
         ::curl_easy_setopt(easy_, CURLOPT_URL, request_.url().data());
         ::curl_easy_setopt(easy_, CURLOPT_WRITEFUNCTION, &write_thunk);
@@ -285,8 +285,8 @@ class remote_byte_source {
         ::curl_easy_setopt(easy_, CURLOPT_LOW_SPEED_TIME, options_.low_speed_timeout_seconds);
         ::curl_easy_setopt(easy_, CURLOPT_SSL_VERIFYPEER, 1L);
         ::curl_easy_setopt(easy_, CURLOPT_SSL_VERIFYHOST, 2L);
-        // No CURLOPT_ACCEPT_ENCODING: automatic content decoding stays disabled
-        // so a declared gzip layer is decoded exactly once by our own decoder.
+        // Leave content decoding to the decoder that reads this source.
+        // Asking libcurl to decode gzip here would decode that layer twice.
         resolve_list_ = nullptr;
         const std::string entry = request_.curl_resolve_entry();
         if (!entry.empty()) {
@@ -295,7 +295,7 @@ class remote_byte_source {
         }
     }
 
-    /// Transfers native handles and callback ownership from another source.
+    /// Take ownership of the handles and redirect writes to this object.
     void adopt_state_from(remote_byte_source&& other) noexcept {
         request_ = std::move(other.request_);
         options_ = std::move(other.options_);
@@ -319,15 +319,14 @@ class remote_byte_source {
         other.easy_ = nullptr;
         other.resolve_list_ = nullptr;
         other.is_handle_added_ = false;
-        // The libcurl write callback captured `&other` as its userdata. Repoint
-        // it at this object so a moved source (e.g. wrapped by gzip_decode_source)
-        // writes into the live carry buffer, not the moved-from shell.
+        // libcurl still points at the old object after a move. Update its callback
+        // target so incoming data reaches this object's carry buffer.
         if (easy_ != nullptr) {
             ::curl_easy_setopt(easy_, CURLOPT_WRITEDATA, this);
         }
     }
 
-    /// Releases all owned libcurl resources in dependency order.
+    /// Detach the easy handle, then free handles and the saved address list.
     void release_curl_resources() noexcept {
         if (multi_ != nullptr && easy_ != nullptr && is_handle_added_) {
             ::curl_multi_remove_handle(multi_, easy_);

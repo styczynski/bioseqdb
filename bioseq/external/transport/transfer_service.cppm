@@ -1,13 +1,11 @@
 /**
  * @file external/transport/transfer_service.cppm
- * @brief Passkey-guarded type erasure for provider transfer services.
+ * @brief Borrowed callbacks for download validation and cancellation.
  */
 module;
 
-/// Type-erased transfer-service handle and borrowed passkey.
-///
-/// The reference exposes validation, execution identity, and cancellation
-/// without owning or linking a concrete transfer implementation.
+/// Call a transfer service through borrowed callbacks.
+/// The adapter creates the passkey required by the validation method.
 
 export module bioseq.external.transport.transfer_service;
 
@@ -24,11 +22,11 @@ export namespace bioseq::external::transport {
 namespace prov = bioseq::external::provider;
 
 namespace detail {
-/// Forward declaration used to constrain passkey construction.
+/// Declare the adapter allowed to construct validation passkeys.
 template <class p_service_type> struct transfer_service_erasure;
 } // namespace detail
 
-/// Borrowed capability minted only by transfer-service erasure thunks.
+/// Key that only the callback adapter can construct.
 class transfer_service_passkey {
   public:
     transfer_service_passkey(const transfer_service_passkey&) = delete;
@@ -39,7 +37,7 @@ class transfer_service_passkey {
     template <class p_service_type> friend struct detail::transfer_service_erasure;
 };
 
-/// Contract for passkey-gated validation, execution identity, and cancellation.
+/// Required methods for validation, execution identity, and cancellation.
 template <class p_service_type>
 concept external_transfer_service_compatible =
     requires(p_service_type& service,
@@ -54,7 +52,7 @@ concept external_transfer_service_compatible =
         { service.request_stop() };
     };
 
-/// Non-owning type-erased transfer-service reference.
+/// Borrowed transfer-service callbacks.
 struct transfer_service_ref {
     void* object{};
     std::expected<validated_transfer_request, prov::external_error> (*validate_fn)(
@@ -67,7 +65,7 @@ struct transfer_service_ref {
 };
 
 namespace detail {
-/// Adapts a concrete transfer service to the erased callbacks.
+/// Forward callbacks to a concrete service, creating a passkey for validation.
 template <class p_service_type> struct transfer_service_erasure {
     static std::expected<validated_transfer_request, prov::external_error>
     validate(void* object,
@@ -86,7 +84,7 @@ template <class p_service_type> struct transfer_service_erasure {
 };
 } // namespace detail
 
-/// Erases a concrete transfer service without taking ownership.
+/// Borrow a service through callbacks without taking ownership.
 template <class p_service_type>
     requires external_transfer_service_compatible<p_service_type>
 [[nodiscard]] transfer_service_ref make_transfer_service_ref(p_service_type& service) {
@@ -96,14 +94,14 @@ template <class p_service_type>
                                 &detail::transfer_service_erasure<p_service_type>::request_stop};
 }
 
-/// Libcurl-backed transfer service with cooperative cancellation.
+/// Download validation with an execution ID and a shared stop source.
 class curl_transfer_service {
   public:
     curl_transfer_service() = default;
     /// Constructs a service for one execution identity.
     explicit curl_transfer_service(prov::external_execution_key key) : key_(key) {}
 
-    /// Validates a candidate under the supplied locator policy.
+    /// Check the candidate URL and resolve its addresses.
     std::expected<validated_transfer_request, prov::external_error>
     validate(const transfer_service_passkey& /*borrowed*/,
              prov::provider_id provider,
@@ -123,7 +121,7 @@ class curl_transfer_service {
     [[nodiscard]] std::stop_token stop_token() const noexcept {
         return stop_.get_token();
     }
-    /// Returns a non-owning erased reference to this service.
+    /// Return borrowed callbacks for this service.
     [[nodiscard]] transfer_service_ref ref() {
         return make_transfer_service_ref(*this);
     }
