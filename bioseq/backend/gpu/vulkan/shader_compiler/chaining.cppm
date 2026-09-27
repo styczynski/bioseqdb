@@ -1,6 +1,6 @@
 /**
  * @file chaining.cppm
- * @brief Owns chaining and coordinate-reduction compute shader bodies.
+ * @brief GPU shaders for chaining anchors, choosing coordinates, and computing mapping quality.
  */
 module bioseq.gpu.vulkan.shader_compiler:chaining;
 
@@ -9,12 +9,13 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Tiled DP score-generation kernel body, beginning after the injected
-/// compile-time constants. It consumes the 24-byte `gpu_anchor_wire` ABI with
-/// full 64-bit reference/query positions and per-anchor `query_span`, accepts
-/// `max_iter` at runtime, and emits absolute predecessor indices for
-/// `backtrack_chains`. One workgroup owns one independent hard range, so the
-/// tail sweep needs no atomics.
+/// @brief Computes the best chain score and predecessor for each anchor.
+/// A workgroup processes one independent anchor range at a time. Its 32 lanes
+/// compare possible predecessors in parallel, then choose the best link before
+/// advancing to the next anchor. `max_iter` limits the backward search.
+///
+/// Inputs use 24-byte `gpu_anchor_wire` records with 64-bit positions and a
+/// span for each anchor. Predecessors are absolute indices used during traceback.
 inline constexpr std::string_view k_chain_tiled_dp_body = R"GLSL(
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -192,13 +193,10 @@ void main() {
     }
 }
 )GLSL";
-/// @brief Chain-range construction. One workgroup (1 invocation) per query
-/// serially scans that query's sorted anchor span, emitting `GpuChainRange`
-/// records at strand/chromosome changes and hard reference gaps, matching the
-/// CPU `build_gpu_chain_ranges` predicate. When any hard range is very long,
-/// the shader also performs the same endpoint-preserving thinning used by the
-/// CPU-side Vulkan chainer so resident seed-to-coordinate does not feed huge
-/// dense ranges into DP.
+/// @brief Splits each query's sorted anchors into independent chaining ranges.
+/// Starts a new range when the strand changes or a target-position gap exceeds
+/// the limit. One thread scans each query. Very long ranges are thinned at
+/// regular intervals while keeping both endpoints, which limits chaining work.
 inline constexpr std::string_view k_chain_range_build_body = R"GLSL(
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 struct gpu_anchor_wire { uint64_t ref_position; uint64_t query_position; uint is_reverse; uint span_flags_segment; };
@@ -298,8 +296,10 @@ void main() {
 }
 )GLSL";
 
-/// @brief Resident coordinate-only finalizer. It mirrors the bounded top-k CPU
-/// coordinate extractor, but downloads only one compact mapping record.
+/// @brief Chooses mapping coordinates by tracing back the best unvisited chain ends.
+/// Stops at the first chain that meets the score and seed-count thresholds, or
+/// after `probe_limit` attempts. Writes a compact mapping result and its anchor
+/// trace so callers can avoid downloading all chaining scores.
 inline constexpr std::string_view k_coordinate_reduce_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -502,12 +502,10 @@ void main() {
 }
 )GLSL";
 
-/// @brief Complete accepted-chain enumeration and deterministic pre-alignment
-/// primary/secondary classification for the persisted full-Vulkan MAPQ route.
-///
-/// The fixed candidate array is an admission boundary, not a top-k
-/// approximation: encountering one more accepted chain sets a nonzero status
-/// and the host rejects the complete operation.
+/// @brief Collects accepted chains and selects candidates for GPU alignment.
+/// Classifies overlapping candidates as primary or secondary using their query
+/// coverage and chain scores. If accepted chains fill the candidate array, the
+/// next accepted chain reports overflow and the host rejects the operation.
 inline constexpr std::string_view k_chain_candidate_reduce_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -1115,10 +1113,11 @@ void main() {
 }
 )GLSL";
 
-/// @brief Deterministic post-alignment parent/secondary classification and Vulkan MAPQ.
-///
-/// Every retained candidate must have one ordered physical CIGAR binding. The
-/// shader rejects rather than deriving a score from missing or malformed data.
+/// @brief Reclassifies aligned candidates and computes their mapping quality (MAPQ).
+/// Each candidate selected for alignment must match an ordered CIGAR result.
+/// Missing or invalid alignment data fails the job. Scores account for competing
+/// mappings, alignment identity, and repetitive query sequence before results
+/// are published.
 inline constexpr std::string_view k_mapping_quality_reduce_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -1651,7 +1650,9 @@ void main() {
 }
 )GLSL";
 
-/// @brief Selects one coordinate by bounded diagonal voting.
+/// @brief Estimates a mapping position from anchors that support a similar diagonal.
+/// Counts nearby target-minus-query offsets on the same strand, then uses the
+/// best-supported offset to place the full query if it passes the thresholds.
 inline constexpr std::string_view k_coordinate_vote_reduce_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
@@ -1793,7 +1794,10 @@ void main() {
 }
 )GLSL";
 
-/// @brief Selects coordinates for a batch of independent diagonal-vote jobs.
+/// @brief Estimates one mapping position per job using sampled diagonal votes.
+/// Each workgroup compares candidate offsets against at most 32 evenly spaced
+/// anchors. It scales the winning vote count to the job size before testing
+/// the score and seed-count thresholds.
 inline constexpr std::string_view k_coordinate_vote_reduce_batch_body = R"GLSL(
 layout(local_size_x = compile_time_workgroup_size_x, local_size_y = 1, local_size_z = 1) in;
 
