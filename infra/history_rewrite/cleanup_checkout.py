@@ -19,7 +19,10 @@ easy_profiler-develop ftxui-main g3sa-main highway-master hwinfo-main
 libassert-main memory-main minimap2-fast-contrib-v2.22 minimap2-master-clean
 librapidarchive-main moltenvk-main onetbb-master paradedb-experiments
 perf-cpp-dev pg_background-master pg-ast pgvector-master pg_extension-master
-website_design_files_tmp CHAINING_BRANCHING_EXPERIMENT_FOLLOWUP_ARTIFACTS'''.split())
+website_design_files_tmp CHAINING_BRANCHING_EXPERIMENT_FOLLOWUP_ARTIFACTS
+CHAINING_BRANCHING_DENSE_DIVERGENCE_EXPERIMENT_ARTIFACTS
+CHAINING_BRANCHING_MAX_DROP_FIGURES
+CHAINING_BRANCHING_REPEAT_EXPERIMENT_ARTIFACTS'''.split())
 KEEP_FILES = {'vcpkg.json', 'vcpkg-configuration.json', 'LICENSE', '.gitignore', '.gitattributes'}
 
 

@@ -1,2 +1,0 @@
-comb_query_m256	914311	19374	914295	+	comb_reference_m256	919136	25199	919120	145920	1021921	60	tp:A:P	cm:i:9728	s1:i:114300	s2:i:0	dv:f:0.0034	rl:i:0
-comb_query_m256	914311	986	4901	+	comb_reference_m256	919136	986	4901	600	3915	60	tp:A:P	cm:i:40	s1:i:600	s2:i:0	dv:f:0.0032	rl:i:0
