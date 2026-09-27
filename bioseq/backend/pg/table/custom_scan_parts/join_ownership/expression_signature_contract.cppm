@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines exact PostgreSQL function and operator signature predicates.
+ * @brief Checks function and operator expressions against their PostgreSQL catalog signatures.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -12,7 +12,7 @@ import bioseq.postgres.support;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Checks a function node against its exact catalog argument and result types. */
+    /** @brief Checks that a scalar function call has the argument and result types declared in the catalog. */
     [[nodiscard]] bool per_row_function_signature_is_exact(FuncExpr* function) {
         if (function == nullptr || function->funcretset || OidIsValid(function->funcvariadic))
             return false;
@@ -32,7 +32,7 @@ export {
         return true;
     }
 
-    /** @brief Checks an operator node against its exact catalog implementation signature. */
+    /** @brief Checks the operator's implementation function and its argument and result types against the catalog. */
     [[nodiscard]] bool per_row_operator_signature_is_exact(OpExpr* operation) {
         if (operation == nullptr || !OidIsValid(operation->opno) ||
             !OidIsValid(operation->opfuncid) || operation->opretset ||

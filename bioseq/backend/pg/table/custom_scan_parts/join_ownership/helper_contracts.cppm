@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines lightweight match-helper identity contracts for join ownership.
+ * @brief Checks which match helper belongs to a search target.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -32,10 +32,10 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Decodes a match helper with an exact catalog, arity, and result contract.
+     * @brief Returns a match-helper call with a valid function, argument count, and result type.
      *
-     * Its argument binding is resolved separately against the selected owner recipe
-     * after standard_planner has assigned final plan_node_id values.
+     * Its argument is matched to an executor owner later, after standard_planner
+     * assigns the final plan_node_id values.
      */
     [[nodiscard]] FuncExpr*
     batch_join_well_formed_match_helper(Node* expression,
@@ -57,30 +57,30 @@ export {
                    : reinterpret_cast<Node*>(linitial(helper->args));
     }
 
-    /** @brief Builds the canonical base-Var lineage for a match target recipe. */
+    /** @brief Returns the target expression's source sequence Vars, deduplicated and in a stable order. */
     [[nodiscard]] List* canonical_match_base_lineage(Node* target_recipe,
                                                      const bioseq_stub_oids& oids);
 
-    /** @brief Serialize a target recipe and its base lineage as an owner descriptor. */
+    /** @brief Stores the target expression and its source sequence Vars for later owner resolution. */
     [[nodiscard]] List* make_match_owner_descriptor(Node* target_recipe,
                                                     Index base_relid,
                                                     const bioseq_stub_oids& oids);
 
-    /** @brief Collect serialized match-helper bindings from a base-scan target list. */
+    /** @brief Records where match helpers occur in the base scan's output and checks which target they belong to. */
     [[nodiscard]] List* collect_base_match_helper_sites(List* targetlist,
                                                         Node* target_recipe,
                                                         Index target_relid,
                                                         AttrNumber primary_target_attno,
                                                         const bioseq_stub_oids& oids);
 
-    /** @brief Checks whether a helper names the exact transformed target recipe. */
+    /** @brief Checks whether the helper argument equals the complete target expression. */
     [[nodiscard]] bool batch_join_match_helper_names_recipe(FuncExpr* helper,
                                                             Node* target_recipe) noexcept {
         Node* argument = batch_join_match_helper_argument(helper);
         return argument != nullptr && target_recipe != nullptr && equal(argument, target_recipe);
     }
 
-    /** @brief Checks whether a helper names one canonical base source of a recipe. */
+    /** @brief Checks whether the helper names a source sequence or another column from a source relation. */
     [[nodiscard]] bool batch_join_match_helper_names_base_lineage(FuncExpr* helper,
                                                                   Node* target_recipe,
                                                                   const bioseq_stub_oids& oids) {
@@ -104,11 +104,11 @@ export {
     }
 
     /**
-     * @brief Decodes a match-helper PHV at a valid transformed-recipe frontier.
+     * @brief Returns the match-helper call inside a valid PlaceHolderVar.
      *
-     * Unlike the base-lineage helper decoder below, the PHV may cover more than one relation when
-     * the target recipe is a concat.  The final owner resolver validates the
-     * canonical argument and lineage before any executor sees the site.
+     * A concatenated target can draw on several relations, so phrels may contain
+     * several entries. The final owner resolver checks the helper argument and
+     * its source columns before execution.
      */
     [[nodiscard]] FuncExpr*
     batch_join_match_helper_phv_function(const PlaceHolderVar* placeholder,
