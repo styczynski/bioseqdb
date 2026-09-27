@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/report_schemas.cppm
- * @brief NCBI assembly and BioSample report schema fragments.
+ * @brief Data types for NCBI assembly and BioSample reports.
  */
 module;
 

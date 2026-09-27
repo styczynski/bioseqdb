@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/service_schemas.cppm
- * @brief NCBI core service request and response schema fragments.
+ * @brief NCBI request and response types, including API-key settings.
  */
 module;
 

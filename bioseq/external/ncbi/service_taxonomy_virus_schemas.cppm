@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/service_taxonomy_virus_schemas.cppm
- * @brief NCBI sequence, taxonomy, and virus service schema fragments.
+ * @brief Request and response types for NCBI sequence, taxonomy, and virus services.
  */
 module;
 
