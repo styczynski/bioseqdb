@@ -135,6 +135,75 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Invalid package cache cell"):
                     cleanup([dict(cell, distro="../outside")], str(root))
 
+    def test_completed_package_cleanup_finds_nested_builds_without_touching_sources(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        cleanup = namespace["reclaim_collected_package_objects"]
+        for layout in ("build-repository-root", "build"):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                cell_root = root / "arch/postgresql19"
+                tree = cell_root / layout
+                tree.mkdir(parents=True)
+                (tree / "CMakeCache.txt").write_text("retained cache")
+                (tree / "one.o").write_text("regenerable object")
+                (tree / "two.pcm").write_text("regenerable module")
+                (tree / "bioseq.so").write_text("retained library")
+                source = cell_root / "source"
+                source.mkdir()
+                (source / "fixture.o").write_text("source fixture, not build output")
+                outside = root / "outside"
+                outside.mkdir()
+                (outside / "foreign.o").write_text("not owned by this cache")
+                (tree / "linked-directory").symlink_to(outside, target_is_directory=True)
+                with mock.patch.object(namespace["subprocess"], "check_output", return_value=""), \
+                        mock.patch.object(namespace["shutil"], "disk_usage",
+                                          return_value=SimpleNamespace(free=110 * 1024**3)):
+                    result = cleanup([dict(distro="arch", postgres_major=19)], str(root))
+                self.assertEqual(result["removed_files"], 2)
+                self.assertEqual(result["roots"], [str(tree)])
+                for retained in (tree / "CMakeCache.txt", tree / "bioseq.so",
+                                 source / "fixture.o", outside / "foreign.o"):
+                    self.assertTrue(retained.is_file())
+
+    def test_retired_package_data_cleanup_keeps_code_caches_and_binaries(self) -> None:
+        with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
+                mock.patch.object(sys, "path", list(sys.path)):
+            namespace = runpy.run_path(str(REPOSITORY_ROOT / "infra/build_release_fleet.py"))
+        cleanup = namespace["reclaim_retired_package_source_data"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "CMakeLists.txt").write_text("project(test)")
+            cell = root / "build/package-linux/native/cells/postgresql19/arch"
+            fasta_name = "homo_sapiens_GRCh38_dna4.fasta"
+            removed = [cell / "source/data" / fasta_name,
+                       cell / "package/bioseq-postgresql19-4.2.3.tar.gz"]
+            retained = [cell / "source/module.cppm", cell / "source/CMakeCache.txt",
+                        cell / "package/output/bioseq-postgresql19-4.2.3.pkg.tar.zst",
+                        cell / "package/result.json", cell / "source/data/other.fasta",
+                        root / "data" / fasta_name, root / "cache/one.o"]
+            for path in removed + retained:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture")
+            (cell / "package/linked-source").symlink_to(root / "data", target_is_directory=True)
+            (cell / "source/data/homo_sapiens_GRCh38_dna5.fasta").symlink_to(retained[-2])
+            for outputs, reason in ((["999999 python server.py --run-build package-linux\n"], "worker"),
+                                    (["", "container\n"], "container"),
+                                    ([f"999999 clang++ {cell}/source/module.cppm\n"], "referenced")):
+                with mock.patch.object(subprocess, "check_output", side_effect=outputs):
+                    self.assertIn(reason, cleanup(root)["skipped"])
+                self.assertTrue(removed[0].is_file())
+            with mock.patch.object(subprocess, "check_output", return_value=""), \
+                    mock.patch.object(namespace["shutil"], "disk_usage", return_value=SimpleNamespace(free=0)):
+                result = cleanup(root)
+            self.assertEqual(set(result["removed_files"]), set(map(str, removed)))
+            self.assertEqual(result["removed_file_bytes"], 14)
+            for path in retained:
+                self.assertEqual(path.read_text(), "fixture")
+            self.assertTrue((cell / "package/linked-source").is_symlink())
+            self.assertTrue((cell / "source/data/homo_sapiens_GRCh38_dna5.fasta").is_symlink())
+
     def test_coordinator_ip_refresh_only_changes_enrolled_narrow_rules(self) -> None:
         with mock.patch.dict(sys.modules, {"manage_e2e_fleet": SimpleNamespace()}), \
                 mock.patch.object(sys, "path", list(sys.path)):
@@ -547,6 +616,9 @@ class ReleaseFleetAssignmentTests(unittest.TestCase):
         self.assertEqual([row["cell"]["postgres_major"] for row in pending], [17, 20])
         self.assertEqual([row["retry_queued"] for row in pending], [True, False])
         self.assertEqual(pending[1]["log_file"], "/tmp/4.log")
+        state["deferred_package_rebuilds"] = {"test2-m7i": [cells[3]]}
+        pending = namespace["pending_package_failures"](state, inventory)
+        self.assertEqual([row["retry_queued"] for row in pending], [True, True])
         state["jobs"]["test2-m7i"] = dict(cell=cells[3], observed=dict(status="completed"))
         self.assertEqual(len(namespace["pending_package_failures"](state, inventory)), 1)
 
@@ -2829,6 +2901,64 @@ class BuildAndStageContractTests(unittest.TestCase):
 class ReleasePublisherTests(unittest.TestCase):
     def publisher(self):
         return runpy.run_path(str(REPOSITORY_ROOT / 'infra/publish_release.py'))
+
+    def test_publisher_inventory_does_not_import_fleet_or_yaml(self):
+        with mock.patch.dict(sys.modules, {
+                'build_release_fleet': None, 'manage_e2e_fleet': None, 'yaml': None}):
+            publisher = self.publisher()
+            self.assertEqual(publisher['release_state'].pending_package_repairs({}, {'packages': []}), set())
+
+    def test_current_publication_excludes_diagnosed_repairs_until_replaced(self):
+        publisher = self.publisher()
+        accepted = publisher['accepted_packages']
+        signature = publisher['publication_signature']
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            output = root / 'bin_artifacts/packages'
+            output.mkdir(parents=True)
+            records = []
+            for major in (17, 18):
+                artifact = output / f'bioseq{major}.deb'
+                artifact.write_bytes(f'qualified fixture {major}'.encode())
+                records.append(dict(file=artifact.name, bytes=artifact.stat().st_size,
+                    sha256=sha256(artifact), postgres_major=major, distro='debian_13',
+                    architecture='arm64', postgres_release_channel='stable',
+                    validation=dict(passed=True, format='deb', package_version='4.2.3'),
+                    installed_sql_smoke={key: True for key in ('passed', 'default_insert_search',
+                        'default_persisted_search', 'column_defaults_and_vacuum')}))
+            manifest = output / 'manifest.json'
+            manifest.write_text(json.dumps(dict(packages=records)))
+            state_path = root / 'reporting/package_release_fleet/state.json'
+            state_path.parent.mkdir(parents=True)
+            cell = {key: records[0][key] for key in ('postgres_major', 'distro', 'architecture')}
+            state = dict(package_rebuilds={'worker': [cell]}, jobs={})
+            state_path.write_text(json.dumps(state))
+            with mock.patch.dict(accepted.__globals__, {'ROOT': root}):
+                self.assertEqual([p['postgres_major'] for p in accepted()], [18])
+                held_signature = signature()
+                state = dict(jobs={'worker': dict(cell=cell,
+                    replaces_package_sha256=records[0]['sha256'], observed={'status': 'running'})})
+                state_path.write_text(json.dumps(state))
+                self.assertEqual(signature(), held_signature)
+                state['jobs']['worker']['observed']['status'] = 'failed'
+                state['last_hourly_log'] = 123
+                state_path.write_text(json.dumps(state))
+                self.assertEqual(signature(), held_signature)
+                self.assertEqual([p['postgres_major'] for p in accepted()], [18])
+                state = dict(history=[dict(previous_job=state['jobs']['worker'])], jobs={})
+                state_path.write_text(json.dumps(state))
+                self.assertEqual([p['postgres_major'] for p in accepted()], [18])
+                artifact = output / records[0]['file']
+                artifact.write_bytes(b'repaired qualified fixture')
+                records[0].update(bytes=artifact.stat().st_size, sha256=sha256(artifact))
+                manifest.write_text(json.dumps(dict(packages=records)))
+                self.assertNotEqual(signature(), held_signature)
+                self.assertEqual([p['postgres_major'] for p in accepted()], [17, 18])
+                unheld_signature = signature()
+                state['package_rebuilds'] = {'worker': [cell]}
+                state_path.write_text(json.dumps(state))
+                self.assertNotEqual(signature(), unheld_signature)
+                self.assertEqual([p['postgres_major'] for p in accepted()], [18])
 
     def test_upload_snapshot_is_removed_after_success_or_failure(self):
         function = self.publisher()['publish_packages']

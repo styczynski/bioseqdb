@@ -27,6 +27,9 @@ import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "infra"))
+from release_inventory import cell_key, package_release_ready, pending_package_repairs
+
 sys.path.insert(0, str(ROOT / "bench"))
 import manage_e2e_fleet as fleet
 
@@ -256,29 +259,6 @@ def worker_diagnostics(state, mode):
     return result
 
 
-def pending_package_repairs(state, inventory):
-    """Keep diagnosed archive repairs pending through admission and failures.
-
-    This tracks only explicit repairs, never Git age or compiled-input hashes.
-    A qualified replacement with different bytes releases the old archive hold.
-    History retains the hold even after a failed worker takes another cell.
-    """
-    packages = {cell_key(p): p for p in inventory.get("packages", [])}
-    pending = {cell_key(c) for name in ("package_rebuilds", "deferred_package_rebuilds")
-               for queue in state.get(name, {}).values() for c in queue}
-    jobs = [entry.get("previous_job", {}) for entry in state.get("history", [])]
-    jobs.extend(state.get("jobs", {}).values())
-    for job in jobs:
-        previous_sha = job.get("replaces_package_sha256")
-        if not job.get("cell") or not previous_sha:
-            continue
-        key = cell_key(job["cell"])
-        replacement = packages.get(key, {})
-        if replacement.get("sha256") == previous_sha or not package_release_ready(replacement):
-            pending.add(key)
-    return pending
-
-
 def package_readiness_counts(state, inventory):
     packages = inventory.get("packages", [])
     pending = pending_package_repairs(state, inventory)
@@ -305,8 +285,9 @@ def pending_package_failures(state, inventory):
     repairs = pending_package_repairs(state, inventory)
     qualified = {cell_key(package) for package in inventory.get("packages", [])
                  if package_release_ready(package) and cell_key(package) not in repairs}
-    queued = {cell_key(cell) for cells in state.get("package_rebuilds", {}).values()
-              for cell in cells}
+    queued = {cell_key(cell)
+              for queue_name in ("package_rebuilds", "deferred_package_rebuilds")
+              for cells in state.get(queue_name, {}).values() for cell in cells}
     queued.update(cell_key(cell) for cell in state.get("validation_rechecks", {}).values())
     pending = []
     for key, (host, job) in sorted(latest.items()):
@@ -542,13 +523,6 @@ def verify_website_delivery(destination):
                            f"missing={missing[:5]}, extra={extra[:5]}, changed={changed[:5]}")
 
 
-def package_release_ready(package):
-    return (package.get("validation", {}).get("passed") is True
-            and all(package.get("installed_sql_smoke", {}).get(field) is True
-                    for field in ("passed", "default_insert_search", "default_persisted_search",
-                                  "column_defaults_and_vacuum")))
-
-
 def collect_package_revision(host, manifest, source, destination, ssh, *,
                              replacement_authorizations=()):
     """Import only advertised bytes, then move cell ownership without losing revisions.
@@ -691,10 +665,6 @@ def collect(host, observed, *, mode=None):
           host=host, destination=str(destination))
 
 
-def cell_key(cell):
-    return f"pg{cell['postgres_major']}/{cell['distro']}/{cell['architecture']}"
-
-
 def job_mode(host, job):
     """Use the current assignment after the website host joins package work."""
     return job.get("mode") or (
@@ -755,6 +725,79 @@ def reclaim_retired_benchmark_intermediates(repository):
                 reclaimed_bytes=available - before, available_bytes=available, roots=touched)
 
 
+def reclaim_retired_package_source_data(repository):
+    """Drop only regenerable FASTA/source-archive copies from idle staging.
+
+    WorkspaceManager recreates each cell before its next build. Compiler caches,
+    toolchains, source code, package binaries, reports and the repository's own
+    data are outside this cleanup. Keep this helper self-contained for SSH.
+    """
+    repository = Path(repository)
+    root = repository / "build/package-linux/native/cells"
+    if (not repository.is_absolute() or repository.resolve() != repository
+            or not (repository / "CMakeLists.txt").is_file()
+            or root.resolve() != root):
+        raise ValueError("Cleanup requires an explicit nonsymlink package staging path")
+    if not root.is_dir():
+        return {"skipped": "package staging is absent"}
+    processes = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+    for line in processes.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit() and int(pid) not in (os.getpid(), os.getppid()):
+            if re.search(r"(?:^|\s)(?:\S*/)?server\.py\s+--run-build(?:\s|$)", command):
+                return {"skipped": "build worker is still live"}
+            if str(root) in command:
+                return {"skipped": "package staging is still referenced"}
+    if subprocess.check_output(["docker", "ps", "-q"], text=True).strip():
+        return {"skipped": "container is still live"}
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        for link in [process / "cwd", *(process / "fd").glob("*")]:
+            try:
+                target = os.readlink(link)
+                if target == str(root) or target.startswith(str(root) + "/"):
+                    return {"skipped": "package staging has an open reference"}
+            except OSError:
+                pass
+    before = shutil.disk_usage(root).free
+    removed, removed_bytes = [], 0
+    for major in sorted(root.iterdir()):
+        if not re.fullmatch(r"postgresql[0-9]+", major.name) or major.is_symlink() or not major.is_dir():
+            continue
+        for distro in sorted(major.iterdir()):
+            if (not re.fullmatch(r"[a-z][a-z0-9_.]*", distro.name)
+                    or distro.is_symlink() or not distro.is_dir()):
+                continue
+            for kind in ("source", "package"):
+                tree = distro / kind
+                if tree.is_symlink() or not tree.is_dir():
+                    continue
+                for directory, dirs, files in os.walk(tree, followlinks=False):
+                    dirs[:] = [name for name in dirs if not (Path(directory) / name).is_symlink()]
+                    for name in files:
+                        path = Path(directory) / name
+                        fasta = path.parent.name == "data" and name in (
+                            "homo_sapiens_GRCh38_dna4.fasta", "homo_sapiens_GRCh38_dna5.fasta")
+                        archive = kind == "package" and re.fullmatch(
+                            r"bioseq-postgresql[0-9]+-[0-9A-Za-z_.+-]+[.]tar[.]gz", name)
+                        if not (fasta or archive) or path.is_symlink() or not path.is_file():
+                            continue
+                        stat = path.stat()
+                        if stat.st_nlink != 1:
+                            continue
+                        path.unlink()
+                        removed.append(str(path))
+                        removed_bytes += stat.st_size
+            if shutil.disk_usage(root).free >= 100 * 1024**3:
+                break
+        if shutil.disk_usage(root).free >= 100 * 1024**3:
+            break
+    available = shutil.disk_usage(root).free
+    return dict(removed_files=removed, removed_file_bytes=removed_bytes,
+                reclaimed_bytes=available - before, available_bytes=available)
+
+
 def reclaim_collected_package_objects(cells, cache_root="/home/ubuntu/caches/package-cmake"):
     """Reclaim regenerable objects for copied packages on an idle native host.
 
@@ -779,8 +822,18 @@ def reclaim_collected_package_objects(cells, cache_root="/home/ubuntu/caches/pac
         if (re.fullmatch(r"[a-z][a-z0-9_.]*", cell["distro"]) is None
                 or type(cell["postgres_major"]) is not int or cell["postgres_major"] < 17):
             raise ValueError("Invalid package cache cell")
-        tree = root / cell["distro"] / f"postgresql{cell['postgres_major']}"
-        if not tree.is_dir() or tree.resolve() != tree or not (tree / "CMakeCache.txt").is_file():
+        cell_root = root / cell["distro"] / f"postgresql{cell['postgres_major']}"
+        if not cell_root.is_dir() or cell_root.resolve() != cell_root:
+            continue
+        # Current native packages keep sources beside build-repository-root;
+        # older caches used build/ or the cell root itself. Select only an
+        # actual CMake build tree, never walk the adjacent source checkout.
+        tree = next((candidate for candidate in (
+            cell_root / "build-repository-root", cell_root / "build", cell_root)
+            if candidate.is_dir() and candidate.resolve() == candidate
+            and (candidate / "CMakeCache.txt").is_file()
+            and not (candidate / "CMakeCache.txt").is_symlink()), None)
+        if tree is None:
             continue
         referenced = False
         for process in Path("/proc").iterdir():
@@ -983,6 +1036,22 @@ def dispatch_available(state):
                         event("collected_package_cleanup_deferred", host=host, **cleanup)
                 except Exception as error:
                     event("collected_package_cleanup_failed", host=host, error=str(error)[:400])
+        if available < 80 * 1024**3:
+            try:
+                source = ("import json, os, re, shutil, subprocess\nfrom pathlib import Path\n"
+                          + inspect.getsource(reclaim_retired_package_source_data)
+                          + f"\nprint(json.dumps(reclaim_retired_package_source_data({REMOTE!r})))\n")
+                cleanup = json.loads(remote(host, "sudo -n python3 -c " + shlex.quote(source), timeout=55))
+                if not cleanup.get("skipped"):
+                    available = cleanup["available_bytes"]
+                    if cleanup["removed_files"]:
+                        event("retired_package_source_data_reclaimed", host=host,
+                              recovery="recopy repository FASTA or regenerate source archive; binaries retained",
+                              **cleanup)
+                else:
+                    event("retired_package_source_cleanup_deferred", host=host, **cleanup)
+            except Exception as error:
+                event("retired_package_source_cleanup_failed", host=host, error=str(error)[:400])
         if available < 80 * 1024**3:
             if host not in disk_attention:
                 event("package_admission_waiting_for_disk", host=host,
