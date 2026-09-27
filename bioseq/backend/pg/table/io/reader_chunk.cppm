@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Chunk loading, decoding, and row materialization for table reads.
+ * Read stored column chunks and decode their values for row and batch scans.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -53,7 +53,7 @@ deserialize_boolean_array(StringInfo bool_array_buffer, bool *bool_array,
 	}
 }
 
-/** @brief Decode serialized non-null datums into their row positions. */
+/** @brief Decode non-NULL values into their original row positions. */
 static void
 deserialize_datum_array(StringInfo datum_buffer, bool *present_values, uint32_t datum_count,
 					  bool datum_type_by_value, int datum_type_length,
@@ -87,7 +87,7 @@ deserialize_datum_array(StringInfo datum_buffer, bool *present_values, uint32_t 
 	}
 }
 
-/** @brief Evaluate a column's immutable default expression. */
+/** @brief Evaluate a column default that can be reduced to a constant. */
 static Datum
 get_column_default_value(TupleConstr *tuple_constraints, Form_pg_attribute attribute_form)
 {
@@ -106,7 +106,7 @@ get_column_default_value(TupleConstr *tuple_constraints, Form_pg_attribute attri
 
 	Assert(default_value_node != NULL);
 
-	/* try reducing the default value node to a const node */
+	/* Reduce the default expression to a constant before filling old rows. */
 	default_value_node = eval_const_expressions(NULL, default_value_node);
 	if (Const *const_node = try_cast_pg_node<Const>(default_value_node))
 	{
@@ -137,9 +137,8 @@ load_column_buffers(Relation relation, chunk_skip_node *chunk_skip_nodes,
 	}
 
 	/*
-	 * We first read the "exists" chunks. We don't read "values" array here,
-	 * because "exists" chunks are stored sequentially on disk, and we want to
-	 * minimize disk seeks.
+	 * Presence streams are stored together on disk. Read them first to reduce
+	 * seeks, then read the value streams.
 	 */
 	for (chunk_index = 0; chunk_index < chunk_count; chunk_index++)
 	{
@@ -155,7 +154,7 @@ load_column_buffers(Relation relation, chunk_skip_node *chunk_skip_nodes,
 		chunks[chunk_index]->presence_buffer = raw_exists_buffer;
 	}
 
-	/* then read "values" chunks, which are also stored sequentially on disk */
+	/* Value streams are also stored together on disk. */
 	for (chunk_index = 0; chunk_index < chunk_count; chunk_index++)
 	{
 		chunk_skip_node *chunk_skip_node = &chunk_skip_nodes[chunk_index];
@@ -180,7 +179,7 @@ load_column_buffers(Relation relation, chunk_skip_node *chunk_skip_nodes,
 	return loaded_column_buffers;
 }
 
-/** @brief Load projected, predicate-selected buffers for one stripe. */
+/** @brief Read the requested columns from chunk groups that may match the filters. */
 export stripe_buffers *
 load_filtered_stripe_buffers(Relation relation, stripe_metadata *stripe_metadata,
 						  TupleDesc tuple_descriptor, List *projected_columns,
@@ -208,7 +207,7 @@ load_filtered_stripe_buffers(Relation relation, stripe_metadata *stripe_metadata
 													 selected_chunk_mask);
 	}
 
-	/* load column data for projected columns */
+	/* Read only the columns requested by this scan. */
 	column_buffers **columns = bioseq::postgres::support::allocate_zeroed_array<column_buffers*>(column_count);
 
 	for (column_index = 0; column_index < stripe_metadata->column_count; column_index++)
@@ -244,7 +243,11 @@ load_filtered_stripe_buffers(Relation relation, stripe_metadata *stripe_metadata
 	return buffers;
 }
 
-/** @brief Decompress and materialize one selected chunk group. */
+/**
+ * @brief Decode a selected chunk group for the requested columns.
+ * Reuse cached decompressed buffers when available. Values can point into these
+ * buffers, which must stay alive while the decoded rows are in use.
+ */
 static chunk_data *
 deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 					 uint32_t row_count, TupleDesc tuple_descriptor,
@@ -279,7 +282,7 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 				mark_chunk_group_in_use(state->relation->rd_id, stripe_id, chunk_index);
 			}
 
-			/* decompress and deserialize current chunk's data */
+			/* Reuse cached values or decode the stored chunk below. */
 			StringInfo value_buffer = NULL;
 			bool value_buffer_owned = true;
 
@@ -293,7 +296,7 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 			{
 				if (chunk_buffers->value_compression_algorithm == bioseq::compression_algorithm::none && !should_cache)
 				{
-					/* Shared raw stripe buffer: use in place and leave owner unchanged. */
+					/* Borrow uncompressed bytes from the stripe until the stripe is released. */
 					value_buffer = chunk_buffers->value_buffer;
 					value_buffer_owned = false;
 				}
@@ -331,14 +334,14 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 								  attribute_form->attlen, attribute_form->attalign,
 								  pending_chunk->values_by_column[column_index]);
 
-			/* Never pass the shared raw stripe buffer to the chunk free path. */
+			/* The stripe owns raw buffers, so chunk cleanup must leave them alone. */
 			pending_chunk->referenced_value_buffers[column_index] = value_buffer_owned ? value_buffer : NULL;
 		}
 		else if (column_added)
 		{
 			/*
-			 * This is a column that was added after creation of this stripe.
-			 * So we use either the default value or NULL.
+			 * This column was added after the stripe was written. Fill its rows
+			 * with the column default, or NULL when no default exists.
 			 */
 			if (attribute_form->atthasdef)
 			{
@@ -364,7 +367,7 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 	return pending_chunk;
 }
 
-/** @brief Initialize row-reading state for a selected chunk group. */
+/** @brief Load a selected chunk group and start reading at its first row. */
 export chunk_group_read_state *
 begin_chunk_group_read(stripe_buffers *buffers, int chunk_index, TupleDesc tuple_desc,
 					List *projected_columns, MemoryContext cxt, stripe_read_state *state,
@@ -401,7 +404,10 @@ begin_chunk_group_read(stripe_buffers *buffers, int chunk_index, TupleDesc tuple
 	return chunk_group_state;
 }
 
-/** @brief Release a chunk group's decoded values and read state. */
+/**
+ * @brief Free this chunk group's read state and owned buffers.
+ * Cached buffers and borrowed deletion masks keep their owners.
+ */
 export void
 end_chunk_group_read(chunk_group_read_state *chunk_group_state)
 {
@@ -413,13 +419,16 @@ end_chunk_group_read(chunk_group_read_state *chunk_group_state)
 	pfree(chunk_group_state);
 }
 
-/** @brief Materialize the next visible row from a chunk group. */
+/**
+ * @brief Read the next undeleted row from a chunk group.
+ * Return false at the end and add skipped rows to deleted_columns_number.
+ */
 export bool
 read_next_chunk_group_row(chunk_group_read_state *chunk_group_state, Datum *column_values,
 					  bool *column_nulls, int32_t *deleted_columns_number)
 {
 	/*
-	 * Initialize to all-NULL. Only non-NULL projected attributes will be set.
+	 * Unrequested columns and absent values remain NULL in the output row.
 	 */
 	memset(column_nulls, true, sizeof(bool) * chunk_group_state->column_count);
 
@@ -444,7 +453,7 @@ read_next_chunk_group_row(chunk_group_read_state *chunk_group_state, Datum *colu
 			const chunk_data *chunk_group_data = chunk_group_state->chunk_group_data;
 			const int row_index = chunk_group_state->current_row;
 
-			/* attno is 1-indexed; present_values is 0-indexed */
+			/* PostgreSQL attribute numbers start at 1. Column arrays start at 0. */
 			const uint32_t column_index = attno - 1;
 
 			if (chunk_group_data->present_values[column_index][row_index])
@@ -461,7 +470,7 @@ read_next_chunk_group_row(chunk_group_read_state *chunk_group_state, Datum *colu
 	return false;
 }
 
-/** @brief Append visible chunk-group rows to vectorized output columns. */
+/** @brief Append undeleted rows from this chunk group to the column vectors. */
 export bool
 read_next_chunk_group_vector(chunk_group_read_state *chunk_group_state, Datum *column_values,
 						 bool *column_nulls, TupleDesc tuple_desc,
@@ -478,9 +487,7 @@ read_next_chunk_group_vector(chunk_group_read_state *chunk_group_state, Datum *c
 		return false;
 	}
 
-	/*
-	 * Initialize to all-NULL. Only non-NULL projected attributes will be set.
-	 */
+	/* Mark scalar outputs NULL before filling the column vectors. */
 	memset(column_nulls, true, sizeof(bool) * chunk_group_state->column_count);
 
 	int i;
@@ -512,7 +519,7 @@ read_next_chunk_group_vector(chunk_group_read_state *chunk_group_state, Datum *c
 			const chunk_data *chunk_group_data = chunk_group_state->chunk_group_data;
 			const int row_index = chunk_group_state->current_row;
 
-			/* attno is 1-indexed; present_values is 0-indexed */
+			/* PostgreSQL attribute numbers start at 1. Column arrays start at 0. */
 			const uint32_t column_index = attno - 1;
 
 			auto* vector_column = reinterpret_cast<vector_column_storage*>(

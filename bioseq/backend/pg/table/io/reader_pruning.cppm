@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Predicate-driven chunk-group pruning for Bioseq table reads.
+ * Skip chunk groups whose stored column ranges rule out the scan filters.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -14,7 +14,7 @@ import bioseq.postgres.types.compact_sequence;
 
 using namespace bioseq::postgres::support;
 
-/** @brief Resolve a comparison operator for a type and B-tree strategy. */
+/** @brief Find the comparison operator for a type and index strategy. */
 static Oid
 get_operator_for_type(Oid type_id, Oid access_method_id, int16_t strategy_number)
 {
@@ -28,7 +28,7 @@ get_operator_for_type(Oid type_id, Oid access_method_id, int16_t strategy_number
 	return operator_id;
 }
 
-/** @brief Create a nullable comparison expression for a scan variable. */
+/** @brief Build a column comparison with a placeholder for its bound. */
 static OpExpr *
 make_operator_expression(Var *variable, int16_t strategy_number)
 {
@@ -41,7 +41,7 @@ make_operator_expression(Var *variable, int16_t strategy_number)
 	/* Load the operator from system catalogs */
 	Oid operator_id = get_operator_for_type(type_id, access_method_id, strategy_number);
 
-	/* No operator for typeId, search for operator class type */
+	/* Retry using the operator class input type when this type has no operator. */
 	if (operator_id == InvalidOid)
 	{
 		Oid operator_class_id = GetDefaultOpClass(type_id, access_method_id);
@@ -51,22 +51,22 @@ make_operator_expression(Var *variable, int16_t strategy_number)
 
 	Const *constant_value = makeNullConst(type_id, type_mod_id, collation_id);
 
-	/* Now make the expression with the given variable and a null constant */
+	/* The chunk minimum or maximum will replace this NULL placeholder. */
 	OpExpr *expression = reinterpret_cast<OpExpr *>(make_opclause(operator_id,
 												  InvalidOid, /* no result type yet */
-												  false, /* no return set */
+												  false, /* returns one value */
 												  reinterpret_cast<Expr *>(variable),
 												  reinterpret_cast<Expr *>(constant_value),
 												  InvalidOid, collation_id));
 
-	/* Set implementing function id and result type */
+	/* Record the comparison function and the type it returns. */
 	expression->opfuncid = get_opcode(operator_id);
 	expression->opresulttype = get_func_rettype(expression->opfuncid);
 
 	return expression;
 }
 
-/** @brief Build the min/max constraint template for one scan variable. */
+/** @brief Build a reusable expression for minimum <= column <= maximum. */
 static Node *
 build_chunk_constraint(Var *variable)
 {
@@ -79,7 +79,7 @@ build_chunk_constraint(Var *variable)
 	return base_constraint;
 }
 
-/** @brief Set a chunk-constraint template's inclusive min/max bounds. */
+/** @brief Fill the range expression with this chunk's inclusive bounds. */
 static void
 update_chunk_constraint_bounds(Node *base_constraint, Datum min_value, Datum max_value)
 {
@@ -104,15 +104,14 @@ update_chunk_constraint_bounds(Node *base_constraint, Datum min_value, Datum max
 	max_constant->constbyval = true;
 }
 
-/** @brief Collect one variable per referenced physical attribute. */
+/** @brief Collect each table column used by the filters once. */
 export List *
 collect_clause_variables(List *filter_clauses, int natts)
 {
 	/*
-	 * We don't recurse into or include aggregates, window functions, or
-	 * PHVs. We don't expect any PHVs during execution; and Vars found inside
-	 * an aggregate or window function aren't going to be useful in forming
-	 * constraints that can be refuted.
+	 * Only plain column references can provide the bounds used here.
+	 * Columns inside aggregates or window functions do not describe individual
+	 * stored rows. Planner placeholders should be gone before execution.
 	 */
 	int flags = 0;
 	List *vars = pull_var_clause(reinterpret_cast<Node *>(filter_clauses), flags);
@@ -125,7 +124,7 @@ collect_clause_variables(List *filter_clauses, int natts)
 
 		if (deduplicate[idx] != NULL)
 		{
-			/* if they have the same varattno, the rest should be identical */
+			/* References to the same column must describe the same variable. */
 			Assert(equal(var, deduplicate[idx]));
 		}
 
@@ -147,7 +146,11 @@ collect_clause_variables(List *filter_clauses, int natts)
 	return filter_variables.release();
 }
 
-/** @brief Select chunk groups whose min/max metadata cannot refute the filters. */
+/**
+ * @brief Keep chunk groups whose column ranges may contain matching rows.
+ * Skip a group only when PostgreSQL can prove that its range conflicts with
+ * the filters. Count each skipped group once.
+ */
 export bool *
 select_chunk_mask(stripe_skip_list *skip_list, List *filter_clauses,
 				  List *filter_variables, int64 *filtered_chunk_groups)
@@ -169,15 +172,17 @@ select_chunk_mask(stripe_skip_list *skip_list, List *filter_clauses,
 
 		uint32_t column_index = column->varattno - 1;
 
-		/* Sequence extrema are never a sound proxy for logical rank-stream
-		 * order, so claimed min/max metadata is ignored conservatively. */
+		/*
+   * Ignore sequence bounds here because they do not establish logical
+   * letter order. The row filter compares the sequence values.
+   */
 		if (OidIsValid(sequence_type_id)
 			&& column->vartype == sequence_type_id)
 		{
 			continue;
 		}
 
-		/* if this column's data type doesn't have a comparator, skip it */
+		/* This column needs a B-tree comparator before its bounds can be used. */
 		FmgrInfo *comparison_function = find_index_support_function(column->vartype,
 															 BTREE_AM_OID,
 															 BTORDER_PROC);
@@ -194,8 +199,7 @@ select_chunk_mask(stripe_skip_list *skip_list, List *filter_clauses,
 			chunk_skip_node *chunk_skip_node_entry = &chunk_skip_nodes[chunk_index];
 
 			/*
-			 * A column chunk with comparable data type can miss min/max values
-			 * if all values in the chunk are NULL.
+			 * A chunk containing only NULL values has no minimum or maximum.
 			 */
 			if (!chunk_skip_node_entry->has_min_max)
 			{
@@ -220,7 +224,7 @@ select_chunk_mask(stripe_skip_list *skip_list, List *filter_clauses,
 	return selected_chunk_mask;
 }
 
-/** @brief Project a skip list down to selected chunk groups and columns. */
+/** @brief Keep metadata for the selected chunk groups and requested columns. */
 export stripe_skip_list *
 select_chunk_skip_list(stripe_skip_list *skip_list, bool *projected_column_mask,
 					  bool *selected_chunk_mask)
@@ -252,7 +256,7 @@ select_chunk_skip_list(stripe_skip_list *skip_list, bool *projected_column_mask,
 		bool first_column = column_index == 0;
 		selected_chunk_index = 0;
 
-		/* first column's chunk skip node is always read */
+		/* Keep the first column's metadata even when it was not requested. */
 		if (!projected_column_mask[column_index] && !first_column)
 		{
 			selected_chunk_skip_node_array[column_index] = NULL;
@@ -321,7 +325,7 @@ count_stripe_skip_rows(stripe_skip_list *skip_list)
 	return stripe_skip_list_row_count;
 }
 
-/** @brief Construct a zero-based physical-column projection mask. */
+/** @brief Mark the requested columns in an array indexed from zero. */
 export bool *
 build_projected_column_mask(uint32_t column_count, List *projected_columns)
 {
@@ -335,7 +339,7 @@ build_projected_column_mask(uint32_t column_count, List *projected_columns)
 				   attno, column_count);
 		}
 
-		/* attno is 1-indexed; projectedColumnMask is 0-indexed */
+		/* PostgreSQL attribute numbers start at 1. The mask starts at 0. */
 		int column_index = attno - 1;
 		projected_column_mask[column_index] = true;
 	}
