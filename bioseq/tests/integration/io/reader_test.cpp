@@ -1,18 +1,10 @@
 /**
  * @file reader_test.cpp
- * @brief Correctness coverage for `bioseq::io::read_sequences_file`.
+ * @brief Checks FASTA and FASTQ reading through read_sequences_file.
  *
- * Covers parser and streaming hardening:
- *   * round-trip FASTA / FASTQ on tiny corpora.
- *   * multi-line FASTA + multi-line FASTQ qual.
- *   * CRLF line endings.
- *   * empty file.
- *   * capacity sweep (subset of [3, 100]).
- *   * differential fuzz vs kseqpp (FASTA dna4).
- *   * mmap path round-trip.
- *   * gzip path round-trip.
- *   * strict_alphabet mode rejection of stray bytes.
- *   * async pipeline mode round-trip.
+ * Tests multiline records, CRLF, empty files, and small read buffers. Random
+ * FASTA input is compared with kseqpp. Other cases cover memory-mapped input,
+ * gzip decoding, and dispatching batches to workers.
  */
 #include <cstdio>
 #include <unistd.h>
@@ -36,9 +28,8 @@ namespace {
 
 namespace fs = std::filesystem;
 
-/// Write `content` to a temp file and return the path. Each call gets
-/// a unique-per-(pid,counter) name so concurrent runs do not
-/// collide.
+/// Writes a temporary file and returns its path. The process ID and atomic
+/// counter keep concurrent calls from using the same name.
 std::string write_tmp_file(const std::string& content) {
     static std::atomic<std::uint64_t> counter{0};
     fs::path tmp_dir = fs::temp_directory_path();
@@ -69,8 +60,7 @@ std::string write_tmp_gzip(const std::string& content) {
     return tmp_path.string();
 }
 
-/// Decode a `compact_sequence_range<sequence_custom_alphabet<dna4, uint64_t>>`
-/// back to ASCII via the alphabet's symbol iterator.
+/// Decodes packed sequence words to text, leaving out the final padding.
 template <typename p_sequence_range>
 std::string decode_to_ascii(const p_sequence_range& seq) {
     std::string out;
@@ -269,9 +259,7 @@ TEST_CASE("bioseq_io: tiny FASTQ dna4 round-trip",
     fs::remove(path);
 }
 
-// =====================================================================
-// Parser hardening
-// =====================================================================
+// Multiline input and read-buffer boundaries.
 
 TEST_CASE("bioseq_io: multi-line FASTQ qual",
           "[component:bioseq][layer:integration][feature:io][resource:filesystem]") {
@@ -279,8 +267,7 @@ TEST_CASE("bioseq_io: multi-line FASTQ qual",
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
 
-    // 16-letter sequence wrapped over 2 lines, qual wrapped over 2
-    // lines.
+    // Both the 16-base sequence and its quality string span two lines.
     const std::string corpus = "@multi\n"
                                "ACGTACGT\n"
                                "ACGTACGT\n"
@@ -326,9 +313,8 @@ TEST_CASE("bioseq_io: capacity sweep — varying initial buffer size",
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
 
-    // Build a corpus with a mix of header lengths, body lengths, and
-    // line-wrap positions. Bodies use only ACGT to stay within the
-    // dna4 fast path's domain.
+    // Vary header and sequence lengths and line wrapping to cross read-buffer boundaries.
+    // Use ACGT sequences for the DNA4 parser.
     std::string corpus;
     corpus.reserve(8192);
     std::vector<std::pair<std::string, std::string>> expected;
@@ -366,9 +352,7 @@ TEST_CASE("bioseq_io: capacity sweep — varying initial buffer size",
 
     const std::string path = write_tmp_file(corpus);
 
-    // Subset of [3, 100] — full sweep would push past 30s on a debug
-    // build. The chosen sizes exercise tiny (3, 7, 13) up to typical
-    // (64, 100), plus 1 KiB for the larger-headers path.
+    // Try small buffers that split headers and sequence lines, plus a 1 KiB buffer.
     const std::vector<std::size_t> sizes_to_sweep{3, 5, 7, 11, 13, 17, 23, 32, 64, 67, 100, 1024};
     for (const auto initial_size : sizes_to_sweep) {
         reader_options opts;
@@ -441,7 +425,7 @@ TEST_CASE("bioseq_io: differential fuzz vs kseqpp",
         }
         const std::string path = write_tmp_file(corpus);
 
-        // Our reader.
+        // Read with Bioseq.
         std::vector<std::pair<std::string, std::string>> ours;
         std::vector<std::string> ours_errs;
         auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
@@ -456,7 +440,7 @@ TEST_CASE("bioseq_io: differential fuzz vs kseqpp",
         REQUIRE(ours_errs.empty());
         REQUIRE(rc.has_value());
 
-        // kseqpp.
+        // Read the same file with kseqpp.
         std::vector<std::pair<std::string, std::string>> theirs;
         {
             klibpp::SeqStreamIn stream(path.c_str());
@@ -561,8 +545,7 @@ TEST_CASE("bioseq_io: async pipeline (worker_count=2) round-trip",
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
 
-    // Larger corpus so the parser actually flushes batches and the
-    // worker pool sees > 1 batch.
+    // Use enough records for several eight-record batches.
     std::string corpus;
     corpus.reserve(64 * 1024);
     std::vector<std::pair<std::string, std::string>> expected;
@@ -612,8 +595,7 @@ TEST_CASE("bioseq_io: async pipeline (worker_count=2) round-trip",
     REQUIRE(errs.empty());
     REQUIRE(rc.has_value());
     REQUIRE(got.size() == expected.size());
-    // Async dispatch may reorder batches across workers; sort both
-    // sides by header before comparing.
+    // Workers may finish batches out of order. Sort both results before comparing.
     std::sort(got.begin(), got.end());
     auto expected_sorted = expected;
     std::sort(expected_sorted.begin(), expected_sorted.end());
@@ -624,13 +606,9 @@ TEST_CASE("bioseq_io: async pipeline (worker_count=2) round-trip",
     fs::remove(path);
 }
 
-// =====================================================================
-// Diagnostic: stream-compare bioseq pgzip decoder vs zlib byte-by-byte
-// =====================================================================
-//
-// Decompresses the real-human FASTQ corpus with both backends and
-// reports the first byte where they diverge. The large-memory resource tag
-// identifies the 1.9 GiB corpus requirement for focused selection.
+// Compare decompressed bytes from Bioseq and zlib using the human FASTQ fixture.
+// Report the first mismatch. The tests below limit how much of the file is read
+// and skip the comparison if the fixture is unavailable.
 TEST_CASE("bioseq_io: pgzip vs zlib first divergence",
           "[component:bioseq][layer:integration][feature:io][resource:filesystem][resource:large_memory]") {
     const std::string path =
@@ -641,16 +619,16 @@ TEST_CASE("bioseq_io: pgzip vs zlib first divergence",
         return;
     }
 
-    // ---- zlib reference path ----
+    // Open the zlib reference reader.
     gzFile ref = ::gzopen(path.c_str(), "rb");
     REQUIRE(ref != nullptr);
 
-    // ---- bioseq pgzip path: open via mmap_source + parallel_gzip_source.
+    // Open the same file through the mapped parallel-gzip reader.
     bioseq::io::reader_options opts;
     opts.io.gzip_auto_detect            = true;
     opts.io.prefer_mmap                 = true;
     opts.io.parallel_gzip_enabled       = true;
-    opts.io.parallel_gzip_thread_count  = 1;  // single-thread for diag
+    opts.io.parallel_gzip_thread_count  = 1;  // use one decoder worker
     auto mmap_or = bioseq::io::mmap_source::try_open_with_magic(path, opts);
     REQUIRE(mmap_or.has_value());
     REQUIRE(mmap_or->is_gzipped);
@@ -663,7 +641,7 @@ TEST_CASE("bioseq_io: pgzip vs zlib first divergence",
     std::vector<std::uint8_t> ref_buf(k_buffer_bytes);
     std::vector<std::uint8_t> mine_buf(k_buffer_bytes);
     std::size_t total_compared = 0;
-    constexpr std::size_t k_maximum_bytes = 100ULL * 1024 * 1024;  // 100 MB cap.
+    constexpr std::size_t k_maximum_bytes = 100ULL * 1024 * 1024;  // compare at most 100 MiB
 
     while (total_compared < k_maximum_bytes) {
         const std::size_t want_ref = std::min(k_buffer_bytes, k_maximum_bytes - total_compared);

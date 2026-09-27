@@ -1,9 +1,9 @@
 /**
  * @file index_table_test.cpp
- * @brief Verifies the chunked per-table row-count index.
+ * @brief Checks the test index that stores a table's row count.
  *
- * The case streams each table row into one little-endian count chunk and
- * checks that insert-time maintenance is rejected for table-wide indexes.
+ * A rebuild counts all rows and writes the total in one chunk. The table-wide
+ * index must reject the UPDATE_ON_INSERT policy.
  */
 #include <fmt/format.h>
 #include <catch2/catch_test_macros.hpp>
@@ -25,8 +25,8 @@ TEST_CASE("per-table chunked indexing streams every row and persists the count",
     exec_sql(ctx,
              "SELECT bioseq.update_index('chunked_table_index'::regclass, 'test_table_rowcount');");
 
-    // The per-table shard stores the row count in one little-endian int64 chunk.
-    // This fixture has a one-byte low-order count.
+    // This check assumes little-endian byte order. The count is 3, so its first
+    // byte is enough for this fixture.
     const auto names = query_rows(
         ctx,
         "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
@@ -40,7 +40,7 @@ TEST_CASE("per-table chunked indexing streams every row and persists the count",
             fmt::format("SELECT get_byte(blob,0) FROM bioseq_internal.{} ORDER BY chunk_no LIMIT 1",
                         shard)) == 3);
 
-    // The table-wide-never runtime guard: UPDATE_ON_INSERT on a CHUNKED_PER_TABLE index errors.
+    // Table-wide indexes must reject UPDATE_ON_INSERT.
     REQUIRE(sql_fails(ctx,
                       "SELECT bioseq.set_index_policy('chunked_table_index'::regclass, "
                       "'test_table_rowcount', 'UPDATE_ON_INSERT')"));
