@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Canonical logical sequence coordinate type.
+ * @brief Shared type for logical sequence positions and lengths.
  */
 module;
 
@@ -11,10 +11,10 @@ export module bioseq.storage.size;
 export namespace bioseq::storage {
 
 /**
- * Unsigned type for logical sequence positions and lengths.
+ * Unsigned 64-bit type for sequence positions and lengths.
  *
- * SQL and storage boundaries must validate narrowing explicitly. This module
- * deliberately provides no unchecked signed conversion helper.
+ * Check the range before converting to narrower storage fields or signed SQL
+ * integers.
  */
 using sequence_size_t = std::uint64_t;
 
