@@ -50,7 +50,7 @@ def create_archive(host, phase):
                      and p.name.endswith(('.deb', '.rpm', '.pkg.tar.zst')))
     paths.update(p for p in Path('/tmp').glob('bioseq_build_mcp*')
                  if p.is_file() and not p.is_symlink() and p.suffix in ('.log', '.json'))
-    paths.update(p for p in root.glob('ALL_RESULTS*.yaml') if p.is_file() and not p.is_symlink())
+    paths.update(p for p in root.glob('research_benchmarks/paper/e2e/ALL_RESULTS*.yaml') if p.is_file() and not p.is_symlink())
     # Source is authoritative locally; preserve evidence of the frozen remote revision.
     metadata = {'host': host, 'phase': phase, 'time_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                 'source_delivery': 'frozen local commit copied without .git; revisions are in package manifests'}

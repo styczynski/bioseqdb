@@ -431,7 +431,7 @@ class AlgorithmMatrixSingletonAuthorityTests(unittest.TestCase):
             self.LEGACY_EMPTY_LEDGER_FIXTURE.read_text(encoding="utf-8"))
 
     def _ledger_document_patch(self, document):
-        ledger_path = REPOSITORY_ROOT / "ALL_RESULTS.yaml"
+        ledger_path = REPOSITORY_ROOT / "research_benchmarks/paper/e2e/ALL_RESULTS.yaml"
         raw = json.dumps(
             document, sort_keys=True, separators=(",", ":"),
             ensure_ascii=True, allow_nan=False,

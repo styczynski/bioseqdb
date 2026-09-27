@@ -916,6 +916,11 @@ def _allowed_cell_statuses(engine: str, result_status_contract: str) -> list[str
         f"unknown engine/result-status contract {engine!r}/{result_status_contract!r}")
 
 
+def _ledger_location(name: str) -> str:
+    """Keep campaign names stable while locating E2E results in the paper archive."""
+    return "research_benchmarks/paper/e2e/" + name if name == "ALL_RESULTS.yaml" else name
+
+
 def _activate_campaign_profile(ledger_path: str) -> None:
     """Select one exact ledger/campaign pair before reading any evidence."""
     global ACTIVE_CAMPAIGN_PROFILE
@@ -15098,7 +15103,7 @@ def merge(
         all_results_path: Path,
         run_receipt_id: str | None = None,
 ) -> bool:
-    if all_results_path != REPOSITORY_ROOT / EXPECTED_LEDGER_PATH:
+    if all_results_path != REPOSITORY_ROOT / _ledger_location(EXPECTED_LEDGER_PATH):
         raise ContractError(
             f"active campaign requires exact ledger {EXPECTED_LEDGER_PATH}")
     with _exclusive_results_lock(all_results_path):
@@ -15404,7 +15409,7 @@ def main(argv: list[str] | None = None) -> int:
         changed = merge(
             _canonical_repository_file(args.report, "report"),
             _canonical_repository_file(args.config, "config"),
-            _canonical_repository_file(args.all_results, EXPECTED_LEDGER_PATH),
+            _canonical_repository_file(_ledger_location(args.all_results), EXPECTED_LEDGER_PATH),
             args.run_receipt_id,
         )
     except ApprovedTupleDuplicateError as exc:

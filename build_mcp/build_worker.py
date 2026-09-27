@@ -6210,7 +6210,9 @@ def _algorithm_matrix_campaign_authority_status(
                         "q8 config query/artifact cleanup contract is invalid")
             prefix_proof_sha256 = hashlib.sha256(proof_raw).hexdigest()
 
-        results_path = REPOSITORY_ROOT / profile["ledger"]
+        results_path = REPOSITORY_ROOT / (
+            "research_benchmarks/paper/e2e/ALL_RESULTS.yaml"
+            if profile["ledger"] == "ALL_RESULTS.yaml" else profile["ledger"])
         results, _ = _strict_json_object(results_path, profile["ledger"])
         results_contract = results.get("contract")
         results_campaign = results.get("campaign")
@@ -6684,7 +6686,9 @@ def _merge_algorithm_matrix_all_results(
         return
 
     ledger_relative = authority["ledger"]
-    all_results = REPOSITORY_ROOT / ledger_relative
+    all_results = REPOSITORY_ROOT / (
+        "research_benchmarks/paper/e2e/ALL_RESULTS.yaml"
+        if ledger_relative == "ALL_RESULTS.yaml" else ledger_relative)
     try:
         _campaign_internal_regular_file(
             all_results, f"{authority['name']} algorithm-matrix ledger")

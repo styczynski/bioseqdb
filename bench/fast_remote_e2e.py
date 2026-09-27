@@ -66,7 +66,7 @@ def save(state):
 
 
 def result_path(family):
-    return ROOT / ('ALL_RESULTS_TUPLES_FAST_REMOTE_' + family.upper() + '.yaml')
+    return ROOT / 'research_benchmarks/paper/e2e' / ('ALL_RESULTS_TUPLES_FAST_REMOTE_' + family.upper() + '.yaml')
 
 
 def standard_keys(family):
@@ -81,7 +81,7 @@ def standard_keys(family):
 
 def write_results(family, document, children):
     standard = local.load_yaml(recovery.authority_path('default-' + family))
-    local_standard = local.load_yaml(ROOT / 'ALL_RESULTS_TUPLES.yaml')
+    local_standard = local.load_yaml(ROOT / 'research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES.yaml')
     excluded = standard_keys(family)
     scope = copy.deepcopy(standard['matrix_scope'])
     scope.update(repetitions_per_cell=1,
@@ -128,7 +128,7 @@ def document_for(family, children):
         document = local.load_yaml(result_path(family))
         write_results(family, document, children)
         return document
-    standard = local.load_yaml(ROOT / 'ALL_RESULTS_TUPLES.yaml')
+    standard = local.load_yaml(ROOT / 'research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES.yaml')
     document = {key: copy.deepcopy(standard[key]) for key in (
         'schema', 'version', 'status', 'purpose', 'authority', 'campaign_identity',
         'stable_key_contract', 'terminology', 'metric_definitions', 'validity_rules',

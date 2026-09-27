@@ -249,7 +249,7 @@ def main():
       'eligible_stable_keys':eligible,'approved_results':list(rows.values()),
       'qualification_results':qualifications,
       'invalid_attempts':invalid,'remaining_eligible_stable_keys':sorted(set(eligible)-rows.keys())}
-    output=ROOT/('ALL_RESULTS_TUPLES_E2E_EXTERNAL_REMOTE_'+binding['machine_id']+'.yaml')
+    output=ROOT/'research_benchmarks/paper/e2e' / ('ALL_RESULTS_TUPLES_E2E_EXTERNAL_REMOTE_'+binding['machine_id']+'.yaml')
     temporary=output.with_suffix('.yaml.tmp'); temporary.write_text(yaml.safe_dump(result,sort_keys=False,width=120)); temporary.replace(output)
     for path in (AREA/'results').glob('*/*/report.json'):
         report=json.loads(path.read_text())

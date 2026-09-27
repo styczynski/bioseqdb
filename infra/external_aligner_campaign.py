@@ -57,7 +57,7 @@ def fetch(machine,state_dir):
     live=json.loads(subprocess.check_output(['aws','ec2','describe-instances','--region','us-east-1','--instance-ids',outputs['instance_id']]))['Reservations'][0]['Instances'][0]
     assert {t['Key']:t['Value'] for t in live['Tags']}['Name']=='bioseq-e2e-external-'+machine
     outputs['public_ip']=live['PublicIpAddress']
-    name='ALL_RESULTS_TUPLES_E2E_EXTERNAL_REMOTE_'+machine.upper()+'.yaml'
+    name='research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES_E2E_EXTERNAL_REMOTE_'+machine.upper()+'.yaml'
     subprocess.run(['rsync','-a','-e','ssh -i '+outputs['ssh_key_path']+' -o StrictHostKeyChecking=yes',
         'ubuntu@'+outputs['public_ip']+':/home/ubuntu/bioseqdb/'+name,str(ROOT/name)],check=True)
     archive=state_dir/'evidence';archive.mkdir(exist_ok=True)

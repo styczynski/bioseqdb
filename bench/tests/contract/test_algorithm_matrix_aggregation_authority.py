@@ -62,7 +62,7 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
         only this isolated test module binds a reconstructed wrapper's own hash.
         This is synthetic migration input, never historical byte-recovery proof.
         """
-        raw = (REPOSITORY_ROOT / "ALL_RESULTS_TUPLES.yaml").read_bytes()
+        raw = (REPOSITORY_ROOT / "research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES.yaml").read_bytes()
         document = aggregator._parse_approved_tuples_yaml(raw, "current authority")
         aggregator._validate_approved_tuple_authority_document(document, raw)
         cls._current_approved_authority_cache = (copy.deepcopy(document), raw)
@@ -2509,7 +2509,7 @@ class AlgorithmMatrixAggregationAuthorityTests(unittest.TestCase):
 
     def test_q1024_empty_ledger_enforces_deterministic_first_ingestion(self):
         aggregator._activate_campaign_profile("ALL_RESULTS.yaml")
-        ledger_path = REPOSITORY_ROOT / "ALL_RESULTS.yaml"
+        ledger_path = REPOSITORY_ROOT / "research_benchmarks/paper/e2e/ALL_RESULTS.yaml"
         fixture = _revision4_empty_ledger()
         fixture_raw = REVISION4_EMPTY_LEDGER_FIXTURE.read_bytes()
         read_json_file = aggregator._read_json_file

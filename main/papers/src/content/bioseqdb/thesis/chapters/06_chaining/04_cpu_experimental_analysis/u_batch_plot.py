@@ -24,7 +24,7 @@ STYLES = {
 
 def find_results() -> Path:
     for parent in HERE.parents:
-        candidate = parent / "CHAINING_BRANCHING_U_BATCH_EXPERIMENT_RESULTS.yaml"
+        candidate = parent / "research_benchmarks/paper/chaining/CHAINING_BRANCHING_U_BATCH_EXPERIMENT_RESULTS.yaml"
         if candidate.exists():
             return candidate
     raise FileNotFoundError("cannot locate U-counter result YAML above the chapter")

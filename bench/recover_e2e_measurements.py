@@ -57,9 +57,9 @@ def atomic(path: Path, contents: bytes) -> None:
 
 def authority_path(host: str) -> Path:
     if host == "local":
-        return ROOT / "ALL_RESULTS_TUPLES.yaml"
+        return ROOT / "research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES.yaml"
     suffix = host.upper().replace("-", "_").removeprefix("DEFAULT_")
-    return ROOT / f"ALL_RESULTS_TUPLES_REMOTE_{suffix}.yaml"
+    return ROOT / f"research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES_REMOTE_{suffix}.yaml"
 
 
 def parse_report(report_bytes: bytes, raw_bytes: bytes, name: str, children: dict) -> list[dict]:

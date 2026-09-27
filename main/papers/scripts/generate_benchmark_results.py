@@ -879,22 +879,23 @@ def main():
     args = parser.parse_args()
     if not __debug__:
         parser.error('Do not run with -O: input validation uses assertions.')
-    snapshot = Snapshot(args.root)
-    external = ExternalComparison(snapshot, args.root)
-    gpu = GPUComparison(args.root)
+    results_root = args.root / 'research_benchmarks/paper/e2e'
+    snapshot = Snapshot(results_root)
+    external = ExternalComparison(snapshot, results_root)
+    gpu = GPUComparison(results_root)
     registry = SliceRegistry()
     result = render(snapshot, external, gpu, registry)
     cells = registry.render()
     cells_output = args.cells_output or args.output.with_name(CELLS_OUTPUT.name)
     for name, raw in snapshot.raw.items():
-        if (args.root / name).read_bytes() != raw:
+        if (results_root / name).read_bytes() != raw:
             raise RuntimeError(f'{name} changed during generation. Rerun for a consistent snapshot.')
-    if any((args.root / name).exists() for name in snapshot.absent_sources):
+    if any((results_root / name).exists() for name in snapshot.absent_sources):
         raise RuntimeError('A fallback source appeared during generation. Rerun for a consistent snapshot.')
     for host, name in EXTERNAL_FILES.items():
-        if (args.root / name).read_bytes() != external.raw[host]:
+        if (results_root / name).read_bytes() != external.raw[host]:
             raise RuntimeError(f'{name} changed during generation. Rerun for a consistent snapshot.')
-    if (args.root / GPU_FILE).read_bytes() != gpu.raw:
+    if (results_root / GPU_FILE).read_bytes() != gpu.raw:
         raise RuntimeError(f'{GPU_FILE} changed during generation. Rerun for a consistent snapshot.')
     if args.check:
         for path, expected in ((args.output, result), (cells_output, cells)):

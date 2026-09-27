@@ -142,7 +142,7 @@ class DeadlineCampaignContractTests(unittest.TestCase):
         self.assertNotEqual(generator.MANIFEST_PATH, generator.PARENT_MANIFEST)
         self.assertNotEqual(
             generator.OUTPUT_DIRECTORY, generator.PARENT_OUTPUT_DIRECTORY)
-        self.assertNotIn(ROOT / "ALL_RESULTS.yaml", self.outputs)
+        self.assertNotIn(ROOT / "research_benchmarks/paper/e2e/ALL_RESULTS.yaml", self.outputs)
 
     def test_q16_cartesian_is_exactly_five_by_four_by_two(self):
         full = [entry for entry in self.schedule

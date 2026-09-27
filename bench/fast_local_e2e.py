@@ -24,7 +24,7 @@ import recover_e2e_measurements as recovery
 ROOT = recovery.ROOT
 OUTPUT = ROOT / 'reporting/bioseq_benchmark_e2e/fast_local'
 CONFIGS = ROOT / 'bench/e2e_fast_local'
-RESULTS = ROOT / 'ALL_RESULTS_TUPLES_FAST_LOCAL.yaml'
+RESULTS = ROOT / 'research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES_FAST_LOCAL.yaml'
 STATE = OUTPUT / 'state.json'
 
 
@@ -134,7 +134,7 @@ def retire_completed_group():
 def document():
     if RESULTS.exists():
         return load_yaml(RESULTS)
-    standard = load_yaml(ROOT / 'ALL_RESULTS_TUPLES.yaml')
+    standard = load_yaml(ROOT / 'research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES.yaml')
     # Reuse existing descriptive/identity fields, but do not carry historical
     # counters or historical preservation assertions into this new authority.
     out = {key: copy.deepcopy(standard[key]) for key in (
@@ -161,7 +161,7 @@ def document():
 
 
 def write_document(out):
-    standard = load_yaml(ROOT / 'ALL_RESULTS_TUPLES.yaml')
+    standard = load_yaml(ROOT / 'research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES.yaml')
     excluded = {row['stable_key'] for row in standard['approved_results']}
     out['matrix_scope']['repetitions_per_cell'] = 1
     out['matrix_scope']['total_expected_cells'] = standard['matrix_scope']['total_expected_cells'] - len(excluded)
@@ -317,7 +317,7 @@ def main():
             if row['event'] in ('audit_failed', 'audited'):
                 latest[row['ordinal']] = row
         approved = {r['stable_key'] for r in document()['approved_results']} | {
-            r['stable_key'] for r in load_yaml(ROOT / 'ALL_RESULTS_TUPLES.yaml')['approved_results']}
+            r['stable_key'] for r in load_yaml(ROOT / 'research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES.yaml')['approved_results']}
         retry_keys = set()
         for ordinal in set(args.retry_setup_failure):
             child = by_ordinal[ordinal]
@@ -345,7 +345,7 @@ def main():
             event('stopped', reason='User ended local measurements; native package builds own this host')
             return
         assert maintenance['hosts']['local']['paused'], 'Standard local queue must remain paused'
-        standard = load_yaml(ROOT / 'ALL_RESULTS_TUPLES.yaml')
+        standard = load_yaml(ROOT / 'research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES.yaml')
         approved = {r['stable_key'] for r in standard['approved_results']} | {
             r['stable_key'] for r in out['approved_results']}
         remaining = [c for c in children if c['stable_key'] not in approved

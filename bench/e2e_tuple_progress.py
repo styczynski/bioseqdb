@@ -61,7 +61,7 @@ def tuple_counts() -> dict:
     for family in FAMILIES:
         filename = ('ALL_RESULTS_TUPLES_FAST_LOCAL.yaml' if family == 'local'
                     else 'ALL_RESULTS_TUPLES_FAST_REMOTE_' + family.upper() + '.yaml')
-        path = ROOT / filename
+        path = ROOT / 'research_benchmarks/paper/e2e' / filename
         if not path.exists():
             continue
         document = yaml.load(path.read_bytes(), Loader=yaml.CSafeLoader)

@@ -35,7 +35,7 @@ known=json.load(sys.stdin)
 root=pathlib.Path('/home/ubuntu/bioseqdb')
 paths=list((root/'reporting/bioseq_benchmark_e2e').rglob('*'))
 paths+=list(pathlib.Path('/tmp').glob('bioseq_build_mcp*'))
-paths+=list(root.glob('ALL_RESULTS_TUPLES*.yaml'))
+paths+=list(root.glob('research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES*.yaml'))
 frozen=root.parent/'bioseq-frozen'
 if frozen.exists():
  for pattern in ('report_*.json','report_*.raw.jsonl','*receipts*.json'):

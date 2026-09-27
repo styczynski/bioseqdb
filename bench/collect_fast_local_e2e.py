@@ -12,7 +12,7 @@ def collect():
     out = runner.document()
     approved = {row['stable_key'] for row in out['approved_results']}
     approved.update(row['stable_key'] for row in runner.load_yaml(
-        runner.ROOT / 'ALL_RESULTS_TUPLES.yaml')['approved_results'])
+        runner.ROOT / 'research_benchmarks/paper/e2e/ALL_RESULTS_TUPLES.yaml')['approved_results'])
     summary = dict(complete_single_sample_reports=0, already_collected=0,
                    newly_accepted=[], unaccepted=[])
     root = runner.ROOT / 'reporting/bioseq_benchmark_e2e'
