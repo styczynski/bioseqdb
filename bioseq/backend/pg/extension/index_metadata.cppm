@@ -1,6 +1,6 @@
 /**
  * @file index_metadata.cppm
- * @brief Implements the metadata-listing entry point.
+ * @brief List available index types and stored-index information for sequence columns.
  */
 module;
 
@@ -45,10 +45,10 @@ using namespace bioseq::postgres::support;
 namespace bioseq::pg::sql_routines {
 
 /**
- * @brief Lists registered indexes, policies, sizes, and ages for Bioseq sequence columns.
- *
- * The result combines configured policy, persisted shard size, and last
- * update time without requiring an index generation to exist.
+ * @brief List every supported index type for each sequence column in a Bioseq table.
+ * Include the update policy, total shard size and time since the last update.
+ * Missing storage gives zero size. A missing update-log entry gives no age.
+ * Internal and temporary tables are excluded.
  */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::list_metadata_row>
@@ -73,11 +73,9 @@ list_metadata() {
 			});
 	};
 	const auto quote_literal_owned = [](const std::string_view value) {
-		/*
-		 * Keep every C++ owner outside the PG_TRY bridge.  The leaf callback
-		 * captures only a stable raw pointer and returns PostgreSQL's owned
-		 * buffer; copying and freeing happen after the bridge has returned.
-		 */
+		/* PostgreSQL errors can jump past C++ destructors. Keep the input string
+		 * outside the callback and pass only its raw pointer. Copy the quoted
+		 * result after the call returns, then free PostgreSQL's buffer. */
 		const std::string input{value};
 		char* const quoted = bioseq::postgres::support::invoke_pg_as_cpp(
 			[input_data = input.c_str()] {
@@ -101,7 +99,7 @@ list_metadata() {
 		}
 	};
 
-	/* 1. every user bioseq-AM relation (exclude internal namespaces / names). */
+	/* Find user tables that use the Bioseq table-access method. */
 	std::vector<Oid> relation_oids;
 	if (execute_spi(
 			"SELECT c.oid FROM pg_class c JOIN pg_am am ON c.relam=am.oid "
@@ -119,7 +117,8 @@ list_metadata() {
 		}
 	}
 
-	/* 2. build the VALUES source: (rel, attno, attname, idx_name, idx_type, def_uoi, prefix). */
+	/* Pair each sequence column with every supported index type. These rows
+	 * supply defaults when the policy or stored index does not exist yet. */
 	std::string source_values;
 	for (const Oid relation_oid : relation_oids) {
 		const auto relation_identity = bsi::index_relation_identity(relation_oid);

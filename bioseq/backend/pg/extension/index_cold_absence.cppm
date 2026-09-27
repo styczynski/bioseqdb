@@ -1,6 +1,6 @@
 /**
  * @file index_cold_absence.cppm
- * @brief Implements the cold no-index storage audit SQL entry point.
+ * @brief Report stored-index counts for tests that expect no existing index.
  */
 module;
 
@@ -27,7 +27,10 @@ import bioseq.postgres.support;
 
 namespace bioseq::pg::sql_routines {
 
-/** @return Evidence that a cold no-index path has no persisted artifacts. */
+/** @return Target-row count and counts of stored index tables, rows and generations.
+ * Read target cardinality from metadata, leaving source sequences undecoded.
+ * Reject values that cannot fit in SQL bigint.
+ */
 bioseq::postgres::support::named_output<
 	bioseq::postgres::sql_rows::inspect_cold_no_index_absence_row>
 inspect_cold_no_index_absence(
