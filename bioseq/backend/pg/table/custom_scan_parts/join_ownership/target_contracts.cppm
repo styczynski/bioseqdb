@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines lightweight row-identity and target-list contracts for per-row owners.
+ * @brief Checks row markers and output-column references used by PerRow joins.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -53,7 +53,7 @@ export {
         return false;
     }
 
-    /** Resolves authoritative sort and group references for @p expressions. */
+    /** Finds the sort and group references for @p expressions in PostgreSQL's processed output list. */
     [[nodiscard]] bool per_row_authoritative_sortgrouprefs(PlannerInfo* root,
                                                            List* expressions,
                                                            std::vector<Index>& results);

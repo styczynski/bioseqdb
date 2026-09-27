@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Validates sequence typmods used by mmsearch planner owners.
+ * @brief Checks the sequence alphabets and storage widths used by planned mmsearch calls.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -61,13 +61,12 @@ export {
     }
 
     /**
-     * @brief Derives one exact typmod through supported sequence-preserving expressions.
+     * @brief Finds one sequence typmod through supported slices, reversals, and concatenations.
      *
-     * PostgreSQL does not propagate typmods through ordinary FuncExpr results,
-     * even when the exact catalog function is sequence-type preserving. Admit an
-     * erased descriptor only after recursively validating one identical concrete
-     * typmod at every sequence-valued leaf. Non-sequence literal or array operands
-     * are neutral only for the exact registered concat overloads.
+     * PostgreSQL can lose a function result's typmod, which identifies its alphabet
+     * and storage width. Recover it from the sequence inputs only when their
+     * concrete typmods agree. Registered concat overloads can also have literal
+     * or array arguments, which contribute no sequence type.
      */
     [[nodiscard]] std::optional<per_row_sequence_typmod_validation>
     per_row_validate_sequence_typmod(Node* expression, bioseq_stub_oids const& oids) {

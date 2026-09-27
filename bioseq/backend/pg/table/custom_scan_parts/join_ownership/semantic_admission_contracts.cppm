@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares per-row semantic admission without importing its implementation.
+ * @brief Declares checks for BioseqScan operands and PerRow join outputs.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -12,14 +12,14 @@ export import :custom_scan_join_ownership_cost_contracts;
 import std;
 import :custom_scan_oid_expression_support_oid_catalog_contracts;
 
-/** @brief Accumulates sequence Vars referenced by a movable per-row operand. */
+/** @brief The join and sequence columns used by an operand that may move to a PerRow owner. */
 export struct per_row_operand_source_resolution {
     RelOptInfo* joinrel = nullptr;
     List* sequence_vars = NIL;
     bool invalid = false;
 };
 
-/** @brief Collects passthrough Vars and helper identities needed by owner setrefs. */
+/** @brief Input columns and whole match helpers needed to bind a PerRow join's final output. */
 export struct per_row_owner_support_validation {
     Index target_relid = 0;
     Relids join_relids = nullptr;
@@ -27,24 +27,22 @@ export struct per_row_owner_support_validation {
     Node* target_recipe = nullptr;
     List* passthrough_vars = NIL;
     List* helper_identities = NIL;
-    /* Sequence-valued helpers which do not name this owner may still be exact
-     * outputs of one versioned descendant BatchJoin.  They remain candidates
-     * until each incumbent path validates that ownership structurally. */
+    /* A helper naming a different sequence expression may belong to a
+     * descendant BatchJoin. Keep it as a candidate until the selected
+     * path confirms that owner. */
     List* foreign_exact_helper_identities = NIL;
     List* helper_argument_vars = NIL;
     bool invalid = false;
 };
 
 /**
- * @brief Describes an admitted base-local mmsearch operand and its source Vars.
+ * @brief A scan-local mmsearch operand, its source columns, and its sequence type.
  *
- * Exact baserel operand validation for BioseqScan-owned mmsearch. Unlike the
- * join relocation validation above, this expression is not moved across a planner
- * frontier: its original post-setrefs ExprState remains authoritative at the
- * scan.  Volatile functions and opaque/erroring CASE/COALESCE arms are thus
- * legal and execute once in PostgreSQL order.  The remaining validation
- * requires that no aggregate/window/subplan/PHV/SRF frontier is crossed and that every
- * Var belongs to this non-nullable scan relation.
+ * PostgreSQL evaluates the original ExprState at the scan, preserving the
+ * order and short-circuit behavior of volatile functions, CASE, and
+ * COALESCE. Every Var must belong to this non-nullable relation. Reject
+ * aggregates, window functions, subplans, PlaceHolderVars, and set-returning
+ * expressions because their evaluation belongs elsewhere.
  */
 export struct base_local_mmsearch_operand_resolution {
     Node* expression = nullptr;
@@ -54,7 +52,7 @@ export struct base_local_mmsearch_operand_resolution {
     bool evaluated = false;
 };
 
-/** @brief Classifies the target and query bindings owned by one base-scan mmsearch. */
+/** @brief The target binding and the kind of query input for one BioseqScan search. */
 export struct base_local_mmsearch_ownership {
     base_local_mmsearch_operand_resolution target{};
     std::optional<base_local_mmsearch_operand_resolution> local_query{};
@@ -64,41 +62,41 @@ export struct base_local_mmsearch_ownership {
     bool any_evaluated_operand = false;
 };
 
-/** @brief Carries the exact sequence typmod derived for a base-local expression. */
+/** @brief The alphabet and storage width found for a scan-local sequence expression. */
 export struct base_local_sequence_typmod_resolution {
     int32 typmod = -1;
     bool invalid = false;
 };
 
-/** @brief Monotonic statement-local token used to pair BatchJoin plan components. */
+/** @brief The next token used to pair BatchJoin plan components. */
 export int next_batch_join_plan_token = 1;
 
-/** @brief Encode a finite planner cost as a FLOAT8 Const. */
+/** @brief Stores a finite planner cost in a float8 Const for the plan. */
 export [[nodiscard]] Const* make_batch_join_cost_const(Cost value);
 
-/** @brief Append one expression when an equal expression is not already present. */
+/** @brief Appends a copy of the expression unless an equal expression is already present. */
 export void per_row_append_unique_expression(List*& expressions, Node* node);
 
-/** @brief Build the projection target emitted by a per-row owner. */
+/** @brief Copies the join's output with matching sort and group references. */
 export [[nodiscard]] PathTarget* per_row_build_owner_target(
     PlannerInfo* root,
     PathTarget* original);
 
-/** @brief Check whether a join target can be emitted by a per-row owner. */
+/** @brief Checks that the PerRow join can produce this output with the same Var and helper bindings. */
 export [[nodiscard]] bool per_row_output_semantics_are_supported(
     PathTarget* target,
     Index target_relid,
     Relids join_relids,
     Node* target_recipe);
 
-/** @brief Collect Plan-only Vars needed to bind a transformed target during setrefs. */
+/** @brief Collects hidden input columns needed when PostgreSQL fixes plan references. */
 export [[nodiscard]] bool per_row_collect_setrefs_carrier_vars(
     Node* target_recipe,
     List* helper_argument_vars,
     Relids join_relids,
     List*& carrier_vars);
 
-/** @brief Collect final-output support expressions for a candidate per-row owner. */
+/** @brief Collects the final output's input columns and match helpers for this PerRow join. */
 export [[nodiscard]] bool per_row_collect_owner_support(
     PlannerInfo* root,
     RelOptInfo* joinrel,
@@ -106,24 +104,24 @@ export [[nodiscard]] bool per_row_collect_owner_support(
     Node* target_recipe,
     per_row_owner_support_validation& validation);
 
-/** @brief Collect nonvolatile sequence sources for a movable join operand. */
+/** @brief Rejects volatile join operands and collects the sequence columns they use. */
 export [[nodiscard]] bool per_row_collect_operand_sources(
     Node* expression,
     RelOptInfo* joinrel,
     per_row_operand_source_resolution& resolution);
 
-/** @brief Resolve a base-local sequence expression that may be evaluated by the scan. */
+/** @brief Checks a scan-local sequence expression and determines its input columns and type. */
 export [[nodiscard]] std::optional<base_local_mmsearch_operand_resolution>
 resolve_base_local_mmsearch_operand(Node* expression,
                                     RelOptInfo* rel,
                                     const bioseq_stub_oids& oids,
                                     const bool require_sequence_var);
 
-/** @brief Derive a compatible sequence typmod through supported expression shapes. */
+/** @brief Finds the sequence alphabet and storage width through supported expressions. */
 export [[nodiscard]] base_local_sequence_typmod_resolution
 resolve_base_local_sequence_typmod(Node* expression, const bioseq_stub_oids& oids);
 
-/** @brief Resolve an mmsearch call that a base relation can own without semantic movement. */
+/** @brief Checks whether a BioseqScan can own this mmsearch call at its current evaluation level. */
 export [[nodiscard]] std::optional<base_local_mmsearch_ownership>
 resolve_base_local_mmsearch_ownership(FuncExpr* function,
                                       RelOptInfo* rel,
