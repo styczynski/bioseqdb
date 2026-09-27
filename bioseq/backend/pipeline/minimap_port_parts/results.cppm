@@ -1,6 +1,6 @@
 /**
  * @file pipeline/minimap_port_parts/results.cppm
- * @brief Mapping result contracts and stable biological identities.
+ * @brief Shared result types and checksums for comparing alignment results.
  */
 export module bioseq.pipeline.minimap_port:results;
 
@@ -21,11 +21,10 @@ export {
 
     namespace bioseq::simd {
 
-    // Every length and absolute coordinate uses the canonical storage size so no
-    // position is silently truncated for sequences longer than 2^31 (C1).
+    // Keep sequence lengths and positions in the shared 64-bit storage type.
     using bioseq::storage::sequence_size_t;
 
-    // Import canonical chaining values from their shared owner.
+    // Make the shared chaining types and functions available to the pipeline.
     using bioseq::chaining::anchor;
     using bioseq::chaining::backtrack_chains;
     using bioseq::chaining::chain;
@@ -37,7 +36,7 @@ export {
     using bioseq::chaining::simd_chaining_policy;
     using bioseq::chaining::simd_chaining_policy_name;
 
-    // Pipeline code consumes the canonical minimizer-index concepts directly.
+    // Use the index lookup interfaces shared with the index builders and readers.
     using bioseq::indexing::lookup_minimizer_spans;
     using bioseq::indexing::minimizer_hashmap_fragment_index;
     using bioseq::indexing::minimizer_lookup_index;
@@ -49,18 +48,14 @@ export {
 
     namespace bioseq::simd {
 
-    // ============================================================================
-    // Constants — mirrors minimap2 defaults from mm_mapopt_t
-    // ============================================================================
+    // Result checksums.
 
-    // CIGAR opcodes and cigar_operation are imported from bioseq_cigar module.
+    // CIGAR operations come from bioseq.sequences.cigar.
 
-    /// Exact, truncation-resistant fingerprint of one complete match_result stream.
-    /// Storage/index checksums deliberately do not feed this value: this is
-    /// biological-result identity and is comparable across independently executed
-    /// pipeline routes.  The two lanes use independent byte-mixing recurrences and
-    /// every field is encoded explicitly, so struct padding and host endianness are
-    /// never part of the stats.
+    /// Counts and checksums for comparing ordered alignment results across runs.
+    /// Every result field and CIGAR operation is encoded explicitly, so struct
+    /// padding and host byte order do not affect the checksums. Storage and index
+    /// checksums are excluded so different execution paths can be compared.
     struct match_result_set_identity {
         std::uint64_t collection_count = 0u;
         std::uint64_t match_result_count = 0u;
@@ -73,13 +68,11 @@ export {
         bool is_computed = false;
         bool is_saturated = false;
 
-        /// Merge one complete result-collection identity into this aggregate.
+        /// Combine another result collection with this running comparison record.
         void merge(const match_result_set_identity& other) noexcept {
             if (!other.is_computed) {
-                // A missing collection stats is a permanent aggregate failure.
-                // `is_computed == false && is_saturated == false` is reserved for the
-                // pristine accumulator so a later valid collection cannot erase
-                // the failure recorded for an earlier collection.
+                // Remember the missing collection even if valid collections arrive later.
+                // The saturated flag distinguishes this failure from an empty accumulator.
                 is_computed = false;
                 is_saturated = true;
                 return;
@@ -120,7 +113,7 @@ export {
 
     namespace biological_identity_detail {
 
-    /// Two-lane byte digest used for architecture-independent result identity.
+    /// Two byte checksums with fixed encodings for portable result comparisons.
     struct biological_digest_state {
         std::uint64_t lane0 = 0xcbf29ce484222325ull;
         std::uint64_t lane1 = 0x6a09e667f3bcc909ull;
@@ -142,22 +135,22 @@ export {
             }
         }
 
-        /// Mix an unsigned 32-bit value through the canonical integer encoding.
+        /// Encode a 32-bit unsigned value as a zero-extended 64-bit value.
         constexpr void add_u32(std::uint32_t value) noexcept {
             add_u64(value);
         }
 
-        /// Mix a signed 32-bit value by its bit representation.
+        /// Encode the 32-bit representation of a signed integer.
         constexpr void add_i32(std::int32_t value) noexcept {
             add_u32(std::bit_cast<std::uint32_t>(value));
         }
 
-        /// Mix one canonical boolean byte.
+        /// Encode false as zero and true as one.
         constexpr void add_bool(bool value) noexcept {
             add_byte(value ? std::uint8_t{1u} : std::uint8_t{0u});
         }
 
-        /// Mix a floating-point value by its bit representation.
+        /// Encode a float using its 32-bit representation.
         constexpr void add_float(float value) noexcept {
             add_u32(std::bit_cast<std::uint32_t>(value));
         }
@@ -165,7 +158,7 @@ export {
 
     } // namespace biological_identity_detail
 
-    /// Compute a complete identity for one ordered alignment-result collection.
+    /// Count and hash every field and CIGAR operation in result order.
     [[nodiscard]] inline match_result_set_identity
     make_match_result_set_identity(std::span<const match_result> results) noexcept {
         biological_identity_detail::biological_digest_state match_digest{};
