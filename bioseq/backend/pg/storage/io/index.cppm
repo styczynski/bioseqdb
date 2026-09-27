@@ -30,7 +30,7 @@ extern "C" {
 #include "access/relation.h"     // index_open / index_close
 #include "access/table.h"        // table_open / table_close
 #include "access/xact.h"         // CommandCounterIncrement
-#include "catalog/namespace.h"   
+#include "catalog/namespace.h"
 #include "catalog/pg_type_d.h"   // TEXTOID, VARCHAROID, BPCHAROID
 #include "commands/sequence.h"   // ResetSequenceCaches
 #include "executor/executor.h"   // ExecConstraints, ExecInitExpr, ExecEvalExpr
@@ -63,16 +63,16 @@ import bioseq.storage.layout;
 import bioseq.common.templating.runtime_dispatch; // dispatch_exact_value_or_default
 import bioseq.common.templating.value_sequence;
 import bioseq.sequences;                       // Sequence alphabets and packed storage types.
-                                               
+
 import bioseq.postgres.types.compact_sequence; // PostgreSQL sequence values and supported alphabets.
 import bioseq.postgres.storage.manager; // Sequence locators, fragment writers and relation caches.
-                                        
+
 
 import bioseq.postgres.table.io; // Column table row writes and per-row memory contexts.
 import bioseq.io.options;                      // sequence_file_format, reader_options
 import bioseq.io.file_kind;                    // detect_sequence_file_kind, sequence_file_kind
 import bioseq.io.reader;                       // Stream sequence chunks and sample input headers.
-                                               
+
 import bioseq.io.identifier_parser.formats;
 import bioseq.io.identifier_parser; // Map input header fields to destination columns.
 import bioseq.postgres.storage.metadata;

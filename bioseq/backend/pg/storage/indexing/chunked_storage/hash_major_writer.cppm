@@ -155,7 +155,7 @@ inline void close_spool(BufFile*& file) {
 
 /// Drop the local file handle and leave cleanup to PostgreSQL.
 inline void abandon_spool(BufFile*& file) noexcept {
-    
+
     file = nullptr;
 }
 
