@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/gene_report_schemas.cppm
- * @brief NCBI gene and protein report schema fragments.
+ * @brief Data types used in NCBI gene and protein reports.
  */
 module;
 

@@ -1,6 +1,6 @@
 /**
  * @file external/ncbi/gene_product_report_paths.cppm
- * @brief NCBI gene product report endpoint fragments.
+ * @brief OpenAPI requests for NCBI gene product reports.
  */
 module;
 
@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:gene_product_report_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Gene product report path entries. */
+/** @brief Gene product report requests with identifier and taxon filters. */
 inline constexpr std::string_view gene_product_report_paths =
     R"bioseq_openapi(  /gene/id/{gene_ids}/product_report:
     get:
