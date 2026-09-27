@@ -13,6 +13,39 @@ import unittest
 from rewrite_history import git, rewrite
 from verify_history import verify
 from cleanup_checkout import plan
+from publish_history import DESTINATION, require_ready, verify_destination_url
+
+
+class PublicationTests(unittest.TestCase):
+    def test_build_gate_requires_audit_and_explicit_running_authorization(self):
+        ready = {'final_audit_passed': True, 'clean_build_passed': True}
+        require_ready(ready)
+        pending = dict(ready, clean_build_passed=False,
+                       publish_while_build_running_authorized=True,
+                       clean_build_attempt={'status': 'running', 'receipt': 'br_test'})
+        require_ready(pending, True)
+        for record, allowed in [
+            (dict(pending, final_audit_passed=False), True),
+            (pending, False),
+            (dict(pending, publish_while_build_running_authorized=False), True),
+            (dict(pending, clean_build_attempt={'status': 'failed', 'receipt': 'br_test'}), True),
+        ]:
+            with self.assertRaises(RuntimeError):
+                require_ready(record, allowed)
+
+    def test_destination_guard_rejects_url_rewriting_and_removes_temporary_remote(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.check_call(['git', 'init', '-q', '-b', 'main', directory])
+            prefix = ['git', '-C', directory, '-c', 'http.followRedirects=false']
+            verify_destination_url(prefix)
+            self.assertEqual(subprocess.check_output(prefix + ['remote']), b'')
+            for rule in ('insteadOf', 'pushInsteadOf'):
+                key = 'url.https://example.invalid/protected.git.' + rule
+                subprocess.check_call(prefix + ['config', key, DESTINATION])
+                with self.assertRaises(RuntimeError):
+                    verify_destination_url(prefix)
+                self.assertEqual(subprocess.check_output(prefix + ['remote']), b'')
+                subprocess.check_call(prefix + ['config', '--unset', key])
 
 
 class HistoryTests(unittest.TestCase):
