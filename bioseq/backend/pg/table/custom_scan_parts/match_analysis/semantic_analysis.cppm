@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Counts finalized base, descendant, and ancestor match owners.
+ * @brief Finds which finalized scans supply match-helper results.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -38,7 +38,7 @@ export import :custom_scan_match_analysis_semantic_analysis_contracts;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Holds a validated base owner's executor sites, recipe, lineage, and stable id. */
+    /** @brief Holds a base scan's checked target expression, source columns, and saved helper bindings. */
     struct finalized_base_owner_site_context {
         List* sites = NIL;
         Node* target_recipe = nullptr;
@@ -47,7 +47,7 @@ export {
         int stable_match_id = 0;
     };
 
-    /** @brief Resolves a complete finalized base-owner site context from a CustomScan. */
+    /** @brief Loads the saved helper bindings of a base scan with a valid match target. */
     [[nodiscard]] bool
     try_resolve_finalized_base_owner_site_context(CustomScan* scan,
                                                   const bioseq_stub_oids& oids,
@@ -97,7 +97,14 @@ export {
         return true;
     }
 
-    /** @brief Checks one serialized base-owner site against a helper and result position. */
+    /**
+     * @brief Checks that a saved binding matches this helper and output column.
+     *
+     * Require the same function and argument, compatible result metadata, and this
+     * scan's match ID. The argument must identify the target expression or a
+     * permitted source column. Set malformed when the saved record has the wrong
+     * shape or field types.
+     */
     [[nodiscard]] bool
     finalized_base_owner_site_matches(List* site,
                                       FuncExpr* helper,
@@ -161,7 +168,7 @@ export {
                (exact_sequence_argument || base_lineage_argument);
     }
 
-    /** @brief Tracks one-to-one coverage between base target helpers and finalized sites. */
+    /** @brief Tracks the saved bindings found while checking the base scan's output expressions. */
     struct finalized_base_targetlist_audit {
         finalized_base_owner_site_context context{};
         const bioseq_stub_oids* oids = nullptr;
@@ -170,9 +177,9 @@ export {
         bool invalid = false;
     };
 
-    /** @brief Validates each base target-list helper against exactly one finalized site. */
+    /** @brief Checks that each helper call has exactly one saved binding for its output column. */
     struct finalized_base_targetlist_audit_visitor {
-        /** @brief Matches one helper node to its serialized site. */
+        /** @brief Finds a helper's saved binding and records it, stopping on invalid or ambiguous data. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               finalized_base_targetlist_audit& audit) const {
@@ -215,7 +222,13 @@ export {
         }
     };
 
-    /** @brief Checks that every helper in a base-scan target list has one finalized owner site. */
+    /**
+     * @brief Checks every base-scan helper against its saved binding.
+     *
+     * Each helper call must match one record for its output column. Also require
+     * every saved record to appear in the target list, so stale bindings cannot
+     * survive unnoticed.
+     */
     [[nodiscard]] bool
     base_scan_targetlist_has_only_finalized_match_helpers(CustomScan* scan,
                                                           const bioseq_stub_oids& oids) {
@@ -242,7 +255,12 @@ export {
         return all_sites_matched;
     }
 
-    /** @brief Counts whether a finalized base owner supplies a helper identity. */
+    /**
+     * @brief Checks whether this base scan supplies a helper result.
+     *
+     * Return 1 when the scan owns a matching helper, even if several output columns
+     * use it. Return 0 for no match and 2 for malformed saved site data.
+     */
     [[nodiscard]] std::size_t finalized_base_owner_matching_site_count(
         CustomScan* scan, Node* identity, const bioseq_stub_oids& oids) {
         finalized_base_owner_site_context context{};
@@ -279,12 +297,9 @@ export {
                 equal(supplied->expr, identity) &&
                 finalized_base_owner_site_matches(
                     site, helper, static_cast<AttrNumber>(resno), context, oids, malformed)) {
-                /* Planner PHV and bare-Func carriers can legitimately collapse to
-                 * equal post-setrefs expressions at distinct resnos.  They are two
-                 * authoritative carrier sites for one base match_result owner, not two
-                 * competing owners.  This routine feeds owner-counting audits, so
-                 * classify the owner once while the resno-specific targetlist audit
-                 * above continues to validate every individual site. */
+                /* setrefs can make a PlaceHolderVar and a bare helper equal in two
+                 * output columns. Both still belong to this one base scan. The
+                 * target-list audit checks their separate output positions. */
                 matches = 1u;
             }
             if (malformed)
@@ -293,13 +308,18 @@ export {
         return matches;
     }
 
-    /** @brief Counts descendant helper owners with saturation at ambiguity. */
+    /**
+     * @brief Counts matching helper owners in this plan subtree.
+     *
+     * Stop at subquery boundaries. Counts stop at 2 because callers only need to
+     * know whether a helper has one unambiguous source.
+     */
     [[nodiscard]] std::size_t finalized_descendant_match_owner_site_count(
         Plan* plan, Node* identity, const bioseq_stub_oids& oids) {
         if (plan == nullptr || identity == nullptr)
             return 0u;
         check_stack_depth();
-        // Saturates owner counts once uniqueness is lost.
+        // Keep 2 as the result once ownership is ambiguous.
         auto add = [](std::size_t left, std::size_t right) noexcept {
             return left > 1u || right > 1u || left + right > 1u ? std::size_t{2u} : left + right;
         };
@@ -335,7 +355,7 @@ export {
             return search_plan_list(reinterpret_cast<BitmapOr*>(plan)->bitmapplans);
         }
         if (IsA(plan, SubqueryScan)) {
-            /* A SubqueryScan starts a distinct finalized helper-binding scope. */
+            /* Helpers inside this subquery have separate bindings. */
             return 0u;
         }
         std::size_t count =
@@ -349,20 +369,18 @@ export {
     }
 
     /**
-     * @brief Counts descendant owners of one selected owner class, saturating at ambiguity.
+     * @brief Counts helper owners of one kind for failure diagnostics.
      *
-     * Diagnostic-only counterpart to finalized_descendant_match_owner_site_count.
-     * Keep Batch and Base ownership separate so a rejected finalized carrier can
-     * explain which owner class, if either, still validates the raw helper identity.
-     * Counts saturate at two because the audit only distinguishes zero, unique,
-     * and ambiguous ownership.
+     * batch_owner selects join owners. Otherwise, count base scans. Keep the same
+     * subquery boundaries as the ownership check and stop each count at 2 so the
+     * diagnostic distinguishes absent, unique, and ambiguous ownership.
      */
     [[nodiscard]] std::size_t finalized_descendant_match_owner_site_count_by_kind(
         Plan* plan, Node* identity, const bioseq_stub_oids& oids, bool batch_owner) {
         if (plan == nullptr || identity == nullptr)
             return 0u;
         check_stack_depth();
-        // Saturates owner counts once uniqueness is lost.
+        // Keep 2 as the result once ownership is ambiguous.
         auto add = [](std::size_t left, std::size_t right) noexcept {
             return left > 1u || right > 1u || left + right > 1u ? std::size_t{2u} : left + right;
         };
@@ -401,7 +419,7 @@ export {
             return search_plan_list(reinterpret_cast<BitmapOr*>(plan)->bitmapplans);
         }
         if (IsA(plan, SubqueryScan)) {
-            /* Match the finalized helper-binding scope fence used by the verdict. */
+            /* Use the same subquery boundary as the ownership check. */
             return 0u;
         }
         std::size_t count = finalized_descendant_match_owner_site_count_by_kind(
@@ -414,13 +432,13 @@ export {
         return count;
     }
 
-    /** @brief Counts finalized owner classes in the direct child subtrees of a plan. */
+    /** @brief Counts join and base-scan helper owners in the child subtrees for diagnostics. */
     [[nodiscard]] finalized_match_owner_site_counts finalized_child_match_owner_site_counts(
         Plan* plan, Node* identity, const bioseq_stub_oids& oids) {
         finalized_match_owner_site_counts counts{};
         if (plan == nullptr || identity == nullptr)
             return counts;
-        // Saturates owner counts once uniqueness is lost.
+        // Keep 2 as the result once ownership is ambiguous.
         auto add = [](std::size_t left, std::size_t right) noexcept {
             return left > 1u || right > 1u || left + right > 1u ? std::size_t{2u} : left + right;
         };
@@ -465,7 +483,13 @@ export {
         return counts;
     }
 
-    /** @brief Resolves and validates the finalization record for an ancestor BatchJoin scan. */
+    /**
+     * @brief Finds the saved match-owner record for an ancestor join.
+     *
+     * Return null when the scan has no join-owner record. Reject duplicates or a
+     * record that disagrees with the scan's private data, plan-node ID, or query
+     * scope. Both batch and per-row joins use this check.
+     */
     [[nodiscard]] match_owner_finalization*
     finalized_batch_owner_for_ancestor_stack(CustomScan* scan,
                                              std::span<match_owner_finalization> owners) {
