@@ -1,9 +1,9 @@
 /**
  * @file highway_vector_stream.cppm
- * @brief Defines the registered Highway target source for fixed-count vector streams.
+ * @brief Applies SIMD operations to small groups of independent vectors.
  *
- * The authored source remains target-neutral. The Highway module generator materializes
- * target-attributed copies while preserving the `vector_stream` source-record identity.
+ * The Highway generator compiles a copy for each CPU target and keeps
+ * the vector_stream name in its generated source records.
  */
 module;
 #include <hwy/highway.h>
@@ -19,26 +19,20 @@ namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
- * @brief Accepts the supported compile-time number of independent SIMD streams.
- * @tparam p_stream_count Number of bundled vector or mask values.
+ * @brief Allows groups of one to four SIMD vectors or masks.
  */
 template <std::size_t p_stream_count>
 concept supported_vector_stream_width = p_stream_count >= 1 && p_stream_count <= 4;
 
 /**
- * @brief Forward declaration of a fixed-count SIMD vector bundle.
- * @tparam p_simd_tag Highway lane descriptor.
- * @tparam p_storage_type Scalar lane type.
- * @tparam p_stream_count Number of independent vectors.
+ * @brief Declares a group of SIMD vectors with a fixed size.
  */
 template <class p_simd_tag, class p_storage_type, std::size_t p_stream_count>
 requires supported_vector_stream_width<p_stream_count>
 struct vector_stream;
 
 /**
- * @brief Forward declaration of a fixed-count SIMD mask bundle.
- * @tparam p_simd_tag Highway lane descriptor.
- * @tparam p_stream_count Number of independent masks.
+ * @brief Declares a group of SIMD masks with a fixed size.
  */
 template <class p_simd_tag, std::size_t p_stream_count>
 requires supported_vector_stream_width<p_stream_count>
@@ -48,7 +42,7 @@ struct mask_stream;
 template <class p_value_type>
 struct is_vector_stream : std::false_type {};
 
-/** @brief Positive specialization for `vector_stream`. */
+/** @brief Recognizes vector_stream types. */
 template <class p_simd_tag, class p_storage_type, std::size_t p_stream_count>
 struct is_vector_stream<vector_stream<p_simd_tag, p_storage_type, p_stream_count>>
     : std::true_type {};
@@ -62,7 +56,7 @@ inline constexpr bool k_is_vector_stream =
 template <class p_value_type>
 struct is_mask_stream : std::false_type {};
 
-/** @brief Positive specialization for `mask_stream`. */
+/** @brief Recognizes mask_stream types. */
 template <class p_simd_tag, std::size_t p_stream_count>
 struct is_mask_stream<mask_stream<p_simd_tag, p_stream_count>> : std::true_type {};
 
@@ -71,22 +65,24 @@ template <class p_value_type>
 inline constexpr bool k_is_mask_stream =
     is_mask_stream<std::remove_cvref_t<p_value_type>>::value;
 
-/** @brief Reports whether a type is either supported stream bundle. */
+/** @brief Checks whether a type is a vector stream or mask stream. */
 template <class p_value_type>
 inline constexpr bool k_is_any_stream =
     k_is_vector_stream<p_value_type> || k_is_mask_stream<p_value_type>;
 
-/** @brief Accepts an argument pack containing at least one stream bundle. */
+/** @brief Requires at least one stream in the argument list. */
 template <class... p_argument_types>
 concept has_stream_argument =
     (k_is_any_stream<p_argument_types> || ... || false);
 
-// ----------------------------------------------------------------------------
+
 /**
- * @brief Bundles independent Highway vectors in target-attributed project callables.
- * @tparam p_simd_tag Highway lane descriptor.
+ * @brief Holds independent SIMD vectors so one operation can process each in turn.
+ *
+ * The group contains one to four vectors with the same lane type and width.
+ * @tparam p_simd_tag Highway lane tag.
  * @tparam p_storage_type Scalar lane type.
- * @tparam p_stream_count Number of independent vectors.
+ * @tparam p_stream_count Number of vectors.
  */
 template <class p_simd_tag, class p_storage_type, std::size_t p_stream_count>
 requires supported_vector_stream_width<p_stream_count>
@@ -98,18 +94,18 @@ vector_stream {
     /** @brief Unqualified Highway lane descriptor. */
     using tag_type = std::remove_cvref_t<p_simd_tag>;
 
-    /** @brief Scalar lane type carried for lifted result deduction. */
+    /** @brief Scalar lane type used to choose result types. */
     using storage_type = p_storage_type;
 
-    /** @brief Target-native Highway vector type. */
+    /** @brief Highway vector type for this CPU target. */
     using vector_type = hn::Vec<tag_type>;
 
     /** @brief Number of independent vectors in the bundle. */
     static constexpr std::size_t k_stream_count = p_stream_count;
 
 private:
-    // Target vectors provide their own alignment. Every copy remains in an attributed
-    // project callable so fixed targets never cross a targetless std::array copy boundary.
+    // Highway vectors supply their own alignment. Copies are written here
+    // so the generator can give them the same CPU target as the vectors.
     std::array<vector_type, p_stream_count> vectors_;
 
     template <class... p_vector_types>
@@ -138,50 +134,50 @@ private:
     }
 
 public:
-    /** @brief Default-constructs each target vector inside generated project code. */
+    /** @brief Default-constructs each vector using code compiled for this CPU target. */
     HWY_INLINE constexpr vector_stream() noexcept
         : vector_stream(std::make_index_sequence<p_stream_count>{}) {}
 
-    // Array special members are not target-attributed, so every copy stays inside
-    // generated project callables and avoids a targetless boundary for fixed targets.
-    /** @brief Copies each target vector inside generated project code. */
+    // Copy elements explicitly because std::array copy functions do not
+    // carry the CPU target attributes added to this module.
+    /** @brief Copies all vector slots. */
     HWY_INLINE constexpr vector_stream(const vector_stream& other) noexcept
         : vector_stream(other, std::make_index_sequence<p_stream_count>{}) {}
 
-    /** @brief Moves each target vector through the target-attributed copy path. */
+    /** @brief Copies the vector slots from the source being moved. */
     HWY_INLINE constexpr vector_stream(vector_stream&& other) noexcept
         : vector_stream(other, std::make_index_sequence<p_stream_count>{}) {}
 
-    /** @brief Copy-assigns each target vector inside generated project code. */
+    /** @brief Copies all vector slots into this stream. */
     HWY_INLINE constexpr vector_stream& operator=(
         const vector_stream& other) noexcept {
         assign_from(other, std::make_index_sequence<p_stream_count>{});
         return *this;
     }
 
-    /** @brief Move-assigns each target vector through the target-attributed copy path. */
+    /** @brief Copies vector slots from the source being moved into this stream. */
     HWY_INLINE constexpr vector_stream& operator=(vector_stream&& other) noexcept {
         assign_from(other, std::make_index_sequence<p_stream_count>{});
         return *this;
     }
 
-    /** @brief Returns a mutable target vector slot. */
+    /** @brief Returns a mutable vector slot without checking its index. */
     [[nodiscard]] constexpr vector_type& operator[](std::size_t slot_index) noexcept {
         return vectors_[slot_index];
     }
 
-    /** @brief Returns a const target vector slot. */
+    /** @brief Returns a read-only vector slot without checking its index. */
     [[nodiscard]] constexpr const vector_type& operator[](
         std::size_t slot_index) const noexcept {
         return vectors_[slot_index];
     }
 
-    /** @brief Returns the mutable inline vector representation. */
+    /** @brief Returns the array of vector slots. */
     [[nodiscard]] constexpr std::array<vector_type, p_stream_count>& data() noexcept {
         return vectors_;
     }
 
-    /** @brief Returns the const inline vector representation. */
+    /** @brief Returns the array of vector slots as read-only storage. */
     [[nodiscard]] constexpr const std::array<vector_type, p_stream_count>&
     data() const noexcept {
         return vectors_;
@@ -217,8 +213,8 @@ private:
         return pack(((void)p_slot_indices, vector)...);
     }
 public:
-    // Small bundles intentionally pass by value. On M1 NEON they remain homogeneous
-    // vector aggregates in V0/V1 registers, avoiding an address escape that can inhibit SROA.
+    // Pass small groups by value so the compiler can keep their vectors
+    // in registers without taking the group's address.
     /** @brief Adds corresponding vectors in two bundles. */
     [[nodiscard]] friend HWY_INLINE auto operator+(
         vector_stream left, vector_stream right) noexcept {
@@ -237,42 +233,42 @@ public:
         return multiply_slots(left, right, std::make_index_sequence<p_stream_count>{});
     }
 
-    /** @brief Compares corresponding vectors for equality. */
+    /** @brief Returns equality masks for corresponding vector lanes. */
     [[nodiscard]] friend HWY_INLINE auto operator==(
         vector_stream left, vector_stream right) noexcept {
         return compare_equal_slots(
             left, right, std::make_index_sequence<p_stream_count>{});
     }
 
-    /** @brief Compares corresponding vectors for inequality. */
+    /** @brief Returns inequality masks for corresponding vector lanes. */
     [[nodiscard]] friend HWY_INLINE auto operator!=(
         vector_stream left, vector_stream right) noexcept {
         return compare_not_equal_slots(
             left, right, std::make_index_sequence<p_stream_count>{});
     }
 
-    /** @brief Compares corresponding vectors with less-than. */
+    /** @brief Returns masks for lanes where left is less than right. */
     [[nodiscard]] friend HWY_INLINE auto operator<(
         vector_stream left, vector_stream right) noexcept {
         return compare_less_slots(
             left, right, std::make_index_sequence<p_stream_count>{});
     }
 
-    /** @brief Compares corresponding vectors with greater-than. */
+    /** @brief Returns masks for lanes where left is greater than right. */
     [[nodiscard]] friend HWY_INLINE auto operator>(
         vector_stream left, vector_stream right) noexcept {
         return compare_greater_slots(
             left, right, std::make_index_sequence<p_stream_count>{});
     }
 
-    /** @brief Compares corresponding vectors with less-than-or-equal. */
+    /** @brief Returns masks for lanes where left is at most right. */
     [[nodiscard]] friend HWY_INLINE auto operator<=(
         vector_stream left, vector_stream right) noexcept {
         return compare_less_equal_slots(
             left, right, std::make_index_sequence<p_stream_count>{});
     }
 
-    /** @brief Compares corresponding vectors with greater-than-or-equal. */
+    /** @brief Returns masks for lanes where left is at least right. */
     [[nodiscard]] friend HWY_INLINE auto operator>=(
         vector_stream left, vector_stream right) noexcept {
         return compare_greater_equal_slots(
@@ -378,9 +374,9 @@ private:
 };
 
 /**
- * @brief Bundles independent Highway masks in target-attributed project callables.
- * @tparam p_simd_tag Highway lane descriptor.
- * @tparam p_stream_count Number of independent masks.
+ * @brief Holds one SIMD mask for each vector in a stream.
+ * @tparam p_simd_tag Highway lane tag.
+ * @tparam p_stream_count Number of masks, from one to four.
  */
 template <class p_simd_tag, std::size_t p_stream_count>
 requires supported_vector_stream_width<p_stream_count>
@@ -392,7 +388,7 @@ mask_stream {
     /** @brief Unqualified Highway lane descriptor. */
     using tag_type = std::remove_cvref_t<p_simd_tag>;
 
-    /** @brief Target-native Highway mask type. */
+    /** @brief Highway mask type for this CPU target. */
     using mask_type = hn::Mask<tag_type>;
 
     /** @brief Number of independent masks in the bundle. */
@@ -427,47 +423,47 @@ private:
     }
 
 public:
-    /** @brief Default-constructs each target mask inside generated project code. */
+    /** @brief Default-constructs each mask using code compiled for this CPU target. */
     HWY_INLINE constexpr mask_stream() noexcept
         : mask_stream(std::make_index_sequence<p_stream_count>{}) {}
 
-    /** @brief Copies each target mask inside generated project code. */
+    /** @brief Copies all mask slots. */
     HWY_INLINE constexpr mask_stream(const mask_stream& other) noexcept
         : mask_stream(other, std::make_index_sequence<p_stream_count>{}) {}
 
-    /** @brief Moves each target mask through the target-attributed copy path. */
+    /** @brief Copies the mask slots from the source being moved. */
     HWY_INLINE constexpr mask_stream(mask_stream&& other) noexcept
         : mask_stream(other, std::make_index_sequence<p_stream_count>{}) {}
 
-    /** @brief Copy-assigns each target mask inside generated project code. */
+    /** @brief Copies all mask slots into this stream. */
     HWY_INLINE constexpr mask_stream& operator=(const mask_stream& other) noexcept {
         assign_from(other, std::make_index_sequence<p_stream_count>{});
         return *this;
     }
 
-    /** @brief Move-assigns each target mask through the target-attributed copy path. */
+    /** @brief Copies mask slots from the source being moved into this stream. */
     HWY_INLINE constexpr mask_stream& operator=(mask_stream&& other) noexcept {
         assign_from(other, std::make_index_sequence<p_stream_count>{});
         return *this;
     }
 
-    /** @brief Returns a mutable target mask slot. */
+    /** @brief Returns a mutable mask slot without checking its index. */
     [[nodiscard]] constexpr mask_type& operator[](std::size_t slot_index) noexcept {
         return masks_[slot_index];
     }
 
-    /** @brief Returns a const target mask slot. */
+    /** @brief Returns a read-only mask slot without checking its index. */
     [[nodiscard]] constexpr const mask_type& operator[](
         std::size_t slot_index) const noexcept {
         return masks_[slot_index];
     }
 
-    /** @brief Returns the mutable inline mask representation. */
+    /** @brief Returns the array of mask slots. */
     [[nodiscard]] constexpr std::array<mask_type, p_stream_count>& data() noexcept {
         return masks_;
     }
 
-    /** @brief Returns the const inline mask representation. */
+    /** @brief Returns the array of mask slots as read-only storage. */
     [[nodiscard]] constexpr const std::array<mask_type, p_stream_count>&
     data() const noexcept {
         return masks_;
@@ -513,7 +509,7 @@ template <class p_stream_type>
 using stream_storage_type =
     typename std::remove_cvref_t<p_stream_type>::storage_type;
 
-/** @brief Accesses one compile-time stream slot while preserving value category. */
+/** @brief Returns a reference to a slot selected at compile time. */
 template <std::size_t p_slot_index, class p_stream_type>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 constexpr decltype(auto) get_stream_slot(p_stream_type&& stream) noexcept {
@@ -523,7 +519,7 @@ constexpr decltype(auto) get_stream_slot(p_stream_type&& stream) noexcept {
     return std::forward<p_stream_type>(stream)[p_slot_index];
 }
 
-/** @brief Packs target vectors through the generated source's stable factory surface. */
+/** @brief Builds a vector stream from one vector per slot. */
 template <
     class p_simd_tag,
     class p_storage_type,
@@ -540,7 +536,7 @@ vector_stream<p_simd_tag, p_storage_type, p_stream_count> pack_vector_stream(
     return vector_stream<p_simd_tag, p_storage_type, p_stream_count>::pack(vectors...);
 }
 
-/** @brief Packs target masks through the generated source's stable factory surface. */
+/** @brief Builds a mask stream from one mask per slot. */
 template <class p_simd_tag, std::size_t p_stream_count, class... p_mask_types>
 requires (
     supported_vector_stream_width<p_stream_count>
@@ -573,19 +569,14 @@ mask_stream<p_simd_tag, p_stream_count> splat_false_mask_stream(
     return mask_stream<p_simd_tag, p_stream_count>::splat_false(simd_tag);
 }
 
-// ============================================================================
-// Lifting machinery
-// ============================================================================
+// Apply one operation separately to each stream slot.
 
 namespace vector_stream_detail {
 
 /**
- * @brief Projects one stream slot or broadcasts a non-stream argument.
+ * @brief Selects one stream slot, or reuses an argument that is not a stream.
  *
- * @tparam p_slot_index Compile-time stream slot.
- * @tparam p_argument_type Projected argument type.
- * @param[in] argument Stream bundle or broadcast argument.
- * @return Selected slot reference for streams, otherwise the original lvalue reference.
+ * Returns a reference in both cases so repeated calls reuse the same value.
  */
 template <std::size_t p_slot_index, class p_argument_type>
 [[gnu::always_inline]] HWY_INLINE constexpr decltype(auto)
@@ -607,7 +598,7 @@ requires k_is_any_stream<p_value_type>
 inline constexpr std::size_t k_stream_count_for_type<p_value_type> =
     std::remove_cvref_t<p_value_type>::k_stream_count;
 
-/** @brief Deduces the greatest stream count in an argument pack. */
+/** @brief Finds the largest slot count among stream arguments. */
 template <class... p_argument_types>
 struct deduced_stream_count;
 
@@ -617,7 +608,7 @@ struct deduced_stream_count<> {
     static constexpr std::size_t k_value = 0;
 };
 
-/** @brief Recursively selects the greatest stream argument count. */
+/** @brief Selects the largest stream count from this argument and the rest. */
 template <class p_first_type, class... p_remaining_types>
 struct deduced_stream_count<p_first_type, p_remaining_types...> {
     static constexpr std::size_t k_tail_value =
@@ -628,7 +619,7 @@ struct deduced_stream_count<p_first_type, p_remaining_types...> {
             : k_tail_value;
 };
 
-/** @brief Exposes the deduced stream count for an argument pack. */
+/** @brief Slot count selected from the argument types. */
 template <class... p_argument_types>
 inline constexpr std::size_t k_deduced_stream_count =
     deduced_stream_count<std::remove_cvref_t<p_argument_types>...>::k_value;
@@ -646,7 +637,7 @@ struct simd_tag_for_type<p_value_type> {
     using simd_tag_type = typename std::remove_cvref_t<p_value_type>::tag_type;
 };
 
-/** @brief Semantic alias for a candidate type's deduced SIMD tag. */
+/** @brief Highway tag for a stream type, or void for another type. */
 template <class p_value_type>
 using simd_tag_type_for = typename simd_tag_for_type<p_value_type>::simd_tag_type;
 
@@ -709,13 +700,9 @@ inline constexpr bool k_stream_tags_consistent =
      && ... && true);
 
 /**
- * @brief Evaluates a lifted operation for one stream slot.
- * @tparam p_slot_index Compile-time stream slot.
- * @tparam p_operation_type Lifted callable type.
- * @tparam p_argument_types Operation argument types.
- * @param[in] operation Lifted callable.
- * @param[in] arguments Stream or broadcast arguments.
- * @return Per-slot operation result.
+ * @brief Calls an operation for one stream slot and returns its result.
+ *
+ * Arguments outside streams are reused unchanged.
  */
 template <std::size_t p_slot_index, class p_operation_type, class... p_argument_types>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
@@ -725,7 +712,7 @@ auto evaluate_lifted_slot(
     return operation(project_stream_slot<p_slot_index>(arguments)...);
 }
 
-/** @brief Applies a void lifted operation for one stream slot. */
+/** @brief Calls an operation for one stream slot when no result is returned. */
 template <std::size_t p_slot_index, class p_operation_type, class... p_argument_types>
 [[gnu::always_inline]] HWY_INLINE void apply_lifted_slot(
     p_operation_type& operation,
@@ -733,7 +720,7 @@ template <std::size_t p_slot_index, class p_operation_type, class... p_argument_
     operation(project_stream_slot<p_slot_index>(arguments)...);
 }
 
-/** @brief Packs per-slot vector results from a lifted operation. */
+/** @brief Collects each slot's vector result into a vector stream. */
 template <
     class p_simd_tag,
     class p_storage_type,
@@ -752,7 +739,7 @@ vector_stream<p_simd_tag, p_storage_type, p_stream_count> pack_lifted_vectors(
             operation, std::forward<p_argument_types>(arguments)...)...);
 }
 
-/** @brief Packs per-slot mask results from a lifted operation. */
+/** @brief Collects each slot's mask result into a mask stream. */
 template <
     class p_simd_tag,
     std::size_t p_stream_count,
@@ -770,7 +757,7 @@ mask_stream<p_simd_tag, p_stream_count> pack_lifted_masks(
             operation, std::forward<p_argument_types>(arguments)...)...);
 }
 
-/** @brief Applies a void lifted operation to every stream slot. */
+/** @brief Calls an operation for each slot without collecting results. */
 template <
     std::size_t... p_slot_indices,
     class p_operation_type,
@@ -785,16 +772,16 @@ template <
 }
 
 /**
- * @brief Lifts one Highway operation over every slot in compatible stream arguments.
+ * @brief Applies one operation separately to every slot in compatible streams.
  *
- * The element result selects a vector stream, mask stream, or void application. Non-stream
- * arguments are broadcast as lvalues to every slot so rvalues are never moved more than once.
+ * All stream arguments must have the same slot count and Highway tag.
+ * Other arguments are reused by reference for each call, including values
+ * originally passed as temporaries. Vector or mask results are grouped
+ * into a matching stream. Operations returning void run once per slot.
  *
- * @tparam p_operation_type Lifted callable type.
- * @tparam p_argument_types Stream and broadcast argument types.
- * @param[in] operation Lifted callable.
- * @param[in] arguments Operation arguments.
- * @return Bundled per-slot result for non-void operations.
+ * @param[in] operation Function to call for each slot.
+ * @param[in] arguments Streams and shared arguments.
+ * @return Grouped results when the operation returns vectors or masks.
  */
 template <class p_operation_type, class... p_argument_types>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
@@ -848,11 +835,10 @@ auto lift_operation(p_operation_type&& operation, p_argument_types&&... argument
 } // namespace vector_stream_detail
 
 /**
- * @brief Applies a registered operation to compatible stream arguments.
- * @tparam p_operation_type Operation adapter type.
- * @tparam p_argument_types Stream and broadcast argument types.
- * @param[in] arguments Operation arguments.
- * @return Bundled operation result.
+ * @brief Applies an operation adapter to each slot in compatible streams.
+ * @tparam p_operation_type Type with a static apply() function.
+ * @param[in] arguments Streams and arguments shared by every slot.
+ * @return Grouped vector or mask results, or void.
  */
 template <class p_operation_type, class... p_argument_types>
 requires has_stream_argument<p_argument_types...>
@@ -867,11 +853,10 @@ auto apply_lifted(p_argument_types&&... arguments) {
         std::forward<p_argument_types>(arguments)...);
 }
 
-// Wrappers remain non-constexpr because Highway operations are target callables.
-// These bodies are likewise source-spelled for structural target attribution.
+// These wrappers call CPU-specific Highway functions at runtime.
+// Keep their bodies in source so the generator can add target attributes.
 
-// Binary lifts — both vec/vec and mask/mask are handled here; the constraint
-// Each wrapper accepts either vector or mask streams as supported by its Highway operation.
+// Two-argument operations accept the vector or mask types supported by Highway.
 /** @brief Adds corresponding lanes across compatible stream arguments. */
 template <class p_left_type, class p_right_type>
 requires has_stream_argument<p_left_type, p_right_type>
@@ -950,7 +935,7 @@ requires has_stream_argument<p_left_type, p_right_type>
         std::forward<p_left_type>(left), std::forward<p_right_type>(right));
 }
 
-/** @brief Computes lane-wise bitwise AND-NOT across compatible stream arguments. */
+/** @brief Computes (~left) & right for corresponding lanes. */
 template <class p_left_type, class p_right_type>
 requires has_stream_argument<p_left_type, p_right_type>
 [[nodiscard]] HWY_INLINE auto bit_and_not(
@@ -1018,7 +1003,7 @@ requires has_stream_argument<p_left_type, p_right_type>
         std::forward<p_left_type>(left), std::forward<p_right_type>(right));
 }
 
-/** @brief Shifts lanes left by per-lane counts across stream slots. */
+/** @brief Shifts every lane left by the same runtime bit count. */
 template <class p_left_type, class p_right_type>
 requires has_stream_argument<p_left_type, p_right_type>
 [[nodiscard]] HWY_INLINE auto shift_left_same(
@@ -1028,7 +1013,7 @@ requires has_stream_argument<p_left_type, p_right_type>
         std::forward<p_left_type>(left), std::forward<p_right_type>(right));
 }
 
-/** @brief Shifts lanes right by per-lane counts across stream slots. */
+/** @brief Shifts every lane right by the same runtime bit count. */
 template <class p_left_type, class p_right_type>
 requires has_stream_argument<p_left_type, p_right_type>
 [[nodiscard]] HWY_INLINE auto shift_right_same(
@@ -1038,7 +1023,7 @@ requires has_stream_argument<p_left_type, p_right_type>
         std::forward<p_left_type>(left), std::forward<p_right_type>(right));
 }
 
-// Unary lifts.
+// Single-argument operations.
 /** @brief Complements every lane in a stream argument. */
 template <class p_input_type>
 requires k_is_any_stream<p_input_type>
@@ -1071,8 +1056,8 @@ requires k_is_any_stream<p_input_type>
         std::forward<p_input_type>(input));
 }
 
-// Ternary lifts (full {stream, scalar}^3 = 27 cases handled in one wrapper).
-/** @brief Selects lanes conditionally across compatible stream arguments. */
+// Conditional selection with stream arguments or values reused across slots.
+/** @brief Selects second where the mask is true and third where it is false. */
 template <class p_first_type, class p_second_type, class p_third_type>
 requires has_stream_argument<p_first_type, p_second_type, p_third_type>
 [[nodiscard]] HWY_INLINE auto if_then_else(
@@ -1085,7 +1070,7 @@ requires has_stream_argument<p_first_type, p_second_type, p_third_type>
         std::forward<p_third_type>(third));
 }
 
-/** @brief Applies true-or-zero conditional selection across stream slots. */
+/** @brief Keeps lanes where the mask is true and writes zero elsewhere. */
 template <class p_left_type, class p_right_type>
 requires has_stream_argument<p_left_type, p_right_type>
 [[nodiscard]] HWY_INLINE auto if_then_else_zero(
@@ -1095,7 +1080,7 @@ requires has_stream_argument<p_left_type, p_right_type>
         std::forward<p_left_type>(left), std::forward<p_right_type>(right));
 }
 
-/** @brief Applies zero-or-false conditional selection across stream slots. */
+/** @brief Writes zero where the mask is true and keeps other lanes. */
 template <class p_left_type, class p_right_type>
 requires has_stream_argument<p_left_type, p_right_type>
 [[nodiscard]] HWY_INLINE auto if_then_zero_else(
@@ -1105,9 +1090,7 @@ requires has_stream_argument<p_left_type, p_right_type>
         std::forward<p_left_type>(left), std::forward<p_right_type>(right));
 }
 
-// ============================================================================
-// Templated shifts — non-type template parameter, written long-hand.
-// ============================================================================
+// Shifts and rotations with a bit count chosen at compile time.
 
 /** @brief Shifts every vector lane left by a compile-time bit count. */
 template <int p_bit_count, class p_input_type>
@@ -1155,7 +1138,7 @@ requires k_is_vector_stream<p_input_type>
 
 namespace vector_stream_bit_cast_detail {
 
-/** @brief Bit-casts one vector stream slot to a destination tag. */
+/** @brief Reinterprets one vector slot's bits using another lane tag. */
 template <class p_destination_tag, class p_input_type, std::size_t p_slot_index>
 [[nodiscard, gnu::always_inline]] HWY_INLINE auto bit_cast_slot(
     p_destination_tag destination_tag,
@@ -1163,7 +1146,7 @@ template <class p_destination_tag, class p_input_type, std::size_t p_slot_index>
     return hn::BitCast(destination_tag, get_stream_slot<p_slot_index>(input));
 }
 
-/** @brief Packs bit-cast vectors for every stream slot. */
+/** @brief Groups the reinterpreted vector slots into a new stream. */
 template <
     class p_destination_tag,
     class p_destination_storage_type,
@@ -1188,12 +1171,12 @@ pack_bit_cast_slots(
 } // namespace vector_stream_bit_cast_detail
 
 /**
- * @brief Bit-casts every vector slot to a destination Highway tag.
- * @tparam p_destination_tag Destination lane descriptor.
- * @tparam p_input_type Source vector stream type.
- * @param[in] destination_tag Destination lane descriptor.
+ * @brief Reinterprets every vector's bits using the destination lane type.
+ *
+ * Values are not converted numerically.
+ * @param[in] destination_tag Destination Highway tag.
  * @param[in] input Source vector stream.
- * @return Bit-cast destination vector stream.
+ * @return Stream with the same number of vector slots.
  */
 template <class p_destination_tag, class p_input_type>
 requires k_is_vector_stream<p_input_type>
@@ -1210,7 +1193,7 @@ requires k_is_vector_stream<p_input_type>
         destination_tag, input, std::make_index_sequence<stream_count>{});
 }
 
-/** @brief Converts every mask slot to a target-native vector slot. */
+/** @brief Expands masks to vectors with all bits set in true lanes and zero in false lanes. */
 template <class p_simd_tag, class p_input_type>
 requires k_is_mask_stream<p_input_type>
 [[nodiscard]] HWY_INLINE auto vector_from_mask(
@@ -1268,8 +1251,8 @@ HWY_INLINE void store_unaligned_stream(
 }
 
 /**
- * @brief Reduces each mask slot independently with Highway `AllFalse`.
- * @return One boolean per stream slot. Cross-stream reduction remains caller-owned.
+ * @brief Checks each mask separately for all-false lanes.
+ * @return One boolean per stream slot. The caller can combine these results.
  */
 template <class p_simd_tag, class p_input_type>
 requires k_is_mask_stream<p_input_type>
@@ -1298,7 +1281,7 @@ template <std::size_t p_stream_count, class p_function_type>
     for_each_index<p_stream_count>(std::forward<p_function_type>(function));
 }
 
-/** @brief Builds a vector stream by invoking one factory per compile-time slot. */
+/** @brief Builds a vector stream by calling the factory once per slot. */
 template <
     class p_simd_tag,
     class p_storage_type,

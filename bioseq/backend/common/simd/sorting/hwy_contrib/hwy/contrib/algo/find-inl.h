@@ -59,7 +59,7 @@ size_t Find(D d, T value, const T* HWY_RESTRICT in, size_t count) {
     HWY_DASSERT(0 != remaining && remaining < N);
     const Mask<D> mask = FirstN(d, remaining);
     const Vec<D> v = MaskedLoad(mask, d, in + i);
-    // Apply mask so that we don't 'find' the zero-padding from MaskedLoad.
+    // Ignore padding lanes when looking for a match.
     const intptr_t pos = FindFirstTrue(d, And(Eq(broadcasted, v), mask));
     if (pos >= 0) return i + static_cast<size_t>(pos);
 #endif  // HWY_MEM_OPS_MIGHT_FAULT
@@ -68,8 +68,8 @@ size_t Find(D d, T value, const T* HWY_RESTRICT in, size_t count) {
   return count;  // not found
 }
 
-// Returns index of the first element in `in[0, count)` for which `func(d, vec)`
-// returns true, otherwise `count`.
+// Returns the index of the first element selected by the mask from
+// `func(d, vec)`, or `count` when no element is selected.
 template <class D, class Func, typename T = TFromD<D>>
 size_t FindIf(D d, const T* HWY_RESTRICT in, size_t count, const Func& func) {
   const size_t N = Lanes(d);
@@ -96,7 +96,7 @@ size_t FindIf(D d, const T* HWY_RESTRICT in, size_t count, const Func& func) {
     HWY_DASSERT(0 != remaining && remaining < N);
     const Mask<D> mask = FirstN(d, remaining);
     const Vec<D> v = MaskedLoad(mask, d, in + i);
-    // Apply mask so that we don't 'find' the zero-padding from MaskedLoad.
+    // Ignore padding lanes when looking for a match.
     const intptr_t pos = FindFirstTrue(d, And(func(d, v), mask));
     if (pos >= 0) return i + static_cast<size_t>(pos);
 #endif  // HWY_MEM_OPS_MIGHT_FAULT

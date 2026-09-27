@@ -31,11 +31,8 @@ HWY_BEFORE_NAMESPACE();
 namespace hwy {
 namespace HWY_NAMESPACE {
 
-// These functions avoid having to write a loop plus remainder handling in the
-// (unfortunately still common) case where arrays are not aligned/padded. If the
-// inputs are known to be aligned/padded, it is more efficient to write a single
-// loop using Load(). We do not provide a CopyAlignedPadded because it
-// would be more verbose than such a loop.
+// SIMD fill and copy operations for arrays that may be unaligned or unpadded.
+// Each function handles the final partial vector.
 
 // Fills `to`[0, `count`) with `value`.
 template <class D, typename T = TFromD<D>>
@@ -79,18 +76,15 @@ void Copy(D d, const T* HWY_RESTRICT from, size_t count, T* HWY_RESTRICT to) {
   SafeCopyN(remaining, d, from + idx, to + idx);
 }
 
-// For idx in [0, count) in ascending order, appends `from[idx]` to `to` if the
-// corresponding mask element of `func(d, v)` is true. Returns the STL-style end
-// of the newly written elements in `to`.
+// Copies selected elements from `from` to `to`. Input order is preserved.
+// `func` accepts a tag and vector and returns a mask with one decision per
+// lane, using a functor with a templated operator() or a C++14 generic lambda.
+// Returns the end pointer.
 //
-// `func` is either a functor with a templated operator()(d, v) returning a
-// mask, or a generic lambda if using C++14. Due to apparent limitations of
-// Clang on Windows, it is currently necessary to add HWY_ATTR before the
-// opening { of the lambda to avoid errors about "function .. requires target".
-//
-// NOTE: this is only supported for 16-, 32- or 64-bit types.
-// NOTE: Func may be called a second time for elements it has already seen, but
-// these elements will not be written to `to` again.
+// Clang on Windows may require HWY_ATTR before the lambda body to avoid target
+// mismatch errors. Supported element sizes are 16, 32, and 64 bits. The final
+// partial vector may make `func` see some elements twice, but each selected
+// element is copied only once.
 template <class D, class Func, typename T = TFromD<D>>
 T* CopyIf(D d, const T* HWY_RESTRICT from, size_t count, T* HWY_RESTRICT to,
           const Func& func) {
@@ -108,7 +102,7 @@ T* CopyIf(D d, const T* HWY_RESTRICT from, size_t count, T* HWY_RESTRICT to,
   if (HWY_UNLIKELY(idx == count)) return to;
 
 #if HWY_MEM_OPS_MIGHT_FAULT
-  // Proceed one by one.
+  // Read the remaining elements individually on targets where masked loads may fault.
   const CappedTag<T, 1> d1;
   for (; idx < count; ++idx) {
     using V1 = Vec<decltype(d1)>;
@@ -118,8 +112,8 @@ T* CopyIf(D d, const T* HWY_RESTRICT from, size_t count, T* HWY_RESTRICT to,
     const T* HWY_RESTRICT from_idx =
         reinterpret_cast<const T * HWY_RESTRICT>(addr + (idx * sizeof(T)));
     const V1 v = LoadU(d1, from_idx);
-    // Avoid storing to `to` unless we know it should be kept - otherwise, we
-    // might overrun the end if it was allocated for the exact count.
+    // Store only selected elements so an output buffer sized to the number of
+    // matches is sufficient.
     if (CountTrue(d1, func(d1, v)) == 0) continue;
     StoreU(v, d1, to);
     to += 1;
