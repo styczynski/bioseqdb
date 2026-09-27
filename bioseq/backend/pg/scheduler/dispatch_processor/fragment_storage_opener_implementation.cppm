@@ -1,6 +1,6 @@
 /**
  * @file fragment_storage_opener_implementation.cppm
- * @brief Implements the typed scanner-row fragment-storage opener.
+ * @brief Open, use, and close the fragment reader behind the scanner callback.
  */
 module;
 

@@ -1,6 +1,6 @@
 /**
  * @file fragment_storage_opener.cppm
- * @brief Declares the fragment-storage opener used only by typed scanner rows.
+ * @brief Read stored minimizer fragments through a callback with a limited lifetime.
  */
 module;
 
@@ -24,7 +24,7 @@ import bioseq.storage.size;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
-/** Scope-bound view of one concrete persisted-index fragment reader. */
+/** A borrowed fragment reader that is valid only during its callback. */
 class typed_dispatch_fragment_read_view;
 
 /** Synchronous callback invoked while the concrete fragment reader remains alive. */
@@ -32,9 +32,9 @@ using typed_dispatch_fragment_read_callback =
     void (*)(void* context, typed_dispatch_fragment_read_view& storage);
 
 /**
- * Open one concrete persisted-index fragment reader, invoke @p callback once,
- * and close or abandon the reader before returning. The view must not escape
- * the synchronous callback.
+ * Open a stored-index reader and call @p callback once. Close the reader
+ * on return, or abandon its PostgreSQL handles after a server error.
+ * The callback must not save the borrowed view for later use.
  */
 void
 open_typed_dispatch_fragment_storage(Oid user_relid,
@@ -51,8 +51,9 @@ open_typed_dispatch_fragment_storage(Oid user_relid,
                                      typed_dispatch_fragment_read_callback callback);
 
 /**
- * Narrow non-owning facade for the coarse persisted-index operations used by a
- * typed scanner row. The opener retains all concrete lifetime and cleanup authority.
+ * Read stored index chunks and assemble minimizers for one query. The opener
+ * owns the reader and handles cleanup. This view is valid only inside its
+ * callback and cannot be copied or moved.
  */
 class typed_dispatch_fragment_read_view final {
   public:

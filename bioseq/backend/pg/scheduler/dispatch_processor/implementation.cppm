@@ -1,6 +1,6 @@
 /**
  * @file implementation.cppm
- * @brief Attaches the scheduler batch-processing implementation partitions.
+ * @brief Import the CPU preparation and typed dispatch implementations.
  */
 
 module bioseq.postgres.scheduler.dispatch_processor;
