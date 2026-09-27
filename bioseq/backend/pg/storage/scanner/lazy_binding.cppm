@@ -1,6 +1,6 @@
 /**
  * @file scanner/lazy_binding.cppm
- * @brief Callback-scoped PostgreSQL lazy sequence bindings.
+ * @brief Give callbacks lazy access to sequences stored in PostgreSQL.
  */
 module;
 
@@ -37,18 +37,18 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
-import bioseq.common.seqan_adapter;     // seq::dna4 in static_assert below
-import bioseq.postgres.storage.manager; // seq_caches + open_sub_table_for_locator
-import bioseq.storage.scanner;          // scanner concepts
-import bioseq.storage.lazy_sequence;    // lazy_sequence + with_postgres_lazy_sequence
+import bioseq.common.seqan_adapter;     
+import bioseq.postgres.storage.manager; // Sequence relation and reader cache.
+import bioseq.storage.scanner;          
+import bioseq.storage.lazy_sequence;    // Lazy sequence views and their owners.
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.physical;
 import bioseq.storage.size;              // sequence_size_t
-import bioseq.postgres.storage.metadata; // stripe_metadata/find_stripe_by_row_number
-import bioseq.sequences;                 // compact_sequence_range, compact_sequence_stdc_instance
+import bioseq.postgres.storage.metadata; 
+import bioseq.sequences;                 // Packed sequence types.
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.table.io; // begin_column_read/read_column_row_by_number
+import bioseq.postgres.table.io; 
 import bioseq.parallelism.pool;
 import bioseq.postgres.storage.scanner.fragment_scanner;
 
@@ -58,9 +58,9 @@ export namespace bioseq::storage {
 
 namespace lazy_postgres_detail {
 
-/// Return the encoded alphabet and storage-width identity for one binding.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
-/// @return Persisted type parameters for the binding.
+/// Get the alphabet code and packed-unit byte width for this binding.
+/// @tparam p_sequence_config Alphabet and packed storage type.
+/// @return Stored alphabet code and packed-unit byte width.
 template <class p_sequence_config>
 [[nodiscard]] constexpr compact_sequence_stdc_type_params binding_type_params() noexcept {
     return {
@@ -70,11 +70,12 @@ template <class p_sequence_config>
     };
 }
 
-/// Validate locator geometry, snapshot registration and cache identity before
-/// constructing a callback-scoped scanner.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
-/// @param binding Immutable binding whose borrowed resources are checked.
-/// @throws PostgreSQL ERROR when locator, snapshot, cache, or context is invalid.
+/// Check the locator's fragment count and padding before opening a reader.
+/// Also require a registered MVCC snapshot, a read cache for the same table,
+/// a parent memory context and a positive column number.
+/// @throws C++ exception if any check fails.
+/// @tparam p_sequence_config Alphabet and packed storage type.
+/// @param binding Source details and borrowed read resources to check.
 template <class p_sequence_config>
 void validate_binding(const postgres_lazy_sequence_binding<p_sequence_config>& binding) {
     using traits = typename compact_sequence_range<p_sequence_config>::traits;
@@ -113,52 +114,52 @@ void validate_binding(const postgres_lazy_sequence_binding<p_sequence_config>& b
     }
 }
 
-/// Own one storage-erased lazy facade for a read-session entry.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
+/// Own a fragment scanner and its lazy view for one read-session entry.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 template <class p_sequence_config> struct call_state final {
     /// Concrete PostgreSQL or in-memory scanner type.
     using scanner_type = postgres_sequence_scanner<p_sequence_config>;
-    /// Successful and abort cleanup policy used by the facade owner.
+    /// Cleanup after a successful read or a failed read.
     struct scanner_resource_lifecycle final {
-        /// Finish scanner-owned PostgreSQL resources on the successful path.
+        /// Delete the scanner's child memory context after a successful read.
         /// @param scanner Scanner whose child memory context is deleted.
         static void finish_as_cpp(scanner_type const& scanner) {
             scanner.finish_pg_resources_as_cpp();
         }
 
-        /// Abandon scanner handles without issuing PostgreSQL calls.
-        /// @param scanner Scanner whose parent owners retain cleanup authority.
+        /// Leave remaining PostgreSQL resources to the parent's cleanup.
+        /// @param scanner Scanner whose buffers remain owned by the parent context.
         static void abandon_noexcept(scanner_type const& scanner) noexcept {
             scanner.abandon_pg_resources_noexcept();
         }
     };
-    /// Storage-erased owner of the scanner and facade callbacks.
+    /// Own the scanner behind the common lazy sequence interface.
     using sequence_owner_type = lazy_sequence_detail::
         fragmented_facade_owner<p_sequence_config, scanner_type, scanner_resource_lifecycle>;
-    /// Callback-scoped alphabet-specialized facade type.
+    /// Lazy view for this sequence's alphabet.
     using view_type = lazy_sequence_view<
         typename postgres_lazy_sequence_binding<p_sequence_config>::alphabet_type>;
 
-    /// Construct scanner ownership inside one read-session context.
-    /// @param binding Validated source binding whose resources outlive this state.
-    /// @param session_context Memory context owning scanner allocations.
+    /// Create the scanner under the session's memory context.
+    /// The binding's snapshot and cache must outlive this state.
+    /// @param binding Source details and borrowed read resources.
+    /// @param session_context Parent context for scanner allocations.
     explicit call_state(const postgres_lazy_sequence_binding<p_sequence_config>& binding,
                         MemoryContext session_context)
         : sequence_owner_(make_scanner(binding, session_context)) {}
 
-    /// Return the callback-scoped facade backed by this call state's owner.
-    /// @return Non-owning view valid until the call state is finalized.
+    /// @return Borrowed lazy view, valid until this state is cleaned up.
     [[nodiscard]] view_type view() const noexcept {
         return sequence_owner_.view();
     }
 
-    /// Finish source resources before destroying a successfully used state.
-    /// @throws PostgreSQL ERROR when scanner context deletion fails.
+    /// Release the scanner's PostgreSQL resources after a successful read.
+    /// @throws C++ exception if context deletion fails.
     void finish_resources_as_cpp() const {
         sequence_owner_.finish_resources_as_cpp();
     }
 
-    /// Abandon source handles before failure-path destruction.
+    /// Forget PostgreSQL resources before destroying a failed read state.
     void abandon_resources_noexcept() const noexcept {
         sequence_owner_.abandon_resources_noexcept();
     }
@@ -166,11 +167,11 @@ template <class p_sequence_config> struct call_state final {
   private:
     sequence_owner_type sequence_owner_;
 
-    /// Construct and revalidate the scanner before transferring ownership.
-    /// @param binding Validated binding supplying borrowed snapshot and cache.
-    /// @param session_context Parent context for scanner allocation.
-    /// @return Concrete scanner owning a child context.
-    /// @throws PostgreSQL ERROR when the scanner does not match the binding.
+    /// Create a scanner and check that it matches the requested source.
+    /// @param binding Source identity and borrowed snapshot and cache.
+    /// @param session_context Parent context for scanner buffers.
+    /// @return Scanner owning a child memory context.
+    /// @throws C++ exception if construction or the source check fails.
     [[nodiscard]] static scanner_type
     make_scanner(const postgres_lazy_sequence_binding<p_sequence_config>& binding,
                  MemoryContext session_context) {
@@ -201,14 +202,13 @@ template <class p_sequence_config> struct call_state final {
 };
 
 #ifdef BIOSEQ_TEST_INDEXES
-/* The direct PostgreSQL binding is itself a source-backed facade. Proxy the
- * test build's backend table to record the same read/resident/bulk-stream
- * operations without changing the scanner or algorithm surface. */
-/// Record one rank-stream read before forwarding to the concrete lazy view.
-/// @tparam p_is_reversed Whether logical source order is reversed.
-/// @tparam p_write_reversed Whether destination write order is reversed.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
-/// @return Cursor pointer after writing the requested rank interval.
+/* Test builds count accesses through the lazy view so tests can check
+ * whether an operation reads ranks, borrows packed data or copies it. */
+/// Count a test read and forward it to the sequence's rank reader.
+/// @tparam p_is_reversed Read the source in reverse order.
+/// @tparam p_write_reversed Write the destination in reverse order.
+/// @return Pointer returned by the rank reader.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 template <bool p_is_reversed, bool p_write_reversed, class p_sequence_config>
 [[nodiscard]] const std::uint8_t* observed_call_state_read_at(void const* opaque,
                                                               sequence_size_t from,
@@ -222,18 +222,17 @@ template <bool p_is_reversed, bool p_write_reversed, class p_sequence_config>
     return cursor.read_at(from, count, output);
 }
 
-/// Return the logical length observed through a test facade.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
-/// @return Logical sequence length in letters.
+/// @return Sequence length in letters, as seen by the test view.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 template <class p_sequence_config>
 [[nodiscard]] sequence_size_t observed_call_state_bp_size(void const* opaque) noexcept {
     auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
     return state.view().bp_size();
 }
 
-/// Probe resident packed storage while recording the facade operation.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
-/// @return Resident packed-range probe result from the concrete view.
+/// Count a test request to borrow packed data and forward it to the view.
+/// @tparam p_sequence_config Alphabet and packed storage type.
+/// @return Packed data already in memory, if the requested range is available.
 template <class p_sequence_config>
 [[nodiscard]] auto observed_call_state_resident_probe(void const* opaque,
                                                       sequence_size_t from,
@@ -246,12 +245,12 @@ template <class p_sequence_config>
     return state.view().try_resident_packed(from, to, requested_width);
 }
 
-/// Copy packed storage through the observed test facade.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
-/// @param destination Caller-owned buffer for `unit_count * requested_width` bytes.
-/// @param unit_count Number of packed units requested.
-/// @param requested_width Bytes per requested packed unit.
-/// @return Whether the view copied the requested representation.
+/// Count a test request to copy the complete packed sequence.
+/// @param destination Space for `unit_count * requested_width` bytes.
+/// @param unit_count Requested number of packed units.
+/// @param requested_width Bytes per packed unit.
+/// @return Whether the underlying view could provide this representation.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 template <class p_sequence_config>
 [[nodiscard]] bool observed_call_state_copy_packed_sequence(void const* opaque,
                                                             void* destination,
@@ -271,7 +270,9 @@ template <class p_sequence_config>
         requested_width);
 }
 
-/// Copy a bounded packed-unit window through the observed facade.
+/// Count and forward a request to copy a packed-unit interval.
+/// @return Whether the copy contains exactly the requested units and starts
+/// at a packed-unit boundary.
 template <class p_sequence_config>
 [[nodiscard]] bool observed_call_state_copy_packed_window(void const* opaque,
                                                           void* destination,
@@ -313,23 +314,22 @@ template <class p_sequence_config>
            copied->leading_symbol_offset == 0u;
 }
 
-/// Report whether the concrete lazy view may be consumed by worker tasks.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
-/// @return Worker-sharing capability of the concrete view.
+/// @return Whether worker tasks may share the underlying sequence view.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 template <class p_sequence_config>
 [[nodiscard]] bool observed_call_state_worker_shareable(void const* opaque) noexcept {
     auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
     return state.view().worker_shareable();
 }
 
-/// Backend operation table that records test-only facade observations.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
+/// Lazy-view callbacks that record access counts in test builds.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 template <class p_sequence_config> struct observed_call_state_adapter final {
-    /// Logical alphabet exposed by the observed view.
+    /// Alphabet of the sequence being observed.
     using alphabet_type = typename postgres_lazy_sequence_binding<p_sequence_config>::alphabet_type;
-    /// Observed facade type.
+    /// Lazy sequence view used by tests.
     using view_type = lazy_sequence_view<alphabet_type>;
-    /// Process-lifetime callback table for the observed facade.
+    /// Callback table shared by test views of this sequence type.
     static inline const typename view_type::backend_ops ops{
         .bp_size = &observed_call_state_bp_size<p_sequence_config>,
         .read_at =
@@ -346,10 +346,11 @@ template <class p_sequence_config> struct observed_call_state_adapter final {
     };
 };
 
-/// Construct the test-observed lazy view for one call state.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
-/// @param state Call state that must outlive the returned view.
-/// @return Non-owning observed facade.
+/// Wrap this state in a lazy view that counts test accesses.
+/// The state must outlive the returned view.
+/// @tparam p_sequence_config Alphabet and packed storage type.
+/// @param state State that must outlive the view.
+/// @return Borrowed view that records test accesses.
 template <class p_sequence_config>
 [[nodiscard]] auto observed_call_state_view(call_state<p_sequence_config> const& state) {
     using adapter = observed_call_state_adapter<p_sequence_config>;
@@ -357,19 +358,20 @@ template <class p_sequence_config>
 }
 #endif
 
-/// Factory input retained only for the duration of read-entry construction.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
+/// Borrowed input used while constructing a read-session entry.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 template <class p_sequence_config> struct call_state_factory_argument final {
     /// Borrowed binding valid during factory invocation.
     const postgres_lazy_sequence_binding<p_sequence_config>* binding;
 };
 
-/// Allocate and construct one call state inside the read-session context.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
+/// Allocate and construct a scanner state in the session's memory context.
 /// @param opaque Borrowed `call_state_factory_argument`.
-/// @param payload_context Memory context owning the returned state.
+/// @param payload_context Context that owns the returned state.
+/// @throws PostgreSQL ERROR if validation, allocation or construction fails.
+/// C++ exceptions are caught before reporting the error to PostgreSQL.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 /// @return Constructed state allocated in `payload_context`.
-/// @throws PostgreSQL ERROR when binding validation, allocation, or construction fails.
 template <class p_sequence_config>
 [[nodiscard]] void* create_call_state(void* opaque, MemoryContext payload_context) {
     const auto& factory =
@@ -413,31 +415,31 @@ template <class p_sequence_config>
     return state;
 }
 
-/// Finish scanner resources and destroy a successfully used call state.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
-/// @param opaque Non-null call state owned by the read session.
-/// @throws PostgreSQL ERROR when scanner finalization fails.
+/// Release scanner resources and destroy a successful read state.
+/// @param opaque Non-null state owned by the read session.
+/// @throws C++ exception if scanner cleanup fails.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 template <class p_sequence_config> void finish_call_state(void* opaque, bool) {
     auto* state = static_cast<call_state<p_sequence_config>*>(opaque);
     state->finish_resources_as_cpp();
     state->~call_state();
 }
 
-/// Abandon PostgreSQL handles and destroy a call state after failure.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
-/// @param opaque Non-null call state owned by the read session.
+/// Drop scanner handles and destroy a failed read state without calling PostgreSQL.
+/// @param opaque Non-null state owned by the read session.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 template <class p_sequence_config> void abort_call_state_noexcept(void* opaque) noexcept {
     auto* state = static_cast<call_state<p_sequence_config>*>(opaque);
     state->abandon_resources_noexcept();
     state->~call_state();
 }
 
-/// Find or create the binding-specific call state in one read session.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
-/// @param session Active backend-thread read session.
-/// @param binding Binding whose address and locator form the entry key.
-/// @return Session-owned state, or null when the session rejects new entries.
-/// @throws PostgreSQL ERROR when creation fails.
+/// Find or create a scanner state for this binding in the read session.
+/// @param session Active session on the PostgreSQL backend thread.
+/// @param binding Its address, locator and stored type identify the entry.
+/// @return Session-owned state, or null if the session rejects new entries.
+/// @throws PostgreSQL ERROR if creation fails.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 template <class p_sequence_config>
 [[nodiscard]] call_state<p_sequence_config>*
 register_call_state(pg_sequence_read_session& session,
@@ -461,11 +463,14 @@ register_call_state(pg_sequence_read_session& session,
                                               &abort_call_state_noexcept<p_sequence_config>));
 }
 
-/// Run a callback inside one PG_TRY-protected read-session lifetime.
+/// Run a callback with a read session and clean up when it finishes.
+/// Both PostgreSQL errors and C++ exceptions abort the session before being
+/// passed back to the caller.
+/// @param parent_mctx Parent context for session allocations.
+/// @param fn Callback taking `pg_sequence_read_session&`, called once after
+/// the session is created.
 /// @tparam p_function Callback accepting `pg_sequence_read_session&`.
-/// @param parent_mctx Parent context for session-owned entries.
-/// @param fn Callback invoked exactly once after session creation.
-/// @throws The callback's exception or PostgreSQL ERROR from session lifecycle.
+/// @throws The callback's exception or PostgreSQL ERROR from session cleanup.
 template <class p_function> void with_session(MemoryContext parent_mctx, p_function&& fn) {
     std::exception_ptr callback_failure;
     pg_sequence_read_session* volatile session = nullptr;
@@ -497,13 +502,14 @@ template <class p_function> void with_session(MemoryContext parent_mctx, p_funct
 } // namespace lazy_postgres_detail
 
 /**
- * @brief Invoke one callback with only the canonical alphabet-specialized facade.
- * @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
+ * Call `fn` with a lazy view of the bound PostgreSQL sequence.
+ * The read session keeps scanner state alive until the callback returns,
+ * then releases its resources. Use the view only inside the callback.
+ * @tparam p_sequence_config Alphabet and packed storage type.
  * @tparam p_function Callback accepting one lazy sequence view.
- * @param binding Immutable source binding copied into this call.
- * @param fn Callback that must not retain the view beyond its invocation.
- * @throws The callback's exception or PostgreSQL ERROR from validation, reading,
- * or session cleanup.
+ * @param binding Source binding copied into this call.
+ * @param fn Callback accepting one lazy sequence view.
+ * @throws The callback's exception or an error from validation, reading or cleanup.
  */
 template <class p_sequence_config, class p_function>
 inline void with_postgres_lazy_sequence(postgres_lazy_sequence_binding<p_sequence_config> binding,
@@ -527,16 +533,17 @@ inline void with_postgres_lazy_sequence(postgres_lazy_sequence_binding<p_sequenc
 }
 
 /**
- * Invoke a two-input callback under one read session. Identical bindings
- * reuse one concrete call state, so both facades share fragment-cache state.
+ * Call `fn` with two lazy sequence views in one read session.
+ * Matching bindings with the same storage type share a scanner and its
+ * fragment cache. Both inputs must have the same alphabet and parent memory
+ * context. Use the views only inside the callback.
  * @tparam p_left_sequence_config Left sequence representation.
  * @tparam p_right_sequence_config Right sequence representation.
  * @tparam p_function Callback accepting two lazy sequence views.
- * @param left_binding Left source binding copied into this call.
- * @param right_binding Right source binding copied into this call.
- * @param fn Callback that must not retain either view beyond its invocation.
- * @throws The callback's exception or PostgreSQL ERROR from validation, reading,
- * or session cleanup.
+ * @param left_binding Left input, copied into this call.
+ * @param right_binding Right input, copied into this call.
+ * @param fn Callback accepting the two views.
+ * @throws The callback's exception or an error from validation, reading or cleanup.
  */
 template <class p_left_sequence_config, class p_right_sequence_config, class p_function>
 inline void
@@ -588,12 +595,11 @@ with_postgres_lazy_sequence(postgres_lazy_sequence_binding<p_left_sequence_confi
         });
 }
 
-/// Borrow an existing compact range through the production scanner type.
-/// The range must outlive the returned scanner because no packed units are
-/// copied.
-/// @tparam p_sequence_config Concrete alphabet and storage-unit configuration.
+/// Read an existing packed range through an in-memory sequence scanner.
+/// No data is copied. Keep the range's backing memory alive while using the scanner.
+/// @tparam p_sequence_config Alphabet and packed storage type.
 /// @param range Borrowed packed sequence range.
-/// @return In-memory scanner whose backing span refers to `range`.
+/// @return In-memory scanner borrowing the range's backing storage.
 template <class p_sequence_config>
 [[nodiscard]] [[gnu::always_inline]]
 inline postgres_sequence_scanner<p_sequence_config> make_in_memory_postgres_sequence_scanner(

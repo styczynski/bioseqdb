@@ -1,6 +1,6 @@
 /**
  * @file sequence_storage_sql_entities.cppm
- * @brief SQL entities governing persisted sequence-source identity.
+ * @brief PostgreSQL sequence used to assign stored sequence versions.
  */
 module;
 
@@ -19,9 +19,7 @@ export namespace bioseq::storage::sql_entities {
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-/**
- * @brief Extension-owned noncycling allocator for immutable sequence-source epochs.
- */
+/** Assign a distinct version number to each stored sequence. Never cycle. */
 inline constexpr std::int64_t sequence_source_epoch_seq = 1;
 
 } // namespace bioseq::storage::sql_entities

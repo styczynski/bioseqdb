@@ -1,9 +1,8 @@
 /**
  * @file scanner/index.cppm
- * @brief Stable facade for PostgreSQL sequence scanner partitions.
+ * @brief PostgreSQL sequence readers and the resources they need.
  *
- * Re-exports fragmented scanning, lazy binding, source registry and
- * locator-backed source scanning contracts.
+ * Exports fragment readers, lazy sequence bindings and source registration.
  */
 export module bioseq.postgres.storage.scanner;
 
