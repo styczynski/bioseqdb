@@ -351,16 +351,16 @@ TEST_CASE("admitted Vulkan chaining buffer denies one byte short before material
     const auto memory_plan = ch::make_vulkan_chaining_memory_plan(12u, 1u);
     bioseq::parallelism::memory_permit permit;
     admission.set_index_memory_cap_bytes(baseline + requirement - 1u);
-    REQUIRE_THROWS_AS(ch::vulkan_chaining_detail::make_chaining_device_buffer(
-        runtime, logical_bytes, usage, requirement, memory_plan, &permit),
+    REQUIRE_THROWS_AS(ch::vulkan_chaining_detail::make_chaining_buffer(
+        runtime, logical_bytes, usage, requirement, memory_plan, &permit, false),
         ch::vulkan_chaining_admission_error);
     REQUIRE_FALSE(permit);
     REQUIRE(admission.reserved_bytes() == baseline);
 
     admission.set_index_memory_cap_bytes(baseline + requirement);
     {
-        auto allocation = ch::vulkan_chaining_detail::make_chaining_device_buffer(
-            runtime, logical_bytes, usage, requirement, memory_plan, &permit);
+        auto allocation = ch::vulkan_chaining_detail::make_chaining_buffer(
+            runtime, logical_bytes, usage, requirement, memory_plan, &permit, false);
         REQUIRE(allocation.allocation_bytes == requirement);
         REQUIRE((permit.bytes() == 0u || permit.bytes() == requirement));
         REQUIRE(admission.reserved_bytes() == baseline + permit.bytes());
