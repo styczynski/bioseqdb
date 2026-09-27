@@ -80,7 +80,7 @@ namespace idx_ns = bioseq::indexing;
 /// Builds a CPU index with four hashes, including one with three positions.
 [[nodiscard]] minimizer_hashmap_fragment_index build_demo_index() {
     std::vector<minimap_sketch_data> minimizers;
-    
+
     minimizers.emplace_back(0x111ULL, 5u, 0u);
     minimizers.emplace_back(0x222ULL, 9u, 1u);
     minimizers.emplace_back(0x333ULL, 13u, 0u);

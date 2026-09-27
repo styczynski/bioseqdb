@@ -124,7 +124,7 @@ struct chain_outputs {
 
 /** Returns the default chaining settings with derived values prepared. */
 [[nodiscard]] ch::chaining_parameters default_chain_params() {
-    ch::chaining_parameters params; 
+    ch::chaining_parameters params;
     params.prepare();
     return params;
 }
@@ -402,7 +402,7 @@ TEST_CASE("Vulkan chaining output invariants",
 
     SECTION("hard range split: a large ref gap splits chains") {
         std::vector<ch::anchor> anchors;
-        
+
         for (std::uint64_t i = 0; i < 6; ++i) {
             anchors.push_back(make_anchor(1000 + i * 12, 500 + i * 12, 0, 15));
         }
@@ -412,7 +412,7 @@ TEST_CASE("Vulkan chaining output invariants",
             anchors.push_back(make_anchor(1000 + gap + i * 12, 9000 + i * 12, 0, 15));
         }
         const auto out = run_vulkan_chain(anchors, params);
-        check_chain_invariants(out, anchors, params); 
+        check_chain_invariants(out, anchors, params);
     }
 }
 
@@ -443,7 +443,7 @@ TEST_CASE("end-to-end GPU chaining smoke",
     INFO("dispatch_count before=" << before << " after=" << after
                                   << " matches=" << matches.results.size());
     REQUIRE(after > before);                // Confirm a GPU chaining dispatch occurred.
-    REQUIRE_FALSE(matches.results.empty()); 
+    REQUIRE_FALSE(matches.results.empty());
     for (const auto& match : matches.results) {
         REQUIRE(match.query_start >= 0);
         REQUIRE(match.query_end <= static_cast<int32_t>(query_sequence.size()));

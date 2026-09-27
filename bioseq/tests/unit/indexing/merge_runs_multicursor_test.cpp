@@ -72,7 +72,7 @@ TEST_CASE("merge_runs over >=3 interleaved spilled runs equals sort+unique",
     bool have_prev = false;
     storage.merge_runs([&got, &prev_kmer, &have_prev](std::uint64_t kmer, auto&& positions) {
         if (have_prev)
-            REQUIRE(kmer > prev_kmer); 
+            REQUIRE(kmer > prev_kmer);
         prev_kmer = kmer;
         have_prev = true;
 
@@ -82,7 +82,7 @@ TEST_CASE("merge_runs over >=3 interleaved spilled runs equals sort+unique",
         });
         REQUIRE(v.size() == positions.total_count());
         for (std::size_t i = 1; i < v.size(); ++i)
-            REQUIRE(v[i - 1] < v[i]); 
+            REQUIRE(v[i - 1] < v[i]);
         got.emplace(kmer, std::move(v));
     });
 
