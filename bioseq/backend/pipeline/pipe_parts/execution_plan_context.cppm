@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/execution_plan_context.cppm
- * @brief Defines execution plans, ownership contexts, and lifetime contracts.
+ * @brief Keep statement settings fixed and manage memory for pipeline execution.
  */
 module;
 
@@ -58,7 +58,7 @@ import bioseq.parallelism.pipeline_ops;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
 namespace bioseq::simd::pipe::detail {
 
-/** Format one exact admission-predicate snapshot only after an E2E refusal. */
+/** Format the memory limits and usage recorded when an E2E reservation failed. */
 [[nodiscard]] inline std::string format_e2e_memory_admission_refusal(
     std::string_view site,
     const bioseq::parallelism::memory_admission_failure& failure) {
@@ -86,7 +86,7 @@ export {
 
     namespace bioseq::simd::pipe {
 
-    /// Independent selected seed and chain locations for one executor request.
+    /// CPU or Vulkan choices for seeding and chaining in one request.
     enum class seed_chain_route : std::uint8_t {
         host_seed_host_chain,
         host_seed_vulkan_chain,
@@ -94,7 +94,7 @@ export {
         vulkan_seed_vulkan_chain,
     };
 
-    /// Classify the two selectors without requiring an all-GPU biological tail.
+    /// Classify seeding and chaining independently from later alignment stages.
     [[nodiscard]] inline seed_chain_route classify_seed_chain_route(
         const minimap2_parameters& params) {
         bool device_seed = false;
@@ -129,12 +129,12 @@ export {
                             : seed_chain_route::host_seed_host_chain);
     }
 
-    /// The sole immutable executor snapshot, shared across retaining boundaries.
+    /// Shared statement settings and route, fixed before pipeline preparation.
     struct statement_execution_plan final {
         const minimap2_parameters frozen_parameters;
         const seed_chain_route route;
 
-        /// Project the already-classified route without consulting selectors again.
+        /// Check the stored route for Vulkan seeding.
         [[nodiscard]] bool uses_vulkan_seed() const {
             switch (route) {
             case seed_chain_route::host_seed_host_chain:
@@ -150,7 +150,8 @@ export {
 
     using statement_execution_plan_owner = std::shared_ptr<const statement_execution_plan>;
 
-    /// Validate and classify before allocating the one shared statement owner.
+    /// Check the selected algorithms and required runtime bindings, then create
+    /// the shared statement plan. Invalid settings throw before allocation.
     [[nodiscard]] inline statement_execution_plan_owner make_statement_execution_plan(
         minimap2_parameters frozen_parameters) {
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
@@ -167,8 +168,8 @@ export {
         case base_alignment_algorithm::ksw2:
         case base_alignment_algorithm::block_aligner:
         case base_alignment_algorithm::ksw2_batched:
-            // The campaign excludes the legacy batched choice in its config;
-            // the statement owner does not narrow the ordinary public API.
+            // Batched KSW2 remains valid for ordinary calls. E2E benchmarks reject
+            // it in the check above.
             break;
         default:
             throw std::invalid_argument("statement plan has an unknown alignment algorithm");
@@ -191,9 +192,8 @@ export {
             break;
         }
         if (frozen_parameters.highway_kernels == nullptr) {
-            // Runtime-core modules are shared by PostgreSQL and standalone
-            // consumers. Bind the exact target at their respective boundary;
-            // a core compile definition cannot identify the eventual caller.
+            // PostgreSQL and standalone callers must supply their selected Highway
+            // kernels. Shared core code cannot choose a binding for the caller.
             throw std::invalid_argument{
                 "statement plan requires an explicit Highway binding"};
         }
@@ -210,11 +210,11 @@ export {
     }
 
     /**
-     * @brief Owns physical context admission for one fresh route attempt.
+     * @brief Own a fresh context and the memory reservations for one attempt.
      *
-     * Declaration order is the lifetime contract: the context and all of its
-     * backing storage are destroyed before the aggregate permit is released.
-     * This owner deliberately contains no route or statement-plan state.
+     * Destroy context backing storage before releasing its reservations.
+     * Statement settings are held separately so workers can share the plan while
+     * each attempt owns its temporary memory.
      */
     struct route_attempt_memory final {
         bioseq::parallelism::operation_memory_retention retention{};
@@ -228,7 +228,7 @@ export {
         ::context::context fresh_context;
 
     private:
-        /** @brief Reconciles one still-local permit inside materialization. */
+        /** Adjust a pending reservation to the allocator's actual byte count. */
         [[nodiscard]] static bool reconcile_permit(
             void* opaque_permit,
             std::uint64_t actual_bytes) noexcept {
@@ -241,7 +241,7 @@ export {
             return permit.bytes() == actual_bytes;
         }
 
-        /** @brief Executes the concrete transaction behind the context hook. */
+        /** Reserve and allocate context backing, then keep or transfer its reservation. */
         [[nodiscard]] static ::context::backing_allocation_authority
         materialize_context_allocation(
             void* opaque_attempt,
@@ -357,10 +357,10 @@ export {
     public:
 
         /**
-         * @brief Installs admission before the context's five initial blocks.
-         * @param admission Controller serializing physical materialization.
-         * @param configuration Initial arena geometry.
-         * @param footprint_probe Process-footprint observation function.
+         * @brief Attach memory accounting before the context allocates its initial blocks.
+         * @param admission Controller used for reservations and allocation accounting.
+         * @param configuration Initial arena sizes.
+         * @param footprint_probe Function that measures process memory.
          */
         explicit route_attempt_memory(
             bioseq::parallelism::memory_admission_controller& admission =
@@ -381,9 +381,8 @@ export {
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
         /**
-         * Capture one controller snapshot for the logical concurrency bound and
-         * any resulting refusal detail. Workspace is still charged only when its
-         * context allocator materializes a physical block through this attempt.
+         * Read the available memory used to limit alignment worker count. Actual
+         * worker buffers are reserved later by their context allocation hooks.
          */
         [[nodiscard]] bioseq::parallelism::memory_admission_snapshot
         alignment_workspace_diagnostic_snapshot() const noexcept {
@@ -392,9 +391,9 @@ export {
 #endif
 
         /**
-         * Admit the physical job-vector allocation beside its canonical batch.
-         * The caller declares the permit before that batch so storage dies first.
-         * Logical anchor-slab growth is deliberately not part of this transaction.
+         * Reserve and prepare the seed-job vector. The caller keeps its permit
+         * alive until the vector is destroyed. Anchor storage uses the context
+         * allocator and is accounted for separately.
          */
         void prepare_seed_job_storage(
             std::vector<canonical_seed_job_span>& destination,
@@ -429,7 +428,7 @@ export {
                 throw std::bad_alloc{};
 #endif
             }
-            // This declaration order also covers allocation/reconciliation exceptions.
+            // Free pending storage before its reservation on any exception.
             std::vector<canonical_seed_job_span> pending_storage;
             const auto materialization = admission_->materialize(
                 *pending_permit,
@@ -484,12 +483,11 @@ export {
     };
 
     /**
-     * @brief Address-stable, independently admitted worker contexts for one joined call.
+     * @brief Provide separate memory-accounted contexts for a parallel call.
      *
-     * Each live slot contains its own route_attempt_memory, whose aggregate
-     * retention precedes its context. No worker mutates another worker's permits.
-     * Slots are claimed by the pool's ETS once per participating worker and are
-     * destroyed only after that synchronous pool call has joined or thrown.
+     * Workers claim fixed slots and construct their own route_attempt_memory.
+     * Slots keep stable addresses while the pool runs. The caller must join
+     * workers before destroying this factory and their contexts.
      */
     class route_worker_context_factory final {
         struct slot_storage {
@@ -593,7 +591,7 @@ export {
             slots_permit_ = std::move(*pending_permit);
         }
 
-        /// Inherit the parent's controller and footprint probe, not its mutable context.
+        /// Reuse the parent's memory controller and probe with independent worker contexts.
         route_worker_context_factory(
             std::size_t maximum_concurrency,
             route_attempt_memory& parent,
@@ -627,11 +625,9 @@ export {
         retained_exact_permit,
     };
 
-    /// One operation-scoped ledger for the selected source-direct resident route.
-    /// It emits exactly one planning receipt after sort/count and exactly one
-    /// terminal receipt after cache/fence/arena cleanup (or unwind).  Checksums are
-    /// allocation-integrity observations only. Biological parity remains a
-    /// test/benchmark property and is deliberately absent from these receipts.
+    /// Record planning, allocation and cleanup for one source-direct GPU index.
+    /// The wrapper writes planning and final status records, including failures.
+    /// Checksums compare copied index data. Result correctness is checked elsewhere.
     struct direct_resident_operation_stats {
         std::uint64_t operation_identity = 0u;
         std::uint64_t minimizer_count = 0u;
@@ -1070,10 +1066,8 @@ export {
         }
     };
 
-    /// Last-resort receipt guard for failures before the wrapper's catch handler
-    /// can finish its unwind. Cleanup remains owned by the wrapper/PostSeed. This
-    /// guard only prevents a selected operation from disappearing without its two
-    /// operation-level receipts.
+    /// Try to write missing planning and failure records during unwinding.
+    /// Resource cleanup belongs to the wrapper and post-seed lifetime owner.
     struct direct_resident_receipt_guard {
         direct_resident_operation_stats* ledger = nullptr;
 
@@ -1089,10 +1083,9 @@ export {
         }
     };
 
-    /// Release authority for one operation-owned transient CPU target index.
-    /// Ordinary transient indexes carry only `index`. The fixed Vulkan handoff
-    /// also carries the exact permit that accounts for storage not already
-    /// represented by its one-shot process-footprint authority.
+    /// Identify the transient CPU index this operation may release, together
+    /// with any required reservation. The direct GPU path also carries its
+    /// operation-owned cache and accounting record.
     struct transient_target_index_release_authorization {
         bioseq::indexing::minimizer_hashmap_fragment_index* index = nullptr;
         bioseq::parallelism::memory_permit* permit = nullptr;
@@ -1109,12 +1102,10 @@ export {
         }
     };
 
-    /// One operation-owned lifetime boundary between seed lookup and chaining.
-    /// Borrowed persisted CPU indexes may use it only to retire an invocation-owned
-    /// GPU cache. External caches never receive release authority. Every successful
-    /// seed consumer signals exactly once after dropping its local resident handle.
-    /// the last consumer deallocates any transient CPU lookup index and clears any
-    /// internally-owned GPU cache before downstream chaining begins.
+    /// Release owned lookup storage after the last seed user finishes. Each user
+    /// signals once after dropping its resident-index handle. The last user
+    /// clears the operation's GPU cache and frees its transient CPU index before
+    /// chaining. Caller-owned indexes and caches need separate release permission.
     struct post_seed_owned_lifetime {
         struct release_receipt {
             std::uint64_t gpu_cache_evictions = 0;

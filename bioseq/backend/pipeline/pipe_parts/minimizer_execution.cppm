@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/minimizer_execution.cppm
- * @brief Re-exports the minimizer execution partitions.
+ * @brief Exports minimizer checks, execution and result conversion.
  */
 export module bioseq.pipeline.pipe:minimizer_execution;
 

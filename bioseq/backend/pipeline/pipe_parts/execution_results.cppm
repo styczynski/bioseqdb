@@ -1,6 +1,6 @@
 /**
  * @file pipeline/pipe_parts/execution_results.cppm
- * @brief Assembles pipeline results and operation statistics.
+ * @brief Build pipeline stages and collect results from query execution.
  */
 module;
 
@@ -62,15 +62,14 @@ export {
 
     namespace bioseq::simd::pipe {
 
-    // =============================================================================
-    // make_minimap_pipeline — single source of truth for the pipeline shape
-    // =============================================================================
+    // Build the stage graph shared by execution and EXPLAIN.
 
     [[nodiscard]] inline bool
     vulkan_components_requested(const ::bioseq::simd::minimap2_parameters& params) noexcept;
 
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    /// Pipeline description also constructs stages; only execution may attest work.
+    /// Check the statement plan and operation owner when execution begins.
+    /// EXPLAIN also constructs stages, so construction alone cannot record work.
     [[gnu::always_inline]] inline void attest_benchmark_e2e_pipeline_execution(
         const statement_execution_plan_owner& execution_plan) {
         const auto& params = execution_plan->frozen_parameters;
@@ -93,10 +92,10 @@ export {
 #endif
 
     /**
-     * @brief Construct the one selected chaining and ordinary host suffix.
+     * @brief Build chaining, filtering, alignment and result stages after seeding.
      *
-     * Query storage and the immutable statement snapshot are retained by the
-     * graph even when divergence is disabled. This factor never seeds again.
+     * The graph keeps the query minimizer owner and statement plan alive. It
+     * accepts prepared anchors and performs no index lookup.
      */
     template <is_constexpr_aligner_params p_aligner_parameters,
               ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
@@ -124,9 +123,8 @@ export {
             throw std::invalid_argument("post-seed pipeline requires plan and query ownership");
         }
         const auto& params = execution_plan->frozen_parameters;
-        // The caller retains these owners beyond graph completion. Physical
-        // allocations use the installed context's backing hook, not a second
-        // logical-slab reservation at this construction boundary.
+        // The caller keeps these owners alive until the graph finishes.
+        // Buffer allocations use the installed context's memory accounting.
         (void)owned_lifetime;
         match_result_collection* host_timing_dst =
             &output_collection;
@@ -193,11 +191,10 @@ export {
     }
 
     /**
-     * @brief Runs exactly one authenticated canonical job through the shared suffix.
+     * @brief Run one checked seed job through chaining and the remaining stages.
      *
-     * The wave caller owns the canonical batch, query/target storage, physical
-     * attempt and result capacity. No index or seeding stage is constructed here.
-     * Empty jobs still enter the selected chaining stage exactly once.
+     * The caller owns the seed batch, sequence storage and fresh memory context.
+     * Empty anchor jobs still reach chaining once so their completion is recorded.
      */
     template <is_constexpr_aligner_params p_aligner_parameters,
               ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
@@ -249,8 +246,8 @@ export {
         const auto& alignment = detail::resolve_alignment_kernels<p_alphabet>(params);
         auto chain_scope = context::current().push<context::arena::chain>();
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-        // Preserve any caller-admitted capacity, but keep the entire suffix
-        // attempt private until its terminal callback succeeds.
+        // Reuse the caller's result capacity in a private output object. Publish
+        // it only after the complete suffix succeeds.
         static_assert(std::is_nothrow_move_assignable_v<match_result_collection>);
         match_result_collection pending_output{std::move(output)};
         output = match_result_collection{};
@@ -287,8 +284,8 @@ export {
         suffix_output.detach_downstream_active_wall_tracker();
         output = std::move(pending_output);
         if (completed_chaining != nullptr) {
-            // The caller receives this authority only after the entire selected
-            // host suffix succeeds. Empty/host-chain jobs retain an unissued token.
+            // Transfer the Vulkan token after every remaining stage succeeds.
+            // Empty jobs and CPU chaining leave the token empty.
             *completed_chaining = std::move(pending_chaining);
         } else {
             output.completed_vulkan_chaining = std::move(pending_chaining);
@@ -297,7 +294,7 @@ export {
         output.detach_downstream_active_wall_tracker();
     }
 
-    /** @brief Prepend existing index/seed work to the one post-seed pipeline. */
+    /** Add target-index lookup and seeding before the shared post-seed stages. */
     template <is_constexpr_aligner_params p_aligner_parameters,
               ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
               ::bioseq::simd::chaining_algorithm p_chaining_algorithm,
@@ -367,19 +364,16 @@ export {
         }
     }
 
-    // =============================================================================
-    // pipeline_run_impl_batch — batched leaf dispatcher
-    // =============================================================================
+    // Run a query batch against a shared target index.
 
     /**
-     * @brief Run the pipeline over N queries against one shared target index.
+     * @brief Align a batch of queries against one target index.
      *
-     * Opens a single outer `Arena::chain` scope for the whole batch and a nested
-     * inner scope per query so each query's slabs are reclaimed before the next
-     * iteration's pipeline is built.  Per-query results are appended to
-     * `out_per_query` in input order.
+     * Each query gets a temporary chain-arena scope and its own result collection.
+     * Eligible CPU batches can run queries in parallel. Returned results keep
+     * the input query order.
      */
-    // Batched execution shares one implementation for all alignment algorithms.
+    // All selected alignment algorithms use this batch runner.
     template <is_constexpr_aligner_params p_aligner_parameters,
               ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
               ::bioseq::simd::chaining_algorithm p_chaining_algorithm,
@@ -427,14 +421,12 @@ export {
 
         const sequence_size_t target_len = target_seq.bp_size();
         const auto& scoring_matrix = thread_local_scoring_matrix<p_alphabet>(params);
-        // Resolve once for the entire alphabet-homogeneous query wave. Every
-        // per-query pipeline borrows this immutable typed binding.
+        // Resolve the alphabet's alignment kernels once for all queries.
         const auto& alignment_kernels = detail::resolve_alignment_kernels<p_alphabet>(params);
 
-        /// One GPU index cache for the whole batch wave, shared
-        // across queries that look up the same target index. When a Vulkan seed
-        // path is selected, runtime/device failure is reported before scalar work
-        // can masquerade as a GPU row.
+        /// Reuse one GPU target-index cache across the query batch.
+        // Use the caller's cache when supplied. A selected GPU operation reports
+        // device failure instead of silently rerunning on the CPU.
         std::optional<bioseq::indexing::gpu_minimizer_index_cache> owned_gpu_index_cache;
         if (external_gpu_index_cache == nullptr && params.vulkan_enabled &&
             params.vulkan_seed_hits_enabled) {
@@ -453,15 +445,12 @@ export {
                 ? external_gpu_index_cache
                 : (owned_gpu_index_cache ? &*owned_gpu_index_cache : nullptr);
 
-        /// Build the target minimizer index on the GPU and inject
-        // it into the wave cache under the key the seed_hit_stage will compute, so the
-        // CPU `minimizer_hashmap_fragment_index` build (skipped upstream in
-        // `minimap2_port` for this leaf) is never paid. If the device build declines
-        // this selected GPU path fails loudly.
+        /// Prepare the target index on the GPU for the selected build path.
+        // Cache the built index under the same key used by seed lookup. This
+        // route starts with an empty host index and reports a failed GPU build.
         ordered_sketch_query_gate_storage gpu_query_gate;
-        // A production target index is complete and query-independent.  Keep the
-        // gate type for explicitly named direct-matching experiments, but publish
-        // the ordinary/no-index build under the canonical disabled identity.
+        // Build the full target index independently of query hashes. The query
+        // gate remains disabled for this ordinary index-build path.
         const auto gpu_query_gate_identity = gpu_query_gate.canonical_identity();
         if (is_gpu_target_index_build_active(params)) {
             bind_gpu_query_gate_identity(
@@ -514,7 +503,7 @@ export {
         }
         const p_index& effective_index = *effective_index_ptr;
 
-        // Empty proto for the from_sequence path's unused minimizers argument.
+        // Supply an owned empty minimizer batch when the pipeline sketches the query.
         static const auto empty_minimizers_proto = minimizer_batch_view<p_minimizer>::from_shared_host(
             std::make_shared<const std::vector<p_minimizer>>(), 0u, 0u);
         auto run_one_query = [target_len,
@@ -649,9 +638,8 @@ export {
                     pipeline.on_batch(std::span<const p_minimizer>{mins_for_this_query.data(),
                                                                    mins_for_this_query.size()});
                 } else {
-                    // from_sequence: minimizer_stage's process ignores the input and
-                    // sketches the cached query_seq_ pointer instead; pass an empty
-                    // span of bytes as a placeholder.
+                    // The query-sketch stage reads its stored sequence view. An empty
+                    // byte span triggers that stage without supplying minimizers.
                     pipeline.on_batch(std::span<const std::byte>{});
                 }
                 pipeline.on_completed();
@@ -659,15 +647,11 @@ export {
                 out.detach_downstream_active_wall_tracker();
                 throw;
             }
-            // Prebuilt minimizers are operation-owned by their producer. That
-            // producer publishes their exact identity only after this completed
-            // collection returns; the selected template is not evidence of how
-            // caller-supplied minimizers were made.
+            // For caller-supplied minimizers, the producer records the algorithm
+            // after the consuming pipeline returns successfully.
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
             if (!out.mapq_execution_available) {
-                // A normally completed pipeline with no MAPQ-stage batch is an
-                // exact non-execution observation, not evidence that the
-                // selected flag ran an operation.
+                // Successful completion with no MAPQ batch records that MAPQ did not run.
                 out.record_mapq_execution(false);
             }
             out.completed_vulkan_chaining = std::move(pending_chaining);
@@ -710,7 +694,7 @@ export {
             }
         }
 
-        // — release the wave's resident GPU index handles.
+        // Release GPU index handles owned by this batch.
         if (owned_gpu_index_cache) {
             owned_gpu_index_cache->clear();
         }
@@ -718,7 +702,10 @@ export {
     }
 
     /**
-     * @brief Single-query convenience wrapper around `pipeline_run_impl_batch`.
+     * @brief Run one query with its selected algorithms and target-index owners.
+     *
+     * Keep temporary memory and index lifetimes around the pipeline. Eligible
+     * coordinate-only GPU requests can return directly from resident-index execution.
      */
     template <is_constexpr_aligner_params p_aligner_parameters,
               ::bioseq::simd::base_alignment_algorithm p_alignment_algorithm,
@@ -763,12 +750,10 @@ export {
         if (!query_minimizers.has_host_owner()) {
             throw std::invalid_argument("pipeline execution requires real query ownership");
         }
-        // The locally owned cache must outlive PostSeed's raw cache pointer, while
-        // PostSeed itself must outlive every Arena::chain that backs an admitted
-        // anchor slab. Reverse destruction therefore requires this exact order.
+        // Destruction must release the chain arena, then post-seed ownership,
+        // then the local GPU cache that the ownership object borrows.
         std::optional<bioseq::indexing::gpu_minimizer_index_cache> owned_gpu_index_cache;
-        // Declared before the Arena::chain scope so any exact retained anchor
-        // permit is released only after that arena has physically unwound.
+        // Keep anchor memory reserved until the chain arena releases its backing.
         std::optional<post_seed_owned_lifetime> post_seed_owned_lifetime;
         auto outer_chain_scope = context::current().push<context::arena::chain>();
 
@@ -797,7 +782,7 @@ export {
                 : (owned_gpu_index_cache ? &*owned_gpu_index_cache : nullptr);
 
         ordered_sketch_query_gate_storage gpu_query_gate;
-        // Fair no-index semantics require the full query-independent target index.
+        // A request without a stored index builds the full target index.
         const auto gpu_query_gate_identity = gpu_query_gate.canonical_identity();
         if (is_gpu_target_index_build_active(params)) {
             bind_gpu_query_gate_identity(
@@ -929,13 +914,9 @@ export {
             owned_gpu_index_cache || transient_target_index_owner.index != nullptr ||
             transient_target_index_owner.operation_owned_gpu_cache != nullptr ||
             transient_target_index_owner.direct_ledger != nullptr) {
-            // CPU-index release authority is supplied only by `minimap2_port`,
-            // which owns that transient value. GPU-cache release authority is
-            // independent: even a borrowed persisted CPU index may use and then
-            // retire the cache constructed by this invocation. An external cache
-            // is always borrowed and is never installed here. With such a cache,
-            // the empty release authority still retains legacy anchor admission
-            // through the chain arena lifetime; it does not own the caller's index.
+            // Release only indexes and caches owned by this call or explicitly
+            // transferred to it. A caller-supplied cache remains borrowed.
+            // Anchor reservations stay alive until the chain arena unwinds.
             post_seed_owned_lifetime.emplace(
                 actual_seed_consumers,
                 owned_gpu_index_cache ? &*owned_gpu_index_cache
@@ -950,11 +931,9 @@ export {
         if constexpr (p_entry_point == pipeline_entry_point::with_prebuilt_minimizers &&
                       std::same_as<std::remove_cvref_t<p_index>,
                                    bioseq::indexing::minimizer_hashmap_fragment_index>) {
-            // The resident seed-to-coordinate kernel is only profitable once the
-            // target index is genuinely resident/GPU-built. Using it on the current
-            // vulkan_segment host-materialised sparse segment indexes repeats
-            // submit/readback orchestration per segment and is slower than the
-            // normal Vulkan seed+chain path ( 2026-06-25).
+            // Use the combined seed-to-coordinate call with a GPU-built resident
+            // index. Host-built segment indexes use the ordinary stages to avoid
+            // repeating this call's submission and readback work for each segment.
             if (is_gpu_coordinate_only_execution_active(params) && allow_gpu_target_index_build &&
                 effective_index.table_empty()) {
                 auto& runtime = bioseq::gpu::vulkan::runtime::instance();
@@ -1102,8 +1081,7 @@ export {
 #endif
         out.detach_downstream_active_wall_tracker();
         if (direct_ledger != nullptr) {
-            // Seed completion alone is insufficient: this bit is set only after
-            // both the batch and the terminal pipeline callback returned normally.
+            // Record completion after both the input batch and final callback succeed.
             direct_ledger->pipeline_completed = true;
         }
         return out;
