@@ -1,0 +1,255 @@
+\section{What existing sequence indexes store}
+\label{sec:index-minimap2-comparison}
+
+\subsection{Indexing: minimap2}
+
+After computing minimizers they need to be grouped by their hash, minimap2 choose to use the lowest $b$ hash bits (by default $b=14$) to choose one of $2^b$ buckets~\autocite{minimap2_paper,minimap2_software}.
+Minimap2 builds a hash table per bucket whose keys are the remaining hash bits. This buckets with hasmaps are serialized into \path{.mmi} file.
+I performed in-depth analysis of how the \path{.mmi} format is specified based on available Github old issues~\autocite{minimap2_issue_820,minimap2_mmi_gist} and original code from minimap2's \texttt{mm\_idx\_dump} and \texttt{mm\_idx\_load} functions.
+\noindent
+\coderef{minimap2index/index.c}{Writing and loading an index part}{mm_idx_dump, mm_idx_load}{475}
+
+The index file is concatenation of blocks presented in the Figure~\ref{fig:index-mmi-layout}:
+\begin{itemize}
+  \item \textbf{Magic bytes} The bytes are \texttt{MMI} followed by
+    \texttt{0x02} (\texttt{MM\_IDX\_MAGIC}).
+  \item \textbf{Metadata} Minimap2 saves $w$, the $k$-mer
+    length $k$, used bitcount $b$, the number of sequences
+    $n_{\mathrm{seq}}$ and a flag word (for various minimap2-specific bitflags)
+  \item \textbf{Sequence table} For each of the $n_{\mathrm{seq}}$ sequences
+    the file stores 1-byte name length $\ell$ followed by $\ell$ ASCII characters representing the sequence name (header taken from original FASTA file), and
+    a 32-bit sequence length
+  \item \textbf{Buckets} The buckets store the hash-map, where key is remaining hash and bit indicating if there's single value for that key or not. 
+    The hash-map is stored as two components however. 
+    First is the value list $p$ which is used when there are more than 1 value per key.
+    Second is the hash array itself, which stores key/value pairs.
+    If there are more than one value per key (last bit of key set to 1), then the value represents offset and count into the value list $p$
+    The values, either as values in the key/value pairs or entries in $p$ store sequence id, position and strand bit.
+  \item \textbf{Bit-acked bases (optional)} If the \texttt{MM\_I\_NO\_SEQ} flag
+    is unset manually by user, bit-packed reference bases are saved at the end.
+\label{lst:high-level-mmi-index-format-description}
+\end{itemize}
+
+The depiction of the index file layout is presented in the Figure~\ref{fig:index-mmi-layout} below.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\footnotesize,
+  bitfill/.style={draw=black!60,line width=0.4pt},
+  lab/.style={align=center,font=\scriptsize,inner sep=0pt},
+  zoom/.style={line width=0.9pt, line join=miter, line cap=rect,
+    -{Latex[length=2.4mm,width=1.7mm]}}
+]
+  % (b) indent 1.05, (c)=(d) indent 2.10.
+  % (b) ends at 8.55 so the green rail can pass at x=9.35.
+
+  % ----- (a) y: boxes 14.20--14.95 -----
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0,15.25)
+    {(a) Byte order of one \texttt{.mmi} part};
+  \fill[indexBlue!14] (0,14.20) rectangle (1.70,14.95);
+  \draw[black!55] (0,14.20) rectangle (1.70,14.95);
+  \node[lab] at (0.85,14.575) {magic\\4\,B};
+  \fill[indexBlue!14] (1.70,14.20) rectangle (5.20,14.95);
+  \draw[black!55] (1.70,14.20) rectangle (5.20,14.95);
+  \node[lab] at (3.45,14.575) {$w$, $k$, $b$, $n_{\mathrm{seq}}$, flag\\$5\times 4$\,B};
+  \fill[indexOrange!16] (5.20,14.20) rectangle (7.80,14.95);
+  \draw[black!55] (5.20,14.20) rectangle (7.80,14.95);
+  \node[lab] at (6.50,14.575) {sequence table\\$n_{\mathrm{seq}}$ records};
+  \fill[indexGreen!16] (7.80,14.20) rectangle (10.90,14.95);
+  \draw[black!55] (7.80,14.20) rectangle (10.90,14.95);
+  \node[lab] at (9.35,14.575) {buckets\\$2^{b}$ in order};
+  \fill[black!8] (10.90,14.20) rectangle (12.80,14.95);
+  \draw[black!55] (10.90,14.20) rectangle (12.80,14.95);
+  \node[lab] at (11.85,14.575) {packed $S$\\if stored};
+
+  % ----- (b) boxes 11.45--12.20, title below orange rail -----
+  \node[anchor=south west,font=\bfseries\footnotesize] at (1.05,12.50)
+    {(b) One sequence record};
+  \fill[indexOrange!16] (1.05,11.45) rectangle (2.95,12.20);
+  \draw[black!55] (1.05,11.45) rectangle (2.95,12.20);
+  \node[lab] at (2.00,11.825) {name length $\ell$\\1\,B};
+  \fill[indexOrange!16] (2.95,11.45) rectangle (6.45,12.20);
+  \draw[black!55] (2.95,11.45) rectangle (6.45,12.20);
+  \node[lab] at (4.70,11.825) {name (ASCII)\\$\ell$\,B};
+  \fill[indexOrange!16] (6.45,11.45) rectangle (8.55,12.20);
+  \draw[black!55] (6.45,11.45) rectangle (8.55,12.20);
+  \node[lab] at (7.50,11.825) {seq.\ length\\4\,B};
+
+  % ----- (c) boxes 8.75--9.50, title below green rail -----
+  \node[anchor=south west,font=\bfseries\footnotesize] at (2.10,9.80)
+    {(c) One bucket};
+  \fill[indexGreen!16] (2.10,8.75) rectangle (3.70,9.50);
+  \draw[black!55] (2.10,8.75) rectangle (3.70,9.50);
+  \node[lab] at (2.90,9.125) {$n$\\4\,B};
+  \fill[indexOrange!16] (3.70,8.75) rectangle (7.10,9.50);
+  \draw[black!55] (3.70,8.75) rectangle (7.10,9.50);
+  \node[lab] at (5.40,9.125) {value list $p$\\$n\times 8$\,B};
+  \fill[indexGreen!16] (7.10,8.75) rectangle (8.60,9.50);
+  \draw[black!55] (7.10,8.75) rectangle (8.60,9.50);
+  \node[lab] at (7.85,9.125) {$s$\\4\,B};
+  \fill[indexBlue!14] (8.60,8.75) rectangle (12.80,9.50);
+  \draw[black!55] (8.60,8.75) rectangle (12.80,9.50);
+  \node[lab] at (10.70,9.125) {$s$ key/value pairs\\$s\times(8{+}8)$\,B};
+
+  % ----- (d) -----
+  \node[anchor=south west,font=\bfseries\footnotesize] at (2.10,7.20)
+    {(d) 64-bit words, high bits on the left ($b{=}14$)};
+
+  \node[anchor=south west,font=\scriptsize] at (2.10,6.80) {Hash-table key};
+  \fill[black!10] (2.10,6.05) rectangle (5.6109,6.65);
+  \draw[bitfill] (2.10,6.05) rectangle (5.6109,6.65);
+  \node[lab] at (3.86,6.35) {unused, 21 bits};
+  \fill[indexBlue!18] (5.6109,6.05) rectangle (12.6328,6.65);
+  \draw[indexBlue] (5.6109,6.05) rectangle (12.6328,6.65);
+  \node[lab] at (9.12,6.35) {remaining hash $(\mathit{hash}\gg b)$, 42 bits};
+  \fill[indexGreen!35] (12.6328,6.05) rectangle (12.80,6.65);
+  \draw[indexGreen,very thick] (12.6328,6.05) rectangle (12.80,6.65);
+
+  \node[anchor=south west,font=\scriptsize] at (2.10,5.50)
+    {Hash-map value for single value / $p$ element};
+  \fill[indexBlue!18] (2.10,4.70) rectangle (7.45,5.30);
+  \draw[indexBlue] (2.10,4.70) rectangle (7.45,5.30);
+  \node[lab] at (4.78,5.00) {sequence id, 32 bits};
+  \fill[indexOrange!20] (7.45,4.70) rectangle (12.6328,5.30);
+  \draw[indexOrange] (7.45,4.70) rectangle (12.6328,5.30);
+  \node[lab] at (10.04,5.00) {last-base position, 31 bits};
+  \fill[indexGreen!35] (12.6328,4.70) rectangle (12.80,5.30);
+  \draw[indexGreen,very thick] (12.6328,4.70) rectangle (12.80,5.30);
+
+  \node[anchor=south west,font=\scriptsize] at (2.10,4.20)
+    {Hash-map value for non-single value};
+  \fill[indexOrange!20] (2.10,3.40) rectangle (7.45,4.00);
+  \draw[indexOrange] (2.10,3.40) rectangle (7.45,4.00);
+  \node[lab] at (4.78,3.70) {offset into $p$, 32 bits};
+  \fill[indexBlue!18] (7.45,3.40) rectangle (12.80,4.00);
+  \draw[indexBlue] (7.45,3.40) rectangle (12.80,4.00);
+  \node[lab] at (10.12,3.70) {count, 32 bits};
+
+  \fill[indexGreen!35] (2.10,2.75) rectangle (2.38,3.03);
+  \draw[indexGreen] (2.10,2.75) rectangle (2.38,3.03);
+  \node[anchor=west,font=\scriptsize,text=black!55] at (2.52,2.89)
+    {1-bit field: either means strand (for hash-map value) or means that hash-map value is single (for hash-map key)};
+
+  % Orange (a seq -> b): H at mid(14.20, 12.20)=13.20. Spine 0.22.
+  \draw[zoom,indexOrange]
+    (6.50,14.20) -- (6.50,13.20) -- (0.22,13.20) -- (0.22,11.825) -- (1.05,11.825);
+  % Green (a buckets -> c): H at mid(11.45, 9.50)=10.475. Spine 0.55.
+  \draw[zoom,indexGreen]
+    (9.35,14.20) -- (9.35,10.475) -- (0.55,10.475) -- (0.55,9.125) -- (2.10,9.125);
+  % Blue (pairs -> key): H 7.95, below the p rail. Spine 1.25.
+  \draw[zoom,indexBlue]
+    (9.80,8.75) -- (9.80,7.95) -- (1.25,7.95) -- (1.25,6.35) -- (2.10,6.35);
+  % Orange (p -> occurrence): H 8.40, above the blue rails. Spine 0.40.
+  \draw[zoom,indexOrange]
+    (5.40,8.75) -- (5.40,8.40) -- (0.40,8.40) -- (0.40,5.00) -- (2.10,5.00);
+  % Blue (pairs -> value): right rail 13.60, enter from the right.
+  \draw[zoom,indexBlue]
+    (11.80,8.75) -- (11.80,7.95) -- (13.60,7.95) -- (13.60,3.70) -- (12.80,3.70);
+  \draw[zoom,indexBlue]
+    (11.80,8.75) -- (11.80,7.95) -- (13.60,7.95) -- (13.60,5.00) -- (12.80,5.00);
+\end{tikzpicture}
+\caption[Interpretation of one \texttt{.mmi} index]{%
+Interpretation of one \texttt{.mmi} index.
+For very large datasets index files are split into multiple parts where each of them follows the same format.
+Minimap2 needs to store sequence ID (RID~\ref{lst:minimap-minimizer-cpp-decl}), because the index parts are generated for a set of sequences, not just one, so
+each part needs to identify which reference sequence the minimizer comes from.
+Arrows represent how specific elements of arrays look like in close inspection.
+Panel~(a) depicts high-level structure of the index~\ref{lst:high-level-mmi-index-format-description}.
+Panel~(b) presents records storing sequence information.
+Panel~(c) shows each bucket of minimizers, which stores its own hash-map via two lists.
+Panel~(d) shows how elements of $p$ looks like and key/values in the hash-map list.
+Hash map key is always remaining 42 bits with bit indicating that there's single value for that key.
+If the bit is set, then value in the key/value pair is (sequence id, position, strand bit), if not, then value points via offset/count pair into the list $p$.
+The list $p$ stores the same (sequence id, position, strand bit) values.}
+\label{fig:index-mmi-layout}
+\end{figure}
+
+The idea of storing hash-map as two lists inside bucket is also presented in the Figure~\ref{fig:index-mmi-construction} below to allow easier understanding of the 
+index concept.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,5.8) {Minimizer occurrences before grouping};
+  \foreach \x/\h/\p in {1/13/17,3/21/24,5/10/29,7/21/30}
+    \node[index blue,minimum width=1.6cm] at (\x,4.95) {$h=\h$\\$p=\p$};
+  \node[anchor=west,align=left] at (9,4.95) {$b=2$: bucket $h\bmod4$\\remaining key: $\lfloor h/4\rfloor$};
+  \foreach \x/\b in {1/0,4/1,7/2,10/3}
+    \node[index cell,fill=black!3,minimum width=2.2cm] (b\b) at (\x,3.3) {bucket \b};
+  \draw[index arrow,indexBlue] (1,4.42)--(4,3.6);
+  \draw[index arrow,indexBlue] (3,4.42)--(4,3.6);
+  \draw[index arrow,indexBlue] (7,4.42)--(4,3.6);
+  \draw[index arrow,black!45] (5,4.42)--(7,3.6);
+  \node[anchor=west,font=\bfseries] at (0,2.35) {Bucket 1 after sorting};
+  \node[index blue,minimum width=3.6cm] (single) at (2.35,1.5)
+    {remaining bits 3: $p=17$};
+  \node[index orange,minimum width=3.6cm] (repeated) at (2.35,.5)
+    {remaining bits 5: offset 0, count 2};
+  \node[anchor=west] at (6.0,1.7) {separate position array};
+  \node[index orange,minimum width=1.15cm] at (6.65,.5) {$p=24$};
+  \node[index orange,minimum width=1.15cm] at (7.85,.5) {$p=30$};
+  \node[index cell,dashed,minimum width=1.15cm] at (9.05,.5) {$\cdots$};
+  \node at (6.65,1.08) {0}; \node at (7.85,1.08) {1};
+  \draw[index arrow,indexOrange] (repeated.east)--(6.05,.5);
+  \node[anchor=west,text=black!65] at (0,-.45)
+    {A singleton needs no separate list. Repeated keys share a contiguous array.};
+\end{tikzpicture}
+\caption{A simplified minimap2 bucket: hashes 13 and 21 have the same
+lowest two bits, but different remaining keys, so they land in bucket 1 together. The two occurrences of hash
+21 become adjacent in the bucket's position array.}
+\label{fig:index-mmi-construction}
+\end{figure}
+
+\subsection{Indexing: mmseqs2}
+
+There are alternative approaches in literature to building an index.
+MMseqs2 stores one index file that contains counts and offsets, and then writes larger index files 
+that contain all occurence lists instead of bucketing them like minimap2 does.
+It's worth noting that 2017 MMseqs2\autocite{Steinegger079681,mmseqs2_2017} paper uses spaced k-mers which wasn't the focus of this thesis, so I didn't 
+investigate more how the alignment is precisely done.
+
+MMseqs2 offers great performance in clsutering, which is different problem to alignment, however connected as it involves 
+estimation of edit distances for large datasets. The software also allows sets of taxonomy operations and alignment-based searches as well.\autocite{mmseqs2_linclust_2018}\autocite{mmseqs2_taxonomy_2021}\autocite{mmseqs2_desktop_2019}\autocite{mmseqs2_gpu_2025}.
+\noindent
+\coderef{mmseqsindex/src/prefiltering/IndexBuilder.cpp}{Count and fill the MMseqs2 index}{IndexBuilder::fillDatabase}{56}
+
+\noindent
+\coderef{mmseqsindex/src/prefiltering/IndexTable.h}{Read a word's entry range}{getDBSeqList}{178}
+
+\noindent
+\coderef{mmseqsindex/src/prefiltering/IndexTable.h}{Keep distinct word codes within one target}{addSequence}{350}
+
+I illustrate the idea of MMseqs2 index on a small example in the Figure~\ref{fig:index-mmseqs-inverted} below, where 
+I just assume that we use 2-letter k-mers of natural language for simplicity.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,6.55) {(a) Read target words};
+  \foreach \x/\id/\s in {2/1/ACD,6/2/CAD,10/3/ACE}
+    \node[index blue,minimum width=2.8cm] at (\x,5.75) {target \id: \texttt{\s}};
+  \node[anchor=west,font=\bfseries] at (0,4.8) {(b) Count entries, then sum counts to find list starts};
+  \node[anchor=east] at (1.25,3.95) {word};
+  \node[anchor=east] at (1.25,3.2) {count};
+  \node[anchor=east] at (1.25,2.45) {offset};
+  \foreach \x/\word/\n/\o in {2.25/AC/2/0,4.1/AD/1/2,5.95/CA/1/3,7.8/CD/1/4,9.65/CE/1/5} {
+    \node[index blue,minimum width=1.55cm] at (\x,3.95) {\texttt{\word}};
+    \node[index cell,minimum width=1.55cm] at (\x,3.2) {$\n$};
+    \node[index green,minimum width=1.55cm] at (\x,2.45) {$\o$};
+  }
+  \node[index green,minimum width=1.25cm] at (11.25,2.45) {6};
+  \node[above] at (11.25,2.78) {end};
+  \node[anchor=west,font=\bfseries] at (0,1.5) {(c) Fill the reserved list ranges};
+  \foreach \x/\id/\p/\i in {2.1/1/0/0,3.7/3/0/1,5.3/2/1/2,6.9/2/0/3,8.5/1/1/4,10.1/3/1/5} {
+    \node[index cell,minimum width=1.48cm] at (\x,.5) {$(\id,\p)$};
+    \node[above] at (\x,.81) {$\i$};
+  }
+  \draw[indexBlue,very thick] (1.3,.12)--(4.5,.12);
+  \node[below,text=indexBlue] at (2.9,.12) {AC: entries $[0,2)$};
+  \node[anchor=west,align=left] at (6,-.15)
+    {Entry = (target ID, word start).\\Positions start at zero.};
+\end{tikzpicture}
+\caption{A small example of MMseqs2's lists construction, where word/count/offsets triplets are stored in single file, file the actual (very large) lists of entries are stored separately}
+\label{fig:index-mmseqs-inverted}
+\end{figure}

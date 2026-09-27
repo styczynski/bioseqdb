@@ -1,0 +1,681 @@
+\section{BioseqDB indexing abstractions}
+\label{sec:index-abstraction-layers}
+
+Indexes are stored separately in BioseqDB~\ref{lst:types-of-storage-entities-in-bioseqdb} to all internal sequence fragmented tables~\ref{fig:storage-length-buckets} 
+and they are separate entities to the usual indexes in Postgres which provide generic access paths to the tables.
+
+There is thin layer of abstraction over the indexes, so in the future implementation of other types of indexes is easy. The storage abstraction 
+requires implementer only to specify the type and depending on it we only need to provide logic to write the index chunks.
+One problem with current state of BioseqDB is that the index reading is not abstracted, so we encapsulate details of implementation, but they leak into pipeline (as the pipeline 
+currently needs to understand how we store minimizers).
+
+\info{Seed abstraction}{In the future I want to improve curent implementation to use abstract notion of "seed". I already extensively use templates, so 
+introducing new concept to represents types of seeds isn't a problem. This abstraction will allow to fully decouple indexing from the pipeline.
+Pipeline stages then could automatically detect how to compute certain seeds (like minimizers) and how to read and store them.
+Current BioseqDB implementation only uses minimizers, so I decided not to decicate my time to this idea.
+}
+
+I assume here that index store \emph{chunks} which are separate abstraction to the chunks in columnar tables.
+One chunk consists of bytes the index implementation needs to write or store and I assume the chunk cannot be larger than $960MB$ (due to Postgre's TOASTing limits). 
+The chunks are stored in internal tables that does not use columnar storage, they're ordinary heap tables - I decided that columnar storage in this case won't give any advantage (although I didn't A/B test this approach).
+Additionally, index tables are create \texttt{UNLOGGED} to avoid unnecessary logging and to reduce the amount of data written to the disk.
+
+There are several supported methods of storing index:
+
+\begin{itemize}
+  \item \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}}.
+    One fragment~\ref{info:sequence-fragments} of a sequence can have multiple chunks in the index.
+    % They are grouped by a \emph{sub-key}, an extra number chosen by the index.
+    % For \texttt{minimizers\_per\_fragment} that number is the fragment, so one fragment can fill several chunks.
+    % \texttt{minimizers\_per\_sequence} uses this same layout.
+    % Its sub-key is the number of one hash group, not a fragment number.
+  \item \textbf{\texttt{INLINE\_PER\_SEQUENCE}}.
+    One sequence has a single chunk that is stored as Postgres varlena. This means that entire data stored for one sequence cannot exceed $960MB$ if that happens BioseqDB will error.
+    \texttt{symbol\_counts} is BiosqeDB index that uses this layout. It stores how many times each symbol occurs in that sequence and the payload is so small that it nicely fits into one small row.
+  \item \textbf{\texttt{CHUNKED\_PER\_TABLE}}.
+    This is special layout that in its implementation exposes only simple methods to access random chunks of the table. The idea is that some indexing structures may want 
+    to implement custom strategies, for example trees of sequences or graphs of fragments that do not fit into other representations.
+    I don't use this layout at the moment, but it's supported to provide extension point in the future. 
+\end{itemize}
+
+Figure~\ref{fig:index-storage-layouts} shows what three of these layouts are representing.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\footnotesize,
+  lab/.style={align=center,font=\scriptsize,inner sep=1pt},
+  arr/.style={line width=0.85pt,line join=miter,line cap=rect,
+    -{Latex[length=2.4mm,width=1.7mm]}},
+  stem/.style={line width=0.85pt,line join=miter,line cap=rect}
+]
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0.85,12.22)
+    {(a) User table};
+  \draw[indexGreen,line width=1pt,fill=black!3]
+    (0.85,9.35) rectangle (6.35,12.05);
+  \node[lab,anchor=west] at (1.05,11.68) {id};
+  \node[lab,anchor=west] at (2.45,11.68) {sequence locator};
+  \draw[black!25] (0.85,11.42) -- (6.35,11.42);
+  \fill[black!5] (1.05,10.72) rectangle (2.05,11.22);
+  \draw[black!40] (1.05,10.72) rectangle (2.05,11.22);
+  \node[lab] at (1.55,10.97) {2};
+  \fill[black!5] (2.25,10.72) rectangle (6.15,11.22);
+  \draw[black!40] (2.25,10.72) rectangle (6.15,11.22);
+  \node[lab] at (4.20,10.97) {locator of sequence 2};
+  \fill[black!5] (1.05,9.58) rectangle (2.05,10.28);
+  \draw[black!40] (1.05,9.58) rectangle (2.05,10.28);
+  \node[lab] at (1.55,9.93) {1};
+  \fill[indexOrange!22] (2.25,9.58) rectangle (6.15,10.28);
+  \draw[indexOrange,line width=1pt] (2.25,9.58) rectangle (6.15,10.28);
+  \node[lab] at (4.20,9.93) {locator of sequence 1};
+
+  % ---------- (b) fragments ----------
+  \node[anchor=south west,font=\bfseries\footnotesize] at (7.15,12.22)
+    {(b) Fragment rows of sequence 1};
+  \draw[black!55,fill=black!3] (7.15,9.35) rectangle (15.05,12.05);
+  \fill[black!5] (7.40,9.72) rectangle (9.55,11.55);
+  \draw[black!40] (7.40,9.72) rectangle (9.55,11.55);
+  \node[lab] at (8.475,10.64) {fragment 0};
+  \fill[indexBlue!18] (9.80,9.72) rectangle (12.35,11.55);
+  \draw[indexBlue,line width=1pt] (9.80,9.72) rectangle (12.35,11.55);
+  \node[lab] at (11.075,10.64) {fragment 1};
+  \fill[black!5] (12.60,9.72) rectangle (14.80,11.55);
+  \draw[black!40] (12.60,9.72) rectangle (14.80,11.55);
+  \node[lab] at (13.70,10.64) {fragment 2};
+
+  % ---------- shared row geometry ----------
+  % bar i top = 4.28 - i*0.56, height 0.46, center = 4.05 - i*0.56
+
+  % ---------- (c) table chunks: all 5 rows ----------
+  \draw[indexGreen!70,fill=indexGreen!5] (1.05,1.28) rectangle (4.85,5.62);
+  \node[lab,font=\bfseries\scriptsize] at (2.95,5.22) {\texttt{CHUNKED\_PER\_TABLE}};
+  \node[lab] at (2.95,4.72) {chunks of the whole table};
+  \foreach \i/\name in {0/{chunk 0},1/{chunk 1},2/{chunk 2},3/{chunk 3},4/{chunk 4}} {
+    \fill[indexGreen!20] (1.22,{4.28-\i*0.56}) rectangle (4.68,{3.82-\i*0.56});
+    \draw[indexGreen] (1.22,{4.28-\i*0.56}) rectangle (4.68,{3.82-\i*0.56});
+    \node[lab] at (2.95,{4.05-\i*0.56}) {\name};
+  }
+
+  % ---------- (d) inline: 5 rows, one belongs to sequence 1 ----------
+  \draw[black!45,fill=indexOrange!4] (6.05,1.28) rectangle (9.85,5.62);
+  \node[lab,font=\bfseries\scriptsize] at (7.95,5.22) {\texttt{INLINE\_PER\_SEQUENCE}};
+  \node[lab] at (7.95,4.72) {one row for each sequence};
+  \foreach \i/\name/\on in {0/{sequence 2}/0,1/{sequence 1}/1,2/{other sequence}/0,3/{other sequence}/0,4/{other sequence}/0} {
+    \ifnum\on=1
+      \fill[indexOrange!24] (6.22,{4.28-\i*0.56}) rectangle (9.68,{3.82-\i*0.56});
+      \draw[indexOrange,line width=0.9pt] (6.22,{4.28-\i*0.56}) rectangle (9.68,{3.82-\i*0.56});
+    \else
+      \fill[black!4] (6.22,{4.28-\i*0.56}) rectangle (9.68,{3.82-\i*0.56});
+      \draw[black!35] (6.22,{4.28-\i*0.56}) rectangle (9.68,{3.82-\i*0.56});
+    \fi
+    \node[lab] at (7.95,{4.05-\i*0.56}) {\name};
+  }
+
+  % ---------- (e) fragment chunks: 3 of 5 rows are fragment 1 ----------
+  \draw[black!45,fill=indexBlue!4] (10.85,1.28) rectangle (15.05,5.62);
+  \node[lab,font=\bfseries\scriptsize] at (12.95,5.22) {\texttt{CHUNKED\_PER\_FRAGMENT}};
+  \node[lab] at (12.95,4.72) {chunks of fragment 1};
+  \foreach \i/\name/\on in {
+      0/{fragment 0}/0,
+      1/{fragment 1, chunk 0}/1,
+      2/{fragment 1, chunk 1}/1,
+      3/{fragment 1, chunk 2}/1,
+      4/{fragment 2}/0} {
+    \ifnum\on=1
+      \fill[indexBlue!18] (11.02,{4.28-\i*0.56}) rectangle (14.88,{3.82-\i*0.56});
+      \draw[indexBlue] (11.02,{4.28-\i*0.56}) rectangle (14.88,{3.82-\i*0.56});
+    \else
+      \fill[black!4] (11.02,{4.28-\i*0.56}) rectangle (14.88,{3.82-\i*0.56});
+      \draw[black!35] (11.02,{4.28-\i*0.56}) rectangle (14.88,{3.82-\i*0.56});
+    \fi
+    \node[lab] at (12.95,{4.05-\i*0.56}) {\name};
+  }
+
+  % Green: open brace on the whole user table, then one branch into every chunk row.
+  % End caps stop short of the table border so they do not form an extra column.
+  \draw[stem,indexGreen] (0.62,11.92) -- (0.42,11.92) -- (0.42,10.70)
+    -- (0.28,10.70) -- (0.28,1.81);
+  \draw[stem,indexGreen] (0.62,9.48) -- (0.42,9.48) -- (0.42,10.70);
+  \foreach \i in {0,1,2,3,4} {
+    \draw[arr,indexGreen] (0.28,{4.05-\i*0.56}) -- (1.22,{4.05-\i*0.56});
+  }
+
+  % Orange: locator cell -> the one sequence-1 row (bar 1, center 3.49).
+  \draw[stem,indexOrange] (4.20,9.58) -- (4.20,8.55) -- (5.45,8.55) -- (5.45,3.49);
+  \draw[arr,indexOrange] (5.45,3.49) -- (6.22,3.49);
+
+  % Blue: leave fragment 1 itself, then split into its three chunk rows.
+  \draw[stem,indexBlue] (11.075,9.72) -- (11.075,7.55) -- (10.22,7.55) -- (10.22,2.37);
+  \foreach \i in {1,2,3} {
+    \draw[arr,indexBlue] (10.22,{4.05-\i*0.56}) -- (11.02,{4.05-\i*0.56});
+  }
+\end{tikzpicture}
+\caption[Logical concepts of the three index storage layouts]{Each index is drawn as five rows.
+The green brace represents the fact that the index structure represents all sequences stored in the table.
+The orange arrow shows that one locator corresponds to exactly one chunk (one row in the index table).
+The blue arrow shows that one fragment can have multiple chunks.
+In case of \textbf{\texttt{CHUNKED\_PER\_TABLE}} we only store chunk number and for \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}} I store fragment's number and chunk number.
+}
+\label{fig:index-storage-layouts}
+\end{figure}
+
+In reality the fragment's number can be viewed as a generic sub-key. This distorts the original meaning of \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}}, because in relity it's just 
+"per-sequence" but with extra key: $\langle$query\_key,\\sub\_key,\\chunk\_no$\rangle$, while \textbf{\texttt{CHUNKED\_PER\_TABLE}} has $\langle$chunk\_no$\rangle$.
+This idea is depicted below by real SQL schema of internal storage:
+
+\begin{lstlisting}[style=bioseq-index-sql,
+  caption={One heap row of a per-fragment index.},
+  label={lst:chunked-per-fragment-row}]
+CREATE TABLE bioseq_internal.seqidx_mpf_... (
+  query_key   BIGINT NOT NULL, -- which sequence in this shard
+  sub_key     BIGINT NOT NULL, -- which item of that sequence (can be fragment number but doesn't practically have to)
+  -- Then we store byte array defined by index implementation but split across chunks:
+  chunk_no    INT    NOT NULL, -- 0, 1, 2, ... of that item's byte string
+  chunk_bytes INT    NOT NULL, -- how many bytes this chunk holds
+  blob        BYTEA  NOT NULL, -- the bytes of this chunk
+  PRIMARY KEY (query_key, sub_key, chunk_no)
+);
+\end{lstlisting}
+
+The payload of an index is one byte array.
+\texttt{CHUNKED\_PER\_FRAGMENT} stores that array as rows of Listing~\ref{lst:chunked-per-fragment-row}.
+When the array is longer than one chunk, it is divided into chunk 0, chunk 1, and the following chunks.
+Those rows keep the same \texttt{query\_key} and the same \texttt{sub\_key}.
+A reader orders them by \texttt{chunk\_no} and concatenates \texttt{blob}.
+
+\info{Storage details}{
+\label{info:index-storage-details}
+  It's important to note that for minimizers per fragment MPF the sub-key number is the fragment number.
+I use the same column to store another number when the index is not split by fragment.
+Technically this means that \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}} should have its name changed to something more appropriate.
+}
+
+In code \texttt{pg\_supported\_indexes} is a special templated that connects those implementation classes to the registered indexes. This is frequent practice used by me - encoding 
+implementation vs. abstraction pairs as tuples in type lists created using template metaprogramming, so if extension is required we only need to write new type and add it into the 
+\texttt{pg\_supported\_indexes} template list. Checks if implementation is valid are done via C++26 concepts~\ref{lst:mpf-index-storage-check}:
+
+\begin{BioseqCppSnippet}[caption={Minimizers per fragment require fragment-chunk storage.},
+  label={lst:mpf-index-storage-check}]
+template <class p_storage>
+struct minimizers_per_fragment_index {
+  static_assert(is_index_chunked_storage_for<
+      p_storage, sequence_index_layout::fragment_chunks>);
+  static constexpr sequence_index_layout index_type =
+      sequence_index_layout::fragment_chunks;
+  using storage_type = p_storage;
+};
+\end{BioseqCppSnippet}
+
+\section{BioseqDB supported indexing}
+\label{sec:index-logical-layouts}
+
+There are 3 implementations of indexes inside BioseqDB:
+\begin{itemize}
+  \item \textbf{\texttt{minimizers\_per\_fragment}} (shortened to \texttt{mpf}) stores minimizers calculated per one fragment and uses \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}} layout.
+  \item \textbf{\texttt{minimizers\_per\_sequence}} (shortened to \texttt{mps}) stores minimizers calculated per sequence, but as the number of minimizers grows
+    they would not fit in a single chunk, thus one may consider using \textbf{\texttt{CHUNKED\_PER\_TABLE}}.
+    However, as mentioned, the sub-key~\ref{info:index-storage-details} is a number, so in MPS I use this number as a hash-group id, not as a hash.
+    The rows stay in the \textbf{\texttt{CHUNKED\_PER\_FRAGMENT}} layout even though
+    these numbers are not fragment numbers, as seen on the figure below~\ref{fig:index-mpf-mps}.
+  \item \textbf{\texttt{symbol\_counts}}: stores counter of occurences of each symbol in a sequence, uses \textbf{\texttt{INLINE\_PER\_SEQUENCE}} layout, because the counter struct is very small,
+    so Postgres inlines the varlena into the row.
+\label{lst:types-of-indexes-in-bioseqdb}
+\end{itemize}
+
+
+
+% The sequence store can fetch a small interval without decoding a whole
+% chromosome. Seed lookup has a different question: at which positions does a
+% query minimizer occur in the target? Reading every target symbol and rebuilding
+% its minimizer table for each query would repeat much of the same work.
+% A persistent index saves that table between executions.
+
+% The useful object is a mapping from a seed key to its occurrences. A
+% \emph{posting} is one stored occurrence, including a position and any source or
+% strand information needed to interpret it. A \emph{posting list} contains all
+% stored occurrences for one key. The key may be a minimizer hash, as in
+% BioSeqDB and minimap2, or a spaced word, as in the CPU MMseqs2 prefilter.
+% The seed-selection rule determines which occurrences the index stores.
+
+% Reuse of reference indexes already appears in biological workflows. For
+% example, BioWorkbench's RASflow workflow checks for an existing Bowtie2 index
+% before preparing it again\autocite{Mondelli_2018}. MMseqs2's interactive
+% search system also saves precomputed search structures to reduce setup for
+% repeated requests\autocite{mmseqs2_desktop_2019}. BioSeqDB has to connect this
+% reuse to the database's changing rows and to the search operators from the
+% previous chapters.
+
+% Four questions guide the design:
+% \begin{itemize}
+%   \item \textbf{What is stored?} Minimizer positions answer seed lookups;
+%     symbol counts answer a different question about sequence composition.
+%   \item \textbf{How is it grouped?} Grouping by target interval makes
+%     construction local. Grouping by hash makes later reads selective.
+%   \item \textbf{When is it usable?} The index must describe the same source
+%     version and minimizer rules as the query expects.
+%   \item \textbf{Who keeps its bytes alive?} A reader needs valid storage and
+%     buffers until its last lookup, including when another transaction changes
+%     the source.
+% \end{itemize}
+
+% An index is derived data: removing it does not remove the sequence. This also
+% distinguishes it from the completed-query cache in
+% Section~\ref{sec:bioseq-result-cache}. A minimizer index can serve many
+% different query sequences; a cached result describes completed executions.
+
+The main idea behind MPF and MPS was:
+\begin{itemize}
+  \item \textbf{MPF}: I can keep small hashmaps separated so random queries during seeding stage, where we need to find common minimizers between query and target, can hit
+  CPU caches more often as the accesses are localized.
+  \item \textbf{MPS}: The most frequent minimizers are trimmed by minimap2 and MPF trimming is done per fragment, so it's less reliable and can remove minimizers 
+  that are locally frequent, but globally rare reducing total number of minimizers and speeding up processing at the cost of potentially missing some matches. Additionally,
+  MPF needs to perform multiple hash lookups if we want to determine all locations of minimizer's occurences so there's also performance penalty. This penalty can be 
+  also mitigated by the fact that MPF is easier to parallelize.
+  Thus we can see there are several important trade-offs and it's not clear if the implementation of MPS should be more or less performant in theory.
+  In case of BioseqDB as it would be very inneficient to store all minimizers individually, I decided to still generate minimizers per fragment, but store them and merge later
+  during process that can potentially spill to disk (if the entire index fits into RAM then no spillage occurs, but if it doesn't there are heavy performance penalties).
+  Additionally I must note that MPS uses the trick described here~\ref{info:index-storage-details}, so the sub-key is a hash-group number, not fragment number.
+  This implies that if the query is short there will be not many groups to check, and as each group is held as heap rows, then MPS can be very fast, because it reads only the list of one group, not the entire index.
+\end{itemize}
+
+The figure~\ref{fig:index-mpf-mps} below shows 6 minimizer occurrences in a sequence, and panel~(c) shows the byte strings that store them.
+Panels~(a) and~(b) show the same six minimizers in two groupings.
+Panel~(c)and later illustrate the encoding of the strctures in binary strings (every rectangle onward is the binary string \texttt{blob} of one heap row from Listing~\ref{lst:chunked-per-fragment-row}), where 
+the label on the left is that row's \texttt{query\_key} and \texttt{sub\_key}.
+If a string is longer than one chunk, later chunks continue it under the same two numbers.
+
+\subsubsection{Binary coding of non-grouped MPF}
+
+There are two types of MPF index depedning on BioseqDB setting flag: \path{bioseq.aligner.grouped_soa_generation.enabled}.
+The non-grouped version is depicted in panel~(c). The sub-key is just the fragment number. The entry intself contains two arrays similar to what minimap2~\ref{fig:index-mmi-layout} does.
+The first array with \path{controls} contains hash value, start position in \path{positions} array and count of how many positiosn have that same hash.
+\path{positions} just represent minimizer positions.
+Usually in headers there's additional metadata and some of it is redundant as the exact shapes evolved during my implementation. 
+There are versions and special magic values to potentially error if index was corrupted.
+
+\subsubsection{Binary coding of grouped MPF}
+
+I tried to improve MPF by doing something more sophisticated. The MPF can changed format based on grouped generation setting flag.
+Panel~(d) shows how grouped MPF looks like:
+\begin{itemize}
+    \item This is similar to MPF buit instead of storing array of structures (AoS) we store structure of arrays (SoA) so hash, start, and count are now three arrays in a row.
+    \item I use special bit i.e $2^{61}$ to store positions array separately in separate row.
+    \item There also is one special directory row using unique \path{sub\_key} value. 
+    The directory is list of $128B$ entries mapping fragment number to specific \path{sub\_key} value.
+    \item Each directory row $128B$ entry constains useful metadata like min(hash), max(hash) so some rows doesn't have to be read at all if they don't contain 
+    hash values we are interested in.
+    \item Using this \path{sub\_key}$\leftrightarrow$\path{fragment} mapping allows to potentially split fragment hash/start/count entry into multiple ones. 
+    However this is not used in the code currently and effectively \path{sub_key} $=$ \path{fragment} for all entries.
+    \item The directory item also contains information that is redundant for example \path{controls\_first} is number of first chunk storing hash/start/count binary string.
+    This is always $0$ as the binary strings are split into chunks, which are zero-indexed. The same logic applies to other fields and the entry size 
+    could be massively reduced.
+    \item Grouped-MPF is very generic format and it also supports variable-width entries. The width of hash/start/count/positions can be adjusted independently for example 
+    for very short sequences we could use $2B$ \path{position} array and for very low minimizer density we could use $2B$ for \path{start\_array} or 
+    for very unrepetitive sequences where unique minimizers are very common, we could use $2B$ for \path{count\_array}.
+    Practically, current code uses currently same widths for most of the fields and hash is adjusted depending on $k$ and
+    sequence length from minimizer type~\ref{fig:minimizer-representation-layout}.
+\end{itemize}
+
+On the figure Panel~(d) I didn't depict all fields in the MPF grouped directory as not all fields are relevant.
+Table~\ref{tab:grouped-mpf-directory-entry} below lists all fields that are stored:
+\begin{table}[htbp]
+\centering
+\small
+\caption{Fields of one 128-byte grouped MPF directory entry.}
+\label{tab:grouped-mpf-directory-entry}
+\begin{tabularx}{\linewidth}{@{}llX@{}}
+\toprule
+\textbf{Bytes} & \textbf{Size} & \textbf{Field}\\
+\midrule
+0--3 & 4 & partition number (this is an index of entry in the directory row's array)\\
+4--7 & 4 & fragment\\
+8--15 & 8 & min(hash)\\
+16--23 & 8 & max(hash)\\
+24--31 & 8 & sub-key (in theory was meant to use to allow dividing entry for fragment into multiple rows, but currently it's always equal to frament number)\\
+32--35 & 4 & first chunk of the control byte string (chunks are zero-indexed so it's always $0$ and should be removed in the future)\\
+36--39 & 4 & how many control chunks (counts in how many chunks hash/start/count binary array will use)\\
+40--43 & 4 & first chunk of the position array (chunks are zero-indexed so it's always $0$ and should be removed in the future)\\
+44--47 & 4 & how many position chunks (counts in how many chunks position binary array will use)\\
+48--55 & 8 & how many controls (number of items in each of hash/start/count arrays)\\
+56--63 & 8 & how many positions (number of items in the position array)\\
+64--71 & 8 & byte size of the control byte string\\
+72--79 & 8 & byte size of the position array\\
+80--87 & 8 & checksum of the control byte string\\
+88--95 & 8 & checksum of the position array\\
+96 & 1 & hash width: 2, 4, or 8\\
+97 & 1 & start-array width: 2, 4, or 8\\
+98 & 1 & count width: 2, 4, or 8\\
+99 & 1 & position width: 2, 4, or 8\\
+100 & 1 & Used to represent differnt orders of hash/start/count arrays. Now meaningless and fixed to $1$ \\
+101 & 1 & Used to reresent how many positions there are per one hash entry. It's always $1$, so this is meaningless. \\
+102 & 1 & Meaningless now, fixed to $2$ \\
+103 & 1 & Number of extra entries in start aray at the end. Now it's meaningless and fixed to $1$ (and we don't need to store this one extra item at all)\\
+104--127 & 24 & zeros\\
+\bottomrule
+\end{tabularx}
+\label{tab:fields-in-grouped-mpf-directory-entry}
+\end{table}
+
+\subsubsection{Binary coding for MPS}
+
+The MPS index stores the same rows as non-grouped MPF, but this time we also have additional one directory row.
+Also the fragment keys are just not reffering to fragments anymore, but they represent groups of hashes similarily to minimap2~\ref{fig:index-mmi-layout}.
+
+The directory contains metadata information like how many distinct hashes are there in total and for every group it stores min(hash), max(hash)
+to allow us to quickly skip groups if certain hash values do not exist there.
+
+% As mentione above~\ref{lst:types-of-indexes-in-bioseqdb} BioSeqDB supports \emph{minimizers per fragment} (MPF) and
+% \emph{minimizers per sequence} (MPS). MPF groups entries by source interval;
+% MPS groups them by hash across one logical sequence. Both preserve positions
+% needed to form anchors. Figure~\ref{fig:index-mpf-mps} shows the same six
+% occurrences in the two organizations, and the heap rows that store the lists.
+% Panel~(c) uses the per-fragment layout of Figure~\ref{fig:index-storage-layouts}.
+% The lists are stored.
+% A header and a control list sit in front of each position list.
+% A directory row stores metadata and does not store positions.
+% Here a minimizer position is its
+% last-symbol coordinate, using zero-based positions.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  x=1cm,y=1cm,font=\footnotesize,
+  lab/.style={align=center,font=\scriptsize,inner sep=1pt},
+  cell/.style={align=center,font=\scriptsize,inner sep=1pt},
+  zoom/.style={line width=0.85pt,line join=miter,line cap=rect,
+    -{Latex[length=2.4mm,width=1.7mm]}}
+]
+  % ---------- (a) logical MPF ----------
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0.15,11.55)
+    {(a) MPF: keep each source interval together};
+  \draw[black!45,fill=black!3] (0.15,9.35) rectangle (4.55,11.30);
+  \node[lab] at (2.35,10.95) {fragment 0: $[0,100)$};
+  \fill[indexBlue!18] (0.45,9.60) rectangle (4.25,10.35);
+  \draw[indexBlue] (0.45,9.60) rectangle (4.25,10.35);
+  \node[cell] at (2.35,9.97) {$a$: 17, 65};
+
+  \draw[black!45,fill=black!3] (4.85,9.35) rectangle (9.25,11.30);
+  \node[lab] at (7.05,10.95) {fragment 1: $[100,200)$};
+  \fill[indexOrange!20] (5.15,9.95) rectangle (8.95,10.55);
+  \draw[indexOrange] (5.15,9.95) rectangle (8.95,10.55);
+  \node[cell] at (7.05,10.25) {$b$: 120};
+  \fill[indexBlue!18] (5.15,9.55) rectangle (8.95,9.90);
+  \draw[indexBlue] (5.15,9.55) rectangle (8.95,9.90);
+  \node[cell] at (7.05,9.72) {$a$: 180};
+
+  \draw[black!45,fill=black!3] (9.55,9.35) rectangle (14.35,11.30);
+  \node[lab] at (11.95,10.95) {fragment 2: $[200,300)$};
+  \fill[indexBlue!18] (9.85,9.95) rectangle (14.05,10.55);
+  \draw[indexBlue] (9.85,9.95) rectangle (14.05,10.55);
+  \node[cell] at (11.95,10.25) {$a$: 230};
+  \fill[indexGreen!20] (9.85,9.55) rectangle (14.05,9.90);
+  \draw[indexGreen] (9.85,9.55) rectangle (14.05,9.90);
+  \node[cell] at (11.95,9.72) {$c$: 280};
+
+  % ---------- (b) logical MPS ----------
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0.15,8.85)
+    {(b) MPS: put equal hashes together across the sequence};
+  \fill[indexBlue!18] (0.15,7.95) rectangle (1.35,8.50);
+  \draw[indexBlue] (0.15,7.95) rectangle (1.35,8.50);
+  \node[cell] at (0.75,8.22) {$a$};
+  \foreach \x/\p in {2.15/17,3.45/65,4.75/180,6.05/230} {
+    \fill[indexBlue!18] (\x,7.95) rectangle (\x+1.15,8.50);
+    \draw[indexBlue] (\x,7.95) rectangle (\x+1.15,8.50);
+    \node[cell] at (\x+0.575,8.22) {$\p$};
+  }
+  \draw[indexBlue,line width=0.8pt,-{Latex[length=2.2mm]}] (1.35,8.22) -- (2.15,8.22);
+
+  \fill[indexOrange!20] (0.15,7.20) rectangle (1.35,7.75);
+  \draw[indexOrange] (0.15,7.20) rectangle (1.35,7.75);
+  \node[cell] at (0.75,7.47) {$b$};
+  \fill[indexOrange!20] (2.15,7.20) rectangle (3.30,7.75);
+  \draw[indexOrange] (2.15,7.20) rectangle (3.30,7.75);
+  \node[cell] at (2.725,7.47) {$120$};
+  \draw[indexOrange,line width=0.8pt,-{Latex[length=2.2mm]}] (1.35,7.47) -- (2.15,7.47);
+
+  \fill[indexGreen!20] (0.15,6.45) rectangle (1.35,7.00);
+  \draw[indexGreen] (0.15,6.45) rectangle (1.35,7.00);
+  \node[cell] at (0.75,6.72) {$c$};
+  \fill[indexGreen!20] (2.15,6.45) rectangle (3.30,7.00);
+  \draw[indexGreen] (2.15,6.45) rectangle (3.30,7.00);
+  \node[cell] at (2.725,6.72) {$280$};
+  \draw[indexGreen,line width=0.8pt,-{Latex[length=2.2mm]}] (1.35,6.72) -- (2.15,6.72);
+  \node[anchor=west,align=left,font=\scriptsize] at (8.0,7.35)
+    {Equal hashes become one list.\\A query for $a$ reads that list only.};
+
+  % ---------- (c) ordinary MPF byte string ----------
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0.15,5.72)
+    {(c) Ordinary MPF: one fragment is one byte string};
+  \node[lab,anchor=east] at (3.25,5.15)
+    {$\langle$query\_key,\\fragment$\rangle$};
+  \fill[black!8] (3.35,4.80) rectangle (5.55,5.50);
+  \draw[black!55] (3.35,4.80) rectangle (5.55,5.50);
+  \node[lab] at (4.45,5.15) {header\\32\,B};
+  \fill[indexBlue!12] (5.55,4.80) rectangle (9.85,5.50);
+  \draw[black!55] (5.55,4.80) rectangle (9.85,5.50);
+  \node[lab] at (7.70,5.15) {controls\\$n\times 16$\,B};
+  \fill[indexOrange!16] (9.85,4.80) rectangle (14.25,5.50);
+  \draw[black!55] (9.85,4.80) rectangle (14.25,5.50);
+  \node[lab] at (12.05,5.15) {positions\\$m\times 8$\,B};
+
+  % 32-byte header, left edge aligned with the header. Not a separate panel.
+  \fill[black!8] (3.35,2.55) rectangle (4.63,3.20);
+  \draw[black!55] (3.35,2.55) rectangle (4.63,3.20);
+  \node[lab] at (3.99,2.875) {magic\\4\,B};
+  \fill[black!8] (4.63,2.55) rectangle (5.91,3.20);
+  \draw[black!55] (4.63,2.55) rectangle (5.91,3.20);
+  \node[lab] at (5.27,2.875) {revision\\4\,B};
+  \fill[black!6] (5.91,2.55) rectangle (8.47,3.20);
+  \draw[black!55] (5.91,2.55) rectangle (8.47,3.20);
+  \node[lab] at (7.19,2.875) {length\\8\,B};
+  \fill[indexBlue!14] (8.47,2.55) rectangle (9.75,3.20);
+  \draw[black!55] (8.47,2.55) rectangle (9.75,3.20);
+  \node[lab] at (9.11,2.875) {$n$\\4\,B};
+  \fill[black!6] (9.75,2.55) rectangle (11.03,3.20);
+  \draw[black!55] (9.75,2.55) rectangle (11.03,3.20);
+  \node[lab] at (10.39,2.875) {reserved\\4\,B};
+  \fill[indexOrange!16] (11.03,2.55) rectangle (13.59,3.20);
+  \draw[black!55] (11.03,2.55) rectangle (13.59,3.20);
+  \node[lab] at (12.31,2.875) {$m$\\8\,B};
+  \draw[zoom,black!70] (4.45,4.80) -- (4.45,3.20);
+
+  % one control, directly under the controls rectangle of (c). Not a separate panel.
+  \fill[indexBlue!18] (5.55,3.65) rectangle (7.70,4.35);
+  \draw[indexBlue] (5.55,3.65) rectangle (7.70,4.35);
+  \node[lab] at (6.625,4.00) {hash\\8\,B};
+  \fill[indexOrange!20] (7.70,3.65) rectangle (8.775,4.35);
+  \draw[indexOrange] (7.70,3.65) rectangle (8.775,4.35);
+  \node[lab] at (8.24,4.00) {start\\4\,B};
+  \fill[indexGreen!20] (8.775,3.65) rectangle (9.85,4.35);
+  \draw[indexGreen] (8.775,3.65) rectangle (9.85,4.35);
+  \node[lab] at (9.31,4.00) {count\\4\,B};
+  \draw[zoom,indexBlue] (7.70,4.80) -- (7.70,4.35);
+
+  % (d) grouped MPF. Separate byte strings. No arrow back to the control in (c).
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0.15,1.98)
+    {(d) Grouped MPF};
+  \node[lab,anchor=east] at (3.25,1.50)
+    {$\langle$query\_key,\\sub\_key$\rangle$};
+  \fill[indexBlue!16] (4.50,1.15) rectangle (7.75,1.85);
+  \draw[indexBlue] (4.50,1.15) rectangle (7.75,1.85);
+  \node[lab] at (6.125,1.50) {hash array\\$n\times$ 2, 4, or 8\,B};
+  \fill[indexOrange!18] (7.75,1.15) rectangle (11.00,1.85);
+  \draw[indexOrange] (7.75,1.15) rectangle (11.00,1.85);
+  \node[lab] at (9.375,1.50) {start array\\$(n{+}1)\times$ 2, 4, or 8\,B};
+  \fill[indexGreen!18] (11.00,1.15) rectangle (14.25,1.85);
+  \draw[indexGreen] (11.00,1.15) rectangle (14.25,1.85);
+  \node[lab] at (12.625,1.50) {count array\\$n\times$ 2, 4, or 8\,B};
+
+  \node[lab,anchor=east] at (3.25,0.52)
+    {$\langle$query\_key,\\$2^{61}{+}$sub\_key$\rangle$};
+  \fill[indexOrange!14] (4.50,0.17) rectangle (14.25,0.87);
+  \draw[indexOrange] (4.50,0.17) rectangle (14.25,0.87);
+  \node[lab] at (9.375,0.52) {position array\\$m\times$ 2, 4, or 8\,B};
+
+  \node[lab,anchor=east] at (3.25,-1.70)
+    {$\langle$query\_key,\\$2^{63}{-}1\rangle$};
+  \node[lab] at (3.70,-1.70) {$p\times$\\128\,B};
+  \fill[black!6] (4.22,-2.20) rectangle (5.44,-1.20);
+  \draw[black!55] (4.22,-2.20) rectangle (5.44,-1.20);
+  \node[lab] at (4.83,-1.70) {partition\\4\,B};
+  \fill[black!8] (5.44,-2.20) rectangle (6.66,-1.20);
+  \draw[black!55] (5.44,-2.20) rectangle (6.66,-1.20);
+  \node[lab] at (6.05,-1.70) {fragment\\4\,B};
+  \fill[indexBlue!14] (6.66,-2.20) rectangle (8.08,-1.20);
+  \draw[black!55] (6.66,-2.20) rectangle (8.08,-1.20);
+  \node[lab] at (7.37,-1.70) {min(hash)\\8\,B};
+  \fill[indexBlue!14] (8.08,-2.20) rectangle (9.56,-1.20);
+  \draw[black!55] (8.08,-2.20) rectangle (9.56,-1.20);
+  \node[lab] at (8.82,-1.70) {max(hash)\\8\,B};
+  \fill[black!8] (9.56,-2.20) rectangle (10.71,-1.20);
+  \draw[black!55] (9.56,-2.20) rectangle (10.71,-1.20);
+  \node[lab] at (10.135,-1.70) {sub-key\\8\,B};
+  \fill[indexGreen!12] (10.71,-2.20) rectangle (11.60,-1.20);
+  \draw[black!55] (10.71,-2.20) rectangle (11.60,-1.20);
+  \node[lab] at (11.155,-1.70) {4\,B};
+  \fill[indexGreen!12] (11.60,-2.20) rectangle (12.49,-1.20);
+  \draw[black!55] (11.60,-2.20) rectangle (12.49,-1.20);
+  \node[lab] at (12.045,-1.70) {4\,B};
+  \fill[indexOrange!14] (12.49,-2.20) rectangle (13.38,-1.20);
+  \draw[black!55] (12.49,-2.20) rectangle (13.38,-1.20);
+  \node[lab] at (12.935,-1.70) {4\,B};
+  \fill[indexOrange!14] (13.38,-2.20) rectangle (14.25,-1.20);
+  \draw[black!55] (13.38,-2.20) rectangle (14.25,-1.20);
+  \node[lab] at (13.815,-1.70) {4\,B};
+  \node[lab,anchor=south] at (11.155,-0.22) {controls first};
+  \draw[black!60,line width=0.7pt] (11.155,-0.22) -- (11.155,-1.20);
+  \node[lab,anchor=south] at (12.935,-0.62) {positions first};
+  \draw[black!60,line width=0.7pt] (12.935,-0.62) -- (12.935,-1.20);
+  \node[lab,anchor=north] at (12.045,-2.45) {count};
+  \draw[black!60,line width=0.7pt] (12.045,-2.20) -- (12.045,-2.45);
+  \node[lab,anchor=north] at (13.815,-2.45) {count};
+  \draw[black!60,line width=0.7pt] (13.815,-2.20) -- (13.815,-2.45);
+
+  % (e) MPS: same byte string, then its directory, header, and one entry
+  \node[anchor=south west,font=\bfseries\footnotesize] at (0.15,-3.25)
+    {(e) MPS group: the same byte string as (c)};
+  \node[lab,anchor=east] at (3.25,-3.77)
+    {$\langle$query\_key,\\group number$\rangle$};
+  \fill[black!8] (3.35,-4.12) rectangle (5.55,-3.42);
+  \draw[black!55] (3.35,-4.12) rectangle (5.55,-3.42);
+  \node[lab] at (4.45,-3.77) {header\\32\,B};
+  \fill[indexBlue!12] (5.55,-4.12) rectangle (9.85,-3.42);
+  \draw[black!55] (5.55,-4.12) rectangle (9.85,-3.42);
+  \node[lab] at (7.70,-3.77) {controls\\$n\times 16$\,B};
+  \fill[indexOrange!16] (9.85,-4.12) rectangle (14.25,-3.42);
+  \draw[black!55] (9.85,-4.12) rectangle (14.25,-3.42);
+  \node[lab] at (12.05,-3.77) {positions\\$m\times 8$\,B};
+
+  \node[lab,anchor=east] at (3.25,-4.815)
+    {$\langle$query\_key,\\$2^{63}{-}1\rangle$};
+  \fill[black!10] (3.35,-5.19) rectangle (6.15,-4.44);
+  \draw[black!55] (3.35,-5.19) rectangle (6.15,-4.44);
+  \node[lab] at (4.75,-4.815) {directory header\\40\,B};
+  \fill[indexBlue!12] (6.15,-5.19) rectangle (14.25,-4.44);
+  \draw[black!55] (6.15,-5.19) rectangle (14.25,-4.44);
+  \node[lab] at (10.20,-4.815) {one entry per group, 24\,B};
+
+  \fill[black!8] (3.35,-7.10) rectangle (3.94,-6.20);
+  \draw[black!55] (3.35,-7.10) rectangle (3.94,-6.20);
+  \node[lab] at (3.645,-6.65) {4\,B};
+  \fill[black!8] (3.94,-7.10) rectangle (4.53,-6.20);
+  \draw[black!55] (3.94,-7.10) rectangle (4.53,-6.20);
+  \node[lab] at (4.235,-6.65) {4\,B};
+  \fill[black!6] (4.53,-7.10) rectangle (5.12,-6.20);
+  \draw[black!55] (4.53,-7.10) rectangle (5.12,-6.20);
+  \node[lab] at (4.825,-6.65) {4\,B};
+  \fill[black!6] (5.12,-7.10) rectangle (5.71,-6.20);
+  \draw[black!55] (5.12,-7.10) rectangle (5.71,-6.20);
+  \node[lab] at (5.415,-6.65) {4\,B};
+  \fill[indexBlue!14] (5.71,-7.10) rectangle (6.88,-6.20);
+  \draw[black!55] (5.71,-7.10) rectangle (6.88,-6.20);
+  \node[lab] at (6.295,-6.65) {groups\\8\,B};
+  \fill[indexBlue!14] (6.88,-7.10) rectangle (8.05,-6.20);
+  \draw[black!55] (6.88,-7.10) rectangle (8.05,-6.20);
+  \node[lab] at (7.465,-6.65) {distinct\\hashes\\8\,B};
+  \fill[indexOrange!16] (8.05,-7.10) rectangle (9.22,-6.20);
+  \draw[black!55] (8.05,-7.10) rectangle (9.22,-6.20);
+  \node[lab] at (8.635,-6.65) {positions\\8\,B};
+  \node[lab,anchor=south] at (3.645,-5.72) {magic};
+  \draw[black!60,line width=0.7pt] (3.645,-5.72) -- (3.645,-6.20);
+  \node[lab,anchor=south] at (4.825,-5.72) {flags};
+  \draw[black!60,line width=0.7pt] (4.825,-5.72) -- (4.825,-6.20);
+  \node[lab,anchor=north] at (4.235,-7.35) {revision};
+  \draw[black!60,line width=0.7pt] (4.235,-7.10) -- (4.235,-7.35);
+  \node[lab,anchor=north] at (5.415,-7.35) {reserved};
+  \draw[black!60,line width=0.7pt] (5.415,-7.10) -- (5.415,-7.35);
+  \draw[zoom,black!70] (4.25,-5.19) -- (4.25,-6.20);
+
+  \fill[indexBlue!16] (9.40,-7.10) rectangle (10.95,-6.20);
+  \draw[indexBlue] (9.40,-7.10) rectangle (10.95,-6.20);
+  \node[lab] at (10.175,-6.65) {min(hash)\\8\,B};
+  \fill[indexBlue!16] (10.95,-7.10) rectangle (12.50,-6.20);
+  \draw[indexBlue] (10.95,-7.10) rectangle (12.50,-6.20);
+  \node[lab] at (11.725,-6.65) {max(hash)\\8\,B};
+  \fill[black!8] (12.50,-7.10) rectangle (14.05,-6.20);
+  \draw[black!55] (12.50,-7.10) rectangle (14.05,-6.20);
+  \node[lab] at (13.275,-6.65) {group number\\8\,B};
+  \draw[zoom,indexBlue] (10.20,-5.19) -- (10.20,-6.20);
+\end{tikzpicture}
+\caption[Byte strings of ordinary MPF, grouped MPF, and MPS]{
+  Each row with two key in brackets $\langle$query\_key, sub\_key$\rangle$ represent binary string that will be split into multiple chunks that could be find 
+  by complex key $\langle$query\_key, sub\_key, chunk\_number$\rangle$.
+  There's always one special sub-key for directory for grouped MPF and MPS, these formats also store two rows per one sub-key.
+}
+\label{fig:index-mpf-mps}
+\end{figure}
+
+MPS index building needs to spend additional work on sorting and merging so later queries can skip
+unrelated hash ranges, while MPF just keeps smaller hashmaps based on fragments. 
+The current default BioseqDB active minimizer index is MPF.
+
+\subsection{Index versioning}
+\label{sec:index-compatibility}
+
+Internal sequence storage tables use \path{epoch} to provide sequence versioning~\ref{lst:storage-sequence-locator}, indexes don't have to use separate versioning field.
+I decided not to store epoch in the index table~\ref{tab:fields-in-grouped-mpf-directory-entry}, but instead \path{query_key} is number of the row inside the 
+table shard. They are stable with respect to \path{INSERT}s, \path{DELETE}s and \path{UPDATE}s as update will create new sequence version. 
+Special handling is only required when tables are rewritten using \path{VACCUM FULL}: vacuum full would cause the rows to change numbering, however
+the indexes tables contain a hash of database, table space and Postgres \path{relfilenode}, so if the table is rewritten (\path{relfilenode} will change) BisoeqDB won't detect the old index.
+This is the most naive approach, but provides basic protection against table rewrites.
+
+
+\subsection{Symbol count index}
+\label{sec:index-symbol-counts}
+
+I implemented one index type that does not store minimizers at all: \texttt{symbol\_counts}
+index keeps a very small symbol histogram for one sequence.
+Each symbol has 64-bit counter (for DNA4, the counters are $A,C,G,T$ so sequence
+\texttt{AACGTA} gives $(3,1,1,1)$). The counts are stored separately because as we use heap rows the value will be stored inline in Postgres table.
+This allows very fast access and usually users don't need to count symbols.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=.7cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,5.6) {One sequence};
+  \foreach \x/\s in {1/A,2/A,3/C,4/G,5/T,6/A}
+    \node[index blue] at (\x,4.7) {\texttt{\s}};
+  \node[anchor=west,font=\bfseries] at (8,5.6) {Four counters};
+  \foreach \x/\s/\n in {8.5/A/3,9.7/C/1,10.9/G/1,12.1/T/1} {
+    \draw[fill=indexGreen!18,draw=indexGreen] (\x-.38,.7) rectangle (\x+.38,.7+\n);
+    \node[above] at (\x,.7+\n) {$\n$};
+    \node[below] at (\x,.7) {\texttt{\s}};
+  }
+  \draw[index arrow] (6.5,3.6)--(7.75,3.6);
+  \node[anchor=west,align=left] at (0,1.6)
+    {To count A, read A's counter.\\Seed lookup: positions are still needed.};
+\end{tikzpicture}
+\caption{Hitsogram counter for symbols is stored separately so BioseqDB access it only when specified in the query}
+\label{fig:index-symbol-counts}
+\end{figure}
+
+\begin{lstlisting}[style=bioseq-index-sql,
+  caption={Request a symbol count for each stored sequence.},
+  label={lst:index-symbol-counts}]
+SELECT id, bioseq.symbol_count(seq, 'A') AS a_count
+FROM reads;
+\end{lstlisting}
+Using this small metadata index allows me to never access the sequence content at all, meaning the read is very fast.
+If the index entry is not found, then BioseqDB will traverse entire sequence.
+The primary benefit is that this can be computed when loading FASTA or inserting rows autmatically so the user pays the 
+cost only once (or later when infrequent \path{INSERT} or \path{UPDATE} happen)

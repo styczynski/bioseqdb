@@ -1,0 +1,192 @@
+\clearpage
+\section{Caching results}
+\label{sec:bioseq-result-cache}
+
+As mentioned before I provide layers of caching:
+\begin{itemize}
+  \item Chunk (strip) cache that stores rows of columnar stored (compressed blobs that can potentially store multiple sequences)~\ref{fig:execcustomscan-dispatch}. Described more in detail in next chapters~\ref{sec:pg-storage-role}
+  \item Lazy interface cache implemented by scanner slots~\ref{fig:execcustomscan-dispatch}
+  \item I also provide long-term experimental cache layer for alignments results described here.
+\end{itemize}
+
+An alignment query may run for hours while returning a small result. If two
+sessions submit the same request, running the alignment twice wastes work.
+I created separate small \texttt{bioseq\_cache} extension that is provided along with BioseqDB.
+
+\warn{Experimental support}{
+  This chapter doesn't go into details of chache implementation, because it's still experimental. I didn't perform enough testing to be confident enough about all edge cases correctness 
+  as I needed to be very careful how to lock queries and split work (it needs comparing expression trees to detect query identity or overlap, serializing them to store them, parallel-safe coordination of locking).
+  The subextension isn't loaded by default and user need to execute \path{CREATE} \path{EXTENSION} \path{bioseq_cache} manually and restard Postgres server.
+  There are some problems with this approach as the MVCC Postgres visiblity can change during execution (there could be insert when alignment is running). 
+  This problem wasn't addressed so the user would see old version of the data. That's why I decided to disable caching now.
+  Moreover the "excact results" setting is fully supported now and can be enabled if user loads extension, while "reusable fragments" have most of the code ready except that it was only tested on scalar 
+  types (INTs, FLOATs etc.) and sequence support will require some alterations (planner will fallback to "exact results" anyway)
+}
+
+The cache subextension coordinates requests and stores completed results.
+The extension provides two forms of reuse:
+\begin{itemize}
+  \item \textbf{Exact results:} If user executes two identical queries at the same time, we provide special custom scan in plan that waits for currently running job and loads results from it. It needs to happen during planning stage - planner needs to detect that alignment pipeline is running 
+  and then during execution stage block execution until results are available.
+  \item \textbf{Reusable fragments:} This is more complicated part of the code that doesn't completely block execution of the query. If similar query is currently running, planner will try to alter current query to still execute it, but try to cover region that is not covered by running jobs.
+\end{itemize}
+
+\emph{producer} is the query runner that currently executes alignment job. 
+In that timeframe another Postgres-spawned process with other user query waits for results.
+Submission of partial results would be possible, although very complicated to implement correctly.
+\emph{sealing} here means that we store last tuple, collect some metadata like tuple counts and create new UUID for the result.
+Figure~\ref{fig:cache-lifecycle} shows what happens during the execution of two queries. 
+The cache has expiration TTL time after which the results cannot be reused anymore.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \draw[scan arrow,black!55] (0,3.0) -- (11.7,3.0)
+    node[right]{time};
+  \node[anchor=east] at (0,2.25) {producer};
+  \node[anchor=east] at (0,.85) {waiter};
+  \node[scan input,minimum width=1.2cm] (claim) at (.9,2.25) {claim};
+  \node[scan input,minimum width=3.6cm] (build) at (3.7,2.25)
+    {compute and store rows};
+  \node[scan output,minimum width=1.8cm] (seal) at (6.9,2.25)
+    {compute hash};
+  \node[scan output,minimum width=1.6cm] (complete) at (9.2,2.25)
+    {complete};
+  \draw[scan arrow] (claim) -- (build);
+  \draw[scan arrow] (build) -- (seal);
+  \draw[scan arrow] (seal) -- (complete);
+  \node[scan box,minimum width=1.25cm] (lookup) at (2.25,.85) {lookup};
+  \draw[thick,dashed,scanBlue] (lookup.east) -- (7.65,.85)
+    node[midway,above=3pt]{wait until everything is completed};
+  \node[scan output,minimum width=1.5cm] (recheck) at (9.2,.85)
+    {check again};
+  \node[scan output,minimum width=1.25cm] (read) at (11.2,.85) {read};
+  \draw[scan arrow] (7.65,.85) -- (recheck);
+  \draw[scan arrow,scanGreen] (complete) -- (recheck)
+    node[midway,right=2pt]{wake};
+  \draw[scan arrow] (recheck) -- (read);
+  \node[scan hit,minimum width=2.6cm] (failed) at (3.7,-.65)
+    {failed attempt};
+  \draw[thick,scanOrange] (build.south) -- (3.7,1.45);
+  \draw[thick,scanOrange] (seal.south) -- (6.9,1.45) -- (1.2,1.45);
+  \fill[scanOrange] (3.7,1.45) circle[radius=1.1pt];
+  \draw[scan arrow,scanOrange] (1.2,1.45) |- (failed.west);
+  \node[anchor=east,text=scanOrange,align=right] at (1.05,1.45)
+    {error or\\early stop};
+  \node[scan hit,minimum width=3.25cm] (invalid) at (9.7,-.65)
+    {expired or invalidated};
+  \draw[scan arrow,scanOrange] (complete.east) -- (12.15,2.25)
+    |- (invalid.east);
+  \node[scan box,minimum height=.5cm] (removed) at (6.75,-1.55)
+    {removed when unused};
+  \draw[scan arrow,black!60] (failed.south) |- (removed.west);
+  \draw[scan arrow,black!60] (invalid.south) |- (removed.east);
+\end{tikzpicture}
+\caption{Consumer just waits for all results from producer and then reads them.}
+\label{fig:cache-lifecycle}
+\end{figure}
+
+There's one lock that is taken by any consumer during execution just to access shared state.
+The consumer sleeps and preiodically acquires and releases the lock to check if it can continue execution (polling).
+If the producer fails or is cancelled I wake all consumers that registered for this job and then each of them will try manually run the query (so the consumer won't fail due to producer error or cancellation).
+
+The interesting problem is that matching SQL text alone is insufficient. I needed to include
+analyzed query, parameter values, result types, relevant execution settings,
+and the database context objects to make sure we reliably detect identical queries.
+Additionally I keep track of query dependencies (all relations) and if the relation changes (row insert) during processing, then cache will be invalidated.
+This means that insert during consumer's wait time will cause the consumer to execute query by themselves (although this require more testing to confirm correctness)
+
+\subsection{Reusing fragments of queries}
+\label{sec:seq-results-cache}
+
+Suppose that table is kept unchanged, but user slightly changes some metadata condition (for example instead of aligning all sequences with dates between some range, we extend the range to include few more dates).
+For indentiy comparison I store the analyzed query plan as well so we can say what filter conditions were used for that cache entry. 
+
+The general idea of describing what is cached, reading useful part and computing remainer was very loosely inspired by semantic caching paper\footnote{Dar, Franklin, J\'onsson,
+Srivastava, and Tan, \href{https://www.vldb.org/conf/1996/P330.PDF}
+{\emph{Semantic Data Caching and Replacement}}, VLDB 1996, pp.~330--341.}
+
+For example, select input rows with $40\leq id<100$. Completed sources cover
+$0\leq id<60$ and $50\leq id<80$. We read $[40,60)$ from the first source,
+$[60,80)$ from the second, and compute $[80,100)$.
+Let's define it formally via predicates:
+\begin{itemize}
+  \item $T(t)$: $t$ is an input tuple
+  \item $A(t,h)$: $h$ is tuple with alignment of tuple $t$
+  \item $p(t)$: the new SQL predicate $P$ evaluates to \texttt{TRUE} on $t$
+  \item $c_i(t)$: cached source $i$ has tuple with alginment for which the original predicate$P_i$ evaluates to \texttt{TRUE} on $t$.
+\end{itemize}
+Order the selected cached sources from $1$ to $m$, source $i$ supplies part $B_i$, while the reminder we have to compute is $D$:
+\begin{align}
+ B_i &= \{(t,h)\mid T(t)\land A(t,h)\land p(t)\land c_i(t)
+                     \land \forall j<i:\neg c_j(t)\},
+                     \label{eq:cache-branch}\\
+ D &= \{t\mid T(t)\land p(t)\land \forall i\in\{1,\ldots,m\}:\neg c_i(t)\}.
+                     \label{eq:cache-difference}
+\end{align}
+Each requested hit is returned from the first valid source covering its
+input, or computed from $D$:
+\begin{equation}
+ \{(t,h)\mid T(t)\land A(t,h)\land p(t)\}
+   = B_1\uplus\cdots\uplus B_m
+     \uplus\{(t,h)\mid t\in D\land A(t,h)\}.
+ \label{eq:cache-result}
+\end{equation}
+Here $\uplus$ joins disjoint sets of occurrences. This simple formal description can be implemented as large \texttt{UNION ALL} operation of the entries in cache.
+Figure~\ref{fig:cache-ranges} shows the same example, including the overlap
+between the two sources.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=.10cm,y=1cm,font=\footnotesize]
+  \foreach \x in {0,40,50,60,80,100} {
+    \draw[black!18] (\x,-.15) -- (\x,3.1);
+    \node[anchor=north] at (\x,-.2) {$\x$};
+  }
+  \node[anchor=east] at (-4,2.75) {request};
+  \draw[fill=black!8,draw=black!70] (40,2.52) rectangle (100,2.98);
+  \node[anchor=east] at (-4,1.95) {source 1};
+  \draw[fill=scanBlue!15,draw=scanBlue] (0,1.72) rectangle (60,2.18);
+  \node[anchor=east] at (-4,1.15) {source 2};
+  \draw[fill=scanGreen!16,draw=scanGreen] (50,.92) rectangle (80,1.38);
+  \fill[black!20] (50,.92) rectangle (60,1.38);
+  \node[anchor=east] at (-4,.35) {return from};
+  \draw[fill=scanBlue!20,draw=scanBlue] (40,.12) rectangle (60,.58);
+  \draw[fill=scanGreen!20,draw=scanGreen] (60,.12) rectangle (80,.58);
+  \draw[fill=scanOrange!20,draw=scanOrange] (80,.12) rectangle (100,.58);
+  \node at (50,.35) {source 1};
+  \node at (70,.35) {source 2};
+  \node at (90,.35) {compute};
+  \draw[scan arrow,black!55] (0,-.65) -- (103,-.65)
+    node[right]{row $id$};
+\end{tikzpicture}
+\caption{Example of resuable query with one predicate on the primary ID column.The new request uses source 1 for $[40,60)$, source 2 for
+$[60,80)$, and computes $[80,100)$. The gray overlap in source 2 is omitted
+because source 1 already contains those occurrences. Cached rows outside
+the new request are also omitted.}
+\label{fig:cache-ranges}
+\end{figure}
+
+With both sources valid, the missing inputs have this equivalent SQL
+description:
+\begin{lstlisting}[style=bioseq-search-sql,
+  caption={Input rows on which the expensive operation is still needed.},
+  label={lst:cache-missing-inputs}]
+SELECT id, seq
+FROM sequences
+WHERE id >= 40 AND id < 100 -- New query we want to compute
+  AND (id >=  0 AND id < 60) IS NOT TRUE -- Minus source 1 results 
+  AND (id >= 50 AND id < 80) IS NOT TRUE; -- Minus source 2 results
+\end{lstlisting}
+
+There are few important details about the implementation:
+\begin{itemize}
+  \item \textbf{I need to correctly handle NULLs} For a nullable predicate, \texttt{NOT P} also becomes
+    unknown when $P$ is unknown. \texttt{P IS NOT TRUE} includes both false
+    and unknown, so it keeps every input excluded from the earlier
+    cache.\footnote{PostgreSQL 17,
+    \href{https://www.postgresql.org/docs/17/functions-comparison.html}
+    {Comparison Functions and Operators}, Table~9.2.}
+  \item \textbf{Handle source failures} If source 1 fails, $c_1$ is falsethen $D$ should become $[40,50)\cup[80,100)$ so on error we don't abort execution and just adjust computed region (currently this is realised by adding barrier for each query and computing $D$ at the end)
+  \item \textbf{Column differences} There could be a case in which source supplies only subset of columns. I don't optimise this scenario as computing new columns still requires running entire pipeline again, so we assume here that the column list is always the same.
+\end{itemize}

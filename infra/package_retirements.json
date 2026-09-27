@@ -1,0 +1,17 @@
+{
+  "description": "Retired or safely parked hosts accept no new packages or retries and are not polled after the specified UTC epoch. User account-deletion deadlines apply only where explicitly recorded. Parked completed hosts retain their disks and collected local artifacts.",
+  "hosts": {
+    "test2-c7g": {"profile": "test2", "account_id": "090072209895", "stop_polling_after_epoch": 1790328000, "deletion_deadline": "2026-09-25T11:30:00+02:00"},
+    "test2-m4": {"profile": "test2", "account_id": "090072209895", "stop_polling_after_epoch": 1790328000, "deletion_deadline": "2026-09-25T11:30:00+02:00"},
+    "test2-m7a": {"profile": "test2", "account_id": "090072209895", "stop_polling_after_epoch": 1790328000, "deletion_deadline": "2026-09-25T11:30:00+02:00"},
+    "test2-m7i": {"profile": "test2", "account_id": "090072209895", "stop_polling_after_epoch": 1790328000, "deletion_deadline": "2026-09-25T11:30:00+02:00"},
+    "test3-m4": {"profile": "test3", "account_id": "918106144232", "instance_id": "i-09295b2ebfeb60ab3", "stop_polling_after_epoch": 1790489243, "reason": "x64 package and Docker matrices complete, artifacts locally hash-verified and published; stop idle compute, preserve EBS"},
+    "test3-m7a": {"profile": "test3", "account_id": "918106144232", "instance_id": "i-0a0d7fd853ae150bb", "stop_polling_after_epoch": 1790489243, "reason": "x64 package and Docker matrices complete, artifacts locally hash-verified and published; stop idle compute, preserve EBS"},
+    "test3-m7i": {"profile": "test3", "account_id": "918106144232", "instance_id": "i-044628f5bf4ec153e", "stop_polling_after_epoch": 1790489243, "reason": "x64 package, website and Docker work complete and collected; stop idle compute, preserve EBS"},
+    "test4-m4": {"profile": "test4", "account_id": "665651551858", "instance_id": "i-006a2d87202c3fdee", "stop_polling_after_epoch": 1790489243, "reason": "x64 package and Docker matrices complete, artifacts locally hash-verified and published; stop idle compute, preserve EBS"},
+    "test4-m7a": {"profile": "test4", "account_id": "665651551858", "instance_id": "i-029644d5d0b0c629f", "stop_polling_after_epoch": 1790489243, "reason": "x64 package and Docker matrices complete, artifacts locally hash-verified and published; stop idle compute, preserve EBS"},
+    "test4-m7i": {"profile": "test4", "account_id": "665651551858", "instance_id": "i-0c2570972b289f94a", "stop_polling_after_epoch": 1790489243, "reason": "x64 package and Docker matrices complete, artifacts locally hash-verified and published; stop idle compute, preserve EBS"},
+    "test3-c7g": {"profile": "test3", "account_id": "918106144232", "instance_id": "i-07404edee9cd5e10f", "stop_polling_after_epoch": 1790500665, "reason": "all 44 native package cells qualified and locally hash-verified; no live worker or container; final publication is local-only; stop idle compute, preserve EBS"},
+    "test4-c7g": {"profile": "test4", "account_id": "665651551858", "instance_id": "i-04ba9fa8bcc210350", "stop_polling_after_epoch": 1790500665, "reason": "all 44 native package cells qualified and locally hash-verified; no live worker or container; final publication is local-only; stop idle compute, preserve EBS"}
+  }
+}

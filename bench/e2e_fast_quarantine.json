@@ -1,0 +1,9 @@
+{
+  "families": {
+    "c7g": "User ended AWS tuple campaign; drain and collect for package builds",
+    "m4": "User ended AWS tuple campaign; drain and collect for package builds",
+    "m7a": "User ended AWS tuple campaign; drain and collect for package builds",
+    "m7i": "User ended AWS tuple campaign; drain and collect for package builds"
+  },
+  "hosts": {}
+}

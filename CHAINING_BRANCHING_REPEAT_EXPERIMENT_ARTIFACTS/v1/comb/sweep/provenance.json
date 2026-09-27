@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "experiment": "repaired_P_G_C_R_Run_L_adversarial_control",
+  "started_utc": "2026-09-02T12:32:32Z",
+  "completed_utc": "2026-09-02T12:41:32Z",
+  "command": [
+    "python3",
+    "original-minimap2-code/runl_comb_generate.py",
+    "--m",
+    "1,2,4,8,16,32,64,128,256,512,1024",
+    "--mapping-timeout-seconds",
+    "300",
+    "--output-root",
+    "original-minimap2-code/comb_sweep_final_20260902T123232Z"
+  ],
+  "case_values": [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+  "lane_widths": [2, 4, 8, 16, 32, 64],
+  "accepted_cases": 11,
+  "total_cases": 11,
+  "accepted_run_l_records": 66,
+  "generator_sha256": "e9262fdf19c8ae5d48ba35158a91bec1c2736d299e332e2dc79dacd6283a37b3",
+  "lchain_sha256": "879e032527fcfcccdab69ceda588a9bb7a106a94c0e880b0710bdf2b2ae215f3",
+  "makefile_sha256": "e7b970f150adab377fe1d5d32a2d374f64a109efbc4df25a8b3094c69d3742c1",
+  "standalone_source_manifest_sha256": "76caa0a203d90295107260cb553430aed171ff3b58f20069def2c9c112e338fc",
+  "minimap2_binary_sha256": "6533837743e94e3ec22db01b874e75efbc8b2c6402f232cde0d5709924efd6c3",
+  "minimap2_version": "2.31-r1302",
+  "rebuild_command": "make -B -j2 minimap2",
+  "rebuild_elapsed_seconds": 9.38,
+  "resource_usage": {
+    "wall_seconds": 446.43,
+    "user_seconds": 442.95,
+    "system_seconds": 1.28,
+    "maximum_rss_kib": 270312,
+    "swap_events": 0,
+    "pre_sweep_swap_used_kib": 2570496,
+    "post_sweep_swap_used_kib": 2570256
+  },
+  "acceptance_gates": [
+    "exact generated reference and query minimizer streams",
+    "valid intended-name and intended-length PAF records",
+    "one PAF record spanning selected private branch r_m_02 through r_m_39 on both axes",
+    "exact total and qualifying PAF counts",
+    "exact sorted score/index candidate array",
+    "exact complete f and p arrays",
+    "score-615 top multiplicity m with decreasing-position selection of e_m",
+    "all six complete MM_RUNL records match state-for-state emulation",
+    "maximal unit-predecessor run fast-batch oracle agrees with direct emulation",
+    "zero scalar validation and emulation errors",
+    "reference FASTA, query FASTA, and minimap2 binary SHA-256 provenance"
+  ],
+  "preserved_failed_pilot": "../comb_sweep_pilot"
+}

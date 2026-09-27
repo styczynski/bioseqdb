@@ -1,6 +1,0 @@
-{"event":"BENCHMARK_STARTED","timestamp":1783988278677,"benchmark_name":"bench_aligners_simd_chaining_endpoint_quality"}
-{"event":"CASE_STARTED","timestamp":1783988282692,"benchmark_name":"bench_aligners_simd_chaining_endpoint_quality","case_name":"simd_chaining_endpoint_qualification"}
-{"event":"CASE_STARTED","timestamp":1783988282692,"benchmark_name":"bench_aligners_simd_chaining_endpoint_quality","case_name":"simd_chaining_endpoint_zero_reference"}
-{"event":"CASE_RESULTS","timestamp":1783988313894,"benchmark_name":"bench_aligners_simd_chaining_endpoint_quality","case_name":"simd_chaining_endpoint_qualification","results":{"execution_tuples":[{"tuple":{"simd_chaining_endpoint_qualification":{"_":0}},"test_cases":{}}]}}
-{"event":"CASE_RESULTS","timestamp":1783988313894,"benchmark_name":"bench_aligners_simd_chaining_endpoint_quality","case_name":"simd_chaining_endpoint_zero_reference","results":{"execution_tuples":[{"tuple":{"simd_chaining_endpoint_zero_reference":{"_":0}},"test_cases":{}}]}}
-{"event":"EXECUTION_FINISHED","timestamp":1783988314097,"results_path":"/Users/styczynski/Code/bioseqdb/main/bioseq/../reporting/bioseq_bench/report_115.json"}

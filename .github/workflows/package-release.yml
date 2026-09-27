@@ -1,0 +1,856 @@
+name: Native package release
+
+"on":
+  push:
+    branches:
+      - main
+      - refactor/start-massive-refactor
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bioseq-native-package-release
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  metadata:
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/refactor/start-massive-refactor' &&
+       contains(github.event.head_commit.message, '[package-release]')) ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.ref == 'refs/heads/main' ||
+        github.ref == 'refs/heads/refactor/start-massive-refactor'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      package_version: ${{ steps.identity.outputs.package_version }}
+      release_prerelease: ${{ steps.identity.outputs.release_prerelease }}
+      release_tag_suffix: ${{ steps.identity.outputs.release_tag_suffix }}
+      release_title: ${{ steps.identity.outputs.release_title }}
+      release_already_complete: ${{ steps.release_check.outputs.release_already_complete }}
+
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Verify release source identity and matrix
+        id: identity
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 infra/package_builder.py matrix --require-complete \
+            > "$RUNNER_TEMP/package-matrix.json"
+          package_version=$(jq -r .package_version "$RUNNER_TEMP/package-matrix.json")
+          [[ "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          short_sha=${GITHUB_SHA:0:12}
+          case "$GITHUB_REF" in
+            refs/heads/main)
+              release_prerelease=false
+              release_tag_suffix=""
+              release_title="Bioseq native packages ${package_version} (${short_sha})"
+              ;;
+            refs/heads/refactor/start-massive-refactor)
+              release_prerelease=true
+              release_tag_suffix="-refactor-validation"
+              release_title="Bioseq native packages ${package_version} (${short_sha}) [refactor validation]"
+              ;;
+            *)
+              printf 'unsupported package release ref: %s\n' "$GITHUB_REF" >&2
+              exit 1
+              ;;
+          esac
+          printf 'package_version=%s\n' "$package_version" >> "$GITHUB_OUTPUT"
+          printf 'release_prerelease=%s\n' "$release_prerelease" >> "$GITHUB_OUTPUT"
+          printf 'release_tag_suffix=%s\n' "$release_tag_suffix" >> "$GITHUB_OUTPUT"
+          printf 'release_title=%s\n' "$release_title" >> "$GITHUB_OUTPUT"
+
+      - name: Reuse an already published exact-commit release
+        id: release_check
+        timeout-minutes: 15
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          PACKAGE_VERSION: ${{ steps.identity.outputs.package_version }}
+          RELEASE_PRERELEASE: ${{ steps.identity.outputs.release_prerelease }}
+          RELEASE_TAG_SUFFIX: ${{ steps.identity.outputs.release_tag_suffix }}
+          RELEASE_TITLE: ${{ steps.identity.outputs.release_title }}
+        run: |
+          set -Eeuo pipefail
+          printf 'release_already_complete=0\n' >> "$GITHUB_OUTPUT"
+          short_sha=${GITHUB_SHA:0:12}
+          tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}${RELEASE_TAG_SUFFIX}"
+          tag_target=$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq ".[] | select(.ref == \"refs/tags/$tag\") | .object.sha")
+          if [[ -n "$tag_target" ]]; then
+            test "$tag_target" = "$GITHUB_SHA"
+          fi
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            exit 0
+          fi
+          test "$tag_target" = "$GITHUB_SHA"
+          IFS=$'\t' read -r draft prerelease release_title < <(
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,name \
+              --jq '[.isDraft, .isPrerelease, .name] | @tsv'
+          )
+          test "$prerelease" = "$RELEASE_PRERELEASE"
+          test "$release_title" = "$RELEASE_TITLE"
+          if [[ "$draft" = true ]]; then
+            exit 0
+          fi
+          published_assets="$RUNNER_TEMP/published-release-assets"
+          mkdir -m 0700 "$published_assets"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --dir "$published_assets"
+          python3 infra/package_builder.py verify-release-assets \
+            --asset-dir "$published_assets" \
+            --expected-revision "$GITHUB_SHA"
+          for asset in "$published_assets"/*; do
+            digest=$(sha256sum "$asset" | cut -d ' ' -f 1)
+            printf '%s\t%s\n' "$(basename "$asset")" "sha256:$digest"
+          done | LC_ALL=C sort > "$RUNNER_TEMP/published-local-digests.txt"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq '.assets[] | [.name, .digest] | @tsv' \
+            | LC_ALL=C sort > "$RUNNER_TEMP/published-api-digests.txt"
+          diff -u \
+            "$RUNNER_TEMP/published-local-digests.txt" \
+            "$RUNNER_TEMP/published-api-digests.txt"
+          printf 'release_already_complete=1\n' >> "$GITHUB_OUTPUT"
+
+  launch:
+    needs: metadata
+    if: >-
+      needs.metadata.result == 'success' &&
+      needs.metadata.outputs.release_already_complete != '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    outputs:
+      controller_state: ${{ steps.state.outputs.controller_state }}
+
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Open launch-job builder access
+        id: access
+        timeout-minutes: 10
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        run: |
+          set -Eeuo pipefail
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/package-builder-key"
+          python3 infra/package_builder.py open-ci-access \
+            --region "$AWS_REGION" \
+            --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --owner-token "$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$GITHUB_JOB:$GITHUB_RUN_ATTEMPT" \
+            --receipt "$RUNNER_TEMP/package-builder-access.json"
+
+      - name: Persist lifecycle ownership and launch exact workers
+        id: controller
+        timeout-minutes: 285
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        run: |
+          set -Eeuo pipefail
+          python3 infra/package_builder.py launch-run \
+            --existing-only \
+            --optimization O3 \
+            --region "$AWS_REGION" \
+            --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --access-receipt "$RUNNER_TEMP/package-builder-access.json" \
+            --receipt "$RUNNER_TEMP/package-controller.json" \
+            --source-revision "$GITHUB_SHA" \
+            --owner-token "$GITHUB_REPOSITORY:package-release:$GITHUB_SHA"
+
+      - name: Export controller state
+        id: state
+        if: steps.controller.outcome == 'success'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          state=$(jq -r .state "$RUNNER_TEMP/package-controller.json")
+          case "$state" in
+            active) ;;
+            completed|finalized|collected) state=completed ;;
+            *) printf 'invalid launch controller state: %s\n' "$state" >&2; exit 1 ;;
+          esac
+          printf 'controller_state=%s\n' "$state" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve launch controller receipt
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bioseq-package-controller-${{ github.sha }}-launch
+          path: ${{ runner.temp }}/package-controller.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Revoke only launch-job access
+        if: always()
+        timeout-minutes: 15
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -f "$RUNNER_TEMP/package-builder-access.json" ]]; then
+            python3 infra/package_builder.py close-ci-access \
+              --region "$AWS_REGION" \
+              --receipt "$RUNNER_TEMP/package-builder-access.json"
+          fi
+
+  lifecycle_finalizer:
+    name: Receipt-owned lifecycle finalizer
+    needs:
+      - metadata
+      - launch
+      - poll_1
+      - poll_2
+      - poll_3
+      - poll_4
+      - wait_budget_exhausted
+      - finalize_release
+    if: >-
+      always() &&
+      needs.metadata.result != 'skipped'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+
+    steps:
+      - name: Check out the exact release commit for lifecycle cleanup
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Cancel only receipt-owned package work
+        if: always()
+        timeout-minutes: 25
+        shell: bash
+        env: &lifecycle_finalizer_aws_credentials
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        run: |
+          set -Eeuo pipefail
+          python3 infra/package_builder.py cleanup-run \
+            --if-present \
+            --region "$AWS_REGION" \
+            --receipt "$RUNNER_TEMP/package-controller.json" \
+            --source-revision "$GITHUB_SHA" \
+            --owner-token "$GITHUB_REPOSITORY:package-release:$GITHUB_SHA" \
+            --evidence "$RUNNER_TEMP/package-cleanup-evidence.json" \
+            2> "$RUNNER_TEMP/package-cleanup.stderr"
+
+      - name: Revoke every workflow-owned access rule independently
+        if: always()
+        timeout-minutes: 10
+        shell: bash
+        env: *lifecycle_finalizer_aws_credentials
+        run: |
+          set -Eeuo pipefail
+          mkdir -m 0700 "$RUNNER_TEMP/package-access-cleanup"
+          cleanup_status=0
+          for attempt in $(seq 1 "$GITHUB_RUN_ATTEMPT"); do
+            for owner_job in launch poll_1 poll_2 poll_3 poll_4 finalize_release; do
+              output="$RUNNER_TEMP/package-access-cleanup/${attempt}-${owner_job}.json"
+              set +e
+              python3 infra/package_builder.py close-ci-access-owner \
+                --region "$AWS_REGION" \
+                --owner-token "$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$owner_job:$attempt" \
+                > "$output" 2>&1
+              status=$?
+              set -e
+              if [[ $status -ne 0 ]]; then
+                cleanup_status=$status
+              fi
+            done
+          done
+          exit "$cleanup_status"
+
+      - name: Preserve lifecycle cleanup evidence
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bioseq-package-cleanup-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/package-controller.json
+            ${{ runner.temp }}/package-cleanup-evidence.json
+            ${{ runner.temp }}/package-cleanup.stderr
+            ${{ runner.temp }}/package-access-cleanup/*
+          if-no-files-found: ignore
+          retention-days: 30
+
+  poll_1:
+    name: Attach and poll (1/4)
+    needs: launch
+    if: >-
+      needs.launch.result == 'success' &&
+      needs.launch.outputs.controller_state == 'active'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    outputs:
+      controller_state: ${{ steps.state.outputs.controller_state }}
+
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Open poll-1 builder access
+        timeout-minutes: 10
+        shell: bash
+        env: &aws_credentials
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        run: |
+          set -Eeuo pipefail
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/package-builder-key"
+          python3 infra/package_builder.py open-ci-access \
+            --region "$AWS_REGION" --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --owner-token "$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$GITHUB_JOB:$GITHUB_RUN_ATTEMPT" \
+            --receipt "$RUNNER_TEMP/package-builder-access.json"
+      - name: Attach without launching and wait bounded slice 1
+        id: controller
+        timeout-minutes: 265
+        shell: bash
+        env: *aws_credentials
+        run: |
+          set -Eeuo pipefail
+          python3 infra/package_builder.py attach-run \
+            --existing-only --region "$AWS_REGION" --wait-seconds 15600 \
+            --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --access-receipt "$RUNNER_TEMP/package-builder-access.json" \
+            --receipt "$RUNNER_TEMP/package-controller.json" \
+            --source-revision "$GITHUB_SHA" \
+            --owner-token "$GITHUB_REPOSITORY:package-release:$GITHUB_SHA"
+      - name: Export poll-1 controller state
+        id: state
+        if: steps.controller.outcome == 'success'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          state=$(jq -r .state "$RUNNER_TEMP/package-controller.json")
+          case "$state" in active) ;; completed|finalized|collected) state=completed ;; *) exit 1 ;; esac
+          printf 'controller_state=%s\n' "$state" >> "$GITHUB_OUTPUT"
+      - name: Preserve poll-1 controller receipt
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bioseq-package-controller-${{ github.sha }}-poll-1
+          path: ${{ runner.temp }}/package-controller.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Revoke only poll-1 access
+        if: always()
+        timeout-minutes: 10
+        shell: bash
+        env: *aws_credentials
+        run: |
+          set -Eeuo pipefail
+          if [[ -f "$RUNNER_TEMP/package-builder-access.json" ]]; then
+            python3 infra/package_builder.py close-ci-access --region "$AWS_REGION" \
+              --receipt "$RUNNER_TEMP/package-builder-access.json"
+          fi
+
+  poll_2:
+    name: Attach and poll (2/4)
+    needs: poll_1
+    if: >-
+      needs.poll_1.result == 'success' &&
+      needs.poll_1.outputs.controller_state == 'active'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    outputs:
+      controller_state: ${{ steps.state.outputs.controller_state }}
+
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Open poll-2 builder access
+        timeout-minutes: 10
+        shell: bash
+        env: &aws_credentials_2
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        run: |
+          set -Eeuo pipefail
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/package-builder-key"
+          python3 infra/package_builder.py open-ci-access \
+            --region "$AWS_REGION" --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --owner-token "$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$GITHUB_JOB:$GITHUB_RUN_ATTEMPT" \
+            --receipt "$RUNNER_TEMP/package-builder-access.json"
+      - name: Attach without launching and wait bounded slice 2
+        id: controller
+        timeout-minutes: 265
+        shell: bash
+        env: *aws_credentials_2
+        run: |
+          set -Eeuo pipefail
+          python3 infra/package_builder.py attach-run \
+            --existing-only --region "$AWS_REGION" --wait-seconds 15600 \
+            --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --access-receipt "$RUNNER_TEMP/package-builder-access.json" \
+            --receipt "$RUNNER_TEMP/package-controller.json" \
+            --source-revision "$GITHUB_SHA" \
+            --owner-token "$GITHUB_REPOSITORY:package-release:$GITHUB_SHA"
+      - name: Export poll-2 controller state
+        id: state
+        if: steps.controller.outcome == 'success'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          state=$(jq -r .state "$RUNNER_TEMP/package-controller.json")
+          case "$state" in active) ;; completed|finalized|collected) state=completed ;; *) exit 1 ;; esac
+          printf 'controller_state=%s\n' "$state" >> "$GITHUB_OUTPUT"
+      - name: Preserve poll-2 controller receipt
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bioseq-package-controller-${{ github.sha }}-poll-2
+          path: ${{ runner.temp }}/package-controller.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Revoke only poll-2 access
+        if: always()
+        timeout-minutes: 10
+        shell: bash
+        env: *aws_credentials_2
+        run: |
+          set -Eeuo pipefail
+          if [[ -f "$RUNNER_TEMP/package-builder-access.json" ]]; then
+            python3 infra/package_builder.py close-ci-access --region "$AWS_REGION" \
+              --receipt "$RUNNER_TEMP/package-builder-access.json"
+          fi
+
+  poll_3:
+    name: Attach and poll (3/4)
+    needs: poll_2
+    if: >-
+      needs.poll_2.result == 'success' &&
+      needs.poll_2.outputs.controller_state == 'active'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    outputs:
+      controller_state: ${{ steps.state.outputs.controller_state }}
+
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Open poll-3 builder access
+        timeout-minutes: 10
+        shell: bash
+        env: &aws_credentials_3
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        run: |
+          set -Eeuo pipefail
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/package-builder-key"
+          python3 infra/package_builder.py open-ci-access \
+            --region "$AWS_REGION" --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --owner-token "$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$GITHUB_JOB:$GITHUB_RUN_ATTEMPT" \
+            --receipt "$RUNNER_TEMP/package-builder-access.json"
+      - name: Attach without launching and wait bounded slice 3
+        id: controller
+        timeout-minutes: 265
+        shell: bash
+        env: *aws_credentials_3
+        run: |
+          set -Eeuo pipefail
+          python3 infra/package_builder.py attach-run \
+            --existing-only --region "$AWS_REGION" --wait-seconds 15600 \
+            --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --access-receipt "$RUNNER_TEMP/package-builder-access.json" \
+            --receipt "$RUNNER_TEMP/package-controller.json" \
+            --source-revision "$GITHUB_SHA" \
+            --owner-token "$GITHUB_REPOSITORY:package-release:$GITHUB_SHA"
+      - name: Export poll-3 controller state
+        id: state
+        if: steps.controller.outcome == 'success'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          state=$(jq -r .state "$RUNNER_TEMP/package-controller.json")
+          case "$state" in active) ;; completed|finalized|collected) state=completed ;; *) exit 1 ;; esac
+          printf 'controller_state=%s\n' "$state" >> "$GITHUB_OUTPUT"
+      - name: Preserve poll-3 controller receipt
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bioseq-package-controller-${{ github.sha }}-poll-3
+          path: ${{ runner.temp }}/package-controller.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Revoke only poll-3 access
+        if: always()
+        timeout-minutes: 10
+        shell: bash
+        env: *aws_credentials_3
+        run: |
+          set -Eeuo pipefail
+          if [[ -f "$RUNNER_TEMP/package-builder-access.json" ]]; then
+            python3 infra/package_builder.py close-ci-access --region "$AWS_REGION" \
+              --receipt "$RUNNER_TEMP/package-builder-access.json"
+          fi
+
+  poll_4:
+    name: Attach and poll (4/4)
+    needs: poll_3
+    if: >-
+      needs.poll_3.result == 'success' &&
+      needs.poll_3.outputs.controller_state == 'active'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    outputs:
+      controller_state: ${{ steps.state.outputs.controller_state }}
+
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Open poll-4 builder access
+        timeout-minutes: 10
+        shell: bash
+        env: &aws_credentials_4
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        run: |
+          set -Eeuo pipefail
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/package-builder-key"
+          python3 infra/package_builder.py open-ci-access \
+            --region "$AWS_REGION" --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --owner-token "$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$GITHUB_JOB:$GITHUB_RUN_ATTEMPT" \
+            --receipt "$RUNNER_TEMP/package-builder-access.json"
+      - name: Attach without launching and wait bounded slice 4
+        id: controller
+        timeout-minutes: 265
+        shell: bash
+        env: *aws_credentials_4
+        run: |
+          set -Eeuo pipefail
+          python3 infra/package_builder.py attach-run \
+            --existing-only --region "$AWS_REGION" --wait-seconds 15600 \
+            --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --access-receipt "$RUNNER_TEMP/package-builder-access.json" \
+            --receipt "$RUNNER_TEMP/package-controller.json" \
+            --source-revision "$GITHUB_SHA" \
+            --owner-token "$GITHUB_REPOSITORY:package-release:$GITHUB_SHA"
+      - name: Export poll-4 controller state
+        id: state
+        if: steps.controller.outcome == 'success'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          state=$(jq -r .state "$RUNNER_TEMP/package-controller.json")
+          case "$state" in active) ;; completed|finalized|collected) state=completed ;; *) exit 1 ;; esac
+          printf 'controller_state=%s\n' "$state" >> "$GITHUB_OUTPUT"
+      - name: Preserve poll-4 controller receipt
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bioseq-package-controller-${{ github.sha }}-poll-4
+          path: ${{ runner.temp }}/package-controller.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Revoke only poll-4 access
+        if: always()
+        timeout-minutes: 10
+        shell: bash
+        env: *aws_credentials_4
+        run: |
+          set -Eeuo pipefail
+          if [[ -f "$RUNNER_TEMP/package-builder-access.json" ]]; then
+            python3 infra/package_builder.py close-ci-access --region "$AWS_REGION" \
+              --receipt "$RUNNER_TEMP/package-builder-access.json"
+          fi
+
+  wait_budget_exhausted:
+    name: Fail after the finite attach budget
+    needs: poll_4
+    if: >-
+      always() &&
+      needs.poll_4.result == 'success' &&
+      needs.poll_4.outputs.controller_state == 'active'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report bounded continuation exhaustion
+        shell: bash
+        run: |
+          printf '%s\n' \
+            'package workers remain active after four 260-minute attach slices; refusing unbounded recursion' >&2
+          exit 1
+
+  finalize_release:
+    name: Finalize, collect, and publish
+    needs: [metadata, launch, poll_1, poll_2, poll_3, poll_4]
+    if: >-
+      always() &&
+      needs.metadata.result == 'success' &&
+      needs.metadata.outputs.release_already_complete != '1' &&
+      (needs.launch.outputs.controller_state == 'completed' ||
+       needs.poll_1.outputs.controller_state == 'completed' ||
+       needs.poll_2.outputs.controller_state == 'completed' ||
+       needs.poll_3.outputs.controller_state == 'completed' ||
+       needs.poll_4.outputs.controller_state == 'completed')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Open finalizer builder access
+        timeout-minutes: 10
+        shell: bash
+        env: &finalizer_aws_credentials
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
+        run: |
+          set -Eeuo pipefail
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/package-builder-key"
+          python3 infra/package_builder.py open-ci-access \
+            --region "$AWS_REGION" --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --owner-token "$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$GITHUB_JOB:$GITHUB_RUN_ATTEMPT" \
+            --receipt "$RUNNER_TEMP/package-builder-access.json"
+
+      - name: Finalize the exact completed controller run
+        id: finalize
+        timeout-minutes: 240
+        shell: bash
+        env: *finalizer_aws_credentials
+        run: |
+          set -Eeuo pipefail
+          python3 infra/package_builder.py finalize-run \
+            --existing-only --region "$AWS_REGION" \
+            --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --access-receipt "$RUNNER_TEMP/package-builder-access.json" \
+            --receipt "$RUNNER_TEMP/package-controller.json" \
+            --source-revision "$GITHUB_SHA" \
+            --owner-token "$GITHUB_REPOSITORY:package-release:$GITHUB_SHA"
+
+      - name: Collect and verify exact release assets
+        id: collect
+        timeout-minutes: 25
+        shell: bash
+        env: *finalizer_aws_credentials
+        run: |
+          set -Eeuo pipefail
+          python3 infra/package_builder.py collect \
+            --region "$AWS_REGION" \
+            --run-result infra/package_build_infra/.runtime/last-run.json \
+            --output-dir "$RUNNER_TEMP/release-assets" \
+            --expected-revision "$GITHUB_SHA" \
+            --controller-receipt "$RUNNER_TEMP/package-controller.json"
+          printf 'PACKAGE_COLLECTION_SUCCEEDED=1\n' >> "$GITHUB_ENV"
+
+      - name: Preserve verified packages
+        if: steps.collect.outcome == 'success'
+        timeout-minutes: 10
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bioseq-packages-${{ github.sha }}
+          path: ${{ runner.temp }}/release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Create deterministic GitHub release
+        if: steps.collect.outcome == 'success'
+        timeout-minutes: 20
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          PACKAGE_VERSION: ${{ needs.metadata.outputs.package_version }}
+          RELEASE_PRERELEASE: ${{ needs.metadata.outputs.release_prerelease }}
+          RELEASE_TAG_SUFFIX: ${{ needs.metadata.outputs.release_tag_suffix }}
+          RELEASE_TITLE: ${{ needs.metadata.outputs.release_title }}
+        run: |
+          set -Eeuo pipefail
+          short_sha=${GITHUB_SHA:0:12}
+          tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}${RELEASE_TAG_SUFFIX}"
+          notes="$RUNNER_TEMP/release-notes.md"
+          if [[ "$RELEASE_PRERELEASE" = true ]]; then
+            printf '%s\n' \
+              "Validation prerelease for refactor/start-massive-refactor." \
+              "Native PostgreSQL 17 packages for the repository-declared distro and architecture matrix." \
+              "Tag convention: bioseq-packages-v<package-version>-<12-character-source-SHA>-refactor-validation." \
+              "Source commit: ${GITHUB_SHA}" > "$notes"
+          else
+            test "$RELEASE_PRERELEASE" = false
+            printf '%s\n' \
+              "Native PostgreSQL 17 packages for the repository-declared distro and architecture matrix." \
+              "Tag convention: bioseq-packages-v<package-version>-<12-character-source-SHA>." \
+              "Source commit: ${GITHUB_SHA}" > "$notes"
+          fi
+          python3 infra/package_builder.py verify-release-assets \
+            --asset-dir "$RUNNER_TEMP/release-assets" \
+            --expected-revision "$GITHUB_SHA"
+
+          verify_assets() {
+            local expected_assets="$RUNNER_TEMP/expected-assets.txt"
+            local observed_assets="$RUNNER_TEMP/observed-assets.txt"
+            local digest
+            for asset in "$RUNNER_TEMP"/release-assets/*; do
+              digest=$(sha256sum "$asset" | cut -d ' ' -f 1)
+              printf '%s\t%s\n' "$(basename "$asset")" "sha256:$digest"
+            done | LC_ALL=C sort > "$expected_assets"
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              --jq '.assets[] | [.name, .digest] | @tsv' \
+              | LC_ALL=C sort > "$observed_assets"
+            diff -u "$expected_assets" "$observed_assets"
+          }
+
+          tag_target=$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq ".[] | select(.ref == \"refs/tags/$tag\") | .object.sha")
+          if [[ -n "$tag_target" ]]; then
+            test "$tag_target" = "$GITHUB_SHA"
+          fi
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            test "$tag_target" = "$GITHUB_SHA"
+            IFS=$'\t' read -r draft prerelease release_title < <(
+              gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+                --json isDraft,isPrerelease,name \
+                --jq '[.isDraft, .isPrerelease, .name] | @tsv'
+            )
+            test "$prerelease" = "$RELEASE_PRERELEASE"
+            test "$release_title" = "$RELEASE_TITLE"
+            if [[ "$draft" = false ]]; then
+              verify_assets
+              exit 0
+            fi
+          else
+            release_flags=(--draft)
+            if [[ "$RELEASE_PRERELEASE" = true ]]; then
+              release_flags+=(--prerelease)
+            else
+              test "$RELEASE_PRERELEASE" = false
+            fi
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$notes" \
+              "${release_flags[@]}"
+          fi
+
+          tag_target=$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq ".[] | select(.ref == \"refs/tags/$tag\") | .object.sha")
+          test "$tag_target" = "$GITHUB_SHA"
+          IFS=$'\t' read -r draft prerelease release_title < <(
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,name \
+              --jq '[.isDraft, .isPrerelease, .name] | @tsv'
+          )
+          test "$draft" = true
+          test "$prerelease" = "$RELEASE_PRERELEASE"
+          test "$release_title" = "$RELEASE_TITLE"
+          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq 'select(.draft == true) | .id')
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq '.[].id' > "$RUNNER_TEMP/stale-draft-asset-ids.txt"
+          while IFS= read -r asset_id; do
+            [[ "$asset_id" =~ ^[0-9]+$ ]]
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10"
+          done < "$RUNNER_TEMP/stale-draft-asset-ids.txt"
+
+          gh release upload "$tag" "$RUNNER_TEMP"/release-assets/* \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          expected=$(find "$RUNNER_TEMP/release-assets" -maxdepth 1 -type f | wc -l | tr -d ' ')
+          observed=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets | length')
+          test "$observed" = "$expected"
+          verify_assets
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
+          IFS=$'\t' read -r draft prerelease release_title < <(
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,name \
+              --jq '[.isDraft, .isPrerelease, .name] | @tsv'
+          )
+          test "$draft" = false
+          test "$prerelease" = "$RELEASE_PRERELEASE"
+          test "$release_title" = "$RELEASE_TITLE"
+          verify_assets
+
+      - name: Revoke only finalizer-job access (always)
+        if: always()
+        timeout-minutes: 10
+        shell: bash
+        env: *finalizer_aws_credentials
+        run: |
+          set -Eeuo pipefail
+          if [[ -f "$RUNNER_TEMP/package-builder-access.json" ]]; then
+            python3 infra/package_builder.py close-ci-access \
+              --region "$AWS_REGION" \
+              --receipt "$RUNNER_TEMP/package-builder-access.json"
+          fi

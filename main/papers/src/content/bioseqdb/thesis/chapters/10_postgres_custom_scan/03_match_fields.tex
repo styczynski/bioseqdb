@@ -1,0 +1,191 @@
+\section{Dispatch buffer as glue between Postgres scan and alignment pipeline}
+\label{sec:match-placeholder-injection}
+
+I still need to explain how exactly \texttt{CustomBioseqScan} works with worker-architecture shown in Figure~\ref{fig:sequence-scan-lifecycle}.
+The main abstraction here is the dispatch buffer which is reposible for transferring data between Postgres and workers.
+
+Figure~\ref{fig:execcustomscan-dispatch} shows how Panel~(a) of Figure~\ref{fig:sequence-scan-lifecycle} looks in the context of Postgres scan.
+\texttt{BioseqScan} asks for the next row from TAM. This row is placed into dispatch buffer (locator only) and dispatch buffer holds all the structures presented before~\ref{fig:sequence-scan-lifecycle} - scanners.
+The dispatch buffer code then handles all view copies to the workers.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\scriptsize,
+  pg/.style={scan box,minimum width=3.55cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  hook/.style={scan hit,minimum width=4.05cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  tam/.style={scan output,minimum width=3.85cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  stagelab/.style={anchor=north west,font=\scriptsize\bfseries,
+    text=black!45,inner sep=0pt},
+  note/.style={font=\scriptsize,text=black!60,inner sep=1pt,align=center},
+  callarr/.style={scan arrow},
+  altarr/.style={scan arrow,draw=scanBlue}]
+% three code regions
+\fill[scanOrange!8,rounded corners=1.2pt]
+  (0.06,-1.70) rectangle (4.78,9.88);
+\node[stagelab] at (0.16,9.80) {BioseqScan};
+\fill[scanBlue!9,rounded corners=1.2pt]
+  (4.90,-1.70) rectangle (9.78,9.88);
+\node[stagelab] at (5.00,9.80) {Dispatch buffer code};
+\fill[scanGreen!8,rounded corners=1.2pt]
+  (9.90,-1.70) rectangle (15.50,9.88);
+\node[stagelab] at (10.00,9.80) {TAM};
+% BioseqScan
+\node[pg] (exec) at (2.42,9.20) {\texttt{ExecCustomScan}};
+\node[hook] (locator) at (2.42,8.00) {locator row};
+\node[pg] (retnow) at (2.42,2.30) {return one row};
+% Dispatch buffer
+\node[draw=scanOrange,fill=scanOrange!12,rounded corners=2.5pt,
+  minimum width=4.37cm,minimum height=1.50cm,anchor=center] (bufbox) at (7.34,6.30) {};
+\node at (7.34,6.82) {locator slots};
+\foreach \i in {0,1,2,3} {
+  \draw[draw=scanOrange,fill=white]
+    (5.55+0.90*\i,5.78) rectangle ++(.78,.48);
+  \node at (5.94+0.90*\i,6.02) {\tiny loc};
+}
+\node[draw=black!40,rounded corners=2pt,dashed,
+  minimum width=4.37cm,minimum height=2.10cm,anchor=center] (scanframe) at (7.34,4.12) {};
+\node[anchor=north west,font=\scriptsize\itshape,text=black!70]
+  at (5.25,5.10) {session + scanners};
+\foreach \i in {0,1} {
+  \draw[draw=black!45,fill=white]
+    (5.30,4.45-0.72*\i) rectangle (9.38,4.82-0.72*\i);
+  \foreach \j in {0,...,9}
+    \draw[draw=black!40,fill=white]
+      (5.42+0.38*\j,4.52-0.72*\i) rectangle ++(.32,.24);
+}
+\foreach \j in {0,1,4}
+  \draw[draw=scanBlue,fill=scanBlue!35]
+    (5.42+0.38*\j,4.52) rectangle ++(.32,.24);
+\node[draw=scanGreen,fill=scanGreen!14,
+  minimum width=1.18cm,minimum height=.72cm] (w1) at (5.88,0.55) {worker 1};
+\node[draw=scanGreen,fill=scanGreen!14,
+  minimum width=1.18cm,minimum height=.72cm] (w2) at (7.34,0.55) {worker 2};
+\node[draw=scanGreen,fill=scanGreen!14,
+  minimum width=1.18cm,minimum height=.72cm] (w3) at (8.80,0.55) {worker 3};
+% TAM
+\node[tam] (usertam) at (12.24,9.20) {user table};
+\node[note] at (13.48,8.58) {locator + metadata};
+\node[tam] (colcache) at (12.24,4.12) {column cache};
+\node[note] at (11.18,2.82) {load stripe};
+\node[draw=scanGreen,fill=scanGreen!9,rounded corners=2pt,
+  minimum width=4.08cm,minimum height=1.70cm,anchor=center] (fragbox) at (12.24,1.00) {};
+\node[font=\scriptsize] at (12.24,1.62) {fragment sub-table};
+\foreach \i in {0,1,2,3} {
+  \draw[draw=scanGreen,fill=scanGreen!22]
+    (10.45+0.90*\i,0.32) rectangle (11.20+0.90*\i,1.28);
+  \node[font=\tiny] at (10.825+0.90*\i,0.80) {f\i};
+}
+% ExecCustomScan asks the user-table TAM for the next locator
+\draw[callarr] (exec)--(usertam);
+% locator comes back: drop below the user table, then a long run into the east side
+\draw[callarr,rounded corners=2.5pt]
+  (usertam.south)--++(0,-0.92)--(locator.east);
+% place into buffer from the middle of the locator's south side
+\draw[callarr,rounded corners=2.5pt]
+  (locator.south)--++(0,-1.42)--(bufbox.west);
+\node[note,align=center] at (4.05,6.55) {place into\\buffer};
+% not-full loop: long last segment into the east side, not a tight top corner
+\draw[callarr,dashed,rounded corners=2.5pt]
+  (bufbox.east)--(14.85,6.30)--(14.85,9.06)--([yshift=-4pt]usertam.east);
+\node[note,align=center] at (13.12,6.85)
+  {fetch next row\\if batch not full};
+% full buffer opens scanners on the backend thread
+\draw[callarr] (bufbox.south)--(scanframe.north);
+\node[note] at (6.18,5.34) {run next batch};
+% scanners load fragments. workers never touch TAM or the cache
+\draw[callarr] (scanframe.east)--(colcache.west);
+\node[note] at (9.82,4.42) {miss};
+\draw[callarr] (colcache.south)--(fragbox.north);
+\draw[callarr,dashed]
+  ([yshift=-8pt]colcache.west)--([yshift=-8pt]scanframe.east);
+\node[note] at (9.82,3.78) {copy};
+\coordinate (viewbus) at (7.34,1.90);
+\draw[rounded corners=2pt,thick] (scanframe.south)--(viewbus);
+\draw[callarr,rounded corners=2.5pt] (viewbus)-|(w1.north);
+\draw[callarr,rounded corners=2.5pt] (viewbus)--(w2.north);
+\draw[callarr,rounded corners=2.5pt] (viewbus)-|(w3.north);
+\node[note] at (8.72,2.22) {provide view copy};
+% drain hits enter the east side of the return box, not along its bottom
+\draw[callarr,rounded corners=2.5pt]
+  (w1.west)--++(-0.45,0)|-(retnow.east);
+\node[note] at (3.55,1.15) {drain hits};
+\draw[callarr,dashed,rounded corners=2.5pt]
+  (retnow.west)--++(-0.55,0)|-(exec.west);
+\node[note,align=left,anchor=west] at (0.52,5.85) {Postgres fetches\\next tuple};
+% no search: leave the locator to the right, hydrate via cache, return into south
+\draw[altarr,rounded corners=2.5pt]
+  (locator.south east)--++(0.40,0)--++(0,-0.28)--(15.15,7.44)
+  --(15.15,4.12)--(colcache.east);
+\draw[altarr,rounded corners=2.5pt]
+  ([xshift=20pt]colcache.south)--++(0,-0.48)--(15.15,3.36)
+  --(15.15,-1.12)--(2.42,-1.12)--(retnow.south);
+\node[note,text=scanBlue,align=center] at (7.34,-1.40)
+  {no search: hydrate via cache, then return};
+\end{tikzpicture}
+\caption{Inside \texttt{ExecCustomScan}, the following things happen:
+\texttt{BioseqScan} holds dispatch buffer and fetches a locator handles it to the buffer logic and retrieves results from it.
+The dispatch buffer stores locators, then builds a session that holds scanners.
+A scanner miss reads the fragment sub-table through the TAM column cache and copies the fragment into a slot.
+Workers receive a view copy from the scanners.
+Black arrows show the normal alignmen execution path, however it might happen that we don't perform alignment and just want to return the sequences itself.
+In that case the flow uses blue arrows (there's no \texttt{mmsearch} in the query) and \texttt{BioseqScan} hydrates the sequence row through cache and just returns it without interacting with dispatch buffer.
+Dashed arrows repesent loops here.}
+\label{fig:execcustomscan-dispatch}
+\end{figure}
+
+The collect loop is the gap between batch~1 and batch~2 in panel~(d) of Figure~\ref{fig:sequence-scan-lifecycle}.
+\texttt{BioseqScan} may call the user-table TAM many times before it returns to fill in the dispatch buffer.
+The backend thread that owns the scanners performs fragment reads, while workers only see the view copy described in panel~(b).
+
+\subsection{Returning results back to Postgres}
+
+Now I not only need to build the tuple but somehow explain to Postgres that certain values correspond to requested values of function calls like \texttt{bioseq.dp\_score(t.seq)}.
+PostgreSQL evaluates output expressions through an expression tree. Before
+returning its first alignment hit, the executor walks this tree and replaces the function calls with \texttt{Const} nodes. 
+It writes the hit's values and null flags
+into these nodes and rebuilds the output-expression evaluator so that it
+reads the changed fields.
+This makes Postgres know that we already computed these values. The idea was created by analyzing how ParadeDB provides its search results\coderef{paradedb/pg_search/src/postgres/customscan/basescan/mod.rs}
+{ParadeDB current-result score}{exec_custom_scan}{1784}
+
+\begin{algorithm}[htbp]
+\caption{How to return tuple}
+\label{alg:scan-project-hit}
+\small
+\begin{enumerate}
+  \item Restore the original columns.
+  \item For every requested BioseqDB function like \path{score(seq)}, \path{target_start(seq)}, \path{cigar(seq)} and so on, write its field from this hit into the
+    corresponding typed value node.
+  \item Rebuild the evaluator, then evaluate the output expressions.
+  \item Return the resulting SQL row
+\end{enumerate}
+\end{algorithm}
+
+\subsection{Supporting joins}
+
+A join can lift a helper such as \texttt{bioseq.score(t.pk)} out of the scan that produced the hit and an outer join can also emit a null row when one input has no match.
+
+The \texttt{Const} rewrite from the previous subsection is nice execution trick inside \texttt{BioseqScan}, but the join planner does not see those constants.
+It still sees an ordinary function call, so PostgreSQL may copy that call onto the other input of a \texttt{LEFT JOIN}, or evaluate it again in a \texttt{Join} or \texttt{Aggregate} node.
+
+PostgreSQL's \texttt{PlaceHolderVar} exactly to resolve this issue, however it's suprisingly low volume of documentation about it. I only found old mailing list archive, where it's described as an anti-COALESCE: the expression keeps its value on a matching row and is forced to \path{NULL} on a missing row~\autocite{lane2010_placeholdervar}.
+The \texttt{PlaceHolderVar} records the relation at which the expression must be computed and the value then rises through the plan like a column.
+When an outer join nulls that relation, the placeholder becomes \path{NULL} (a \texttt{Const} cannot do this as it's always the same value).
+\coderef{postgres17/src/include/nodes/pathnodes.h}
+  {PostgreSQL expression placement}{PlaceHolderVar}{2750}
+
+Without that wrapper the following could happen:
+\begin{itemize}
+  \item The inner scan of a \texttt{LEFT JOIN} receives \texttt{bioseq.cigar(t1.pk)} even though the helper belongs to \texttt{t1} and that scan rewrites a function it does not own.
+  \item A \texttt{Join} or \texttt{Aggregate} node calls the C++ stub. As I mentioned the function does not compute an alignment (the actual value is only scan-provided), so we get an error.
+  \item Mishandling of \path{NULL} values:An unmatched outer-join row keeps a filled score instead of SQL \path{NULL} or \texttt{ORDER BY bioseq.score(t.pk)} after a join can sort on all-null keys.
+\end{itemize}
+
+ParadeDB uses the same mechanism for \texttt{pdb.score} and its planner function wraps the call in a \texttt{PlaceHolderVar} when the query has a join or an aggregate, so the custom scan keeps emitting the score and upper nodes do not re-run the function.
+\coderef{paradedb/pg_search/src/postgres/customscan/projections.rs}
+  {ParadeDB score placement}{placeholder_support}{314}
+
+In BioSeqDB I do this using \texttt{SupportRequestSimplify} hook as \texttt{bioseq\_placeholder\_support}, where we kip placeholders when there's no joins or aggregates.

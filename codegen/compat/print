@@ -1,0 +1,35 @@
+#pragma once
+
+#if __has_include_next(<print>)
+#  include_next <print>
+#else
+#  include <cstdio>
+#  include <format>
+#  include <utility>
+
+// libstdc++ 13 predates C++23 <print>, while the official LLVM Linux
+// LibTooling binaries use the libstdc++ ABI.  Keep this host-codegen-only
+// compatibility surface equivalent to the two std::println overloads used by
+// the generator; production bioseq targets do not include this directory.
+namespace std {
+
+template <typename... arguments_t>
+inline void println(
+    FILE* stream,
+    format_string<arguments_t...> format,
+    arguments_t&&... arguments) {
+    const auto rendered = std::format(
+        format, std::forward<arguments_t>(arguments)...);
+    std::fwrite(rendered.data(), 1, rendered.size(), stream);
+    std::fputc('\n', stream);
+}
+
+template <typename... arguments_t>
+inline void println(
+    format_string<arguments_t...> format,
+    arguments_t&&... arguments) {
+    std::println(stdout, format, std::forward<arguments_t>(arguments)...);
+}
+
+}  // namespace std
+#endif

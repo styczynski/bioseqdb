@@ -1,0 +1,14 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(Boost REQUIRED COMPONENTS filesystem json regex)
+find_dependency(expected-lite CONFIG REQUIRED)
+find_dependency(fmt CONFIG REQUIRED)
+find_dependency(optional-lite CONFIG REQUIRED)
+find_dependency(string-view-lite CONFIG REQUIRED)
+find_dependency(variant-lite CONFIG REQUIRED)
+
+include("${CMAKE_CURRENT_LIST_DIR}/jinja2cpp-targets.cmake")
+
+check_required_components(jinja2cpp)

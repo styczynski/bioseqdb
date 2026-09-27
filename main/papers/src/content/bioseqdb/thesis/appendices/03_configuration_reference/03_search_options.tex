@@ -1,0 +1,61 @@
+\section{Per-search options}
+\label{sec:appendix-search-options}
+\label{sec:appendix-options-precedence}
+
+Additionally instead of operating on global settings, user can also provide single object as third parameter to the \texttt{mmsearch} function call.
+
+\info{Parameter encoding}{
+  Currently the enum options are encoded by integers - they correspond to the global GUCs, but you can use only numbers. 
+  This is just unimplemented feature - the types of the options should be changed to strings and encoded to internal enum int values.
+  It was requiring less effort to expose internal representation, so it was left as is, see listing below~\ref{lst:configuration-options}.
+}
+
+Encoding of parameters as integer values:
+\begin{lstlisting}[style=bioseq-search-sql,
+  caption={Passing options by 3rd argument of mmsearch},
+  label={lst:configuration-options}]
+SELECT (public.aligner_options(
+  minimizer_algorithm => 0,
+  index_read_requirement => 1)).*;
+\end{lstlisting}
+
+Every options is available below, for meaning and usage check the GUC tables:
+\input{appendices/03_configuration_reference/04_options_table}
+
+\subsection{The index-read requirement}
+\label{sec:appendix-options-index-policy}
+
+This is special field that has no GUC equivalent, that is only available via \texttt{aligner\_options}. This is special flag very useful during testing and controls
+how index reader behaves.
+
+\begingroup
+\small
+\setlength{\tabcolsep}{3pt}
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{.25\linewidth}
+  >{\raggedright\arraybackslash}p{.07\linewidth}
+  >{\raggedright\arraybackslash}p{.25\linewidth}
+  >{\raggedright\arraybackslash}p{\dimexpr.43\linewidth-6\tabcolsep\relax}@{}}
+\caption{Special option controling index reader}
+\label{tab:configuration-index-requirement}\\
+\toprule
+\textbf{Options field} & \textbf{Type} & \textbf{Value} & \textbf{Description}\\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Options field} & \textbf{Type} & \textbf{Value} & \textbf{Description}\\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\multirow[t]{3}{=}{\nolinkurl{index_read_requirement}} &
+\multirow[t]{3}{=}{int} &
+\textbf{0: \texttt{allow}}\par(default) &
+If no compatible index is available, seeds can be recomputed from scratch. This is the most useful in practical sense as it allows the largest flexibility for user. \\*
+& & 1: \nolinkurl{require_absent} &
+Never read index even if it exists, always recompute seeds from scratch. Additionally setting this option will produce errors if deffered index update is ON. 
+Practically used in testing scenarios to see what happens if index does not exist.\\*
+& & 2: \nolinkurl{require_compatible_persisted} &
+Hard requirement that index must allways exist. If the index does not exist or is incompatible (different k/w parameters etc.), the query will produce error before execution. \\
+\end{longtable}
+\endgroup
+

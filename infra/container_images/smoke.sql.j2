@@ -1,0 +1,26 @@
+\set ON_ERROR_STOP on
+SET statement_timeout = '90s';
+SELECT current_user, version();
+CREATE EXTENSION IF NOT EXISTS bioseq_cache;
+CREATE EXTENSION IF NOT EXISTS bioseq;
+CREATE TABLE bioseq_container_smoke (id integer PRIMARY KEY, seq bioseq.seq('dna4', 64)) USING bioseq;
+INSERT INTO bioseq_container_smoke
+SELECT 1, string_agg(translate(md5(i::text), '0123456789abcdef', 'ACGTACGTACGTACGT'), '' ORDER BY i)::bioseq.seq('dna4', 64)
+FROM generate_series(1, 32) AS i;
+SELECT id, bioseq.cigar(seq) AS cigar FROM bioseq_container_smoke WHERE public.mmsearch(seq, seq);
+CREATE TEMP TABLE observed AS
+SELECT id{% for function in functions %}, bioseq.{{ function }}(seq) AS {{ function }}{% endfor %}
+FROM bioseq_container_smoke WHERE public.mmsearch(seq, seq);
+SELECT * FROM observed;
+SELECT 1 / (count(*) > 0 AND bool_and(cigar IS NOT NULL AND length(cigar::text) > 0))::integer AS self_search_valid FROM observed;
+EXPLAIN (ANALYZE, VERBOSE, BUFFERS)
+SELECT id{% for function in functions %}, bioseq.{{ function }}(seq) AS {{ function }}{% endfor %}
+FROM bioseq_container_smoke WHERE public.mmsearch(seq, seq);
+CREATE TABLE bioseq_container_empty (value integer) USING bioseq;
+VACUUM (ANALYZE) bioseq_container_empty;
+INSERT INTO bioseq_container_empty VALUES (42);
+VACUUM (ANALYZE) bioseq_container_empty;
+SELECT 1 / (count(*) = 1 AND sum(value) = 42)::integer AS empty_vacuum_reinsert_valid FROM bioseq_container_empty;
+DROP TABLE bioseq_container_empty;
+DROP TABLE bioseq_container_smoke;
+SELECT 'BIOSEQ_CONTAINER_SMOKE_OK' AS result;

@@ -1,1 +1,0 @@
-../bin/minimap2-gpu ../data/ref/ref.mmi ../data/query/hg002_100k.fasta --config ../config.json > out.log

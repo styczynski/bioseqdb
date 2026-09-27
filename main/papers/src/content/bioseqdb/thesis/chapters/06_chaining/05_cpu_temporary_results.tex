@@ -1,0 +1,60 @@
+
+\section{BioseqDB SIMD performance comparison}
+
+I perfomed intermediate testing to verify if predictions coming from synthetic results can be correct.
+
+The test used $|T|=500Mbps$ and $|Q|=5Mbps$ sequences  with just one $N=1$ occurence (this means that this is very optimistic case of random scenario)
+
+\todo{Replace this section with final results or remove it entirely (the b panel is misleading and there's no interpretation of the results.). For anyone reading: this is just old test I found to illustrate performance so it's probably outdated and misleading because for backtracking there is single SIMD algorithm. Benchmarking framwork resuses labels but it's the same algorithm in panel B for B1/B5 and it makes no sense at all}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.0,transform shape,x=1cm,y=1cm,
+  font=\footnotesize,>=Latex]
+  \node[anchor=west,font=\bfseries] at (.10,9.55)
+    {(a) Chaining};
+  \draw[->] (2.50,5.10)--(12.15,5.10) node[right] {ms};
+  \foreach \x/\lab in {0/0,20/20,40/40,60/60,80/80,100/100,120/120}
+    {
+      \draw (2.50+.075*\x,5.00)--(2.50+.075*\x,5.20);
+      \node[anchor=north] at (2.50+.075*\x,4.97) {\lab};
+    }
+  \node[anchor=east] at (2.35,8.55) {B1 scalar};
+  \node[anchor=east] at (2.35,7.35) {B1 exact SIMD};
+  \node[anchor=east] at (2.35,6.15) {B5 bounded SIMD};
+  \draw[fill=chainGray!32,draw=chainGray!90!black]
+    (2.50,8.17) rectangle (2.50+.075*115.286,8.93);
+  \draw[fill=chainBlue!22,draw=chainBlue!90!black]
+    (2.50,6.97) rectangle (2.50+.075*101.885,7.73);
+  \draw[fill=chainOrange!25,draw=chainOrange!95!black]
+    (2.50,5.77) rectangle (2.50+.075*67.012,6.53);
+  \node[anchor=west] at (2.66+.075*115.286,8.55) {115.286};
+  \node[anchor=west] at (2.66+.075*101.885,7.35) {101.885};
+  \node[anchor=west] at (2.66+.075*67.012,6.15) {67.012};
+
+  \node[anchor=west,font=\bfseries] at (.10,4.15)
+    {(b) Backtrack};
+  \draw[->] (2.50,-.30)--(10.10,-.30) node[right] {ms};
+  \foreach \x/\lab in {0/0,2/2,4/4,6/6,8/8,10/10,12/12}
+    {
+      \draw (2.50+.58*\x,-.40)--(2.50+.58*\x,-.20);
+      \node[anchor=north] at (2.50+.58*\x,-.43) {\lab};
+    }
+  \node[anchor=east] at (2.35,3.15) {B1 scalar};
+  \node[anchor=east] at (2.35,1.95) {B1 exact SIMD};
+  \node[anchor=east] at (2.35,.75) {B5 bounded SIMD};
+  \draw[fill=chainGray!32,draw=chainGray!90!black]
+    (2.50,2.77) rectangle (2.50+.58*11.769,3.53);
+  \draw[fill=chainBlue!22,draw=chainBlue!90!black]
+    (2.50,1.57) rectangle (2.50+.58*8.549,2.33);
+  \draw[fill=chainOrange!25,draw=chainOrange!95!black]
+    (2.50,.37) rectangle (2.50+.58*8.345,1.13);
+  \node[anchor=west] at (2.65+.58*11.769,3.15) {11.769};
+  \node[anchor=west] at (2.65+.58*8.549,1.95) {8.549};
+  \node[anchor=west] at (2.65+.58*8.345,.75) {8.345};
+\end{tikzpicture}
+\caption{Recorded times for the three CPU modes}
+\label{fig:chaining-mode-times}
+\end{figure}
+
+The figure above depicts only two runs and presents only quick prototyping test measurements to judge if we are going in right direction.

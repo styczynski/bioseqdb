@@ -5,10 +5,10 @@
         "--clang-tidy",
         "--all-scopes-completion",
         "--header-insertion-decorators",
-        "-pretty", 
+        "-pretty",
         "--background-index",
         "--experimental-modules-support",
-        "--compile-commands-dir=/Users/styczynski/Code/bioseqdb/main/build/"
+        "--compile-commands-dir=${workspaceFolder}/build/"
     ],
     "C_Cpp.intelliSenseCacheSize": 9120,
     "C_Cpp.intelliSenseMemoryLimit": 6096,
@@ -77,5 +77,5 @@
         "regex": "cpp",
         "future": "cpp"
     },
-    "cmake.sourceDirectory": "/Users/styczynski/Code/bioseqdb/main"
+    "cmake.sourceDirectory": "${workspaceFolder}"
 }

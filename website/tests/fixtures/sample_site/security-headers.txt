@@ -1,0 +1,16 @@
+# Bioseq static-deployment security headers (§15.5).
+#
+# Host-agnostic deployment contract / sample: files alone cannot enforce
+# clickjacking protection, so the real header set (including the header-only
+# frame-ancestors directive) is recorded here for the deploying host to apply.
+# website/tests/support/static_fixture_server.py reads this file and applies
+# every header below to every response; tests/integration/test_browser.py
+# asserts they are present.
+#
+# Format: one "Header-Name: value" per line; blank lines and lines starting with
+# '#' are ignored. This is the same restrictive CSP as the base template's meta
+# element PLUS the header-only frame-ancestors 'none' directive.
+Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'
+X-Content-Type-Options: nosniff
+Referrer-Policy: strict-origin-when-cross-origin
+Permissions-Policy: accelerometer=(), autoplay=(), camera=(), display-capture=(), fullscreen=(self), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()

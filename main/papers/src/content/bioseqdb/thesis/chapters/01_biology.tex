@@ -1,116 +1,72 @@
-% Chapter 1 draft: General biological introduction.
-% Internal provenance and chronology audit:
-%   research_audit/ch01_docs.md
-% Current implementation anchors:
-%   DOC0321
-%   main/bioseq/backend/sequences/sequences.cppm
-%   main/bioseq/io/{fasta,fastq,pipeline,public_api}.cppm
-%   main/bioseq/sql/bioseq--1.0.sql
-% Scholarly references are given as full footnotes so this chapter remains
-% readable independently. Primary sources are also registered in the thesis
-% bibliography where they are reused by later chapters.
-
-\section{Biological sequences as information-bearing observations}
+\section{Biological context}
 \label{sec:biology-sequences}
 
-Most biological records processed by BioSeqDB ultimately derive from molecular
-observations, although synthetic and computationally constructed sequences are
-valid inputs as well. In either case, an alignment algorithm does not receive a
-molecule. It receives an ordered sequence of symbols. This distinction is
-elementary and important. A physical DNA molecule has chemical structure,
-direction, complementary strands and a history inside a cell. A database value
-is a finite string together with metadata that describes how the string was
-obtained and how its symbols should be interpreted. A reliable computational
-system must preserve enough of that interpretation to distinguish, for
-example, a nucleotide sequence from a protein sequence and an unknown base
-from an ordinary base.
+"Significant scrutiny and attention have been given to genome-sequencing costs and how they are calculated since the beginning of the field of genomics in the late 1980s". \cite{nhgri_sequencing_cost_2026}
+NHGRI (National Human Genome Research Institute) has carefully tracked costs per genome and expose this data publically.
+
+
+In the last 15 years, there has been seen a massive development of sequencing technologies. Companies like Applied Biosystems, Illumina, Roche, and Pacific Biosciences have developed a plethora of sequencing platforms, e.g. SOLiD, GS FLX, and PacBio. These tools are able to generate an enormous amount of data in a matter of days. As an example, Illumina NextSeq generates up to 360 Gbp, split into reads of length up to 150 bp in merely 2 days (data taken from Illumina website). \\
+ 
+\noindent Although those platforms vary in detail, the general idea behind them is as follows:
+\begin{enumerate}
+\item DNA is fragmented through physical and chemical methods. Adapters are appended to the ends of the fragments to form what is called a sequencing library.
+\item Fragments of unwanted size or self-ligated adapters are removed from the library.
+\item The library is immobilized on a chemical bead so that it can be steadily observed.
+\item Amplification is performed, e.g. through PCR emulsion
+\item A combination of optical devices and fluorophores is used to make reads.
+\end{enumerate}
+
+With new advancements in sequencing technologies, the cost of sequencing a genome has been decreasing significantly to the point where most popular open databases store more than 10s of petabytes of data.
+To make this data usesable researchers often need to perform search operations:
+\begin{itemize}
+\item For bioinvestigative resarch: does this genomic sequence already contains known genes? Does it contain a known mutation? Is it a known pathogen?
+\item For evolutionary biology: is this genomic sequence a known evolutionary lineage? What is the genetic distance between this sequence and a known sequence?
+\item For legal research: is this DNA sample from known individual? Does it represent known kinship to someone else?
+\end{itemize}
+This search operation is using an operation called "sequence alignment" which is the core concept of this thesis.
 
 \subsection{DNA, ribonucleic acid (RNA), and protein alphabets}
 
-DNA is a polymer whose monomers contain one of four canonical bases:
+DNA is a polymer containing one of four bases:
 adenine, cytosine, guanine and thymine. Their conventional one-letter symbols
 form the alphabet
 \[
   \Sigma_{\mathrm{DNA4}} =
   \{\mathtt{A},\mathtt{C},\mathtt{G},\mathtt{T}\}.
 \]
-The order of symbols is normally written from the \(5'\) end of a strand to its
-\(3'\) end. DNA in a chromosome is usually double-stranded. Adenine pairs with
-thymine, while cytosine pairs with guanine. Consequently, the sequence
-\(\mathtt{ACGTT}\) on one strand determines
-\(\mathtt{AACGT}\) on the opposite strand when that strand is also written in
-the \(5'\)-to-\(3'\) direction. The second string is the \emph{reverse
-complement} of the first. A mapper cannot assume that an observed read has the
-same orientation as the stored reference. It commonly has to consider both the
-forward sequence and its reverse complement.
 
 Four symbols are sufficient for an unambiguous DNA string, but experimental
-data are not always unambiguous. The symbol \(\mathtt{N}\) conventionally means
+data introduces ambiguity. The symbol \(\mathtt{N}\) conventionally means
 that the nucleotide at a position is unknown or was not resolved. Other
 International Union of Pure and Applied Chemistry (IUPAC) codes describe sets
-of possible bases, such as a purine at a position. These
-are uncertainty symbols, not additional chemical bases. Treating
-\(\mathtt{N}\) as if it were an ordinary fifth base would change the meaning of
-exact matches, hashes and alignment scores. A sequence type therefore needs an
-explicit alphabet and an explicit policy for symbols outside that alphabet.
-The current BioSeqDB sequence core follows this principle at the software level:
-its compact ranges are parameterized by an alphabet, and current code paths
-instantiate both four-symbol and five-symbol DNA representations. The later
-sequence-abstraction chapter explains how those symbols are packed and viewed.
+of possible bases, such as a purine at a position.
 
 RNA uses adenine, cytosine, guanine and uracil, so a basic RNA alphabet replaces
 \(\mathtt{T}\) with \(\mathtt{U}\). Many RNA molecules are transcribed from
-DNA. Protein-coding transcripts can then be translated in groups of three
-nucleotides, called codons, into amino acids. For protein-coding genes,
-transcription followed by translation yields the familiar DNA-to-RNA-to-protein
-flow. Crick's central dogma is the narrower restriction that residue-by-residue
-sequence information cannot flow from a protein sequence into either another
-protein sequence or a nucleic acid~\cite{crick_central_dogma_1970}. It is not
-a claim that all RNA is translated. Ribosomal, transfer, regulatory and many
-other RNAs are functional without becoming proteins.
+DNA. \cite{crick_central_dogma_1970}
 
-A protein sequence is written over the twenty common amino-acid symbols.
-Protein comparison differs from nucleotide comparison in two ways that matter
-computationally. First, the alphabet is much larger. Second, substitutions are
-not naturally divided into only ``same'' and ``different''. Replacing an amino
-acid with one having similar chemical properties may be more plausible than a
-replacement with a very different residue. Protein aligners therefore often
-use empirical substitution matrices. Nucleotide aligners can also use a
-matrix, but a simpler match, mismatch and gap model is often appropriate.
-Table~\ref{tab:biological-alphabets} summarizes the distinctions that storage
-and alignment must preserve.
+A protein sequence is written over the twenty common amino-acid symbols. It's alphabet is notably larger, but in most cases we can translate it to a DNA sequence and use the DNA alphabet directly.
 
-\begin{table}[ht]
+\begin{table}[H]
   \centering
   \small
   \setlength{\tabcolsep}{4pt}
-  \begin{tabularx}{\linewidth}{
-      @{}
-      >{\raggedright\arraybackslash}p{0.16\linewidth}
-      >{\raggedright\arraybackslash}p{0.27\linewidth}
-      >{\raggedright\arraybackslash}X
-      @{}
-    }
+  \begin{tabular}{@{}ll@{}}
     \toprule
-    Sequence class & Core symbols & Computational consequences \\
+    Sequence class & Core symbols \\
     \midrule
-    DNA &
-    \(\mathtt{A,C,G,T}\), with optional ambiguity codes &
-    Reverse-complement orientation is biologically meaningful. Unknown and
-    degenerate symbols need explicit matching and hashing policies. \\
-    RNA &
-    \(\mathtt{A,C,G,U}\), with optional ambiguity codes &
-    Transcript sequences may cross splice junctions. A system must state
-    whether it preserves \(\mathtt{U}\) or normalizes it to
-    \(\mathtt{T}\). \\
-    Protein &
-    Twenty common amino-acid symbols, plus data-format conventions for
-    ambiguity and exceptional residues &
-    A larger alphabet requires more bits per symbol. Substitution scores
-    normally encode biochemical or evolutionary similarity rather than
-    equality alone. \\
+    DNA4 &
+    \(\mathtt{A,C,G,T}\) \\
+    RNA4 &
+    \(\mathtt{A,C,G,U}\) \\
+    DNA5 &
+    \(\mathtt{A,C,G,T,N}\) \\
+    RNA5 &
+    \(\mathtt{A,C,G,U,N}\) \\
+    PROT20 &
+    Twenty common amino-acid symbols \\
     \bottomrule
-  \end{tabularx}
+  \end{tabular}
   \caption{Biological alphabets and the distinctions that a sequence-processing
     system must not erase. The table describes biological data in general. It
     does not assert that every alphabet or ambiguity convention is exposed by
@@ -118,351 +74,254 @@ and alignment must preserve.
   \label{tab:biological-alphabets}
 \end{table}
 
-The alphabet is thus part of the type of a sequence, not a decorative label.
-It determines the set of valid symbols, the minimum number of bits needed for
-storage, whether a complement operation exists and how comparison should
-behave. This observation connects basic biology to a central systems decision
-in BioSeqDB: algorithms should consume a common sequence abstraction while
-remaining explicit about the alphabet represented by that abstraction.
+\section{Alignment operation}
 
-\section{From genomes to computational records}
-\label{sec:genomes-to-records}
+Due to nature of biological sequences, search must be able to match fragments that are non-exact, thus alignment operation is similar to popular fuzzy-search operations on normal text.
+The alignment can be viewed as a processes that optimises gaps (insertions and deletions) in a way to optimise similarity metric. High similarity score between parts of sequences can indicate that they share same evolutionary origin or have a common purpose. By comparing newly found sequences to already researched ones, we can deduce lots of relevant biological data. \cite{zpp_bio}
 
-\subsection{Genomes, chromosomes and assemblies}
+We will consider finite nonemptystrings over the DNA4 alphabet. A gap is a symbol indicated by \texttt{-}. An alignment is a process of adding gaps to the sequences so that they are of the same length and at the same time, there is no index where a gap occurs in both sequences.
 
-A \emph{genome} is the genetic material carried by an organism or biological
-sample. Depending on the organism and the question, it may be distributed
-among one or more chromosomes, plasmids or organellar molecules. The genome of
-a diploid individual contains homologous chromosome copies that need not be
-identical. A microbial sample can contain many species and strains at once.
-Consequently, ``the genome'' is not always one linear string.
+%TODO: Change those two sequences and replace this verbatim with nice looking tikz diagram similar to figure in 05_minimizers "Sliding minima from blockwise prefixes and suffixes. Blocks have the same width as the minimizer window ..." I want there to have nucleotide in coloured boxes (one color per A,C,T and G), "-" for delection without box. The sequences should be visually aligned and there should be cigar below with square-angled lines pointing to boxes/gaps describing each part - for example 2I should point to a gap of size 2
+As an example, let us present an alignment of $GATCAGATA$ and $CATTCAATCA$.
+One of the possible alignments is:
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  nucleotide/.style={minimum width=.48cm,minimum height=.48cm,
+    inner sep=0pt,line width=.55pt,font=\ttfamily\bfseries},
+  nuc A/.style={nucleotide,draw=Plum!80!black,fill=Plum!18},
+  nuc C/.style={nucleotide,draw=MidnightBlue!80!black,fill=MidnightBlue!14},
+  nuc G/.style={nucleotide,draw=OrangeRed!85!black,fill=OrangeRed!16},
+  nuc T/.style={nucleotide,draw=Green!60!black,fill=Green!15},
+  gap/.style={minimum width=.48cm,minimum height=.48cm,inner sep=0pt,
+    draw=none,fill=none,font=\ttfamily\bfseries},
+  row label/.style={anchor=east,font=\sffamily\scriptsize},
+  connector/.style={draw=black!35,line width=.45pt},
+  cigar/.style={minimum width=.48cm,minimum height=.40cm,inner sep=1pt,
+    draw=black!55,font=\ttfamily\scriptsize\bfseries},
+  cigar M/.style={cigar,fill=MidnightBlue!12},
+  cigar I/.style={cigar,fill=OrangeRed!16},
+  cigar D/.style={cigar,fill=Green!16}
+]
+  % Orthogonal source-to-alignment mappings are drawn first so boxes remain crisp.
+  \foreach \i/\c in {0/0,1/1,2/2,3/4,4/5,5/6,6/7,7/8,8/10} {
+    \pgfmathsetmacro{\sx}{.28+.67*\i}
+    \pgfmathsetmacro{\ax}{.58*\c}
+    \draw[connector] (\sx,3.20) -- (\sx,2.67) -| (\ax,2.40);
+  }
+  \foreach \i/\c in {0/0,1/1,2/2,3/3,4/4,5/5,6/7,7/8,8/9,9/10} {
+    \pgfmathsetmacro{\sx}{.10+.63*\i}
+    \pgfmathsetmacro{\ax}{.58*\c}
+    \draw[connector] (\ax,.70) -- (\ax,.15) -| (\sx,-.10);
+  }
 
-Sequencing and assembly software nevertheless have to produce finite records.
-A \emph{contig} is a contiguous consensus sequence assembled from overlapping
-evidence. Scaffolds can order or orient contigs while retaining unresolved
-gaps. A \emph{reference assembly} is a selected set of such sequences used as a
-coordinate system and comparison target. It is extremely useful, but it is not
-the unique biological truth for every sample. Regions absent from the
-reference, alternative haplotypes and repeated segments can all make a
-reference-centered explanation incomplete.
+  \node[row label] at (-.55,3.45) {target sequence};
+  \node[row label] at (-.55,2.15) {target alignment};
+  \node[row label] at (-.55,.95) {query alignment};
+  \node[anchor=east,font=\sffamily\scriptsize] at (-0.55,-0.35)
+    {query sequence};
 
-This distinction affects the interpretation of an alignment. Mapping a read
-to a reference says that the chosen reference interval is a plausible source
-or homologous locus under a scoring model. It does not prove that the sample
-is identical to the reference at that interval. It also does not prove that
-the reported location is unique when multiple loci are sufficiently similar.
-The alignment result must therefore retain coordinates, orientation, score
-and, when available, information about competing placements.
+  \foreach \i/\b in {0/G,1/A,2/T,3/C,4/A,5/G,6/A,7/T,8/A} {
+    \pgfmathsetmacro{\x}{.28+.67*\i}
+    \node[nuc \b] at (\x,3.45) {\b};
+  }
+  \foreach \c/\b in {0/G,1/A,2/T,4/C,5/A,6/G,7/A,8/T,10/A}
+    \node[nuc \b] at ({.58*\c},2.15) {\b};
+  \foreach \c in {3,9}
+    \node[gap] at ({.58*\c},2.15) {-};
 
-\subsection{Reads are measurements, not perfect substrings}
+  \foreach \c/\b in {0/C,1/A,2/T,3/T,4/C,5/A,7/A,8/T,9/C,10/A}
+    \node[nuc \b] at ({.58*\c},.95) {\b};
+  \node[gap] at ({.58*6},.95) {-};
+  \foreach \i/\b in {0/C,1/A,2/T,3/T,4/C,5/A,6/A,7/T,8/C,9/A} {
+    \pgfmathsetmacro{\x}{.10+.63*\i}
+    \node[nuc \b] at (\x,-.35) {\b};
+  }
 
-A sequencing instrument observes molecules and emits \emph{base calls}. A
-base call is the instrument's interpretation of a physical signal. The calls
-for one observed molecule or molecule fragment form a \emph{read}. Some
-protocols produce relatively short reads, others produce long reads, and
-paired-end protocols retain a relationship between two reads from opposite
-ends of a fragment. The categories are operational rather than absolute. What
-matters to an aligner is the joint profile of read length, error, orientation
-and expected biological divergence.
-
-FASTA stores named sequence records. FASTQ additionally associates each called
-symbol with a quality character. The widely used Phred convention expresses
-an estimated error probability \(p\) as
-\[
-  Q = -10\log_{10}p.
-\]
-The FASTQ format and the historical variation in its quality encodings are
-documented by Cock et al.~\cite{cock_fastq_2010}. A quality score is useful
-evidence, but it is neither a guarantee nor a biological property of the base
-itself. Calibration can vary by instrument, chemistry and processing pipeline.
-
-Sequencing errors are commonly described as substitutions, insertions and
-deletions. A substitution reports one symbol in place of another. An insertion
-adds a symbol relative to the underlying molecule or comparison target. A
-deletion omits one. Long-read and short-read technologies can have different
-mixtures and contexts of these errors, which is why one universal scoring
-preset is insufficient for all data~\cite{goodwin_ngs_2016,
-logsdon_long_read_2020}.
-
-\subsection{Biological variation and measurement error}
-
-Two homologous biological sequences can differ even if both are measured
-perfectly. A single-nucleotide variant changes one nucleotide. An insertion or
-deletion changes sequence length. Larger structural variants can duplicate,
-invert, move or remove longer intervals. Recombination and horizontal transfer
-can join segments with different histories. In transcript data, splicing
-removes introns and joins exons, so a mature RNA or complementary DNA (cDNA)
-read can correspond to multiple separated intervals in a genomic reference.
-
-The algorithm sees many of these events through the same small vocabulary:
-matches, substitutions and gaps. A mismatch may represent a true variant or a
-base-calling error. A gap may represent a biological insertion or deletion, a
-sequencing error, or a difference between the reference assembly and the
-sample. A split alignment may represent a structural variant, a splice
-junction, an assembly boundary or an experimental chimera. Interpretation
-therefore requires metadata and context in addition to the aligned strings.
-Figure~\ref{fig:variation-versus-error} traces how biological variation and
-measurement error can produce the same observed disagreement.
-
-\begin{figure}[ht]
-  \centering
-  \begin{tikzpicture}[
-      node distance=1.30cm and 1.80cm,
-      >=Latex,
-      box/.style={draw, rounded corners=2pt, align=center,
-                  minimum height=8mm, text width=25mm, fill=black!3},
-      cause/.style={draw, rounded corners=2pt, align=center,
-                    minimum height=8mm, text width=27mm, fill=black!7},
-      flow note/.style={font=\scriptsize, align=center, inner sep=1pt}
-    ]
-    \node[box] (reference) {reference\\assembly};
-    \node[box, below=of reference] (sample) {sample's true\\molecule};
-    \node[cause, right=of sample] (sequencing) {sequencing and\\base calling};
-    \node[box, right=of sequencing] (read) {observed\\query read};
-    \node[box, above=of read] (comparison) {sequence\\comparison};
-
-    \draw[<->, densely dashed] (reference) --
-      node[right, font=\scriptsize, align=left] {biological\\variation}
-      (sample);
-    \draw[->] (sample) --
-      node[midway, above=1pt, flow note] {true sample\\string}
-      (sequencing);
-    \draw[->] (sequencing) --
-      node[midway, above=1pt, flow note] {may add\\error}
-      (read);
-    \draw[->] (read) -- (comparison);
-    \draw[->] (reference) -- (comparison);
-  \end{tikzpicture}
-  \caption{Two sources of disagreement meet at the same comparison. Biological
-    variation separates the sample molecule from the reference, while
-    sequencing and base calling can separate the observed read from that
-    molecule. Alignment locates and describes disagreement. Metadata and
-    experimental context are needed to interpret its cause.}
-  \label{fig:variation-versus-error}
+  \draw[black!50,line width=.6pt] (7.00,-.82) -- (7.00,3.78);
+  \node[font=\sffamily\bfseries] at (9.35,3.50) {CIGAR};
+  \foreach \i/\op/\kind in {0/3M/M,1/1I/I,2/2M/M,3/1D/D,4/2M/M,5/1I/I,6/1M/M}
+    \node[cigar \kind] at ({7.58+.59*\i},2.92) {\op};
+  \node[anchor=north west,align=left,text width=4.55cm,
+        font=\sffamily\scriptsize] at (7.35,2.48) {%
+    \textbf{M}: both alignments consume a base (match or mismatch).\\[2pt]
+    \textbf{I}: the query consumes a base opposite a target gap.\\[2pt]
+    \textbf{D}: the target consumes a base opposite a query gap.};
+\end{tikzpicture}
+\caption{Alignment of the target sequence \texttt{GATCAGATA} and query
+sequence \texttt{CATTCAATCA}. Orthogonal connectors map each ungapped
+sequence position to its aligned column; gaps are intentionally unboxed.}
+\label{fig:biology-alignment-example}
 \end{figure}
 
-Figure~\ref{fig:variation-versus-error} explains why exact string equality is
-too strict and why alignment alone is not a variant caller. The comparison
-stage must tolerate plausible differences. Assigning a biological
-interpretation generally requires task-specific corroboration. Depending on
-the question, that evidence can include coverage, base qualities, sample
-relationships or experimental metadata.
-Table~\ref{tab:alignment-ambiguity} maps common alignment patterns to the
-distinct causes that remain unresolved at this stage.
-
-\begin{table}[ht]
-  \centering
-  \small
-  \setlength{\tabcolsep}{3pt}
-  \begin{tabularx}{\linewidth}{
-      @{}
-      >{\raggedright\arraybackslash}p{0.15\linewidth}
-      >{\raggedright\arraybackslash}X
-      >{\raggedright\arraybackslash}X
-      >{\raggedright\arraybackslash}p{0.18\linewidth}
-      @{}
-    }
-    \toprule
-    Observed pattern & Possible biological explanation &
-    Possible observational or representation explanation &
-    Alignment-level representation \\
-    \midrule
-    One symbol differs &
-    single-nucleotide variant or divergence between homologues &
-    base-calling error, consensus error or unresolved ambiguity &
-    mismatch or scored substitution \\
-    Extra or missing symbols &
-    insertion or deletion in the sample lineage &
-    insertion/deletion sequencing error or assembly gap &
-    one or more gap operations \\
-    Long discontinuity &
-    structural variant, rearrangement or splice junction &
-    chimeric read, reference discontinuity or assembly error &
-    long gap or split alignment \\
-    Several plausible locations &
-    repeated or duplicated biological sequence &
-    incomplete reference or query too short to disambiguate &
-    competing mappings with similar scores \\
-    \bottomrule
-  \end{tabularx}
-  \caption{The same alignment pattern can have several causes. The table is a
-    reminder that similarity search generates evidence. It does not by itself
-    determine the biological event.}
-  \label{tab:alignment-ambiguity}
-\end{table}
-
-\section{Reference and query are computational roles}
-\label{sec:reference-query-roles}
-
-Throughout this thesis, the \emph{reference} or \emph{target} is the sequence
-or sequence collection prepared for search, sometimes by building an index.
-The \emph{query} is the sequence presented for comparison against that target.
-These are roles in an operation, not fixed classes of molecule. A chromosome
-assembly can be a reference when reads are mapped to it and a query when it is
-compared with another assembly. A read set can be searched against a reference
-genome, against another read set to find overlaps, or against a database of
-known sequences. BioSeqDB's SQL-facing similarity predicate follows the same
-operational distinction by accepting a target sequence value and a query
-sequence value.
-
-The role assignment changes the engineering cost. Work spent once on a stable
-reference index can be amortized over many queries. If both inputs change for
-every comparison, as in an all-versus-all overlap workload, index construction
-and reuse have a different balance. A database makes this reuse question
-explicit because sequence values, indexes and query plans have managed
-lifetimes rather than being unrelated files produced by a script.
-
-Several coordinate conventions follow from the reference/query distinction.
-Positions are usually reported in the coordinate system of the stored target.
-The query can align in forward or reverse-complement orientation. Local
-alignment can consume only a portion of either input. Gaps advance one sequence
-without advancing the other. Split mappings can produce several target
-intervals for one query. These facts explain why an alignment result is richer
-than a Boolean answer and why downstream columns such as start, end,
-orientation, score and edit description are useful.
-
-\section{Why biological sequence comparison requires alignment}
-\label{sec:why-alignment}
-
-Exact equality answers whether two symbol strings are identical. Most
-biological questions ask something different: whether the strings can be
-explained as related sequences after a plausible number and arrangement of
-changes. A useful comparison must therefore answer three connected questions:
-
+\noindent There are 4 cases that can occur during alignments:
 \begin{enumerate}
-  \item \emph{Where} can the query be placed relative to the target?
-  \item \emph{How} do their symbols correspond, including substitutions and
-    gaps?
-  \item \emph{How credible} is that correspondence compared with alternatives?
+\item Insertion - a gap has been added to the first sequence
+\item Deletion - a gap has been added to the second sequence
+\item Mismatch - letters at a given index are different
+\item Match - letters at a given index are the same
 \end{enumerate}
 
-An \emph{alignment} makes the correspondence explicit by placing symbols in
-columns and introducing gaps where one sequence advances without the other.
-A scoring model rewards compatible symbol pairs and penalizes substitutions
-and gaps. Global alignment attempts to explain both inputs end to end. Local
-alignment searches for high-scoring similar regions. Semi-global and
-free-end-gap variants model cases in which one input is expected to be
-contained within another. Spliced and split alignment add structure for
-discontinuous relationships.
 
-The fully general dynamic-programming solution examines a matrix whose axes are
-the two sequences. That formulation is precise, but its work grows with the
-product of their lengths. Genome-scale tools therefore avoid evaluating most
-matrix cells. Modern mappers commonly identify short exact or near-exact
-anchors, connect mutually consistent anchors into chains, and perform detailed
-alignment only around promising chains. Minimap2 is a prominent example of
-this organization around seeding, chaining, and
-alignment~\cite{minimap2_paper}.
-BioSeqDB's current alignment pipeline is minimap2-derived. Individual stages
-are replaced or extended with CPU SIMD and GPU-oriented implementations.
+\section{Technical considerations}
 
-These biological constraints determine what those algorithms must
-preserve. They must handle strand orientation, tolerate both substitutions and
-length-changing differences, avoid being dominated by repeated sequence, and
-retain coordinates that can be joined with annotations. They must also avoid
-assigning biological meaning that the sequence comparison alone cannot
-support.
+A typical workflow for sequence analysis includes $3$ data formats - FASTA, FASTQ, and SAM/BAM. Reference genome, stored in FASTA, is aligned with millions of reads in the FASTQ file and the result of alignment is saved as SAM/BAM file. The reason for the reference genome being in FASTA and reads in FASTQ is that we assume that the reference genome is correct, but reads produced by sequencers can contain various errors. Moreover, we're more likely to score alignments with high-quality bases higher than the ones with low-quality.
 
-\section{Why place sequence analysis inside a database?}
-\label{sec:why-database-resident}
+\subsection{FASTA}
 
-Sequence analysis is often presented as a file-to-file transformation. A FASTA
-or FASTQ file enters a command-line program and an alignment file leaves it.
-That model is effective for a single tool invocation, but a real study also
-contains:
+FASTA is a text-based file format for storing nucleotide sequences. It is one of the most widely used formats in bioinformatics. The current standard specification is given by NCBI. Below is a description of the usually encountered version. \\
+
+\noindent It consists of a series of entries separated by a new line. Each entry starts with a single-line header. The header starts with \texttt{>} and contains various metadata about the following sequence, like the description of the sequence, library accession number, and submission date. After the header comes the sequence itself represented with standard IUB/IUPAC acid codes, split into lines of length usually not exceeding $80$ characters. Aside from A, C, T, G commonly encountered is code N, which means any of A/C/T/G. Lowercase letters are treated the same as uppercase. The usual extension is .fasta and .fa. An example FASTA file:
+
+%TODO: This verbatim with nice tikz diagram where on the left side we have text with line for "indentifier", "sequence" and on the left side we got text with lines to "HG_9357/2022" and "2022-03-01" with text "There's no standard for header, but usually metadata is separated by "|" or "/" characters"
+\begin{FastxFile}[fasta]
+(*@\FastxHeaderLine{>PartOfHumanGenome|HG_9357/2022|2022-03-01}@*)
+ACTTTGAGCTAGCATCGATTGGATCAGATGCAT
+ACTCATCGGCAGTCGCATCAGCTTGGACTACGT
+(*@\FastxHeaderLine{>PartOfMouseGenome|MG_5417/2019|2019-08-14}@*)
+ACTATAGGAGCAGANNNNNNNNCTAGAGACATC
+TCTGCGTNTNTTCCGGACGTACGTAGCATAGTC
+\end{FastxFile}
+
+\noindent The advantages of this format are simplicity and human readability. The downside is that it is not optimal in terms of size. To adhere to this issue, compression software is used, like gzip.
+
+
+\subsection{FASTQ}
+
+FASTQ is an extension of the FASTA format. It enhances FASTA by adding quality scores of sequences. It is a standard output format of sequencers. \\
+
+\noindent Each entry consists of $4$ lines. The first line starts with \texttt{@} and contains metadata about the sequence. The second line contains the sequence itself. The third line starts with \texttt{+} and may contain some additional metadata. The fourth line contains quality scores, represented by ASCII characters with codes from $33$ to $126$, one character per nucleotide. The file extension used is .fq and .fastq. Again, gzip can be used to reduce file size. An example FASTQ file:
+
+%TODO: This verbatim with nice tikz diagram where on the left side we have text (simialr to FASTA example) with line for "indentifier", "sequence", "quality scores" and "+ sign and identifier"
+\begin{FastxFile}[fastq]
+(*@\FastxHeaderLine{@HumanGenomeSequencerRead}@*)
+ACTACTAGACGG
+(*@\FastxSeparatorLine{+Genome20200301}@*)
+(*@\FastxQualityLine{*!]^#[$*@*!(}@*)
+\end{FastxFile}
+
+\noindent The quality score is usually a phread score, meaning $Q$ satisfies $Q = -10 \log_{10} p$, where $p$ is the probability of a corresponding nucleotide being incorrect. ASCII codes from $33$ to $126$ are mapped from $0$ to $93$.
+
+\Needspace{34\baselineskip}
+\subsection{CIGAR}
+
+CIGAR is an acronym for Concise Idiosyncratic Gapped Alignment Report and has been originally defined by the Exonerate alignment program. The CIGAR format is designed to contain the minimal information necessary for the reconstruction of an alignment. This format does not include nucleotides.
+\cite{cigar_nbis_explained}
+
 \begin{itemize}
-  \item sample identifiers,
-  \item collection conditions,
-  \item organism labels,
-  \item cohort membership,
-  \item reference versions,
-  \item quality-control decisions, and
-  \item derived annotations.
+\setlength{\topsep}{.35\baselineskip}
+\setlength{\itemsep}{.12\baselineskip}
+\setlength{\parsep}{0pt}
+\item M - match or mismatch
+\item D - deletion
+\item I - insertion
+\item S - soft clipping. Can occur only at the beginning or at the end of the alignment. Indicates that nucleotides are clipped from the alignment.
+\item H - hard clipping. The same as soft clipping, except that the clipped part is not present in the SEQ field of the SAM file.
+\item N - skipped region. Used for representing introns (part of the gene that is non-coded) in the alignment.
+\item = - match
+\item X - mismatch
 \end{itemize}
-When each stage writes another loosely coupled file, the
-relationship between a sequence and its provenance is maintained by file
-names, scripts and conventions outside the data itself.
 
-A database-resident design changes the unit of work. Instead of asking an
-aligner to process every record in a file, a relational query can first select
-the relevant samples. It can join them with the chosen reference or query set
-and invoke similarity search on the resulting sequence pairs. It can then
-aggregate or filter the results. A schematic workload is:
-\[
-  \text{metadata selection}
-  \;\longrightarrow\;
-  \text{candidate sequence pairs}
-  \;\longrightarrow\;
-  \text{alignment}
-  \;\longrightarrow\;
-  \text{relational result}.
-\]
-This organization is valuable for five reasons.
+% \section{Why place sequence analysis inside a database?}
+% \label{sec:why-database-resident}
 
-\begin{enumerate}
-  \item \textbf{Metadata and sequence remain addressable together.}
-    Alignment results can be related to sample, experiment and reference
-    records without reconstructing those relationships from external file
-    naming schemes.
-  \item \textbf{Cheap predicates can reduce expensive work.}
-    Filtering by sample attributes or indexed identifiers before alignment can
-    reduce the number of candidate comparisons. This is a planning
-    opportunity, not a guarantee that every SQL formulation will be optimal.
-  \item \textbf{Indexes acquire managed lifetimes.}
-    A sequence index can be associated with stored data and reused across
-    queries. Its construction, invalidation and selection become part of the
-    database system rather than an implicit side effect of a script.
-  \item \textbf{Results compose with ordinary relational operations.}
-    Coordinates, scores and edit summaries can feed joins, grouping and
-    aggregation. A biological workflow need not cross a process boundary after
-    every comparison step.
-  \item \textbf{Provenance and consistency have a common home.}
-    Transactions and typed columns can keep a sequence value, its metadata and
-    derived state synchronized. External resources and large data transfers
-    still exist, but their relationship to stored records can be made
-    explicit.
-\end{enumerate}
+% Sequence analysis is often presented as a file-to-file transformation. A FASTA
+% or FASTQ file enters a command-line program and an alignment file leaves it.
+% That model is effective for a single tool invocation, but a real study also
+% contains:
+% \begin{itemize}
+%   \item sample identifiers,
+%   \item collection conditions,
+%   \item organism labels,
+%   \item cohort membership,
+%   \item reference versions,
+%   \item quality-control decisions, and
+%   \item derived annotations.
+% \end{itemize}
+% When each stage writes another loosely coupled file, the
+% relationship between a sequence and its provenance is maintained by file
+% names, scripts and conventions outside the data itself.
 
-BioSeqDB implements this idea as a PostgreSQL extension rather than as a
-standalone aligner wrapped by SQL text. Current source exposes alphabet-aware
-sequence values and an \texttt{mmsearch} similarity predicate. Integration
-tests exercise searches over stored columns, constants, slices and joins.
-PostgreSQL custom scans then provide execution paths that can batch sequence
-work and return relational tuples. Later chapters explain the planner
-rewrites, storage layout, index persistence, caching and vectorized aggregates
-that make this interface more than a scalar function call.
+% A database-resident design changes the unit of work. Instead of asking an
+% aligner to process every record in a file, a relational query can first select
+% the relevant samples. It can join them with the chosen reference or query set
+% and invoke similarity search on the resulting sequence pairs. It can then
+% aggregate or filter the results. A schematic workload is:
+% \[
+%   \text{metadata selection}
+%   \;\longrightarrow\;
+%   \text{candidate sequence pairs}
+%   \;\longrightarrow\;
+%   \text{alignment}
+%   \;\longrightarrow\;
+%   \text{relational result}.
+% \]
+% This organization is valuable for five reasons.
 
-Database residence does not imply that all computation is free or that no data
-ever moves. Alignment remains expensive. GPU execution can require transfer to
-device memory. External sequence providers still require network and I/O
-boundaries. Large intermediate results can still dominate a query. The useful
-claim is narrower: sequence storage, candidate selection, alignment execution
-and downstream relational processing can participate in one managed system.
-That integration creates opportunities for reuse, batching and provenance that
-are difficult to obtain from a collection of unrelated file transformations.
+% \begin{enumerate}
+%   \item \textbf{Metadata and sequence remain addressable together.}
+%     Alignment results can be related to sample, experiment and reference
+%     records without reconstructing those relationships from external file
+%     naming schemes.
+%   \item \textbf{Cheap predicates can reduce expensive work.}
+%     Filtering by sample attributes or indexed identifiers before alignment can
+%     reduce the number of candidate comparisons. This is a planning
+%     opportunity, not a guarantee that every SQL formulation will be optimal.
+%   \item \textbf{Indexes acquire managed lifetimes.}
+%     A sequence index can be associated with stored data and reused across
+%     queries. Its construction, invalidation and selection become part of the
+%     database system rather than an implicit side effect of a script.
+%   \item \textbf{Results compose with ordinary relational operations.}
+%     Coordinates, scores and edit summaries can feed joins, grouping and
+%     aggregation. A biological workflow need not cross a process boundary after
+%     every comparison step.
+%   \item \textbf{Provenance and consistency have a common home.}
+%     Transactions and typed columns can keep a sequence value, its metadata and
+%     derived state synchronized. External resources and large data transfers
+%     still exist, but their relationship to stored records can be made
+%     explicit.
+% \end{enumerate}
 
-\section{Transition from biology to algorithms}
-\label{sec:biology-transition}
+% BioSeqDB implements this idea as a PostgreSQL extension rather than as a
+% standalone aligner wrapped by SQL text. It exposes alphabet-aware sequence
+% values and an \texttt{mmsearch} similarity predicate over stored columns,
+% constants, slices, and joins. PostgreSQL custom scans provide execution paths
+% that can batch sequence work and return relational tuples. Later chapters explain the planner
+% rewrites, storage layout, index persistence, caching and vectorized aggregates
+% that make this interface more than a scalar function call.
 
-The biological problem can now be stated in computational terms. The input is
-not simply ``DNA''. It is an alphabet-tagged reference or target, an
-alphabet-compatible query, orientation and coordinate conventions, and
-metadata describing the origin of both values. Differences can arise from
-evolution, within-population variation, transcript structure, sequencing error
-or incomplete representation. The required output is therefore not only a
-similarity decision. It is a defensible correspondence between positions,
-accompanied by enough score and coordinate information for later
-interpretation.
+% Database residence does not imply that all computation is free or that no data
+% ever moves. Alignment remains expensive. GPU execution can require transfer to
+% device memory. External sequence providers still require network and I/O
+% boundaries. Large intermediate results can still dominate a query. The useful
+% claim is narrower: sequence storage, candidate selection, alignment execution
+% and downstream relational processing can participate in one managed system.
+% That integration creates opportunities for reuse, batching and provenance that
+% are difficult to obtain from a collection of unrelated file transformations.
 
-The next chapter develops the algorithms that compute or approximate this
-correspondence at scale. It begins with exact dynamic programming to establish
-what an alignment optimizes. It then explains seed-and-extend methods,
-minimizer-based seeding and graph-based alternatives such as de Bruijn graphs.
-That progression connects the biological sources of disagreement described
-here to the design of BioSeqDB's processing pipeline. Minimizer extraction
-produces sketches, and target-index lookup turns matching sketches into
-candidate anchors. Chaining assembles the anchors into coherent placements.
-When an applicable edit predicate is present, an optional prefilter can reject
-candidates before final alignment. The final step computes alignment results
-and can emit a base-level traceback of matches, substitutions and gaps when the
-query requests it.
+% \section{Transition from biology to algorithms}
+% \label{sec:biology-transition}
+
+% The biological problem can now be stated in computational terms. The input is
+% not simply ``DNA''. It is an alphabet-tagged reference or target, an
+% alphabet-compatible query, orientation and coordinate conventions, and
+% metadata describing the origin of both values. Differences can arise from
+% evolution, within-population variation, transcript structure, sequencing error
+% or incomplete representation. The required output is therefore not only a
+% similarity decision. It is a scored correspondence between positions,
+% accompanied by enough score and coordinate information for later
+% interpretation.
+
+% The next chapter develops the algorithms that compute or approximate this
+% correspondence at scale. It begins with exact dynamic programming to establish
+% what an alignment optimizes. It then explains seed-and-extend methods,
+% minimizer-based seeding and graph-based alternatives such as de Bruijn graphs.
+% That progression connects the biological sources of disagreement described
+% here to the design of BioSeqDB's processing pipeline. Minimizer extraction
+% produces sketches, and target-index lookup turns matching sketches into
+% candidate anchors. Chaining assembles the anchors into coherent placements.
+% When an applicable edit predicate is present, an optional prefilter can reject
+% candidates before final alignment. The final step computes alignment results
+% and can emit a base-level traceback of matches, substitutions and gaps when the
+% query requests it.

@@ -1,0 +1,40 @@
+\label{chap:conclusion}
+
+BioSeqDB demonstrates that sequence search can be represented as a PostgreSQL
+execution operation rather than as a scalar call to an external mapper. The
+system stores packed biological sequences, constructs persistent minimizer
+indexes, and runs a minimap2-derived pipeline for seeding, chaining, filtering,
+and final extension. Planner support and custom scans preserve the batch
+structure required by SIMD and GPU implementations while presenting typed SQL
+results that can participate in filters, projections, and joins.
+
+The first research question concerned a shared representation for the
+algorithmic stages. Alphabet-generic compact ranges cover resident values,
+while lazy sequence views represent fragmented, sliced, and composed sources.
+Algorithms read the required region without first converting the complete
+value to a byte array. The second question concerned heterogeneous execution. Minimizer
+extraction and chaining provide regular work for the implemented SIMD and GPU
+routes. Dispatch follows explicit algorithm settings, input compatibility,
+index form, and resource availability. Final alignment uses banded or unbanded
+KSW2, adaptive Block Aligner, and GPU routes that may return specialized scripts
+before device dynamic programming. Optional prefilters may reject unsuitable
+candidates but do not replace alignment.
+
+The third question concerned database execution. A custom scan owns the search
+expression, batches input rows, and substitutes match fields into planned
+expressions. This design also permits multiple alignments for one input row.
+The fourth question concerned the surrounding data system. Physical sequence
+storage, persistent indexes, bounded ingestion, external-provider relation definitions,
+cache coordination, and source-driven SQL generation give the kernels explicit
+storage and lifecycle contracts.
+
+The remaining limits are operational and algorithmic. Some remote retrieval
+paths still require record-sized or archive-sized memory. Provider quotas are
+not coordinated across all PostgreSQL backends. Hardware-specific routes have
+batch-size thresholds and require broader evaluation on additional devices.
+GPU chaining may examine a bounded predecessor set, and seed and alignment
+backends retain route-specific contracts. The present mapper is centered on
+linear references rather than pangenome graphs. A relational database can
+nevertheless plan and execute batched
+sequence analysis while retaining typed data, bounded resources, persistent
+derived state, and explicit algorithm selection.

@@ -1,0 +1,308 @@
+/**
+ * @file
+ * @brief Generates fixed-target packed-sequence iteration probes.
+ */
+
+#ifndef BIOSEQ_TEST_INDEXES
+#error "fixed-target unit probes require BIOSEQ_TEST_INDEXES"
+#endif
+
+module @BIOSEQ_HIGHWAY_PROBE_PRIMARY_MODULE@;
+
+import std;
+import bioseq.highway.test_probe_contract;
+import bioseq.common.seqan_adapter;
+import bioseq.sequences;
+import :sequence_ops;
+
+namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail {
+
+namespace hn = hwy::HWY_NAMESPACE;
+
+/**
+ * @brief Records lane coverage and rank values from one SIMD iteration.
+ * @tparam p_range Compact-sequence range under test.
+ */
+template<class p_range>
+class iteration_receipt final {
+private:
+    using range_type = std::remove_cvref_t<p_range>;
+    using traits_type = typename range_type::traits;
+    using storage_unit_type = typename traits_type::storage_unit;
+    using simd_tag_type = hn::ScalableTag<storage_unit_type>;
+    static constexpr std::size_t k_maximum_lanes =
+        hn::MaxLanes(simd_tag_type{});
+
+    const range_type& source_;
+    std::vector<std::uint8_t> expected_;
+    std::array<std::size_t, k_maximum_lanes> starts_{};
+    std::array<std::size_t, k_maximum_lanes> counts_{};
+    std::size_t lanes_{};
+    std::size_t context_{};
+    bool valid_{true};
+
+    /**
+     * @brief Records one target-local callback invocation.
+     * @tparam p_simd_tag Highway descriptor type.
+     * @tparam p_mask Highway mask type.
+     * @tparam p_vector Highway vector type.
+     * @tparam p_offsets Lane-offset collection type.
+     * @param[in] simd_tag Active descriptor.
+     * @param[in] mask Valid input lanes.
+     * @param[in] incoming Packed ranks for the callback.
+     * @param[in] offsets Source storage offsets for each lane.
+     */
+    template<class p_simd_tag,
+             class p_mask,
+             class p_vector,
+             class p_offsets>
+    auto observe(
+        p_simd_tag& simd_tag,
+        const p_mask& mask,
+        const p_vector& incoming,
+        const p_offsets& offsets) -> void {
+        std::array<storage_unit_type, k_maximum_lanes> lane_values{};
+        std::array<storage_unit_type, k_maximum_lanes> lane_masks{};
+        hn::Store(incoming, simd_tag, lane_values.data());
+        hn::Store(
+            hn::VecFromMask(simd_tag, mask),
+            simd_tag,
+            lane_masks.data());
+        lanes_ = hn::Lanes(simd_tag);
+        for (std::size_t lane = 0U; lane < lanes_; ++lane) {
+            const std::size_t start =
+                offsets[lane] * traits_type::letters_per_unit;
+            if (counts_[lane] == 0U) starts_[lane] = start;
+            if (lane_masks[lane] == storage_unit_type{}) continue;
+            const std::size_t position = start + counts_[lane];
+            if (position >= expected_.size()
+                || static_cast<std::uint8_t>(lane_values[lane])
+                    != expected_[position]) {
+                valid_ = false;
+            }
+            ++counts_[lane];
+        }
+    }
+
+public:
+    /**
+     * @brief Creates a receipt with scalar ranks derived from the source.
+     * @param[in] source Sequence range retained for the probe lifetime.
+     */
+    explicit iteration_receipt(const range_type& source)
+        : source_(source) {
+        expected_.reserve(source.bp_size());
+        for (const auto rank : source.template iterable<logical_rank>()) {
+            expected_.push_back(static_cast<std::uint8_t>(rank));
+        }
+    }
+
+    /**
+     * @brief Runs immediate or delayed iteration for one context length.
+     * @param[in] context Required context length in logical bases.
+     * @param[in] delayed Whether to inspect the delayed callback path.
+     * @param[in] delay Requested callback delay.
+     */
+    auto run(
+        const std::size_t context,
+        const bool delayed,
+        const std::size_t delay = 0U) -> void {
+        context_ = context;
+        starts_.fill(0U);
+        counts_.fill(0U);
+        lanes_ = 0U;
+        valid_ = true;
+        if (!delayed) {
+            iterate_sequence_bp_simd_offsets(
+                source_, source_.begin(), source_.end(), context,
+                [this]<bool p_is_full>(
+                    std::bool_constant<p_is_full>,
+                    const auto& offsets,
+                    auto& simd_tag,
+                    auto& mask,
+                    auto&& incoming) -> void {
+                    observe(simd_tag, mask, incoming, offsets);
+                },
+                [](const auto&, auto&, auto&) -> void {});
+        } else {
+            iterate_sequence_bp_simd_offsets(
+                source_, source_.begin(), source_.end(), context,
+                [this]<bool p_is_full>(
+                    std::bool_constant<p_is_full>,
+                    const auto& offsets,
+                    auto& simd_tag,
+                    auto&,
+                    auto&&,
+                    auto delayed_mask,
+                    auto delayed_incoming) -> void {
+                    observe(
+                        simd_tag,
+                        delayed_mask,
+                        delayed_incoming,
+                        offsets);
+                },
+                [](const auto&, auto&, auto&) -> void {}, delay);
+        }
+    }
+
+    /**
+     * @brief Returns whether callbacks exactly and continuously cover the source.
+     * @return `true` when values and coverage match the scalar sequence.
+     */
+    [[nodiscard]] auto valid() const -> bool {
+        if (!valid_) return false;
+        if (source_.bp_size() < context_) {
+            return lanes_ == 0U
+                && std::ranges::all_of(counts_, [](const auto count) -> bool {
+                    return count == 0U;
+                });
+        }
+        if (lanes_ == 0U) return false;
+
+        std::vector<std::pair<std::size_t, std::size_t>> coverage;
+        coverage.reserve(lanes_);
+        for (std::size_t lane = 0U; lane < lanes_; ++lane) {
+            if (counts_[lane] == 0U || counts_[lane] < context_) {
+                return false;
+            }
+            coverage.emplace_back(
+                starts_[lane], starts_[lane] + counts_[lane]);
+        }
+        std::ranges::sort(coverage);
+        if (coverage.front().first != 0U
+            || coverage.back().second != source_.bp_size()) {
+            return false;
+        }
+        std::size_t covered_until = coverage.front().second;
+        for (std::size_t index = 1U; index < coverage.size(); ++index) {
+            if (coverage[index].first > covered_until) return false;
+            covered_until = std::max(covered_until, coverage[index].second);
+        }
+        return covered_until == source_.bp_size();
+    }
+};
+
+/**
+ * @brief Builds a deterministic pseudo-random alphabet sequence.
+ * @tparam p_alphabet Logical alphabet type.
+ * @param[in] size Number of symbols to create.
+ * @param[in] state Initial generator state.
+ * @return Generated logical symbols.
+ */
+template<class p_alphabet>
+[[nodiscard]] auto make_sequence(
+    const std::size_t size,
+    std::uint64_t state) -> std::vector<p_alphabet> {
+    std::vector<p_alphabet> sequence(size);
+    constexpr std::size_t k_alphabet_size =
+        seqan3::alphabet_size<p_alphabet>;
+    for (std::size_t index = 0U; index < size; ++index) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        const auto rank = static_cast<seqan3::alphabet_rank_t<p_alphabet>>(
+            (state >> 32U) % k_alphabet_size);
+        sequence[index].assign_rank(rank);
+    }
+    return sequence;
+}
+
+/**
+ * @brief Checks immediate and delayed iteration across boundary contexts.
+ * @tparam p_range Compact-sequence range type.
+ * @param[in] range Sequence range to iterate.
+ * @param[in,out] cases_run Number of checks attempted.
+ * @param[in,out] cases_passed Number of successful checks.
+ * @return `true` when every context is covered correctly.
+ */
+template<class p_range>
+[[nodiscard]] auto run_context_matrix(
+    p_range& range,
+    std::uint32_t& cases_run,
+    std::uint32_t& cases_passed) -> bool {
+    const std::size_t size = range.bp_size();
+    const std::array<std::size_t, 14U> contexts{
+        size + 1U, size * 2U,
+        size,
+        size - 1U, size - 2U, size - 3U, size - 4U, size - 8U,
+        0U, 1U, 2U, 5U, 10U, size / 2U,
+    };
+    bool passed = true;
+    for (const std::size_t context : contexts) {
+        iteration_receipt<p_range> receipt{range};
+        receipt.run(context, false);
+        ++cases_run;
+        if (receipt.valid()) {
+            ++cases_passed;
+        } else {
+            passed = false;
+        }
+    }
+    for (const std::size_t delay : {0U, 1U, 3U, 5U}) {
+        iteration_receipt<p_range> receipt{range};
+        receipt.run(5U, true, delay);
+        ++cases_run;
+        if (receipt.valid()) {
+            ++cases_passed;
+        } else {
+            passed = false;
+        }
+    }
+    return passed;
+}
+
+/**
+ * @brief Checks packed and vector-backed iteration for one alphabet fixture.
+ * @tparam p_alphabet Logical alphabet type.
+ * @param[in] size Fixture size in logical symbols.
+ * @param[in] seed Deterministic fixture seed.
+ * @param[in,out] cases_run Number of checks attempted.
+ * @param[in,out] cases_passed Number of successful checks.
+ * @return `true` when both storage forms pass.
+ */
+template<class p_alphabet>
+[[nodiscard]] auto run_group(
+    const std::size_t size,
+    const std::uint64_t seed,
+    std::uint32_t& cases_run,
+    std::uint32_t& cases_passed) -> bool {
+    auto source = make_sequence<p_alphabet>(size, seed);
+    using packed_configuration = sequence_custom_alphabet<p_alphabet>;
+    compact_sequence_range<packed_configuration> packed{source};
+    compact_sequence_range<std::vector<p_alphabet>> vector_backed{source};
+    const bool packed_ok =
+        run_context_matrix(packed, cases_run, cases_passed);
+    const bool vector_ok =
+        run_context_matrix(vector_backed, cases_run, cases_passed);
+    return packed_ok && vector_ok;
+}
+
+}  // namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail
+
+/** @copydoc bioseq_highway_run_sequence_ops_probe */
+extern "C" auto bioseq_highway_run_sequence_ops_probe(
+    bioseq_highway_sequence_ops_probe_receipt* receipt) noexcept -> bool {
+    if (receipt == nullptr) return false;
+    *receipt = {};
+    receipt->target = static_cast<std::int64_t>(HWY_TARGET);
+    namespace probe =
+        bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail;
+    try {
+        const auto record = [&receipt](
+                                const std::uint64_t bit,
+                                const bool passed) -> void {
+            if (passed) receipt->passed_properties |= bit;
+        };
+        record(1U << 0U, probe::run_group<seq::dna4>(
+            289U, 0x14f6d2c93b85a071ULL,
+            receipt->cases_run, receipt->cases_passed));
+        record(1U << 1U, probe::run_group<seq::dna5>(
+            301U, 0xd507aa21ecbe5493ULL,
+            receipt->cases_run, receipt->cases_passed));
+        record(1U << 2U, probe::run_group<seq::dna4>(
+            4096U, 0x70c1869d3a4f52ebULL,
+            receipt->cases_run, receipt->cases_passed));
+        return receipt->passed_properties == 0x7U
+            && receipt->cases_run == receipt->cases_passed;
+    } catch (...) {
+        return false;
+    }
+}

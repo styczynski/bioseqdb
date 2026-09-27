@@ -1,0 +1,120 @@
+\section{Joins support}
+\label{sec:mmsearch-join-ownership}
+
+Asssime we have a search between two tables \texttt{reads} and \texttt{targets}:
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Search sequence pairs from two tables.}]
+SELECT t.id AS target_id, q.id AS query_id,
+       bioseq.dp_score(t.seq) AS score,
+       bioseq.cigar(t.seq) AS cigar
+FROM targets AS t
+JOIN reads AS q ON mmsearch(t.seq, q.seq)
+WHERE t.id > 20 AND q.id <= 100;
+\end{lstlisting}
+\end{minipage}
+
+There are several possible plans for searches:
+
+\begin{itemize}
+  \item \textbf{Search before a join:} A base \texttt{BioseqScan} can search
+    a target against a constant query. This is the most straightforward operation, but isn't possible for the described join.
+  \item \textbf{Search with an outer parameter:} Postgres can create a nested-loop plan that used \texttt{BioseqScan} inside. This was discussed in scan list~\ref{lst:bioseqscan-types} and causes the target to be loaded multiple times, which reduces performance heavily.
+  \item \textbf{Search at the join:} \texttt{BioseqBatchJoin} replaces the nested-loop plan and allows to keep the target index loaded only once, while iterating over queries. This is the most efficient plan for the described join.
+\end{itemize}
+
+Interesting thing happens if we want to make two searches for the same row. Consider the example below:
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Two searches with one ambiguous target binding.},label={lst:ambiguous-target-binding}]
+-- Unsupported: this will cause an error
+SELECT t.id, bioseq.dp_score(t.seq)
+FROM targets AS t
+WHERE mmsearch(t.seq, $1::bioseq.seq('dna5', 64))
+  AND mmsearch(t.seq, $2::bioseq.seq('dna5', 64));
+\end{lstlisting}
+\end{minipage}
+
+In this case due to my choise of SQL API, we don't know which score \path{bioseq.dp_score(t.seq)} refers to as we have two potential results with different scores.
+To resolve this issue we can do a self-join on the same table:
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Give each independent search its own target binding.}]
+-- Supported: this is valid use-case within BioseqDB
+SELECT a.id,
+       bioseq.dp_score(a.seq) AS score_a,
+       bioseq.dp_score(b.seq) AS score_b
+FROM targets AS a
+JOIN targets AS b ON a.id = b.id
+WHERE mmsearch(a.seq, $1::bioseq.seq('dna5', 64))
+  AND mmsearch(b.seq, $2::bioseq.seq('dna5', 64));
+\end{lstlisting}
+\end{minipage}
+
+Now, let $a_i$ be hit $i$ of the search bound to alias \texttt{a}, and let $b_j$
+be hit $j$ of the search bound to alias \texttt{b}. Figure~\ref{fig:scan-alias-pairs}
+shows their combinations for one target row. We can see that natural extension of the used syntax would be to generate cross-product of hits.
+It's worth noting that currently we are not able to express search-specific limits~\ref{sec:filter-placement} meaning that there's no optimisation for example if we wanted to have only best-hit per each sequence (only tuple with best score on both searches). In that case all tuples needs to be evaluated and user can construct a query manually
+to select the highest-scoring hits:
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Keep one highest score from each of the two searches, per stored row.}]
+SELECT a.id,
+       MAX(bioseq.dp_score(a.seq)) AS score_a,
+       MAX(bioseq.dp_score(b.seq)) AS score_b
+FROM targets AS a
+JOIN targets AS b ON a.id = b.id
+WHERE mmsearch(a.seq, $1::bioseq.seq('dna5', 64))
+  AND mmsearch(b.seq, $2::bioseq.seq('dna5', 64))
+GROUP BY a.id;
+\end{lstlisting}
+\end{minipage}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,4.1) {One row, two target bindings};
+  \node[scan input,minimum width=2.5cm] (stored) at (2.9,3.15)
+    {stored row id 27};
+  \node[scan hit,minimum width=2.4cm] (a) at (1.35,1.55)
+    {alias a\\query 1: two hits};
+  \node[scan hit,minimum width=2.4cm] (b) at (4.5,1.55)
+    {alias b\\query 2: three hits};
+  \draw[scan arrow] (stored.south west) -- (a.north);
+  \draw[scan arrow] (stored.south east) -- (b.north);
+  \node[anchor=west,font=\bfseries] at (7.1,4.1) {Six joined hit pairs};
+  \foreach \x/\j in {8.25/0,9.45/1,10.65/2}
+    \node at (\x,3.25) {$b_{\j}$};
+  \foreach \y/\i in {2.4/0,1.35/1}
+    \node at (7.1,\y) {$a_{\i}$};
+  \foreach \x/\j in {8.25/0,9.45/1,10.65/2}
+    \foreach \y/\i in {2.4/0,1.35/1}
+      \node[scan output,minimum width=1.05cm,minimum height=.8cm]
+        at (\x,\y) {$(a_{\i},b_{\j})$};
+  \node[anchor=west,text=black!65] at (.1,.2)
+    {Self-join searches the same row twice};
+\end{tikzpicture}
+\caption{Two hits from the first search and three from the second
+produce six combinations. Additional hit conditions may select subset of this cross-product matrix, but this is responsibility of the user as I don't provide any specialised optimisation for example to extract only one best-hit for each search.}
+\label{fig:scan-alias-pairs}
+\end{figure}
+
+The intereesting part is that self-joins in relational databases are commonly used for hierarchical structures (trees), detect duplicates, extract consecutive elements (and other comparison operations). In this case it's used to create new alias for the column without any additional operations.
+
+There is however one interesting exception that is a bug in the BioseqDB code (initially I supported conflicting calls under one alias and there is leftover branch of the code that still supports it).
+Users should be aware that there still can be some undiscovered edge cases that are not correctly detected.
+I initially planned to support same-alias searches if no feature is used (we don't specify CIGAR, score etc.), but this results in usability issue that adding these properties suddently requires user to rewrite the query completely.
+For this reason I later decided to disable any conflicting alias searches even if we don't specify any properties in the \texttt{SELECT} list.
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Low priority bug that still exists in the code},label={lst:constant-extra-mmsearch}]
+-- This shouldn't be possible, but currently works (bug)
+SELECT t.id, bioseq.dp_score(t.seq) AS score
+FROM queries AS q, targets AS t
+-- index_read_requirement is a special debug parameter to disable BioseqDB from loading index
+-- for some reason enabling it allows you to trigger specific BioseqJoin path that doesn't correctly detect the conficting calls
+-- The queries table needs to be normal table, not defined using "USING bioseq"
+WHERE mmsearch(t.seq, q.seq, aligner_options(index_read_requirement => 1))
+  AND mmsearch(t.seq, 'ACGTACGTACGTACGT'::bioseq.seq('dna5', 64));
+\end{lstlisting}
+\end{minipage}

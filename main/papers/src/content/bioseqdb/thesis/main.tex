@@ -28,68 +28,62 @@
 %   - !partial
 %     title: Biological foundations of sequence analysis
 %     path: chapters/01_biology
-%     description: introduces biological sequences, sequencing data, variation, and the computational questions that motivate database-resident sequence analysis.
+%     description: introduces biological sequences and sequencing data. It explains variation and the computational questions that motivate database-resident sequence analysis.
 %   - !partial
 %     title: Sequence alignment and search strategies
 %     path: chapters/02_alignment_foundations
-%     description: develops exact dynamic programming, seed-and-extend mapping, and graph-based approaches so that the later engineering chapters share a precise algorithmic vocabulary.
-%   - !partial
-%     title: Limitations of existing tools
-%     path: chapters/03_solution_gaps
-%     description: separates algorithmic bottlenecks from data-management and integration problems, then states the design goals addressed by BioSeqDB.
-%   - !partial
-%     title: The BioSeqDB alignment pipeline
-%     path: chapters/04_pipeline
-%     description: presents the complete processing path, its stage contracts, its CPU and accelerator routes, and the evolution from the imported baseline to the final architecture.
+%     description: develops exact dynamic programming and seed-and-extend mapping. It also presents graph-based approaches and the limits of existing tools.
 %   - !partial
 %     title: Minimizer extraction
 %     path: chapters/05_minimizers
-%     description: explains minimizer sketching, rolling hashing, SIMD and Vulkan implementations, comparison with minimap2 and SIMD-Minimizers, and the optimizations selected for the final system.
+%     description: explains minimizer sketching and rolling hashing. It compares the SIMD and Vulkan implementations with minimap2 and SIMD-Minimizers.
 %   - !partial
 %     title: Chaining seed anchors
 %     path: chapters/06_chaining
-%     description: derives the chaining objective, compares scalar, RMQ, SIMD, and GPU approaches, and documents the policy used to retain mapping quality while accelerating endpoint selection.
+%     description: derives the chaining objective and compares its scalar RMQ SIMD and GPU forms. It then states the selection policy.
 %   - !partial
-%     title: Final alignment and extension
-%     path: chapters/07_final_alignment
-%     description: describes affine-gap alignment, KSW2 and block-based SIMD extension, traceback, accelerator integration, and the final runtime selection rules.
-%   - !partial
-%     title: Alignment prefiltering
-%     path: chapters/08_prefiltering
-%     description: reconstructs SneakySnake and GateKeeper, explains their filtering guarantees and GPU mappings, and records how BioSeqDB deploys them before expensive alignment.
+%     title: Final alignment and postprocessing
+%     path: chapters/07_final_alignment_postprocessing_and_preprocessing
+%     description: compares KSW2 and Block Aligner, explains SneakySnake filtering and distinguishes the reported alignment statistics.
 %   - !partial
 %     title: Sequence representations and lazy evaluation
 %     path: chapters/09_sequence_abstractions
-%     description: develops compact_sequence_range, bit-level views, fragmented and lazy sequences, PostgreSQL-backed adapters, and generated alphabet dispatch.
+%     description: develops compact sequence ranges and bit-level views. It then presents fragmented and lazy sequences with PostgreSQL-backed adapters and alphabet dispatch.
 %   - !partial
 %     title: PostgreSQL API and custom scans
 %     path: chapters/10_postgres_custom_scan
-%     description: follows an mmsearch expression through planner support, custom paths and plans, node injection, batched execution, joins, and per-row result substitution.
+%     description: follows an mmsearch expression through planning and batched execution. It explains joins and per-row result substitution.
 %   - !partial
 %     title: Physical sequence storage in PostgreSQL
 %     path: chapters/11_postgres_storage
-%     description: explains the columnar-derived storage layout, fragment metadata, cache and request locking, and vectorized metadata processing.
+%     description: explains the columnar-derived storage layout and fragment metadata. It also covers caching and request coordination.
 %   - !partial
 %     title: Persistent sequence indexes
 %     path: chapters/12_index_storage
-%     description: describes index construction, storage, compatibility, selective cold loading, memory accounting, update semantics, and differences from standalone minimap2 indexes.
+%     description: describes index construction and storage with compatibility checks and selective cold loading. It also explains updates and differences from minimap2 indexes.
+%%   - !partial
+%%     title: BioSeqDB architecture
+%%     path: chapters/13_bioseqdb_architecture
+%%     description: connects algorithm selection and oneTBB scheduling to a reusable processing core. It also covers sequence ingestion, remote access, code generation, validation and authorship.
 %   - !partial
-%     title: Bounded sequence ingestion and integrity limits
-%     path: chapters/13_io_loading
-%     description: presents the bounded input/output (I/O) pipeline for FASTA and FASTQ data, compression, header parsing, typed PostgreSQL writes, failure handling, and measured throughput.
-%   - !partial
-%     title: External sequence providers
-%     path: chapters/14_external_apis
-%     description: explains generated API clients and the provider abstraction that exposes remote sequence databases as PostgreSQL relations without weakening the core data plane.
-%   - !partial
-%     title: Source-driven SQL code generation
-%     path: chapters/15_sql_codegen
-%     description: documents structural source analysis, annotations, dependency graphs, SQL and PostgreSQL function-manager generation, safety ledgers, reproducibility controls, and migration from handwritten boundary code.
+%     title: Benchmarking and performance evaluation
+%     path: chapters/16_benchmarking
+%     description: measuring overall performance of BioseqDB
 %   - !partial
 %     title: Conclusions
-%     path: chapters/16_conclusion
-%     description: answers the research questions, contrasts the final system with its minimap2-derived starting point, and identifies the principal limitations and next engineering steps.
-% xrenderonly: postgres
+%     path: chapters/17_conclusion
+%     description: answers the research questions and summarizes the final system. It identifies the principal limitations and possible extensions.
+% authorship: !partial
+%   title: Authorship, development and AI assistance
+%   path: chapters/18_authorship
+% appendices:
+%   - !partial
+%     title: A runnable SQL walkthrough
+%     path: appendices/02_sql_walkthrough
+%   - !partial
+%     title: Configuration reference
+%     path: appendices/03_configuration_reference
+% xrenderonly: chapters/05_minimizers
 
 % Keep thesis hyperlinks legible on a white page.  `breaklinks` also permits
 % linked bibliography fields (for example, long conference titles) to wrap.
@@ -107,7 +101,8 @@
 % the following page.
 \keywords{sequence alignment, bioinformatics, minimap2, PostgreSQL, databases,
     genomic data management, SIMD, GPU computing}
-\klasyfikacja{\mbox{Applied computing; Life and medical sciences; Bioinformatics}}
+\dziedzina{11.3 Informatics and Computer Science}
+\klasyfikacja{\mbox{Applied computing, life and medical sciences, bioinformatics}}
 
 \begin{abstract}
     % This abstract is too long for the class's vertically centered layout.
@@ -115,40 +110,33 @@
     \vfilneg
     % Keep the Polish-title label and its two-line value on this title page.
     \enlargethispage{4\baselineskip}
-    Genomic analysis is commonly organized as a sequence of standalone
-    programs connected by files.  This model provides specialized tools,
-    but it separates sequence data from relational metadata, repeats
-    parsing and indexing work, and makes query planning unaware of the
-    true cost of alignment.  This thesis presents BioSeqDB, a PostgreSQL
-    extension that stores compact biological sequences and executes a
-    minimap2-derived seeding, chaining, and extension pipeline inside database
+    Genomic workflows commonly connect specialized programs through files.
+    This arrangement separates sequences from relational metadata, repeats
+    parsing and indexing work, and prevents the database planner from
+    representing the cost of alignment. This thesis presents BioSeqDB, a
+    PostgreSQL extension that stores compact biological sequences and runs a
+    minimap2-derived seeding, chaining, and extension pipeline during database
     scans.
-    The work is both algorithmic and systems-oriented.  It develops
-    alphabet-generic bit-packed sequence views.  It provides scalar and
-    single instruction, multiple data (SIMD) minimizer extraction, plus
-    graphics processing unit (GPU) implementations using Vulkan for selected
-    sketching and chaining operations.  It also provides bounded base-level
-    extension based on established dynamic-programming kernels and optional
-    SneakySnake and GateKeeper prefilters.  The persistent database layer adds
-    minimizer indexes, bounded sequence ingestion, and external sequence
-    providers.  The design also includes a coordinated cache and structural
-    generation of the PostgreSQL extension surface from compact type and
-    function declarations.
 
-    BioSeqDB does not expose alignment as an ordinary row-by-row scalar
-    function.  Planner support functions introduce custom paths whose
-    execution nodes batch sequences, select an implementation according
-    to data and runtime capabilities, and substitute alignment results
-    into planned expressions.  This design connects high-throughput
-    kernels with PostgreSQL joins, filtering, metadata projection, and
-    persistence.  The thesis reconstructs the algorithms from their
-    original publications, validates the description against the
-    implemented C++26 and PostgreSQL code, and uses project benchmark
-    evidence to explain which intermediate designs were retained or
-    rejected.  The result is a practical account of how a standalone
-    mapper architecture can be transformed into an integrated,
-    query-planned sequence data system without hiding the trade-offs
-    introduced by batching, storage, and heterogeneous execution.
+    BioSeqDB provides alphabet-generic packed sequence views, scalar and
+    single instruction, multiple data (SIMD) minimizer extraction, and Vulkan
+    implementations for selected sketching and chaining operations. Bounded
+    CPU dynamic-programming kernels and GPU alignment routes perform final
+    extension. Optional SneakySnake
+    and GateKeeper filters reject unsuitable candidate regions before that
+    stage. The database layer adds persistent minimizer indexes, bounded
+    ingestion, external-provider relation definitions, coordinated caching,
+    and generated PostgreSQL boundary declarations.
+
+    Alignment is not evaluated as an independent scalar function for every
+    row. Planner support introduces custom paths whose execution nodes batch
+    sequences, execute the explicitly selected implementation when the input
+    and hardware pass admission, and place alignment results into planned
+    expressions. The same
+    operation can therefore participate in joins, filtering, metadata
+    projection, and persistent storage. The thesis describes how the mapper's
+    data and control flow become a database execution primitive while retaining
+    explicit resource bounds and support for heterogeneous processors.
 \end{abstract}
 
 \makeatletter
@@ -193,8 +181,8 @@
     string.  The alignment
     path is derived from minimap2: representative $k$-mers are extracted
     as minimizers, matching minimizers become anchors, compatible anchors
-    are chained, and bounded dynamic-programming kernels extend the selected
-    regions.  The port is not a line-for-line translation.  The
+    are chained, and CPU or GPU alignment routes extend the selected regions.
+    The port is not a line-for-line translation.  The
     implementation introduces template-selected alphabets and layouts,
     Highway SIMD kernels, task-based parallel execution, Vulkan compute
     paths, persistent PostgreSQL-backed indexes, and prefilters for
@@ -208,14 +196,14 @@
     an alignment fallback: it fails closed if no BioSeqDB custom executor
     owns the expression.  Its planner-support function assigns the unowned
     expression a high startup cost, while structural planner hooks can
-    construct an owning custom path with honest nonnegative costs.  The
+    construct an owning custom path with explicit nonnegative costs.  The
     resulting custom scan batches input,
     invokes the alignment pipeline, and makes its results available to
     planned expressions through injected PostgreSQL nodes.  This is what
     permits alignment to participate in filters, projections, and joins
     while retaining the execution structure required by central processing
     unit (CPU) vector units
-    and GPUs.
+    and graphics processing units (GPUs).
 
     The central research question is therefore not whether an existing
     aligner can be called from SQL.  It is whether the aligner's data and
@@ -227,8 +215,8 @@
     \begin{enumerate}
         \item[\textbf{RQ1.}] Which parts of seeding, chaining, and extension can be expressed
         over a common compact sequence abstraction without eager conversion?
-        \item[\textbf{RQ2.}] Which scalar operations benefit from SIMD or GPU execution,
-        and which overheads move the break-even point?
+        \item[\textbf{RQ2.}] Which stages admit SIMD or GPU implementations, and
+        which input and resource constraints govern their selection?
         \item[\textbf{RQ3.}] How can PostgreSQL plan and execute a set-valued,
         batch-oriented search while presenting an ordinary typed SQL
         interface?
@@ -237,15 +225,12 @@
         that the resulting system remains inspectable and reliable?
     \end{enumerate}
 
-    This thesis answers these questions through implementation and
-    measurement.  Historical designs are included when they explain a
-    constraint or a rejected optimization.  They are not presented as
-    simultaneous production architectures.  Where project documents
-    disagree, the implementation and the most recent dated evidence take
-    precedence.  Numerical claims are tied to a named benchmark report
-    and its configuration.  Comparisons with minimap2, SIMD-Minimizers,
-    the G3SA GPU seed--chain--extend system, Block Aligner, SneakySnake,
-    GateKeeper, ParadeDB, and Citus
+    This thesis answers these questions through implementation and analysis of
+    algorithmic and execution contracts. Historical designs appear only when they explain a
+    constraint or a rejected optimization. They are not presented as
+    simultaneous production architectures. Comparisons with minimap2,
+    SIMD-Minimizers, the G3SA GPU seed-chain-extend system, Block Aligner, SneakySnake,
+    GateKeeper, and Citus
     Columnar distinguish inherited mechanisms from BioSeqDB-specific
     changes.
 
@@ -256,8 +241,7 @@
         packed, fragmented, lazily composed, and PostgreSQL-backed data
         through a common range contract.
         \item[\textbf{C2.}] A staged minimap2-derived mapper with scalar, SIMD, and
-        Vulkan components, including explicit dispatch and evidence for
-        intermediate optimization decisions.
+        Vulkan components and explicit runtime dispatch.
         \item[\textbf{C3.}] Optional GPU-capable SneakySnake and GateKeeper candidate
         filters integrated without changing the meaning of an accepted
         alignment.
@@ -283,8 +267,7 @@
     planning, physical storage, persistent indexes, ingestion, external
     providers, and generated SQL boundary code.
 
-    % Keep all generated chapter briefs on this final Introduction text page;
-    % the class still opens Chapter 1 on the following recto.
+    % Keep the chapter roadmap together before the development timeline.
     \begin{itemize}
         \setlength{\itemsep}{0pt}
         \setlength{\parsep}{0pt}
@@ -293,10 +276,133 @@
         }
     \end{itemize}
 
+    \clearpage
+    \section*{Timeline}
+    \phantomsection
+    \addcontentsline{toc}{section}{Timeline}
+    \label{sec:introduction-timeline}
+
+    This thesis required several years of exploration and experiments.
+    I began without a formal background in computational biology, so
+    learning the field was part of the research. I proposed the database
+    idea and prepared the initial design for our internal team. I directed
+    the 2022 prototype, whose implementation was written by colleagues.\footnote{\fontsize{7.5}{9}\selectfont The current BioSeqDB is a separate project, designed and written by me. It contains no code or intellectual property from the early BWA-MEM integration experiments.}
+    The MMseqs2 discussions did not lead to a collaboration. The Python
+    prototypes that led to the implementation studied here began in
+    December 2023.
+
+    \begin{center}
+    \begin{tikzpicture}[x=1cm,y=1cm,font=\small,
+      timeline date/.style={anchor=east,font=\small\bfseries,
+        inner sep=0pt},
+      timeline event/.style={anchor=west,align=left,text width=11.8cm,
+        inner sep=0pt},
+      timeline dot/.style={circle,inner sep=0pt,minimum size=5pt}]
+      \definecolor{timelineConcept}{HTML}{366B98}
+      \definecolor{timelinePython}{HTML}{438452}
+      \definecolor{timelineBioseq}{HTML}{B36A1F}
+
+      % A separate striped bar marks the career period beside the milestones.
+      \fill[timelineConcept!8] (0,-0.4) rectangle (0.18,-4.8);
+      \begin{scope}
+        \clip (0,-0.4) rectangle (0.18,-4.8);
+        \foreach \timelineStripe in {-5,-4.82,...,-0.2} {
+          \draw[timelineConcept!70,line width=0.35pt]
+            (-0.04,\timelineStripe) -- (0.22,{\timelineStripe+0.26});
+        }
+      \end{scope}
+      \draw[timelineConcept!80,line width=0.4pt]
+        (0,-0.4) rectangle (0.18,-4.8);
+      \node[anchor=west,font=\footnotesize,inner sep=0pt]
+        at (0.35,-0.4) {Apr 2020};
+      \node[anchor=west,font=\footnotesize,inner sep=0pt]
+        at (0.35,-4.8) {Aug 2022};
+      \node[rotate=90,align=center,font=\footnotesize,inner sep=0pt]
+        at (-0.55,-2.6)
+        {Deepflare\footnotemark\\Chief Engineering Officer};
+
+      % A compact key names the phases without long explanations.
+      \fill[timelineConcept] (0,0.1) circle (2.5pt);
+      \node[anchor=west] at (0.15,0.1) {Team exploration};
+      \fill[timelinePython] (4,0.1) circle (2.5pt);
+      \node[anchor=west] at (4.15,0.1) {Python aligners};
+      \fill[timelineBioseq] (8,0.1) circle (2.5pt);
+      \node[anchor=west] at (8.15,0.1) {BioSeqDB};
+
+      \draw[black!18,line width=1pt] (2.2,-0.9) -- (2.2,-12.9);
+      \draw[timelineConcept,line width=2pt] (2.2,-0.9) -- (2.2,-4.05);
+      \draw[timelinePython,line width=2pt] (2.2,-5.4) -- (2.2,-6.3);
+      \draw[timelineBioseq,line width=2pt] (2.2,-7.5) -- (2.2,-12.9);
+
+      \foreach \timelineY/\timelineDate/\timelineColor in {
+        -0.9/Feb 2021/timelineConcept,
+        -2.1/May 2021/timelineConcept,
+        -3.0/Mar 2022/timelineConcept,
+        -4.05/May 2022/timelineConcept,
+        -5.4/Dec 2023/timelinePython,
+        -6.3/Nov 2024/timelinePython,
+        -7.5/Dec 2025/timelineBioseq,
+        -8.4/Jan 2026/timelineBioseq,
+        -9.3/May 2026/timelineBioseq,
+        -10.2/Jun 2026/timelineBioseq,
+        -11.1/Jul 2026/timelineBioseq,
+        -12.0/Aug 2026/timelineBioseq,
+        -12.9/Sep 2026/timelineBioseq} {
+        \node[timeline date] at (1.9,\timelineY) {\timelineDate};
+        \node[timeline dot,fill=\timelineColor] at (2.2,\timelineY) {};
+      }
+
+      \node[timeline event] at (2.55,-0.9)
+        {Training natural language processing models on large GISAID datasets\\
+         FASTA files were hard to manage\\
+         We found no database tools that met our needs};
+      \node[timeline event] at (2.55,-2.1)
+        {Database idea and design\\
+         \href{https://github.com/soedinglab/MMseqs2/issues/450\#issue-878875419}
+           {MMseqs2 Python-bindings discussion}};
+      \node[timeline event] at (2.55,-3.0)
+        {PostgreSQL internals discussion with Joe Conway};
+      \node[timeline event] at (2.55,-4.05)
+        {\href{https://github.com/styczynski/deepflare-bioseqdb-archive}
+           {Team prototype: BWA-MEM in PostgreSQL}\\
+         Limited features and high maintenance effort\\
+         led the company to focus on MMseqs2};
+      \node[timeline event] at (2.55,-5.4)
+        {\href{https://github.com/styczynski/aadg-genomics-class}
+           {First Python aligner prototype}};
+      \node[timeline event] at (2.55,-6.3)
+        {\href{https://github.com/styczynski/aadg-genomics-class}
+           {Improved Python aligner}};
+      \node[timeline event] at (2.55,-7.5)
+        {First BioSeqDB: original minimap2 and columnar storage};
+      \node[timeline event] at (2.55,-8.4)
+        {First custom seeding algorithms};
+      \node[timeline event] at (2.55,-9.3)
+        {Custom chaining and base alignment\\First working benchmark results};
+      \node[timeline event] at (2.55,-10.2)
+        {End-to-end benchmarks, first Vulkan programs and indexes};
+      \node[timeline event] at (2.55,-11.1)
+        {Sequence slices};
+      \node[timeline event] at (2.55,-12.0)
+        {Query cache and code refactoring};
+      \node[timeline event] at (2.55,-12.9)
+        {Debugging, final end-to-end benchmarks and thesis writing\\
+         \textit{Ongoing in September 2026}};
+    \end{tikzpicture}
+    \end{center}
+    {\small\noindent Selected milestones from my project history.
+    Spacing is not proportional to elapsed time. Linked entries point to
+    the related discussion and prototype repositories.\par}
+    \footnotetext{\fontsize{7.5}{9}\selectfont I was a co-founder (shareholder) until 15 July 2022 (KRS update on 3 Jun 2022) in Covid Genomics Sp. z o.o. (registered in Poland in Jun 2020, KRS 0000846289) which then changed its legal name to CGen Sp. z o.o. (on 3 Jun 2022) and then changed its branding name to Deepflare (on Jul 2022). I was also a Chief Engineering Officer from 1 Apr 2020 till 31 Aug 2022.}
+
 \foreachdata{chapters}{\chapteri} {
     \defchapter{\data{chapters.\chapteri.title}}{r:\data{chapters.\chapteri.ref}}
     \datapartial{chapters.\chapteri}
 }
+
+\chapter*{Authorship, development and AI assistance}
+\addcontentsline{toc}{chapter}{Authorship, development and AI assistance}
+\datapartial{authorship}
 
 \else
 \foreachdata{chapters}{\chapteri} {
@@ -314,4 +420,17 @@
     \setlength{\emergencystretch}{3em}
     \printbibliography[heading=bibintoc,title={References}]
   \endgroup
+\fi
+
+% Appendices follow the references and do not enter the chapter synopsis.
+\if\dataeq{renderonly}{??}
+  \appendix
+  \renewcommand{\thechapter}{\arabic{chapter}}
+  \renewcommand{\theHchapter}{appendix.\arabic{chapter}}
+  \addtocontents{toc}{\protect\setcounter{tocdepth}{1}}
+  \foreachdata{appendices}{\appendixi} {
+    \chapter{\data{appendices.\appendixi.title}}
+    \label{r:\data{appendices.\appendixi.ref}}
+    \datapartial{appendices.\appendixi}
+  }
 \fi

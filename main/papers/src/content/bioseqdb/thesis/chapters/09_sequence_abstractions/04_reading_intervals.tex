@@ -1,0 +1,350 @@
+\section{Reading only what the algorithm requires}
+\label{sec:lazy-sequence-facade}
+\label{sec:sequence-materialization}
+
+The storage can be provided in different forms as explained previously in the first section~\ref{sec:sequence-abstractions}
+In BioseqDB main implementation of Postgres-based storage is done via \path{lazy_sequence_view<A>} and \path{retained_lazy_sequence_view<A>} mentioned in table~\ref{tab:sequence-representation-specializations}.
+These types holds pointers to functions that implement the storage and represent the following operations:
+\begin{itemize}
+  \item Report sizes of sequences
+  \item Copy selected intervals into caller-owned memory, which in this case can be GPU-owned memory in GPU-accelerated pipeline stages
+  \item Reading successive chunks
+  \item Checking if the compatible interval was already materialized and can be borrowed (caching)
+\end{itemize}
+Internally I distinguish several access policies which are specified by the pipeline stage, they are the following choices:
+\begin{enumerate}
+  \item \textbf{Stream.} If the algorithm accepts a stream, read the selected
+        interval in bounded chunks and save it to reusable scratch memory (large memory pool)
+  \item \textbf{Borrow.} If the algorithm needs packed data, first check if's already in cache and safe to borrow.
+  \item \textbf{Pack.} In case if borrowing is not possible, algorithm needs to request new memory permit (this is routed through custom pool allocator). Caller is then responsible for this memory chunk.
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,
+  request/.style={draw=black!60,fill=black!3,minimum width=3.9cm,
+    minimum height=.72cm,align=center},
+  decision/.style={diamond,aspect=2.7,draw=black!60,
+    inner sep=3pt,align=center}]
+  \node[request] (q) at (6.5,4.6) {requested interval $[a,b)$};
+  \node[decision] (need) at (6.5,3.25) {one packed block needed?};
+  \draw[seq nine flow] (q)--(need);
+  \coordinate (stream) at (1.6,1.05);
+  \draw[seq nine flow,seqNineBlue] (need.west)-|node[pos=.18,above] {no} (stream);
+  \node[decision] (safe) at (9.05,1.9) {safe to borrow?};
+  \draw[seq nine flow] (need.east)-|node[pos=.3,above] {yes} (safe);
+  \draw[seq nine flow,seqNineGreen] (safe.west)-|node[pos=.27,above] {yes} (6.45,.45);
+  \draw[seq nine flow,seqNineOrange] (safe.east)-|node[pos=.27,above] {no} (11.5,.45);
+  \foreach \r in {0,1,2} {
+    \foreach \i in {0,1,2}
+      \draw[draw=seqNineBlue,fill=seqNineBlue!12]
+        (.5+.57*\i,.3-.5*\r) rectangle ++(.52,.36);
+  }
+  \draw[seq nine flow,seqNineBlue] (2.35,.46)--(2.35,-.54);
+  \node[align=center] at (1.55,-1.35)
+    {stream chunks\\reuse scratch memory};
+  \draw[fill=black!4,draw=black!50] (4.4,-.32) rectangle (8.3,.2);
+  \draw[draw=seqNineGreen,fill=seqNineGreen!20,thick]
+    (5.375,-.32) rectangle (7.325,.2);
+  \foreach \x in {5.375,6.35,7.325}
+    \draw[black!55] (\x,-.32)--(\x,.2);
+  \node[below,text=seqNineGreen] at (6.35,-.4) {borrow this interval};
+  \node[align=center] at (6.35,-1.5)
+    {existing packed units\\owner stays alive};
+  \foreach \i in {0,...,4}
+    \draw[seqNineOrange,fill=seqNineOrange!15]
+      (10.05+.52*\i,-.32) rectangle ++(.52,.52);
+  \node[below,text=seqNineOrange] at (11.35,-.4) {new packed interval};
+  \node[align=center] at (11.35,-1.5)
+    {allocate with a permit\\retain buffer and permit};
+\end{tikzpicture}
+\caption{Simplified view of different access policies}
+\label{fig:sequence-abstraction-layers}
+\end{figure}
+
+\info{Borrowing}{Borrowing can fail if the region for example starts in the middle of storage unit in packed sequence, then we cannot reuse that memory chunk as it's misaligned}
+
+\subsection{Copying ranks from a PostgreSQL sequence}
+\label{sec:sequence-pg-rank-copy}
+
+The PostgreSQL source-provider view keeps its scanner and packed fragment
+slots in the read session. A rank request visits the requested symbols,
+looks up each symbol's fragment in that scanner and unpacks its rank.
+Repeated small requests can reuse packed fragments, but still repeat the
+callback and symbol-extraction work; they need not read the fragment again
+from disk or decode the whole fragment into ranks.
+Retaining a packed target for the alignment stage avoids these
+source-provider calls, although an algorithm requesting byte ranks must
+still unpack the selected interval.
+% Source: typed_support_parts/scanner_row.cppm -> source_provider_promotion.cppm
+% -> pg/types/compact_sequence/view_session.cppm: facade_ptr_at/emit_tree_range
+% -> pg/storage/scanner/source_scanner/entry.cppm: read_domain_ranks and
+% typed_scanner_read_ranks; fragment_scanner.cppm: load_fragment cache hits.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=0.97cm,y=0.90cm,font=\footnotesize,
+  panel/.style={anchor=west,font=\small\bfseries},
+  frame/.style={draw=black!40,rounded corners=2pt},
+  note/.style={anchor=north west,align=left,text=black!72,font=\scriptsize},
+  lead/.style={anchor=north west,text=black!72,font=\scriptsize\itshape},
+  arrowlab/.style={font=\scriptsize,inner sep=1pt},
+  rowlab/.style={anchor=east,font=\footnotesize},
+  evlab/.style={anchor=south west,rotate=20,font=\scriptsize,
+    text=black!80,inner sep=1pt},
+  guide/.style={draw=black!22,dashed,line width=.3pt},
+  inbar/.style={font=\scriptsize,text=black!70},
+  stepmark/.style={draw=black!60,circle,fill=white,inner sep=.5pt,
+    font=\scriptsize,minimum size=.32cm}]
+
+%% ---------------------------------------------------------------- (a)
+\node[panel] at (0,19.35)
+  {(a) One batch of rows gets reads session with multiple scanner. Each scanner has it's own slots for caching.};
+\node[lead] at (0,19.0)
+  {Read session is created lazilly on first access};
+
+\draw[frame] (0,15.05) rectangle (2.7,18.55);
+\node[anchor=north west,font=\scriptsize\itshape,text=black!70]
+  at (.08,18.48) {one batch};
+\foreach \i/\r in {0/7,1/8,2/9} {
+  \draw[draw=seqNineBlue,fill=seqNineBlue!10]
+    (.2,17.4-.95*\i) rectangle (2.5,18.1-.95*\i);
+  \node at (1.35,17.75-.95*\i) {row \r: locator};
+}
+
+\draw[frame,dashed,draw=black!45] (3.5,15.05) rectangle (8.85,18.65);
+\node[anchor=north east,font=\scriptsize\itshape,text=black!70]
+  at (8.75,18.58) {one session for the batch};
+
+\foreach \i/\r in {0/7,1/8,2/9} {
+  \draw[frame,fill=black!2]
+    (3.65,17.28-.95*\i) rectangle (8.7,18.18-.95*\i);
+  \node[anchor=north west,font=\scriptsize] at (3.75,18.13-.95*\i)
+    {scanner for row \r};
+  \foreach \j in {0,...,15}
+    \draw[draw=black!45,fill=white]
+      (3.8+.3*\j,17.38-.95*\i) rectangle ++(.26,.32);
+}
+\foreach \j in {0,1,4}
+  \draw[draw=seqNineBlue,fill=seqNineBlue!30]
+    (3.8+.3*\j,17.38) rectangle ++(.26,.32);
+\draw[draw=seqNineBlue,fill=seqNineBlue!30]
+  (3.8,16.43) rectangle ++(.26,.32);
+\foreach \j in {0,1}
+  \draw[draw=seqNineBlue,fill=seqNineBlue!30]
+    (3.8+.3*\j,15.48) rectangle ++(.26,.32);
+\foreach \i in {0,1,2}
+  \draw[seq nine flow] (2.7,17.75-.95*\i)--(3.65,17.75-.95*\i);
+
+\draw[frame] (9.65,16.85) rectangle (12.55,18.55);
+\node[anchor=north west,font=\scriptsize] at (9.75,18.48) {chunk cache};
+\draw[draw=seqNineOrange,fill=seqNineOrange!16]
+  (9.8,17.05) rectangle (12.4,17.95);
+\node at (11.1,17.5) {decoded chunk};
+
+\draw[frame] (9.65,15.05) rectangle (12.55,16.65);
+\node[anchor=north west,font=\scriptsize] at (9.75,16.58)
+  {columnar relation};
+\foreach \i in {0,...,3} {
+  \draw[draw=black!50,fill=black!5]
+    (9.8+.65*\i,15.25) rectangle (10.35+.65*\i,16.05);
+  \node[font=\scriptsize] at (10.075+.65*\i,15.65) {c\i};
+}
+
+\draw[seq nine flow,seqNineOrange] (8.85,17.9)--(9.65,17.5);
+\node[arrowlab,text=seqNineOrange,above] at (9.25,17.88) {miss};
+\draw[seq nine flow,seqNineOrange] (11.1,16.85)--(11.1,16.65);
+\node[arrowlab,text=seqNineOrange,anchor=west] at (11.25,16.75) {miss};
+\draw[seq nine flow,seqNineOrange] (9.65,17.3)--(8.85,17.55);
+\node[arrowlab,text=seqNineOrange,below] at (9.25,17.28) {copy};
+
+\node[note,text width=2.55cm] at (12.75,18.55)
+  {Access policies are used here~\ref{fig:sequence-abstraction-layers} \\ We ither reuse parts depeding if this is \\ stream, borrow or pack};
+
+%% ---------------------------------------------------------------- (b)
+\node[panel] at (0,14.35)
+  {(b) Reading is single-threaded with distribution to multiple thread workers};
+\draw[frame,fill=black!2] (0,11.35) rectangle (8.35,13.95);
+\node[anchor=north west,font=\scriptsize\itshape,text=black!70]
+  at (.1,13.88) {the PostgreSQL backend running the query};
+\draw[draw=black!50,fill=white] (.25,12.45) rectangle (3.45,13.55);
+\node[align=center] at (1.85,13.0) {the scanners\\of panel (a)};
+\draw[draw=seqNineOrange,fill=seqNineOrange!12]
+  (4.55,12.45) rectangle (8.1,13.55);
+\node[align=center] at (6.325,13.0) {one packed copy in memory};
+\draw[seq nine flow] (3.45,13.0)--(4.55,13.0);
+\foreach \i/\w in {0/1,1/2,2/3} {
+  \draw[draw=seqNineGreen,fill=seqNineGreen!12]
+    (9.2,13.35-.7*\i) rectangle (12.15,13.95-.7*\i);
+  \node at (10.675,13.65-.7*\i) {worker \w};
+  \draw[seq nine flow,seqNineGreen] (8.35,13.0)--(9.2,13.65-.7*\i);
+}
+\node[note,text width=2.9cm] at (12.35,13.95)
+  {workers share the buffer, each keeps a view copy};
+
+%% ---------------------------------------------------------------- (c)
+\node[panel] at (0,10.55)
+  {(c) View copy sent to workers holds two base pointers (and release callback)};
+\draw[frame,dashed,draw=seqNineGreen] (-.05,9.05) rectangle (3.25,10.1);
+\draw[draw=black!60,fill=black!4] (.1,9.22) rectangle (1.55,9.92);
+\node at (.825,9.57) {state};
+\draw[draw=black!60,fill=black!4] (1.7,9.22) rectangle (3.1,9.92);
+\node at (2.4,9.57) {ops};
+\draw[seq nine flow] (3.25,9.57)--(4.05,9.57);
+\foreach \i/\t in {0/length,1/read one window,2/may I borrow?,3/copy it all packed,4/safe for workers?} {
+  \draw[draw=black!55,fill=black!4]
+    (4.05+2.2*\i,9.12) rectangle ++(2.14,.8);
+  \node[align=center,font=\scriptsize,text width=2.0cm]
+    at (5.12+2.2*\i,9.52) {\t};
+}
+\draw[seq nine flow] (.825,9.05)--(.825,8.7);
+\draw[frame,fill=black!2] (0,7.05) rectangle (9.2,8.7);
+\node[font=\scriptsize] at (1.85,8.48) {piece tree};
+\node[circle,draw=black!55,fill=black!4,inner sep=0.8pt,font=\tiny,
+  minimum size=.38cm] (croot) at (1.85,7.85) {10};
+\node[draw=seqNineBlue,fill=seqNineBlue!12,font=\tiny,inner sep=1pt,
+  minimum width=1.25cm,minimum height=.34cm,align=center]
+  (cleft) at (0.75,7.28) {$S[2,6)$};
+\node[draw=seqNineGreen,fill=seqNineGreen!12,font=\tiny,inner sep=1pt,
+  minimum width=1.05cm,minimum height=.34cm,align=center]
+  (cright) at (3.0,7.28) {AC};
+\draw[seq nine flow] (croot)--(cleft);
+\draw[seq nine flow] (croot)--(cright);
+
+\node[font=\scriptsize] at (6.35,8.48) {session scanners};
+\foreach \i in {0,1} {
+  \draw[draw=black!45,fill=white]
+    (4.35,7.55-.45*\i) rectangle (8.95,7.95-.45*\i);
+  \foreach \j in {0,...,12}
+    \draw[draw=black!40,fill=white]
+      (4.48+.26*\j,7.61-.45*\i) rectangle ++(.22,.26);
+}
+\foreach \j in {0,2,5}
+  \draw[draw=seqNineBlue,fill=seqNineBlue!30]
+    (4.48+.26*\j,7.61) rectangle ++(.22,.26);
+\foreach \j in {0,1}
+  \draw[draw=seqNineBlue,fill=seqNineBlue!30]
+    (4.48+.26*\j,7.16) rectangle ++(.22,.26);
+
+%% ---------------------------------------------------------------- (d)
+\begin{scope}[shift={(0,-1.32)}]
+\node[panel] at (0,6.35)
+  {(d) Timeline of the scan};
+
+\foreach \x in {4.85,5.85,6.95,8.2,9.55,10.75,13.75}
+  \draw[guide] (\x,5.45)--(\x,1.55);
+\node[evlab] at (4.85,5.52) {scan starts};
+\node[evlab] at (5.85,5.52) {batch 1 arrives};
+\node[evlab] at (6.95,5.52) {first symbols wanted};
+\node[evlab] at (8.2,5.52) {distribute to workers};
+\node[evlab] at (9.55,5.52) {batch 1 ends};
+\node[evlab] at (10.75,5.52) {batch 2 arrives};
+\node[evlab] at (13.75,5.52) {scan ends};
+
+\node[rowlab] at (4.35,5.05) {worker threads};
+\draw[draw=seqNineGreen!55,dashed,fill=seqNineGreen!8]
+  (8.2,4.9) rectangle (15.1,5.2);
+\draw[draw=seqNineGreen,fill=seqNineGreen!35]
+  (8.2,4.9) rectangle (9.2,5.2);
+\draw[draw=seqNineGreen,fill=seqNineGreen!35]
+  (12.05,4.9) rectangle (13.0,5.2);
+\node[inbar] at (8.7,5.05) {busy};
+\node[inbar] at (10.7,5.05) {alive, idle};
+\node[inbar] at (12.52,5.05) {busy};
+
+\node[rowlab] at (4.35,4.5) {table readers + snapshot};
+\draw[draw=black!45,fill=black!12] (4.85,4.35) rectangle (13.75,4.65);
+
+\node[rowlab] at (4.35,3.95) {rows of one batch};
+\draw[draw=seqNineBlue!70,fill=seqNineBlue!15]
+  (5.85,3.8) rectangle (9.55,4.1);
+\node[inbar] at (7.7,3.95) {batch 1};
+\draw[draw=seqNineBlue!70,fill=seqNineBlue!15]
+  (10.75,3.8) rectangle (13.2,4.1);
+\node[inbar] at (11.97,3.95) {batch 2};
+
+\node[rowlab] at (4.35,3.4) {read session};
+\draw[draw=black!55,fill=black!8] (5.85,3.25) rectangle (9.55,3.55);
+\draw[draw=black!55,fill=black!8] (10.75,3.25) rectangle (13.2,3.55);
+\node[stepmark] at (9.7,3.4) {3};
+\node[stepmark] at (13.35,3.4) {3};
+
+\node[rowlab] at (4.35,2.85) {scanner + 16 slots};
+\draw[draw=seqNineBlue,fill=seqNineBlue!30]
+  (6.95,2.7) rectangle (9.35,3.0);
+\draw[draw=seqNineBlue,fill=seqNineBlue!30]
+  (11.45,2.7) rectangle (13.0,3.0);
+\node[stepmark] at (9.5,2.85) {2};
+\node[stepmark] at (13.15,2.85) {2};
+
+\node[rowlab] at (4.35,2.3) {retained view};
+\draw[draw=seqNineGreen,fill=seqNineGreen!22]
+  (6.95,2.15) rectangle (9.15,2.45);
+\draw[draw=seqNineGreen,fill=seqNineGreen!22]
+  (11.45,2.15) rectangle (12.8,2.45);
+\node[stepmark] at (9.3,2.3) {1};
+\node[stepmark] at (12.95,2.3) {1};
+
+\node[rowlab] at (4.35,1.75) {packed copy};
+\draw[draw=seqNineOrange,fill=seqNineOrange!25]
+  (8.2,1.6) rectangle (9.2,1.9);
+\draw[draw=seqNineOrange,fill=seqNineOrange!25]
+  (12.05,1.6) rectangle (13.0,1.9);
+
+\draw[seq nine flow,black!55] (4.55,1.55)--(15.15,1.55);
+\node[font=\scriptsize,text=black!70,anchor=north east] at (15.15,1.5)
+  {time};
+\end{scope}
+\end{tikzpicture}
+\caption{Illustration of structures used and operations performed on sequences during scan lifecycle}
+\label{fig:sequence-scan-lifecycle}
+\end{figure}
+
+At this point I need to describe lifecycles of various entities to illustrate how reading is performed.
+Figure~\ref{fig:sequence-scan-lifecycle} shows how what is happening under the hood during the scan:
+\begin{itemize}
+  \item (a)~Each row of a batch gets its own scanner with 16 fragment slots for caching. A miss looks in the decoded chunk cache
+  (this is lower-layer cache for sequences chunks which may store multiple unrelated sequences and is discussed in later chapters),
+  then in the columnar relation, and copies one fragment into a slot.
+  \item (b)~The incoming queries are grouped in batches. Each batch has it's own session, which is destroyed when batch processing is finished.
+  The session is different entity to the chunk cache so relation isn't reopen when batch is finished and we keep large sequence chunks still in memory.
+  At the start of the batch the backend first builds one packed copy in memory and distributes that copy to workers from the pool.
+  It's important that in this architecture we only have one backend thread which is responsible for reading relation.
+  This means that the actual pipeline is run by single thread that submits various work to worker pool.
+  I needed to read the relation on a single thread to avoid race conditions on PostgreSQL's process-local state which is not thread-safe -
+  PostgreSQL starts (forks) a new server process for each client connection, and even parallel SQL starts extra background worker processes rather than extra threads inside the 
+  same backend~\autocite{postgresql17_tutorial_arch,postgresql17_how_parallel_query}.
+  The same read could still be done in parallel by giving each reader its own backend: one way would be to fork a background worker with a database connection
+  (which in this context is problematic as forking with pool running will result in segfaults) 
+  or open a second client session through libpq (libpq is thread-safe when each thread uses its own connection)~\autocite{postgresql17_bgworker,postgresql17_libpq_threading}.
+  I did not take those paths for fragment reads during a query as it would complicate the implementation and this is something to be done in the future.
+  \item (c)~A view is built from two pointers - \texttt{state} is a piece tree together with the session that holds one scanner per source row and \texttt{ops} contains length, two flags and 
+  two function pointers. Providing function pointer serves as abstraction layer to divide non-Postgres code with actual Postgres implementation.
+  Using templated types could be possible here, but they still would need type erasure.
+  A retained view additionally holds a release callback (C-style destructor)
+  \item (d)~At every batch end, in this order: (1)~release retained views, (2)~finish each scanner so its slot copies go, (3)~drop the session's memory.
+  The worker pool and the snapshot naturally outlive the batch as discussed here.
+  It might happen that we encounter an error and failing query skips C++ destructors, so steps 1--3 also run from a memory context callback (retained view release callback)
+\label{lst:sequence-scan-lifecycle-steps}
+\end{itemize}
+
+
+Panel~(d) of Figure~\ref{fig:sequence-scan-lifecycle} has a gap between the end of batch~1 and the start of batch~2.
+In that gap the backend collects the next tuples from the relation (metadata and sequence locators, not entire sequences), applies the query's \texttt{WHERE} clauses, and places surviving tuples in the dispatch buffer.
+When enough tuples are collected, it submits the next batch.
+That collection still uses one relation-reading thread per PostgreSQL process.
+There's however support for \path{bioseq.scheduler.postgres_parallel.enabled} for any query that do not use alignment. 
+The reasoning behind that is that only the thread pool wasn't designed around being multi-process safe and current statistics collection doesn't support it.
+The scans that do not use alignment are marked parallel-safe. This means that example shown on lsiting below~\ref{code:simple-table-read-with-slice} can be executed by postgres parallel scan.
+
+Scans in details are covered in the next chapter~\ref{sec:postgres-custom-scan-scope} in detail.
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Simple table read},label={code:simple-table-read-with-slice}]
+  SELECT id, bioseq.to_text(s[0:8]) FROM t;
+\end{lstlisting}
+\end{minipage}
+
+\warn{Parallel scan}{
+  This is potential optimisation in the future. Statistics collection can be easily made multi-process safe by implementing reduce function, while thread pool design needs to be revisited and reimplemented.
+}

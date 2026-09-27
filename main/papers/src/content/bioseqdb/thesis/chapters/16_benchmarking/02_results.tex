@@ -1,0 +1,53 @@
+\subsection{Measurement procedure and reading the full tables}
+\label{sec:benchmark-results}
+
+The following tables present results comparins BioseqDB and minimap2 on one Macos machine and 4 AWS machines.
+
+\begin{itemize}
+  \item \textbf{Index.} A persisted index is constructed before measurement.
+  Each repeat starts a fresh process and measures reading the index and mapping
+  the queries. Construction of the persisted index is excluded. Operating-system page caches are not purged, so
+  this is process-cold execution, but not a guaranteed cold disk read (I decided to measure it this way, because minimap2 still has a chance to use system page cache).
+  \item \textbf{No index.} No pre-existing user index is available.
+  \item \textbf{Two measurements per cell.} The first duration, A, is the
+  nearest-rank P50 of the complete measured interval. The second, B, is the
+  nearest-rank P50 after subtracting the union of instrumented CIGAR
+  and MAPQ in each repeat
+\end{itemize}
+
+By default chunk cache for decompressed columns is disabled.
+Each repeat runs 1,024 queries against one reference sequence:
+\begin{itemize}
+  \item References contain exactly
+  $2\times10^9$ or $4\times10^9$ base pairs
+  The parameter pairs are $(k,w)=(15,10)$ and $(20,15)$,
+  \item Each query and target is randomly generated. DNA4 uses same probability for each base (25\%). The DNA5
+  generator assigns probability 1\% to N and 24.75\% to each base.
+  \item Query samples length is 20,000 bp and standard deviation 500 bp (before applying insertions and deletions), it's reverse-complemented with probability 0.5.
+  \item Substitution probability is 0.001 and for insert/deletions it's 0.0005.
+  \item Each query originates from one known sampled
+  reference interval and later substitutions/insertions/deletions are applied to it.
+\end{itemize}
+
+BioseqDB uses task-parallel (most parallel-friendly mode) execution with prefiltering disabled and both CIGAR
+and MAPQ projection enabled. 
+
+AWS machines were missing GPUs so all Vulkan rows are grouped together and marked as not available.
+
+\paragraph{Reading comparisons and highlights.}
+Each cell places the A duration above its comparison, followed by the B duration
+and its own comparison. Durations are rounded to tenths of a second for display.
+All comparisons and minima use the original integer nanoseconds.
+\begin{itemize}
+  \item Minimap2 (light-gray) as the baseline is first row in each table. 
+  \item All of the rows apart from minimap2 are ordered top-to-bottom by the minimum A time for the given "index" configuration.
+  \item A BioseqDB value is compared with minimap2 for the same configuration (green/red triangles), while the minimap2 row compares with the fastest
+  measured eligible BioseqDB effective path in that same column
+  \item Pale yellow
+  identifies the preferred BioseqDB configuration: MPF / Bounded / SIMD-DP /
+  Block. This is the author's (my) selected configuration.
+  \item A dot means there is no measurement, while a horizontal dash with \textsuperscript{g} identifies that GPU configuration wasn't available (no GPU on AWS machines)
+\end{itemize}
+
+
+\include{chapters/16_benchmarking/generated_results}

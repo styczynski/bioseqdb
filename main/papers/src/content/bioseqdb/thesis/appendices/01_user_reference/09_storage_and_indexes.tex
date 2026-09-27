@@ -1,0 +1,750 @@
+\section{Columnar tables and vector aggregates}
+\label{sec:appendix-columnar}
+
+Columnar storage makes three separate choices visible in a query plan:
+which columns to read, which groups of rows to skip, and whether an
+aggregate can process a batch of values at once. A query can benefit from
+the first two without using a vector aggregate. The physical layout is
+described in Section~\ref{sec:pg-storage-columnar}.
+
+\subsection{Create a table with suitable storage options}
+
+The parent table stores scalar columns in stripes. A stripe contains
+smaller chunk groups, with separate presence and value streams for each
+column. Presence records whether a value is NULL. Minimum and maximum
+values can rule out a chunk group before its values are read. Compression
+applies to the column streams independently.
+
+Sequence symbols occupy separate storage shards. The parent row identifies
+the sequence without requiring its whole payload to be read. Each sequence
+column has its own shards. Two sequence columns in one row therefore do
+not share a payload merely because their alphabets match.
+\texttt{bioseq.len} reports sequence symbols. \texttt{bioseq.unit\_len}
+reports packed units, which are not necessarily bytes.
+
+Set initial table options before \texttt{CREATE TABLE}. For example:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Create a columnar table with two sequence columns.}]
+SET bioseq.storage.stripe.row_limit = 20000;
+SET bioseq.storage.chunk_group.row_limit = 2000;
+SET bioseq.storage.compression.algorithm = 'pglz';
+
+CREATE TABLE run_measurements (
+    read_id integer PRIMARY KEY,
+    sample_id text NOT NULL,
+    read_count integer NOT NULL,
+    bases bigint NOT NULL,
+    collected_on date NOT NULL,
+    forward_read bioseq.seq('dna4', 32) NOT NULL,
+    reverse_read bioseq.seq('dna4', 32)
+) USING bioseq;
+
+RESET bioseq.storage.stripe.row_limit;
+RESET bioseq.storage.chunk_group.row_limit;
+RESET bioseq.storage.compression.algorithm;
+\end{lstlisting}
+\end{minipage}
+
+The relevant settings have the following roles:
+\begin{itemize}
+  \item \path{bioseq.storage.stripe.row_limit} defaults to 150000 rows.
+    \path{bioseq.storage.chunk_group.row_limit} defaults to 10000 rows.
+    Each accepts values from 1000 to 100000000.
+  \item \path{bioseq.storage.compression.algorithm} accepts
+    \texttt{none} and \texttt{pglz}. Builds with the corresponding libraries
+    also accept \texttt{lz4} and \texttt{zstd}. The default prefers
+    Zstandard, then LZ4, then pglz, according to build support.
+    A stream can remain uncompressed when compression does not help.
+  \item \path{bioseq.storage.compression.level} defaults to 3 and accepts
+    1--19. It affects Zstandard. The current pglz and LZ4 paths do not use
+    this level.
+  \item \path{bioseq.storage.sequence_shard.max_size_gib} defaults to
+    1024 GiB and requires superuser privileges to change. It controls
+    later shard allocation. It does not rebalance existing shards.
+    Zero starts a new shard for each inserted sequence.
+\end{itemize}
+
+The stripe, chunk-group, and compression settings are copied into the
+table's options when the table is created. A later \texttt{SET} does not
+replace those stored options or rewrite existing data.
+
+\subsection{Change the options of an existing table}
+
+Use the table-option functions to change later writes to an existing table:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Change stored options, then reset them to current GUC values.}]
+SELECT pg_catalog.alter_bioseq_table_set(
+    'run_measurements'::regclass,
+    stripe_row_limit => 30000,
+    chunk_group_row_limit => 3000,
+    compression => 'pglz');
+
+SELECT pg_catalog.alter_bioseq_table_reset(
+    'run_measurements'::regclass,
+    stripe_row_limit => true,
+    chunk_group_row_limit => true,
+    compression => true,
+    compression_level => true);
+\end{lstlisting}
+\end{minipage}
+
+Both functions require ownership of the table and take an
+\texttt{AccessExclusiveLock}. Omitted arguments leave their options
+unchanged. The reset function copies the session's current GUC values,
+rather than necessarily restoring the original defaults. Neither function
+recompresses old stripes.
+
+\subsection{Project, filter, and cache only the needed data}
+
+The following query needs two scalar columns and no sequence symbols:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Inspect column projection and chunk-group filtering.}]
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)
+SELECT read_id, read_count
+FROM run_measurements
+WHERE read_count >= 1000;
+\end{lstlisting}
+\end{minipage}
+
+Read these plan properties separately:
+\begin{itemize}
+  \item \texttt{Projected Columns} lists columns required by the scan.
+  \item \texttt{Chunk Group Filters} describes tests against group
+    metadata. \texttt{Groups Removed by Filter}, reported during analyzed
+    execution, counts groups that were skipped.
+  \item \texttt{Vectorized Filter} describes batch filtering. It does not
+    imply that a later aggregate is vectorized.
+\end{itemize}
+
+Casting a sequence to \texttt{text} requests its symbols. A slice limits
+the requested interval, as described in the sequence-value reference.
+The decompressed-column cache can reuse a compressed column buffer during
+one scan:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Enable the decompressed-column cache for one transaction.}]
+BEGIN;
+SET LOCAL bioseq.column_cache.enabled = on;
+SET LOCAL bioseq.column_cache.capacity_mb = 200;
+
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)
+SELECT read_id, forward_read[0:64]::text
+FROM run_measurements
+WHERE sample_id = 'alpha';
+COMMIT;
+\end{lstlisting}
+\end{minipage}
+
+The cache is disabled by default. Its capacity defaults to 200 MiB and
+accepts 20--20000 MiB. Entries identify a relation, stripe, chunk group,
+and column. They belong to one PostgreSQL backend and are cleared when
+the scan ends. Plan counters report hits, misses, writes, evictions, and
+peak and final cache use. These buffers are separate from the
+\texttt{bioseq\_cache} extension, which stores completed query results.
+Section~\ref{sec:pg-storage-caches} compares the cache lifetimes.
+
+\subsection{Use a supported vector aggregate}
+
+The current aggregate registry supports:
+\begin{itemize}
+  \item \texttt{count(*)}, and \texttt{count(column)} for a direct column.
+  \item \texttt{sum}, \texttt{avg}, \texttt{min}, and \texttt{max} for
+    \texttt{smallint}, \texttt{integer}, and \texttt{bigint} inputs.
+  \item \texttt{min} and \texttt{max} for \texttt{date} inputs.
+\end{itemize}
+
+An eligible plan has a plain aggregate directly above a
+\texttt{BioseqScan}, with \path{bioseq.vectorization.enabled} on.
+The following nonempty example has no NULL aggregate inputs. The nullable
+second sequence column still illustrates independent sequence storage.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Load a small table for inspecting the aggregate path.}]
+INSERT INTO run_measurements VALUES
+    (1, 'alpha', 12, 32, DATE '2026-01-02',
+     repeat('ACGT', 8)::bioseq.seq('dna4', 32),
+     'TGCATGCATGCATGCA'),
+    (2, 'alpha', 20, 32, DATE '2026-01-03',
+     'TCACTGTAGGATCGTAGCTAGTCCGTACTGTA', 'ACGTACGTACGTACGT'),
+    (3, 'beta', 28, 32, DATE '2026-01-04',
+     'GGGGCCCCTTTTAAAAGGGGCCCCTTTTAAAA', NULL),
+    (4, 'beta', 36, 32, DATE '2026-01-05',
+     'CTAGTCACTGTAGCCTGATCGTAGCTAGTCAA', 'AAAACCCCGGGGTTTT');
+ANALYZE run_measurements;
+\end{lstlisting}
+\end{minipage}
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Ask for and inspect a plain vector aggregate.}]
+BEGIN;
+SET LOCAL max_parallel_workers_per_gather = 0;
+SET LOCAL bioseq.execution.parallel.enabled = off;
+SET LOCAL bioseq.vectorization.enabled = on;
+
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)
+SELECT count(*) AS rows,
+       sum(read_count) AS reads,
+       avg(bases) AS average_bases,
+       min(collected_on) AS first_day,
+       max(collected_on) AS last_day
+FROM run_measurements;
+COMMIT;
+\end{lstlisting}
+\end{minipage}
+
+The plan to look for is \texttt{Custom Scan (VectorAggNode)} with a
+\texttt{BioseqScan} child. Run the \texttt{SELECT} without
+\texttt{EXPLAIN} to obtain the values: four rows, a read-count sum of 96,
+an average of 32 bases, and dates from 2 to 5 January 2026.
+Neither sequence payload is an input to this aggregate.
+The two parallel-scan controls disable PostgreSQL query workers for this
+example. They do not disable the separate oneTBB task scheduler.
+
+\subsection{Recognize ordinary aggregation and its correctness role}
+
+Grouped aggregates, joins, aggregate \texttt{DISTINCT} or \texttt{FILTER}
+clauses, slice projections, and aggregates over an owned
+\texttt{mmsearch} result use the ordinary path. Unregistered aggregate
+functions and unsupported input expressions do so too. For example:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Useful queries that do not select the plain vector aggregate.}]
+SELECT sample_id, sum(read_count)
+FROM run_measurements
+GROUP BY sample_id
+ORDER BY sample_id;
+
+SELECT max(bioseq.len(forward_read[0:16]))
+FROM run_measurements;
+
+SELECT count(DISTINCT sample_id)
+FROM run_measurements;
+\end{lstlisting}
+\end{minipage}
+
+\begin{quote}
+\textbf{Current correctness limitation.}
+Some vector aggregates return the wrong result for empty or all-NULL
+inputs. Small-integer and integer sums can return zero instead of NULL.
+Some integer and date minimum or maximum functions can return their
+initial extreme value. Keep \path{bioseq.vectorization.enabled} off for
+queries that can encounter these cases. The ordinary PostgreSQL aggregate
+path provides the expected SQL results.
+\end{quote}
+
+\subsection{Inspect and maintain sequence storage}
+
+Use the public shard function to inspect each sequence column:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Inspect payload shards and their companion relations.}]
+SELECT column_attno, bucket_idx, shard_idx,
+       sub_relation, sidecar_relation, bytes_written, is_full,
+       pg_relation_size(sub_relation) AS payload_relation_bytes,
+       pg_relation_size(sidecar_relation) AS sidecar_relation_bytes
+FROM bioseq.list_seq_storage_shards(
+    'run_measurements'::regclass)
+ORDER BY column_attno, bucket_idx, shard_idx;
+\end{lstlisting}
+\end{minipage}
+
+The column number distinguishes the two sequence columns. The bucket
+groups sequences by length, and the shard number distinguishes successive
+allocations in that bucket. The two returned relation identifiers name
+the payload relation and its companion metadata relation.
+\texttt{bytes\_written} and \texttt{is\_full} describe shard allocation.
+\texttt{pg\_relation\_size} measures the returned relation's physical size.
+Index sizes and update ages are available through the separate index
+metadata interface below.
+
+The parent table and its sequence shards have separate maintenance calls:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Maintain the parent table and allocated sequence shards.}]
+VACUUM (ANALYZE) run_measurements;
+CALL bioseq.vacuum_seq_storage('run_measurements'::regclass);
+\end{lstlisting}
+\end{minipage}
+
+Call the procedure outside an explicit transaction block when shards have
+been allocated. It runs \texttt{VACUUM ANALYZE} on shard pairs and can
+commit between them. An error can leave earlier pairs maintained. After
+correcting the error, call it again. A table with no allocated sequence
+shards is a no-op. This procedure does not rebuild sequence indexes.
+
+A practical sequence is to choose table options, load rows, run
+\texttt{ANALYZE}, and inspect projection and filtering with
+\texttt{EXPLAIN ANALYZE}. Enable the column cache or vector aggregation
+only when their behavior suits the query. After mutations, maintain the
+parent, shards, and indexes according to their separate roles.
+Keep \path{bioseq.storage.dml.enabled} on: despite its name, this internal
+switch controls reading deletion masks. Turning it off can expose deleted
+rows and does not make the table read-only.
+
+\section{Sequence-index maintenance and metadata}
+\label{sec:appendix-indexes}
+
+BioSeqDB manages sequence indexes through its own SQL functions.
+\texttt{CREATE INDEX} creates a PostgreSQL index and does not build these
+sequence search structures. Section~\ref{sec:index-logical-layouts}
+explains the layouts. This section gives the operational steps.
+
+\subsection{Choose a family and its update policy}
+
+Each sequence column registers three production index families:
+\begin{itemize}
+  \item \texttt{minimizers\_per\_fragment} (MPF) stores minimizers for
+    sequence fragments. It is the default read family and defaults to
+    \texttt{UPDATE\_ON\_INSERT}.
+  \item \texttt{minimizers\_per\_sequence} (MPS) groups minimizer
+    positions across a sequence. It defaults to
+    \texttt{UPDATE\_MANUALLY}.
+  \item \texttt{symbol\_counts} stores letter counts and defaults to
+    \texttt{UPDATE\_ON\_INSERT}. It serves operations such as
+    \texttt{bioseq.symbol\_count(sequence, 'A')}.
+\end{itemize}
+
+Registration describes the available families. An empty table has no
+sequence-index payload to read. A table with multiple sequence columns
+has separate registrations for each column. Both minimizer families can
+report \texttt{CHUNKED\_PER\_FRAGMENT} in their physical
+\texttt{index\_type}. Use \texttt{index\_name} to distinguish their
+logical roles.
+
+There are two levels of insertion maintenance:
+\begin{enumerate}
+  \item \path{bioseq.index.insert_maintenance.enabled}, on by default,
+    permits insertion-time maintenance in the current session.
+  \item Each index's stored policy decides whether that family is
+    maintained on insertion. \texttt{UPDATE\_MANUALLY} requires an
+    explicit rebuild. \texttt{UPDATE\_ON\_INSERT} permits eligible
+    insertion-time maintenance.
+\end{enumerate}
+
+For an existing \texttt{indexed\_reads} table, the following calls switch
+MPS between the two policies:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Change one index family's policy for every sequence column.}]
+SELECT bioseq.set_index_policy(
+    'indexed_reads'::regclass,
+    'minimizers_per_sequence', 'UPDATE_ON_INSERT');
+
+SELECT bioseq.set_index_policy(
+    'indexed_reads'::regclass,
+    'minimizers_per_sequence', 'UPDATE_MANUALLY');
+\end{lstlisting}
+\end{minipage}
+
+Use these exact policy names. The current function treats a string other
+than \texttt{UPDATE\_ON\_INSERT} as manual, so a spelling error can
+silently select manual maintenance. Changing a policy does not build
+missing payloads, clear old payloads, or select the active read family.
+The optional grouped construction path has additional restrictions,
+described below.
+
+For frequent small insertions, ordinary MPF and symbol counts provide a
+useful starting point. For a large load, disable insertion maintenance,
+then build the selected families once. For stable data, compare MPF and
+MPS using the actual query workload. Letter-composition queries need
+symbol counts rather than a minimizer index. A one-off search can use
+transient preparation without constructing a persistent index.
+
+\subsection{Load first, then build the selected indexes}
+
+The following example uses a fresh table and commits its source rows
+before explicit index construction. The repeated flanks make each target
+longer than the query shown later.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Load a searchable table without insertion-time indexing.}]
+BEGIN;
+SET LOCAL bioseq.index.insert_maintenance.enabled = off;
+
+CREATE TABLE indexed_reads (
+    read_id integer PRIMARY KEY,
+    sample_id text NOT NULL,
+    sequence bioseq.seq('dna4', 64) NOT NULL
+) USING bioseq;
+
+INSERT INTO indexed_reads VALUES
+    (1, 'alpha',
+     (repeat('ACGT', 96) || 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' ||
+      repeat('TGCA', 32))::bioseq.seq('dna4', 64)),
+    (2, 'alpha',
+     (repeat('TGCA', 72) || 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' ||
+      repeat('ACGT', 48))::bioseq.seq('dna4', 64)),
+    (3, 'beta', repeat('GATTACA', 80)::bioseq.seq('dna4', 64));
+COMMIT;
+\end{lstlisting}
+\end{minipage}
+
+Inspect the initial state before building:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Read the public index metadata.}]
+SELECT column_name, index_name, index_type, update_policy,
+       storage_size, time_since_update
+FROM bioseq.list_metadata()
+WHERE table_name = 'indexed_reads'::regclass
+ORDER BY column_attno, index_name;
+\end{lstlisting}
+\end{minipage}
+
+There should be three registered rows for this sequence column, with no
+built payload and no update time. \texttt{column\_attno} and
+\texttt{column\_name} identify the source column.
+\texttt{storage\_size} and \texttt{time\_since\_update} describe stored
+index data and its last recorded update. They do not establish that a
+particular query can use it.
+
+For ordinary relation-backed indexes, leave
+\path{bioseq.aligner.grouped_soa_generation.enabled} off and explicitly
+build the desired families:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Build all three ordinary families and select MPF for reads.},
+  label={lst:appendix-ordinary-index-build}]
+SET bioseq.aligner.grouped_soa_generation.enabled = off;
+SET bioseq.aligner.vulkan.enabled = off;
+SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';
+SET bioseq.aligner.minimizer.kmer_size = 15;
+SET bioseq.aligner.minimizer.window_size = 10;
+
+SELECT bioseq.update_index(
+    'indexed_reads'::regclass, 'minimizers_per_fragment');
+SELECT bioseq.update_index(
+    'indexed_reads'::regclass, 'minimizers_per_sequence');
+SELECT bioseq.update_index(
+    'indexed_reads'::regclass, 'symbol_counts');
+SELECT bioseq.set_active_read_index(
+    'indexed_reads'::regclass, 'minimizers_per_fragment');
+ANALYZE indexed_reads;
+\end{lstlisting}
+\end{minipage}
+
+\texttt{update\_index} returns the number of sequence values processed,
+across the table's sequence columns. It is not a count of physical index
+rows. \texttt{set\_active\_read\_index} changes the selected family for
+all sequence columns. It does not build that family.
+The chosen minimizer implementation, $k=15$, and $w=10$ define this
+example's sketch profile. Keep the search profile compatible with the
+construction profile. Turning Vulkan off selects CPU availability for
+this example, rather than rebuilding stored data.
+
+\texttt{ANALYZE} updates PostgreSQL planner statistics.
+\texttt{VACUUM}, \texttt{CREATE INDEX}, and \texttt{REINDEX} have their
+PostgreSQL roles. None replaces \texttt{bioseq.update\_index}.
+
+\subsection{Inspect physical rows and letter-count reuse}
+
+After construction, inspect the stored index relations through public SQL:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Inspect index storage and one source row's published keys.}]
+SELECT index_name, update_policy, storage_size, time_since_update,
+       bioseq.index_table_row_count(
+           'indexed_reads'::regclass, index_name) AS physical_rows
+FROM bioseq.list_metadata()
+WHERE table_name = 'indexed_reads'::regclass
+ORDER BY column_attno, index_name;
+
+SELECT r.read_id,
+       bioseq.index_distinct_sub_keys(
+           'indexed_reads'::regclass,
+           'minimizers_per_fragment',
+           bioseq.column_row_number(
+               'indexed_reads'::regclass, r.ctid)) AS published_keys
+FROM indexed_reads AS r
+ORDER BY r.read_id;
+\end{lstlisting}
+\end{minipage}
+
+\texttt{index\_table\_row\_count} counts physical rows across the chosen
+family's index shards. \texttt{index\_distinct\_sub\_keys} reports the
+largest per-shard count of published sub-keys for the supplied source row
+number. A sub-key identifies a stored part of that row's index.
+\texttt{column\_row\_number} decodes the current BioSeqDB tuple locator
+from \texttt{ctid}. Keep the application key \texttt{read\_id} for durable
+row references. A physical locator is not an application identifier.
+
+The letter-count use case is independent of minimizer-family selection:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Inspect direct use of saved letter counts.}]
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)
+SELECT read_id, bioseq.symbol_count(sequence, 'A') AS adenines
+FROM indexed_reads
+ORDER BY read_id;
+\end{lstlisting}
+\end{minipage}
+
+Look for \texttt{Bioseq Fetched From Meta} in a compatible projection
+plan. A missing compatible count can be recomputed from the sequence.
+Using \texttt{symbol\_count} in a predicate does not create a conventional
+PostgreSQL index scan over letter counts.
+
+\subsection{Distinguish permitted reads from required reads}
+
+\path{bioseq.index.sequence_read.enabled}, on by default, permits stored
+index reads for ordinary searches. Turning it off prevents such reuse.
+It does not delete index data, disable insertion maintenance, or disable
+background persistence.
+
+The per-call \texttt{aligner\_options(index\_read\_requirement => ...)}
+argument makes a stronger choice:
+\begin{itemize}
+  \item \texttt{0}: allow a compatible stored index or an eligible
+    fallback. Use this for searches that may recompute missing data.
+  \item \texttt{1}: force transient target preparation. Existing stored
+    indexes may remain present, but the query does not read them.
+  \item \texttt{2}: require a compatible stored target index. A missing
+    or incompatible index is an error. This overrides the ordinary
+    stored-read GUC.
+\end{itemize}
+
+These are per-call options, not GUC values. Their relationship to other
+search defaults is described in Section~\ref{sec:appendix-search-options}.
+A positive physical row count alone does not satisfy requirement 2.
+Compatibility also depends on source identity, alphabet, packed-unit
+width, minimizer scheme and parameters, stored format, and the chosen
+reader. See Section~\ref{sec:index-compatibility}.
+
+For a controlled transient comparison, use requirement 1. To compare the
+stored-read GUC on and off, keep requirement 0. Otherwise the per-call
+requirement can determine the outcome instead of the GUC.
+
+\subsection{Build and check the experimental grouped reader}
+
+The optional grouped path is a separate construction choice. To try it,
+repeat the fresh-table load above under a new table name, or use
+\texttt{indexed\_reads} before running
+Listing~\ref{lst:appendix-ordinary-index-build}. It should have committed
+source rows and no previously built ordinary minimizer layout.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Build grouped generations from committed source rows.}]
+SET max_parallel_workers_per_gather = 0;
+SET bioseq.execution.parallel.enabled = off;
+SET bioseq.aligner.vulkan.enabled = off;
+SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';
+SET bioseq.aligner.minimizer.kmer_size = 15;
+SET bioseq.aligner.minimizer.window_size = 10;
+SET bioseq.aligner.chaining.algorithm = 'simd_minimap2';
+SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';
+SET bioseq.index.async_persistence.enabled = off;
+SET bioseq.index.recompute_async_persistence.enabled = off;
+SET bioseq.aligner.grouped_soa_generation.enabled = on;
+
+SELECT bioseq.update_index(
+    'indexed_reads'::regclass, 'minimizers_per_fragment');
+SELECT bioseq.update_index(
+    'indexed_reads'::regclass, 'minimizers_per_sequence');
+SELECT bioseq.update_index(
+    'indexed_reads'::regclass, 'symbol_counts');
+SELECT bioseq.set_active_read_index(
+    'indexed_reads'::regclass, 'minimizers_per_fragment');
+ANALYZE indexed_reads;
+\end{lstlisting}
+\end{minipage}
+
+The settings in this example have distinct jobs:
+\begin{itemize}
+  \item \path{bioseq.aligner.grouped_soa_generation.enabled}, off by
+    default, changes explicit index construction. Grouped MPF writes
+    relation rows and a CPU reader image. Grouped MPS writes relation
+    streams. The flag neither builds an index by itself nor selects the
+    later query reader.
+  \item Both asynchronous-persistence settings must be off for explicit
+    grouped construction. Their ordinary purpose is explained below.
+  \item The current grouped builder uses $k=15,w=10$. The selected
+    minimizer implementation must agree between build and search.
+    \texttt{simd\_minimap2} selects CPU chaining, and
+    \texttt{block\_aligner} selects base alignment.
+  \item Disabling PostgreSQL parallel query workers and Vulkan gives a
+    CPU example. BioSeqDB can still schedule its own CPU tasks.
+\end{itemize}
+
+Ordinary per-tuple insertion with grouped construction enabled rejects
+minimizer families set to \texttt{UPDATE\_ON\_INSERT}. Load with insertion
+maintenance off and publish after the source rows commit. The streamed
+loader has a separate post-flush batch path, so its maintenance behavior
+should not be inferred from ordinary per-tuple insertion.
+
+The current strict reader belongs to an eligible \texttt{BioseqBatchJoin}.
+Create a small query table and search its whole sequence column against
+the whole target column. A constant-query \texttt{BioseqScan} does not
+support this strict reader and rejects requirement 2.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Prepare query rows for the strict batch-join reader.}]
+BEGIN;
+SET LOCAL bioseq.index.insert_maintenance.enabled = off;
+CREATE TABLE index_queries (
+    query_id integer PRIMARY KEY,
+    sequence bioseq.seq('dna4', 64) NOT NULL
+) USING bioseq;
+INSERT INTO index_queries VALUES
+    (1, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT');
+COMMIT;
+ANALYZE index_queries;
+\end{lstlisting}
+\end{minipage}
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Check stored-index use through an analyzed search.}]
+SET bioseq.index.sequence_read.enabled = on;
+
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)
+SELECT r.read_id, q.query_id,
+       bioseq.target_start(r.read_id) AS target_start,
+       bioseq.target_end(r.read_id) AS target_end
+FROM indexed_reads AS r
+JOIN index_queries AS q
+  ON mmsearch(r.sequence, q.sequence,
+              aligner_options(index_read_requirement => 2))
+ORDER BY r.read_id, q.query_id, target_start;
+
+SELECT requested_target_index_source, actual_target_index_source,
+       persisted_generation_id, persisted_source_identity,
+       persisted_index_rows, missing_persisted_index_rows,
+       recomputed_target_index_rows,
+       persisted_generation_read_sessions
+FROM bioseq.last_alignment_execution_stats()
+WHERE stage = 'query_sketch';
+\end{lstlisting}
+\end{minipage}
+
+For a successful strict check, the analyzed plan should contain
+\texttt{BioseqBatchJoin} and report
+\texttt{require\_compatible\_persisted} and actual target source
+\texttt{persisted}. Missing and recomputed target-index row counts should
+be zero. The last-run statistics identify the accepted generation and
+source. Read them immediately after the search in the same backend.
+They are diagnostic state, not a permanent history of queries.
+
+The grouped MPF image is used by eligible prepared CPU batch-join readers
+over whole, untransformed targets. Enabling the
+construction flag does not make every search map that file. Ordinary
+allow-mode readers can instead read relation-backed payloads. The reader
+selection and its limits are described in
+Section~\ref{sec:index-example-settings} and
+Figure~\ref{fig:index-join-read-paths}.
+This path remains experimental. Cleanup of retired images and complete
+recovery support are unfinished. Do not treat the example as a durability
+guarantee for those images.
+
+Plain \texttt{SET} persists in the session after a successful commit.
+After this experiment, restore the changed settings with \texttt{RESET},
+or use a dedicated connection. In particular, restore grouped construction
+before returning to ordinary insertion-time maintenance.
+
+\subsection{Handle mutations and concurrent use}
+
+Index maintenance follows the identity of the visible source sequence:
+\begin{itemize}
+  \item \texttt{INSERT} adds a new source value. Eligible indexes follow
+    their insertion policy when the session permits maintenance.
+  \item \texttt{UPDATE} retires the old row version and inserts a new
+    source value. The new value needs index data for its new identity.
+  \item \texttt{DELETE} removes the row from visible search input.
+    Retiring its source identity is separate from immediately reclaiming
+    every stored index chunk.
+\end{itemize}
+
+A manually maintained index can retain physical data for an older source
+without being suitable for the new one. An allow-mode search may recompute
+eligible missing data. A strict search should fail when no compatible
+generation is available. Rebuild the selected families after a bulk
+change, then run \texttt{ANALYZE}.
+
+PostgreSQL snapshots determine which row versions a scan can see. Index
+generation checks must agree with those visible sources. Committing new
+source rows and building their indexes in a later transaction creates an
+interval during which strict readers can fail. Plan that interval for
+maintenance, or allow recomputation where supported. Do not assume that
+an asynchronous rebuild becomes available at the source commit.
+Section~\ref{sec:pg-storage-versions} explains row visibility, and
+Section~\ref{sec:index-generations} explains index publication and its
+current durability limits.
+
+Use three checks before depending on stored reads:
+\begin{enumerate}
+  \item Inspect the per-column family, update policy, size, and update
+    time in \nolinkurl{bioseq.list_metadata()}.
+  \item Check physical index rows through the public inspection
+    functions when storage state needs investigation.
+  \item Execute a representative strict search and inspect its actual
+    reader choice. Metadata alone does not prove query compatibility.
+\end{enumerate}
+
+\subsection{Bound index memory and inspect deferred work}
+
+\path{bioseq.index.memory_cap_mb} limits accounted resident-index
+reservations. Zero uses the runtime memory policy. A nonzero value does
+not set a whole-query or cluster-wide memory ceiling. Large index builds
+can spill sorted runs to PostgreSQL temporary storage and merge them.
+Inspect the most recent build and current scheduler state separately:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql,
+  caption={Inspect index construction and scheduler reservations.}]
+SELECT bioseq.last_index_merge_run_count();
+
+SELECT current_threads, batches_awaiting,
+       async_persist_jobs_waiting, index_memory_reserved_bytes
+FROM bioseq.scheduler_stats();
+\end{lstlisting}
+\end{minipage}
+
+The merge-run count is backend-local state from the most recent index
+build. It is not a property of every index or a search-time measurement.
+The scheduler snapshot reports current threads, waiting batches, queued
+persistence jobs, and reserved index bytes. Reserved bytes do not include
+every allocation in the process.
+
+Two GUCs control eligible deferred persistence:
+\begin{itemize}
+  \item \path{bioseq.index.async_persistence.enabled}, on by default,
+    permits background persistence requests. It does not turn an explicit
+    \texttt{update\_index} call into an asynchronous call.
+  \item \path{bioseq.index.recompute_async_persistence.enabled}, off by
+    default, also permits an eligible query-time recomputation to request
+    persistence for later searches. It requires the preceding setting.
+\end{itemize}
+
+Current recomputation persistence needs a real source relation, an
+eligible insertion-maintained policy, a supported minimizer scheme, and
+$k=15,w=10$. The older deferred path excludes bounded ntHash and does not
+build the grouped MPF reader image. Requests are staged for submission
+after commit. Abort discards them. A background worker reopens the source
+and rechecks eligibility. Missing queue resources or failed eligibility
+checks can prevent persistence, so a successful search does not imply
+that a stored index was created.
+
+For predictable maintenance, choose the family and profile, choose
+insertion or explicit updates, build after loading, and check a real
+stored read. After mutations, repeat the relevant build and readiness
+steps. Keep source maintenance, PostgreSQL statistics, index publication,
+and background work as separate operations when interpreting diagnostics.

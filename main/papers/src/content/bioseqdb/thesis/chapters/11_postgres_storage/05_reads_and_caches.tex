@@ -1,0 +1,33 @@
+\subsection{BioseqDB all cache layers}
+\label{sec:pg-storage-caches}
+
+The optional column cache stores decompressed stripe chunks. It is separate
+from the scanner-owned packed fragment slots in
+Figure~\ref{fig:sequence-scan-lifecycle}.
+
+The setting \path{bioseq.column_cache.enabled} controls the decompressed cache.
+The original benchmark campaign disabled it, whereas binary releases enable
+it by default. It stores decoded chunks inside one PostgreSQL backend process.
+Its key contains relation, stripe, chunk
+group, and column identifiers (the configured
+capacity when enabled defaults to 200~MiB)
+
+The cache can return borrowed pointer to a decompression buffer for a chunk, which allows to prevent additional chunk loads wasting time on decompression multiple times.
+As I discussed all methods of caching within BisoeqDB already, I present table with comparison of all cache layers:
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Stored bytes and reusable memory have different owners.}
+\label{tab:storage-cache-scopes}
+\begin{tabularx}{\linewidth}{@{}p{.23\linewidth}XX@{}}
+\toprule
+\textbf{Object} & \textbf{Retained data} & \textbf{Scope} \\
+\midrule
+PostgreSQL buffer & Relation page bytes & Internal buffer manager in Postgres pins each page and loads/unloads pages on demand so multiple accesses to the same page are efficient \\
+Column cache~\ref{sec:pg-storage-caches} & Decoded column value buffer & Can cache decompressed chunks, so loading and decompression of the same chunks can be efficient \\
+Fragment slots~\ref{fig:sequence-scan-lifecycle} & Copy of one packed fragment & Scanner-owned packed copies reused within a read session, independently of the column-cache setting.\\
+Query-result cache~\ref{sec:seq-results-cache} & Completed SQL result rows & Separate \path{bioseq_cache} subextension can store and share results after pipeline execution is finished so same or similar queries can be efficient (experimental and disabled by default) \\
+\bottomrule
+\end{tabularx}
+\end{table}

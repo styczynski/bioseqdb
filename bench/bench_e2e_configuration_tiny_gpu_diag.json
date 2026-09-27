@@ -1,0 +1,45 @@
+{
+  "params": {
+    "bioseq_block_gpu_dp_gpu_seed_no_index": {
+      "_": {"type": "integer", "default": 0, "description": "Resident GPU-index frontend (Vulkan GPU seeding + tiled-DP chaining + block aligner); load(no index)+GPU recompute align, all via SQL, timed end-to-end"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "write-policy minimizer index selected before load/recompute"},
+      "recompute_async_persistence": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "stage the recompute minimizer index for async persistence (off = pure from-scratch no-index measure)"},
+      "pipeline_mode": {"type": "string", "default": "single_thread", "enum": ["single_thread", "parallel_dispatch", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL recompute path"}
+    }
+  },
+
+  "test_cases": {
+    "E2E_TINY_DNA4": { "concurrency": 1, "data": {
+        "alphabet": "dna4", "size_label": "tiny_dna4", "reference_length": 2000000,
+        "fragment_count": 1, "fragment_length_mean": 50000, "fragment_length_stddev": 1000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 2000352, "seed": 3219876 },
+      "description": "TINY dna4 2 Mbp reference, one 50 kbp query — diagnostic GPU backend repro only" }
+  },
+
+  "bench_e2e": {
+    "tags": ["e2e", "gpu", "tiny", "diag"],
+    "description": "TINY GPU diagnostic pass: trigger the real PG-backend Vulkan GPU pipeline creation quickly to capture interpose diagnostics.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": { "E2E_TINY_DNA4": 1 },
+      "over": {
+        "bioseq_block_gpu_dp_gpu_seed_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns":   { "rules": [] },
+        "region_total_ns": { "type": "region", "rules": [] },
+        "match_count":            { "type": "evaluation" },
+        "found_fraction":         { "type": "evaluation", "rules": [] },
+        "measured_region_ns_manual": { "type": "evaluation", "rules": [] },
+        "peak_postgres_rss_mb":   { "type": "evaluation", "rules": [] }
+      }
+    }
+  },
+
+  "regression_rules": []
+}

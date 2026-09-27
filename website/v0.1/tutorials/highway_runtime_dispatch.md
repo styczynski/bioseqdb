@@ -1,0 +1,339 @@
+---
+title: Highway runtime dispatch
+slug: highway_runtime_dispatch
+description: Read Bioseq's compiled, runnable, planned, and executed SIMD targets, plus the related Vulkan sort counters.
+order: 90
+keywords: [Highway, SIMD, runtime dispatch, EXPLAIN, architecture, Vulkan, GPU sort]
+draft: false
+---
+
+Bioseq compiles a closed set of Highway SIMD targets into the extension. At
+planning time, it intersects that set with the targets the current CPU and
+operating system can run. The resulting runnable set has one selected target.
+The scheduler binds that target once for the query and validates that the bound
+kernel table is complete before worker execution starts.
+
+This page separates three questions that are easy to conflate:
+
+- What the extension was built with
+- What this host can run and what the planner selected
+- What actually ran for this execution
+
+The first two are planning facts. The third is a runtime result, so it needs
+`EXPLAIN ANALYZE`.
+
+Prerequisite: [Search multiple sequence columns and join by sequence](../multiple_sequence_columns_and_joins/)
+introduces the single-search and batch shapes used here.
+
+## SIMD controls and a reproducible dispatch query
+
+`bioseq.vectorization.enabled` enables Bioseq vectorized execution paths. It
+does not name an ISA and it is not a request to use a particular Highway target.
+Highway chooses from the compiled targets that are runnable on the backend's
+current host. Do not hard-code a target name in an application check because
+the target inventory can differ by build, CPU, and operating-system support.
+
+The following block selects the deterministic SIMD algorithms used by the
+examples. Vulkan is disabled so the resulting fields describe the CPU Highway
+dispatch rather than a GPU alignment route. It runs [[sql:bioseq.mmsearch]] over
+a [[sql:bioseq.seq]] column once with vectorization enabled and once with it
+disabled, so both plans come from the current host.
+
+```sql runnable id=highway_dispatch_explain timeout=30s
+-- bioseq:setup
+SET max_parallel_workers_per_gather = 0;
+SET bioseq.index.insert_maintenance.enabled = off;
+SET bioseq.index.sequence_read.enabled = off;
+SET bioseq.aligner.vulkan.enabled = off;
+SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';
+SET bioseq.aligner.chaining.algorithm = 'simd_minimap2';
+SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';
+CREATE TABLE highway_dispatch_reads (
+  pk integer PRIMARY KEY,
+  seq0 bioseq.seq('dna4', 32)
+) USING bioseq;
+INSERT INTO highway_dispatch_reads VALUES
+  (1, 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'),
+  (2, 'CCCCAACTTAGTCACTTCTCAAAAATTACTCTCTCATCATCATCTACTCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACACACACCCCAAA'),
+  (3, 'GGGGGTCACTTCTCAAAAATTAGGGGGGGGGTAGTCACTGTAGCCTGATCGTAGCTAGGACACATATCATCATCTACTCCTATCATCATCTACTCCTA');
+-- bioseq:visible
+SET bioseq.vectorization.enabled = on;
+EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)
+SELECT pk
+FROM highway_dispatch_reads
+WHERE public.mmsearch(
+  seq0,
+  'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 32))
+ORDER BY pk;
+
+SET bioseq.vectorization.enabled = off;
+EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)
+SELECT pk
+FROM highway_dispatch_reads
+WHERE public.mmsearch(
+  seq0,
+  'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'::bioseq.seq('dna4', 32))
+ORDER BY pk;
+-- bioseq:teardown
+DROP TABLE highway_dispatch_reads;
+RESET bioseq.aligner.base_alignment.algorithm;
+RESET bioseq.aligner.chaining.algorithm;
+RESET bioseq.aligner.minimizer.algorithm;
+RESET bioseq.aligner.vulkan.enabled;
+RESET bioseq.vectorization.enabled;
+RESET bioseq.index.sequence_read.enabled;
+RESET bioseq.index.insert_maintenance.enabled;
+RESET max_parallel_workers_per_gather;
+```
+
+The public control surface in this example is deliberately small. Use
+`bioseq.vectorization.enabled = off` for a CPU vectorization A/B comparison.
+Use the algorithm settings only when you need a particular supported pipeline
+shape. They select the minimizer, chaining, and base-alignment algorithms, not
+an individual Highway ISA.
+
+Turning the Boolean switch off does not require every Highway label to vanish
+from a plan. A pipeline can still contain a Highway-backed function outside the
+route controlled by that switch. Compare ordered result rows first, then read
+the per-stage `vectorised` labels and the complete dispatch object. Do not use
+the presence of the word `Highway` as the only A/B check.
+
+## Read every Highway EXPLAIN field
+
+A Bioseq search node with pipeline detail uses the same five stable dispatch
+fields. In JSON they are collected once under the `Highway SIMD Dispatch`
+object.
+
+| Field | Meaning | When it is available |
+| --- | --- | --- |
+| `Highway Compiled Targets` | Target kernels present in this extension binary | Planning and execution |
+| `CPU-Supported Targets` | Targets Highway says this CPU and OS may execute | Planning and execution |
+| `Runnable Targets` | The intersection of compiled and CPU-supported targets | Planning and execution |
+| `Planned Architecture` | The single target selected from `Runnable Targets` | Planning and execution |
+| `Executed Architecture` | The target recorded by execution | `EXPLAIN ANALYZE` only |
+
+Plain text `EXPLAIN` prints the first four fields and planned `Highway
+Function` entries. Those entries identify the selected function and its stage,
+such as query sketch, chaining, or alignment. They are an explanation of the
+plan, not a record of completed execution.
+
+`EXPLAIN ANALYZE` adds `* Executed Architecture` in text output. For the
+normal one-plan, one-bind path it must equal `Planned Architecture`. The value
+`mixed` means that the aggregated workers reported different executed targets.
+Treat `mixed` as a summary result. It does not say one requested target ran.
+
+Structured output has two useful levels. `Highway SIMD Dispatch` contains the
+five dispatch fields. `Planned Highway Functions` lists the top-level planned
+functions, while `Highway Functions` can occur under individual pipeline
+stages when verbose stage detail is present. A plain structured `EXPLAIN`
+intentionally omits `Executed Architecture`. Its presence means that the
+statement executed under `ANALYZE`.
+
+The following checks are more useful than comparing host-specific names:
+
+1. Confirm that `Runnable Targets` contains `Planned Architecture`.
+2. Confirm that every expected `Highway Function` has the same planned
+   architecture.
+3. Run `EXPLAIN ANALYZE` and confirm that `Executed Architecture` equals the
+   planned architecture.
+4. Preserve the complete dispatch object with a performance report, because a
+   later build or host may have a different compiled or supported inventory.
+
+## Confirm actual Vulkan execution
+
+`bioseq.aligner.vulkan.enabled` is the top-level Vulkan switch used by both
+alignment routing and the sequence batch-sort executor. Enabling it permits an
+eligible path to attempt Vulkan. It does not make a GPU available, force a GPU
+kernel, or replace the Highway fields above.
+
+Check the runtime before interpreting a GPU request:
+
+```sql
+SELECT is_available,
+       device_name,
+       max_workgroup_count_x,
+       has_scalar_block_layout,
+       device_local_bytes,
+       is_software_device,
+       initialization_error
+FROM bioseq.vulkan_runtime_status();
+```
+
+`is_available` is the first gate. When it is false, read
+`initialization_error` and expect CPU execution or a strict-route error,
+depending on the operation. When it is true, keep the device name and relevant
+capabilities with the plan. `SHOW bioseq.aligner.vulkan.enabled` only reports a
+session preference. It does not replace this runtime check.
+
+For a supported `mmsearch` all-GPU tuple, the additional public controls are
+`bioseq.aligner.vulkan.seed_lookup.enabled`,
+`bioseq.aligner.vulkan.index_cache.enabled`,
+`bioseq.aligner.vulkan.fused_frontend.enabled`,
+`bioseq.aligner.vulkan.index_build.enabled`, and
+`bioseq.aligner.vulkan.alignment_extension.enabled`. The Vulkan-specific
+algorithm choices for this route are
+`bioseq.aligner.minimizer.algorithm = 'vulkan_minimap_integer'` and
+`bioseq.aligner.chaining.algorithm = 'vulkan_tiled_dynamic_programming'`.
+These controls describe a supported alignment route. They do not change the
+meaning of the five Highway fields and should be enabled only with a compatible
+device, stored representation, query shape, and selected algorithm tuple.
+
+For sequence `ORDER BY`, the separate opt-in
+`bioseq.planner.sequence_sort_scan.enabled` asks the planner to replace one
+eligible sequence sort with `Custom Scan (BioseqBatchSortScan)`. It defaults to
+off. With it off, PostgreSQL keeps its normal `Sort` node. With it on, the
+planner still leaves the normal plan in place unless the query has exactly one
+sequence ordering key and an eligible input path.
+
+## GPU sequence sort: plan choice versus execution result
+
+The batch-sort custom scan is a sequence ordering accelerator, not a general
+promise that every `ORDER BY` runs on the device. The sort executor reads
+`bioseq.aligner.vulkan.enabled` at execution time. A GPU attempt requires a
+usable Vulkan device, a batch that can be represented as a compatible resident
+packed layout, valid bounded sizes, memory admission, and a successful device
+round trip. DNA4 and DNA5 have dedicated kernel kinds. Other supported sequence
+alphabets use the generic kernel kind.
+
+This block is a portable control experiment. It reports the runtime capability,
+then analyzes the same custom sort first with Vulkan disabled and then enabled.
+The enabled run records either a device execution or the real CPU fallback.
+
+```sql runnable id=highway_dispatch_batch_sort timeout=30s
+-- bioseq:setup
+SET bioseq.planner.sequence_sort_scan.enabled = on;
+CREATE TABLE highway_dispatch_sort_reads (
+  pk integer PRIMARY KEY,
+  seq0 bioseq.seq('dna4', 32)
+) USING bioseq;
+INSERT INTO highway_dispatch_sort_reads VALUES
+  (1, 'TTTT'),
+  (2, 'AAAA'),
+  (3, 'CCCC'),
+  (4, 'GGGG');
+-- bioseq:visible
+SELECT is_available,
+       device_name,
+       is_software_device,
+       initialization_error
+FROM bioseq.vulkan_runtime_status();
+
+SET bioseq.aligner.vulkan.enabled = off;
+EXPLAIN (ANALYZE, VERBOSE)
+SELECT pk
+FROM highway_dispatch_sort_reads
+ORDER BY seq0;
+
+SET bioseq.aligner.vulkan.enabled = on;
+EXPLAIN (ANALYZE, VERBOSE)
+SELECT pk
+FROM highway_dispatch_sort_reads
+ORDER BY seq0;
+-- bioseq:teardown
+DROP TABLE highway_dispatch_sort_reads;
+RESET bioseq.aligner.vulkan.enabled;
+RESET bioseq.planner.sequence_sort_scan.enabled;
+```
+
+First look for `Custom Scan (BioseqBatchSortScan)`. That is a planning result
+only. Then read its execution properties, which are produced by the custom
+scan after it runs:
+
+| EXPLAIN property | What it reports |
+| --- | --- |
+| `Bioseq Sort Accelerator` | `vulkan`, `stdc_compare`, or `stdc_compare backend source` for this execution |
+| `Bioseq Sort Rows` and `Bioseq Sort Runtime Ns` | The observed batch size and sort time |
+| `Bioseq GPU Sort Dispatches` | Number of sequence-sort GPU dispatches |
+| `Bioseq GPU Global Compare Dispatches` | Number of full-payload compare dispatches |
+| `Bioseq GPU Dense Scatter Dispatches` | Number of prefix dense-scatter dispatches |
+| `Bioseq GPU Sort Uploaded Bytes` | Bytes uploaded for the recorded sort attempt |
+| `Bioseq Source Rows Admitted` and `Bioseq Source Bytes Admitted` | Source materialization admitted before sorting |
+| `Bioseq Source Admission Fallbacks` | Count of source-admission failures that reverted to the original source views |
+| `Bioseq Source Routes Acquired` | Whether the custom scan acquired source routes |
+
+In the first plan, `Bioseq Sort Accelerator` is `stdc_compare` and the three GPU
+dispatch counters are zero. In the second plan, an available and admitted device
+reports `Bioseq Sort Accelerator: vulkan` and a nonzero `Bioseq GPU Sort
+Dispatches`. A machine without that route reports the CPU fallback instead. A
+`BioseqBatchSortScan` node alone does not say the GPU ran. Likewise, enabling
+`bioseq.aligner.vulkan.enabled` alone does not say the GPU ran.
+
+Use this plan-shape table before investigating device counters:
+
+| Query shape | Expected planning behavior |
+| --- | --- |
+| `ORDER BY seq0` | Eligible for `BioseqBatchSortScan` when the planner switch is on |
+| `ORDER BY seq0 DESC` | Eligible, with the final permutation reversed |
+| `ORDER BY seq0, pk` | Keep an ordinary PostgreSQL sort because there is more than one ordering key |
+| `ORDER BY seq0::text` | Sorts text and does not request the sequence batch sorter |
+| Planner switch off | Keeps the ordinary PostgreSQL sort |
+
+The selected output columns do not have to include the sequence key. The key
+must still be a direct eligible sequence ordering expression. Always explain
+the exact application query because an extra tie-break key or cast changes the
+plan shape.
+
+For a controlled comparison, run the same ordered query twice. The next
+statements assume the four-row `highway_dispatch_sort_reads` fixture still
+exists, so run them after its `INSERT` and before the teardown `DROP TABLE`:
+
+```sql
+SET bioseq.planner.sequence_sort_scan.enabled = off;
+```
+
+```sql
+SELECT pk
+FROM highway_dispatch_sort_reads
+ORDER BY seq0;
+```
+
+```sql
+SET bioseq.planner.sequence_sort_scan.enabled = on;
+```
+
+```sql
+SELECT pk
+FROM highway_dispatch_sort_reads
+ORDER BY seq0;
+```
+
+The ordered primary keys must agree. After correctness agrees, compare
+analyzed plans. On a host without an admitted Vulkan route, the custom plan can
+still run with `Bioseq Sort Accelerator: stdc_compare`, the full source row
+count, and zero GPU dispatches. That is a successful CPU fallback, not a GPU
+measurement.
+
+The GPU sorter can first try a prefix payload when sampled leading units vary.
+It accepts that result only if the runtime recorded a dense-scatter dispatch.
+Otherwise it reruns with the full payload for exact ordering. Descending order
+reverses the resulting permutation, and equal sequences retain a deterministic
+source-index tie break. GPU and CPU paths therefore preserve the same sequence
+ordering contract.
+
+## Fallbacks and fail-closed boundaries
+
+The two dispatch systems have intentionally different failure behavior.
+
+- Highway is fail-closed. A plan with no runnable selected target, an incomplete
+  target table, or a dynamic bind that disagrees with the planned target raises
+  an error. Bioseq does not silently substitute an unreported scalar target for
+  that selected SIMD work.
+- The batch sorter is opportunistic. If Vulkan is disabled, no device is
+  available, the batch cannot satisfy the resident layout contract, memory
+  admission fails, payload construction overflows, or a Vulkan sort round trip
+  fails, it returns to the CPU comparison sorter. The EXPLAIN accelerator and
+  counters make that fallback observable.
+- A source-admission failure is also visible. The custom scan increments
+  `Bioseq Source Admission Fallbacks` and labels the execution
+  `stdc_compare backend source` when that fallback was the reason the CPU path
+  was used.
+- A requested supported all-GPU alignment tuple is stricter than the sort
+  preference. Its routing checks reject an incomplete GPU route rather than
+  silently claiming GPU execution.
+
+Use the five Highway fields for CPU SIMD selection and the batch-sort execution
+properties for the GPU-sort result. Keep planning labels and execution fields
+together when investigating a fallback or comparing performance across hosts.
+
+Next: place the dispatch fields in their complete plan context with
+[Read every Bioseq EXPLAIN section](../reading_bioseq_explain/).

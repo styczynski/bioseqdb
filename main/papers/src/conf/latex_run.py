@@ -9,7 +9,6 @@ from threading import Thread
 
 DEFAULT_ARGS = [
     "--shell-escape",
-    "--enable-pipes",
     "--enable-write18",
     "-interaction", "nonstopmode",
     "-halt-on-error",
@@ -82,6 +81,13 @@ def latex_run(latex_executable, biber, draft, times, timeout, output_directory):
         process_env = os.environ.copy()
         if "TERM" not in process_env or (not process_env["TERM"]):
             process_env["TERM"] = "unknown"
+        venv_bin = os.path.dirname(os.path.abspath(sys.executable))
+        wrapper_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+        process_env["PATH"] = (
+            wrapper_bin + os.pathsep + venv_bin + os.pathsep + process_env.get("PATH", "")
+        )
+        if not biber:
+            process_env["TEXMF_OUTPUT_DIRECTORY"] = output_directory
 
         if process_log_file and os.path.exists(process_log_file):
             try:

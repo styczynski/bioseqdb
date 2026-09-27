@@ -1,0 +1,186 @@
+\section{Load sequence files through a reusable parser}
+\label{sec:arch-ingestion}
+\label{sec:io-loading-contract}
+
+Public sequence archives distribute FASTA or FASTQ text, often compressed with
+gzip. BioSeqDB's input layer turns that text into compact sequence chunks and
+raw headers. A PostgreSQL sink then turns the headers into typed columns and
+stores the chunks. Separating these jobs lets the same parser serve database
+loading and ordinary C++ consumers without importing PostgreSQL into the
+file-reading code.
+
+\subsection{Separate byte sources from record framing}
+\label{sec:arch-io-sources}
+\label{sec:io-reader-architecture}
+\label{sec:io-parsing}
+
+A byte source fills a caller-owned buffer and reports bytes read, end of input,
+or an error. The parser is specialized for the source type, so refill calls
+need no virtual dispatch. Plain files can use a memory mapping or sequential
+reads. The SQL loading path uses zlib for gzip input. Biological format and
+compression are selected independently: the filename suffix chooses FASTA or
+FASTQ, while gzip magic bytes identify compression. The loader does not infer
+the biological grammar from an arbitrary first record.
+
+The parser design was inspired by Helicase's vectorized parsing and compact
+DNA output, and by StringZilla's vectorized byte-search
+operations~\autocite{helicase,stringzilla}. BioSeqDB implements its own kernels
+through Highway. These libraries are not runtime dependencies of the input
+path. In FASTA, the header begins with \texttt{>}, followed by a sequence body.
+For DNA4 packed into 64-bit units, the optimized body loop searches for the
+next \texttt{>} while encoding symbols. Boundary detection and packing thus
+share an input pass. Other alphabet and unit combinations use the same record
+states with their corresponding encoder and line scanner.
+
+FASTQ adds a \texttt{+} separator and quality bytes. Quality lines can contain
+\texttt{@}, \texttt{+}, or \texttt{>}, so those characters cannot independently
+identify the next record. The parser instead counts quality bytes against the
+raw sequence length after removing line endings. This count is distinct from
+the number of symbols retained by the compact encoder.
+
+\subsection{Deliver chunks while a record remains open}
+\label{sec:arch-io-chunks}
+\label{sec:io-bounds}
+
+The parser invokes sink functions, called callbacks, when a record begins,
+when packed chunks are available, and when the record ends. It keeps its
+current state and an unfinished
+storage word across refills. Complete words can be delivered before the record
+ends. The final chunk supplies the remaining word and its valid symbol count.
+Figure~\ref{fig:arch-io-state} shows why an input-buffer boundary need not be a
+record boundary.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,
+  source/.style={draw=black!40,fill=black!2},
+  record a/.style={draw=blue!65!black,fill=blue!9},
+  record b/.style={draw=green!45!black,fill=green!10},
+  flow/.style={-{Latex[length=2mm]},thick,draw=black!65}]
+  \node[anchor=west,font=\footnotesize\bfseries] at (.25,6.4)
+    {Source bytes: record A has 70 bases, record B has 40};
+  \foreach \left/\right/\middle/\name in
+    {.25/4.45/2.35/1,4.65/8.85/6.75/2,9.05/13.25/11.15/3} {
+    \draw[source] (\left,3.95) rectangle (\right,5.85);
+    \node at (\middle,6.05) {input buffer \name};
+  }
+  \draw[record a] (.45,4.7) rectangle (4.25,5.6);
+  \node[align=center] at (2.35,5.15)
+    {\texttt{>A} + LF\\A: bases 1--38};
+  \draw[record a] (4.85,5.0) rectangle (8.65,5.6);
+  \node[align=center] at (6.75,5.3) {A: bases 39--70 + LF};
+  \draw[record b] (4.85,4.05) rectangle (8.65,4.85);
+  \node[align=center] at (6.75,4.45)
+    {\texttt{>B} + LF\\B: bases 1--5};
+  \draw[record b] (9.25,4.15) rectangle (13.05,5.05);
+  \node[align=center] at (11.15,4.6)
+    {B: bases 6--40 + LF\\end of file};
+
+  \foreach \middle in {2.35,6.75,11.15}
+    \draw[flow] (\middle,3.95) -- (\middle,3.2);
+  \node at (2.35,3.0) {A: first chunk};
+  \node at (6.75,3.0) {A: final chunk};
+  \node at (11.15,3.0) {B: final chunk};
+
+  \draw[record a] (1.65,2.1) rectangle (3.05,2.7);
+  \node at (2.35,2.4) {32};
+  \draw[record a] (5.35,2.1) rectangle (6.75,2.7);
+  \draw[record a,fill=blue!3,dashed] (6.75,2.1) rectangle (8.15,2.7);
+  \node at (6.05,2.4) {32};
+  \node at (7.45,2.4) {6 + pad};
+  \draw[record b] (9.75,2.1) rectangle (11.15,2.7);
+  \draw[record b,fill=green!3,dashed] (11.15,2.1) rectangle (12.55,2.7);
+  \node at (10.45,2.4) {32};
+  \node at (11.85,2.4) {8 + pad};
+  \node[align=center] at (2.35,1.55)
+    {6 bases remain\\in A's partial word};
+  \node[align=center] at (6.75,1.55)
+    {A closes at 70 bases\\B retains 5 bases};
+  \node[align=center] at (11.15,1.55)
+    {B closes at 40 bases\\with 8 final valid bases};
+  \node[anchor=west,font=\footnotesize\bfseries] at (.25,.65)
+    {Packed output: each box is one 64-bit DNA4 word};
+\end{tikzpicture}
+\caption{Two single-line FASTA records parsed with illustrative 41-byte input
+buffers. LF denotes a line-feed byte. Header and LF bytes occupy input space
+but are not sequence symbols.
+The first refill ends inside A: 32 bases are delivered, while six remain in
+its partial word. The next buffer finishes A and starts B. Source and packed
+widths are schematic. Word labels count valid bases, with padding in dashed
+words. Chunk views
+are borrowed for their callback and copied by the backend before reuse.}
+\label{fig:arch-io-state}
+\label{fig:io-load-pipeline}
+\end{figure}
+
+The SQL sink runs on the PostgreSQL backend thread. Its default path consumes
+callbacks directly. Optional overlap moves owned events through a FIFO queue
+of fixed capacity: a worker parses, and the backend performs database writes.
+A full queue blocks the producer. Closing it wakes blocked participants, and
+the worker is joined before a consumer error is propagated.
+
+The reusable batch API has a different contract. It owns complete batches and
+can use direct mapped views, parallel parser shards, or a parallel gzip
+source. Those options do not describe SQL streaming, which refills a slab and
+uses the single-threaded zlib source for gzip. In particular, a batch parser's
+throughput is not a measurement of database loading.
+
+\subsection{Route header fields into SQL columns}
+\label{sec:arch-io-headers}
+\label{sec:io-header-mapping}
+\label{sec:io-sql}
+
+Headers can be preserved verbatim or parsed using a named convention, such as
+GenBank, RefSeq, or UniProt. Their conventions distinguish identifiers from
+annotations carried in the same definition
+line~\autocite{ncbiFastaFormat,uniprotFastaHeaders}. Automatic selection samples
+a bounded decompressed prefix once per file. The loader also resolves field-to-column routes once,
+using destination names and any explicit mappings. Per-record parsing then
+passes field slices to the PostgreSQL sink, which applies the destination
+types. A header dialect describes metadata structure. It is not a strict
+validator for the sequence alphabet.
+
+For example, a gzipped FASTA file may contain the header
+\texttt{>dna\_new [organism=Homo sapiens] [chromosome=17] [moltype=mRNA]}.
+The following table gives those fields their relational types:
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-arch-sql,basicstyle=\ttfamily\footnotesize,
+  caption={Load a FASTA file with GenBank-style header fields.},
+  label={lst:arch-load-genbank}]
+CREATE TABLE sequences (
+  id text,
+  organism text,
+  chromosome integer,
+  moltype text,
+  seq bioseq.seq('dna4', 64)
+) USING bioseq;
+
+SELECT bioseq.load('sequences'::regclass,
+                   '/data/example.fasta.gz');
+\end{lstlisting}
+\end{minipage}
+
+Here automatic routing produces identifier \texttt{dna\_new}, organism
+\texttt{Homo sapiens}, integer chromosome \texttt{17}, and molecule type
+\texttt{mRNA}. The return value is the number of loaded records. Compression
+changes the byte source, while the SQL interface remains the same.
+
+The sequence column selects the compact alphabet and storage-unit width
+before parsing starts. Once a record's fragments are ready, the sink writes
+the parent row and publishes its sequence locator. PostgreSQL controls
+transaction visibility and rollback. The sink evaluates defaults and
+\texttt{NOT NULL}/\texttt{CHECK} constraints. It does not run ordinary
+\texttt{INSERT} triggers or maintain ordinary secondary indexes. Normal
+trigger-based foreign-key checks and index-based unique or exclusion checks
+therefore do not run.
+
+\label{sec:arch-io-limits}
+\label{sec:io-integrity-limits}
+The memory guarantee concerns streamed packed bodies. Headers and FASTQ
+quality storage can grow with record length, and paths that retain unfinished
+physical lines remain subject to the input-buffer limit. Alphabet handling
+is permissive, and the declared strict-alphabet option is not enforced by the
+parser. FASTQ length checks also have an exception for excess quality bytes
+on an unterminated final line. These limits preclude treating successful
+loading as complete input validation.

@@ -1,0 +1,103 @@
+\section{Remote sequences and local persistence}
+\label{sec:arch-remote-sequences}
+
+An installation built with external-provider support exposes metadata,
+complete nucleotide records and sequence chunks through relations in the
+\texttt{bioseq\_external} schema. These relations obtain their rows from remote
+services. An application can select a versioned accession and insert its
+sequence into a local BioSeqDB table before repeated analysis.
+
+Metadata discovery and sequence retrieval use distinct requests. Generated
+HTTPS clients perform bounded metadata requests, and provider adapters
+normalize their responses. For NCBI, the catalog reads Datasets assembly
+reports~\autocite{ncbi_datasets_v2_api}. A nucleotide accession such as
+\texttt{NC\_012920.1} instead requests plain-text FASTA from the EFetch
+nucleotide endpoint~\autocite{ncbiEutilities}.
+Assembly accessions beginning with \texttt{GCF\_} or \texttt{GCA\_} select a
+Datasets ZIP package containing sequence files. An assembly accession and a
+constituent sequence accession therefore identify different retrieval units.
+
+The remote relation returns an \emph{unbound sequence literal}: sequence
+characters without a selected storage alphabet or packed layout. In
+Listing~\ref{lst:arch-ncbi-import}, assignment to the destination
+\texttt{bioseq.seq('dna5',64)} column validates and encodes those characters
+for the declared alphabet and storage width.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+    x=1cm,y=1cm,>=Latex,font=\footnotesize,
+    archremote/.style={draw=black!55,rounded corners=2pt,
+      fill=blue!5,align=center,inner sep=4pt,minimum height=.70cm},
+    archflow/.style={->,semithick,draw=black!75}
+  ]
+    \node[font=\footnotesize\bfseries] at (0,1.2) {Remote service};
+    \node[font=\footnotesize\bfseries] at (4.70,1.2) {Network worker};
+    \node[font=\footnotesize\bfseries] at (9.65,1.2) {PostgreSQL backend};
+    \draw[densely dashed,black!35] (1.60,.62) -- (1.60,-.68);
+    \draw[densely dashed,black!35] (8.05,.62) -- (8.05,-2.4);
+    \node[archremote,text width=2.10cm] (archremote-ncbi) at (0,0)
+      {NCBI EFetch\\FASTA response};
+    \node[archremote,text width=2.15cm] (archremote-reader) at (3.25,0)
+      {Read and parse\\sequence bases};
+    \node[archremote,text width=2.05cm] (archremote-queue) at (6.40,0)
+      {Bounded queue\\owned sequence data};
+    \node[archremote,text width=2.60cm] (archremote-backend) at (9.65,0)
+      {Build unbound SQL value\\apply local checks};
+    \node[archremote,text width=2.60cm,fill=green!7]
+      (archremote-local) at (9.65,-1.9)
+      {Local table\\packed sequence};
+    \draw[archflow] (archremote-ncbi) -- (archremote-reader);
+    \draw[archflow] (archremote-reader) -- (archremote-queue);
+    \draw[archflow] (archremote-queue) -- (archremote-backend);
+    \draw[archflow] (archremote-backend) --
+      node[left,font=\footnotesize] {\texttt{INSERT} + destination type}
+      (archremote-local);
+  \end{tikzpicture}
+  \caption{An exact NCBI sequence request followed by local insertion.
+  Remote delivery and persistent sequence encoding have separate owners.}
+  \label{fig:arch-remote-import}
+\end{figure}
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-arch-sql,basicstyle=\footnotesize\ttfamily,
+  caption={Importing one versioned NCBI sequence into local storage.},
+  label={lst:arch-ncbi-import}]
+CREATE TABLE ncbi_sequences (
+    accession text,
+    sequence bioseq.seq('dna5', 64),
+    retrieved_at timestamptz
+) USING bioseq;
+
+INSERT INTO ncbi_sequences
+SELECT accession, sequence, retrieved_at
+FROM bioseq_external.sequences
+WHERE provider = 'ncbi' AND accession = 'NC_012920.1';
+
+SELECT accession, bioseq.len(sequence) AS bases
+FROM ncbi_sequences;
+\end{lstlisting}
+\end{minipage}
+
+Ordinary SQL qualifications remain local checks even when equality predicates
+also constrain the remote request. Array expansion is capped at 64 query
+combinations, with a warning when combinations are omitted. A provider union
+may return partial results if one provider fails, and metadata scans do not
+automatically follow every page. Explicit accessions and a single provider
+make the import's requested scope clear. Selecting fewer columns from a
+sequence relation does not currently avoid sequence retrieval.
+
+For the NCBI streaming route, a worker passes owned sequence data through a queue
+bounded by both bytes and item count. Chunk delivery limits temporary
+buffering, whereas a complete-record value still requires record-sized memory.
+Archive retrieval buffers a size-limited ZIP before decoding. The backend checks
+cancellation between bounded queue waits. Transient FASTA requests can be
+retried only before the first row is emitted, preventing replay of visible
+chunks.
+
+Remote responses are not a durable cache, and request rates are not coordinated
+across backends. E-utilities usage requirements therefore remain relevant to
+the caller~\autocite{ncbiEutilitiesUsage}. A transaction controls the local INSERT,
+but does not make separate HTTP requests one database snapshot. Retaining the
+accession version and retrieval time records which import supplied the stored
+sequence. Subsequent queries of the local table need no remote request.

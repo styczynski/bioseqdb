@@ -1,0 +1,314 @@
+{
+  "schema": "bioseq.e2e.algorithm-matrix-q8-prefix-proof",
+  "version": 2,
+  "verdict": "proven_exact_fixed_seed_ordered_prefix",
+  "campaign_binding": {
+    "campaign_id": "bioseq-e2e-algorithm-matrix-local-q8-v1",
+    "campaign_digest": "e1efe2033ea95f729e147725d2807f9c94eccb83d9cd8711879034c09e70168a",
+    "manifest": "bench/bench_e2e_algorithm_matrix_q8_campaign_manifest.json",
+    "manifest_sha256": "428e155f98f16a2085afccf88dcd4d29d92246ce9d70fdfa5965481142870d46",
+    "config": "bench/bench_e2e_algorithm_matrix_q8_campaign.json",
+    "config_sha256": "c9c2d786a71fae1297d585f8a4bb97909a71def0e3bdb7a11f2c28b9caaac3fe"
+  },
+  "q1024_binding": {
+    "campaign_id": "bioseq-e2e-algorithm-matrix-local-v1",
+    "campaign_digest": "011fbb1ef33a214ab80d3568c2341e8d0f8311f82e21a5955bdcb93b3c63b979",
+    "manifest": "bench/bench_e2e_algorithm_matrix_campaign_contract.json",
+    "manifest_sha256": "e80407ca3a515ca04ac7ad616f0c7f5e0ef477f3e09884ec8ab93370e8c55933",
+    "config": "bench/bench_e2e_algorithm_matrix_campaign.json",
+    "config_sha256": "53f6eb2db17d25cd090c7f52e7c5b60dd37f0c65a800878e54fcbf1c626de644"
+  },
+  "query_generation_contract": {
+    "fragment_count_is_query_count": true,
+    "reference_generation_is_independent_of_fragment_count": true,
+    "fragment_stream_key": "seed_stream(seed, k_reference_stream_space + fragment_index)",
+    "first_fragment_index": 0,
+    "q8_fragment_indices": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "q8_is_subset_of_q1024": true,
+    "q8_is_ordered_prefix_of_q1024": true,
+    "parallel_schedule_cannot_change_per_index_streams": true,
+    "benchmark_loader": {
+      "path": "bench/e2e/index.cppm",
+      "sha256": "aaf022a752348276dfe2024b8b0549ea0f355843e423e370f478519cd23f3b93",
+      "evidence": [
+        {
+          "line": 9204,
+          "statement": "gp.fragment_count         = static_cast<std::size_t>(jint(data, \"fragment_count\", 1));"
+        },
+        {
+          "line": 9311,
+          "statement": ".generate_sequences_pairs(gp.fragment_count);"
+        }
+      ]
+    },
+    "sequence_generator": {
+      "path": "bioseq/backend/sequences/generation/sequence_generator.cppm",
+      "sha256": "5c6c2d4d53f9c6ff783785791c71b157eed20a09fa89e22e7671fbe8462ec8a2",
+      "evidence": [
+        {
+          "line": 773,
+          "statement": "return generate_fragment_pairs(generate_reference(), 0, count);"
+        },
+        {
+          "line": 858,
+          "statement": "const std::size_t fragment_index = first + pair_index;"
+        },
+        {
+          "line": 860,
+          "statement": "seed_stream(params_.seed, k_reference_stream_space + fragment_index);"
+        }
+      ]
+    },
+    "datasets": [
+      {
+        "test_case": "M2_D4_K15_W10",
+        "alphabet": "dna4",
+        "reference_length": 2000000000,
+        "seed": 33320010,
+        "q1024_fragment_count": 1024,
+        "q8_fragment_count": 8,
+        "generation_data_without_fragment_count_sha256": "9ba1c8c2697eef7cc7de90d0e81e3b2ee2ce005851bb000860a2dacf3c8e9d89",
+        "q8_fragment_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "relation": "exact ordered prefix of q1024 indices 0..7"
+      },
+      {
+        "test_case": "M2_D4_K20_W15",
+        "alphabet": "dna4",
+        "reference_length": 2000000000,
+        "seed": 33320015,
+        "q1024_fragment_count": 1024,
+        "q8_fragment_count": 8,
+        "generation_data_without_fragment_count_sha256": "70bdcc92237f35771cf1a674f185e4fc246bdefe7786cc0ec7a352a47b748a69",
+        "q8_fragment_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "relation": "exact ordered prefix of q1024 indices 0..7"
+      },
+      {
+        "test_case": "M2_D5_K15_W10",
+        "alphabet": "dna5",
+        "reference_length": 2000000000,
+        "seed": 33325010,
+        "q1024_fragment_count": 1024,
+        "q8_fragment_count": 8,
+        "generation_data_without_fragment_count_sha256": "c7c0074ddb3347b914d11cbe8e71eb58d04201cddb1a5c6d8fd390a9df136408",
+        "q8_fragment_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "relation": "exact ordered prefix of q1024 indices 0..7"
+      },
+      {
+        "test_case": "M2_D5_K20_W15",
+        "alphabet": "dna5",
+        "reference_length": 2000000000,
+        "seed": 33325015,
+        "q1024_fragment_count": 1024,
+        "q8_fragment_count": 8,
+        "generation_data_without_fragment_count_sha256": "5eb170dc7015793b158389f8464b1d29f5969f076abc245993d1813d677b6eb1",
+        "q8_fragment_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "relation": "exact ordered prefix of q1024 indices 0..7"
+      },
+      {
+        "test_case": "M4_D4_K15_W10",
+        "alphabet": "dna4",
+        "reference_length": 4000000000,
+        "seed": 33340010,
+        "q1024_fragment_count": 1024,
+        "q8_fragment_count": 8,
+        "generation_data_without_fragment_count_sha256": "c55c6c89536cfe583b5ee9f27d0135a8e14464038aa90f699ad30554f44ba3d8",
+        "q8_fragment_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "relation": "exact ordered prefix of q1024 indices 0..7"
+      },
+      {
+        "test_case": "M4_D4_K20_W15",
+        "alphabet": "dna4",
+        "reference_length": 4000000000,
+        "seed": 33340015,
+        "q1024_fragment_count": 1024,
+        "q8_fragment_count": 8,
+        "generation_data_without_fragment_count_sha256": "734571212fbfec2a813ba060ee6c14ef614600678a3fd3f1a821358a31108e0b",
+        "q8_fragment_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "relation": "exact ordered prefix of q1024 indices 0..7"
+      },
+      {
+        "test_case": "M4_D5_K15_W10",
+        "alphabet": "dna5",
+        "reference_length": 4000000000,
+        "seed": 33345010,
+        "q1024_fragment_count": 1024,
+        "q8_fragment_count": 8,
+        "generation_data_without_fragment_count_sha256": "c6d709e154b958393b8fda8799eed43a0ef402d6e58c93f6c5f8f837c6eb37a1",
+        "q8_fragment_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "relation": "exact ordered prefix of q1024 indices 0..7"
+      },
+      {
+        "test_case": "M4_D5_K20_W15",
+        "alphabet": "dna5",
+        "reference_length": 4000000000,
+        "seed": 33345015,
+        "q1024_fragment_count": 1024,
+        "q8_fragment_count": 8,
+        "generation_data_without_fragment_count_sha256": "ae77c7337e5c65c4ffcd16a06d9ec502f38d128c728008f05242a46a23c20b35",
+        "q8_fragment_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "relation": "exact ordered prefix of q1024 indices 0..7"
+      }
+    ]
+  },
+  "matrix_and_repeat_contract": {
+    "result_cells": 1296,
+    "records": 6480,
+    "repetitions_per_cell": 5,
+    "repeat_indices": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 333
+    },
+    "full_matrix_and_metric_declarations_byte_equivalent": true,
+    "non_campaign_cell_identity_fields_preserved": true,
+    "ksw2_batched_excluded": true,
+    "cigar_projection": true,
+    "mapq_projection": true,
+    "prefilter_enabled": false,
+    "sealed_matrix_evidence": {
+      "path": "bench/aggregate_e2e_algorithm_matrix.py",
+      "sha256": "2384024dbde53481c70ff5d4c77a5eeaf1a4f236c91c97b02a7bac48f2103ec2",
+      "evidence": [
+        {
+          "line": 1363,
+          "statement": "\"prefilter_enabled\": False,"
+        },
+        {
+          "line": 5818,
+          "statement": "\"explicitly_excluded_base_alignment_algorithms\": [\"ksw2_batched\"],"
+        }
+      ]
+    }
+  },
+  "timeout_and_shard_contract": {
+    "runtime_hard_timeout_seconds": 14400,
+    "required_shards": 256,
+    "no_index_micro_shards": 160,
+    "maximum_bioseq_cells_per_no_index_shard": 4,
+    "isolated_minimap2_baseline_shards": 16,
+    "maximum_cells_per_minimap2_baseline_shard": 1,
+    "persisted_index_shards": 80,
+    "maximum_cells_per_persisted_index_shard": 8
+  },
+  "ownership_and_resume_contract": {
+    "exact_nonoverlapping": true,
+    "all_cells_appear_exactly_once": true,
+    "stable_key_schema": "bioseq-e2e-cell-v2",
+    "stable_key_fields": [
+      "campaign_id",
+      "dataset",
+      "alphabet",
+      "target_size_gbp",
+      "kmer_size",
+      "window_size",
+      "index_mode",
+      "engine",
+      "bioseq_index_name",
+      "requested_minimizer_algorithm",
+      "requested_chaining_algorithm",
+      "requested_base_alignment_algorithm"
+    ],
+    "stable_keys_sha256": "698217856fe026efeafb6bc7d4e05a0b2e10a9175acafcfe58e064f10114bce2",
+    "monolithic_stable_keys_sha256": "698217856fe026efeafb6bc7d4e05a0b2e10a9175acafcfe58e064f10114bce2",
+    "q1024_stable_keys_sha256": "5103d36ed70d929f9055b4712b490c521ac08d00e44b36465e536f11010afa5e",
+    "campaign_namespace_is_collision_free": true,
+    "q8_is_eligible_for_q1024_automatic_merge": false,
+    "aggregation_authority": "q8 reports must be resumed and aggregated only against this q8 manifest"
+  },
+  "rescue_execution_authority": {
+    "schema": "bioseq.e2e.algorithm-matrix-q8-rescue",
+    "version": 2,
+    "ordinal": 1,
+    "manifest": "bench/bench_e2e_algorithm_matrix_q8_ordinal1_rescue_manifest.json",
+    "manifest_sha256": "42e0fb86754bab94e04adce30ac95fb4971d65fd5c834b838bab84e97fb9bb8f",
+    "canonical_parent_union_cells": 4,
+    "canonical_parent_union_records": 20
+  }
+}

@@ -1,0 +1,754 @@
+{
+    "version": 3,
+    "configurePresets": [
+      {
+        "name": "dev",
+        "displayName": "Default development config",
+         "description": "Default build using Ninja generator",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -g",
+          "VCPKG_TARGET_TRIPLET": "arm64-osx",
+          "CMAKE_OSX_ARCHITECTURES": "arm64",
+          "VCPKG_TARGET_ARCHITECTURE": "arm64",
+          "VCPKG_CRT_LINKAGE": "static",
+          "VCPKG_LIBRARY_LINKAGE": "static"
+        }
+      },
+      {
+        "name": "dev-opt",
+        "displayName": "Default development config",
+         "description": "Default build using Ninja generator",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -fsanitize=address -g",
+          "CMAKE_LINKER_FLAGS": "-fno-omit-frame-pointer -fsanitize=address -g",
+          "VCPKG_TARGET_TRIPLET": "arm64-osx",
+          "CMAKE_OSX_ARCHITECTURES": "arm64",
+          "VCPKG_TARGET_ARCHITECTURE": "arm64",
+          "VCPKG_CRT_LINKAGE": "static",
+          "VCPKG_LIBRARY_LINKAGE": "static"
+        }
+      },
+      {
+        "name": "dev-opt-pg",
+        "displayName": "Default development config",
+         "description": "Default build using Ninja generator",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -g",
+          "VCPKG_TARGET_TRIPLET": "arm64-osx",
+          "CMAKE_OSX_ARCHITECTURES": "arm64",
+          "VCPKG_TARGET_ARCHITECTURE": "arm64",
+          "VCPKG_CRT_LINKAGE": "static",
+          "VCPKG_LIBRARY_LINKAGE": "static"
+        }
+      },
+      {
+        "name": "bench-opt",
+        "displayName": "Benchmark-tuned optimisation config",
+         "description": "Production-grade -O3 + NDEBUG used by every default build (postgresql_bioseq, the test execs, bioseq_benchmark). The previous form of this preset also carried `-save-temps=obj -g`; both were dropped because they more than doubled per-TU peak RSS on the heavy-template TUs (dispatch_buffer.cppm, two_stacks_minimizers.cppm) — the DWARF tables alone push the dispatch_buffer compile from ~5 GB to >11 GB and the .ii/.s/.bc dumps add a multi-GB write per TU on top of that. `CMAKE_CXX_FLAGS_DEBUG` is set to an empty string so `-g` is NOT silently re-added by the `Debug` build type (the Debug type is preserved only because other CMake logic in the tree branches on it). For the inspect MCP tool (which needs the per-TU .s/.bc and DWARF) use the `bench-opt-debug` preset, or pass `debug=true` to `start_build` so the MCP server selects that preset automatically.",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
+          "CMAKE_CXX_FLAGS_DEBUG": "",
+          "CMAKE_C_FLAGS_DEBUG": "",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+          "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/gettext",
+          "Intl_INCLUDE_DIR": "/opt/homebrew/opt/gettext/include",
+          "Intl_LIBRARY": "/opt/homebrew/opt/gettext/lib/libintl.dylib",
+          "VCPKG_TARGET_TRIPLET": "arm64-osx",
+          "CMAKE_OSX_ARCHITECTURES": "arm64",
+          "VCPKG_TARGET_ARCHITECTURE": "arm64",
+          "VCPKG_CRT_LINKAGE": "static",
+          "VCPKG_LIBRARY_LINKAGE": "static"
+        }
+      },
+      {
+        "name": "bench-e2e-opt",
+        "inherits": "bench-opt",
+        "displayName": "Dedicated E2E interval-evidence config",
+        "description": "Isolated production-flavor tree for benchmark-e2e. Only this tree compiles statement-scoped CIGAR/MAPQ interval evidence into the Bioseq DSO and module owners.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64"
+        }
+      },
+      {
+        "name": "test-opt",
+        "inherits": "bench-opt",
+        "displayName": "Optimised unit/integration test config",
+        "description": "Isolated bench-opt-equivalent tree with BIOSEQ_TEST_INDEXES enabled. Keeping test hooks/descriptors in build/test-opt prevents benchmark binaries in build/bench-opt from silently carrying failure-injection branches or test-only indexes.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEST_INDEXES": "ON",
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64"
+        }
+      },
+      {
+        "name": "highway-gcc-canary",
+        "inherits": "bench-opt",
+        "displayName": "Local Homebrew GCC 16 generated-module canary",
+        "description": "Opt-in Darwin GCC boundary proof: an isolated empty-environment, no-vcpkg-toolchain Ninja sub-build compiles and links a conservative two-target Highway dispatch table, a compile/link-only attributed target probe, and the generic generated-module closure with authenticated Homebrew g++-16, then audits their sealed dyld dependencies. The local builder executes the imported-binder canary and records its selected target IDs only when build_only=false. This is not the full external-api or production DSO build.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "environment": {
+          "CMAKE_NAMED_ENV_TYPE": "H"
+        },
+        "cacheVariables": {
+          "BIOSEQ_HIGHWAY_GCC_CANARY": "ON",
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "OFF",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+          "BIOSEQ_BUILD_WEBSITE": "OFF",
+          "BUILD_TESTING": "OFF"
+        }
+      },
+      {
+        "name": "postgres-error-safety-production",
+        "inherits": "bench-opt",
+        "displayName": "PostgreSQL error-safety production profile",
+        "description": "Isolated local production-profile tree for sealed PostgreSQL error-safety runtime evidence.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_TESTS": "OFF",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE": "${sourceDir}/codegen/safety/tests/integration/fixtures/postgres_error_safety_cases.json",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE": "isolated",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_PEER_BUILD_DIR": "${sourceDir}/build/postgres-error-safety-test-indexes",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+          "BIOSEQ_BUILD_WEBSITE": "OFF"
+        }
+      },
+      {
+        "name": "postgres-error-safety-test-indexes",
+        "inherits": "test-opt",
+        "displayName": "PostgreSQL error-safety test-index profile",
+        "description": "Isolated local test-index-profile tree for sealed PostgreSQL error-safety runtime evidence.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_TESTS": "ON",
+          "BIOSEQ_TEST_INDEXES": "ON",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE": "${sourceDir}/codegen/safety/tests/integration/fixtures/postgres_error_safety_cases.json",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE": "isolated",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+          "BIOSEQ_BUILD_WEBSITE": "OFF"
+        }
+      },
+      {
+        "name": "test-opt-sanitizer",
+        "inherits": "test-opt",
+        "hidden": true,
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
+          "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+          "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/gettext"
+        }
+      },
+      {
+        "name": "test-opt-asan",
+        "inherits": "test-opt-sanitizer",
+        "displayName": "AddressSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 ownership and lifetime qualification tree. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the dna4_uint64 profile, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with AddressSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=address"
+        }
+      },
+      {
+        "name": "test-opt-ubsan",
+        "inherits": "test-opt-sanitizer",
+        "displayName": "UndefinedBehaviorSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 arithmetic, representation, and lifecycle qualification tree. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the dna4_uint64 profile, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with UndefinedBehaviorSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=undefined",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=undefined",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=undefined"
+        }
+      },
+      {
+        "name": "test-opt-tsan",
+        "inherits": "test-opt-sanitizer",
+        "displayName": "ThreadSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 async-owner, TBB, and DSM publication qualification tree. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the dna4_uint64 profile, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with ThreadSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=thread",
+          "VCPKG_OVERLAY_PORTS": "${sourceDir}/overlays/cppast;${sourceDir}/overlays/md4c;${sourceDir}/overlays/jinja2cpp;${sourceDir}/cmake/ports-tsan"
+        }
+      },
+      {
+        "name": "test-optimized-all-alphabets-uint64",
+        "inherits": "test-opt",
+        "displayName": "All-alphabets uint64 qualification config",
+        "description": "Isolated unit/integration qualification tree for the 14-unit all-alphabets uint64 typed-scheduler profile.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64"
+        }
+      },
+      {
+        "name": "test-optimized-all-coordinates",
+        "inherits": "test-opt",
+        "displayName": "All-coordinates qualification config",
+        "description": "Isolated unit/integration qualification tree for every alphabet and storage-width scheduler coordinate.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_coordinates"
+        }
+      },
+      {
+        "name": "test-optimized-full-specialization",
+        "inherits": "test-opt",
+        "displayName": "Full-specialization qualification config",
+        "description": "Isolated unit/integration qualification tree for the complete template-specialization domain.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "full_specialization"
+        }
+      },
+      {
+        "name": "test-optimized-all-coordinates-trace",
+        "inherits": "test-optimized-all-coordinates",
+        "displayName": "All-coordinates compiler-trace qualification config",
+        "description": "Isolated compiler-instantiation evidence tree with complete Clang time-trace events.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TIME_TRACE": "ON",
+          "BIOSEQ_TIME_TRACE_GRANULARITY": "0"
+        }
+      },
+      {
+        "name": "bench-opt-debug",
+        "displayName": "Benchmark-tuned optimisation config (with debug symbols and per-TU temps)",
+         "description": "Same -O3 + NDEBUG as `bench-opt`, plus `-save-temps=obj` (keeps per-TU .s/.ii/.bc artifacts beside each .o so the inspect MCP tool can extract assembly and IR for any function) and `-g` (preserves DWARF symbols for source-line cross-references in objdump output). Lives under build/bench-opt-debug/ so it does not invalidate the default bench-opt ninja graph. ~2x slower to compile and ~2-3x peak RSS per TU than `bench-opt`; only use when the inspect tool is needed.",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -save-temps=obj -g",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -save-temps=obj -g",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+          "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/gettext",
+          "Intl_INCLUDE_DIR": "/opt/homebrew/opt/gettext/include",
+          "Intl_LIBRARY": "/opt/homebrew/opt/gettext/lib/libintl.dylib",
+          "VCPKG_TARGET_TRIPLET": "arm64-osx",
+          "CMAKE_OSX_ARCHITECTURES": "arm64",
+          "VCPKG_TARGET_ARCHITECTURE": "arm64",
+          "VCPKG_CRT_LINKAGE": "static",
+          "VCPKG_LIBRARY_LINKAGE": "static"
+        }
+      },
+      {
+        "name": "bench-e2e-opt-debug",
+        "inherits": "bench-opt-debug",
+        "displayName": "Dedicated E2E interval-evidence debug config",
+        "description": "Debug/inspect analogue of bench-e2e-opt in its own build tree. Retains source-line and inlining DWARF plus per-TU assembly/IR, without full variable/type debug metadata that makes generated pipeline listings multi-gigabyte.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS_DEBUG": "-gline-tables-only",
+          "CMAKE_CXX_FLAGS_DEBUG": "-gline-tables-only",
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64"
+        }
+      },
+      {
+        "name": "test-opt-debug",
+        "inherits": "bench-opt-debug",
+        "displayName": "Optimised unit/integration test config with debug artefacts",
+        "description": "Debug/inspect analogue of test-opt with BIOSEQ_TEST_INDEXES enabled in its own build tree. Retains source-line and inlining DWARF plus per-TU assembly/IR, without full variable/type debug metadata that makes generated pipeline listings multi-gigabyte.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS_DEBUG": "-gline-tables-only",
+          "CMAKE_CXX_FLAGS_DEBUG": "-gline-tables-only",
+          "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "cache-opt",
+        "inherits": "bench-opt",
+        "displayName": "Independent bioseq_cache optimized build",
+        "description": "Cache-only C++26 module tree with deterministic test hooks; skips Bioseq sequence, GPU, paper and benchmark dependencies.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_TARGET_TRIPLET": null,
+          "CMAKE_OSX_ARCHITECTURES": null,
+          "VCPKG_TARGET_ARCHITECTURE": null,
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "cache-opt-debug",
+        "inherits": "bench-opt-debug",
+        "displayName": "Independent bioseq_cache debug/inspect build",
+        "description": "Debug-artifact analogue of cache-opt with DWARF and per-module compiler outputs for MCP inspect.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_TARGET_TRIPLET": null,
+          "CMAKE_OSX_ARCHITECTURES": null,
+          "VCPKG_TARGET_ARCHITECTURE": null,
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "cache-bioseq-opt",
+        "inherits": "bench-opt",
+        "displayName": "Bioseq plus bioseq_cache integration build",
+        "description": "Combined provider tree retaining the Bioseq manifest while enabling cache test hooks and private-cluster integration targets.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "cache-bioseq-opt-debug",
+        "inherits": "bench-opt-debug",
+        "displayName": "Bioseq plus bioseq_cache debug/inspect build",
+        "description": "Combined provider tree with cache hooks, DWARF and per-module compiler artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux",
+        "displayName": "AWS x86_64 Linux benchmark box (clang-22 + libc++)",
+        "description": "Linux/x86_64 analogue of bench-opt for the disposable AWS reference machine provisioned by infra. Selects the AWS_MACHINE_X64 toolchain block in CMakeLists.txt via the environment and builds bioseq with clang-22 + libc++ (required for import std / C++ modules). vcpkg dependencies use the checked-in x64-linux-libcxx overlay triplet so C++ static archives link against the same libc++ ABI as bioseq. -O3 + NDEBUG, DWARF off, mirroring bench-opt.",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+      "environment": {
+        "CMAKE_NAMED_ENV_TYPE": "AWS_MACHINE_X64",
+        "BIOSEQ_LLVM_ROOT": "/opt/bioseq-package-toolchain/llvm-22",
+        "BIOSEQ_LIBCXX_MODULES_JSON": "/opt/bioseq-package-toolchain/llvm-22/lib/x86_64-unknown-linux-gnu/libc++.modules.json",
+        "LLVM_CONFIG_BINARY": "/opt/bioseq-package-toolchain/llvm-22/bin/llvm-config",
+        "ZIC": "/usr/sbin/zic"
+      },
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -stdlib=libc++",
+          "CMAKE_CXX_FLAGS_DEBUG": "",
+          "CMAKE_C_FLAGS_DEBUG": "",
+      "CMAKE_EXE_LINKER_FLAGS": "-stdlib=libc++",
+      "CMAKE_SHARED_LINKER_FLAGS": "-stdlib=libc++",
+      "CMAKE_MODULE_LINKER_FLAGS": "-stdlib=libc++",
+      "CMAKE_LINKER_TYPE": "LLD",
+      "BIOSEQ_TEST_INDEXES": "OFF",
+          "VCPKG_TARGET_TRIPLET": "x64-linux-libcxx",
+          "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets",
+          "VCPKG_OVERLAY_PORTS": "${sourceDir}/overlays/cppast;${sourceDir}/overlays/md4c;${sourceDir}/overlays/jinja2cpp;${sourceDir}/cmake/ports",
+          "VCPKG_TARGET_ARCHITECTURE": "x64",
+          "BIOSEQ_HEAVY_JOBS": "4"
+        }
+      },
+      {
+        "name": "aws-x64-linux-debug",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang debug/inspect config",
+        "description": "AWS Clang production-flavor tree with DWARF and per-TU compiler artefacts; test hooks remain disabled.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -stdlib=libc++ -save-temps=obj -g",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "aws-x64-linux-e2e",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang E2E interval evidence build",
+        "description": "Isolated AWS Clang benchmark-e2e tree with benchmark-only CIGAR/MAPQ interval instrumentation; production and test-index trees remain unchanged.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "aws-x64-linux-e2e-debug",
+        "inherits": "aws-x64-linux-debug",
+        "displayName": "AWS Clang E2E interval debug/inspect build",
+        "description": "Isolated AWS Clang benchmark-e2e tree with interval instrumentation, DWARF, and per-TU compiler artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "native-arm64-clang22-linux",
+        "displayName": "Native ARM64 Linux benchmark host (Clang 22 + libc++)",
+        "description": "Architecture-exact Linux/aarch64 analogue of aws-x64-linux for Graviton workers using the pinned /opt/bioseq-package-toolchain LLVM 22 installation.",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "environment": {
+          "CMAKE_NAMED_ENV_TYPE": "AWS_MACHINE_LINUX_CLANG22",
+          "BIOSEQ_LLVM_ROOT": "/opt/bioseq-package-toolchain/llvm-22",
+          "BIOSEQ_LIBCXX_MODULES_JSON": "/opt/bioseq-package-toolchain/llvm-22/lib/aarch64-unknown-linux-gnu/libc++.modules.json",
+          "LLVM_CONFIG_BINARY": "/opt/bioseq-package-toolchain/llvm-22/bin/llvm-config",
+          "ZIC": "/usr/sbin/zic"
+        },
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -stdlib=libc++",
+          "CMAKE_CXX_FLAGS_DEBUG": "",
+          "CMAKE_C_FLAGS_DEBUG": "",
+          "CMAKE_EXE_LINKER_FLAGS": "-stdlib=libc++",
+          "CMAKE_SHARED_LINKER_FLAGS": "-stdlib=libc++",
+          "CMAKE_MODULE_LINKER_FLAGS": "-stdlib=libc++",
+          "CMAKE_LINKER_TYPE": "LLD",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
+          "BIOSEQ_CODEGEN_C_COMPILER": "/opt/bioseq-package-toolchain/llvm-22/bin/clang",
+          "BIOSEQ_CODEGEN_CXX_COMPILER": "/opt/bioseq-package-toolchain/llvm-22/bin/clang++",
+          "BIOSEQ_CODEGEN_CLANG_BINARY": "/opt/bioseq-package-toolchain/llvm-22/bin/clang++",
+          "BIOSEQ_CODEGEN_LLVM_CONFIG": "/opt/bioseq-package-toolchain/llvm-22/bin/llvm-config",
+          "BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON": "/opt/bioseq-package-toolchain/llvm-22/lib/aarch64-unknown-linux-gnu/libc++.modules.json",
+          "VCPKG_TARGET_TRIPLET": "arm64-linux-libcxx",
+          "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets",
+          "VCPKG_OVERLAY_PORTS": "${sourceDir}/overlays/cppast;${sourceDir}/overlays/md4c;${sourceDir}/overlays/jinja2cpp;${sourceDir}/cmake/ports",
+          "VCPKG_TARGET_ARCHITECTURE": "arm64",
+          "BIOSEQ_HEAVY_JOBS": "1"
+        }
+      },
+      {
+        "name": "native-arm64-clang22-linux-e2e",
+        "inherits": "native-arm64-clang22-linux",
+        "displayName": "Native ARM64 Clang E2E interval evidence build",
+        "description": "Isolated ARM64 Clang benchmark-e2e tree with benchmark-only CIGAR/MAPQ interval instrumentation.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "website-aws-x64-linux",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang static documentation website build",
+        "description": "Clang-22 production Bioseq, cache and isolated code generator for the static website. All E2E alphabets, O3, and a private PostgreSQL cluster for runnable SQL; papers are off.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_BUILD_WEBSITE": "ON",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+          "BIOSEQ_WEBSITE_VERSION": "v0.1",
+          "BIOSEQ_WEBSITE_VERSION_ARTIFACTS": "",
+          "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "all_alphabets_uint64",
+          "BIOSEQ_CODEGEN_C_COMPILER": "/opt/bioseq-package-toolchain/llvm-22/bin/clang",
+          "BIOSEQ_CODEGEN_CXX_COMPILER": "/opt/bioseq-package-toolchain/llvm-22/bin/clang++",
+          "BIOSEQ_CODEGEN_CLANG_BINARY": "/opt/bioseq-package-toolchain/llvm-22/bin/clang++",
+          "BIOSEQ_CODEGEN_LLVM_CONFIG": "/opt/bioseq-package-toolchain/llvm-22/bin/llvm-config",
+          "BIOSEQ_HEAVY_JOBS": "1"
+        }
+      },
+      {
+        "name": "website-aws-x64-linux-debug",
+        "inherits": "aws-x64-linux-debug",
+        "displayName": "AWS Clang website debug/inspect config",
+        "description": "Website Bioseq plus bioseq_cache Clang tree with DWARF and per-TU compiler artefacts for saved-temp diagnostics; website artifacts are not inspect targets.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_BUILD_WEBSITE": "ON",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+          "BIOSEQ_WEBSITE_VERSION": "v0.1",
+          "BIOSEQ_WEBSITE_VERSION_ARTIFACTS": ""
+        }
+      },
+      {
+        "name": "test-aws-x64-linux",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang unit/integration test config",
+        "description": "Isolated AWS Clang test tree with BIOSEQ_TEST_INDEXES enabled; production AWS benchmark binaries remain hook-free.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "test-aws-x64-linux-debug",
+        "inherits": "aws-x64-linux-debug",
+        "displayName": "AWS Clang unit/integration debug config",
+        "description": "Isolated AWS Clang test tree with failure hooks, DWARF and per-TU compiler artefacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-cache",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang independent bioseq_cache build",
+        "description": "Cache-only AWS Clang/libc++ tree inheriting the platform ABI, overlay and compiler environment.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-cache-debug",
+        "inherits": "aws-x64-linux-debug",
+        "displayName": "AWS Clang independent bioseq_cache debug build",
+        "description": "Cache-only AWS Clang/libc++ tree with inspect artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-cache-bioseq",
+        "inherits": "aws-x64-linux",
+        "displayName": "AWS Clang Bioseq plus bioseq_cache build",
+        "description": "Combined AWS Clang/libc++ provider integration tree retaining the Bioseq manifest.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-cache-bioseq-debug",
+        "inherits": "aws-x64-linux-debug",
+        "displayName": "AWS Clang Bioseq plus bioseq_cache debug build",
+        "description": "Combined AWS Clang/libc++ provider integration tree with inspect artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161",
+        "displayName": "AWS x86_64 Linux benchmark box (GCC 16.1 + libstdc++)",
+        "description": "GCC 16.1+ build tree for the AWS x86_64 box. Uses the stock x64-linux vcpkg triplet and libstdc++ std-module metadata from the official GCC 16.1+ install under /opt.",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "environment": {
+          "CMAKE_NAMED_ENV_TYPE": "AWS_MACHINE_X64_GCC16"
+        },
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive -fabi-version=0 -Wno-expose-global-module-tu-local -Wno-external-tu-local -Wno-template-names-tu-local -Wno-global-module -Wno-template-body",
+          "CMAKE_CXX_FLAGS_DEBUG": "",
+          "CMAKE_C_FLAGS_DEBUG": "",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "VCPKG_TARGET_TRIPLET": "x64-linux",
+          "VCPKG_TARGET_ARCHITECTURE": "x64",
+          "BIOSEQ_HEAVY_JOBS": "4",
+          "BIOSEQ_GCC_TYPED_DISPATCH_JOBS": "1",
+          "BIOSEQ_GCC_TEMPLATE_FORCE_INLINE": "OFF"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-debug",
+        "inherits": "aws-x64-linux-gcc161",
+        "displayName": "AWS GCC debug/inspect config",
+        "description": "AWS GCC production-flavor tree with DWARF and per-TU compiler artefacts; test hooks remain disabled.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive -fabi-version=0 -Wno-expose-global-module-tu-local -Wno-external-tu-local -Wno-template-names-tu-local -Wno-global-module -Wno-template-body -save-temps=obj -g",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-e2e",
+        "inherits": "aws-x64-linux-gcc161",
+        "displayName": "AWS GCC 16 E2E interval evidence build",
+        "description": "Isolated AWS GCC 16 benchmark-e2e tree with benchmark-only CIGAR/MAPQ interval instrumentation; production and test-index trees remain unchanged.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-e2e-debug",
+        "inherits": "aws-x64-linux-gcc161-debug",
+        "displayName": "AWS GCC 16 E2E interval debug/inspect build",
+        "description": "Isolated AWS GCC 16 benchmark-e2e tree with interval instrumentation, DWARF, and per-TU compiler artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BENCHMARK_E2E_INTERVALS": "ON",
+          "BIOSEQ_TEST_INDEXES": "OFF"
+        }
+      },
+      {
+        "name": "test-aws-x64-linux-gcc161",
+        "inherits": "aws-x64-linux-gcc161",
+        "displayName": "AWS GCC unit/integration test config",
+        "description": "Isolated AWS GCC test tree with BIOSEQ_TEST_INDEXES enabled; production AWS benchmark binaries remain hook-free.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "test-aws-x64-linux-gcc161-debug",
+        "inherits": "aws-x64-linux-gcc161-debug",
+        "displayName": "AWS GCC unit/integration debug config",
+        "description": "Isolated AWS GCC test tree with failure hooks, DWARF and per-TU compiler artefacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-cache",
+        "inherits": "aws-x64-linux-gcc161",
+        "displayName": "AWS GCC independent bioseq_cache build",
+        "description": "Cache-only AWS GCC/libstdc++ tree inheriting the platform ABI and compiler environment.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-cache-debug",
+        "inherits": "aws-x64-linux-gcc161-debug",
+        "displayName": "AWS GCC independent bioseq_cache debug build",
+        "description": "Cache-only AWS GCC/libstdc++ tree with inspect artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "VCPKG_MANIFEST_DIR": "${sourceDir}/bioseq_caching",
+          "BIOSEQ_BUILD_CORE": "OFF",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-cache-bioseq",
+        "inherits": "aws-x64-linux-gcc161",
+        "displayName": "AWS GCC Bioseq plus bioseq_cache build",
+        "description": "Combined AWS GCC/libstdc++ provider integration tree retaining the Bioseq manifest.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "aws-x64-linux-gcc161-cache-bioseq-debug",
+        "inherits": "aws-x64-linux-gcc161-debug",
+        "displayName": "AWS GCC Bioseq plus bioseq_cache debug build",
+        "description": "Combined AWS GCC/libstdc++ provider integration tree with inspect artifacts.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_CORE": "ON",
+          "BIOSEQ_BUILD_CACHE": "ON",
+          "BIOSEQ_BUILD_PAPERS": "OFF",
+          "BIOSEQ_CACHE_BUILD_TESTS": "ON",
+          "BIOSEQ_CACHE_TESTING": "ON"
+        }
+      },
+      {
+        "name": "prod",
+        "displayName": "Default release config",
+         "description": "Default build using Ninja generator",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Release",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "VCPKG_TARGET_TRIPLET": "arm64-osx",
+          "CMAKE_OSX_ARCHITECTURES": "arm64",
+          "VCPKG_TARGET_ARCHITECTURE": "arm64",
+          "VCPKG_CRT_LINKAGE": "static",
+          "VCPKG_LIBRARY_LINKAGE": "static"
+        }
+      }
+    ]
+  }

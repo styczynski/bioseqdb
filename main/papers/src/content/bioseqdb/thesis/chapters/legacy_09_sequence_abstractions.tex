@@ -1,0 +1,1554 @@
+\section{One logical sequence, several physical forms}
+\label{sec:sequence-abstractions}
+
+The algorithms in the preceding chapters are easiest to describe over an array
+of nucleotide codes.  A database execution engine rarely provides such an
+array directly.  In \mbox{BioSeqDB}, the same logical sequence may be backed by an
+in-memory bit-packed object, a PostgreSQL value stored out of line through the
+Oversized-Attribute Storage Technique (TOAST)~\cite{postgresql17_toast}, or a
+set of columnar fragments.  It may also denote a provider slice, a
+concatenation, or a reversed view.  Converting every case to a byte-per-symbol
+vector would simplify algorithm interfaces, but it would discard one of the
+main advantages of in-database alignment: reading and decoding only the region
+selected by the query.
+
+\mbox{BioSeqDB} therefore separates four ideas that are easily conflated:
+
+\begin{enumerate}
+    \item \emph{Logical sequence}: a length and an ordered stream of alphabet
+    ranks.
+    \item \emph{Packed geometry}: the mapping from ranks to physical storage
+    units.
+    \item \emph{Representation}: the object that owns or locates symbols and
+    determines their lifetime.
+    \item \emph{Access requirement}: the consumer contract that determines
+    whether streaming is sufficient or a contiguous packed region must be
+    acquired.
+\end{enumerate}
+
+This separation is the common data plane beneath minimizer extraction,
+indexing, chaining input preparation, alignment, PostgreSQL operators, and
+graphics processing unit (GPU) uploads.  It also gives ``lazy'' a precise
+meaning.  A lazy expression may allocate tree nodes, retain a source handle,
+and record provenance.  Laziness means that the complete symbol payload is not
+decoded and repacked until a consumer requests a representation that requires
+those operations.
+
+Consumers include scalar central processing unit (CPU) kernels and
+single instruction, multiple data (SIMD) kernels as well as GPU upload paths.
+
+The final design has two principal C++ interfaces.  The
+\texttt{compact\_sequence\_range} family provides typed rank access with an
+alphabet and storage-unit policy known at compile time.  Its specializations
+do not have one ownership model.  They include a borrowed unpacked container,
+an owning packed vector, and a borrowed packed PostgreSQL object.  The
+\texttt{basic\_lazy\_sequence\_view} facade is a non-owning logical rank stream
+whose backing representation is selected at run time.  A separate call owner
+or PostgreSQL read session keeps that backing state alive.  PostgreSQL expanded
+values, source-backed pieces, fragmented scanners, and flat packed values are
+adapted to the facade.  A consumer which truly needs packed resident storage
+uses an explicit access plan to borrow or materialize a region.  Figure
+\ref{fig:sequence-abstraction-layers} summarizes these layers.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    font=\small,
+    box/.style={draw, rounded corners, minimum width=12.2cm,
+                minimum height=0.8cm, align=center},
+    >=Latex
+]
+  \node[box,fill=blue!8] (sql) at (0,3.3)
+    {SQL value: flat, TOASTed, source-backed, sliced, concatenated, transformed};
+  \node[box,fill=green!10] (lazy) at (0,2.1)
+    {\texttt{basic\_lazy\_sequence\_view<Alphabet>}: non-owning logical rank stream\\
+     call owner or read session supplies lifetime};
+  \node[box,fill=orange!12] (plan) at (0,0.9)
+    {access plan: stream symbols \quad|\quad borrow resident region
+     \quad|\quad materialize admitted region};
+  \node[box,fill=gray!12] (packed) at (0,-0.3)
+    {\texttt{compact\_sequence\_range}: typed rank access with
+     specialization-specific storage};
+  \node[box,fill=purple!10] (kernel) at (0,-1.5)
+    {minimizers, indexes, alignment, SQL conversion, CPU/SIMD/GPU consumers};
+  \draw[->,thick] (sql) -- (lazy);
+  \draw[->,thick] (lazy) -- (plan);
+  \draw[->,thick] (plan) -- (packed);
+  \draw[->,thick] (packed) -- (kernel);
+\end{tikzpicture}
+\caption{The final sequence data plane.  The facade borrows its state.  A
+consumer reaches packed resident storage only when its access requirement
+makes that representation necessary.}
+\label{fig:sequence-abstraction-layers}
+\end{figure}
+
+\section{The compile-time compact range}
+\label{sec:compact-sequence-range}
+
+\subsection{Alphabet, container, and range concepts}
+
+The core definitions are in
+\texttt{main/bioseq/backend/sequences/sequences.cppm}.  An alphabet type
+satisfies \texttt{sequence\_alphabet} when SeqAn can obtain a rank and a
+compile-time cardinality from it.  A \texttt{sequence\_custom\_alphabet}
+combines that logical alphabet with a physical unit and a chosen bit width.
+A proper unpacked sequence container is a sized random-access range whose
+reference is an alphabet value.  Finally,
+\texttt{supports\_compact\_sequence\_range} identifies source types from which
+the packed range family can be formed.  Listing
+\ref{lst:compact-range-concepts} presents the public shape.  Function bodies
+and diagnostic details are omitted.
+
+\begin{lstlisting}[
+  language=C++,
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  caption={Abridged C++26 concepts and packed-range traits from
+  \texttt{sequences.cppm}, symbols at lines 46--117 and 874--929.},
+  label={lst:compact-range-concepts}]
+template<class A>
+concept sequence_alphabet = requires (A const a) {
+    { seqan3::to_rank(a) };
+    { seqan3::alphabet_size<A> };
+};
+
+template<sequence_alphabet Alphabet,
+         class StorageUnit,
+         size_t LetterBitWidth>
+struct sequence_custom_alphabet {
+    using alphabet_type = Alphabet;
+    using storage_unit = StorageUnit;
+    static constexpr size_t letter_bit_width = LetterBitWidth;
+};
+
+template<class R>
+concept sequence_proper_container =
+    sequence_alphabet<
+        remove_reference_t<ranges::range_reference_t<R>>> &&
+    ranges::sized_range<R> &&
+    ranges::random_access_range<R>;
+
+template<class R>
+concept supports_compact_sequence_range =
+    is_sequence_custom_alphabet<R> ||
+    sequence_proper_container<R> ||
+    sequence_alphabet<R> ||
+    is_compact_sequence_stdc_instance<R>;
+
+template<class Derived, class Alphabet, class StorageUnit,
+         size_t LetterBitWidth>
+struct compact_sequence_range_base {
+    struct traits {
+        using alphabet_type = Alphabet;
+        using storage_unit = StorageUnit;
+        static constexpr size_t bits_per_char = LetterBitWidth;
+        static constexpr size_t unit_width = sizeof(StorageUnit) * 8;
+        static constexpr size_t letters_per_unit =
+            unit_width / bits_per_char;
+        static constexpr size_t unit_used_bits =
+            letters_per_unit * bits_per_char;
+        static constexpr size_t unit_leftover_bits =
+            unit_width - unit_used_bits;
+        static constexpr StorageUnit char_mask =
+            (StorageUnit{1} << bits_per_char) - 1;
+        static constexpr size_t alphabet_size =
+            seqan3::alphabet_size<Alphabet>;
+        static constexpr size_t alphabet_size_n =
+            alphabet_size + 1;
+    };
+};
+\end{lstlisting}
+
+The abstraction deliberately exposes both the logical alphabet and the
+physical unit.  An algorithm such as minimizer extraction can use
+\texttt{traits::alphabet\_type} for complement semantics,
+\texttt{traits::bits\_per\_char} for masks, and
+\texttt{traits::letters\_per\_unit} for vectorized loads without hard-coding
+DNA4 or a 64-bit word.  The additional
+\texttt{alphabet\_size\_n = alphabet\_size + 1} trait is part of the current
+algorithm-facing API.  It must not be confused with the true cardinality,
+which remains \texttt{alphabet\_size}.
+
+There are two important qualifications.  First,
+\texttt{supports\_compact\_sequence\_range} is a construction-domain concept,
+not a promise that its argument already owns packed bytes.  A public algorithm
+which is intended to consume a range should accept the resulting range or the
+new behavioral lazy facade, rather than repeatedly reconstructing it.
+Second, storage geometry is not an algorithm's arithmetic state.  The K=27
+failure documented in DOC0213 arose when a 32-bit physical DNA4 unit, which
+contains only 16 ranks, was also treated as the rolling-hash state.  The
+sequence was stored correctly, but the \(k\)-mer was silently shortened.  The
+final rule is that packing width controls loads and iteration.  A hash,
+\(k\)-mer, score, or coordinate type must be selected independently of the
+mathematical range it must represent.
+
+The range family shares an algorithm-facing vocabulary, but Table
+\ref{tab:compact-range-specializations} shows why ``compact'' must not be read
+as a universal ownership or packing guarantee.
+
+\begin{table}[H]
+\centering
+\caption{Representation-bearing \texttt{compact\_sequence\_range}
+specializations used by \mbox{BioSeqDB}.}
+\label{tab:compact-range-specializations}
+\begingroup
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\textwidth}{@{}
+  >{\raggedright\arraybackslash}p{0.24\textwidth}
+  >{\raggedright\arraybackslash}p{0.19\textwidth}
+  >{\raggedright\arraybackslash}p{0.25\textwidth}
+  >{\raggedright\arraybackslash}X@{}}
+\textbf{Source specialization} & \textbf{Physical form} &
+\textbf{Ownership and lifetime} & \textbf{Construction}\\
+\hline
+\path{sequence_proper_container<R>} & one alphabet value per range element &
+borrows \texttt{const R\&}.  The caller keeps the container alive &
+\(O(1)\), with no packing\\
+\path{sequence_custom_alphabet} & bit-packed vector &
+owns the vector and its packed payload & \(O(N)\) from symbols\\
+\path{compact_sequence_stdc_instance} & bit-packed flat
+\texttt{data[]} payload & borrows a previously validated datum &
+\(O(1)\), with no payload copy\\
+\end{tabularx}
+\endgroup
+\end{table}
+
+The proper-container specialization currently stores \texttt{const R\&} and
+also exposes an rvalue-taking constructor.  Constructing it from a temporary
+can therefore leave the range with a dangling reference.  This is current
+implementation debt, not an ownership feature.  Until the constructor is
+removed or changed to own such inputs, callers must construct this
+specialization from an lvalue whose lifetime encloses every use of the range.
+
+\subsection{Ranks, symbols, and orientation}
+
+The base range exposes scalar rank and symbol iterators.  The rank iterator,
+called BP in the implementation, returns integer alphabet ranks.  The SYMBOL
+iterator converts each rank to the alphabet type.  Algorithms whose inner loops
+need only small integers avoid constructing alphabet objects.  Text output and
+alphabet-aware validation use the symbolic form.  The logical length is
+\[
+  N = U_{\mathrm{count}}L - P,
+\]
+where \(U_{\mathrm{count}}\) is the number of storage units,
+\(L\) is \texttt{letters\_per\_unit}, and \(P\) is the number of trailing
+padding slots.  \texttt{bp\_size()} returns \(N\), whereas
+\texttt{size()} denotes storage units.  Keeping these names distinct matters:
+using unit count as symbol count is correct only when \(L=1\).
+
+The conversion API includes full extraction and range extraction.  The
+allocating \texttt{to\_encoded\_vector()} method is intentionally eager and
+remains available for legacy byte-oriented boundaries.  Current KSW2-facing
+paths do not make whole-sequence conversion their default.  They use the
+\texttt{encoded\_iter} slot ring or fill selected spans through
+\texttt{to\_encoded\_into}.  The allocating
+\texttt{to\_encoded\_vector(from,to)} overload writes only the requested
+interval, but its current forward implementation reaches \texttt{to} by
+logical iteration from the beginning.  Its traversal cost is therefore
+\(O(\mathtt{to})\), and reverse traversal can approach \(O(N)\).
+The span-oriented alternative has the signature
+\begin{center}
+\small\texttt{to\_encoded\_into<IsReversed, WriteReversed>}
+\end{center}
+It seeks to the containing unit and decodes only \([from,to)\), giving
+\(O(\mathtt{to}-\mathtt{from})\) resident work.  The two Boolean dimensions are
+independent:
+\texttt{IsReversed} mirrors logical coordinates and applies complement
+semantics for the reverse strand, while \texttt{WriteReversed} controls the
+order placed in the destination.  The four combinations are required by
+canonical minimizer cursors.  Collapsing the two flags into one ``reverse''
+bit once caused source-backed reverse-write calls to read the wrong
+coordinates.  The current facade preserves the full four-callback table.
+
+\section{Bit layout and reinterpretation}
+\label{sec:sequence-bit-layout}
+
+\subsection{Least-significant symbol first}
+
+For the default and PostgreSQL standard-layout packing policies, an alphabet
+with \(\sigma\) ranks uses the minimum width
+\[
+ b=\lceil\log_2 \sigma\rceil
+\]
+bits per symbol.  The generic \texttt{sequence\_custom\_alphabet} type may
+instead receive an explicit width.  For these layout equations,
+\(b=\texttt{traits::bits\_per\_char}\), and the selected policy must provide
+enough values to encode every alphabet rank.  Thus the ceiling formula is the
+default minimum, not a universal invariant of the range family.  For a
+physical unit of \(W\) bytes, the current layout stores
+\[
+ L=\left\lfloor\frac{8W}{b}\right\rfloor
+ \quad\text{symbols and leaves}\quad
+ r=8W-Lb
+\]
+unused high bits.  For logical position \(i\),
+\[
+  u(i)=\left\lfloor i/L\right\rfloor,\qquad
+  s(i)=b(i\bmod L),\qquad
+  rank(i)=\bigl(unit[u(i)]\gg s(i)\bigr)\mathbin{\&}(2^b-1).
+\]
+The first logical symbol occupies the least significant \(b\) bits of the
+first unit.  Figure~\ref{fig:lsb-packed-layout} reconstructs a 16-bit DNA4
+example.  It is a description of \mbox{BioSeqDB}'s source invariant, not a generic
+property of every biological file format.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[x=1.25cm,y=1cm,font=\small,>=Latex]
+  \foreach \x/\sym/\rank in {
+    0/A/00,1/C/01,2/G/10,3/T/11,
+    4/A/00,5/G/10,6/C/01,7/T/11} {
+      \draw[fill=blue!8] (\x,0) rectangle ++(1,1);
+      \node at (\x+0.5,0.66) {\sym};
+      \node[font=\scriptsize\ttfamily] at (\x+0.5,0.28) {\rank};
+      \node[font=\scriptsize] at (\x+0.5,-0.22) {\the\numexpr\x*2\relax--\the\numexpr\x*2+1\relax};
+  }
+  \draw[->,thick] (0,-0.75) -- (3.2,-0.75)
+    node[midway,below] {increasing logical positions};
+  \node[anchor=east] at (-0.2,0.5) {16-bit unit};
+  \node[anchor=east,font=\scriptsize] at (-0.2,-0.22) {bit positions};
+  \node[anchor=west,font=\scriptsize] at (5.0,-0.75)
+    {high-order slots};
+\end{tikzpicture}
+\caption{DNA4 ranks in one 16-bit unit.  Position zero is in bits 0--1,
+so sequential extraction masks the low bits and shifts right.}
+\label{fig:lsb-packed-layout}
+\end{figure}
+
+Table~\ref{tab:packing-geometries} shows why non-power-of-two alphabets require
+care.  DNA4 fills every supported width exactly.  DNA5 uses three-bit ranks,
+so one or two bits per physical unit are not symbol slots.  The padding count
+describes empty \emph{slots} in the last used unit and is separate from those
+per-unit unused bits.
+
+\begin{table}[ht]
+\centering
+\caption{Current packing geometry for DNA4 and DNA5.  \(W\) is the physical
+unit width in bytes.}
+\label{tab:packing-geometries}
+\begin{tabular}{lrrrr}
+\textbf{Alphabet} & \(\boldsymbol{b}\) & \(\boldsymbol{W}\) &
+\(\boldsymbol{L=\lfloor8W/b\rfloor}\) & \textbf{unused bits/unit}\\
+\hline
+DNA4 & 2 & 1 & 4  & 0\\
+DNA4 & 2 & 2 & 8  & 0\\
+DNA4 & 2 & 4 & 16 & 0\\
+DNA4 & 2 & 8 & 32 & 0\\
+DNA5 & 3 & 1 & 2  & 2\\
+DNA5 & 3 & 2 & 5  & 1\\
+DNA5 & 3 & 4 & 10 & 2\\
+DNA5 & 3 & 8 & 21 & 1\\
+\end{tabular}
+\end{table}
+
+For a resident packed range, reading an arbitrary rank is \(O(1)\), with one
+unit load, one shift, and one mask.  Sequential traversal is \(O(N)\), with a
+constant determined by unit width, iterator form, and vectorization.  Packing
+an admitted interval of \(m\) symbols is \(O(m)\).
+\texttt{to\_encoded\_into} also performs \(O(m)\) resident work because it
+seeks directly to the containing unit.  The allocating range-vector overload
+performs \(O(\mathtt{to})\) forward traversal and can approach \(O(N)\) in
+reverse even though it writes only \(m\) symbols.  These bounds do not imply
+that a source-backed rank is always
+\(O(1)\) in wall time.  A provider may need a fragment lookup or bounded I/O.
+The facade guarantees that it asks the provider only for the selected window.
+
+\raggedbottom
+\subsection{The bit-cast view}
+
+\texttt{bit\_casted\_view} in \texttt{sequences.cppm}, lines 726--866, is a
+legacy target-specific view that changes the traversal unit of a resident byte
+stream without changing its content.  For example, it can present a
+DNA4/\texttt{uint64\_t} range through a \texttt{uint32\_t} unit type.  This
+conversion is permitted only when source and target use the same alphabet and
+symbol width.  Their unit widths must divide exactly, and neither supported
+geometry may contain leftover bits.  The view borrows its base and scales
+iterator movement by the power-of-two width ratio.  Logical and byte lengths
+remain unchanged.
+
+Those geometry checks do not make the view a standards-portable typed
+zero-copy API.  A typed dereference must also satisfy C++ alignment,
+object-lifetime, and type-accessibility rules.  An upcast may require alignment
+that the original allocation did not promise.  Logical rank order also assumes
+the deployed little-endian byte order.  For downcasts, divisibility of the
+iterator step by the width ratio is checked only by \texttt{DEBUG\_ASSERT}, so
+a release caller must satisfy that precondition itself.  Generic code should
+inspect \texttt{traits::unit\_leftover\_bits}.  The older
+\texttt{sequence\_custom\_alphabet::leftover\_bits} member alone does not state
+the complete target geometry.
+
+The lazy access planner therefore has a separate
+\texttt{byte\_upload\_compatible} policy for one little-endian 64-to-32-bit
+case.  That policy returns a descriptor whose bytes may be copied to a Vulkan
+buffer.  The bytes still belong to live \texttt{uint64\_t} storage objects, so
+a CPU consumer must not dereference them through a \texttt{uint32\_t*}.  Native
+typed borrowing and byte-compatible upload are recorded as different receipt
+kinds.  The latter is the truthful cross-width contract for new integrations.
+
+Table~\ref{tab:compact-operation-costs} consolidates the resulting cost and
+ownership boundaries.  It distinguishes constant-time adaptation from
+operations whose work scales with total or selected symbols.
+
+\newpage
+\flushbottom
+\begin{table}[H]
+\centering
+\caption{Packed-range operations and their data movement.}
+\label{tab:compact-operation-costs}
+\begingroup
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\textwidth}{@{}
+  >{\raggedright\arraybackslash}p{0.30\textwidth}
+  >{\raggedright\arraybackslash}p{0.18\textwidth}
+  >{\raggedright\arraybackslash}X@{}}
+\textbf{Operation} & \textbf{Cost} & \textbf{Ownership/copy behavior}\\
+\hline
+construct owning range from symbols & \(O(N)\) & packs into an owned vector\\
+construct proper-container adapter & \(O(1)\) & borrows an unpacked lvalue.
+The caller supplies lifetime\\
+construct range over standard-layout trailing-payload object & \(O(1)\) & stores a reference to
+the aligned, previously validated payload with zero copy\\
+read one resident rank & \(O(1)\) & one unit load and bit extraction\\
+iterate ranks or symbols & \(O(N)\) & no payload copy.  Symbols may be
+constructed on demand\\
+direct\newline\texttt{to\_encoded\_into}\newline\texttt{([a,b))} &
+\(O(b-a)\) & seeks to the first
+containing unit and writes exactly the selected ranks\\
+allocating\newline\texttt{to\_encoded\_vector}\newline\texttt{(a,b)} &
+forward \(O(b)\),\newline reverse up to \(O(N)\) &
+writes \(b-a\) ranks after iterator traversal\\
+unit-aligned \texttt{split\_units} & \(O(k)\) metadata & records unit offsets.
+Only aligned boundaries are zero-copy\\
+construct legacy \texttt{bit\_casted\_view} & \(O(1)\) & borrows its base.
+Typed use also requires effective-type, alignment, endian, and step
+preconditions\\
+\end{tabularx}
+\endgroup
+\end{table}
+
+\section{A standard-layout trailing-payload object}
+\label{sec:sequence-stdc}
+
+\subsection{Standard layout and a zero-copy adapter}
+
+An owning C++ range is unsuitable as a PostgreSQL datum because
+\texttt{std::vector} is neither a C application binary interface (ABI) object
+nor a PostgreSQL variable-length (varlena) payload.  The
+\texttt{compact\_sequence\_stdc} C++ class-template family, introduced in the
+DOC0258 work and subsequently revised, provides a shared standard-layout
+representation with a C-style trailing-payload convention.  Its current
+symbols are in \texttt{sequences.cppm}: type parameters at lines 1995--2027,
+the standard-layout object at lines 2094--2255, its typed instance at lines
+2299--2332, and the range adapter at lines 2340--2436.  Listing
+\ref{lst:compact-stdc-api} shows the representation-level API.
+
+\begin{lstlisting}[
+  language=C++,
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
+  caption={Abridged standard-layout sequence API.  Methods are declarations.
+  Implementations and factories are omitted.},
+  label={lst:compact-stdc-api}]
+struct compact_sequence_stdc_type_params {
+    uint8_t alphabet_code;
+    uint8_t storage_unit_byte_width;
+    constexpr int32_t encode() const;
+    static constexpr compact_sequence_stdc_type_params decode(int32_t);
+};
+
+template<class SupportedAlphabets,
+         class BpSize = uint32_t,
+         class VarlenaHeader = int32_t,
+         class SupportedWidths = all_storage_unit_byte_widths>
+struct compact_sequence_stdc {
+    VarlenaHeader vl_len_;
+    typename SupportedAlphabets::alphabet_code_t alphabet_code;
+    uint8_t storage_unit_byte_width;
+    uint16_t padding_letters;
+    BpSize bp_size;
+    [[no_unique_address]] alignment_reserved_holder<...> _reserved;
+    uint8_t data[1];
+
+    static constexpr size_t header_bytes();
+    template<class Handler>
+    static constexpr void dispatch_instance(
+        alphabet_code_t, uint8_t byte_width, Handler&&);
+    template<class Handler> void convert_to(Handler&&) const;
+    size_t unit_count() const noexcept;
+    size_t payload_bytes() const noexcept;
+};
+
+template<class Stdc, sequence_alphabet Alphabet, size_t WidthBytes>
+struct compact_sequence_stdc_instance {
+    using compact_sequence_stdc_type = Stdc;
+    using alphabet_type = Alphabet;
+    using storage_unit = /* uint8_t, uint16_t, uint32_t, or uint64_t */;
+    static constexpr size_t byte_width = WidthBytes;
+    static constexpr size_t letter_bit_width =
+        seqan3::detail::ceil_log2(seqan3::alphabet_size<Alphabet>);
+};
+
+template<class Instance>
+requires is_compact_sequence_stdc_instance<Instance>
+struct compact_sequence_range<Instance> {
+    using storage_unit = typename Instance::storage_unit;
+    explicit compact_sequence_range(
+        typename Instance::compact_sequence_stdc_type const&) noexcept;
+    size_t padding() const noexcept;
+    size_t size() const noexcept;       // physical units
+    size_t bp_size() const noexcept;    // logical symbols
+    storage_unit const* cbegin() const noexcept;
+};
+\end{lstlisting}
+
+The header records runtime type parameters, logical length, and last-unit
+padding.  The one-byte \texttt{data[1]} member marks the start of the
+trailing payload. It is not a C flexible-array member.  The reserved field
+makes the payload offset relative to the object base a multiple of eight.
+That relative offset does not itself guarantee an eight-byte-aligned
+allocation base.  PostgreSQL supplies double-aligned varlena storage on the
+supported ABI. A generic allocator or borrower must separately prove adequate
+base alignment before forming typed loads.  The PostgreSQL specialization uses
+a 32-bit base-pair count and a 32-bit varlena header.
+On the target little-endian PostgreSQL ABI the stored header uses the
+four-byte uncompressed varlena encoding, rather than a raw byte count.  A raw
+count would make PostgreSQL interpret only one quarter of the object and
+truncate detoasted copies.
+
+\texttt{compact\_sequence\_stdc\_instance} carries no runtime state.  It pins
+the two header bytes, alphabet code and physical width, as C++ template
+parameters.  PostgreSQL first classifies the frame and header in
+\texttt{view\_session.cppm}, lines 331--358.  That production boundary checks
+the payload size, logical length, unit count, padding, and type geometry before
+typed dispatch.  Once those invariants have been established, the
+\texttt{compact\_sequence\_range<Instance>} specialization holds a const
+reference to the datum and points directly at \texttt{data[]}.  It does not
+create a vector.  Its constructor is a trusted zero-copy adapter with debug
+assertions.  It does not independently validate the varlena payload length in
+a release build.  The classifier, not this constructor, is responsible for
+production validation.  Together they form the main zero-copy boundary between
+a validated flat PostgreSQL value and the resident algorithm interface.
+
+\subsection{Contrast with minimap2's split representation}
+
+The pinned minimap2 implementation and its accompanying publication
+\cite{minimap2_software,minimap2_paper} make a different, internally
+consistent trade-off.  Its input record \texttt{mm\_bseq1\_t} stores an integer length and
+\texttt{char*} fields for name, sequence, quality, and comment
+(\path{main/bench/tool_minimap2/minimap2/bseq.h}, lines 14--17).  Mapping
+entry points such as \texttt{mm\_map} receive the query as
+\texttt{const char*}.  The reference index uses another representation:
+\texttt{mm\_idx\_t::S} is a \texttt{uint32\_t*} containing a four-bit packed
+reference (\texttt{minimap.h}, lines 80--100).  Reverse complementation of an
+input record mutates the byte string in place.
+
+This split is well suited to a command-line mapper which reads batches from
+FASTA/FASTQ, constructs its own index, and releases batch-owned memory after
+mapping.  It is not an SQL value model.  A PostgreSQL slice cannot safely be
+represented as a borrowed \texttt{char*}.  A concat cannot mutate its operands.
+An expression may outlive the scan node that discovered the source fragment.
+
+Table~\ref{tab:minimap2-sequence-representation} contrasts these representation
+boundaries without implying a change to minimap2's mapping algorithm.
+
+\begin{table}[ht]
+\centering
+\caption{Representation boundary in the minimap2 reference and
+\mbox{BioSeqDB}.}
+\label{tab:minimap2-sequence-representation}
+\begingroup
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\textwidth}{@{}
+  >{\raggedright\arraybackslash}p{0.22\textwidth}
+  >{\raggedright\arraybackslash}p{0.30\textwidth}
+  >{\raggedright\arraybackslash}X@{}}
+\textbf{Aspect} & \textbf{minimap2 reference} & \textbf{\mbox{BioSeqDB}}\\
+\hline
+mapping query & ASCII-compatible \texttt{char*} and integer length &
+alphabet rank stream.  Bytes are produced only for a byte-oriented boundary\\
+reference index & separate four-bit packed \texttt{uint32\_t} array &
+packed geometry selected by alphabet/width policy and exposed through typed
+ranges or lazy access\\
+reverse operation & may mutate a batch sequence buffer &
+logical edge transform.  Operands remain immutable\\
+slice/concat lifetime & caller/batch responsibility &
+expanded object, arena dependencies, retained source handle, and declared
+flattening boundary\\
+alphabet dispatch & nucleotide lookup tables and reference-specific encoding &
+compile-time alphabet pack selected once from runtime datum metadata\\
+\end{tabularx}
+\endgroup
+\end{table}
+
+The \mbox{BioSeqDB} benchmark adapter preserves the reference contract rather than
+pretending minimap2 accepts the lazy facade.  The helper
+\texttt{compact\_sequence\_to\_acgt} in
+\path{main/bench/tool_minimap2/tool_minimap2.cppm}, lines 58--87, performs
+one \(O(N)\) rank-to-character pass.  The reference wrapper then calls
+\texttt{mm\_idx\_str} and \texttt{mm\_map} with those strings (lines
+218--310).  \mbox{BioSeqDB}-native routes avoid that boundary when their kernels
+support compact or lazy ranks.  This is a systems difference rather than a
+change to minimap2's seed-chain-extend mathematics.
+
+\subsection{Runtime metadata becomes compile-time specialization}
+
+Alphabet registration is itself type-level.  An
+\texttt{alphabet\_entry<A,Name>} pairs an alphabet with a compile-time string.
+\texttt{supported\_alphabets<...>} verifies unique types and names, assigns a
+small integer code, and supplies code-to-name, name-to-code, and dispatch
+operations.  Listing~\ref{lst:alphabet-dispatch} gives a representative
+boundary dispatch:
+
+\begin{lstlisting}[
+  language=C++,
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  caption={Runtime header dispatch into a compile-time alphabet/width
+  specialization.},
+  label={lst:alphabet-dispatch}]
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+using pgseq_supported_alphabets =
+    supported_alphabets<
+        alphabet_entry<seqan3::dna4, "dna4">>;
+#else
+using pgseq_supported_alphabets =
+    supported_alphabets<
+        alphabet_entry<seqan3::dna4, "dna4">,
+        alphabet_entry<seqan3::dna5, "dna5">>;
+#endif
+
+bioseq::pg_types::seq::dispatch_instance(
+    runtime_alphabet_code, runtime_width,
+    [&]<class Instance>() {
+        using range_type = compact_sequence_range<Instance>;
+        using alphabet_type = typename Instance::alphabet_type;
+        range_type packed{datum};
+        consume<alphabet_type>(packed);
+    });
+\end{lstlisting}
+
+The exact PostgreSQL profile is in
+\path{main/bioseq/backend/pg/types/compact_sequence/flat_abi.cppm}.
+At optimization profile 0, \texttt{pgseq\_supported\_alphabets} contains only
+DNA4.  Higher profiles add DNA5.  Profiles 0 and 1 enable only an eight-byte
+physical unit, while every profile at level 2 or higher enables
+\(\{1,2,4,8\}\).  SQL width requests
+are validated and normalized through this policy.  Consequently the symbol
+named in some older design notes as \texttt{pg\_supported\_sequences<>} is not
+the implemented abstraction.  The current aliases are
+\texttt{pgseq\_supported\_alphabets} and
+\texttt{pgseq\_supported\_storage\_unit\_byte\_widths}.
+
+Dispatch is paid at the boundary, not in the rank loop.  After the nested
+alphabet/width selection, masks, letters per unit, complement operations, and
+lane types are compile-time constants.  This is how one stored SQL base type
+can remain alphabet-generic without placing a switch statement inside every
+symbol operation.
+
+\subsection{Dispatch is not SQL code generation}
+
+A second compile-time-looking mechanism has a different purpose.
+Listing~\ref{lst:seq-type-annotation} shows the C++ declaration in
+\texttt{flat\_abi.cppm} that owns the generated SQL type metadata.
+
+\begin{lstlisting}[
+  language=C++,
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  caption={The C++ declaration that owns the generated SQL type metadata.},
+  label={lst:seq-type-annotation}]
+using seq [[bioseq_sql::type({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .internal_length = bioseq::sql::variable_length,
+    .alignment = bioseq::sql::type_alignment::double_,
+    .storage = bioseq::sql::type_storage::extended,
+})]] = compact_sequence_stdc<
+    pgseq_supported_alphabets,
+    uint32_t,
+    int32_t,
+    pgseq_supported_storage_unit_byte_widths>;
+\end{lstlisting}
+
+The \texttt{bioseq\_sql} attributes are consumed by
+\texttt{main/codegen/sql}.  The annotation model describes entities and
+options.  The collector reads annotated declarations, while the graph layer
+resolves dependencies and fmgr facets.  Renderers then produce installation
+SQL, C/fmgr boundary code, and manifests.
+
+Function, result, parameter, operator, and subscript attributes keep each SQL
+signature next to its C++ authority.  These attributes appear in
+\texttt{concat\_reverse.cppm}, \texttt{subscript.cppm},
+\texttt{letter.cppm}, and related partitions.
+
+This generation path does \emph{not} select a nucleotide alphabet at query
+run time.  Conversely, \texttt{supported\_alphabets} does not generate SQL.
+The former removes duplicated boundary declarations at build time.  The latter
+specializes data processing at run time.  Keeping the two mechanisms separate
+is important both for understanding the code and for assigning failures to
+the correct layer.
+
+\section{From fragmented storage to one lazy facade}
+\label{sec:lazy-sequence-facade}
+
+\subsection{Why a packed pointer is not a sufficient interface}
+
+The flat adapter solves only the case in which the entire payload is already
+resident in one datum.  Columnar storage and external providers return bounded
+pieces.  A range may cross fragment boundaries, and a reverse-strand cursor
+may request those pieces in the opposite logical order.  Requiring a single
+pointer would force all fragments to be joined before a consumer could inspect
+the first rank.
+
+The first \mbox{BioSeqDB} lazy design, still visible in
+\path{main/bioseq/backend/storage/lazy_compact_sequence.cppm}, was
+parameterized by a concrete range and scanner.  Its no-fragment specialization
+was close to a pointer-sized wrapper.  The fragmented specialization held a
+small fragment cache and stitched a requested window into scratch storage when
+it crossed a boundary.  This was useful because existing minimizer iterators
+could ask for a small contiguous run without knowing how fragments were
+loaded.  It was nevertheless representation-specific: an algorithm's type
+mentioned the scanner, the underlying range, and the fragment machinery.
+
+The final facade moves the representation choice behind an operation table.
+It is specialized by logical alphabet, but not by PostgreSQL width, source
+provider, tree shape, or scanner class.  The interface emits rank bytes for
+sequential consumers and can optionally describe an already-resident packed
+region.  Listing~\ref{lst:lazy-facade-api} shows the essential API from
+\texttt{lazy\_compact\_sequence.cppm}, lines 169--568.
+
+\begin{lstlisting}[
+  language=C++,
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
+  caption={Abridged declaration-only form of the canonical lazy facade.},
+  label={lst:lazy-facade-api}]
+template<sequence_alphabet Alphabet>
+struct lazy_rank_stream_traits {
+    using alphabet_type = Alphabet;
+    using storage_unit = uint8_t; // one emitted rank, not packed storage
+    static constexpr size_t logical_bits_per_symbol =
+        seqan3::detail::ceil_log2(
+            seqan3::alphabet_size<Alphabet>);
+};
+
+template<sequence_alphabet Alphabet>
+class basic_lazy_sequence_view {
+public:
+    using ptr_at_fn = uint8_t const* (*)(
+        void const* state, sequence_size_t from,
+        size_t count, span<uint8_t> scratch);
+
+    enum class packed_bit_order : uint8_t {
+        least_significant_symbol_first
+    };
+
+    struct resident_packed_region {
+        void const* units;
+        size_t unit_count;
+        sequence_size_t bp_length;
+        uint8_t storage_unit_byte_width;
+        uint8_t bits_per_symbol;
+        uint16_t leading_symbol_offset;
+        uint16_t trailing_padding_letters;
+        packed_bit_order bit_order;
+    };
+
+    struct backend_ops {
+        sequence_size_t (*bp_size)(void const*) noexcept;
+        array<ptr_at_fn, 4> ptr_at;
+        optional<resident_packed_region> (*try_resident_packed)(
+            void const*, sequence_size_t, sequence_size_t,
+            uint8_t) noexcept;
+        bool (*copy_full_packed)(
+            void const*, void*, size_t, uint8_t);
+        bool (*worker_shareable)(void const*) noexcept;
+    };
+
+    basic_lazy_sequence_view(
+        void const* state, backend_ops const* ops,
+        sequence_payload_allocation_observer const* = nullptr) noexcept;
+
+    sequence_size_t bp_size() const noexcept;
+    bool worker_shareable() const noexcept;
+    optional<resident_packed_region> try_resident_packed(
+        sequence_size_t from, sequence_size_t to,
+        uint8_t requested_width) const noexcept;
+
+    template<bool IsReversed, bool WriteReversed = false>
+    void to_encoded_into(
+        span<uint8_t> output, size_t from, size_t to) const;
+};
+\end{lstlisting}
+
+The \texttt{uint8\_t} called \texttt{storage\_unit} in
+\texttt{lazy\_rank\_stream\_traits} is a rank-stream element, not the physical
+packed unit of the backing object.  DNA4 still contains two logical bits per
+symbol.  A facade callback writes one rank per scratch byte only for the
+requested window.  This distinction avoids implying that the lazy interface
+expands the whole value to bytes.
+
+The state pointer and static operation table form a small
+representation-erased object.  Backends provide four \texttt{ptr\_at}
+callbacks for the Cartesian product of logical reverse orientation and
+destination write order.  A callback may return a pointer into backing
+storage when its representation permits it, or return the supplied scratch
+buffer after filling the request.  The PostgreSQL facade currently emits
+ranks into scratch for both flat and tree traversal.  Its separate resident
+probe is what permits a zero-copy packed borrow.  The facade itself does not
+retain or release its state.  Every operation therefore requires a separate
+owner or read session to remain alive.
+
+\subsection{Ownership is part of the abstraction}
+
+A borrowed view without a lifetime is an unsafe pointer with a better name.
+\path{lazy_sequence_call_owner<Alphabet>} is therefore a move-only
+resource-acquisition-is-initialization (RAII) owner.  It stores the facade and
+the release action for its state.  PostgreSQL constructs these owners in a
+read-session memory context.
+
+The helper \path{with_pg_sequence_view<Result>} in
+\path{view_session.cppm}, lines 995--1064, restricts callback result types at
+compile time.  A result cannot be a pointer, reference, range view, or iterator,
+and it must be trivially destructible.  This prevents the borrowed view from
+escaping through the callback's declared result type.  It is not a recursive
+proof against callback side effects such as storing the view elsewhere.
+Callback code must not retain the facade after its owner or read session ends.
+
+This restriction also addresses PostgreSQL's non-local error model.
+Source reads may raise a PostgreSQL error while C++ owners are live.  The
+\texttt{PG\_CATCH} path intercepts the non-local transfer, explicitly drains
+registered session owners, and invokes \texttt{PG\_RE\_THROW} to restore the
+original PostgreSQL error.  This design does not rely on C++ stack unwinding
+across \texttt{ERROR}.  An ordinary destructor alone would be insufficient
+because PostgreSQL performs a \texttt{longjmp} across C++
+frames~\cite{postgresql17_cpp_extensibility}.
+
+Worker sharing is explicit as well.  A flat resident value is shareable.
+A tree is shareable only if every source leaf's provider says that its state
+is shareable.  Current source-backed PostgreSQL views remain on the backend
+thread.  The \texttt{worker\_shareable} result is capability eligibility.  It
+does not retain state and is not a lifetime token.  A CPU task or Vulkan
+operation which outlives that call first obtains an admitted resident owner.
+Both the allocation and its memory permit remain alive until task completion
+or the GPU fence.
+
+\section{Persistent SQL expressions as immutable piece trees}
+\label{sec:sequence-piece-tree}
+
+\subsection{Leaves, branches, and transforms}
+
+PostgreSQL needs lazy values to survive ordinary expression evaluation,
+concatenation, and nested slices.  A raw tuple pointer cannot provide that
+lifetime: its memory can be detoasted, copied, or reset, and an arbitrary
+slice may begin in the middle of a packed word.  The final representation is
+a PostgreSQL expanded object whose payload is an immutable balanced piece
+tree.  The public plain data structures are declared in
+\path{main/bioseq/backend/pg/types/compact_sequence/tree_types.cppm},
+lines 31--222, and are abridged in Listing~\ref{lst:piece-tree-api}.
+
+\begin{lstlisting}[
+  language=C++,
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
+  caption={Persistent sequence-piece API.  Transforms are edge metadata.
+  There is no payload-bearing reverse node.},
+  label={lst:piece-tree-api}]
+struct piece_edge {
+    piece_tree_arena* arena;
+    piece_node const* node;
+    sequence_transform transform;
+};
+
+struct source_piece {
+    pg_sequence_source_handle source;
+    seq_locator locator;
+    compact_sequence_stdc_type_params stored_type_params;
+    uint16_t last_padding_letters;
+    uint64_t from;
+    uint64_t to;
+};
+
+struct literal_piece {
+    piece_tree_arena* storage_arena;
+    byte const* bytes;
+    uint64_t symbol_from;
+    uint64_t symbol_to;
+    compact_sequence_stdc_type_params stored_type_params;
+    literal_encoding encoding;
+    literal_validation validation;
+};
+
+struct branch_piece { piece_edge left; piece_edge right; };
+
+struct piece_node {
+    enum class kind : uint8_t { branch, source, literal } node_kind;
+    uint64_t bp_length;
+    uint32_t piece_count;
+    uint16_t height;
+    union {
+        branch_piece branch;
+        source_piece source;
+        literal_piece literal;
+    } payload;
+};
+
+struct pg_sequence_expanded {
+    ExpandedObjectHeader hdr;
+    MemoryContext object_context;
+    MemoryContextCallback reset_callback;
+    compact_sequence_stdc_type_params type_params;
+    bool alphabet_bound;
+    uint64_t bp_length;
+    piece_edge root;
+    slice_trace_attachment* trace;
+    uint32_t producer_value_id;
+};
+\end{lstlisting}
+
+A source leaf stores a retained provider handle and stable logical
+coordinates, not an address into a tuple.  A literal leaf stores owned packed
+or unbound bytes and its validated type.  Concatenation creates a branch.
+Each node caches logical length, piece count, and Adelson-Velsky and Landis
+(AVL) tree height.  Existing
+subtrees are immutable and retained through arena dependencies, so a new
+expression shares them rather than copying their symbols.
+
+Reverse and complement state is attached to an edge.  Composing a transform
+changes metadata and preserves the subtree.  For a branch reached through a
+reversed edge, logical child order is reversed during traversal.  For a
+literal or source leaf, coordinate mirroring, output order, and complementation
+are applied at the facade callback.  Adding this transform metadata is
+\(O(1)\) in payload length and never decodes or repacks ranks.  The complete SQL
+operation remains \(O(\text{piece count})\) because
+\texttt{transform\_pg\_sequence} validates the resulting tree.  A flat or
+TOASTed input must first be acquired as a writable expanded value.  That first
+expansion copies its packed literal payload once in \(O(\text{payload bytes})\)
+without decoding and repacking individual ranks.  Later transforms of an
+expanded value still avoid rank decoding and repacking.
+
+The current node kinds deserve emphasis.  Design documents sometimes use
+``slice piece'' and ``transform piece'' as conceptual terms, but the source
+does not store separate payload nodes with those enum values.  A slice narrows
+leaf ranges by splitting the tree and shares unaffected nodes.  A transform is
+carried by \texttt{piece\_edge}.  Describing the conceptual expression directed
+acyclic graph (DAG) is useful in SQL \texttt{EXPLAIN}, but the physical
+piece-tree enum is
+\{\texttt{branch}, \texttt{source}, \texttt{literal}\}.
+
+Figure~\ref{fig:piece-tree} illustrates how slices, concatenation, and reversal
+compose without copying source payloads.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  node/.style={draw,rounded corners,align=center,minimum width=3.0cm,
+               minimum height=0.8cm},
+  >=Latex
+]
+  \node[node,fill=orange!12] (root) at (0,2.8)
+    {branch\\length 130};
+  \node[node,fill=blue!9] (left) at (-3.2,1.2)
+    {source leaf\\handle \(S_1\), [500000,500064)};
+  \node[node,fill=green!10] (right) at (3.2,1.2)
+    {branch\\length 66};
+  \node[node,fill=blue!9] (rsrc) at (1.0,-0.4)
+    {source leaf\\handle \(S_1\), [\(N-64,N\))};
+  \node[node,fill=gray!12] (lit) at (5.4,-0.4)
+    {literal leaf\\``AC''};
+  \draw[->,thick] (root) -- node[left] {identity} (left);
+  \draw[->,thick] (root) -- (right);
+  \draw[->,thick] (right) -- node[left] {reverse} (rsrc);
+  \draw[->,thick] (right) -- node[right] {identity} (lit);
+\end{tikzpicture}
+\caption{An illustrative persistent composition.  Slices narrow logical
+coordinates, concatenation adds balanced branch metadata, and reversal is an
+edge transform.  The source payload is not copied into the tree.}
+\label{fig:piece-tree}
+\end{figure}
+
+\subsection{Composition and complexity}
+
+\texttt{concat\_pg\_sequences} in
+\texttt{packed\_output.cppm}, lines 3306--3361, acquires one writable expanded
+value, resolves bound/unbound type adoption, checks the summed logical length,
+and joins the two immutable roots.  The join in
+\texttt{tree\_ops.cppm}, lines 1665--1765, descends according to subtree
+height and performs an AVL single or double rotation when needed.  Work for
+already validated roots is bounded by the height-guided join path, not by the
+total number of pieces.  Adjacent compatible leaves may be coalesced.
+
+These metadata bounds assume that the operands have already been classified
+and expanded.  The first acquisition of a flat or TOASTed operand may copy its
+packed payload in \(O(\text{payload bytes})\).  The balanced join, slice, and
+transform operations avoid rank decoding and repacking after that acquisition.
+
+\texttt{slice\_tree} at lines 1887--1911 splits first at the upper and then at
+the lower coordinate, releases the two discarded sides, and returns the
+middle.  In a balanced, already validated tree, each split follows a boundary
+path.  Payload outside those paths is shared.  This helper-local cost depends
+on tree height and boundary-leaf construction, not on the number of symbols in
+the selected interval.  The SQL wrapper in \texttt{packed\_output.cppm},
+lines 3363--3384, additionally invokes full tree-and-limit validation through
+\texttt{replace\_root\_error\_safe}. A complete SQL slice call is therefore
+not bounded only by the two boundary paths.  Reading the selected symbols
+later remains \(O(m)\) for an interval of length \(m\), plus
+provider/fragment overhead.
+
+The arenas make persistent sharing compatible with PostgreSQL memory
+contexts.  They reference older arenas and source dependencies, keep
+generation ordering, and release dependencies iteratively.  Construction uses
+a fixed cleanup ledger because a PostgreSQL error may bypass C++ stack
+destructors.  This bookkeeping is not merely defensive infrastructure: it is
+what allows an expanded sequence returned by one SQL operator to remain valid
+for the next operator without copying the original payload.
+
+\subsection{Bound, unbound, and letter values}
+
+The expanded header carries both physical type parameters and an
+\texttt{alphabet\_bound} flag.  A bound value has an alphabet and packing
+width.  An unbound SQL literal contains canonical ASCII but has not yet
+adopted an alphabet.  Alphabet-independent operations such as length, slicing,
+reversal, comparison, and unbound concatenation remain possible.  Combining
+one unbound and one bound value validates the unbound symbols and adopts the
+bound alphabet.  Two different bound alphabets are never silently recoded.
+
+Element access returns \texttt{bioseq.letter}, a fixed two-byte value
+containing \((alphabet\_code,rank)\).  This is more robust than returning a
+character because the alphabet identity survives arrays, prepared statements,
+and places where PostgreSQL does not retain expression typmods.  An in-range
+element of an unbound sequence is an error because no physical alphabet is
+known.  An out-of-range element is still SQL \texttt{NULL}.
+
+Equality and hashing follow logical content rather than storage.  For unbound
+values the key is a state tag and canonical ASCII bytes.  For bound values it
+is a different state tag, unsigned alphabet code, and the logical rank stream.
+Storage width, padding, flat versus expanded form, source backing, and piece
+boundaries are excluded.  Hence a flat value and a many-piece lazy value
+compare equal and hash identically when their logical state, alphabet, and
+ranks agree.  A bound value is intentionally not equal to an unbound value
+with the same printed text.
+
+\section{SQL slicing and logical transforms}
+\label{sec:sequence-sql-slicing}
+
+The production subscript handler uses PostgreSQL 17
+\texttt{SubscriptRoutines}.  Listing~\ref{lst:sequence-sql-examples}
+illustrates its zero-based, half-open coordinate rules.  These rules resemble
+Python slicing but are intentionally narrower.  Negative indices are relative
+to logical length, omitted bounds select the corresponding end, and bounds are
+clamped.  If the normalized upper bound precedes the lower bound, it is set
+equal to the lower bound and the result is a typed empty sequence.  A missing
+element produces \texttt{NULL}.  SQL \texttt{NULL} bounds propagate
+\texttt{NULL}.  Assignment, non-unit steps, and multiple dimensions are
+rejected.
+
+\begin{lstlisting}[
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  caption={Current SQL coordinate and composition semantics.},
+  label={lst:sequence-sql-examples}]
+WITH v(s) AS (
+  VALUES ('ACGTA'::bioseq.seq('dna4', 32))
+)
+SELECT s[0]::text,        -- A
+       s[-1]::text,       -- A
+       s[:2]::text,       -- AC
+       s[1:-1]::text,     -- CGT
+       bioseq.len(s[4:2]);-- 0
+
+SELECT ('AC'::bioseq.seq('dna4',32) || 'TG')::text;
+SELECT bioseq.reverse('AAGC'::bioseq.seq('dna4',32))::text;
+SELECT bioseq.reverse_complement(
+         'AAGC'::bioseq.seq('dna4',32))::text;
+\end{lstlisting}
+
+Concatenation is symmetric for sequences, \texttt{text},
+\texttt{varchar}, one-dimensional \texttt{text[]} and
+\texttt{bioseq.letter[]} operands.  Empty arrays act as identities.  Null
+elements and multidimensional arrays fail explicitly.  The overloads are
+strict, so a null operand yields null without inspecting the other operand.
+\texttt{bioseq.reverse} is valid for bound and unbound values because it only
+changes order.  Reverse-complement requires a bound alphabet and a complete
+complement mapping.
+
+Same-type typmod casts are logical operations.  An identical alphabet/width
+is metadata-only.  A same-alphabet width change records the target geometry and
+delays repacking until a flat consumer requests it.  Binding an unbound
+literal validates every symbol.  Relabeling a bound value as another alphabet
+fails.  These rules apply equally to flat, TOASTed, expanded, and
+source-backed data.
+
+The coordinate convention is a concrete example of why date precedence
+matters.  DOC0313 proved that PostgreSQL generic subscripting could be attached
+to the custom type, but its proof of concept used PostgreSQL array-style
+one-based inclusive bounds and eagerly repacked each slice.  The later
+DOC0387 reference and the current \texttt{subscript.cppm} supersede those
+choices with zero-based half-open logical views.  The older report's safety
+finding remains correct: a user-visible value must not hold a raw pointer into
+another varlena.  The final tree and source-owner design satisfies that
+constraint without forcing eager payload materialization.
+
+\section{Access planning and materialization boundaries}
+\label{sec:sequence-materialization}
+
+\subsection{Consumers state what they require}
+
+The abstraction cannot make every algorithm streaming.  A scalar rank scan
+needs only sequential symbols.  A block-oriented kernel may need bounded
+random windows.  A GPU upload or a SIMD routine which forms typed unit pointers
+may require one contiguous packed region.  \mbox{BioSeqDB} makes this difference
+explicit through \texttt{sequence\_access\_requirement} in
+\texttt{sequence\_scanner.cppm}, lines 217--221, and the planner in
+\texttt{lazy\_compact\_sequence.cppm}, lines 2148--2405.
+
+Listing~\ref{lst:sequence-access-plan} shows the declaration-only form of the
+requirements and resulting plans.
+
+\begin{lstlisting}[
+  language=C++,
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  caption={Declaration-only form of lazy access requirements and plans.},
+  label={lst:sequence-access-plan}]
+enum class sequence_access_requirement : uint8_t {
+    sequential_symbols,
+    bounded_random_window,
+    contiguous_resident
+};
+
+enum class sequence_access_route : uint8_t {
+    stream_symbols,
+    borrow_resident,
+    materialize_admitted
+};
+
+enum class sequence_resident_borrow_kind : uint8_t {
+    none,
+    native_typed_storage,
+    reinterpreted_bytes
+};
+
+template<sequence_alphabet Alphabet>
+struct sequence_access_plan {
+    sequence_access_requirement requirement;
+    sequence_access_route route;
+    optional<resident_packed_region> resident;
+    sequence_resident_borrow_kind resident_borrow_kind;
+    uint64_t admission_bytes;
+    sequence_size_t from;
+    sequence_size_t to;
+    uint8_t requested_width;
+};
+
+template<sequence_alphabet Alphabet>
+sequence_access_plan<Alphabet> plan_sequence_access(
+    basic_lazy_sequence_view<Alphabet> view,
+    sequence_access_requirement requirement,
+    sequence_size_t from, sequence_size_t to,
+    uint8_t requested_width = 0,
+    sequence_resident_borrow_policy =
+        sequence_resident_borrow_policy::native_typed_storage_only);
+\end{lstlisting}
+
+For \texttt{sequential\_symbols}, the current planner immediately selects
+\texttt{stream\_symbols}.  A caller uses the facade's chunk iterator or
+\texttt{to\_encoded\_into} and supplies bounded scratch space.  For
+\texttt{contiguous\_resident}, the planner first probes the representation at
+the requested physical width.  Borrowing is accepted only when the descriptor
+is internally consistent and its \texttt{leading\_symbol\_offset} is zero.  A
+nonzero offset means that the requested interval begins inside a packed unit.
+The ordinary \texttt{compact\_sequence\_range} interface has no field for that
+offset and typed consumers would read the wrong first rank.  The current
+generic planner sends \texttt{bounded\_random\_window} to admitted
+materialization as well.  A consumer which can formulate its computation as
+forward bounded chunks should request the sequential route instead.
+
+If no valid borrow exists, the plan reports the configured admission charge
+for a packed owner over \([from,to)\).  The caller acquires a
+\texttt{MemoryPermit}, and
+\texttt{materialize\_packed\_region} packs only that interval at the requested
+width.  The returned owner contains the stable allocation, descriptor, and
+permit.  Moving ownership into an asynchronous task or Vulkan submission also
+moves the permit, preventing accounting from ending before the last load or
+completion fence.
+
+Table~\ref{tab:lazy-access-routes} summarizes the copy and lifetime contract of
+each route.
+
+\begin{table}[ht]
+\centering
+\caption{The three current access routes.}
+\label{tab:lazy-access-routes}
+\begin{tabularx}{\textwidth}{
+  >{\raggedright\arraybackslash}p{0.25\textwidth}
+  >{\raggedright\arraybackslash}p{0.27\textwidth}
+  >{\raggedright\arraybackslash}X}
+\textbf{Route} & \textbf{Typical producer/consumer} &
+\textbf{Copy and lifetime rule}\\
+\hline
+\texttt{stream\_\allowbreak symbols} &
+fragment/source tree to a forward minimizer or
+conversion loop & decodes bounded rank chunks into caller scratch.  No
+whole-sequence packed allocation\\
+\texttt{borrow\_\allowbreak resident} &
+aligned flat payload to a typed CPU kernel, or
+strict byte-compatible GPU upload & no payload copy.  The owner of the flat
+datum must remain live.  Typed and byte-only receipts are distinct\\
+\texttt{materialize\_\allowbreak admitted} &
+unaligned flat range, source/tree range, or
+resident-only CPU/SIMD/GPU kernel & packs exactly the selected interval.
+Allocation and memory permit live through the consumer/fence\\
+\end{tabularx}
+\end{table}
+
+\subsection{What ``zero copy'' does and does not mean}
+
+\mbox{BioSeqDB} has several useful zero-copy cases, but no universal zero-copy
+promise:
+
+\begin{itemize}
+    \item constructing \texttt{compact\_sequence\_range<Instance>} over an
+    already resident, uncompressed, and validated flat datum is reference-only.
+    \item once its operands are expanded, constructing a slice, concatenation,
+    or transform can create or share only metadata.
+    \item a flat, unit-aligned interval at its native physical width can be
+    borrowed while its owner or read session remains live.
+    \item a fragmented or source-backed interval can be streamed
+    without forming a complete packed result, although requested chunks are
+    decoded into scratch.
+\end{itemize}
+
+There are corresponding boundaries where copying is required.  PostgreSQL may
+first detoast a compressed or external flat value.  The zero-copy C++ adapter
+does not bypass PostgreSQL's varlena ownership rules.  A typed resident kernel
+cannot borrow an interval with an in-unit start.  Text, binary send, and
+\texttt{bioseq.letter[]} output require materialized destination forms.  A
+heap tuple or index tuple requires a durable representation.  A provider view
+is transaction-scoped, so it must be flattened before it crosses a durable or
+cross-transaction boundary.  Finally, a logical expanded value may be larger
+than the flat varlena representation can encode.  Metadata operations can
+continue to work, but a later flat boundary raises SQLSTATE \texttt{54000}
+rather than truncating it.
+
+Figure~\ref{fig:lazy-lifecycle} follows one expression through these decisions.
+The important observation is that SQL evaluation and payload materialization
+are separate events.
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw,rounded corners,align=center,minimum width=3.2cm,
+              minimum height=0.9cm},
+  >=Latex
+]
+  \node[box,fill=blue!8] (expr) at (0,3.3)
+    {SQL expression\\slice/concat/reverse};
+  \node[box,fill=orange!10] (tree) at (0,1.9)
+    {expanded piece tree\\source handles retained};
+  \node[box,fill=green!10] (facade) at (0,0.5)
+    {alphabet facade\\requested \([from,to)\)};
+  \node[box,fill=gray!10] (stream) at (-4.2,-1.2)
+    {stream ranks\\bounded scratch};
+  \node[box,fill=gray!10] (borrow) at (0,-1.2)
+    {borrow flat units\\aligned + resident};
+  \node[box,fill=gray!10] (pack) at (4.2,-1.2)
+    {pack admitted region\\permit-owned};
+  \node[box,fill=purple!9] (durable) at (0,-3.0)
+    {declared flat boundary\\text/binary/array/heap/index/client};
+  \draw[->,thick] (expr) -- (tree);
+  \draw[->,thick] (tree) -- (facade);
+  \draw[->,thick] (facade) --
+    node[midway,below,inner sep=1pt] {sequential} (stream);
+  \draw[->,thick] (facade) --
+    node[midway,right,align=center,inner sep=1pt] {resident\\probe} (borrow);
+  \draw[->,thick] (facade) --
+    node[midway,below,inner sep=1pt,xshift=3mm] {fallback} (pack);
+  \draw[->,thick,dashed] (stream) -- (durable);
+  \draw[->,thick,dashed] (borrow) -- (durable);
+  \draw[->,thick,dashed] (pack) -- (durable);
+\end{tikzpicture}
+\caption{Lifecycle of a lazy SQL value.  The lower boundary is reached only
+when the selected consumer requires a durable or alternate representation.
+An algorithm may finish on any of the three access routes without reaching it.}
+\label{fig:lazy-lifecycle}
+\end{figure}
+
+\subsection{Bounded source reads}
+
+The PostgreSQL adapter state in \texttt{view\_session.cppm}, lines 430--738,
+contains a read session, a logical descriptor, and either a flat pointer or a
+tree edge.  Its tree-range emitter descends only through branches intersecting
+the requested coordinates.  Literal ranks are extracted from the relevant
+packed range.  A source leaf invokes the provider's bounded
+\texttt{read\_ranks} operation.  Reversal maps the logical interval to base
+coordinates before traversal and only then changes destination order and
+complements ranks.  A small terminal slice therefore does not require a
+prefix scan by the tree traversal.  The provider-specific cost of
+\texttt{read\_ranks} remains outside that guarantee.
+
+The resident probe is intentionally stricter.  It succeeds only for a flat
+value at the requested native width.  Tree and source states return no
+resident descriptor, even if a provider internally has a cache page, because
+the generic facade does not own a stable typed allocation for that page.
+This honesty prevents an optimization from extending a cache pin or
+PostgreSQL memory-context pointer beyond its contract.
+
+The byte-upload-compatible policy in
+Section~\ref{sec:sequence-bit-layout} grants a byte-copy capability.  It does
+not grant a cross-width typed CPU borrow.
+
+\section{Evolution of the design}
+\label{sec:sequence-abstraction-evolution}
+
+The sequence layer did not emerge as a single rewrite.
+Table~\ref{tab:sequence-evolution} orders the principal stages by date.  The
+sequence is important because several documents marked ``active'' describe
+approaches superseded by later implementation.
+
+\begin{table}[H]
+\centering
+\caption{Evolution from eager resident data to the final lazy SQL value.}
+\label{tab:sequence-evolution}
+\begingroup
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\textwidth}{@{}
+  >{\raggedright\arraybackslash}p{0.20\textwidth}
+  >{\raggedright\arraybackslash}p{0.23\textwidth}
+  >{\raggedright\arraybackslash}X@{}}
+\textbf{Date/evidence} & \textbf{Design stage} & \textbf{Outcome}\\
+\hline
+May 7, 2026, DOC0215 & owning packed inputs plus reference-tool ASCII conversion &
+exposed the cost and benchmark bias of decoding a 500 Mbp target at the wrong
+boundary\\
+May 22, 2026, DOC0258 & standard-layout C++ object with a C-style trailing payload &
+introduced \texttt{compact\_sequence\_stdc} and an in-place typed range rather
+than duplicating PostgreSQL and standalone layouts\\
+May 24, 2026, DOC0261 & type-level alphabet names and packs &
+replaced handwritten string ladders with one runtime-to-template dispatch
+authority\\
+May 25, 2026, DOC0263 & scanner-parameterized lazy fragmented sequence &
+added fragment-aware cursors, direct reads within one fragment, and scratch
+stitching across fragments\\
+June 12, 2026, DOC0313 & native-subscripting feasibility report &
+proved custom subscripts, correctly rejected persistent raw pointers, but
+recommended eager materialization and one-based semantics\\
+July 14, 2026, DOC0376 & lazy slicing goal &
+required nested half-open slices, concatenation, reversal, letters, and
+explainable materialization\\
+July 19--23, 2026, DOC0387 and the July 23 DOC0388 lazy-sequence report &
+final expanded tree and facade &
+delivered zero-based logical SQL views, source ownership, one alphabet-generic
+facade, admitted resident routes, tracing, tests, and bounded benchmarks\\
+\end{tabularx}
+\endgroup
+\end{table}
+
+Three engineering lessons follow from this history.
+
+First, the safety problem in DOC0313 was real but did not imply that all
+slices must be eager.  A flat varlena has neither an arbitrary bit-start field
+nor an owner pointer, so merely incrementing \texttt{data[]} is unsound.
+The final solution changed the persistent representation instead of weakening
+the invariant: it stores stable source coordinates or arena-owned literal
+ranges and retains the source domain.
+
+Second, the older fragmented iterator and the final facade solve different
+levels of the problem.  Fragment stitching is a useful backend mechanism.  It
+should not be the type named by every algorithm.  Representation erasure
+allows the same logical cursor to traverse a flat value, a piece tree, a
+provider, or an admitted packed owner.
+
+Third, materialization cannot be hidden in a convenience conversion.  Once the
+consumer declares its requirement, the system can estimate bytes, obtain a
+permit, report the reason in \texttt{EXPLAIN}, and keep ownership through
+asynchronous execution.  Without that declaration, a seemingly harmless
+\texttt{to\_vector()} can expand an entire target in the scheduler's timing
+window or on every row of a query.
+
+\section{Measured consequences}
+\label{sec:sequence-abstraction-results}
+
+\subsection{An early boundary-placement failure}
+
+DOC0215 investigated a benchmark containing one 5 Mbp fragment and a 500 Mbp
+reference.  The DNA4 target occupied approximately 125 MB in packed form, but
+the minimap2 reference wrapper converted it to a 500 MB ASCII string inside
+the timed call.  The mitigation moved conversion into input preparation and
+serialized benchmark cells sharing the huge cached input.  The resulting
+one-iteration figures are reproduced in
+Table~\ref{tab:xxl-boundary-history}.
+
+\begin{table}[ht]
+\centering
+\caption{Historical XXL\_HIFI wall times from DOC0215.  Conversion placement
+and test-case concurrency changed together, so deltas are diagnostic rather
+than isolated codec speedups.}
+\label{tab:xxl-boundary-history}
+\begin{tabular}{lrrr}
+\textbf{Route} & \textbf{old} & \textbf{mitigated} & \textbf{change}\\
+\hline
+\mbox{BioSeqDB} Block Aligner SIMD & 62.27 s & 7.69 s & \(-88\%\)\\
+\mbox{BioSeqDB} KSW2 scalar & 9.89 s & 9.13 s & \(-8\%\)\\
+\mbox{BioSeqDB} KSW2 SIMD & 62.40 s & 8.49 s & \(-86\%\)\\
+minimap2 reference & 36.99 s & 11.76 s & \(-68\%\)\\
+\end{tabular}
+\end{table}
+
+The experiment does not show that the compact abstraction alone made the
+algorithms eight times faster.  It shows two measurement failures that a
+database implementation must avoid: unrelated cells were contending for the
+same memory bandwidth, and only the reference route paid a full packed-to-text
+conversion inside its measured region.  After the mitigation all routes
+reported the same correct mapping, but the single repeat remains too small for
+a general performance claim.  Its role in this chapter is historical: it
+motivated explicit conversion boundaries and comparable input ownership.
+
+\subsection{Small slices perform bounded work}
+
+The final DOC0388 implementation report, dated 23 July 2026, gives a more
+direct PostgreSQL 17.5 test.  One row contained 8,388,608 DNA4 symbols.  Seven
+alternating measurements converted either a 64-symbol middle slice or the whole
+source to text.  The database had just-in-time compilation (JIT), column cache,
+and vectorization disabled for this focused comparison.  Results appear in
+Table~\ref{tab:slice-bounded-work}.
+
+\begin{table}[ht]
+\centering
+\caption{PostgreSQL source-slice timing reported by DOC0388.}
+\label{tab:slice-bounded-work}
+\begin{tabular}{lrrrr}
+\textbf{Expression} & \textbf{symbols} & \textbf{minimum} &
+\textbf{median} & \textbf{maximum}\\
+\hline
+64-symbol slice & 64 & 404 \(\mu\)s & 613 \(\mu\)s & 778 \(\mu\)s\\
+whole source & 8,388,608 & 38,177 \(\mu\)s & 38,964 \(\mu\)s &
+40,590 \(\mu\)s\\
+\end{tabular}
+\end{table}
+
+The slice-to-whole median-time ratio was 0.0157.  Timing alone could still be
+explained by caching or a special text path.  The materialization trace is
+stronger evidence.  The slice expression reported one SQL conversion with 64
+input symbols, 64 output symbols, and 68 bytes.  It did not report a
+whole-source packed boundary.  This establishes bounded source access for that
+expression.  It does not imply that every arbitrary provider has constant
+latency or that a resident-only alignment kernel can process a lazy tree
+without packing its selected region.
+
+\subsection{Deferred composition versus eager intermediates}
+
+The same closure report records a focused lazy-I/O benchmark with twelve
+schedule-matched repeats and seven blocking paired rules.  The deferred route
+and an eager comparison reported the same output length of 6,291,456 symbols
+and exact matching high and low hashes.  This is the correctness receipt that
+the artifact records.  It is not presented as a byte-for-byte output
+comparison.  Table~\ref{tab:lazy-io-results} shows the allocation and time
+differences.  The source artifact is
+\texttt{bioseq\_io\_bench/report\_7.json}.
+Each table row aligns one metric with its deferred value, eager value, and
+reported ratio.
+
+\begin{table}[ht]
+\centering
+\caption{Deferred and eager lazy-I/O benchmark evidence.}
+\label{tab:lazy-io-results}
+\begingroup
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}
+  >{\raggedright\arraybackslash}p{0.36\textwidth}
+  r
+  r
+  >{\raggedright\arraybackslash}X@{}}
+\textbf{Metric} & \textbf{deferred} & \textbf{eager} &
+\textbf{reported ratio}\\
+\hline
+wall-time median (P50) & 22,503,667 ns & 69,166,708 ns &
+paired median: 0.3243467\\
+payload materializations & 1 & 6 & 0.16667\\
+intermediate materializations & 0 & 5 & 0\\
+payload bytes & 1,572,864 & 6,815,744 & 0.23077\\
+admitted bytes & 1,572,952 & 6,816,272 & 0.23076\\
+\end{tabularx}
+\endgroup
+\end{table}
+
+The timing comparison in the last column is the median of the twelve paired
+iteration ratios.  It is not the quotient of the two independently aggregated
+P50 values.  The counters match the intended lifecycle.  Five eager
+intermediate payloads disappear, while one final payload boundary remains
+because the output itself must exist.  This is the operational definition of
+successful lazy composition in \mbox{BioSeqDB}.
+
+This focused artifact was recorded on 23 July 2026 before the masked-gather
+repair, at exact commit
+\texttt{a5b14ec886532a51ebfcaf44e4643fe38e80c66d}.  It used the historically
+named profile 0, while compiler receipts show \texttt{-O3 -DNDEBUG}.  The
+artifact records \texttt{dirty=true}.  DOC0388 attributes that state to held or
+generated documentation and benchmark artifacts, and reports that no tracked
+source diff existed from the pushed implementation commit.  These numbers are
+therefore historical receipts, not a fresh current-head rerun.
+
+The final closure commit
+\texttt{e0a6ab6a437deb964e34b6aeddb52663db22782f} passed the selected
+AddressSanitizer (ASan) and optimized suites.  Its
+UndefinedBehaviorSanitizer (UBSan) build completed, but the final-head UBSan
+runtime stopped before the DOC0377 cases at a pre-existing global-constructor
+alignment error in \texttt{mlogging.cppm}.  DOC0388 therefore does not claim a
+final-head UBSan runtime pass.  Its ThreadSanitizer (TSan) statement reuses the
+earlier recorded run and qualifies the later production delta.
+
+\section{Practical contract for algorithm authors}
+\label{sec:sequence-author-contract}
+
+The final representation is broad, but its safe use can be summarized in a
+small set of rules:
+
+\begin{enumerate}
+    \item Write alphabet-generic code against
+    \texttt{compact\_sequence\_range} traits or the behavioral lazy facade.
+    Deduce masks, ranks, and alphabet cardinality from the selected type.
+    Do not infer a hash-state width from the physical storage unit.
+    \item Request the weakest access requirement that implements the
+    algorithm.  A forward scan should remain a scan.  A resident-only routine
+    must request a region and accept the admission/lifetime owner.
+    \item Convert only the selected \([from,to)\) region at the point where a
+    byte-oriented external API actually requires it.  Hoist invariant
+    conversions out of repeated or timed calls.
+    \item Treat a resident descriptor as a capability with a precise type.
+    A byte-upload receipt is not permission to form a differently typed CPU
+    pointer, and an unaligned first symbol is not a flat compact range.
+    \item Never persist a pointer into a tuple, TOAST value, cache page, or
+    provider buffer.  Persistent laziness uses retained handles, logical
+    coordinates, immutable arenas, and declared flattening boundaries.
+    \item Keep SQL generation and alphabet dispatch conceptually separate.
+    C++ attributes generate boundary artifacts.  The supported-alphabet pack
+    specializes execution after a datum is read.
+\end{enumerate}
+
+These rules explain how the final solution differs from the original
+resident-vector model.  The original model made the algorithm's preferred
+layout the mandatory representation of every input.  The final model makes
+logical ranks and ownership the mandatory contract, while packed contiguity is
+a requested capability.  This inversion is what permits an alignment pipeline
+to consume database-resident slices without pretending that TOAST, fragments,
+source providers, GPU lifetimes, and SQL persistence are all the same kind of
+memory.
+
+The next chapter carries this ownership-aware value model into PostgreSQL
+planning and execution.  It shows how custom scans consume sequence expressions
+without weakening the lifetime, representation, or materialization contracts
+established here.

@@ -1,0 +1,98 @@
+\section{Slices keep logical coordinates}
+\label{sec:sequence-sql-slicing}
+
+Postgres support array subscription operations natively, so I decided to support slicing as well in first version of BioseqDB.
+
+A slice selects positions \([a,b)\): it includes \(a\) and excludes \(b\).
+BioSeqDB uses zero-based positions, so \(S[0]\) is the first symbol of the slice.
+
+\warn{0-based indexing}{
+  This contradicts the fact that Postgres slices are 1-based, but it wasn't intentional decision. I had limited experience with Postgres array functionality and this realisation came only after most of the support was already implemented.
+  What is more interesting that SeqKit - tool for operating on FASTA/Q files use 1-based indexing~\cite{seqkit_subseq_usage}.
+  This incompatibility might be something to reconsider in the future.
+}
+
+I provided utility functions for common operations like reversing and reverse-complementing slices as well, example available in listing~\ref{lst:sequence-sql-examples}.
+\begin{lstlisting}[style=seq-nine-sql,
+  caption={Zero-based slices and sequence transforms in SQL.},
+  label={lst:sequence-sql-examples}]
+WITH v(s) AS (
+  VALUES ('ACGTAACCGTTA'::bioseq.seq('dna4', 32))     -- ACGTAACCGTTA
+)
+SELECT s[2:10]::text AS middle,                       -- GTAACCGT
+       ((s[2:10])[1:5])::text AS nested,              -- TAAC
+       s[-4:]::text AS suffix,                        -- GTTA
+       bioseq.reverse(s[2:10])::text AS rev,          -- TGCCAATG
+       bioseq.reverse_complement(s[2:10])::text AS rc -- ACGGTTAC
+FROM v;
+\end{lstlisting}
+
+The bounds follow a small set of intuitive rules simiar to design of slices in Python~\cite{python_common_sequence_operations}:
+\begin{itemize}
+  \item A missing lower bound means zero. A missing upper bound means the
+        sequence length.
+  \item A negative bound counts from the end (example: for length 12, \(-4\) means 8) and bounds outside the sequence are clamped to its ends.
+  \item An upper bound below the lower bound gives an empty slice, so \texttt{s[4:2]} has length zero.
+  \item User can extract any element (symbol) from slice, which has separate SQL type \texttt{LETTER}. An out-of-range element, such as \texttt{s[12]} in this example,
+        gives SQL \texttt{NULL}. An explicit null slice bound also gives \texttt{NULL} i.e $s[a:\text{NULL}]$ is equivalent to $s[\text{NULL}:a]$ and is also equivalent to $s[\text{NULL}:\text{NULL}]$ (all of them result in \texttt{NULL})
+\end{itemize}
+
+The slicing can be implemented by old holding slice coordinates, without actually loading any sequences, by very simple coordinates arithmetic visible at figure below~\ref{fig:sequence-slice-coordinates}
+For a slice view \(V=S[a,b)\), view position \(j\) refers to
+\(S[a+j]\). A second slice therefore combines its offsets directly:
+\[
+  V[c,d)=S[a+c,a+d).
+\]
+The example's \(S[2,10)[1,5)\) is \(S[3,7)\), which reads
+\texttt{TAAC}. Reversal is represented by reversing start and end coordinates: For
+\(W=\operatorname{reverse}(S[a,b))\) we have:
+\[
+  W[j]=S[b-1-j],\qquad
+  W[c,d)=\operatorname{reverse}(S[b-d,b-c)).
+\]
+Complementing operation leaves the coordinates unchanged, but alters binary flag representing if the slice is complemented or not.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,4.8)
+    {(a) A slice of a slice keeps exact source positions};
+  \node[anchor=east] at (2.3,3.9) {$S$};
+  \foreach \i/\s in {0/A,1/C,2/G,3/T,4/A,5/A,6/C,7/C,8/G,9/T,10/T,11/A} {
+    \node[seq nine cell,fill=black!3] at (2.7+.72*\i,3.9) {\texttt{\s}};
+    \node[font=\scriptsize] at (2.7+.72*\i,4.4) {\i};
+  }
+  \foreach \i/\s in {2/G,3/T,4/A,5/A,6/C,7/C,8/G,9/T}
+    \node[seq nine blue] at (2.7+.72*\i,3.9) {\texttt{\s}};
+  \foreach \i/\s in {3/T,4/A,5/A,6/C}
+    \node[seq nine orange] at (2.7+.72*\i,3.9) {\texttt{\s}};
+  \node[anchor=east] at (2.3,2.85) {$V=S[2,10)$};
+  \foreach \i/\s in {0/G,1/T,2/A,3/A,4/C,5/C,6/G,7/T} {
+    \node[seq nine blue] at (4.14+.72*\i,2.85) {\texttt{\s}};
+    \node[font=\scriptsize] at (4.14+.72*\i,2.38) {\i};
+  }
+  \foreach \i/\s in {1/T,2/A,3/A,4/C}
+    \node[seq nine orange] at (4.14+.72*\i,2.85) {\texttt{\s}};
+  \draw[seq nine flow,seqNineBlue] (4.14,3.62)--(4.14,3.15);
+  \draw[seq nine flow,seqNineBlue] (9.18,3.62)--(9.18,3.15);
+  \node[anchor=west,text=seqNineOrange] at (10.35,2.85)
+    {$V[1,5)$};
+
+  \node[anchor=west,font=\bfseries] at (0,1.45)
+    {(b) Reversal changes which source position comes first};
+  \node[anchor=east] at (2.3,.55) {$W$};
+  \foreach \i/\s/\p in {0/T/9,1/G/8,2/C/7,3/C/6,4/A/5,5/A/4,6/T/3,7/G/2} {
+    \node[seq nine blue] at (4.14+.72*\i,.55) {\texttt{\s}};
+    \node[font=\scriptsize] at (4.14+.72*\i,.03) {$j=\i$};
+    \node[font=\scriptsize,text=seqNineBlue] at (4.14+.72*\i,1.08) {\p};
+  }
+  \foreach \i/\s in {1/G,2/C,3/C}
+    \node[seq nine orange] at (4.14+.72*\i,.55) {\texttt{\s}};
+  \node[anchor=east,font=\scriptsize,text=seqNineBlue] at (3.63,1.08)
+    {source position};
+  \node[anchor=west,align=left,text=seqNineOrange] at (10.35,.55)
+    {$W[1,4)$\\reads $S[6,9)$\\backward: \texttt{GCC}};
+\end{tikzpicture}
+\caption{Blue cells form the first slice and orange cells show a second slice}
+\label{fig:sequence-slice-coordinates}
+\end{figure}

@@ -1,0 +1,190 @@
+\section{Designing SQL API for an aligner}
+\label{sec:postgres-custom-scan-scope}
+
+In the previous chapter I presented how the sequence abstrations work and how they interact with the workers, we also had opportunity to look on how batching is done on figure~\ref{fig:sequence-scan-lifecycle}.
+This chapter focuses on the main problem - how I incorporated this infrastructure into Postgres.
+
+First, I want to discsuss how we can design SQL API for the aligner. Currently BioseqDB can be used in the following way:
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Search once and return the fields of each hit.}]
+CREATE TABLE targets (
+  id bigint PRIMARY KEY,
+  seq bioseq.seq('dna5', 64)
+) USING bioseq;
+
+SELECT t.id,
+       bioseq.dp_score(t.seq) AS score,
+       bioseq.target_start(t.seq) AS start,
+       bioseq.cigar(t.seq) AS cigar
+FROM targets AS t
+WHERE t.id > 20
+  AND mmsearch(t.seq, $1::bioseq.seq('dna5', 64));
+\end{lstlisting}
+\end{minipage}
+
+The first \texttt{mmsearch} argument is the target sequence and the second
+is the query, - here query is supplied by \texttt{\$1} (text parameter in prepared statement). The
+\texttt{score} alias means the dynamic-programming score of the current hit,
+CIGAR string describes the alignment and we also request position of the match in the sequence coming from target table.
+
+One insteresting observation is that naturally each alignment can produce multiple hits, so this operation can return multiple rows for a single input row. We intuitively expect that there will be two kinds of selected expressions: Some of them will not depend on alignment (in this case it's primary key), so they will be the same for all these hits, while some of them like score and cigar will be different.
+Figure~\ref{fig:scan-occurrences} illustrates that alignment should be set-returning function.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,3.15) {One stored row};
+  \node[scan input,minimum width=1.35cm] at (.85,2.28) {id 27};
+  \foreach \x/\s in {2.1/X,2.85/Y,3.6/X}
+    \node[scan cell] at (\x,2.28) {\texttt{\s}};
+  \foreach \x/\p in {2.1/0,2.85/1,3.6/2}
+    \node[anchor=south,text=black!65] at (\x,2.6) {\p};
+  \node[scan hit,minimum width=1.4cm] (query) at (2.85,.65)
+    {query \texttt{X}};
+  \draw[scan arrow,scanOrange] (query.north west) -- (2.1,1.99);
+  \draw[scan arrow,scanOrange] (query.north east) -- (3.6,1.99);
+  \node[anchor=west,font=\bfseries] at (7.0,3.15) {Two result rows};
+  \node[scan output,minimum width=4.8cm] (r0) at (9.45,2.28)
+    {id 27\qquad hit start 0};
+  \node[scan output,minimum width=4.8cm] (r2) at (9.45,1.17)
+    {id 27\qquad hit start 2};
+  \draw[scan arrow] (4.15,2.28) -- (r0.west);
+  \draw[scan arrow] (4.15,2.28) to[out=-35,in=180] (r2.west);
+  \node[anchor=north,text=black!65] at (9.45,.60)
+    {the identifier repeats, the hit changes};
+\end{tikzpicture}
+\caption{Searching \texttt{XYX} for \texttt{X} gives two occurrences, so the function needs to "clone" metadata of tuple (id key in this case) and for each generated tuple fill-in the alignment hit position.}
+\label{fig:scan-occurrences}
+\end{figure}
+
+The first idea for implementation of such search was the simplest one - implementing alignment as callable Postgres function, which is very easy to do in C++. The function accepts query as raw SQL string:
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={An early interface sketch passes SQL as text.}]
+SELECT * FROM search_sql(
+  'targets',
+  'SELECT id, seq FROM reads WHERE id > 20'
+);
+\end{lstlisting}
+\end{minipage}
+
+This however introduces serveral problems:
+\begin{itemize}
+  \item \textbf{Which is the column we want to align?} We can make a choice to hardcode column name to be \texttt{seq} at all times, but this limits flexibility heavily.
+   Other choice is to allow passing the aligned column name as a parameter, which resolves this problem.
+  \item \textbf{How do optimiser know about inner query?} As the inner query can be complex the optimiser doesn't know about it. We can call libpq inside the function, which can optimise the query separately, but
+  then we should change it depending on the context: you can imagine very trivial case that the outer SELECT statement only selects primary key for some reason, so we don't have to do any alignment. In that case
+  we would expect the function to do this optimisation, but this means that its implementation needs to do the same work as Postgres optimizer.
+\end{itemize}
+
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={An outer condition cannot automatically filter a hidden scan.}]
+-- Hypothetical SQL-string interface
+SELECT h.*
+FROM search_sql('targets', 'SELECT id, seq FROM reads') AS h
+WHERE h.target_id = 27;
+-- The function must itself restrict the hidden target scan.
+\end{lstlisting}
+\end{minipage}
+
+The listing illustrates point stated by me: the function sees the target table through the string \texttt{'targets'}, but it's used in a context, where we will do only one alignment. If the function doesn't interpret its context, then it will perform alignment on entire table.
+The solution could be to pass this reponsibility to the user, but this generates huge inconvenience - for more complex queries, user would need to transfer SQL statements to and from the raw text pased to search function and manually be responsible for optimisation. In that case this should mean that
+when we forgot to do that the different is enormous - the statement will align two tables instead of one (could be orders of magnitude slower).
+
+SQL already has a direct way to express one-to-many output. A set-returning
+function in a \texttt{LATERAL} join could return a record for every
+hit.\footcite{postgresql17_set_returning_functions}. The \texttt{LATERAL} clause
+lets that call refer to the current target row.\footnote{PostgreSQL 17,
+\href{https://www.postgresql.org/docs/17/queries-table-expressions.html\#QUERIES-LATERAL}
+{\texttt{LATERAL} Subqueries}.}
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={A different API could return explicit hit records.}]
+-- Alternative API sketch, not an existing BioSeqDB function
+SELECT t.id, h.score, h.start, h.cigar
+FROM targets AS t
+CROSS JOIN LATERAL align_hits(t.seq, $1) AS h
+WHERE t.id > 20;
+\end{lstlisting}
+\end{minipage}
+
+This means that optimiser can work with queries, but user needs to do \texttt{CROSS JOIN LATERAL} for each alignment, which adds lots of boilerplate code.
+Additionally we loose ability to conditional evaluation in this case. Sometimes alignment may not require CIGAR which is more expensive operation as it requires running base alignment and the \texttt{SELECT} clause may only
+specify score. This prevents us from evaluating alignments differently based on what fields are needed.
+
+To more easily indentify what parts of the alignment are needed (because otherwise we would need to track where the record type is used and how), I decided to separate returned record type into calls to functions.
+The function takes sequence as argument and returns some information about alignment. This concept is presented below.
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Hidden state does not establish an evaluation order.}]
+-- Hypothetical functions with shared hidden state
+SELECT id, last_score(seq)
+FROM targets
+WHERE save_search(seq, $1)
+  AND last_score(seq) > 100;
+\end{lstlisting}
+\end{minipage}
+
+Now the fields are easy to track as we can directly look for a call to a function in the AST expression tree. 
+However if the extension implemented only Postgres function this example couldn't work. 
+We would need to pass some internal state between function calls - \texttt{save\_search} would need to save some pointer
+to lazy execution object invisible to the user so it can be later called by \texttt{last\_score}. This way we compute only what we need.
+Declaring these functions \texttt{VOLATILE} limits some planner transformations, but does not
+guarantee execution order between them\footnote{PostgreSQL 17,
+\href{https://www.postgresql.org/docs/17/xfunc-volatility.html}
+{Function Volatility Categories}.}
+This means that it's not possible to reliably pass this hidden lazy object between functions.
+
+We can see that example above is much cleaner than \texttt{LATERAL} join and easier to understand, but to implement it we need to 
+tell Postgres how we want to execute this query - in which order expressions are evaluated and create our own tuples inside.
+Historically before PostgreSQL 9.5 only way this could be done was via foreign-data wrapper interface, which treated remote table as opaque object.
+Later Postgres version introduced custom scans and table access methods. There's overlap in all these interfaces, but the main advantage of TAMs and custom scans was
+that the logic wasn't only tied to one specific table and there was deeper and more cleaner integration with the executor.
+
+\begin{enumerate}
+  \item PostgreSQL~9.1 added foreign tables and the foreign-data wrapper (FDW) API, a partial implementation of SQL/MED~\autocite{postgresql91_release,postgresql17_ddl_foreign_data}.
+        PostgreSQL~9.3 added \texttt{postgres\_fdw}, the in-tree wrapper that queries another PostgreSQL server~\autocite{postgresql93_release,postgresql17_postgres_fdw}.
+  \item PostgreSQL~9.5 added custom path and scan methods, so an extension can insert its own executor node into a plan~\autocite{postgresql95_release,postgresql17_custom_scan}.
+  \item PostgreSQL~12 added table access methods (TAM) through \texttt{CREATE ACCESS METHOD \ldots TYPE TABLE}.
+        Heap remains the default TAM~\autocite{postgresql12_release,postgresql17_tableam}.
+\end{enumerate}
+
+Table~\ref{tab:pg-scan-extension-points} summarises the split.
+
+\begin{table}[htbp]
+\centering
+\footnotesize
+\caption{PostgreSQL interfaces that can supply rows to a query.}
+\label{tab:pg-scan-extension-points}
+\begin{tabular}{@{}p{0.20\textwidth}p{0.24\textwidth}p{0.24\textwidth}p{0.24\textwidth}@{}}
+\toprule
+ & FDW & Custom scan & TAM \\
+\midrule
+First in core
+  & 9.1 API, 9.3 \texttt{postgres\_fdw}
+  & 9.5
+  & 12 \\
+Attaches to
+  & a foreign table
+  & a plan node
+  & a local table \\
+Stores bytes here
+  & no
+  & no
+  & yes \\
+Typical work
+  & fetch remote rows
+  & replace a scan or join
+  & layout, insert, vacuum \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The BioseqDB implements the following components:
+\begin{itemize}
+  \item Custom scans - allow to implement syntax suggested here with selective evaluation of the pipeline, efficient batching integrated with optimizer, so I rely on optimisations from Postgres as well.
+  Theoretically custom scan can replace scans to any table, but I don not offer support for tables other than BioseqDB tables (created using \texttt{CREATE TABLE USING bioseq} TAM)
+  \item Table access method - stores data in columnar format, so I can load large chunks of metadata and sequence in single row fetch
+\end{itemize}

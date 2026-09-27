@@ -1,0 +1,44 @@
+{
+  "dependencies": [
+    "boost-iterator",
+    "boost-program-options",
+    "boost-regex",
+    "boost-serialization",
+    "boost-system",
+    "catch2",
+    "c-ares",
+    "cppast",
+    {
+      "name": "curl",
+      "features": [
+        "c-ares",
+        "http2",
+        "non-http",
+        "openssl"
+      ]
+    },
+    "libarchive",
+    "foonathan-memory",
+    "ftxui",
+    "highway",
+    "jinja2cpp",
+    "json-schema-validator",
+    "libassert",
+    "reflectcpp",
+    "simdjson",
+    {
+      "name": "sqlgen",
+      "features": [
+        "postgres"
+      ]
+    },
+    "tbb",
+    "zlib",
+    "lfreist-hwinfo",
+    "md4c",
+    "spirv-cross",
+    "glslang",
+    "vulkan",
+    "vulkan-utility-libraries"
+  ]
+}

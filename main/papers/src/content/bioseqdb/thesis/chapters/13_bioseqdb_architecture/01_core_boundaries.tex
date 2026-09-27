@@ -1,0 +1,242 @@
+\section{Connecting sequence processing to the database}
+\label{sec:arch-core-boundaries}
+
+Consider a search between stored reference sequences and query sequences.
+Both tables below have an identifier \texttt{id} and a sequence column
+\texttt{seq}. One statement supplies comparisons to the alignment system:
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-arch-sql,
+  caption={A sequence join connects SQL input to the processing core.},
+  label={lst:arch-opening-query}]
+SELECT r.id AS target_id, q.id AS query_id
+FROM refs AS r JOIN queries AS q
+  ON mmsearch(r.seq, q.seq);
+\end{lstlisting}
+\end{minipage}
+
+PostgreSQL supplies the rows and owns their visibility. BioSeqDB selects
+compatible implementations, obtains sequence and index views, schedules the
+comparisons, and returns matches for SQL projection. This chapter explains
+how those responsibilities fit together.
+
+A \emph{batch} groups input comparisons for processing. A \emph{wave} is a
+subset admitted together under the memory policy. A \emph{task} is a unit of
+work submitted to the task scheduler and can process one or more comparisons.
+These terms describe how work is grouped, not different alignment algorithms.
+
+The preceding chapters describe the work performed by a sequence search.
+Minimizers produce sparse seed keys
+(Section~\ref{sec:minimizers-role}), chaining groups matching positions
+(Section~\ref{sec:chaining-bioseqdb}), and final alignment compares the selected
+intervals at base level (Section~\ref{sec:final-alignment-role}). These stages
+must also fit into a database execution. The sequence store determines how
+symbols can be read, persistent indexes retain lookup work, and the custom
+scan turns matches into SQL rows.
+
+BioSeqDB connects these components through a reusable C++ core and
+PostgreSQL-specific adapters. The core expresses biological operations over
+logical sequences and index views. The adapters connect those operations to
+database resources. This division gives three kinds of code different duties:
+\begin{itemize}
+  \item \textbf{Algorithms} consume symbols, positions and scores. Their
+    interfaces do not require a PostgreSQL tuple or relation.
+  \item \textbf{Adapters} construct suitable views and keep their backing
+    resources valid. They also convert returned results into database values.
+  \item \textbf{PostgreSQL execution} controls planning, snapshots, locks and
+    the lifetime of a statement. These mechanisms remain native to PostgreSQL.
+\end{itemize}
+
+The build reflects this division. A shared object-library target owns the
+PostgreSQL-free modules, and the extension consumes their compiled objects
+and module interfaces. PostgreSQL-dependent modules are compiled separately.
+The common code is therefore shared with non-server consumers without
+recompiling it under PostgreSQL-specific definitions. This is a source and
+compilation boundary. It does not by itself define a separately distributed
+library or remove PostgreSQL discovery from the project's build configuration.
+
+\subsection{Reuse at the alphabet boundary}
+\label{sec:arch-seqan-reuse}
+
+SeqAn provides an established example of composing efficient sequence-analysis
+software from generic C++ components. Its library includes sequence
+representations, indexes and configurable alignment algorithms, with SIMD
+alignment already described in the 2017 overview.\autocite{REINERT2017157,seqanManual}
+BioSeqDB uses SeqAn3's alphabet layer within its own representation. A rank
+is a small integer code for a symbol, and the alphabet's cardinality gives
+the number of possible ranks. Rank and character conversions
+give those ranks their biological meaning, and complement operations apply
+where the alphabet supports them.\autocite{seqan3AlphabetsDocs}
+The implementation also uses related type traits and a few mathematical
+utilities.
+
+BioSeqDB defines the packed storage, lazy views and search composition around
+these alphabet semantics. This lets the same logical symbol model participate
+in storage reads and in the local alignment kernels. It also lets index
+preparation produce the lookup form needed by a particular execution.
+Keeping this composition local gives BioSeqDB control over when storage is
+read, which stages run, and how long their data survives. SeqAn's own generic
+interfaces and optimized algorithms remain a precedent for that design.
+The choice of a local pipeline does not establish a performance advantage
+over a pipeline assembled from SeqAn components.
+
+Two applications illustrate why composition matters. Masai describes seed
+search over conceptual trees but chooses concrete index structures for each
+role and combines the search with banded bit-vector
+verification.\autocite{siragusa2012fastsensitivereadmapping}
+DREAM-Stellar groups query segments by reference region and uses bounded
+batches with shared sequence ownership before local
+verification.\autocite{Aasna2026}
+These are examples of separating algorithms, representations and scheduling.
+BioSeqDB makes those choices around its database inputs and result contracts.
+
+\section{Contracts describe the operations a stage needs}
+\label{sec:arch-operation-contracts}
+
+The implementation is built in C++26 mode. It uses templates, concepts and
+named modules to express these boundaries, although concepts and modules
+entered the language in C++20. A concept states which operations a type must
+provide. A template constrained by that concept can accept different
+representations without requiring inheritance from one common base class.
+
+The following reduced API excerpt shows the contiguous minimizer-lookup
+contract. It keeps the current operation and return type, while shortening
+the template parameter names. A lookup receives a hash and returns a borrowed
+span of encoded positions.
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-cpp26,numbers=none,
+  basicstyle=\footnotesize\ttfamily,
+  caption={The contiguous lookup API constrains the operation visible to a consumer.},
+  label={lst:arch-lookup-contract}]
+template<class I>
+concept contiguous_minimizer_lookup_index =
+    requires(const I& index, std::uint64_t hash) {
+        { index.lookup(hash) }
+            -> std::same_as<std::span<const std::uint64_t>>;
+    };
+\end{lstlisting}
+\end{minipage}
+
+This is one supported lookup shape. Other consumers can receive segmented
+position spans or canonical anchors prepared for a query. The consumer needs
+the meaning and lifetime of those positions, rather than the PostgreSQL
+relation from which they came. In particular, the total occurrence count
+remains authoritative when a selective reader omits the postings of a
+high-frequency seed. The storage choice must preserve the pruning decision.
+
+Index construction uses a separate contract. It describes typed chunk reads
+and writes, enumeration and temporary sorted-run storage. Concrete
+PostgreSQL types satisfy the contracts for per-fragment chunks, a single
+per-sequence value, and table-wide chunks. Compile-time assertions check the
+required interfaces. Separating these storage operations from the query's
+lookup operation lets each side use the representation suited to its work.
+The persistence mechanisms are developed in
+Section~\ref{sec:index-storage-role}.
+
+Sequence access follows the same principle. A scanner supplies size and
+fragment-access operations. Its PostgreSQL implementation reads the fragments
+described in Section~\ref{sec:pg-storage-role}, while an in-memory
+implementation exposes caller-owned packed
+storage. Algorithms normally use the logical views introduced in
+Section~\ref{sec:sequence-abstractions}, so they do not need to repeat either
+scanner's storage logic. A smaller example appears in column comparison:
+a result-sink concept asks for result allocation and writable value and null
+masks. The PostgreSQL sink supplies those buffers using database allocation
+rules. Character comparison that requires PostgreSQL collation remains in
+the PostgreSQL adapter.
+
+These are selective abstractions. A minimizer lookup needs occurrence
+positions, but it does not need an abstract join operator. A sequence reader
+needs valid source access, but it does not implement an alternative MVCC
+system. Keeping the database mechanisms in PostgreSQL preserves their
+existing ownership and visibility rules. The common contracts instead expose
+the operations needed by the biological stages and their test callers.
+
+\section{Ownership completes the interface}
+\label{sec:arch-ownership-boundary}
+
+A successful concept check proves that an expression has a usable type.
+It does not prove that a returned span remains valid or that its source may
+be read from another thread. Figure~\ref{fig:arch-core-boundary} separates the
+operation interface from the resources that make an execution valid.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,
+  arch owner/.style={draw=blue!55!black,fill=blue!5,align=center,
+    inner sep=5pt,minimum height=.85cm},
+  arch adapter/.style={draw=black!60,fill=black!3,align=center,
+    inner sep=5pt,minimum height=.85cm},
+  arch flow/.style={-{Latex[length=1.8mm]},thick}]
+  \node[arch owner,text width=12.25cm] (owner) at (6.5,5.1)
+    {\textbf{PostgreSQL executor owns the resources}\\
+     locked relation, registered snapshot, memory contexts};
+  \node[arch adapter,text width=5.15cm] (source) at (3.2,3.65)
+    {\textbf{Source and index adapters}\\
+     keep source data available};
+  \node[arch adapter,text width=5.15cm] (projection) at (9.8,3.65)
+    {\textbf{Result projection}\\
+     construct database values and SQL rows};
+  \draw[arch flow] (3.2,4.64)--(source.north);
+  \draw[arch flow] (projection.north)--(9.8,4.64);
+
+  \draw[dashed,black!55] (.15,2.65)--(12.85,2.65);
+  \node[fill=white,inner sep=4pt] at (6.5,2.65)
+    {module interface boundary};
+  \draw[draw=green!45!black,fill=green!4]
+    (.2,-.18) rectangle (12.8,1.65);
+  \node[font=\footnotesize\bfseries] at (6.5,1.28)
+    {Sequence-processing core};
+  \node at (6.5,.84)
+    {minimizers $\rightarrow$ lookup $\rightarrow$ chaining $\rightarrow$ alignment};
+  \node[align=center] at (6.5,.32)
+    {Worker execution additionally requires shareable input\\
+     retained through completion, and its own temporary storage.};
+  \draw[arch flow] (source.south)--(3.2,1.65)
+    node[pos=.75,left,align=right] {logical views\\and index views};
+  \draw[arch flow] (9.8,1.65)--(projection.south)
+    node[pos=.25,right,align=left] {owning matches\\and CIGAR};
+\end{tikzpicture}
+\caption{Data crosses a narrow interface while the PostgreSQL executor
+retains database ownership. Arrows show runtime data flow. Static module
+dependencies point from the adapters to the core contracts. A logical view
+may still request a PostgreSQL read on the owning backend thread. Worker
+execution requires an additional check of input sharing and lifetime.}
+\label{fig:arch-core-boundary}
+\end{figure}
+
+The custom scan from Section~\ref{sec:postgres-custom-scan-scope} owns its
+locked relation and registered snapshot. Read
+adapters borrow them within the statement's lifetime. A lazy sequence view
+can therefore be PostgreSQL-free as a C++ interface while still requesting
+data through a PostgreSQL-backed source. The source rejects calls from the
+wrong thread before entering PostgreSQL error-handling machinery. The
+sharing rules in Section~\ref{sec:sequence-materialization} apply here:
+worker eligibility and source lifetime are separate requirements. Depending
+on the route, preparation may copy data into admitted resident storage or
+retain an immutable mapped index until its readers finish.
+
+Memory also has several owners. The core context separates temporary
+alignment storage from longer-lived pipeline storage. Numerical worker tasks
+install a context for their executing thread, while database buffers remain under PostgreSQL memory
+contexts. A memory permit accounts for a reservation but does not own the
+allocation itself. The bytes must be released before that reservation becomes
+available to another task. Returned matches and their CIGAR operations use
+owning C++ vectors, which the PostgreSQL adapter can consume without retaining
+a temporary alignment arena.
+
+Error handling follows the same division. PostgreSQL failures are translated
+at checked calls so that surrounding C++ owners can unwind normally.
+Database resource cleanup also has to remain valid on PostgreSQL's own error
+path. PostgreSQL interrupt checks occur at supported adapter boundaries,
+including between rows, rather than inside every native numerical loop.
+Thus a generic function signature alone makes no promise about cancellation
+latency.
+
+The remaining shared assumptions are concrete. Both sides must agree on
+alphabet ranks, coordinate conventions and index encodings. A prepared index
+must describe the source version and minimizer rules expected by the query.
+The build must contain the selected implementation. These agreements make
+the stages composable, while the adapters keep each execution within the
+database's resource and visibility rules.

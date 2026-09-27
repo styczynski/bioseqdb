@@ -1,2 +1,0 @@
--- citus_columnar--13.2-1--14.0-1
--- bump version to 14.0-1

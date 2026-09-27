@@ -1,0 +1,39 @@
+{
+  "platforms": {
+    "darwin-arm64": {
+      "archive_sha256": "028d120e4baea55005c7ec1086bbbd56802730bcf80f99d730b56cbb5816f197",
+      "archive_size_bytes": 83011303,
+      "archive_type": "dmg",
+      "archive_url": "https://github.com/doxygen/doxygen/releases/download/Release_1_9_8/Doxygen-1.9.8.dmg",
+      "executable_architecture": "x86_64",
+      "executable_member": "Doxygen.app/Contents/Resources/doxygen",
+      "executable_sha256": "0a32cc25a03f936b4ba51bb0804f23c900d132ca78fc5f5c3ad05343b2b954c8",
+      "executable_size_bytes": 152669392,
+      "version_output": "1.9.8 (c2fe5c3e4986974eb2a97608b24086683502f07f)"
+    },
+    "darwin-x86_64": {
+      "archive_sha256": "028d120e4baea55005c7ec1086bbbd56802730bcf80f99d730b56cbb5816f197",
+      "archive_size_bytes": 83011303,
+      "archive_type": "dmg",
+      "archive_url": "https://github.com/doxygen/doxygen/releases/download/Release_1_9_8/Doxygen-1.9.8.dmg",
+      "executable_architecture": "x86_64",
+      "executable_member": "Doxygen.app/Contents/Resources/doxygen",
+      "executable_sha256": "0a32cc25a03f936b4ba51bb0804f23c900d132ca78fc5f5c3ad05343b2b954c8",
+      "executable_size_bytes": 152669392,
+      "version_output": "1.9.8 (c2fe5c3e4986974eb2a97608b24086683502f07f)"
+    },
+    "linux-x86_64": {
+      "archive_sha256": "dda773bdc62384b7d796fe8b6c5029daad72483e4c8ad4abf6ee9fb98b649388",
+      "archive_size_bytes": 50500806,
+      "archive_type": "tar_gz",
+      "archive_url": "https://github.com/doxygen/doxygen/releases/download/Release_1_9_8/doxygen-1.9.8.linux.bin.tar.gz",
+      "executable_architecture": "x86_64",
+      "executable_member": "doxygen-1.9.8/bin/doxygen",
+      "executable_sha256": "d99783ad0f3e7f69e26a9a3f038d7450c5d5f94c3e81d8a3fa285de891fbf263",
+      "executable_size_bytes": 148029744,
+      "version_output": "1.9.8 (c2fe5c3e4986974eb2a97608b24086683502f07f)"
+    }
+  },
+  "schema_revision": 1,
+  "version": "1.9.8"
+}

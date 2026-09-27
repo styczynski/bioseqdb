@@ -1,0 +1,2277 @@
+schema: bioseq.gpu-approved-e2e-result-tuples
+version: 3
+status: fast_partial_matrix
+purpose: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+  All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group. Compatible
+  just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL restarts
+  before each measurement. Deterministic FASTA and query-truth fixtures are reused for both modes; no_index
+  still loads base data untimed and includes transient index construction in measured A. B=A minus the
+  same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off mapping controls
+  are disabled. Measured-statement correctness, ordered match parity against same-host minimap2, actual
+  stages, prefilter-off and physical interval evidence remain required. OS filesystem caches are uncontrolled.
+  Never pool these observations with five-run results.'
+authority:
+  normative_tuple_dataset: approved_results
+  contains_only_approved_rows: true
+  full_matrix_complete: false
+  external_lookup_required_to_interpret: false
+  raw_repeat_timings_included: false
+  sealed_verification_manifest_required_for_append: false
+campaign_identity:
+  campaign_digest: 011fbb1ef33a214ab80d3568c2341e8d0f8311f82e21a5955bdcb93b3c63b979
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  classification: derived_non_authoritative
+  execution_scope: vastai_gpu_fast_single_sample_campaign
+  projection_description: Generated projection of the campaign identity carried by every normative row.
+  row_identity_note: campaign_id is carried by every row and is the first stable-key value. campaign_digest
+    is campaign-level metadata and is not a bioseq-e2e-cell-v2 row-identity field.
+stable_key_contract:
+  approved_row_field_projection:
+    alphabet: alphabet
+    bioseq_index_name: index_type for pipeline bioseq; null for pipeline minimap2
+    campaign_id: campaign_id
+    dataset: dataset
+    engine: pipeline
+    index_mode: mode
+    kmer_size: kmer_size
+    requested_base_alignment_algorithm: requested_algorithms.base_alignment
+    requested_chaining_algorithm: requested_algorithms.chaining
+    requested_minimizer_algorithm: requested_algorithms.minimizer
+    target_size_gbp: target_size_gbp
+    window_size: window_size
+  classification: derived_non_authoritative
+  observation_identity_rule: stable_key remains the logical tuple identity; the publication observation
+    identity is the ordered pair (stable_key, timing_scope).
+  ordered_aggregator_fields:
+  - campaign_id
+  - dataset
+  - alphabet
+  - target_size_gbp
+  - kmer_size
+  - window_size
+  - index_mode
+  - engine
+  - bioseq_index_name
+  - requested_minimizer_algorithm
+  - requested_chaining_algorithm
+  - requested_base_alignment_algorithm
+  projection_description: Generated descriptive copy of the existing aggregator contract used by every
+    approved row; it is not a second identity authority.
+  stable_key_encoding: 'The literal prefix bioseq-e2e-cell-v2: followed by a compact JSON array of the
+    ordered field values, encoded with ensure_ascii=true and separators comma and colon.'
+  stable_key_schema: bioseq-e2e-cell-v2
+  validation_rule: Decode each stable_key and compare its twelve values with the row field projection.
+    Stable keys may repeat only across timing scopes; every (stable_key, timing_scope) observation pair
+    is unique.
+terminology:
+  approved_row_field_guide:
+    alphabet: Sequence alphabet key used by the measured dataset.
+    campaign_id: Campaign identity included as the first value in stable_key.
+    classification: derived_non_authoritative
+    comments: Null or a complete qualification needed to interpret preservation or fallback status.
+    comparison_eligibility: Boolean gates for exact observed-path and requested-path performance comparisons.
+    dataset: Stable campaign dataset key; matrix_<target>gbp_<alphabet>_k<kmer_size>_w<window_size> describes
+      the target size, alphabet, k-mer size, and window size.
+    effective_path: Human-readable projection of the observed stage sequence; display-only and never a
+      replacement for observed_algorithms.
+    exact_baseline_match_count_equal: Whether each accepted repeat produced exactly the same match count
+      as its mode-matched minimap2 baseline; counts themselves are intentionally omitted.
+    execution_conformance: Classification relating requested and observed execution identities.
+    index_type: Index representation used by the row; interpreted by terminology.index_types.
+    kmer_size: Number of symbols in each k-mer.
+    metrics: Exact integer P50 A and B durations in nanoseconds, interpreted by metric_definitions.
+    mode: Index-use mode, interpreted by terminology.modes.
+    observed_algorithms: Literal operation-observed minimizer, chaining, and base-alignment keys for Bioseq,
+      or three nulls for external minimap2.
+    pipeline: Measured engine; bioseq selects the Bioseq pipeline and minimap2 selects the external minimap2
+      baseline.
+    pipeline_mode: Bioseq concurrency mode, or null when the external minimap2 pipeline does not use this
+      setting.
+    prefilter: Whether a prefilter participated in the measured path; every approved row is false.
+    projection_description: Generated interpretation guide for fields in each normative approved_results
+      row; it is descriptive and does not establish another row schema.
+    query_count: Number of query fragments in the measured cell.
+    requested_algorithms: Literal minimizer, chaining, and base-alignment keys requested for Bioseq, or
+      three nulls for external minimap2.
+    run_count: Number of complete accepted repeats contributing to the row P50s.
+    stable_key: Canonical full identity string for this campaign cell; its construction is described by
+      stable_key_contract.
+    stable_key_schema: Identifies the existing aggregator stable-key contract used by stable_key.
+    status: Publication disposition; approved_results contains accepted only.
+    target_size_gbp: Target dataset size in decimal gigabase pairs, where 1 Gbp is 1,000,000,000 base
+      pairs.
+    timing_scope: Non-metric classification of the timing boundary used by this row.
+    window_size: Number of consecutive k-mers in each minimizer window.
+  classification: derived_non_authoritative
+  execution_conformance_values:
+  - definition: All requested Bioseq algorithm identities equal the observed identities.
+    key: exact_requested_path
+  - definition: Requested and observed identities agree; approval is retained by an explicit audited preservation
+      decision.
+    key: exact_requested_path_user_preserved
+  - definition: The requested minimizer was simd_minimap2_reference but the observed minimizer was scalar.
+      The effective scalar path is factual; requested SIMD execution is not proved.
+    key: documented_scalar_minimizer_fallback
+  - definition: External minimap2 baseline; Bioseq algorithm enum fields are not applicable and are null.
+    key: external_minimap2_baseline
+  guc_and_pipeline_algorithm_enums:
+    minimizer:
+      guc_cpp_type: bioseq::aligner::minimizer_algorithm
+      guc_setting: bioseq.aligner.minimizer.algorithm
+      ordinals_match: true
+      pipeline_cpp_type: bioseq::simd::minimizer_algorithm
+      values:
+      - human_label: Scalar Minimizers
+        key: scalar
+        ordinal: 0
+      - human_label: SIMD Minimap2 (slow reference)
+        key: simd_minimap2_reference
+        note: A request for this key is not proof of SIMD execution; observed identity controls.
+        ordinal: 1
+      - human_label: Two-Stack nthash SIMD Minimizers
+        key: two_stack_nthash
+        ordinal: 2
+      - human_label: Vulkan minimap-int minimizers
+        key: vulkan_minimap_integer
+        ordinal: 3
+      - human_label: Bounded u32 ntHash SIMD Minimizers
+        key: bounded_nthash_simd
+        ordinal: 4
+    chaining:
+      guc_cpp_type: bioseq::aligner::chaining_algorithm
+      guc_setting: bioseq.aligner.chaining.algorithm
+      ordinals_match: true
+      pipeline_cpp_type: bioseq::simd::chaining_algorithm
+      values:
+      - human_label: Minimap2 Scalar
+        key: scalar_minimap2
+        note: Scalar minimap2 dynamic programming.
+        ordinal: 0
+      - human_label: Minimap2 SIMD
+        key: simd_minimap2
+        note: The generated display shorthand is SIMD-DP. The literal key records the requested or observed
+          value, while the code enum remains authoritative.
+        ordinal: 1
+      - human_label: Minimap2 RMQ
+        key: range_minimum_query
+        note: RMQ is a distinct CPU chaining algorithm and must never be relabeled SIMD-DP.
+        ordinal: 2
+      - human_label: Vulkan tiled DP
+        key: vulkan_tiled_dynamic_programming
+        ordinal: 3
+    base_alignment:
+      campaign_values:
+      - human_label: KSW2
+        key: ksw2
+        ordinal: 0
+      - human_label: Block Aligner
+        key: block_aligner
+        ordinal: 1
+      guc_cpp_type: bioseq::aligner::base_alignment_algorithm
+      guc_setting: bioseq.aligner.base_alignment.algorithm
+      pipeline_cpp_type: bioseq::simd::base_alignment_algorithm
+      runtime_only_excluded_values:
+      - human_label: KSW2 (inter-region batched)
+        key: ksw2_batched
+        note: Internal runtime value only; excluded from this matrix and absent from approved rows.
+        ordinal: 2
+  index_types:
+  - constant_name: k_minimizers_per_fragment_index_name
+    human_label: Minimizers per fragment
+    key: minimizers_per_fragment
+    short_label: MPF
+  - constant_name: k_minimizers_per_sequence_index_name
+    human_label: Minimizers per sequence
+    key: minimizers_per_sequence
+    short_label: MPS
+  - applies_to_pipeline: minimap2
+    human_label: minimap2 internal index representation
+    key: minimap2_internal
+    short_label: minimap2
+  modes:
+  - definition: The index is created before measurement and the measured operation queries it.
+    human_label: Just index
+    key: just_index
+  - definition: No pre-existing query index is used; any required transient/recomputed work is inside
+      the measured path.
+    human_label: No index
+    key: no_index
+  pipeline_concurrency_enums:
+    campaign_selected: task_parallel
+    guc_cpp_type: bioseq::scheduler::pipeline_concurrency_mode
+    guc_setting: bioseq.scheduler.pipeline.mode
+    guc_values:
+    - human_label: Single thread
+      key: single_thread
+      ordinal: 0
+    - human_label: Parallel dispatch
+      key: parallel_dispatch
+      ordinal: 1
+    - human_label: Task parallel
+      key: task_parallel
+      ordinal: 2
+    ordinal_one_spelling_note: The GUC enum spells ordinal 1 parallel_dispatch; the pipeline runtime enum
+      spells it dispatch_parallel. This campaign selects task_parallel (ordinal 2) only.
+    pipeline_cpp_type: bioseq::parallelism::pipeline_concurrency_mode
+    pipeline_values:
+    - human_label: Single thread
+      key: single_thread
+      ordinal: 0
+    - human_label: Parallel dispatch
+      key: dispatch_parallel
+      ordinal: 1
+    - human_label: Task parallel
+      key: task_parallel
+      ordinal: 2
+  projection_description: Generated descriptive projection for interpreting approved_results. Literal
+    keys record the aggregator-observed configuration values; labels are explanatory only, requested and
+    observed identities are separate facts, and code enums remain authoritative.
+metric_definitions:
+  a:
+    aggregation: Single accepted sample; P50 equals its value.
+    per_repeat_definition: Framework measured iteration. just_index excludes setup; no_index includes
+      transient index construction.
+    row_key: metrics.p50_a
+    unit: ns
+  b:
+    aggregation: Single A minus its merged CIGAR/MAPQ physical interval union.
+    bioseq_cigar_interval_scope: For Block Aligner and KSW2, the CIGAR interval brackets the fused per-region
+      base-alignment invocation, including DP, trace storage, traceback, CIGAR construction, and the required
+      CIGAR-derived result fields.
+    forbidden_derivations:
+    - Subtract independently aggregated medians.
+    - Add overlapping CIGAR and MAPQ durations without taking their interval union.
+    - Subtract a downstream wall-time metric instead of the CIGAR/MAPQ interval union.
+    interpretation_limit: B removes the instrumented CIGAR/MAPQ union, not an isolated traceback or formatting
+      cost; on fused Bioseq paths it also removes the corresponding base-alignment work. It is not a universal
+      seeding-plus-chaining-only timing.
+    per_repeat_definition: For each repeat, B = A - union(CIGAR intervals, MAPQ intervals), where the
+      merged half-open union prevents overlap from being subtracted twice.
+    row_key: metrics.p50_b
+    unit: ns
+  classification: derived_non_authoritative
+  clock_semantics:
+    bioseq_intervals: Monotonic nanosecond durations from the finalized statement interval receipt and
+      the identical framework clock implementation.
+    duration_unit: Integer nanoseconds.
+    framework_outer: Monotonic duration for the row's classified framework interval; the two timing scopes
+      are retained and aggregated separately.
+    minimap2_intervals: Monotonic nanosecond durations from the helper-declared monotonic clock receipt.
+    subtraction_rate_gate: B is admitted only when outer and interval durations have a proven equal nanosecond
+      rate.
+    timestamp_rule: Absolute timestamps from different clock domains are neither subtracted nor compared;
+      only nonnegative equal-rate durations are used.
+  p50_method: Single-sample identity, not a five-run median estimate.
+  projection_description: Generated timing-semantics projection for the normative row metrics.
+  timing_scope:
+    allowed_values:
+    - query_only_framework_iteration_fast_remote_single_sample_v1
+    classification: non_metric_observation_scope
+    p50_partition_rule: FAST single-sample results are never pooled with five-run observations.
+matrix_scope:
+  alphabets:
+  - dna4
+  - dna5
+  bioseq_base_alignment_algorithms:
+  - ksw2
+  - block_aligner
+  bioseq_chaining_algorithms:
+  - scalar_minimap2
+  - simd_minimap2
+  - range_minimum_query
+  - vulkan_tiled_dynamic_programming
+  bioseq_expected_cells: 512
+  bioseq_index_types:
+  - minimizers_per_fragment
+  - minimizers_per_sequence
+  bioseq_minimizer_algorithms:
+  - scalar
+  - simd_minimap2_reference
+  - two_stack_nthash
+  - vulkan_minimap_integer
+  - bounded_nthash_simd
+  bioseq_pipeline_mode: task_parallel
+  cigar_projection: true
+  classification: derived_non_authoritative
+  excluded_runtime_only_base_alignment_algorithms:
+  - ksw2_batched
+  execution_location: vastai
+  mapq_projection: true
+  minimap2_expected_cells: 16
+  modes:
+  - no_index
+  - just_index
+  pipelines:
+  - bioseq
+  - minimap2
+  prefilter: false
+  projection_description: Generated scope projection from approved_results and the frozen campaign input;
+    it is not a publication-row authority.
+  query_count: 1024
+  repetitions_per_cell: 1
+  target_size_gbp:
+  - 2
+  - 4
+  target_size_unit: Decimal Gbp, exactly 1,000,000,000 base pairs.
+  total_expected_cells: 528
+  total_expected_runs: 528
+  window_kmer_pairs:
+  - kmer_size: 15
+    window_size: 10
+  - kmer_size: 20
+    window_size: 15
+  selection_rule: At least one requested seed/chaining stage uses Vulkan. All 64 dual-Vulkan tuples precede
+    the remaining 448; compatible fixtures are grouped and Block precedes KSW2 within each group.
+host_binding:
+  cloud_provider: vastai
+  instance_id: 52055807
+  machine_id: 147971
+  host_id: 54814
+  hourly_usd_including_200gb_disk: 0.7622222222222222
+  metered_network_excluded_from_hourly_price: true
+  os: Ubuntu 24.04
+  kernel: 6.8.0-139-generic
+  architecture: x86_64
+  cpu: AMD EPYC 7282 16-Core Processor
+  visible_logical_cpus: 32
+  cpu_quota_cores: 7.68
+  container_memory_limit_bytes: 129656422400
+  disk_allocated_gb: 200
+  gpu:
+    device: NVIDIA GeForce RTX 5090
+    device_count: 1
+    vram_mib: 32607
+    driver: '595.84'
+    vulkan_device_api: 1.4.329
+    uuid: f306bec3-35d5-2e2c-7385-1753ac50c3f5
+  postgresql_server: 17.11-1.pgdg24.04+2
+  libpq: 18.6-1.pgdg24.04+2
+  notes: Visible host resources exceed the container CPU quota and memory limit. OS page cache is uncontrolled;
+    report per-repeat process-cold evidence separately.
+campaign_progress:
+  approved_vulkan_cells: 12
+  approved_baseline_cells: 8
+  remaining_vulkan_cells: 500
+  q2_pipeline_qualified: true
+  notes: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results.'
+  audited_rejected_cells: 16
+  attempted_cells: 41
+  remaining_unattempted_cells: 487
+  execution_queue_complete: false
+  execution_failed_cells: 5
+  execution_paused: true
+  pause_reason: User requested shutdown after pushing collected tuples and source changes.
+  paused_at_utc: '2026-09-23T17:18:19.247854+00:00'
+approved_results:
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 277022269283
+    p50_b: 227043174773
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 218475572457
+    p50_b: 169774611457
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_5d9ef7df80a2edbd4efc10c14394445f;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 108688653898
+    p50_b: 58876975109
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 114860653727
+    p50_b: 62254956406
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","minimap2",null,null,null,null]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k15_w10
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode: null
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  observed_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 14078032352
+    p50_b: 13048134932
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_5d9ef7df80a2edbd4efc10c14394445f;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 188355650476
+    p50_b: 141179011818
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_5d9ef7df80a2edbd4efc10c14394445f;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 178333153460
+    p50_b: 129443998277
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_5d9ef7df80a2edbd4efc10c14394445f;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 98502260379
+    p50_b: 47030000821
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_sequence
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 98454844248
+    p50_b: 44067227425
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","minimap2",null,null,null,null]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna4_k20_w15
+  target_size_gbp: 2
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode: null
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  observed_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 94628208937
+    p50_b: 93611868687
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_5d9ef7df80a2edbd4efc10c14394445f;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","minimap2",null,null,null,null]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k15_w10
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode: null
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  observed_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 13740922783
+    p50_b: 12631521866
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","minimap2",null,null,null,null]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_2gbp_dna5_k20_w15
+  target_size_gbp: 2
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode: null
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  observed_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 12162245293
+    p50_b: 11256402261
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 427482742262
+    p50_b: 368095789318
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 410778946230
+    p50_b: 348516986119
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","minimap2",null,null,null,null]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k15_w10
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode: null
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  observed_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 19486616235
+    p50_b: 18027418075
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: block_aligner
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> block_aligner
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 348049144571
+    p50_b: 287970243512
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: bioseq
+  pipeline_mode: task_parallel
+  index_type: minimizers_per_fragment
+  requested_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  observed_algorithms:
+    minimizer: vulkan_minimap_integer
+    chaining: vulkan_tiled_dynamic_programming
+    base_alignment: ksw2
+  effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> ksw2
+  execution_conformance: exact_requested_path
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: requested_and_effective_path
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 324180993434
+    p50_b: 262103697454
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","minimap2",null,null,null,null]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna4_k20_w15
+  target_size_gbp: 4
+  alphabet: dna4
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode: null
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  observed_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 42481366254
+    p50_b: 41480804284
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","minimap2",null,null,null,null]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k15_w10
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 15
+  window_size: 10
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode: null
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  observed_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 17892981831
+    p50_b: 16649049252
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+- stable_key_schema: bioseq-e2e-cell-v2
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","minimap2",null,null,null,null]
+  timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+  campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+  dataset: matrix_4gbp_dna5_k20_w15
+  target_size_gbp: 4
+  alphabet: dna5
+  kmer_size: 20
+  window_size: 15
+  query_count: 1024
+  mode: just_index
+  pipeline: minimap2
+  pipeline_mode: null
+  index_type: minimap2_internal
+  requested_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  observed_algorithms:
+    minimizer: null
+    chaining: null
+    base_alignment: null
+  effective_path: minimap2
+  execution_conformance: external_minimap2_baseline
+  comparison_eligibility:
+    requested_path: true
+    effective_path: true
+    scope: external_minimap2_baseline
+  prefilter: false
+  exact_baseline_match_count_equal: true
+  status: accepted
+  run_count: 1
+  metrics:
+    unit: ns
+    p50_a: 22929250964
+    p50_b: 22016147113
+  comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+    All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+    Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+    restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+    modes; no_index still loads base data untimed and includes transient index construction in measured
+    A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+    mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+    minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+    caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_d6d60a517ccdb1af6e54e039c19f5d23;
+    same Vast.ai host supplies the minimap2 baseline.'
+native_build:
+  source_commit: 57ddc35c0bf9df5bb4de34d44399d64f8624c1f4
+  status: completed
+  remote_source: /home/ubuntu/bioseqdb-native
+  previous_build_receipt_id: br_fc7a5b9b08a56b5a3faa26c4f4663edc
+  build_receipt_id: br_d6d60a517ccdb1af6e54e039c19f5d23
+  source_graph_fingerprint: e15fc033f45ea5d6e717646e52d2085f35d6925f46d6c69a08bde5ea64e5003b
+  campaign_local_overrides:
+  - file: bench/e2e/index.cppm
+    purpose: Reuse generated FASTA/query truth; upstream FAST control-free measured-statement validation.
+    committed: false
+  - file: build_mcp/postgres_runtime.py
+    purpose: PostgreSQL 17 restart in non-systemd container.
+    committed: false
+  - file: bioseq/backend/gpu/vulkan/runtime/device.cppm
+    purpose: Prefer mapped VRAM for GPU working sets; host-buffer allocations remain CPU-cached.
+    committed: false
+  - file: bioseq/backend/sequences/chaining/vulkan.cppm
+    purpose: CPU-cached scores and predecessors for host backtracking; device-local arrays for the GPU-only
+      coordinate path.
+    committed: false
+  - file: bioseq/backend/sequences/indexing/gpu_minimizer_index/hash_sorted_ingest.cppm
+    purpose: CPU-searched resident indexes explicitly use cached host buffers.
+    committed: false
+  - file: bioseq/backend/sequences/indexing/gpu_minimizer_index/cache.cppm
+    purpose: Cached host allocations for CPU prefix lookup and resident materialization.
+    committed: false
+  - file: bioseq/backend/gpu/vulkan/runtime/target_index.cppm
+    purpose: Adopted GPU-built final control/position buffers remain CPU-cached; working scratch prefers
+      VRAM.
+    committed: false
+  - file: bioseq/backend/sequences/seeding/vulkan/prefix_authority.cppm
+    purpose: Use completed resident materialization authority; remove per-query full-payload rescans at
+      explicit user request.
+    committed: false
+  installed_bioseq_sha256: 7f7e43c892dd1069629d0dbda9891c697045de837893b8058393faf6aa2417aa
+  published_performance_fixes:
+    commit: d30531d285340f94780fbbf7166ffe0f99fb581c
+    url: https://github.com/styczynski/bioseqdb/commit/d30531d285340f94780fbbf7166ffe0f99fb581c
+    author: Piotr Styczyński <code@styczynski.in>
+    files:
+    - bioseq/backend/gpu/vulkan/runtime/device.cppm
+    - bioseq/backend/sequences/seeding/vulkan/prefix_authority.cppm
+    note: Published from a separate worktree after q2 and audited q1024 passed. The measured checkout
+      remains at its sealed source commit with these exact uncommitted overrides; no rebuild or binary
+      change.
+  vastai_receipt_registration:
+    scope: Campaign-local Python auditor configuration
+    hostname: a841630d096a
+    architecture: x86_64
+    preset: aws-x64-linux-e2e
+    note: Adds this exact Vast.ai host to the Linux E2E receipt policy. All content seals, report/config/runtime
+      hashes, execution binding and measured-statement validation remain required.
+  build_history:
+  - source_commit: 57ddc35c0bf9df5bb4de34d44399d64f8624c1f4
+    status: completed
+    remote_source: /home/ubuntu/bioseqdb-native
+    previous_build_receipt_id: br_fc7a5b9b08a56b5a3faa26c4f4663edc
+    build_receipt_id: br_5d9ef7df80a2edbd4efc10c14394445f
+    source_graph_fingerprint: 4e7d028a9fa9a44efadacc54581e57120e3fd779e69e9302237ceb853e089636
+    campaign_local_overrides:
+    - file: bench/e2e/index.cppm
+      purpose: Reuse generated FASTA/query truth; upstream FAST control-free measured-statement validation.
+      committed: false
+    - file: build_mcp/postgres_runtime.py
+      purpose: PostgreSQL 17 restart in non-systemd container.
+      committed: false
+    - file: bioseq/backend/gpu/vulkan/runtime/device.cppm
+      purpose: Prefer CPU-cached coherent mapped Vulkan allocations after debugger-confirmed discrete-GPU
+        CPU read bottleneck.
+      committed: false
+    - file: bioseq/backend/sequences/seeding/vulkan/prefix_authority.cppm
+      purpose: Use completed resident materialization authority; remove per-query full-payload rescans
+        at explicit user request.
+      committed: false
+    installed_bioseq_sha256: eff5ca4cb283766698935417c82651c05f4f289254c71372a6b75b8bf264aaeb
+    published_performance_fixes:
+      commit: d30531d285340f94780fbbf7166ffe0f99fb581c
+      url: https://github.com/styczynski/bioseqdb/commit/d30531d285340f94780fbbf7166ffe0f99fb581c
+      author: Piotr Styczyński <code@styczynski.in>
+      files:
+      - bioseq/backend/gpu/vulkan/runtime/device.cppm
+      - bioseq/backend/sequences/seeding/vulkan/prefix_authority.cppm
+      note: Published from a separate worktree after q2 and audited q1024 passed. The measured checkout
+        remains at its sealed source commit with these exact uncommitted overrides; no rebuild or binary
+        change.
+    vastai_receipt_registration:
+      scope: Campaign-local Python auditor configuration
+      hostname: a841630d096a
+      architecture: x86_64
+      preset: aws-x64-linux-e2e
+      note: Adds this exact Vast.ai host to the Linux E2E receipt policy. All content seals, report/config/runtime
+        hashes, execution binding and measured-statement validation remain required.
+native_vulkan_blocker:
+  timestamp_utc: '2026-09-22T16:53:48.175231+00:00'
+  event: native_vulkan_q2_blocker_confirmed
+  build_receipt: br_85fa9d18bc7f140fbfa4ac56644ab188
+  cpu_sigill_fix_commit: d8227045af24492158f025ceb6fe138e5b69c462
+  gdb_evidence: readback-debug/gdb-readback-coverage.txt
+  physical_query_minimizers: 7540
+  device_output_coverage_valid: true
+  query_authority_valid: false
+  root_cause: Native Linux sketch dispatch skips the Metal-dependent causal pipeline collector; the canonical
+    consumer unconditionally requires its token. Runtime, E2E gate, and Python aggregator also require
+    immutable Metal-backed all-hit cache evidence.
+  approved_q1024_rows: 0
+  benchmark_contract_preserved: true
+  postgres_restarted: true
+  status: resolved; native Vulkan qualified
+native_vulkan_policy:
+  user_authorized_linux_metal_exemption: true
+  reported_policy: native_vulkan
+  metal_seed_and_load_fields: 0
+  metal_cache_hit: false
+  physical_gpu_pipeline_creation_and_submission_validation: required
+  five_repeat_p50_methodology: Superseded by user-authorized FAST one-sample methodology.
+validity_rules:
+  current_campaign_expected_repeat_count: 1
+  minimum_repeat_count: 1
+  requirements:
+  - Each row has exactly one complete accepted q1024 sample.
+  - Measured-statement correctness, position, strand, CIGAR replay, MAPQ, exact ordered minimap2 count
+    parity, physical Vulkan receipts and prefilter-off must pass.
+  - B is computed from the same sample A and its merged CIGAR/MAPQ interval union.
+  - Only compatible READY persisted indexes may be reused; no_index proves both persistent index policies
+    absent and includes transient build time.
+rejected_results:
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna5_k15_w10
+    alphabet: dna5
+    target_size_gbp: 2
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_fragment
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_fragment
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_29.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_29.raw.jsonl
+    run_id: 29:2026-09-23T03:12:01Z:266345
+    schedule_sorted_checksum: 85bad11f9c36f33b
+    run_receipt_id: rr_b8ac41a208da431527303bc007c9c64f
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna5_k15_w10
+    alphabet: dna5
+    target_size_gbp: 2
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_fragment
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_fragment
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_46.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_46.raw.jsonl
+    run_id: 46:2026-09-23T09:32:41Z:317493
+    schedule_sorted_checksum: a79c4aa579c0a92b
+    run_receipt_id: rr_3d23638e5a2201f6f9bbf19b300b669d
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna5_k15_w10
+    alphabet: dna5
+    target_size_gbp: 2
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_sequence
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_47.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_47.raw.jsonl
+    run_id: 47:2026-09-23T09:33:54Z:317676
+    schedule_sorted_checksum: 3f3fa1412189a2fb
+    run_receipt_id: rr_31c531f66daafd5f1de09fda1cde972d
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k15_w10","dna5",2,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna5_k15_w10
+    alphabet: dna5
+    target_size_gbp: 2
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_sequence
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_48.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_48.raw.jsonl
+    run_id: 48:2026-09-23T09:35:06Z:317861
+    schedule_sorted_checksum: 0b3a3bc4283c2dc9
+    run_receipt_id: rr_2ee17148535ad408a63046996f8f31c9
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna5_k20_w15
+    alphabet: dna5
+    target_size_gbp: 2
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_fragment
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_fragment
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_49.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_49.raw.jsonl
+    run_id: 49:2026-09-23T09:36:18Z:318040
+    schedule_sorted_checksum: 65df6f58e17b06df
+    run_receipt_id: rr_7d29530fb012dd85b3150af9544db540
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna5_k20_w15
+    alphabet: dna5
+    target_size_gbp: 2
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_fragment
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_fragment
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_51.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_51.raw.jsonl
+    run_id: 51:2026-09-23T09:40:15Z:318717
+    schedule_sorted_checksum: 44cacf92653304be
+    run_receipt_id: rr_efd727f563d194c59c06f22631697f2c
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna5_k20_w15
+    alphabet: dna5
+    target_size_gbp: 2
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_sequence
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_52.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_52.raw.jsonl
+    run_id: 52:2026-09-23T09:41:27Z:318900
+    schedule_sorted_checksum: 8a453b4a7ce57242
+    run_receipt_id: rr_e5aabb964b89460d186e8b9ab0f7f9e6
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna5_k20_w15","dna5",2,20,15,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna5_k20_w15
+    alphabet: dna5
+    target_size_gbp: 2
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_sequence
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_53.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_53.raw.jsonl
+    run_id: 53:2026-09-23T09:42:40Z:319117
+    schedule_sorted_checksum: c47f7253bc60de49
+    run_receipt_id: rr_dacd86af181d4783d65f92b2ff81420b
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna5_k15_w10
+    alphabet: dna5
+    target_size_gbp: 4
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_fragment
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_fragment
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_64.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_64.raw.jsonl
+    run_id: 64:2026-09-23T12:05:30Z:351423
+    schedule_sorted_checksum: cd46a4a1c89d3dd4
+    run_receipt_id: rr_adf99052f29bfc66ceaa2333aa78d47b
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna5_k15_w10
+    alphabet: dna5
+    target_size_gbp: 4
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_fragment
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_fragment
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_66.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_66.raw.jsonl
+    run_id: 66:2026-09-23T12:10:56Z:352088
+    schedule_sorted_checksum: ca8bb9be17c54779
+    run_receipt_id: rr_95688b1d78329ff5adfbadd1d38aa395
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna5_k15_w10
+    alphabet: dna5
+    target_size_gbp: 4
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_sequence
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_72.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_72.raw.jsonl
+    run_id: 72:2026-09-23T12:48:33Z:354211
+    schedule_sorted_checksum: 4dc97854c5ba4d73
+    run_receipt_id: rr_86820969ed12144b26457f93272febde
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna5_k15_w10
+    alphabet: dna5
+    target_size_gbp: 4
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_sequence
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_73.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_73.raw.jsonl
+    run_id: 73:2026-09-23T12:49:47Z:354493
+    schedule_sorted_checksum: 3f076ccf28259f67
+    run_receipt_id: rr_ef202ddb5c748e4e7a3eaab5ba5d9376
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna5_k20_w15
+    alphabet: dna5
+    target_size_gbp: 4
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_fragment
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_fragment
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_69.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_69.raw.jsonl
+    run_id: 69:2026-09-23T12:14:03Z:352536
+    schedule_sorted_checksum: bc4e3615be626c64
+    run_receipt_id: rr_8872a2376f0102f3d2854774b64eca05
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna5_k20_w15
+    alphabet: dna5
+    target_size_gbp: 4
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_fragment
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_fragment
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_75.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_75.raw.jsonl
+    run_id: 75:2026-09-23T13:08:46Z:355845
+    schedule_sorted_checksum: 8ef1a5ff10aef04f
+    run_receipt_id: rr_f55cc48587720d4a80a624cd7bcf8ad4
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna5_k20_w15
+    alphabet: dna5
+    target_size_gbp: 4
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_sequence
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_76.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_76.raw.jsonl
+    run_id: 76:2026-09-23T13:10:00Z:356048
+    schedule_sorted_checksum: 4d3f444a75970168
+    run_receipt_id: rr_4da01cbcde14a989ac49ca7fda233777
+    run_receipt_sha256: null
+- stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k20_w15","dna5",4,20,15,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna5_k20_w15
+    alphabet: dna5
+    target_size_gbp: 4
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: rejected
+  disposition: rejected_setup
+  reason: allowlisted untimed bioseq.seq typmod capability rejection identity=vulkan_minimap_integer|minimizers_per_sequence
+    SQLSTATE=22023 primary=bioseq.seq alphabet "dna5" is not supported
+  run_count: 1
+  a_ns: null
+  b_ns: null
+  source:
+    report: reporting/bioseq_benchmark_e2e/report_77.json
+    raw_sidecar: reporting/bioseq_benchmark_e2e/report_77.raw.jsonl
+    run_id: 77:2026-09-23T13:11:13Z:356233
+    schedule_sorted_checksum: 8f359a4f853d2b2c
+    run_receipt_id: rr_333e07a3404e3874fbf73213b1972081
+    run_receipt_sha256: null
+execution_failures:
+- ordinal: 1039
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna4_k15_w10
+    alphabet: dna4
+    target_size_gbp: 4
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: execution_failed
+  error: MCP run failed; retained fast-q1024-1039
+  a_ns: null
+  b_ns: null
+  log_file: /tmp/bioseq_build_mcp_benchmark-e2e_20260923-104206.log
+  reports: []
+  run_receipt_id: null
+  diagnostic: '[bench_e2e] MATRIX-SQL-FATAL status=server_error result_status=PGRES_FATAL_ERROR sqlstate=0A000
+    primary=required persisted GPU grouped-SoA target is unavailable detail=GPU grouped-SoA resident admission
+    rejected foundation_error=4 hint=Publish a matching grouped-SoA READY generation; GPU preparation
+    has no CPU, SIMD, recompute, or alternate-index fallback. connection=ERROR:  required persisted GPU
+    grouped-SoA target is unavailable'
+  diagnosed_cause: Persisted MPS control buffer exceeds maxStorageBufferRange before GPU query dispatch
+  capacity_evidence:
+    control_bytes: 5941184520
+    position_bytes: 2985969500
+    maxStorageBufferRange: 4294967295
+    partition_count: 34332
+  diagnostic_artifact: /home/ubuntu/vastai-campaign/debug-mps-4g-buffer-range/diagnosis.json
+  measured_sample_valid: false
+- ordinal: 1035
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k15_w10","dna4",4,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna4_k15_w10
+    alphabet: dna4
+    target_size_gbp: 4
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: execution_failed
+  error: MCP run failed; retained fast-q1024-1035
+  a_ns: null
+  b_ns: null
+  log_file: /tmp/bioseq_build_mcp_benchmark-e2e_20260923-110650.log
+  reports: []
+  run_receipt_id: null
+  diagnostic: '[bench_e2e] MATRIX-SQL-FATAL status=server_error result_status=PGRES_FATAL_ERROR sqlstate=0A000
+    primary=required persisted GPU grouped-SoA target is unavailable detail=GPU grouped-SoA resident admission
+    rejected foundation_error=4 hint=Publish a matching grouped-SoA READY generation; GPU preparation
+    has no CPU, SIMD, recompute, or alternate-index fallback. connection=ERROR:  required persisted GPU
+    grouped-SoA target is unavailable'
+  diagnosed_cause: Persisted MPS control buffer exceeds maxStorageBufferRange before GPU query dispatch
+  capacity_evidence:
+    control_bytes: 5941184520
+    position_bytes: 2985969500
+    maxStorageBufferRange: 4294967295
+    partition_count: 34332
+  diagnostic_artifact: /home/ubuntu/vastai-campaign/debug-mps-4g-buffer-range/diagnosis.json
+  measured_sample_valid: false
+- ordinal: 1119
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna4_k20_w15
+    alphabet: dna4
+    target_size_gbp: 4
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: execution_failed
+  error: MCP run failed; retained fast-q1024-1119
+  a_ns: null
+  b_ns: null
+  log_file: /tmp/bioseq_build_mcp_benchmark-e2e_20260923-114634.log
+  reports: []
+  run_receipt_id: null
+  diagnostic: '[bench_e2e] MATRIX-SQL-FATAL status=server_error result_status=PGRES_FATAL_ERROR sqlstate=0A000
+    primary=required persisted GPU grouped-SoA target is unavailable detail=GPU grouped-SoA resident admission
+    rejected foundation_error=4 hint=Publish a matching grouped-SoA READY generation; GPU preparation
+    has no CPU, SIMD, recompute, or alternate-index fallback. connection=ERROR:  required persisted GPU
+    grouped-SoA target is unavailable'
+- ordinal: 1115
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna4_k20_w15","dna4",4,20,15,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna4_k20_w15
+    alphabet: dna4
+    target_size_gbp: 4
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: execution_failed
+  error: MCP run failed; retained fast-q1024-1115
+  a_ns: null
+  b_ns: null
+  log_file: /tmp/bioseq_build_mcp_benchmark-e2e_20260923-125030.log
+  reports: []
+  run_receipt_id: null
+  diagnostic: '[bench_e2e] MATRIX-SQL-FATAL status=server_error result_status=PGRES_FATAL_ERROR sqlstate=0A000
+    primary=required persisted GPU grouped-SoA target is unavailable detail=GPU grouped-SoA resident admission
+    rejected foundation_error=4 hint=Publish a matching grouped-SoA READY generation; GPU preparation
+    has no CPU, SIMD, recompute, or alternate-index fallback. connection=ERROR:  required persisted GPU
+    grouped-SoA target is unavailable'
+  diagnostic_artifact: /home/ubuntu/vastai-campaign/debug-mps-buffer-range-1115/diagnosis.json
+  capacity_evidence:
+    ordinal: 1115
+    table: seqidx_mps_dc08a0ebf97876e0_34_0
+    target_length: 4000000000
+    control_count: 500129526
+    position_count: 500132210
+    payload_bytes: 8002207576
+    directory_bytes: 3951872
+    kmer_size: 20
+    window_size: 15
+    control_bytes: 6001678736
+    position_bytes: 2000528840
+    partition_count: 30874
+    maxStorageBufferRange: 4294967295
+    limit_evidence: /home/ubuntu/vastai-campaign/debug-mps-4g-buffer-range/live-vulkaninfo.txt
+    single_control_buffer_exceeds_limit: true
+    single_position_buffer_exceeds_limit: false
+    manifest_sha256: 3ebd679686a95da8da8d1608d5be067448c63c3626cdca1d85ad84024b040ce9
+    directory_sha256: 1c42da3c91e5c0864965e0fcd7c70d57ca462f8d324958df1b4888f764488521
+    diagnostic_only: true
+  measured_sample_valid: false
+  diagnosed_cause: Persisted MPS control buffer exceeds maxStorageBufferRange before GPU query dispatch
+- ordinal: 62
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"no_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna4_k15_w10
+    alphabet: dna4
+    target_size_gbp: 2
+    kmer_size: 15
+    window_size: 10
+    index_mode: no_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_fragment
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: execution_failed
+  error: MCP run failed; retained fast-q1024-0062
+  a_ns: null
+  b_ns: null
+  log_file: /tmp/bioseq_build_mcp_benchmark-e2e_20260923-131156.log
+  reports: []
+  run_receipt_id: null
+  diagnostic: '[bench_e2e] MATRIX-SQL-FATAL status=server_error result_status=PGRES_FATAL_ERROR sqlstate=XX000
+    primary=BioseqBatchJoin Exec raised a C++ exception detail=Vulkan seed wave did not stage complete
+    per-job attestation hint= connection=ERROR:  BioseqBatchJoin Exec raised a C++ exception'
+superseded_results:
+- reason: Replaced by a strictly audited FAST n1 sample after the shared GPU memory-placement fix. The
+    original measurement remains valid for its original frozen binary.
+  replaced_at_utc: '2026-09-23T08:58:26.787160+00:00'
+  row:
+    stable_key_schema: bioseq-e2e-cell-v2
+    stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_fragment","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+    timing_scope: query_only_framework_iteration_fast_remote_single_sample_v1
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna4_k15_w10
+    target_size_gbp: 2
+    alphabet: dna4
+    kmer_size: 15
+    window_size: 10
+    query_count: 1024
+    mode: just_index
+    pipeline: bioseq
+    pipeline_mode: task_parallel
+    index_type: minimizers_per_fragment
+    requested_algorithms:
+      minimizer: vulkan_minimap_integer
+      chaining: vulkan_tiled_dynamic_programming
+      base_alignment: block_aligner
+    observed_algorithms:
+      minimizer: vulkan_minimap_integer
+      chaining: vulkan_tiled_dynamic_programming
+      base_alignment: block_aligner
+    effective_path: vulkan_minimap_integer -> vulkan_tiled_dynamic_programming -> block_aligner
+    execution_conformance: exact_requested_path
+    comparison_eligibility:
+      requested_path: true
+      effective_path: true
+      scope: requested_and_effective_path
+    prefilter: false
+    exact_baseline_match_count_equal: true
+    status: accepted
+    run_count: 1
+    metrics:
+      unit: ns
+      p50_a: 219835871969
+      p50_b: 172732670749
+    comments: 'FAST Vast.ai: one complete q1024 sample; P50 equals that observation, not a five-run estimate.
+      All-Vulkan tuples have highest priority; Block precedes KSW2 within each compatible fixture group.
+      Compatible just_index generations are reused after READY/source/producer/k/w validation and PostgreSQL
+      restarts before each measurement. Deterministic FASTA and query-truth fixtures are reused for both
+      modes; no_index still loads base data untimed and includes transient index construction in measured
+      A. B=A minus the same-sample merged CIGAR/MAPQ interval union. Extra EXPLAIN/cache-off/vectorization-off
+      mapping controls are disabled. Measured-statement correctness, ordered match parity against same-host
+      minimap2, actual stages, prefilter-off and physical interval evidence remain required. OS filesystem
+      caches are uncontrolled. Never pool these observations with five-run results. Binary receipt br_5d9ef7df80a2edbd4efc10c14394445f;
+      same Vast.ai host supplies the minimap2 baseline.'
+resolved_execution_failures:
+- ordinal: 719
+  error: MCP run failed; retained fast-q1024-0719
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna4_k15_w10
+    alphabet: dna4
+    target_size_gbp: 2
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: execution_failed
+  phase: measured_statement
+  a_ns: null
+  b_ns: null
+  diagnostic: '[bench_e2e] MATRIX-SQL-FATAL status=server_error result_status=PGRES_FATAL_ERROR sqlstate=XX000
+    primary=Vulkan aligner execution failed detail=Vulkan canonical seed route: submit(grouped_soa_seed_only_count):
+    VkResult -4 hint=Selected Vulkan execution has no CPU fallback; fix the Vulkan runtime or select a
+    non-Vulkan algorithm before dispatch. connection=ERROR:  Vulkan aligner execution failed'
+  log_file: /tmp/bioseq_build_mcp_benchmark-e2e_20260923-023233.log
+  resolution: Passed q1024 after explicit GPU/CPU memory placement and query-union preparation optimizations
+  build_receipt_id: br_d6d60a517ccdb1af6e54e039c19f5d23
+- ordinal: 715
+  error: MCP run failed; retained fast-q1024-0715
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k15_w10","dna4",2,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna4_k15_w10
+    alphabet: dna4
+    target_size_gbp: 2
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: execution_failed
+  phase: measured_statement
+  a_ns: null
+  b_ns: null
+  diagnostic: '[bench_e2e] MATRIX-SQL-FATAL status=server_error result_status=PGRES_FATAL_ERROR sqlstate=XX000
+    primary=Vulkan aligner execution failed detail=Vulkan canonical seed route: submit(grouped_soa_seed_only_count):
+    VkResult -4 hint=Selected Vulkan execution has no CPU fallback; fix the Vulkan runtime or select a
+    non-Vulkan algorithm before dispatch. connection=ERROR:  Vulkan aligner execution failed'
+  log_file: /tmp/bioseq_build_mcp_benchmark-e2e_20260923-024315.log
+  resolution: Passed a later strictly audited q1024 measurement
+  build_receipt_id: br_d6d60a517ccdb1af6e54e039c19f5d23
+  report: /home/ubuntu/bioseqdb-native/reporting/bioseq_benchmark_e2e/report_42.json
+- ordinal: 799
+  error: MCP run failed; retained fast-q1024-0799
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna4_k20_w15
+    alphabet: dna4
+    target_size_gbp: 2
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: execution_failed
+  phase: measured_statement
+  a_ns: null
+  b_ns: null
+  diagnostic: '[bench_e2e] MATRIX-SQL-FATAL status=server_error result_status=PGRES_FATAL_ERROR sqlstate=XX000
+    primary=Vulkan aligner execution failed detail=Vulkan canonical seed route: submit(grouped_soa_seed_only_emit):
+    VkResult -4 hint=Selected Vulkan execution has no CPU fallback; fix the Vulkan runtime or select a
+    non-Vulkan algorithm before dispatch. connection=ERROR:  Vulkan aligner execution failed'
+  log_file: /tmp/bioseq_build_mcp_benchmark-e2e_20260923-030137.log
+  resolution: Passed a later strictly audited q1024 measurement
+  build_receipt_id: br_d6d60a517ccdb1af6e54e039c19f5d23
+  report: /home/ubuntu/bioseqdb-native/reporting/bioseq_benchmark_e2e/report_43.json
+- ordinal: 795
+  error: MCP run failed; retained fast-q1024-0795
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_2gbp_dna4_k20_w15","dna4",2,20,15,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_2gbp_dna4_k20_w15
+    alphabet: dna4
+    target_size_gbp: 2
+    kmer_size: 20
+    window_size: 15
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: execution_failed
+  phase: measured_statement
+  a_ns: null
+  b_ns: null
+  diagnostic: '[bench_e2e] MATRIX-SQL-FATAL status=server_error result_status=PGRES_FATAL_ERROR sqlstate=XX000
+    primary=Vulkan aligner execution failed detail=Vulkan canonical seed route: submit(grouped_soa_seed_only_emit):
+    VkResult -4 hint=Selected Vulkan execution has no CPU fallback; fix the Vulkan runtime or select a
+    non-Vulkan algorithm before dispatch. connection=ERROR:  Vulkan aligner execution failed'
+  log_file: /tmp/bioseq_build_mcp_benchmark-e2e_20260923-030949.log
+  resolution: Passed a later strictly audited q1024 measurement
+  build_receipt_id: br_d6d60a517ccdb1af6e54e039c19f5d23
+  report: /home/ubuntu/bioseqdb-native/reporting/bioseq_benchmark_e2e/report_44.json
+- ordinal: 1199
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","block_aligner"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna5_k15_w10
+    alphabet: dna5
+    target_size_gbp: 4
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: block_aligner
+  status: execution_failed
+  error: MCP run failed; retained fast-q1024-1199
+  a_ns: null
+  b_ns: null
+  log_file: /tmp/bioseq_build_mcp_benchmark-e2e_20260923-121139.log
+  reports: []
+  run_receipt_id: null
+  diagnostic: ''
+  resolution: Later sealed q1024 run completed with an audited capability rejection; no timing accepted
+  resolved_record_status: rejected
+  build_receipt_id: br_d6d60a517ccdb1af6e54e039c19f5d23
+  report: /home/ubuntu/bioseqdb-native/reporting/bioseq_benchmark_e2e/report_72.json
+- ordinal: 1195
+  stable_key: bioseq-e2e-cell-v2:["bioseq-e2e-algorithm-matrix-local-v1","matrix_4gbp_dna5_k15_w10","dna5",4,15,10,"just_index","bioseq","minimizers_per_sequence","vulkan_minimap_integer","vulkan_tiled_dynamic_programming","ksw2"]
+  identity:
+    campaign_id: bioseq-e2e-algorithm-matrix-local-v1
+    dataset: matrix_4gbp_dna5_k15_w10
+    alphabet: dna5
+    target_size_gbp: 4
+    kmer_size: 15
+    window_size: 10
+    index_mode: just_index
+    engine: bioseq
+    bioseq_index_name: minimizers_per_sequence
+    requested_minimizer_algorithm: vulkan_minimap_integer
+    requested_chaining_algorithm: vulkan_tiled_dynamic_programming
+    requested_base_alignment_algorithm: ksw2
+  status: execution_failed
+  error: MCP run failed; retained fast-q1024-1195
+  a_ns: null
+  b_ns: null
+  log_file: /tmp/bioseq_build_mcp_benchmark-e2e_20260923-121251.log
+  reports: []
+  run_receipt_id: null
+  diagnostic: ''
+  resolution: Later sealed q1024 run completed with an audited capability rejection; no timing accepted
+  resolved_record_status: rejected
+  build_receipt_id: br_d6d60a517ccdb1af6e54e039c19f5d23
+  report: /home/ubuntu/bioseqdb-native/reporting/bioseq_benchmark_e2e/report_73.json
+shutdown_source_checkpoint:
+  commit: 937852cc61c15b7d8b669dd83cdc1ad9516dc8fc
+  branch: refactor/start-massive-refactor-checkpoint-3
+  includes: FAST fixture reuse, discrete GPU memory fixes, large MPS buffer windows, exact per-window
+    receipts, reproduction configs
+  build_validation: Final frontend audit correction rebuild stopped at user request; this source checkpoint
+    has not passed full q1024 verification.
+  mps_window_fix_evidence:
+    q2: Passed on br_d9dbe036ce51c67042c458017b833367; two correct results with GPU seed and chaining.
+    full_size_seed: 4G DNA4 k20/w15; 6,001,678,736 control bytes; bounded GPU seed operation completed,
+      then the one-dispatch frontend audit rejected it.
+    last_completed_build_receipt: br_146896a539bf284e7c0cd5fee1bef6c9
+    latest_correction: Frontend audit now matches exact completed window count; rebuild and full q1024
+      rerun remain pending.
+    accepted_q1024_rows_from_window_fix: 0
+    added_regression_tests: Not run before shutdown.
+  timing_policy: Previously accepted tuple observations and their original build receipts are preserved;
+    incomplete debug runs are not accepted measurements.
+  artifact_backup: reporting/bioseq_benchmark_e2e/vastai/native/

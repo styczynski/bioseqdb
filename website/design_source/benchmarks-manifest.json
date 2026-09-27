@@ -1,0 +1,8 @@
+{
+  "_comment": "The website build replaces this configuration-only design projection with a generated same-origin index of validated repository benchmark artifacts.",
+  "sources": [
+    "benchmark-data/alignment_benchmark_configuration.json",
+    "benchmark-data/bench_e2e_configuration.json",
+    "benchmark-data/io_benchmark_configuration.json"
+  ]
+}

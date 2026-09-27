@@ -1,8 +1,0 @@
-{
-  "schema": "bioseq.website.manifest/v1",
-  "hash_algorithm": "sha256",
-  "version": "v0.1",
-  "base_path": "/",
-  "note": "Test fixture manifest. validate_site.py binds its stamp to the SHA-256 of this file; it is not required to enumerate the fixture files.",
-  "outputs": []
-}

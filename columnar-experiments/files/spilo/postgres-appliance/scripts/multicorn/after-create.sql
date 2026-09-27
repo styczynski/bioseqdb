@@ -1,1 +1,0 @@
-GRANT USAGE ON FOREIGN DATA WRAPPER multicorn TO admin;

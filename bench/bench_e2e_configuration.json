@@ -1,0 +1,992 @@
+{
+  "params": {
+    "bioseq_ksw2_scalar_dp_scalar_mm_no_index": {
+      "_": {"type": "integer", "default": 0, "description": "bioseq scalar minimizer sketch + scalar DP chaining/backtracking + KSW2; base target loaded untimed without a minimizer sidecar, PostgreSQL restarted, then transient exact index construction + mapping timed"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "transient minimizer-index policy selected after validating both persisted policies absent"},
+      "recompute_async_persistence": {"type": "string", "default": "off", "enum": ["off"], "description": "standard cold no-index measurements forbid async persistence; use a separately named diagnostic case"},
+      "pipeline_mode": {"type": "string", "default": "single_thread", "enum": ["single_thread", "parallel_dispatch", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL recompute path"}
+    },
+    "bioseq_ksw2_scalar_dp_scalar_mm_just_index": {
+      "_": {"type": "integer", "default": 0, "description": "bioseq scalar minimizer sketch + scalar DP chaining/backtracking + KSW2; index prebuilt untimed, then assembled cold from PostgreSQL storage and mapped after a PostgreSQL restart"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"},
+      "pipeline_mode": {"type": "string", "default": "single_thread", "enum": ["single_thread", "parallel_dispatch", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL persisted-index read path"}
+    },
+    "bioseq_block_simd_dp_two_stack_nthash_no_index": {
+      "_": {"type": "integer", "default": 0, "description": "bioseq block aligner + SIMD-mm2 chaining + two-stack nthash; base target loaded untimed without a minimizer sidecar, PostgreSQL restarted, then transient exact index construction + mapping timed"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "transient minimizer-index policy selected after validating both persisted policies absent"},
+      "recompute_async_persistence": {"type": "string", "default": "off", "enum": ["off"], "description": "standard cold no-index measurements forbid async persistence; use a separately named diagnostic case"},
+      "pipeline_mode": {"type": "string", "default": "single_thread", "enum": ["single_thread", "parallel_dispatch", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL recompute path"}
+    },
+    "bioseq_block_simd_dp_two_stack_nthash_just_index": {
+      "_": {"type": "integer", "default": 0, "description": "bioseq block aligner + SIMD-mm2 chaining + two-stack nthash minimizer; index prebuilt (untimed); assemble align via SQL, timed (cold read after a PostgreSQL restart)"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"},
+      "pipeline_mode": {"type": "string", "default": "single_thread", "enum": ["single_thread", "parallel_dispatch", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL persisted-index read path"}
+    },
+    "bioseq_block_gpu_dp_gpu_seed_just_index": {
+      "_": {"type": "integer", "default": 0, "description": "Resident GPU-index frontend (Vulkan GPU seeding + tiled-DP chaining + block aligner); index prebuilt (untimed); GPU-driven alignment via SQL, timed (cold read after a PostgreSQL restart)"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"},
+      "pipeline_mode": {"type": "string", "default": "single_thread", "enum": ["single_thread", "parallel_dispatch", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL persisted-index read path"}
+    },
+    "bioseq_block_gpu_dp_gpu_seed_no_index": {
+      "_": {"type": "integer", "default": 0, "description": "Resident GPU-index frontend; base target loaded untimed without a minimizer sidecar, PostgreSQL restarted, then transient exact GPU index construction + mapping timed"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "transient minimizer-index policy selected after validating both persisted policies absent"},
+      "recompute_async_persistence": {"type": "string", "default": "off", "enum": ["off"], "description": "standard cold no-index measurements forbid async persistence; use a separately named diagnostic case"},
+      "pipeline_mode": {"type": "string", "default": "single_thread", "enum": ["single_thread", "parallel_dispatch", "task_parallel"], "description": "Scheduler concurrency mode for the bioseq SQL recompute path"}
+    },
+    "minimap2_no_index": {
+      "_": {"type": "integer", "default": 0, "description": "minimap2 rebuild-each (build+map) on split FASTA"},
+      "threads": {"type": "integer", "default": 0, "description": "minimap2 -t value; 0 requires exact parity with the live bioseq scheduler max_threads"}
+    },
+    "minimap2_just_index": {
+      "_": {"type": "integer", "default": 0, "description": "minimap2 prebuilt .mmi (map only)"},
+      "threads": {"type": "integer", "default": 0, "description": "minimap2 -t value; 0 requires exact parity with the live bioseq scheduler max_threads"}
+    }
+  },
+
+  "test_cases": {
+    "E2E_2GBP_DNA4": { "concurrency": 1, "data": {
+        "alphabet": "dna4", "size_label": "2gbp_dna4", "reference_length": 2000000000,
+        "fragment_count": 16, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "cigar_projection": true, "just_index_setup_only": "minimizers_per_fragment",
+        "minimap2_split_bp": 2000000352, "seed": 3219876 },
+      "description": "dna4 2 Gbp reference, 16 independent ~5 Mbp HiFi-error query rows through BioseqBatchJoin (fixed seed)" },
+
+    "E2E_2GBP_DNA5": { "concurrency": 1, "data": {
+        "alphabet": "dna5", "size_label": "2gbp_dna5", "reference_length": 2000000000,
+        "fragment_count": 16, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "cigar_projection": true, "just_index_setup_only": "minimizers_per_fragment",
+        "minimap2_split_bp": 2000000352, "seed": 3219876 },
+      "description": "dna5 2 Gbp reference with deterministic N bases and 16 query rows; same biological parameters as dna4" },
+
+    "E2E_4GBP_DNA4": { "concurrency": 1, "data": {
+        "alphabet": "dna4", "size_label": "4gbp_dna4", "reference_length": 4000000000,
+        "fragment_count": 16, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "cigar_projection": true, "just_index_setup_only": "minimizers_per_fragment",
+        "minimap2_split_bp": 2000000352, "seed": 3219876 },
+      "description": "dna4 4 Gbp reference, 16 independent ~5 Mbp query rows; minimap2 ref split into two records" },
+
+    "E2E_4GBP_DNA5": { "concurrency": 1, "data": {
+        "alphabet": "dna5", "size_label": "4gbp_dna5", "reference_length": 4000000000,
+        "fragment_count": 16, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "cigar_projection": true, "just_index_setup_only": "minimizers_per_fragment",
+        "minimap2_split_bp": 2000000352, "seed": 3219876 },
+      "description": "dna5 4 Gbp reference with deterministic N bases and 16 query rows; same biological parameters as dna4" }
+    ,
+    "E2E_GPU_BATCH_16_300M_SEG_COORD": { "concurrency": 1, "data": {
+        "alphabet": "dna4", "size_label": "gpu_batch16_300m_seg_coord", "reference_length": 300000000,
+        "fragment_count": 16, "fragment_length_mean": 20000, "fragment_length_stddev": 500,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 300000000, "skip_index_baseline_setup": true,
+        "skip_minimap2_baseline_setup": true, "cigar_projection": true,
+        "seed": 4213016 },
+      "description": "16 dna4 query-table rows against one physical 300 Mbp bioseq target; default full-pipeline validation case where BioseqBatchJoin must run selected Vulkan GPU seeding, chaining, and final alignment with zero CPU/SIMD fallback and zero Vulkan declines" }
+    ,
+    "E2E_GPU_BATCH_4096_BOUNDED_CIGAR": { "concurrency": 1, "data": {
+        "alphabet": "dna4", "size_label": "gpu_batch4096_bounded_cigar", "reference_length": 8192,
+        "fragment_count": 4096, "fragment_length_mean": 128, "fragment_length_stddev": 4,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 8192, "skip_index_baseline_setup": true,
+        "skip_minimap2_baseline_setup": true, "cigar_projection": true,
+        "seed": 4218096 },
+      "description": "4096 dna4 query-table rows against one physical target with <=512 bp alignment spans; default BioseqBatchJoin validation case where selected Vulkan GPU CIGAR/final-alignment dispatch must run with exact CIGAR correctness" }
+  },
+
+  "bench_e2e": {
+    "tags": ["e2e", "main", "accelerator-comparison", "cold-index"],
+    "description": "Default three-repeat 2/4 Gbp E2E comparison: all-SIMD CPU, all-GPU, and minimap2 cells in both cold no-index and cold just-index modes. Bioseq no_index loads base target data untimed with every minimizer sidecar absent, restarts PostgreSQL, then times transient index construction + mapping only. just_index prebuilds the index untimed, restarts PostgreSQL, then times cold index read + mapping. minimap2 keeps its CLI build+map/map-only semantics.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "iteration_order": { "mode": "interleaved_seeded", "seed": 370 },
+    "matrix": {
+      "for": { "E2E_2GBP_DNA4": 3, "E2E_2GBP_DNA5": 3,
+               "E2E_4GBP_DNA4": 3, "E2E_4GBP_DNA5": 3 },
+      "over": {
+        "bioseq_block_simd_dp_two_stack_nthash_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
+        "bioseq_block_simd_dp_two_stack_nthash_just_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
+        "bioseq_block_gpu_dp_gpu_seed_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
+        "bioseq_block_gpu_dp_gpu_seed_just_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
+        "minimap2_no_index": {"threads": [0]},
+        "minimap2_just_index": {"threads": [0]}
+      },
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "bioseq_block_simd_dp_two_stack_nthash_no_index",
+          "bioseq_block_simd_dp_two_stack_nthash_just_index",
+          "bioseq_block_gpu_dp_gpu_seed_no_index",
+          "bioseq_block_gpu_dp_gpu_seed_just_index",
+          "minimap2_no_index",
+          "minimap2_just_index"
+        ],
+        "exact_test_case_iterations": {
+          "E2E_2GBP_DNA4": 3,
+          "E2E_2GBP_DNA5": 3,
+          "E2E_4GBP_DNA4": 3,
+          "E2E_4GBP_DNA5": 3
+        },
+        "require_named_region_iteration_coverage": false,
+        "exact_named_region_sample_multiplicities": []
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns":   { "rules": [] },
+        "region_total_ns": { "type": "region", "rules": [] },
+        "region_visits":   { "type": "region", "rules": [] },
+        "match_count":            { "type": "evaluation" },
+        "expected_match_count":   { "type": "evaluation", "rules": [] },
+        "correct_match_count":    { "type": "evaluation", "rules": [] },
+        "cigar_result_count":     { "type": "evaluation", "rules": [] },
+        "correct_cigar_count":    { "type": "evaluation", "rules": [] },
+        "mean_position_offset_bp":{ "type": "evaluation", "rules": [] },
+        "max_position_offset_bp": { "type": "evaluation", "rules": [] },
+        "found_fraction":         { "type": "evaluation", "rules": [] },
+        "pipeline_validation_present": { "type": "evaluation", "rules": [] },
+        "pipeline_validation_attached_to_measurement": { "type": "evaluation", "rules": [] },
+        "pipeline_validation_accepted": { "type": "evaluation", "rules": [] },
+        "stage_engine_matrix_valid": { "type": "evaluation", "rules": [] },
+        "effective_cpu_workers": { "type": "evaluation", "rules": [] },
+        "comparison_cpu_workers": { "type": "evaluation", "rules": [] },
+        "worker_parity": { "type": "evaluation", "rules": [] },
+        "alignment_scan_node_count": { "type": "evaluation", "rules": [] },
+        "nested_alignment_executor_count": { "type": "evaluation", "rules": [] },
+        "alignment_completed": { "type": "evaluation", "rules": [] },
+        "alignment_partial": { "type": "evaluation", "rules": [] },
+        "alignment_fully_drained": { "type": "evaluation", "rules": [] },
+        "persisted_generation_id": { "type": "evaluation", "rules": [] },
+        "pre_restart_persisted_gpu_abi_version": { "type": "evaluation", "rules": [] },
+        "persisted_manifest_rows_read": { "type": "evaluation", "rules": [] },
+        "persisted_manifest_bytes_read": { "type": "evaluation", "rules": [] },
+        "persisted_format5_manifest_contract_valid": { "type": "evaluation", "rules": [] },
+        "persisted_grouped_soa_layout": { "type": "evaluation", "rules": [] },
+        "persisted_generation_read_sessions": { "type": "evaluation", "rules": [] },
+        "persisted_relation_opens": { "type": "evaluation", "rules": [] },
+        "persisted_index_scans": { "type": "evaluation", "rules": [] },
+        "persisted_source_identity_present": { "type": "evaluation", "rules": [] },
+        "gpu_environment_present": { "type": "evaluation", "rules": [] },
+        "gpu_pipeline_cache_seed_size": { "type": "evaluation", "rules": [] },
+        "gpu_pipeline_cache_hit": { "type": "evaluation", "rules": [] },
+        "requested_backend_scalar_cpu": { "type": "evaluation", "rules": [] },
+        "requested_backend_simd_cpu": { "type": "evaluation", "rules": [] },
+        "requested_backend_vulkan_gpu": { "type": "evaluation", "rules": [] },
+        "requested_backend_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "actual_backend_scalar_cpu": { "type": "evaluation", "rules": [] },
+        "actual_backend_simd_cpu": { "type": "evaluation", "rules": [] },
+        "actual_backend_vulkan_gpu": { "type": "evaluation", "rules": [] },
+        "actual_backend_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "requested_target_index_source_recomputed": { "type": "evaluation", "rules": [] },
+        "requested_target_index_source_persisted": { "type": "evaluation", "rules": [] },
+        "requested_target_index_source_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "actual_target_index_source_recomputed": { "type": "evaluation", "rules": [] },
+        "actual_target_index_source_persisted": { "type": "evaluation", "rules": [] },
+        "actual_target_index_source_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "simd_stats_schema_valid": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_none": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_exact_visited": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_none": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_exact_visited": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "nthash_vector_batches": { "type": "evaluation", "rules": [] },
+        "nthash_resident_vector_stream_kernel_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_exact_policy_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_policy_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_score_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_cutoff_stops": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_candidates_skipped": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_rejections": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_stats_saturated": { "type": "evaluation", "rules": [] },
+        "attempted_alignment_jobs": { "type": "evaluation", "rules": [] },
+        "fully_attested_alignment_jobs": { "type": "evaluation", "rules": [] },
+        "unattested_alignment_jobs": { "type": "evaluation", "rules": [] },
+        "first_unattested_target_row": { "type": "evaluation", "rules": [] },
+        "first_unattested_query_ordinal": { "type": "evaluation", "rules": [] },
+        "environment_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "mixed_persisted_identity": { "type": "evaluation", "rules": [] },
+        "operational_identity_conflict": { "type": "evaluation", "rules": [] },
+        "stats_saturated": { "type": "evaluation", "rules": [] },
+        "target_rows": { "type": "evaluation", "rules": [] },
+        "persisted_index_rows": { "type": "evaluation", "rules": [] },
+        "missing_persisted_index_rows": { "type": "evaluation", "rules": [] },
+        "recomputed_target_index_rows": { "type": "evaluation", "rules": [] },
+        "cold_index_schema_valid": { "type": "evaluation", "rules": [] },
+        "cold_index_route_empty": { "type": "evaluation", "rules": [] },
+        "cold_index_route_selective": { "type": "evaluation", "rules": [] },
+        "cold_index_route_full": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_requested": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_delivered": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_scanned": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_skipped": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_requested": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_delivered": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_scanned": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_capacity_accounting_passes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_global_position_storage_preparations": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_global_position_storage_allocations": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_position_append_growth_reservations": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_retained_position_count": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_retained_position_capacity": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_directory_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_query_hash_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_query_record_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_ordinal_route_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_selected_extent_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_current_selected_control_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_global_position_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_control_payload_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_owned_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_admitted_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_exact_position_image_checks": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_exact_position_image_failures": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_retained_layout_checks": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_retained_layout_failures": { "type": "evaluation", "rules": [] },
+        "are_grouped_soa_reader_memory_stats_saturated": { "type": "evaluation", "rules": [] },
+        "gpu_seed_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_chain_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_chain_backtrack_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_extend_dispatches": { "type": "evaluation", "rules": [] },
+        "backend_declines": { "type": "evaluation", "rules": [] },
+        "backend_fallbacks": { "type": "evaluation", "rules": [] },
+        "query_sketch_host_wall_ns": { "type": "evaluation", "rules": [] },
+        "target_index_build_host_wall_ns": { "type": "evaluation", "rules": [] },
+        "host_query_hash_readbacks": { "type": "evaluation", "rules": [] },
+        "host_query_symbol_packing_calls": { "type": "evaluation", "rules": [] },
+        "host_target_symbol_packing_calls": { "type": "evaluation", "rules": [] },
+        "host_alignment_job_classification_calls": { "type": "evaluation", "rules": [] },
+        "host_cigar_construction_calls": { "type": "evaluation", "rules": [] },
+        "measured_region_ns_manual": { "type": "evaluation", "rules": [] },
+        "peak_postgres_rss_mb":   { "type": "evaluation", "rules": [] },
+        "peak_minimap2_rss_mb":   { "type": "evaluation", "rules": [] },
+        "peak_bench_rss_mb":      { "type": "evaluation", "rules": [] },
+        "min_tmp_available_gib":  { "type": "evaluation", "rules": [] },
+        "peak_swap_used_mb":      { "type": "evaluation", "rules": [] },
+        "just_index_restart_performed": { "type": "evaluation", "rules": [] },
+        "just_index_restart_identity_changed": { "type": "evaluation", "rules": [] },
+        "persisted_policy_audit_accepted": { "type": "evaluation", "rules": [] },
+        "cold_no_index_restart_performed": { "type": "evaluation", "rules": [] },
+        "cold_no_index_restart_identity_changed": { "type": "evaluation", "rules": [] },
+        "cold_no_index_pre_restart_target_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_post_restart_target_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_pre_restart_minimizer_fragment_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_pre_restart_minimizer_sequence_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_post_restart_minimizer_fragment_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_post_restart_minimizer_sequence_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_pre_restart_async_jobs": { "type": "evaluation", "rules": [] },
+        "cold_no_index_post_restart_async_jobs": { "type": "evaluation", "rules": [] },
+        "cold_no_index_pre_restart_gucs_off": { "type": "evaluation", "rules": [] },
+        "cold_no_index_post_restart_gucs_off": { "type": "evaluation", "rules": [] },
+        "cold_no_index_lifecycle_accepted": { "type": "evaluation", "rules": [] },
+        "audit_selected_minimizer_is_sequence": { "type": "evaluation", "rules": [] },
+        "audit_minimizer_fragment_rows":         { "type": "evaluation", "rules": [] },
+        "audit_minimizer_sequence_rows":         { "type": "evaluation", "rules": [] },
+        "audit_minimizer_fragment_update_on_insert": { "type": "evaluation", "rules": [] },
+        "audit_minimizer_sequence_update_on_insert": { "type": "evaluation", "rules": [] },
+        "audit_minimizer_fragment_active_read":  { "type": "evaluation", "rules": [] },
+        "audit_minimizer_sequence_active_read":  { "type": "evaluation", "rules": [] },
+        "audit_async_persist_jobs_waiting": { "type": "evaluation", "rules": [] },
+        "audit_index_rows_wait_attempts": { "type": "evaluation", "rules": [] }
+      }
+    }
+  },
+
+  "bench_e2e_signoff": {
+    "tags": [
+      "e2e",
+      "signoff",
+      "accelerator-comparison",
+      "cold-index"
+    ],
+    "description": "Five-repeat sign-off 2/4 Gbp E2E comparison with the same exact all-SIMD CPU, all-GPU, and minimap2 cells and cold-index semantics as bench_e2e.",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 370
+    },
+    "matrix": {
+      "for": {
+        "E2E_2GBP_DNA4": 5,
+        "E2E_2GBP_DNA5": 5,
+        "E2E_4GBP_DNA4": 5,
+        "E2E_4GBP_DNA5": 5
+      },
+      "over": {
+        "bioseq_block_simd_dp_two_stack_nthash_no_index": {
+          "minimizer_index": [
+            "minimizers_per_fragment"
+          ],
+          "pipeline_mode": [
+            "task_parallel"
+          ]
+        },
+        "bioseq_block_simd_dp_two_stack_nthash_just_index": {
+          "minimizer_index": [
+            "minimizers_per_fragment"
+          ],
+          "pipeline_mode": [
+            "task_parallel"
+          ]
+        },
+        "bioseq_block_gpu_dp_gpu_seed_no_index": {
+          "minimizer_index": [
+            "minimizers_per_fragment"
+          ],
+          "pipeline_mode": [
+            "task_parallel"
+          ]
+        },
+        "bioseq_block_gpu_dp_gpu_seed_just_index": {
+          "minimizer_index": [
+            "minimizers_per_fragment"
+          ],
+          "pipeline_mode": [
+            "task_parallel"
+          ]
+        },
+        "minimap2_no_index": {
+          "threads": [
+            0
+          ]
+        },
+        "minimap2_just_index": {
+          "threads": [
+            0
+          ]
+        }
+      },
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "bioseq_block_simd_dp_two_stack_nthash_no_index",
+          "bioseq_block_simd_dp_two_stack_nthash_just_index",
+          "bioseq_block_gpu_dp_gpu_seed_no_index",
+          "bioseq_block_gpu_dp_gpu_seed_just_index",
+          "minimap2_no_index",
+          "minimap2_just_index"
+        ],
+        "exact_test_case_iterations": {
+          "E2E_2GBP_DNA4": 5,
+          "E2E_2GBP_DNA5": 5,
+          "E2E_4GBP_DNA4": 5,
+          "E2E_4GBP_DNA5": 5
+        },
+        "require_named_region_iteration_coverage": false,
+        "exact_named_region_sample_multiplicities": []
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": []
+        },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "region_visits": {
+          "type": "region",
+          "rules": []
+        },
+        "match_count": {
+          "type": "evaluation"
+        },
+        "expected_match_count": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "correct_match_count": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cigar_result_count": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "correct_cigar_count": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "mean_position_offset_bp": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "max_position_offset_bp": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "found_fraction": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "pipeline_validation_present": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "pipeline_validation_attached_to_measurement": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "pipeline_validation_accepted": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "stage_engine_matrix_valid": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "effective_cpu_workers": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "comparison_cpu_workers": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "worker_parity": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "alignment_scan_node_count": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "nested_alignment_executor_count": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "alignment_completed": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "alignment_partial": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "alignment_fully_drained": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_generation_id": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "pre_restart_persisted_gpu_abi_version": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_manifest_rows_read": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_manifest_bytes_read": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_format5_manifest_contract_valid": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_grouped_soa_layout": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_generation_read_sessions": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_relation_opens": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_index_scans": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_source_identity_present": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "gpu_environment_present": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "gpu_pipeline_cache_seed_size": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "gpu_pipeline_cache_hit": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "requested_backend_scalar_cpu": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "requested_backend_simd_cpu": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "requested_backend_vulkan_gpu": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "requested_backend_mixed_invalid": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "actual_backend_scalar_cpu": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "actual_backend_simd_cpu": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "actual_backend_vulkan_gpu": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "actual_backend_mixed_invalid": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "requested_target_index_source_recomputed": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "requested_target_index_source_persisted": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "requested_target_index_source_mixed_invalid": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "actual_target_index_source_recomputed": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "actual_target_index_source_persisted": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "actual_target_index_source_mixed_invalid": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "simd_stats_schema_valid": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_none": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_exact_visited": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
+        "requested_simd_policy_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_none": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_exact_visited": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_bounded_batch_approximate": { "type": "evaluation", "rules": [] },
+        "observed_simd_policy_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "nthash_vector_batches": { "type": "evaluation", "rules": [] },
+        "nthash_resident_vector_stream_kernel_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_exact_policy_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_policy_calls": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_score_batches": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_cutoff_stops": { "type": "evaluation", "rules": [] },
+        "simd_chaining_bounded_candidates_skipped": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_rejections": { "type": "evaluation", "rules": [] },
+        "simd_chaining_policy_stats_saturated": { "type": "evaluation", "rules": [] },
+        "attempted_alignment_jobs": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "fully_attested_alignment_jobs": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "unattested_alignment_jobs": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "first_unattested_target_row": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "first_unattested_query_ordinal": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "environment_mixed_invalid": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "mixed_persisted_identity": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "operational_identity_conflict": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "stats_saturated": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "target_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_index_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "missing_persisted_index_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "recomputed_target_index_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_index_schema_valid": { "type": "evaluation", "rules": [] },
+        "cold_index_route_empty": { "type": "evaluation", "rules": [] },
+        "cold_index_route_selective": { "type": "evaluation", "rules": [] },
+        "cold_index_route_full": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_requested": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_delivered": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_scanned": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_rows_skipped": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_requested": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_delivered": { "type": "evaluation", "rules": [] },
+        "cold_index_payload_bytes_scanned": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_capacity_accounting_passes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_global_position_storage_preparations": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_global_position_storage_allocations": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_position_append_growth_reservations": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_retained_position_count": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_retained_position_capacity": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_directory_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_query_hash_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_query_record_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_ordinal_route_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_selected_extent_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_current_selected_control_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_global_position_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_control_payload_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_owned_capacity_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_admitted_bytes": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_exact_position_image_checks": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_exact_position_image_failures": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_retained_layout_checks": { "type": "evaluation", "rules": [] },
+        "grouped_soa_reader_retained_layout_failures": { "type": "evaluation", "rules": [] },
+        "are_grouped_soa_reader_memory_stats_saturated": { "type": "evaluation", "rules": [] },
+        "gpu_seed_dispatches": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "gpu_chain_dispatches": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "gpu_chain_backtrack_dispatches": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "gpu_extend_dispatches": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "backend_declines": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "backend_fallbacks": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "query_sketch_host_wall_ns": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "target_index_build_host_wall_ns": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "host_query_hash_readbacks": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "host_query_symbol_packing_calls": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "host_target_symbol_packing_calls": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "host_alignment_job_classification_calls": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "host_cigar_construction_calls": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "measured_region_ns_manual": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "peak_postgres_rss_mb": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "peak_minimap2_rss_mb": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "peak_bench_rss_mb": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "min_tmp_available_gib": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "peak_swap_used_mb": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "just_index_restart_performed": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "just_index_restart_identity_changed": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "persisted_policy_audit_accepted": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_restart_performed": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_restart_identity_changed": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_pre_restart_target_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_post_restart_target_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_pre_restart_minimizer_fragment_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_pre_restart_minimizer_sequence_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_post_restart_minimizer_fragment_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_post_restart_minimizer_sequence_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_pre_restart_async_jobs": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_post_restart_async_jobs": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_pre_restart_gucs_off": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_post_restart_gucs_off": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "cold_no_index_lifecycle_accepted": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "audit_selected_minimizer_is_sequence": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "audit_minimizer_fragment_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "audit_minimizer_sequence_rows": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "audit_minimizer_fragment_update_on_insert": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "audit_minimizer_sequence_update_on_insert": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "audit_minimizer_fragment_active_read": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "audit_minimizer_sequence_active_read": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "audit_async_persist_jobs_waiting": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "audit_index_rows_wait_attempts": {
+          "type": "evaluation",
+          "rules": []
+        }
+      }
+    }
+  },
+
+
+  "bench_e2e_gpu_batch_validation": {
+    "tags": ["e2e", "gpu", "gpu_batch_validation", "comparison"],
+    "description": "Focused non-rejection comparison for the selected all-GPU path. One physical bioseq target joins a bounded query table through BioseqBatchJoin; target bytes are never duplicated to manufacture a batch. The GPU row is accepted only when the Vulkan batch branch is taken, CPU/SIMD fallback rows are zero, Vulkan declines are zero, and every query maps correctly.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "iteration_order": { "mode": "interleaved_seeded", "seed": 370 },
+    "matrix": {
+      "for": {
+        "E2E_GPU_BATCH_16_300M_SEG_COORD": 1,
+        "E2E_GPU_BATCH_4096_BOUNDED_CIGAR": 1
+      },
+      "over": {
+        "bioseq_block_simd_dp_two_stack_nthash_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
+        "bioseq_block_gpu_dp_gpu_seed_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["task_parallel"]},
+        "minimap2_no_index": {"threads": [0]}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": { "rules": [] },
+        "region_total_ns": { "type": "region", "rules": [] },
+        "region_visits": { "type": "region", "rules": [] },
+        "match_count": { "type": "evaluation", "rules": [] },
+        "expected_match_count": { "type": "evaluation", "rules": [] },
+        "correct_match_count": { "type": "evaluation", "rules": [] },
+        "cigar_result_count": { "type": "evaluation", "rules": [] },
+        "correct_cigar_count": { "type": "evaluation", "rules": [] },
+        "found_fraction": { "type": "evaluation", "rules": [] },
+        "mean_position_offset_bp": { "type": "evaluation", "rules": [] },
+        "max_position_offset_bp": { "type": "evaluation", "rules": [] },
+        "pipeline_validation_present": { "type": "evaluation", "rules": [] },
+        "pipeline_validation_attached_to_measurement": { "type": "evaluation", "rules": [] },
+        "pipeline_validation_accepted": { "type": "evaluation", "rules": [] },
+        "stage_engine_matrix_valid": { "type": "evaluation", "rules": [] },
+        "effective_cpu_workers": { "type": "evaluation", "rules": [] },
+        "comparison_cpu_workers": { "type": "evaluation", "rules": [] },
+        "worker_parity": { "type": "evaluation", "rules": [] },
+        "alignment_scan_node_count": { "type": "evaluation", "rules": [] },
+        "nested_alignment_executor_count": { "type": "evaluation", "rules": [] },
+        "alignment_completed": { "type": "evaluation", "rules": [] },
+        "alignment_partial": { "type": "evaluation", "rules": [] },
+        "alignment_fully_drained": { "type": "evaluation", "rules": [] },
+        "persisted_generation_id": { "type": "evaluation", "rules": [] },
+        "pre_restart_persisted_gpu_abi_version": { "type": "evaluation", "rules": [] },
+        "persisted_manifest_rows_read": { "type": "evaluation", "rules": [] },
+        "persisted_manifest_bytes_read": { "type": "evaluation", "rules": [] },
+        "persisted_format5_manifest_contract_valid": { "type": "evaluation", "rules": [] },
+        "persisted_grouped_soa_layout": { "type": "evaluation", "rules": [] },
+        "persisted_source_identity_present": { "type": "evaluation", "rules": [] },
+        "gpu_environment_present": { "type": "evaluation", "rules": [] },
+        "gpu_pipeline_cache_seed_size": { "type": "evaluation", "rules": [] },
+        "gpu_pipeline_cache_hit": { "type": "evaluation", "rules": [] },
+        "requested_backend_scalar_cpu": { "type": "evaluation", "rules": [] },
+        "requested_backend_simd_cpu": { "type": "evaluation", "rules": [] },
+        "requested_backend_vulkan_gpu": { "type": "evaluation", "rules": [] },
+        "requested_backend_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "actual_backend_scalar_cpu": { "type": "evaluation", "rules": [] },
+        "actual_backend_simd_cpu": { "type": "evaluation", "rules": [] },
+        "actual_backend_vulkan_gpu": { "type": "evaluation", "rules": [] },
+        "actual_backend_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "requested_target_index_source_recomputed": { "type": "evaluation", "rules": [] },
+        "requested_target_index_source_persisted": { "type": "evaluation", "rules": [] },
+        "requested_target_index_source_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "actual_target_index_source_recomputed": { "type": "evaluation", "rules": [] },
+        "actual_target_index_source_persisted": { "type": "evaluation", "rules": [] },
+        "actual_target_index_source_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "attempted_alignment_jobs": { "type": "evaluation", "rules": [] },
+        "fully_attested_alignment_jobs": { "type": "evaluation", "rules": [] },
+        "unattested_alignment_jobs": { "type": "evaluation", "rules": [] },
+        "first_unattested_target_row": { "type": "evaluation", "rules": [] },
+        "first_unattested_query_ordinal": { "type": "evaluation", "rules": [] },
+        "environment_mixed_invalid": { "type": "evaluation", "rules": [] },
+        "mixed_persisted_identity": { "type": "evaluation", "rules": [] },
+        "operational_identity_conflict": { "type": "evaluation", "rules": [] },
+        "stats_saturated": { "type": "evaluation", "rules": [] },
+        "target_rows": { "type": "evaluation", "rules": [] },
+        "persisted_index_rows": { "type": "evaluation", "rules": [] },
+        "missing_persisted_index_rows": { "type": "evaluation", "rules": [] },
+        "recomputed_target_index_rows": { "type": "evaluation", "rules": [] },
+        "gpu_seed_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_chain_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_chain_backtrack_dispatches": { "type": "evaluation", "rules": [] },
+        "gpu_extend_dispatches": { "type": "evaluation", "rules": [] },
+        "backend_declines": { "type": "evaluation", "rules": [] },
+        "backend_fallbacks": { "type": "evaluation", "rules": [] },
+        "query_sketch_host_wall_ns": { "type": "evaluation", "rules": [] },
+        "target_index_build_host_wall_ns": { "type": "evaluation", "rules": [] },
+        "host_query_hash_readbacks": { "type": "evaluation", "rules": [] },
+        "host_query_symbol_packing_calls": { "type": "evaluation", "rules": [] },
+        "host_target_symbol_packing_calls": { "type": "evaluation", "rules": [] },
+        "host_alignment_job_classification_calls": { "type": "evaluation", "rules": [] },
+        "host_cigar_construction_calls": { "type": "evaluation", "rules": [] },
+        "cold_no_index_restart_performed": { "type": "evaluation", "rules": [] },
+        "cold_no_index_restart_identity_changed": { "type": "evaluation", "rules": [] },
+        "cold_no_index_pre_restart_target_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_post_restart_target_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_pre_restart_minimizer_fragment_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_pre_restart_minimizer_sequence_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_post_restart_minimizer_fragment_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_post_restart_minimizer_sequence_rows": { "type": "evaluation", "rules": [] },
+        "cold_no_index_pre_restart_async_jobs": { "type": "evaluation", "rules": [] },
+        "cold_no_index_post_restart_async_jobs": { "type": "evaluation", "rules": [] },
+        "cold_no_index_pre_restart_gucs_off": { "type": "evaluation", "rules": [] },
+        "cold_no_index_post_restart_gucs_off": { "type": "evaluation", "rules": [] },
+        "cold_no_index_lifecycle_accepted": { "type": "evaluation", "rules": [] },
+        "measured_region_ns_manual": { "type": "evaluation", "rules": [] },
+        "peak_postgres_rss_mb": { "type": "evaluation", "rules": [] },
+        "peak_minimap2_rss_mb": { "type": "evaluation", "rules": [] },
+        "peak_bench_rss_mb": { "type": "evaluation", "rules": [] },
+        "min_tmp_available_gib": { "type": "evaluation", "rules": [] },
+        "peak_swap_used_mb": { "type": "evaluation", "rules": [] }
+      }
+    }
+  },
+
+  "regression_rules": []
+}

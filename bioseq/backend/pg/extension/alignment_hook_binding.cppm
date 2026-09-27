@@ -1,0 +1,152 @@
+/**
+ * @file alignment_hook_binding.cppm
+ * @brief PostgreSQL executor-hook alignment-frame binding and cleanup lifecycle.
+ */
+module;
+
+#include <bioseq/pg_compat.h>
+
+extern "C" {
+#include "executor/executor.h"
+#include "utils/memutils.h"
+}
+
+#include <cstdint>
+
+module bioseq.postgres.extension:alignment_hook_binding;
+
+import :alignment_hook_contract;
+import bioseq.postgres.table.alignment_execution;
+
+namespace bioseq::pg::detail {
+
+namespace alignment_exec = bioseq::postgres::table::alignment_execution;
+
+/** @brief Destroys an unregistered frame and detaches its cleanup token. */
+void destroy_alignment_frame(alignment_executor_frame* frame) noexcept
+{
+	if (frame == nullptr) {
+		return;
+	}
+	retire_escaped_nested_bindings(frame);
+	unlink_alignment_frame(frame);
+	if (frame->cleanup_token != nullptr) {
+		frame->cleanup_token->frame = nullptr;
+		frame->cleanup_token = nullptr;
+	}
+	delete frame;
+}
+
+namespace {
+
+/** @brief Releases a frame when PostgreSQL resets its query memory context. */
+void alignment_frame_context_cleanup(void* argument)
+{
+	auto* token = static_cast<alignment_frame_cleanup_token*>(argument);
+	if (token == nullptr || token->frame == nullptr) {
+		return;
+	}
+	alignment_executor_frame* frame = token->frame;
+	token->frame = nullptr;
+	frame->cleanup_token = nullptr;
+	retire_escaped_nested_bindings(frame);
+	unlink_alignment_frame(frame);
+	delete frame;
+}
+
+} // namespace
+
+/**
+ * @brief Registers query-context cleanup for an executor frame once.
+ * @param[in,out] frame Frame whose heap lifetime is tied to the query context.
+ * @param[in] estate Executor state that owns the query memory context.
+ */
+void ensure_alignment_frame_cleanup(
+		alignment_executor_frame* frame,
+		EState* estate)
+{
+	if (frame == nullptr || estate == nullptr || estate->es_query_cxt == nullptr
+		|| frame->cleanup_token != nullptr) {
+		return;
+	}
+	auto* token = static_cast<alignment_frame_cleanup_token*>(
+		MemoryContextAllocZero(
+			estate->es_query_cxt, sizeof(alignment_frame_cleanup_token)));
+	token->frame = frame;
+	token->callback.func = alignment_frame_context_cleanup;
+	token->callback.arg = token;
+	MemoryContextRegisterResetCallback(
+		estate->es_query_cxt, &token->callback);
+	frame->cleanup_token = token;
+}
+
+/**
+ * @brief Attaches an alignment scan node to the executor frame running it.
+ * @param[in] estate Executor state for the scan node.
+ * @param[in] scan_node_id Statement-local scan-node identifier.
+ * @return A borrowed registration handle valid until its frame is retired.
+ */
+[[nodiscard]] alignment_exec::alignment_node_registration_handle
+bind_alignment_node_to_starting_frame(
+		EState* estate,
+		std::uint32_t scan_node_id)
+{
+	if (estate == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq alignment node began outside ExecutorStart")));
+	}
+	alignment_executor_frame* frame = nullptr;
+	if (!alignment_start_in_progress.empty()) {
+		frame = alignment_start_in_progress.back();
+		if (frame == nullptr || frame->query_desc == nullptr
+			|| frame->query_desc->estate != estate) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("bioseq alignment node could not bind to its ExecutorStart frame")));
+		}
+		frame->estate = estate;
+	} else {
+		frame = find_alignment_frame(estate);
+		if (frame == nullptr && estate->es_epq_active != nullptr) {
+			EState* const parent_estate =
+				estate->es_epq_active->parentestate;
+			if (parent_estate != nullptr && parent_estate != estate) {
+				frame = find_alignment_frame(parent_estate);
+			}
+		}
+		if (frame == nullptr || frame->finished
+			|| alignment_current_run.empty()
+			|| alignment_current_run.back() != frame
+			|| frame->collector_binding.is_retired
+			|| frame->collector_binding.root_collector == nullptr) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("bioseq alignment node began outside ExecutorStart")));
+		}
+	}
+	ensure_alignment_frame_cleanup(frame, frame->estate);
+	return alignment_exec::alignment_node_registration_handle{
+		.binding = &frame->collector_binding,
+		.scan_node_id = scan_node_id,
+	};
+}
+
+/**
+ * @brief Marks an executor frame finished and releases it when cleanup no longer owns it.
+ * @param[in,out] frame Frame to unlink, or null when no frame was registered.
+ */
+void retire_alignment_frame(alignment_executor_frame* frame) noexcept
+{
+	if (frame == nullptr) {
+		return;
+	}
+	retire_escaped_nested_bindings(frame);
+	unlink_alignment_frame(frame);
+	frame->finished = true;
+	if (frame->cleanup_token == nullptr) {
+		delete frame;
+	}
+}
+
+} // namespace bioseq::pg::detail

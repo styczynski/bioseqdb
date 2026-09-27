@@ -1,0 +1,81 @@
+{
+  "description": "Temporary queue ownership for targeted bug-fix build/verification; other workers continue measuring.",
+  "hosts": {
+    "local": {
+      "reason": "User ended local tuple collection on 2026-09-24; native macOS package builds own this machine",
+      "paused": true,
+      "owner": "package_release_fleet"
+    },
+    "test3-m4": {
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "paused": true,
+      "owner": "fast_remote_e2e"
+    },
+    "test4-m4": {
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "paused": true,
+      "build_receipt_id": "br_dc2475cb80c2d3944747e3850aab4107",
+      "owner": "fast_remote_e2e"
+    },
+    "test3-c7g": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test3-m7a": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test4-m7i": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test4-c7g": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test4-m7a": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test3-m7i": {
+      "paused": true,
+      "reason": "Fast campaign owns worker at next terminal boundary; first idle warm-cache worker builds once, siblings import",
+      "owner": "fast_remote_e2e"
+    },
+    "test7-m4": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "owner": "fast_remote_e2e"
+    },
+    "test2-c7g": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "owner": "fast_remote_e2e"
+    },
+    "test7-c7g": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "owner": "fast_remote_e2e"
+    },
+    "test2-m7i": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "owner": "fast_remote_e2e"
+    },
+    "test2-m7a": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "owner": "fast_remote_e2e"
+    },
+    "test2-m4": {
+      "paused": true,
+      "reason": "Fast one-sample queue owns worker; importing verified same-family executable",
+      "owner": "fast_remote_e2e"
+    }
+  }
+}

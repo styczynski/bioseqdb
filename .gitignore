@@ -1,8 +1,12 @@
+.mcp.json
+.codex/config.toml
+
 .DS_Store
 *.dylib
+.bioseq*
+.agents/
+*.lock
 
-columnar-experiments/columnar/configure~
-paradedb-experiments/target/
 **/build
 
 *.log
@@ -12,7 +16,24 @@ paradedb-experiments/target/
 **/target/
 **/vcpkg_installed/
 
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
 **/.claude/scheduled_tasks.lock
 .mcp.json
 .codex/config.toml
 .claude/settings.local.json
+
+
+bench/e2e_fast_local
+bench/e2e_fast_remote/**
+bench/*observed*/**
+reporting/**
+reporting/*
+
+# Locally collected native release packages and the publishable static site.
+/bin_artifacts/

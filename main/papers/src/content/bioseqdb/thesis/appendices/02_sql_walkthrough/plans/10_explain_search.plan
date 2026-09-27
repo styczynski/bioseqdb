@@ -1,0 +1,87 @@
+Result (actual time=1.281..1.295 rows=3 loops=1)
+  ->  Custom Scan (BioseqScan) on samples (actual time=1.281..1.294 rows=3 loops=1)
+        Bioseq Projected Columns: id, age, seq
+        Bioseq Chunk Group Filters: (age >= 30)
+        Bioseq Chunk Groups Removed by Filter: 0
+        Bioseq Vectorized Filter: (age >= 30)
+        Bioseq Index Read Requirement: allow
+        Bioseq Recomputed: minimizers 100%
+        Bioseq Scheduler: supervisor=local mode=task_parallel workers=6/6 batches=8/8 awaiting=0 queries=8/0 qps=0.000 async_persist_waiting=0 index_memory_reserved=0
+        One-to-many alignment:
+          Task-parallel [mode=task_parallel, workers=6, index_memory_reserved=0 bytes]:
+            Planned Architecture: NEON_BF16
+            CPU-Supported Targets: NEON_BF16, NEON, NEON_WITHOUT_AES, EMU128, SCALAR
+            Highway Compiled Targets: NEON_BF16, NEON, NEON_WITHOUT_AES, EMU128
+            Runnable Targets: NEON_BF16, NEON, NEON_WITHOUT_AES, EMU128
+            * Executed Architecture: NEON_BF16
+            | QuerySketchStage: Bounded u32 ntHash SIMD Minimizers
+              Highway Function: minimizer::bounded_nthash [planned architecture: NEON_BF16]
+            | index_stage: pipeline configuration
+              [cep.window_len: 0]
+              [cep.kmer_len: 0]
+              [cep.sequence_len_log2: 63]
+              [cep.specialised: fallback]
+            | seed_hit_stage: Seed hits + canonical CPU ordering
+              max_occ: 500
+              query_len: 0
+              [reserved: 64]
+            | chain_stage: Minimap2 SIMD
+              min_chain_score: 40
+              min_seed_count: 3
+              max_chain_skip: 25
+              max_chain_iter: 5000
+              bandwidth: 500
+              max_gap: 5000
+              simd_chaining_policy: bounded_batch_approximate
+              [vectorised: true]
+              [requires_zero_skip_penalty: false]
+              [specialised: fallback]
+              Highway Function: chaining::chain_anchors_simd [planned architecture: NEON_BF16]
+            | region_stage: Region generation
+              query_len: 0
+            | primary_secondary_stage: Classify primary/secondary
+              mask_level: 0.500000
+              mask_len: 2147483647
+              sub_diff: 8
+            | secondary_filter_stage: Filter secondary regions
+              pri_ratio: 0.800000
+              min_diff: 30
+              best_n: 5
+            | align_stage: Block Aligner
+              match_score: 2
+              mismatch_pen: 4
+              gap_open1: 4
+              gap_ext1: 2
+              block_min_size: 32
+              block_max_size: 256
+              [vectorised: block-affine]
+              [single_affine_only: true]
+              [specialised: fallback]
+              Highway Function: alignment::block_aligner [planned architecture: NEON_BF16]
+            | primary_secondary_stage: Classify primary/secondary
+              mask_level: 0.500000
+              mask_len: 2147483647
+              sub_diff: 8
+            | secondary_filter_stage: Filter secondary regions
+              pri_ratio: 0.800000
+              min_diff: 30
+              best_n: 5
+            * Submit results [targets=2 persisted_index=0 recomputed=2]
+            * Execution statistics [requested_backend=simd_cpu actual_backend=mixed_invalid requested_index_source=persisted actual_index_source=recomputed attempted=2 fully_attested=0 unattested=2 environment_mixed=false persisted_identity_mixed=false identity_conflict=false saturated=false]
+            * First unattested [target_row=1 query_ordinal=0]
+            * Index outcomes [targets=2 persisted=0 missing_persisted=2 recomputed=2]
+            * GPU dispatch [seed=0 chain=0 chain_backtrack=0 coordinate_vote=0 extend=0 backend_declines=0 backend_fallbacks=0]
+            GPU Chain Dispatches: 0
+            GPU Chain Backtrack Dispatches: 0
+            GPU Coordinate Vote Dispatches: 0
+            * Host stats [query_sketch_ns=0 target_index_build_ns=0 query_hash_readbacks=0 query_symbol_packing=0 target_symbol_packing=0 alignment_classification=0 cigar_construction=0]
+        ->  Cache
+              Cache Hits: 0
+              Cache Misses: 5
+              Cache Evictions: 0
+              Cache Writes: 5
+              Cache Maximum Size: 16608
+              Cache Ending Size: 16608
+              Total Cache Entries: 5
+Planning Time: 0.241 ms
+Execution Time: 1.432 ms

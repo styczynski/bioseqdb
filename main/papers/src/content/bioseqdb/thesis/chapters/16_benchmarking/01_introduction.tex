@@ -1,0 +1,286 @@
+\begingroup
+\raggedbottom
+\subsection{What the results show}
+\label{sec:benchmark-interpretation}
+
+BioseqDB was evaluated on JOIN between query and reference tables where reference table contained only one sequence and reference table contained 1024 randomly generated sequences.
+The cases where divided by me into two groups:
+\begin{itemize}
+  \item \textbf{Index:} build the reference index first, restart PostgreSQL,
+  then measure the query, including access to the stored index.
+  \item \textbf{No index:} measure construction of a temporary reference index
+  and the query together. The query batch shares that temporary index.
+\end{itemize}
+
+Overall the main outcomes are as follows:
+\begin{enumerate}
+  \item BioseqDB is the first tool to my knowing that integrates database with aligner software
+  \item Memory admission system and custom grouped-MPF index allow to achieve speedups for already built index by 3x to 8x compared to minimap2 in typical cases and 100x where heavy swapping occurs for long sequences
+  \item BioseqDB for preexisting index beats all common aligners and doesn't require any data preparation (other tools required customized scripts to split the long sequences into chunks)
+  \item BioseqDB without index is usually slower than minimap2, but faster than other similar aligner tools (this is acceptable due to nature of the typical use cases)
+  \item BisoeqDB exposed failures in terms of very inneficient GPU implementation and anomalous implementations of some of other coinfigurations (like scalar)
+\end{enumerate}
+
+\Needspace{13\baselineskip}
+\subsubsection{What an indexed minimizer comparison measures}
+\label{sec:bench-indexed-minimizers}
+
+Scalar and SIMD-ref have similar indexed times in this example, where they
+reuse the same kind of reference index and share most of the query pipeline.
+
+\BenchmarkSlice{aws-2-k15-w10}
+  {mpf-scalar-scalar-block,mpf-simdref-scalar-block}
+  {index-2-k15-w10-dna4-m7a,index-2-k15-w10-dna4-m7i}
+  {Two minimizer implementations with MPF, Scalar-DP and Block held fixed.}
+  {tab:bench-indexed-minimizers}
+
+\warn{An indexed row does not measure reference-index construction}{
+The benchmark requires a compatible persisted \emph{reference} index. It builds
+that index before restarting PostgreSQL, and does not rebuild its minimizers
+inside the measured query. The query sequences themselves have no persisted
+minimizer index: their minimizers are extracted to search the reference.
+Changing the minimizer therefore does not measure reference construction
+again, so the results above measure the same thing for the "index" case.}
+
+In each small table, the upper duration is A: the complete query measurement,
+and the lower duration is B: the A time with substracted time for recorded CIGAR/MAPQ.
+This means that in BioseqDB B represents all the time excluding final alignment.
+You can find complete raw result tables in Benchmark results Section~\ref{sec:benchmark-results}.
+
+The measurements were performed on AWS machines of various classes always of size xlarge and local machine with MacOS ARM64.
+The exact specifications and measurement methotolopgy can be found in the benchmark section as well.
+
+The minimap2 baseline is always gray in the tables, while preferred configuration (grouped-MPF with all SIMD routes) is marked with yellow colour.
+
+\Needspace{13\baselineskip}
+\subsubsection{Paying for the reference once}
+\label{sec:bench-index-benefit}
+
+The preferred BioseqDB configuration beats minimap2 when the reference index
+is available, but loses when index construction is included in this example.
+
+\BenchmarkSlice{aws-2-k15-w10}
+  {minimap2,mpf-bounded-simd-block}
+  {index-2-k15-w10-dna4-m7i,noindex-2-k15-w10-dna4-m7i}
+  {The preferred configuration on M7I, with and without a prepared reference index.}
+  {tab:bench-index-benefit}
+
+BioseqDB can then read its prepared lookup structures, as shown in
+Figures~\ref{fig:index-join-read-paths} and~\ref{fig:index-selective-load}, which is great success. User can usually spend more time once waiting for data load to benefit from faster queries.
+
+\Needspace{13\baselineskip}
+\subsubsection{Specialized kernel failure}
+\label{sec:bench-wide-hash}
+
+The scalar MPF configuration takes much longer on the smaller reference with
+longer k-mers than on the larger reference with shorter k-mers.
+
+\BenchmarkSlice{aws-4-k15-w10}
+  {mpf-scalar-scalar-block,mpf-bounded-simd-block}
+  {index-4-k15-w10-dna4-m7a,index-4-k15-w10-dna4-m7i}
+  {Indexed DNA4 with the shorter k-mer profile.}
+  {tab:bench-short-hash}
+\BenchmarkSlice{aws-2-k20-w15}
+  {mpf-scalar-scalar-block,mpf-bounded-simd-block}
+  {index-2-k20-w15-dna4-m7a,index-2-k20-w15-dna4-m7i}
+  {Indexed DNA4 with the longer k-mer profile, despite a smaller reference.}
+  {tab:bench-wide-hash}
+
+
+Smaller hashes can be directly fetched from MPF index, while for longer the directory row is used~\ref{sec:index-direct-lookup}~\ref{sec:index-control-scan-waves}, this however doesn't explain the difference.
+One possible explanation is that hash for scalar is too wide and it forces these lookups, because bounded SIMD algorithm limits the width of hashes.
+Alternatively this could be a problem with how the algorithm uses memory admission system and going into SWAP usage, but such drastic change is unlikely.
+What I think is the most likely, is the k=15, w=10 has certain optimisations I hardcoded first. When migrating algorithms to be generic I could do it in a way that the performance is heavily deraded for non-default caase.
+
+Nevertheless I'm still accepting these results as k=15, w=10 are the most common (and default minimap2) used parameters.
+
+
+\Needspace{23\baselineskip}
+\subsubsection{RMQ/SIMD chaining performance}
+\label{sec:bench-chaining-choice}
+
+The preferred SIMD configuration is competitive, but the fastest chaining
+choice changes with the testing case and the machine. Suprisingly on MacOS where the most of the development was done SIMD-DP is the fastest one.
+I didn't measure region-specific timings (forward chaining/backward chaining) in this benchmark, so in the future I could spend more time investigating how algorithms compare in terms of memory accesses and 
+other datasets.
+
+\BenchmarkSlice[columns]{aws-2-k15-w10}
+  {mpf-bounded-scalar-block,mpf-bounded-simd-block,mpf-bounded-rmq-block}
+  {index-2-k15-w10-dna4-m7a,index-2-k15-w10-dna4-m7i}
+  {Chaining choices with MPF, bounded minimizers and Block fixed.}
+  {tab:bench-chaining-small}
+
+\BenchmarkSlice[columns]{aws-4-k15-w10}
+  {mpf-bounded-scalar-block,mpf-bounded-simd-block,mpf-bounded-rmq-block}
+  {index-4-k15-w10-dna4-m7a,index-4-k15-w10-dna4-m7i}
+  {The same choices on the larger DNA4 reference.}
+  {tab:bench-chaining-large}
+
+\BenchmarkSlice[columns]{local}
+  {mpf-bounded-scalar-block,mpf-bounded-simd-block,mpf-bounded-rmq-block}
+  {index-2-k20-w15-dna4-local}
+  {A local case in which SIMD-DP wins and RMQ loses.}
+  {tab:bench-chaining-local}
+
+
+\Needspace{13\baselineskip}
+\subsubsection{Ambiguous bases problem}
+\label{sec:bench-dna5}
+
+The local DNA5 slowdown is much larger in the complete no-index measurement
+than in its index measurement.
+
+\BenchmarkSlice{local}
+  {mpf-bounded-simd-block}
+  {index-2-k15-w10-dna4-local,index-2-k15-w10-dna5-local,noindex-2-k15-w10-dna4-local,noindex-2-k15-w10-dna5-local}
+  {The preferred local configuration on DNA4 and DNA5.}
+  {tab:bench-dna5}
+
+"N" bases change the workload at several stages. The bounded DNA5
+sketcher includes N in the k-mers it hashes and it involves entirely different bit-packed representation.
+
+\Needspace{13\baselineskip}
+\subsubsection{Anomalous A/B difference}
+\label{sec:bench-a-b}
+
+This MPS configuration loses to minimap2 on complete time even though its
+B time is lower.
+
+\BenchmarkSlice{aws-2-k20-w15}
+  {minimap2,mps-scalar-simd-block}
+  {index-2-k20-w15-dna4-m7a,index-2-k20-w15-dna4-m7i}
+  {An indexed comparison whose direction changes between A and B.}
+  {tab:bench-a-b}
+
+I previously had problem with implementation of divergence-sort in
+Section~\ref{sec:minimizer-divergence-history} but divergence is not substracted in B.
+Such big difference may be caused by either problems with measurement methodology (because alignment is massively parallel and calculating B is not correct) or most of the slowdown happens in CIGAR work
+due to special treatment of N bases in DNA5.
+
+\Needspace{13\baselineskip}
+\subsubsection{Block aligner is usually faster than KSW2}
+\label{sec:bench-base-aligner}
+
+Block Aligner improves complete time compared to KSW2.
+
+\BenchmarkSlice{aws-2-k15-w10}
+  {mpf-bounded-simd-block,mpf-bounded-simd-ksw2}
+  {index-2-k15-w10-dna4-m7a,index-2-k15-w10-dna4-m7i,index-2-k15-w10-dna4-m4}
+  {Changing only the requested base aligner in the preferred configuration.}
+  {tab:bench-base-aligner}
+
+Block Aligner follows an adaptive block through the scoring matrix, whereas
+KSW2 uses its banded dynamic programming and stopping rules~\ref{sec:final-alignment-cpu-contracts}.
+
+\Needspace{13\baselineskip}
+\subsubsection{MPF is preffered over MPS}
+\label{sec:bench-index-layout}
+
+MPF is both faster to query and faster to construct.
+
+\BenchmarkSlice{aws-2-k15-w10}
+  {mpf-bounded-simd-block,mps-bounded-simd-block}
+  {index-2-k15-w10-dna4-m7a,noindex-2-k15-w10-dna4-m7a}
+  {MPF and MPS with the same minimizer, chaining and alignment choices.}
+  {tab:bench-index-layout}
+
+This happens because MPS overall offers no benefit because it construction requires merge sort with potential disk spilling and querying it is more complicated than in case of MPF~\ref{fig:index-mpf-mps}
+
+
+\BenchmarkSlice{aws-4-k20-w15}
+  {mpf-bounded-simd-block,mps-bounded-simd-block}
+  {index-4-k20-w15-dna5-m7a,index-4-k20-w15-dna5-m7i}
+  {The large DNA5 MPS slowdown appears on several machine classes.}
+  {tab:bench-mps-dna5}
+
+In the example here we can see that likely the k=20, w=15 contains more unique minimizers than k=15, w=10 so the disk spillage happened 
+during measurement and the query needed to check more unique minimizers, which caused multiple random accesses to large index.
+
+\Needspace{13\baselineskip}
+\subsubsection{BioseqDB memory admission system}
+\label{sec:bench-machine-pressure}
+
+The minimap2 baseline itself slows sharply on C7G.
+
+\BenchmarkSlice{aws-4-k20-w15}
+  {minimap2,mpf-bounded-simd-block}
+  {index-4-k20-w15-dna4-m7a,index-4-k20-w15-dna4-m7i,index-4-k20-w15-dna4-m4,index-4-k20-w15-dna4-c7g}
+  {The same indexed workload across the AWS machine classes.}
+  {tab:bench-machine-pressure}
+
+The C7G minimap2 record reports severe paging during measurement.
+C7G has less physical RAM than
+the other AWS classes, so the index with more unique minimizers causes excessive paging.
+
+M4 is slower in many comparisons, but is not uniformly the slowest machine.
+Its older CPU and lower EBS (AWS disk) bandwidth make it slow, but in cases like presented here C7G can also undergo reduced performance~\autocite{aws_ebs_limits}
+The benefit of BioseqDB is that we activelly avoid using SWAP by making sure the memory is sufficient for all allocations of commom memory arenas.
+
+\Needspace{13\baselineskip}
+\subsubsection{Index query slower than no-index query}
+\label{sec:bench-index-reversal}
+
+For this case of C7G measurement benchmark reported that indexed query is slower than no-index query.
+
+\BenchmarkSlice{aws-2-k20-w15}
+  {minimap2,mpf-simdref-simd-block}
+  {index-2-k20-w15-dna4-c7g,noindex-2-k20-w15-dna4-c7g}
+  {The apparently reversed index benefit for MPF and SIMD-ref.}
+  {tab:bench-index-reversal}
+
+This means that BioseqDB requires further optimisation to enable adappitve decisioning whether to use index of not. In this case despited repeated measurements the machine could go 
+period of temproarily reduced disk IOPS, which caused disk reads to be slower than computing index from scratch (in second case the pipeline doesn't have to interface with disk as much)
+
+\Needspace{13\baselineskip}
+\subsubsection{Outliers}
+\label{sec:bench-long-runs}
+
+Several wide-hash MPF were unable to complete in time.
+
+\BenchmarkSlice[columns]{aws-4-k20-w15}
+  {mpf-scalar-scalar-block,mpf-simdref-rmq-block}
+  {index-4-k20-w15-dna4-c7g}
+  {Examples of the longest indexed observations. Superscript s denotes a single sample.}
+  {tab:bench-long-runs}
+
+It's likely that this is a bug in memory admission system which stalled entire pipeline. Other machines didn't report such bad timings.
+
+\Needspace{13\baselineskip}
+\subsubsection{GPU native algorithms are slower than CPU}
+\label{sec:bench-gpu-performance}
+
+Unfortunatelly BioseqDB was my first GPU implementation in Vulkan. I tested it both on local machine with integrated GPU and on remote Vast.ai rented GPU machine.
+In both of the cases there were issues with allocating to much memory on GPU or using CPU host memory instead of GPU.
+It's worth considering G3SA approach with different order of chaining scores computations and also consider one integerated kernel to perform all pipeline stages on GPU without frequent host-device
+transfers.
+
+
+\BenchmarkSlice{local}
+  {minimap2,mpf-vulkan-vulkan-block}
+  {index-2-k15-w10-dna4-local,index-2-k20-w15-dna4-local}
+  {The local integrated GPU with Vulkan seeding and chaining.}
+  {tab:bench-gpu-local}
+
+The GPU faster by serveral orders of magnitud don't translate into better performance:
+
+\BenchmarkSlice{vastai}
+  {minimap2,mps-vulkan-vulkan-block}
+  {index-2-k15-w10-dna4-vastai,index-2-k20-w15-dna4-vastai}
+  {The MPS Vulkan route and the same-host minimap2 baseline on an RTX 5090.}
+  {tab:bench-gpu-vast}
+
+
+\Needspace{13\baselineskip}
+\subsubsection{GPU capacity failures}
+\label{sec:bench-gpu-capacity}
+
+I tried putting parts of MPS index directly on the GPU, however the buffers size is limited and current Bulkan code fails on measured cases for 4Gbp sequences.
+
+\BenchmarkSlice{vastai}
+  {mpf-vulkan-vulkan-block,mps-vulkan-vulkan-block}
+  {index-4-k15-w10-dna4-vastai,index-4-k20-w15-dna4-vastai}
+  {Completed MPF observations and MPS preparation failures on the RTX 5090.}
+  {tab:bench-gpu-capacity}
+
+\clearpage
+\endgroup

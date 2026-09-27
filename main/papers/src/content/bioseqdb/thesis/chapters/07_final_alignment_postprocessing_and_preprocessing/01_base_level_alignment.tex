@@ -1,0 +1,203 @@
+\section{Base-level alignment}
+\label{sec:final-alignment-role}
+\label{sec:final-alignment-cpu-contracts}
+
+A chain suggests where two sequences match. The base aligner resolves the
+symbols between anchors and extends their flanks, producing a score and an
+alignment path (Section~\ref{sec:exact-dp}). BioseqDB uses local ports of KSW2
+from minimap2 and Block Aligner~\cite{minimap2_paper,block_aligner_paper}.
+Both use SIMD. I use these existing algorithms without proposing a new base
+aligner.
+
+Table~\ref{tab:final-aligner-comparison} compares their search and scoring.
+For a gap of length \(\ell\), \(q\) is the opening penalty and \(e\) the
+cost per symbol. KSW2's two affine penalties distinguish short and long gaps.
+
+\begin{table}[H]
+\centering
+\small
+\caption{CPU aligners incorporated into BioseqDB.}
+\label{tab:final-aligner-comparison}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.1}
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{.19\linewidth}
+  >{\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X@{}}
+\toprule
+ & \textbf{KSW2} & \textbf{Block Aligner}\\
+\midrule
+DP region & Fixed diagonal band & Moving square that grows and shrinks\\
+Gap cost & \(\min(q_1+e_1\ell,q_2+e_2\ell)\) & \(q_1+e_1\ell\)\\
+Flank stopping & Z-drop & X-drop after two consecutive low-scoring steps\\
+Search limits & Band width and Z-drop threshold
+ & Block size, currently 16--32 in the CPU pipeline\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+If \(S^\star\) is the best score reached at \((i^\star,j^\star)\), a later
+score \(S\) at \((i,j)\) is tested against
+\begin{equation}
+\begin{aligned}
+  \text{X-drop:}\quad&S^\star-S>X,\\
+  \text{Z-drop:}\quad&S^\star-S>Z+e\left|(i-i^\star)-(j-j^\star)\right|.
+\end{aligned}
+\label{eq:zdrop}
+\end{equation}
+Z-drop allows extra score loss when crossing a gap changes the diagonal.
+Here \(e\) is its gap-extension penalty. BioseqDB supplies the same configured
+threshold as \(Z\) to KSW2 and as \(X\) to Block, despite their different rules.
+Block fills between anchors globally and uses X-drop on the flanks.
+KSW2 can stop a fill under Z-drop, but disables both banding and Z-drop for
+mandatory fills when an exact edit predicate is requested.
+
+\clearpage
+\section{How Block Aligner follows the alignment}
+\label{sec:final-alignment-block}
+
+Block Aligner moves a \(B\times B\) square through the scoring matrix,
+computing strips of width \(s\). Border scores guide its direction.
+If progress stops, it returns to a checkpoint and tries a larger block.
+Later progress near the end of a border can permit shrinking
+(Figure~\ref{fig:block-adaptive-reconstruction}). A finite block limit can
+exclude a better path outside the computed cells.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=0.42cm,y=0.42cm,>=Latex,font=\small]
+  \begin{scope}[xshift=0cm]
+    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
+    \draw[blue!70!black,very thick] (0,0) rectangle (3,3);
+    \fill[blue!16] (2,0) rectangle (3,3);
+    \draw[->,thick] (3.2,1.4) to (4.5,1.4);
+    \node[align=center,text width=3.7cm] at (3,7.4)
+      {shift toward the stronger outgoing border};
+    \node at (3,-1) {(a) move};
+  \end{scope}
+  \begin{scope}[xshift=5.2cm]
+    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
+    \draw[blue!70!black,very thick] (1.5,1.5) rectangle (4.5,4.5);
+    \draw[teal!70!black,dashed,very thick] (0,0) rectangle (6,6);
+    \fill[red!65] (2.7,2.7) circle (0.12);
+    \node[align=center,text width=3.7cm] at (3,7.4)
+      {restore a checkpoint and enlarge the block};
+    \node at (3,-1) {(b) grow};
+  \end{scope}
+  \begin{scope}[xshift=10.4cm]
+    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
+    \draw[teal!70!black,very thick] (0,0) rectangle (6,6);
+    \fill[green!22] (4,4) rectangle (6,6);
+    \draw[blue!70!black,dashed,very thick] (3,3) rectangle (6,6);
+    \draw[->,thick] (5.3,5.3) to (6.5,6.1);
+    \node[align=center,text width=3.7cm] at (3,7.4)
+      {shrink after progress reaches a border suffix};
+    \node at (3,-1) {(c) shrink};
+  \end{scope}
+\end{tikzpicture}
+\caption{Block Aligner moves toward the stronger border, returns to a saved
+checkpoint when it needs a larger block, and shrinks when progress permits.
+The coloured outlines show the block before and after each decision.}
+\label{fig:block-adaptive-reconstruction}
+\end{figure}
+
+\begin{algorithm}[H]
+\caption{Main decisions of adaptive Block Aligner}
+\label{alg:adaptive-block-alignment}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require sequences \(Q,T\), affine scores, bounds \(B_{\min},B_{\max}\), strip width \(s\)
+  \Require global or extension mode, X-drop threshold \(X\)
+  \Ensure score and optional CIGAR for the selected path
+  \State \(B\gets B_{\min},\quad S^\star\gets-\infty,\quad u\gets0,\quad z\gets0\)
+    \Comment{\(u\): stalled steps, \(z\): X-drop steps}
+  \State place the block at the matrix origin and save a checkpoint
+  \While{true}
+    \State compute newly exposed cells by affine-gap SIMD dynamic programming
+    \State \(M\gets\) maximum score in these cells, \(u\gets u+1\)
+    \State \(v\gets[M>S^\star]\) \Comment{new best score}
+    \If{\(v\)}
+      \State \(S^\star\gets M,\quad u\gets0\), save endpoint and checkpoint
+    \EndIf
+    \State \(z\gets z+1\) if \(M<S^\star-X\), otherwise \(z\gets0\)
+    \State \textbf{if} extension mode and \(z=2\) \textbf{then break}
+    \State \textbf{if} both sequence ends have been computed \textbf{then break}
+    \If{\(2B\leq B_{\max}\) and (\(u\geq B/s\) or the last step grew without improving)}
+      \State restore checkpoint, \(B\gets2B,\quad u\gets0\)
+    \Else
+      \If{\(B>B_{\min}\) and \(v\) and a border-suffix score is at least \(M\)}
+        \State keep the bottom-right half, \(B\gets B/2\), save checkpoint
+      \EndIf
+      \State shift by \(s\) toward the stronger outgoing border
+        \Comment{respect matrix edges}
+    \EndIf
+  \EndWhile
+  \State select the global endpoint, or the saved best endpoint in extension mode
+  \State if CIGAR is requested, trace back from that endpoint
+\end{algorithmic}
+\end{algorithm}
+
+\noindent\label{sec:final-alignment-fused-work}
+One alignment call includes scoring, trace storage, traceback and CIGAR
+construction. BioseqDB can skip Block DP when a score bound proves that an
+equal-length fill's straight diagonal is uniquely optimal. The timer in
+Section~\ref{sec:bench-a-b} includes this shortcut too.
+
+% Other existing illustrations retained as source material.
+% \begin{figure}[htbp]
+% \centering
+% \begin{tikzpicture}[
+%   >=Latex,
+%   box/.style={draw,rounded corners,fill=blue!7,align=center,
+%               minimum width=3.25cm,minimum height=1.15cm,font=\small},
+%   note/.style={align=center,font=\small}
+% ]
+%   \node[box] (left) at (1.9,0) {left extension\\reversed flank};
+%   \node[box] (acc) at (5.6,0) {accumulate nearby\\anchor intervals};
+%   \node[box] (fill) at (9.3,0) {mandatory global\\fills};
+%   \node[box] (right) at (13.0,0) {right extension\\forward flank};
+%   \draw[->,thick] (left.east) to (acc.west);
+%   \draw[->,thick] (acc.east) to (fill.west);
+%   \draw[->,thick] (fill.east) to (right.west);
+%   \node[note] at (7.45,-1.05)
+%     {ordered anchors preserve the query and target coordinate direction};
+% \end{tikzpicture}
+% \caption{Decomposition of a chained region into two extensions and a set of
+% global inter-anchor fills. Several short anchor intervals may form one fill.}
+% \label{fig:three-phase-alignment}
+% \end{figure}
+
+% \begin{figure}[htbp]
+% \centering
+% \begin{tikzpicture}[x=0.48cm,y=0.48cm,>=Latex,font=\small]
+%   \begin{scope}
+%     \draw[step=1,gray!24,very thin] (0,0) grid (6,6);
+%     \foreach \x in {0,2,4,6} {\draw[blue!65!black,thick] (\x,0) to (\x,6);}
+%     \foreach \y in {0,2,4,6} {\draw[blue!65!black,thick] (0,\y) to (6,\y);}
+%     \draw[orange!80!black,very thick]
+%       (0.1,0.2) .. controls (1.6,1.0) and (1.4,2.0) .. (2.2,2.2)
+%       .. controls (3.8,2.5) and (3.5,4.0) .. (4.2,4.1)
+%       .. controls (5.0,4.8) and (5.4,5.4) .. (5.9,5.8);
+%     \node[align=center,text width=4.8cm] at (3,7.2)
+%       {forward pass stores tile borders};
+%     \node at (3,-0.9) {(a) boundary state};
+%   \end{scope}
+%   \begin{scope}[xshift=7.3cm]
+%     \draw[step=1,gray!24,very thin] (0,0) grid (6,6);
+%     \foreach \x in {0,2,4,6} {\draw[blue!65!black,thick] (\x,0) to (\x,6);}
+%     \foreach \y in {0,2,4,6} {\draw[blue!65!black,thick] (0,\y) to (6,\y);}
+%     \fill[purple!18] (0,0) rectangle (2,2);
+%     \fill[purple!18] (2,2) rectangle (4,4);
+%     \fill[purple!18] (4,4) rectangle (6,6);
+%     \draw[orange!80!black,very thick,<-]
+%       (0.1,0.2) .. controls (1.6,1.0) and (1.4,2.0) .. (2.2,2.2)
+%       .. controls (3.8,2.5) and (3.5,4.0) .. (4.2,4.1)
+%       .. controls (5.0,4.8) and (5.4,5.4) .. (5.9,5.8);
+%     \node[align=center,text width=4.8cm] at (3,7.2)
+%       {backward pass recomputes visited tiles};
+%     \node at (3,-0.9) {(b) local replay};
+%   \end{scope}
+% \end{tikzpicture}
+% \caption{Gridded traceback. Blue tile borders persist after the forward pass.
+% Only the purple tiles crossed by the selected path are recomputed during
+% traceback.}
+% \label{fig:gridded-traceback}
+% \end{figure}

@@ -1,0 +1,85 @@
+# Third-party provenance lock for the generated-site VALIDATION / BROWSER-TEST
+# toolchain (§4.4, §20.7). This records the pinned, hash-locked Python
+# environment and the Playwright browser used only to validate the generated
+# site; no production page or runtime depends on any entry here.
+#
+# This file is the human-readable provenance record (upstream URL, version/tag,
+# license, content SHA-256). The machine-enforced, fully transitive per-file
+# hash set that `pip install --require-hashes` verifies lives beside the tests
+# in website/tests/requirements.lock; requirements.in holds the top-level
+# pins. The vendored production JS/font assets are locked separately in
+# website/static/third_party.lock.yaml (owned by the render workstream).
+#
+# All hashes below were resolved online from the PyPI JSON API and independently
+# cross-checked for html5lib/six/webencodings via `pip download` + `pip hash`.
+schema: bioseq.website.python_toolchain.lock
+schema_revision: 1
+
+python:
+  interpreter: CPython 3.12 (project-selected Python3_EXECUTABLE)
+  install_target: <build>/website/venv
+  install_command: pip install --require-hashes -r website/tests/requirements.lock
+  # sha256 shown per package is the source distribution (sdist) content hash;
+  # every wheel + sdist hash is enumerated in requirements.lock.
+  top_level:
+    - name: html5lib
+      version: "1.1"
+      role: independent strict-HTML5 site validator (tests/contract/test_generated_site_validation.py)
+      upstream: https://pypi.org/project/html5lib/1.1/
+      homepage: https://github.com/html5lib/html5lib-python
+      license: MIT
+      sdist_sha256: b2e5b40261e20f354d198eae92afc10d750afb487ed5e50f9c4eaf07c184146f
+    - name: playwright
+      version: "1.52.0"
+      role: headless-Chromium browser acceptance tests (tests/integration/test_browser.py)
+      upstream: https://pypi.org/project/playwright/1.52.0/
+      homepage: https://github.com/microsoft/playwright-python
+      license: Apache-2.0
+      note: no sdist published; platform wheels only (all hashed in requirements.lock)
+  transitive:
+    - name: greenlet
+      version: "3.5.3"
+      via: playwright
+      upstream: https://pypi.org/project/greenlet/3.5.3/
+      license: MIT AND PSF-2.0
+      sdist_sha256: a61efc018fd3eb317eeca31aba90ee9e7f26f22884a79b6c6ec715bf71bb62f1
+    - name: pyee
+      version: "13.0.1"
+      via: playwright
+      upstream: https://pypi.org/project/pyee/13.0.1/
+      license: MIT
+      sdist_sha256: 0b931f7c14535667ed4c7e0d531716368715e860b988770fc7eb8578d1f67fc8
+    - name: six
+      version: "1.17.0"
+      via: html5lib
+      upstream: https://pypi.org/project/six/1.17.0/
+      license: MIT
+      sdist_sha256: ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81
+    - name: typing_extensions
+      version: "4.16.0"
+      via: pyee
+      upstream: https://pypi.org/project/typing_extensions/4.16.0/
+      license: PSF-2.0
+      sdist_sha256: dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5
+    - name: webencodings
+      version: "0.5.1"
+      via: html5lib
+      upstream: https://pypi.org/project/webencodings/0.5.1/
+      license: BSD-3-Clause
+      sdist_sha256: b36a1c245f2d304965eb4e0a82848379241dc04b865afcc4aab16748587e1923
+
+# Playwright's locked browser build, provisioned into
+# <build>/website/playwright-browsers during infrastructure bootstrap with
+# `playwright install chromium`. Revisions are the ones pinned by
+# playwright 1.52.0's driver browsers.json (verified from the installed driver).
+browsers:
+  provisioning_command: playwright install chromium
+  install_target: <build>/website/playwright-browsers
+  license: BSD-3-Clause (Chromium)
+  pins:
+    - name: chromium
+      revision: "1169"
+    - name: chromium-headless-shell
+      revision: "1169"
+    - name: ffmpeg
+      revision: "1011"

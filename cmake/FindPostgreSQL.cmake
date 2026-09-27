@@ -1,0 +1,272 @@
+# Based on:
+# https://cmake.org/cmake/help/latest/manual/cmake-developer.7.html#find-modules
+# ----------------------------------------------------------------------------
+
+# https://www.postgresql.org/support/versioning/
+set(PostgreSQL_SUPPORTED_VERSIONS ${PostgreSQL_ADDITIONAL_VERSIONS}
+  "18" "17" "16" "15" "14" "13")
+
+# Use `FIND_VERSION` to locate specific version of pg_config, or fallback to known versions
+if(PostgreSQL_FIND_VERSION)
+  list(PREPEND PostgreSQL_SUPPORTED_VERSIONS "${PostgreSQL_FIND_VERSION_MAJOR}")
+endif()
+
+foreach(suffix ${PostgreSQL_SUPPORTED_VERSIONS})
+  if(WIN32)
+    list(APPEND PostgreSQL_CONFIG_PATH_SUFFIXES
+      "PostgreSQL/${suffix}/bin")
+  endif()
+  if(UNIX)
+    list(APPEND PostgreSQL_CONFIG_HINTS
+      "/usr/lib/postgresql/${suffix}/bin")
+    if(APPLE)
+      # Postgres.app ships per-version trees under /Applications/Postgres.app/Contents/Versions/<N>.
+      # Homebrew installs versioned formulae under {/opt/homebrew,/usr/local}/opt/postgresql@<N>.
+      list(APPEND PostgreSQL_CONFIG_HINTS
+        "/Applications/Postgres.app/Contents/Versions/${suffix}/bin"
+        "/opt/homebrew/opt/postgresql@${suffix}/bin"
+        "/usr/local/opt/postgresql@${suffix}/bin")
+    endif()
+  endif()
+endforeach()
+
+if(APPLE)
+  # `latest` is a symlink Postgres.app maintains to its newest installed major.
+  list(APPEND PostgreSQL_CONFIG_HINTS
+    "/Applications/Postgres.app/Contents/Versions/latest/bin")
+endif()
+
+# Configuration will be based on values gathered from `pg_config`. NO_DEFAULT_PATH
+# keeps us from silently picking a stray /usr/local/bin/pg_config (e.g. an older
+# Homebrew default `postgresql` formula) when one of our versioned hints applies.
+find_program(PostgreSQL_CONFIG pg_config REQUIRED
+  HINTS ${PostgreSQL_CONFIG_HINTS}
+  PATH_SUFFIXES ${PostgreSQL_CONFIG_PATH_SUFFIXES}
+  NO_DEFAULT_PATH
+)
+# Fallback to the default search path if no versioned install was located above.
+find_program(PostgreSQL_CONFIG pg_config REQUIRED)
+
+# Grab information about the installed version of PostgreSQL
+execute_process(COMMAND ${PostgreSQL_CONFIG} --version           OUTPUT_VARIABLE PostgreSQL_VERSION            OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND ${PostgreSQL_CONFIG} --bindir            OUTPUT_VARIABLE PostgreSQL_BIN_DIR            OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND ${PostgreSQL_CONFIG} --sharedir          OUTPUT_VARIABLE PostgreSQL_SHARE_DIR          OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND ${PostgreSQL_CONFIG} --includedir        OUTPUT_VARIABLE PostgreSQL_INCLUDE_DIR        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND ${PostgreSQL_CONFIG} --pkgincludedir     OUTPUT_VARIABLE PostgreSQL_PKG_INCLUDE_DIR    OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND ${PostgreSQL_CONFIG} --includedir-server OUTPUT_VARIABLE PostgreSQL_SERVER_INCLUDE_DIR OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND ${PostgreSQL_CONFIG} --libdir            OUTPUT_VARIABLE PostgreSQL_LIBRARY_DIR        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND ${PostgreSQL_CONFIG} --pkglibdir         OUTPUT_VARIABLE PostgreSQL_PKG_LIBRARY_DIR    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+# @TODO: Figure out if we need _INCLUDE_DIR and/or _PKG_INCLUDE_DIR
+
+# Create include dirs list
+list(APPEND PostgreSQL_INCLUDE_DIRS "${PostgreSQL_INCLUDE_DIR}" "${PostgreSQL_PKG_INCLUDE_DIR}" "${PostgreSQL_SERVER_INCLUDE_DIR}")
+list(APPEND PostgreSQL_LIBRARY_DIRS "${PostgreSQL_LIBRARY_DIR}")
+
+# PostgreSQL's installed server headers expose the configuration of the
+# PostgreSQL build itself.  In particular, an NLS-enabled c.h includes
+# <libintl.h>; consumers therefore need both gettext's headers while compiling
+# and its library when they link.  Keep this dependency on the PostgreSQL
+# interfaces instead of adding Homebrew include/link flags globally.
+set(PostgreSQL_SERVER_LINK_LIBRARIES "")
+set(_postgresql_config_header "${PostgreSQL_SERVER_INCLUDE_DIR}/pg_config.h")
+if(EXISTS "${_postgresql_config_header}")
+  file(STRINGS "${_postgresql_config_header}" _postgresql_enable_nls
+    REGEX "^#define[ \t]+ENABLE_NLS([ \t]+1)?[ \t]*$")
+  if(_postgresql_enable_nls)
+    find_package(Intl REQUIRED)
+    list(APPEND PostgreSQL_INCLUDE_DIRS ${Intl_INCLUDE_DIRS})
+    list(APPEND PostgreSQL_SERVER_LINK_LIBRARIES Intl::Intl)
+  endif()
+endif()
+unset(_postgresql_enable_nls)
+unset(_postgresql_config_header)
+
+# Set library to search for (which is different on WIN32)
+set(FIND_LIBRARY pq)
+
+# Platform fixes: Windows
+# https://wiki.postgresql.org/wiki/Building_and_Installing_PostgreSQL_Extension_Modules
+if(WIN32)
+  set(FIND_LIBRARY postgres)
+  list(APPEND PostgreSQL_INCLUDE_DIRS "${PostgreSQL_SERVER_INCLUDE_DIR}/port/win32")
+  if(MSVC)
+    list(APPEND PostgreSQL_INCLUDE_DIRS "${PostgreSQL_SERVER_INCLUDE_DIR}/port/win32_msvc")
+  endif(MSVC)
+endif(WIN32)
+
+# Platform fixes: MacOS
+# https://github.com/postgres/postgres/blob/master/src/makefiles/Makefile.darwin
+set(PostgreSQL_LINK_FLAGS "")
+# @TODO: Find out if this can be done in a more cmakey way
+if(APPLE)
+  find_program(PostgreSQL_EXECUTABLE postgres REQUIRED NO_DEFAULT_PATH PATHS ${PostgreSQL_BIN_DIR})
+  set(PostgreSQL_LINK_FLAGS "-bundle_loader ${PostgreSQL_EXECUTABLE}")
+endif()
+
+# ----------------------------------------------------------------------------
+# Now we need to find the libraries and include files
+# if the library is available with multiple configurations, you can use SelectLibraryConfigurations
+# to automatically set the _LIBRARY variable:
+
+# @TODO: Find out if we can actually find any debug libraries on each platform
+
+find_library(PostgreSQL_LIBRARY_RELEASE
+  NAMES ${FIND_LIBRARY}
+  PATHS ${PostgreSQL_LIBRARY_DIRS}
+)
+
+find_library(PostgreSQL_LIBRARY_DEBUG
+  NAMES ${FIND_LIBRARY}d # <-- debug
+  PATHS ${PostgreSQL_LIBRARY_DIRS}
+)
+
+include(SelectLibraryConfigurations)
+select_library_configurations(PostgreSQL)
+
+# ----------------------------------------------------------------------------
+# pg_config may report "PostgreSQL 20devel" or "PostgreSQL 19beta3".
+# Only a dotted component is the minor release; qualifier/package digits are
+# not version components. Preserve the original label for diagnostics.
+set(PostgreSQL_VERSION_STRING "${PostgreSQL_VERSION}")
+if(NOT PostgreSQL_VERSION MATCHES "^PostgreSQL ([0-9]+)(\\.([0-9]+))?")
+  message(FATAL_ERROR "Unrecognized pg_config version: ${PostgreSQL_VERSION}")
+endif()
+set(PostgreSQL_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(PostgreSQL_VERSION_MINOR "${CMAKE_MATCH_3}")
+if(PostgreSQL_VERSION_MINOR STREQUAL "")
+  set(PostgreSQL_VERSION_MINOR 0)
+endif()
+set(PostgreSQL_VERSION "${PostgreSQL_VERSION_MAJOR}.${PostgreSQL_VERSION_MINOR}")
+
+# ----------------------------------------------------------------------------
+# Handle additional components
+
+if("PostGIS" IN_LIST PostgreSQL_FIND_COMPONENTS)
+  find_library(
+    POSTGIS
+    NAMES postgis postgis-3 postgis-3.so
+    PATHS ${PostgreSQL_PKG_LIBRARY_DIR}
+  )
+
+  set(PostgreSQL_PostGIS_FOUND TRUE)
+  if(NOT POSTGIS)
+    set(PostgreSQL_PostGIS_FOUND FALSE)
+  endif()
+endif()
+
+# ----------------------------------------------------------------------------
+# Now we can use FindPackageHandleStandardArgs to do
+# most of the rest of the work for us
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(PostgreSQL
+  REQUIRED_VARS
+    PostgreSQL_LIBRARY
+    PostgreSQL_INCLUDE_DIRS
+  HANDLE_COMPONENTS
+  VERSION_VAR PostgreSQL_VERSION
+)
+
+# ----------------------------------------------------------------------------
+# At this point, we have to provide a way for users of the find module to link to the library or libraries that were found.
+#
+# If the library is available with multiple configurations, the IMPORTED_CONFIGURATIONS target property should also be populated:
+
+if(PostgreSQL_FOUND)
+  # Backend extension modules need PostgreSQL's server headers, but on Unix
+  # their server symbols are resolved from the hosting `postgres` executable
+  # when the module is loaded.  Keep that contract separate from the libpq
+  # client target: static libpq packages may propagate frontend-only
+  # libpgcommon/libpgport archives whose symbols must not enter a backend DSO.
+  if (NOT TARGET PostgreSQL::ServerHeaders)
+    add_library(PostgreSQL::ServerHeaders INTERFACE IMPORTED GLOBAL)
+  endif()
+  set_target_properties(PostgreSQL::ServerHeaders PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${PostgreSQL_INCLUDE_DIRS}"
+    INTERFACE_LINK_LIBRARIES "${PostgreSQL_SERVER_LINK_LIBRARIES}"
+  )
+  if(BIOSEQ_PACKAGE_BUILD AND BIOSEQ_PACKAGE_POSTGRES_HEADER_IDENTITY)
+    # Package archives preserve old mtimes even after an SDK update. Include
+    # header content identity in PG consumers' command/cache keys, not in the
+    # numerical modules or isolated generator. Never disable cache validation.
+    set_property(TARGET PostgreSQL::ServerHeaders PROPERTY
+      INTERFACE_COMPILE_DEFINITIONS
+      "BIOSEQ_PACKAGE_POSTGRES_HEADER_IDENTITY=${BIOSEQ_PACKAGE_POSTGRES_HEADER_IDENTITY}")
+  endif()
+
+  # When providing imported targets, these should be namespaced (hence the Foo:: prefix);
+  # CMake will recognize that values passed to target_link_libraries() that contain :: in their name
+  # are supposed to be imported targets (rather than just library names),
+  if (NOT TARGET PostgreSQL::PostgreSQL)
+    add_library(PostgreSQL::PostgreSQL UNKNOWN IMPORTED)
+  endif()
+
+  # The RELEASE variant should be listed first in the property so that the variant is chosen
+  # if the user uses a configuration which is not an exact match for any listed IMPORTED_CONFIGURATIONS.
+  if (PostgreSQL_LIBRARY_RELEASE)
+    set_property(TARGET PostgreSQL::PostgreSQL APPEND PROPERTY
+      IMPORTED_CONFIGURATIONS RELEASE
+    )
+    set_target_properties(PostgreSQL::PostgreSQL PROPERTIES
+      IMPORTED_LOCATION_RELEASE "${PostgreSQL_LIBRARY_RELEASE}"
+    )
+  endif()
+
+  if (PostgreSQL_LIBRARY_DEBUG)
+    set_property(TARGET PostgreSQL::PostgreSQL APPEND PROPERTY
+      IMPORTED_CONFIGURATIONS DEBUG
+    )
+    set_target_properties(PostgreSQL::PostgreSQL PROPERTIES
+      IMPORTED_LOCATION_DEBUG "${PostgreSQL_LIBRARY_DEBUG}"
+    )
+  endif()
+
+  set_target_properties(PostgreSQL::PostgreSQL PROPERTIES
+    #INTERFACE_COMPILE_OPTIONS "${PostgreSQL_CFLAGS_OTHER}"
+    INTERFACE_INCLUDE_DIRECTORIES "${PostgreSQL_INCLUDE_DIRS}"
+    INTERFACE_LINK_LIBRARIES "${PostgreSQL_SERVER_LINK_LIBRARIES}"
+  )
+endif()
+
+# Most of the cache variables should be hidden in the `ccmake` interface unless the user explicitly asks to edit them.
+mark_as_advanced(
+  PostgreSQL_INCLUDE_DIRS
+  PostgreSQL_LIBRARY
+)
+
+# ----------------------------------------------------------------------------
+
+# Traditional variables (from pkg-config):
+#
+# _FOUND            has the package been found
+# _LIBRARIES        ?
+# _LINK_LIBRARIES   ?
+# _LIBRARY_DIRS     ?
+# _LDFLAGS          ?
+# _LDFLAGS_OTHER    ?
+# _INCLUDE_DIRS     ?
+# _CFLAGS           ?
+# _CFLAGS_OTHER     required non-include-dir CFLAGS to stdout
+#
+# _VERSION          full version of found package
+# _PREFIX           ?
+# _INCLUDEDIR       ?
+# _LIBDIR           ?
+
+# debug
+message(STATUS "Find version:  ${PostgreSQL_FIND_VERSION}")
+message(STATUS "Find major:    ${PostgreSQL_FIND_VERSION_MAJOR}")
+message(STATUS "Find minor:    ${PostgreSQL_FIND_VERSION_MINOR}")
+
+message(STATUS "Found version: ${PostgreSQL_VERSION}")
+message(STATUS "Found major:   ${PostgreSQL_VERSION_MAJOR}")
+message(STATUS "Found minor:   ${PostgreSQL_VERSION_MINOR}")
+
+# Get all variables
+GET_CMAKE_PROPERTY(vars VARIABLES)
+FOREACH(var ${vars})
+  STRING(REGEX MATCH "^PostgreSQL_" item ${var})
+  IF(item)
+    message(STATUS "${var} = ${${var}}")
+  ENDIF(item)
+ENDFOREACH(var)

@@ -1,0 +1,9 @@
+{
+  "schema": "bioseq.website.manifest",
+  "schema_revision": 1,
+  "hash_algorithm": "sha256",
+  "version": "v0.1",
+  "base_path": "/bioseqdb/",
+  "note": "Test fixture manifest. test_generated_site_validation.py binds its stamp to the SHA-256 of this file; it is not required to enumerate the fixture files.",
+  "outputs": []
+}

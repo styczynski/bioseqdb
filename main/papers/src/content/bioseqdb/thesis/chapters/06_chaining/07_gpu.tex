@@ -1,0 +1,233 @@
+
+\section{GPU chaining}
+\label{sec:chaining-b2}
+
+\subsection{G3SA algorithm}
+
+The G3SA paper divides GPU kernel into 4 stages:
+\begin{enumerate}
+\item \textbf{First forward-scoring pass:} Either use short kernel (specialized for short sequences) or tiled kernel (tiled kernel is just dividing 
+sequence into smaller chunks and applying modified short kernel). This stage computes total scores as normal chaining $f_j + E(j,i)$.
+\item \textbf{First backtracking and packing:}  G3SA applies minimap2's
+    cut and marking rule, reverses accepted paths, and packs their anchors into a buffer.
+\item \textbf{Conditional ranking:} If the difference between sizes of query and target is big (see Figure~\ref{fig:chaining-pipelines}), then 
+    kernel compares simplified\(h(j)\) and calculates one complete link score for the best canidate (similar to how minimap2 does RMQ rescoring mentioned earlier)
+\item \textbf{Final backtracking:} This is done via minimap2 scalar backtracking algorithm
+\end{enumerate}
+
+\info{G3SA AVL code}{The repository contains CUDA AVL support code and a
+commented experimental entry point.  The active chaining pipeline does not
+call that entry point.  Its second pass uses array-based short and tiled
+kernels.}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
+\draw[chain muted] (.10,3.25) rectangle (1.55,4.15);
+\node at (.825,3.70) {anchors};
+
+\draw[chain blue] (2.10,2.92) rectangle (4.65,4.48);
+\node[font=\bfseries] at (3.375,4.15)
+    {first-pass score};
+\draw[fill=chainBlue!6,draw=chainBlue!70!black]
+    (2.30,3.08) rectangle (3.28,3.72);
+\node at (2.79,3.40) {short};
+\draw[fill=chainBlue!6,draw=chainBlue!70!black]
+    (3.47,3.08) rectangle (4.45,3.72);
+\node at (3.96,3.40) {tiled};
+
+\draw[chain green] (5.20,3.15) rectangle (7.55,4.25);
+\node[align=center] at (6.375,3.70)
+    {backtrack\\and pack};
+
+\draw[chain orange] (8.10,3.05) rectangle (10.72,4.35);
+\node[align=center] at (9.41,3.70)
+    {Is the found chain vs. target size greater than 1000 or 10\% of target size?};
+
+\draw[chain green] (11.35,3.15) rectangle (14.15,4.25);
+\node[align=center] at (12.75,3.70)
+    {no: keep first-pass\\chain records};
+
+\draw[chain blue] (8.10,.75) rectangle (10.72,1.95);
+\node[align=center] at (9.41,1.35)
+    {pool and sort\\rank again};
+
+\draw[chain green] (11.35,.75) rectangle (14.15,1.95);
+\node[align=center] at (12.75,1.35)
+    {same backtracking\\final records};
+
+\draw[chain flow] (1.55,3.70)--(2.10,3.70);
+\draw[chain flow] (4.65,3.70)--(5.20,3.70);
+\draw[chain flow] (7.55,3.70)--(8.10,3.70);
+\draw[chain flow] (10.72,3.70)--(11.35,3.70)
+    node[midway,above] {no};
+\draw[chain flow] (9.41,3.05)--(9.41,1.95)
+    node[midway,right] {yes};
+\draw[chain flow] (10.72,1.35)--(11.35,1.35);
+\end{tikzpicture}
+\caption{Simplified depictions of G3SA pipeline}
+\label{fig:chaining-pipelines}
+\end{figure}
+
+\leavevmode\coderef{g3sa/minimap2/src/kernel_wrapper.cu}
+{G3SA chaining pipeline}{chaining_kernel_wrapper}{775}
+\leavevmode\coderef{g3sa/minimap2/src/krmq_cuda.cu}
+{Commented CUDA AVL entry point}{gpu_chain_rmq}{406}
+
+The main difference between G3SA is that it uses specialised paths depending on data size and it calculates rows instead of columns in the score matrix for anchors:
+the first kernel instead of looking at previous anchors and updating itself, looks at next anchors and updates them~\ref{fig:chaining-work-split}.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,>=Latex]
+    \node[anchor=west,font=\bfseries] at (.15,6.75)
+    {(a) minimap2 B1: fix target \(i\)};
+    \node[anchor=west,font=\bfseries] at (7.35,6.75)
+    {(b) G3SA short: fix source \(j\)};
+
+    \foreach \r/\c in {
+        0/1,0/2,0/3,0/4,0/5,
+        1/2,1/3,1/4,1/5,
+        2/3,2/4,2/5,
+        3/4,3/5,
+        4/5}
+    \draw[fill=chainGray!12,draw=chainGray!80!black]
+        (1.35+.62*\c-.27,5.72-.62*\r-.27)
+        rectangle
+        (1.35+.62*\c+.27,5.72-.62*\r+.27);
+    \foreach \r in {0,...,4}
+    \draw[fill=chainBlue!20,draw=chainBlue!90!black,very thick]
+        (1.35+.62*5-.27,5.72-.62*\r-.27)
+        rectangle
+        (1.35+.62*5+.27,5.72-.62*\r+.27);
+    \draw[fill=chainOrange!24,draw=chainOrange!95!black,very thick]
+    (1.35+.62*5-.27,5.72-.62*5-.27)
+    rectangle
+    (1.35+.62*5+.27,5.72-.62*5+.27);
+    \node at (1.35+.62*5,5.72-.62*5) {\(i\)};
+    \foreach \c in {0,...,5}
+    \node[anchor=south] at (1.35+.62*\c,6.06) {\scriptsize \(i_{\c}\)};
+    \foreach \r in {0,...,5}
+    \node[anchor=east] at (1.00,5.72-.62*\r) {\scriptsize \(j_{\r}\)};
+    \draw[chain flow,draw=chainBlue!90!black]
+    (5.28,2.78)--(5.28,5.40);
+    \node[rotate=90,anchor=south,text=chainBlue!90!black]
+    at (5.43,4.08) {newest to older};
+
+    \foreach \r/\c in {
+        0/1,0/2,0/3,0/4,0/5,
+        1/2,1/3,1/4,1/5,
+        2/3,2/4,2/5,
+        3/4,3/5,
+        4/5}
+    \draw[fill=chainGray!12,draw=chainGray!80!black]
+        (8.55+.62*\c-.27,5.72-.62*\r-.27)
+        rectangle
+        (8.55+.62*\c+.27,5.72-.62*\r+.27);
+    \foreach \c in {3,...,5}
+    \draw[fill=chainBlue!20,draw=chainBlue!90!black,very thick]
+        (8.55+.62*\c-.27,5.72-.62*2-.27)
+        rectangle
+        (8.55+.62*\c+.27,5.72-.62*2+.27);
+    \draw[fill=chainOrange!24,draw=chainOrange!95!black,very thick]
+    (8.55+.62*2-.27,5.72-.62*2-.27)
+    rectangle
+    (8.55+.62*2+.27,5.72-.62*2+.27);
+    \node at (8.55+.62*2,5.72-.62*2) {\(j\)};
+    \foreach \c in {0,...,5}
+    \node[anchor=south] at (8.55+.62*\c,6.06) {\scriptsize \(i_{\c}\)};
+    \foreach \r in {0,...,5}
+    \node[anchor=east] at (8.20,5.72-.62*\r) {\scriptsize \(j_{\r}\)};
+    \draw[chain flow,draw=chainBlue!90!black]
+    (12.00,4.48)--(13.20,4.48);
+    \node[anchor=south,text=chainBlue!90!black] at (12.60,4.58)
+    {update \(i>j\)};
+
+    \draw[fill=chainBlue!12,draw=chainBlue!90!black]
+    (.80,.45) rectangle (3.75,1.25);
+    \node at (2.275,.85) {read earlier \(j\)};
+    \draw[fill=chainOrange!18,draw=chainOrange!95!black]
+    (4.55,.45) rectangle (6.30,1.25);
+    \node at (5.425,.85) {one \(i\)};
+    \draw[chain flow] (3.75,.85)--(4.55,.85);
+
+    \draw[fill=chainOrange!18,draw=chainOrange!95!black]
+    (7.55,.45) rectangle (9.30,1.25);
+    \node at (8.425,.85) {one \(j\)};
+    \draw[fill=chainBlue!12,draw=chainBlue!90!black]
+    (10.10,.45) rectangle (13.55,1.25);
+    \node at (11.825,.85) {write later \(i\)};
+    \draw[chain flow] (9.30,.85)--(10.10,.85);
+\end{tikzpicture}
+\caption{Different approaches (transposed) of minimap2 and G3SA}
+\label{fig:chaining-work-split}
+\end{figure}
+
+After long analysis I decided to implement the simpler approach. Instead of writing multiple kernels, just naively port existing chaining logic to Vulkan API.
+\leavevmode\coderef{g3sa/minimap2/src/chaining_kernel.cu}
+  {G3SA short ranking kernel}{mm_compute_chain_short_rmq}{970}
+\leavevmode\coderef{g3sa/minimap2/src/kernel_wrapper.cu}
+  {G3SA ranking-pass launches}{chaining_kernel_wrapper_rmq}{595}
+
+\subsection{BioseqDB Vulkan tiled DP}
+\label{sec:chaining-vulkan}
+
+BioseqDB's \texttt{vulkan\_tiled\_dynamic\_programming} is the usual chaining algorithm that fixes one anchor \(i\) and examines earlier predecessors in
+batches of 32.
+
+The host first sets
+\[
+  D=\max\{\texttt{max\_gap},\texttt{bandwidth}\}.
+\]
+and sorts anchors to filter them by adjacent reference gap greater than \(D\).
+For a fixed target, lane \(u\) first scores predecessor \(i-u-1\).  The next
+iteration moves all lanes 32 positions to the back.  Every active lane
+calculates the complete value \(f_j+E(j,i)\) to then select one
+pair \((\text{score},j)\).
+
+\begin{algorithm}[H]
+\caption{BioseqDB Vulkan forward chaining for one hard range}
+\label{alg:chaining-vulkan}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require sorted range \(a_b,\ldots,a_{e-1}\), distance \(D\),
+    scan limit \(K\), skip parameter \(S\)
+  \Ensure scores \(f\) and absolute predecessor indices \(p\)
+  \State \(U\gets\infty\) if \(S\leq0\), otherwise
+    \(U\gets\lfloor S/32\rfloor+1\)
+  \For{\(i\gets b\) \textbf{to} \(e-1\)}
+    \State \(f_i\gets\ell_i,\quad p_i\gets-1\)
+    \State \(o\gets1,\quad u\gets0\)
+    \While{\(o\leq K\land i-o\geq b\)}
+      \State \(B\gets\) the longest prefix of
+        \((i-o,\ldots,i-o-31)\) with \(j\geq b\),
+        \(i-j\leq K\), and \(r_i-r_j\leq D\)
+      \If{\(B=\varnothing\)}
+        \State \textbf{break}
+      \EndIf
+      \ForAll{\(j\in B\) in 32 lanes}
+        \State \(c_j\gets f_j+E(j,i)\)
+            \Comment{invalid links use \(-\infty\)}
+      \EndFor
+      \State \(j^\star\gets
+        \operatorname*{arg\,max}_{j\in B}(c_j,j)\)
+            \Comment{larger \(j\) breaks a score tie}
+      \State \(c\gets c_{j^\star}\)
+      \If{\(c>f_i\)}
+        \State \(f_i\gets c,\quad p_i\gets j^\star,\quad u\gets0\)
+      \ElsIf{\(S>0\)}
+        \State \(u\gets u+1\)
+        \If{\(u\geq U\)}
+          \State \textbf{break}
+        \EndIf
+      \EndIf
+      \If{\(|B|<32\)}
+        \State \textbf{break}
+      \EndIf
+      \State \(o\gets o+32\)
+    \EndWhile
+    \State \(\operatorname{await}(\mathrm{targetUpdates}_i)\)
+          \Comment{make \(f_i,p_i\) visible before target \(i+1\)}
+  \EndFor
+\end{algorithmic}
+\end{algorithm}

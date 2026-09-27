@@ -1,0 +1,28 @@
+\section{What is returned after alignment?}
+\label{sec:alignment-postprocessing}
+
+BioseqDB assembles the alignment coordinates, strand, score and CIGAR, then
+repeats primary and secondary selection
+(Section~\ref{sec:chaining-primary-secondary}). The following quantities
+answer different questions:
+\begin{itemize}
+  \item \textbf{Score and edit count.} The score uses the selected aligner's
+    match and gap penalties. The edit count is the number of substitutions,
+    inserted symbols and deleted symbols on its chosen path. A generic
+    CIGAR \texttt{M} operation can include both matches and mismatches, so
+    counting edits also requires comparing the corresponding symbols.
+  \item \textbf{Divergence.} Matching minimizers give an estimate of the
+    fraction of differing bases. This estimate is available before final
+    alignment and does not replace the edit count from the CIGAR.
+  \item \textbf{Mapping quality (MAPQ).} This estimates confidence in the
+    mapping location. Competing chains and repetitive seeds reduce it.
+    BioseqDB follows minimap2's estimate and bounds it to 0--60.
+    Secondary mappings receive zero. A high alignment score alone does not
+    imply high MAPQ when several locations match equally well.
+\end{itemize}
+
+\noindent\label{sec:divergence-prefix-counts}
+To estimate divergence, BioseqDB forms cumulative counts of query minimizers
+by position. Subtracting two counts gives the number in an interval without
+sorting the emitted minimizers. This avoids the extra sorting discussed in
+Section~\ref{sec:minimizer-divergence-history}.

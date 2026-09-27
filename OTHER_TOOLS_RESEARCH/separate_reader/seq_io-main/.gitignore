@@ -1,8 +1,0 @@
-
-/_other/
-target
-Cargo.lock
-**/*.rs.bk
-
-.Rhistory
-.DS_Store

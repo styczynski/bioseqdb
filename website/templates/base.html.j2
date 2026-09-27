@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ page.title }}</title>
+<meta name="description" content="{{ page.description }}">
+<link rel="canonical" href="{{ page.canonical }}">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta property="og:title" content="{{ page.title }}">
+<meta property="og:description" content="{{ page.description }}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{ page.canonical }}">
+<meta property="og:image" content="{{ site.social_image_url }}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ page.title }}">
+<meta name="twitter:description" content="{{ page.description }}">
+<meta name="twitter:image" content="{{ site.social_image_url }}">
+<link rel="icon" href="{{ site.favicon_url }}">
+<link rel="stylesheet" href="{{ site.prism_css_url }}">
+<link rel="stylesheet" href="{{ site.css_url }}">
+{% block design_css %}<link rel="stylesheet" href="{{ site.assets_base_url }}css/docs-design.css">{% endblock %}
+</head>
+<body id="page-top" class="{% block body_class %}docs-design-page{% endblock %}">
+{% block skip_link %}<a class="skip-link" href="#doc-main">Skip to main content</a>{% endblock %}
+{% block page %}
+<div data-screen-label="BioseqDB documentation" class="dd-s0001">
+
+  <!-- ============ TOP NAV ============ -->
+  <header id="dnav" class="dd-s0002">
+    <div class="dd-s0003">
+      <button data-menu aria-label="Menu" class="dd-s0004">
+        <span class="dd-s0005"></span><span class="dd-s0005"></span><span class="dd-s0005"></span>
+      </button>
+      <a data-nav href="{{ nav.documentation }}" class="dd-s0006">
+        <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="30" height="30" alt="BioseqDB logo" class="dd-s0007">
+        <span class="dd-s0008">Bioseq<span class="dd-s0009">DB</span></span>
+        <span data-docsbadge class="dd-s0010">DOCS</span>
+      </a>
+
+      <nav data-topnav class="dd-s0011">
+        <a href="{{ nav.documentation }}" data-nav class="dd-s0012">Docs</a>
+        <a href="{{ site.base_path }}" class="dd-s0013">Product</a>
+        <a href="{{ site.base_path }}benchmarks/" class="dd-s0014 dd-h001">Benchmarks</a>
+        <a href="{{ site.versions_page_url }}" class="dd-s0013">Versions</a>
+      </nav>
+
+      <!-- SEARCH -->
+      <div data-search-wrap class="dd-s0015">
+        <div data-search-box class="dd-s0016">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" class="dd-s0017"><circle cx="7" cy="7" r="5" stroke="#7d94a6" stroke-width="1.6"/><line x1="10.6" y1="10.6" x2="14" y2="14" stroke="#7d94a6" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <input id="doc-search" role="combobox" aria-autocomplete="list" aria-controls="search-dd" aria-expanded="false" data-search-index="{{ site.search_index_url }}" type="text" placeholder="Search docs, functions, types…" autocomplete="off" spellcheck="false" class="dd-s0018">
+          <kbd class="dd-s0019">/</kbd>
+        </div>
+        <div id="search-dd" role="listbox" aria-label="Search results" class="dd-s0020"></div>
+      </div>
+
+      <!-- VERSION -->
+      <div data-ver-wrap class="dd-s0021">
+        <button id="ver-btn" class="dd-s0022">
+          <span class="dd-s0023"></span>{{ site.version }} <span class="docs-version-status">{{ site.status_label }}</span>
+          <span data-caret class="dd-s0025"></span>
+        </button>
+        <div id="ver-menu" data-versions-url="{{ site.versions_url }}" class="dd-s0026">
+          <a data-ver href="{{ nav.documentation }}" aria-current="page" class="dd-s0027">{{ site.version }} <span class="docs-version-current">current</span></a>
+          <a data-ver-all href="{{ site.versions_page_url }}" class="dd-s0029">All versions</a>
+        </div>
+      </div>
+
+      <a data-ghbtn href="{{ site.repository_url }}" rel="noreferrer" class="dd-s0031">GitHub</a>
+    </div>
+  </header>
+
+  <!-- ============ BODY GRID ============ -->
+  <div data-bodygrid class="dd-s0032">
+
+    <!-- ===== LEFT SIDEBAR ===== -->
+    <aside id="sidebar" class="dd-s0033">
+      {% if page.doc_nav %}
+      {% for section in page.doc_nav %}
+      <div data-chapter>
+        <button type="button" data-chap-toggle aria-expanded="true" class="dd-s0034">
+          <span data-caret class="dd-s0035"></span>{{ section.label }}
+        </button>
+        <div data-chap-list class="dd-s0036">
+          {% for item in section.items %}<a data-doc-link href="{{ item.url }}" class="dd-s0037">{{ item.label }}</a>{% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div data-chapter>
+        <div data-static-chapter class="dd-s0036">
+          <a data-doc-link href="{{ nav.documentation }}" class="dd-s0037">Documentation</a>
+          <a data-doc-link href="{{ nav.reference }}" class="dd-s0037">API reference</a>
+        </div>
+      </div>
+      {% endif %}
+      <div class="dd-s0038">
+        <a href="{{ site.repository_url }}" rel="noreferrer" class="dd-s0039">Edit on GitHub</a>
+      </div>
+    </aside>
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <main id="doc-main" class="dd-s0040">
+      {% block main %}{% endblock %}
+    </main>
+
+    <!-- ===== RIGHT TOC ===== -->
+    <aside data-rightrail class="dd-s0234">
+      <div class="dd-s0235">On this page</div>
+      <div id="toc-list" class="dd-s0236">
+        {% if page.on_this_page %}{% for heading in page.on_this_page %}<a data-toc-link data-level="{{ heading.level }}" href="#{{ heading.anchor }}">{{ heading.text }}</a>{% endfor %}{% endif %}
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- ============ SITE FOOTER ============ -->
+  <footer data-screen-label="Docs · Footer" class="dd-s0237">
+    <div aria-hidden="true" class="dd-s0238">BioseqDB</div>
+
+    <div class="dd-s0239">
+      <div data-footcols class="dd-s0240">
+        <div>
+          <div class="dd-s0241">
+            <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="dd-s0007">
+            <span class="dd-s0242">Bioseq<span class="dd-s0243">DB</span></span>
+            <span class="dd-s0244">DOCS</span>
+          </div>
+          <p class="dd-s0245">SQL-native search for biological sequence data. Load, store, and query FASTA and FASTQ beside their metadata.</p>
+          <span class="dd-s0246"><span class="dd-s0247"></span>Free &amp; open source</span>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Documentation</div>
+          <div class="dd-s0249">
+            {% if page.doc_nav %}
+            {% for section in page.doc_nav %}{% for item in section.items %}<a href="{{ item.url }}" class="dd-s0250 dd-h009">{{ item.label }}</a>{% endfor %}{% endfor %}
+            {% else %}<a href="{{ nav.documentation }}" class="dd-s0250 dd-h009">Documentation home</a><a href="{{ nav.reference }}" class="dd-s0250 dd-h009">API reference</a>{% endif %}
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Explore</div>
+          <div class="dd-s0249">
+            <a href="{{ site.base_path }}" class="dd-s0250 dd-h009">Product home</a>
+            <a href="{{ site.base_path }}#workflow" class="dd-s0250 dd-h009">Workflow</a>
+            <a href="{{ site.base_path }}#examples" class="dd-s0250 dd-h009">Examples</a>
+            <a href="{{ site.base_path }}#index" class="dd-s0250 dd-h009">Index</a>
+            <a href="{{ site.base_path }}#scale" class="dd-s0250 dd-h009">Scale</a>
+          </div>
+        </div>
+
+        <div>
+          <div class="dd-s0248">Project</div>
+          <div class="dd-s0249">
+            <a data-nav href="{{ nav.documentation }}" class="dd-s0250 dd-h009">Documentation</a>
+            <a href="{{ site.repository_url }}" rel="noreferrer" class="dd-s0251">GitHub</a>
+            <span class="dd-s0252">{{ site.status_label }} &middot; {{ site.version }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dd-s0253">
+      <div class="dd-s0254"></div>
+      <div class="dd-s0255">
+        <span class="dd-s0256">&copy; {{ site.copyright_year }} {{ site.copyright_holder }} &mdash; an independent open-source project.</span>
+        <nav class="dd-s0257">
+          <a href="{{ site.repository_url }}/blob/main/LICENSE" rel="noreferrer" class="dd-s0258 dd-h010">License (MIT)</a>
+          <a href="{{ site.versions_page_url }}" class="dd-s0258 dd-h010">Versions</a>
+          <a data-totop href="#page-top" class="dd-s0258 dd-h010">Back to top ↑</a>
+        </nav>
+      </div>
+    </div>
+  </footer>
+
+  <div data-backdrop class="dd-s0259"></div>
+
+  <!-- ===== ENTITY POPOVER ===== -->
+  <div id="entity-pop" class="dd-s0260"></div>
+
+</div>
+{% endblock %}
+{% if page.jsonld %}<script type="application/ld+json">{{ page.jsonld }}</script>{% endif %}
+<script src="{{ site.assets_base_url }}js/prism-init.js"></script>
+<script src="{{ site.prism_js_url }}"></script>
+<script type="module" src="{{ site.js_url }}"></script>
+{% block design_script %}<script type="module" src="{{ site.assets_base_url }}js/docs-design.mjs"></script>{% endblock %}
+</body>
+</html>

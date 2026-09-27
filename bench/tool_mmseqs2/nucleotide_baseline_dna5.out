@@ -1,0 +1,7 @@
+# Canonical bases: +2/-4. Ambiguous N (mapped to X): -1, matching baseline sc_ambi=1.
+   A  C  T  G  X
+A  2 -4 -4 -4 -1
+C -4  2 -4 -4 -1
+T -4 -4  2 -4 -1
+G -4 -4 -4  2 -1
+X -1 -1 -1 -1 -1

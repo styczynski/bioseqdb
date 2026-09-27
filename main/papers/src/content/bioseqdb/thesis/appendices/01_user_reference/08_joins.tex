@@ -1,0 +1,556 @@
+\section{Multiple sequence columns and sequence joins}
+\label{sec:appendix-joins}
+
+A sequence search has two roles: the first argument of \texttt{mmsearch} is
+the target, and the second is the query. SQL aliases name those roles when
+both arguments come from stored rows. A table can contain several sequence
+columns; every search and sequence operation names the column it uses.
+Section~\ref{sec:mmsearch-join-ownership} explains how the custom scan keeps
+the resulting alignment fields with the correct search.
+
+\begin{itemize}
+  \item \textbf{One column and a literal.} Search one selected sequence
+    column against a query written in SQL.
+  \item \textbf{One table and two aliases.} Use one alias for targets and
+    another for stored queries. This is a self-join.
+  \item \textbf{Two tables.} Keep the targets and queries in separate
+    relations, then join their sequence columns.
+  \item \textbf{Several searches.} Give each search a supported place in
+    the plan and an unambiguous target. Two predicates on the same target
+    cannot generally share one set of alignment fields.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[font=\small,
+  jt/.style={draw=appendixBlue,fill=appendixBlue!7,minimum width=2.2cm,
+    minimum height=.65cm,align=center},
+  jr/.style={draw=appendixOrange,fill=appendixOrange!10,minimum width=2.2cm,
+    minimum height=.65cm,align=center},
+  ja/.style={-{Latex[length=1.8mm]},thick}]
+  \node[font=\bfseries] at (2.65,3.75) {Self-join};
+  \node[jt,minimum width=4.5cm] (one) at (2.65,2.8)
+    {one table: \texttt{paired\_reads}};
+  \node[jr] (st) at (1.25,1.45) {\texttt{targets.seq0}};
+  \node[jr] (sq) at (4.05,1.45) {\texttt{probes.seq1}};
+  \draw[ja] (one.south west) -- (st.north);
+  \draw[ja] (one.south east) -- (sq.north);
+  \draw[ja] (sq.west) -- (st.east);
+  \node[align=center,text=black!70] at (2.65,.35)
+    {Two SQL roles can read\\different rows of the same table.};
+  \draw[black!25] (5.75,0) -- (5.75,4.05);
+  \node[font=\bfseries] at (8.85,3.75) {Two-table join};
+  \node[jt] (twoa) at (7.45,2.8) {target table};
+  \node[jt] (twob) at (10.25,2.8) {query table};
+  \node[jr] (tt) at (7.45,1.45) {\texttt{t.sequence}};
+  \node[jr] (tq) at (10.25,1.45) {\texttt{q.sequence}};
+  \draw[ja] (twoa) -- (tt);
+  \draw[ja] (twob) -- (tq);
+  \draw[ja] (tq.west) -- (tt.east);
+  \node[align=center,text=black!70] at (8.85,.35)
+    {The same target/query roles\\come from different tables.};
+\end{tikzpicture}
+\caption{The horizontal arrows show the query being searched against the
+target. A self-join changes the SQL roles; it does not create a second
+physical table. Neither layout promises a particular number of storage
+reads or a particular join plan.}
+\label{fig:appendix-join-roles}
+\end{figure}
+
+\subsection{Prepare and inspect a table with two sequence columns}
+
+The examples below use five rows. Both columns contain DNA, but
+\texttt{seq0} holds longer targets and \texttt{seq1} holds shorter queries.
+The two strings on adjacent lines within a single sequence value are joined
+by SQL; they are wrapped only to keep the listing readable.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+CREATE TABLE paired_reads (
+  pk integer PRIMARY KEY,
+  sample_id text NOT NULL,
+  seq0 bioseq.seq('dna4', 32) NOT NULL,
+  seq1 bioseq.seq('dna4', 32) NOT NULL
+) USING bioseq;
+
+SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.vectorization.enabled = on;
+
+INSERT INTO paired_reads VALUES
+  (1, 'alpha',
+   'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAG'
+   'TCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA',
+   'CTAGTCACTGTAGCCTGATCGTAGCTAGT'),
+  (2, 'alpha',
+   'CCCCAACTTAGTCACTTCTCAAAAATTACTCTCTCATCATCATCTACTCC'
+   'TAGTCACTGTAGCCTGATCGTAGCTAGTCACACACACCCCAAA',
+   'TCGTAGCTAGGA'),
+  (3, 'beta',
+   'GGGGGTCACTTCTCAAAAATTAGGGGGGGGGTAGTCACTGTAGCCTGAT'
+   'CGTAGCTAGGACACATATCATCATCTACTCCTATCATCATCTACTCCTA',
+   'TCATCATCTACTCCTA'),
+  (4, 'beta',
+   'TTTCATCATCATCATCTACTCCTATCTATCATCATCATCTACTCCTATC'
+   'TACTCTCATCATCCTGATCGTAGCTATACTCCTACTATCCTATT',
+   'TGTAGCCTGATCGTA'),
+  (5, 'gamma',
+   'ACGTCTAGTCACTGTAGCCTGATCGTAGCTAGTGTACTCTAGTCACTGT'
+   'AGCCTGATCGTAGCTAGTTGATCCCCATATCTTCACTAGTCACTGTAGC'
+   'CTGATCGTAGCTAGTTTTTTTA',
+   'CACTGTAGCCTGATCGTA');
+
+SELECT pk, bioseq.len(seq0), bioseq.len(seq1)
+FROM paired_reads ORDER BY pk;
+
+SELECT pk, sample_id, seq1::text
+FROM paired_reads WHERE sample_id = 'alpha' ORDER BY pk;
+
+SELECT pk, seq0[:12]::text AS target_prefix,
+       seq1[-8:]::text AS query_suffix
+FROM paired_reads ORDER BY pk;
+\end{lstlisting}
+\end{minipage}
+
+Each expression selects its own column. The last query returns up to twelve
+letters from the start of \texttt{seq0} and eight from the end of
+\texttt{seq1}. It does not perform alignment.
+
+The two settings control different work:
+
+\begin{itemize}
+  \item \texttt{bioseq.index.insert\_maintenance.enabled} permits eligible
+    index maintenance during insertion, subject to the index's update
+    policy. It does not build every index or make all index schemes support
+    per-row updates.
+  \item \texttt{bioseq.vectorization.enabled} allows vectorized execution
+    where the selected pipeline supports it. It does not change which
+    column or alias is the target.
+\end{itemize}
+
+The configuration reference documents their defaults and limits.
+
+\subsection{Choose the searched column and return its alignment fields}
+
+These are separate searches. Changing the first argument changes the target
+column; there is no implicit ``current sequence'' column.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+SELECT pk FROM paired_reads
+WHERE public.mmsearch(
+  seq0, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'
+          ::bioseq.seq('dna4', 32));
+
+SELECT pk FROM paired_reads
+WHERE public.mmsearch(
+  seq1, 'TCATCATCTACTCCTA'::bioseq.seq('dna4', 32));
+\end{lstlisting}
+\end{minipage}
+
+Project metadata and alignment fields in the same search query:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+SELECT pk, sample_id,
+       bioseq.target_start(pk) AS target_start,
+       bioseq.target_end(pk) AS target_end,
+       bioseq.query_start(pk) AS query_start,
+       bioseq.query_end(pk) AS query_end,
+       bioseq.cigar(pk) AS cigar
+FROM paired_reads
+WHERE public.mmsearch(
+  seq0, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'
+          ::bioseq.seq('dna4', 32),
+  public.aligner_options(best_n => 3))
+ORDER BY pk, target_start, query_start;
+\end{lstlisting}
+\end{minipage}
+
+Here \texttt{pk} identifies a row from the only target alias, so its
+alignment helpers have one possible search result. The key itself is not
+aligned. A target can produce several result rows with the same key. Keep
+the coordinates and other required alignment fields if those occurrences
+matter. The options object overrides the corresponding GUC defaults for
+this call; Section~\ref{sec:appendix-search-options} defines
+\texttt{best\_n} and the other fields.
+
+\subsection{Use a self-join for stored queries}
+
+The aliases below give the table two roles. For each candidate pair,
+\texttt{targets.seq0} is the target and \texttt{probes.seq1} is the query.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+SELECT targets.pk AS target_pk, probes.pk AS probe_pk,
+       bioseq.target_start(targets.pk) AS target_start,
+       bioseq.target_end(targets.pk) AS target_end,
+       bioseq.cigar(targets.pk) AS cigar
+FROM paired_reads AS targets
+CROSS JOIN paired_reads AS probes
+WHERE public.mmsearch(targets.seq0, probes.seq1)
+ORDER BY target_pk, probe_pk, target_start;
+\end{lstlisting}
+\end{minipage}
+
+Remove the three helper columns when only the key pairs are needed. The
+search can still return several alignments for one pair. Use
+\texttt{SELECT DISTINCT} on the two keys only when the required result is
+one row per matching pair, rather than one row per alignment.
+
+An explicit result stage makes later metadata filters easy to read:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+WITH raw_matches AS MATERIALIZED (
+  SELECT targets.pk AS target_pk, probes.pk AS probe_pk,
+         targets.sample_id AS target_sample,
+         probes.sample_id AS probe_sample
+  FROM paired_reads AS targets
+  CROSS JOIN paired_reads AS probes
+  WHERE public.mmsearch(targets.seq0, probes.seq1)
+)
+SELECT * FROM raw_matches
+WHERE target_sample <> probe_sample AND probe_pk IN (1, 3, 5)
+ORDER BY target_pk, probe_pk;
+\end{lstlisting}
+\end{minipage}
+
+\begin{itemize}
+  \item \textbf{Filter results.} The outer conditions select already
+    generated matches. This example does not avoid alignment for the rows
+    discarded by those conditions.
+  \item \textbf{Reduce input work.} If fewer input rows should reach the
+    search, inspect the actual child plans. A clear alternative is to load
+    the selected inputs into separate BioSeqDB tables first.
+  \item \textbf{Do not assume all subqueries are new search targets.}
+    A materialized result containing sequence values does not automatically
+    acquire the storage and search behavior of a BioSeqDB relation.
+\end{itemize}
+
+\subsection{Remove pairs with the same row key}
+
+To compare different rows, remove pairs whose keys are equal. The
+\emph{diagonal} means precisely those equal-key pairs in this self-join.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+WITH pairs AS MATERIALIZED (
+  SELECT targets.pk AS target_pk, probes.pk AS probe_pk
+  FROM paired_reads AS targets
+  CROSS JOIN paired_reads AS probes
+  WHERE public.mmsearch(targets.seq0, probes.seq1)
+)
+SELECT * FROM pairs
+WHERE target_pk <> probe_pk
+ORDER BY target_pk, probe_pk;
+\end{lstlisting}
+\end{minipage}
+
+If the application defines a symmetric relationship, a condition such as
+\texttt{target\_pk < probe\_pk} can retain one direction of each pair.
+That assumption does not follow from this example: the target and query
+use different columns and the alignment roles are directional. Removing
+one direction without that assumption can discard distinct results.
+
+\subsection{Put targets and queries in separate tables}
+
+The same search roles can come from two physical tables. This example
+copies the previously loaded values to keep the complete workflow runnable.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+CREATE TABLE search_targets (
+  target_id integer PRIMARY KEY,
+  cohort text NOT NULL,
+  sequence bioseq.seq('dna4', 32) NOT NULL
+) USING bioseq;
+
+CREATE TABLE search_queries (
+  query_id integer PRIMARY KEY,
+  query_name text NOT NULL,
+  sequence bioseq.seq('dna4', 32) NOT NULL
+) USING bioseq;
+
+INSERT INTO search_targets
+SELECT pk, sample_id, seq0 FROM paired_reads;
+INSERT INTO search_queries
+SELECT pk, sample_id, seq1 FROM paired_reads;
+
+SELECT q.query_id, q.query_name, t.target_id, t.cohort,
+       bioseq.cigar(t.target_id) AS cigar
+FROM search_queries AS q
+JOIN search_targets AS t
+  ON public.mmsearch(t.sequence, q.sequence)
+ORDER BY q.query_id, t.target_id;
+\end{lstlisting}
+\end{minipage}
+
+For a supported inner-join shape, the planner can select
+\texttt{BioseqBatchJoin}. Other supported shapes use a parameterized
+\texttt{BioseqScan}: its query sequence comes from the current outer row.
+SQL spelling alone does not guarantee one of these plans.
+
+\subsection{Read the join plan and its capacity information}
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT q.query_id, t.target_id
+FROM search_queries AS q
+JOIN search_targets AS t
+  ON public.mmsearch(t.sequence, q.sequence);
+\end{lstlisting}
+\end{minipage}
+
+Add \texttt{ANALYZE} to execute the query and obtain actual counts. The
+following fields are useful when the selected node is
+\texttt{BioseqBatchJoin}; labels are abbreviated by omitting their common
+\texttt{Bioseq} prefix.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{.35\linewidth}p{.60\linewidth}@{}}
+\toprule
+Plan field & Meaning \\
+\midrule
+Query Batch Capacity & Maximum query count in one execution batch. It is
+  not a limit on all retained query rows. \\
+Residual Mmsearch Qual & \texttt{absent} records that the owned search
+  marker was removed from ordinary Boolean filtering. \\
+Index Read Requirement & The selected rule for using, requiring, or
+  avoiding persisted target indexes. \\
+Query Planner Width & PostgreSQL's estimate of bytes per query-side row. \\
+Distinct Targets & Target child rows with a non-null sequence. Repeated
+  target identities count again. \\
+Query Batches & Number of query batches processed during execution. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The join retains its query-side rows before processing the target side.
+Therefore, a small batch capacity does not imply a small total memory
+requirement. The plan also reports estimated admission bytes and actual
+query materialization bytes. These help distinguish memory retained for
+all queries from work grouped into one batch.
+
+Check the custom node as well as its children. An ordinary executable
+\texttt{Join Filter: mmsearch(...)} is not the intended replacement for an
+alignment-owning custom node. Other pair conditions can remain as ordinary
+filters and be evaluated after an alignment has been generated.
+
+\subsection{Use LATERAL to express a query-dependent search}
+
+\texttt{LATERAL} allows the inner query to refer to a preceding input.
+Project the alignment fields inside the search query, then return those
+ordinary output columns outside it:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+SELECT q.query_id, matches.target_id, matches.cigar
+FROM search_queries AS q
+CROSS JOIN LATERAL (
+  SELECT t.target_id, bioseq.cigar(t.target_id) AS cigar
+  FROM search_targets AS t
+  WHERE public.mmsearch(t.sequence, q.sequence)
+) AS matches
+ORDER BY q.query_id, matches.target_id;
+\end{lstlisting}
+\end{minipage}
+
+A target metadata condition, for example \texttt{t.cohort = 'alpha'}, can
+be added inside that subquery. Check the plan to see where it is evaluated
+and whether it reduces the target input before alignment. PostgreSQL can
+flatten a simple lateral subquery, so \texttt{LATERAL} alone does not force
+a separate physical search stage.
+
+A global \texttt{LIMIT} limits the whole result. It does not request a
+fixed number of alignments for each query sequence. If the application
+needs a per-query limit, specify its ordering and stage deliberately, then
+check the plan and returned groups; do not infer that behavior from the
+batch size or from the presence of \texttt{LATERAL}.
+
+\subsection{Chain searches with separate target aliases}
+
+The first search below aligns each query against a middle target. The
+second uses that middle sequence as its query and searches a new target
+alias. The roles, and the two alignment results, are distinct.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+CREATE TABLE second_search_targets (
+  target_id integer PRIMARY KEY,
+  cohort text NOT NULL,
+  sequence bioseq.seq('dna4', 32) NOT NULL
+) USING bioseq;
+
+INSERT INTO second_search_targets
+SELECT target_id, cohort, sequence FROM search_targets;
+
+SELECT q.query_id, middle_targets.target_id AS middle_id,
+       final_targets.target_id AS final_id
+FROM search_queries AS q
+JOIN search_targets AS middle_targets
+  ON public.mmsearch(middle_targets.sequence, q.sequence)
+JOIN second_search_targets AS final_targets
+  ON public.mmsearch(final_targets.sequence,
+                     middle_targets.sequence)
+ORDER BY q.query_id, middle_id, final_id;
+\end{lstlisting}
+\end{minipage}
+
+Inspect the same statement with \texttt{EXPLAIN (ANALYZE, VERBOSE)} to
+find the owner of each search. A later search in this shape can use a
+parameterized \texttt{BioseqScan}; do not expect two
+\texttt{BioseqBatchJoin} nodes simply because the SQL contains two joins.
+Read execution counts, index choices, and algorithm fields at each
+search-owning node.
+
+\subsection{Keep alignment projections unambiguous}
+
+A key such as \texttt{t.target\_id} can identify the current alignment
+only when one search result is associated with that target in its query
+scope. A key does not choose between two alignments from different
+searches. When two candidate searches share the same source, an ambiguous
+helper binding is rejected with SQLSTATE \texttt{42702}.
+
+Keep helpers in the query that owns their search. For example, this
+lateral query explicitly retains a subquery boundary with \texttt{OFFSET 0}
+and exports ordinary coordinate columns:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+SELECT q.query_id, matches.target_id,
+       matches.target_start, matches.target_end
+FROM search_queries AS q
+CROSS JOIN LATERAL (
+  SELECT t.target_id,
+         bioseq.target_start(t.target_id) AS target_start,
+         bioseq.target_end(t.target_id) AS target_end
+  FROM search_targets AS t
+  WHERE public.mmsearch(t.sequence, q.sequence)
+  OFFSET 0
+) AS matches
+ORDER BY q.query_id, matches.target_id, matches.target_start;
+\end{lstlisting}
+\end{minipage}
+
+The outer query reads \texttt{matches.target\_start}; it does not try to
+recover a search result by calling a helper on a detached identifier.
+This is a useful boundary for result expressions, not a promise that all
+possible lateral or nested search combinations are supported.
+
+\subsection{Find rows that match two queries without stacking searches}
+
+The following form is unsupported: two ordinary search predicates ask the
+same target binding to supply independent match results.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+-- Unsupported: two searches on the same target binding.
+SELECT pk FROM paired_reads
+WHERE public.mmsearch(
+        seq0, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'
+                ::bioseq.seq('dna4', 32))
+  AND public.mmsearch(
+        seq0, 'TCATCATCTACTCCTA'::bioseq.seq('dna4', 32));
+\end{lstlisting}
+\end{minipage}
+
+The ordinary stacked form is rejected with SQLSTATE \texttt{0A000}.
+Section~\ref{sec:mmsearch-join-ownership} shows distinct target aliases
+for independent searches. When only the set of matching row keys matters,
+another simple solution is to run one search per result table and intersect
+their keys:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+CREATE TEMP TABLE first_matches AS
+SELECT DISTINCT pk FROM paired_reads
+WHERE public.mmsearch(
+  seq0, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'
+          ::bioseq.seq('dna4', 32));
+
+CREATE TEMP TABLE second_matches AS
+SELECT DISTINCT pk FROM paired_reads
+WHERE public.mmsearch(
+  seq0, 'TCATCATCTACTCCTA'::bioseq.seq('dna4', 32));
+
+SELECT a.pk
+FROM first_matches AS a JOIN second_matches AS b USING (pk)
+ORDER BY a.pk;
+\end{lstlisting}
+\end{minipage}
+
+This deliberately discards multiple occurrences within each search. To
+retain them, project the required coordinates and CIGAR in each search
+stage and join those result rows. The join can then return several
+combinations for one key. If concurrent changes matter across the separate
+statements, run the workflow in a transaction with the required snapshot
+semantics.
+
+\subsection{Search slices and convert their coordinates}
+
+A transformed target is a logical sequence. Its reported positions refer
+to that sequence. For \texttt{targets.seq0[16:-16]}, position zero is the
+first retained letter, sixteen letters into the original value. The end
+bound excludes the final sixteen letters.
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+WITH relative_matches AS MATERIALIZED (
+  SELECT targets.pk AS target_pk, probes.pk AS probe_pk,
+         16 AS slice_start,
+         bioseq.target_start(targets.seq0[16:-16]) AS rel_start,
+         bioseq.target_end(targets.seq0[16:-16]) AS rel_end,
+         bioseq.cigar(targets.seq0[16:-16]) AS cigar
+  FROM paired_reads AS targets
+  CROSS JOIN paired_reads AS probes
+  WHERE public.mmsearch(targets.seq0[16:-16], probes.seq1)
+)
+SELECT target_pk, probe_pk,
+       slice_start + rel_start AS original_start,
+       slice_start + rel_end AS original_end, cigar
+FROM relative_matches
+ORDER BY target_pk, probe_pk, original_start;
+\end{lstlisting}
+\end{minipage}
+
+The helper arguments repeat the exact target slice. The outer query adds
+the known start offset to the already projected coordinates. This example
+uses zero-based, half-open ranges: the start is included and the end is
+excluded. For a negative or computed start bound, first resolve that bound
+against the original sequence length; adding its unevaluated SQL spelling
+would be wrong. Slicing can change index eligibility and the selected plan,
+so inspect a transformed search separately from the unsliced version.
+
+\subsection{Check the workload and remove the example tables}
+
+Before timing a larger join, check the following:
+
+\begin{enumerate}
+  \item Count the query and target rows that actually reach the search.
+    A filter on emitted matches is not necessarily an input restriction.
+  \item Find the search-owning custom nodes. Check the query batch
+    capacity and the memory used to retain all query-side rows.
+  \item Use \texttt{EXPLAIN ANALYZE} to inspect actual batch counts,
+    distinct targets, index source, and selected algorithms. It executes
+    the statement, unlike plain \texttt{EXPLAIN}.
+  \item Decide whether the output should contain all alignments or only
+    distinct row pairs. \texttt{DISTINCT} changes the result and adds work.
+  \item Distinguish a limit on the whole output from a limit per query.
+    Do not interpret \texttt{LIMIT} as a bound on alignment work.
+\end{enumerate}
+
+After running the examples, remove their tables and restore the two session
+defaults:
+
+\par\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-appendix-sql]
+DROP TABLE IF EXISTS first_matches, second_matches;
+DROP TABLE IF EXISTS second_search_targets;
+DROP TABLE IF EXISTS search_queries, search_targets;
+DROP TABLE IF EXISTS paired_reads;
+RESET bioseq.index.insert_maintenance.enabled;
+RESET bioseq.vectorization.enabled;
+\end{lstlisting}
+\end{minipage}

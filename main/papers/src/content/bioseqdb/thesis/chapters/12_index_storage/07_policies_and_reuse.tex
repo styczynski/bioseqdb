@@ -1,0 +1,134 @@
+\section{Other index considerations}
+\label{sec:index-operational-considerations}
+
+Indexes can automatically update themselves on index, however currently enabled by default is grouped MPF index, which due to bugs cannot correctly 
+return minimizers which leads to recomputing them when no explicit index read policy is specified and it doesn't support update on insert.
+More details are presented in the Appendix 1, where I also present concrete examples of how the BioseqDB should be used.
+
+This bug was caused by the fact that grouped MPF not only produces relational index, but also saves that compressed relation chunks into separate file that is used to enable faster reads during JOINs.
+The reader by default rejects ordinary single table queries, so you need to change the GUC to disable grouped-MPF (and use regular MPF instead).
+Saving file enables the JOIN to concurrently access stored data which is a cheap workaround around the decision to only use single Postgres reader process.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \foreach \shift/\mode/\heading in
+    {0/0/{(a) Ordinary MPF},7/1/{(b) Grouped MPF}} {
+    \begin{scope}[xshift=\shift cm]
+      \node[anchor=west,font=\bfseries] at (.1,10.65) {\heading};
+      \node at (4.1,10.15) {\texttt{refs}: targets};
+      \draw[fill=black!4,draw=black!55] (2.4,8.08) rectangle (5.8,9.88);
+      \draw[fill=indexGreen!16,draw=indexGreen] (2.4,8.68) rectangle (5.8,9.28);
+      \draw[black!55] (2.4,9.28)--(5.8,9.28);
+      \draw[black!55] (3.45,8.08)--(3.45,9.88);
+      \node at (2.925,9.58) {id};
+      \node at (4.625,9.58) {seq};
+      \node at (2.925,8.98) {$t_0$};
+      \node at (4.625,8.98) {$\cdots$};
+      \node[text=black!50] at (2.925,8.38) {$t_1$};
+      \node[text=black!50] at (4.625,8.38) {$\cdots$};
+      \draw[index arrow] (4.1,7.98)--(4.1,7.27);
+      \node[anchor=west] at (4.3,7.68) {index for $t_0$};
+
+      \ifnum\mode=0
+        \node at (4.1,7.04) {MPF index relation};
+        \foreach \yy in {6.6,6.23,5.86} {
+          \draw[fill=black!6,draw=black!55] (2.7,\yy-.12) rectangle (5.5,\yy+.12);
+          \draw[fill=indexOrange!25,draw=indexOrange] (3.25,\yy-.12) rectangle (5.5,\yy+.12);
+        }
+        \draw[index arrow,indexOrange] (4.1,5.59)--(4.1,4.75);
+        \node[anchor=west,align=left] at (4.32,5.18) {load and\\assemble};
+        \draw[fill=indexOrange!10,draw=indexOrange] (3.0,2.25) rectangle (6.15,4.65);
+        \node at (4.575,4.3) {private CPU lookup};
+      \else
+        \node at (4.1,7.04) {MPF reader image};
+        \draw[fill=indexGreen!7,draw=indexGreen]
+          (2.7,5.74)--(5.5,5.74)--(5.5,6.43)--(5.21,6.72)--(2.7,6.72)--cycle;
+        \draw[indexGreen] (5.21,6.72)--(5.21,6.43)--(5.5,6.43);
+        \foreach \yy in {6.47,6.2,5.93}
+          \draw[line width=3pt,indexGreen!45] (2.98,\yy)--(4.92,\yy);
+        \draw[index arrow,indexGreen] (4.1,5.59)--(4.1,4.75);
+        \node[anchor=west,align=left] at (4.32,5.18) {open and\\\texttt{mmap}};
+        \draw[dashed,fill=indexGreen!6,draw=indexGreen] (3.0,2.25) rectangle (6.15,4.65);
+        \node at (4.575,4.3) {mapped array view};
+      \fi
+      \node[align=center] at (4.575,3.36) {one reader\\for target $t_0$};
+
+      \node at (1.0,5.02) {\texttt{queries}};
+      \draw[fill=indexBlue!6,draw=indexBlue] (.1,2.25) rectangle (1.9,4.65);
+      \draw[indexBlue] (.75,2.25)--(.75,4.65);
+      \foreach \yy in {4.05,3.45,2.85}
+        \draw[indexBlue] (.1,\yy)--(1.9,\yy);
+      \node at (.425,4.35) {id};
+      \node at (1.325,4.35) {seq};
+      \foreach \yy/\q in {3.75/0,3.15/1,2.55/2} {
+        \node at (.425,\yy) {$q_{\q}$};
+        \node at (1.325,\yy) {$\cdots$};
+        \draw[index arrow,indexBlue] (1.98,\yy)--(2.9,\yy);
+      }
+      \node[align=center] at (1.0,1.72) {keep query\\rows};
+      \draw[index arrow] (4.575,2.14)--(4.575,1.55);
+      \node at (4.575,1.27) {target positions for anchors};
+      \draw[black!45] (3.1,.8)--(6.05,.8);
+      \foreach \xx in {3.32,4.02,5.7}
+        \fill[indexGreen] (\xx,.8) circle (2.2pt);
+    \end{scope}
+  }
+\end{tikzpicture}
+\caption{For large joins grouped-MPF uses saved direct binary dump of relational index, which speeds up the alignment by reducing time to sequentially read the backing table}
+\label{fig:index-join-read-paths}
+\end{figure}
+
+All indexes in BioseqDB can be automatically updated on insert (but as noted earlier, grouped-MPF will produce error on insert due to buggy implementation)
+\begin{table}[htbp]
+\centering
+\small
+\caption{Maintenance policies}
+\label{tab:index-update-policy}
+\begin{tabularx}{\linewidth}{@{}p{.31\linewidth}X@{}}
+\toprule
+\textbf{Policy} & \textbf{Meaning}\\
+\midrule
+\texttt{UPDATE\_ON\_INSERT} & Automatically compute and store minimizers for new sequences \\
+\texttt{UPDATE\_MANUALLY} & User needs to manually call \texttt{bioseq.update\_index} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Default policies in BioseqDB}
+\label{tab:index-policy-defaults}
+\begin{tabularx}{\linewidth}{@{}p{.34\linewidth}p{.30\linewidth}X@{}}
+\toprule
+\textbf{Index} & \textbf{Maintenance policy} & \textbf{Default read role}\\
+\midrule
+\path{minimizers_per_fragment} & \texttt{UPDATE\_ON\_INSERT} & Active minimizer index\\
+\path{minimizers_per_sequence} & \texttt{UPDATE\_MANUALLY} & Not selected\\
+\path{symbol_counts} & \texttt{UPDATE\_ON\_INSERT} & Used by supported symbol-count operations\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Reading saved minimizers}
+\label{sec:index-read-policy}
+
+The query and target must agree on their minimizer scheme and parameters otherwise the reader will refuse to read the index or emit the error.
+By default read requirement allows both reading the index and in case if does not exist or is incompatible, recomputing all minimizers. This behaviour however has some noticable bugs~\ref{tab:configuration-index-requirement}.
+
+\paragraph{Repeated lookups on wider hashes}
+\label{sec:index-direct-lookup}
+\label{sec:index-control-scan-waves}
+For supported 32-bit hashes, grouped MPF provides a sequence-wide
+direct lookup from a query hash to its position list. Wider hashes use the
+directory row, which searches fragment metadata. This means that queries
+can therefore read the same data again and again
+
+\paragraph{Index in RAM}
+\label{sec:index-residency}
+Mapping a reader file does not load all its pages into RAM. First accesses
+can require disk reads, while later accesses may use the operating-system
+page cache. Restarting PostgreSQL discards process-local state but does not
+guarantee an empty operating-system cache.
+

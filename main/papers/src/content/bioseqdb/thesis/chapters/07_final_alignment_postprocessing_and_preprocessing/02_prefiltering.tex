@@ -1,0 +1,100 @@
+\clearpage
+\section{SneakySnake prefiltering}
+\label{sec:prefilter-role}
+\label{sec:prefilter-sneakysnake}
+
+A plausible chain can still contain too many edits to satisfy the query.
+A prefilter tries to reject such candidates before spending time on alignment.
+BioseqDB incorporates the existing SneakySnake algorithm as a component of
+this step~\cite{sneakysnake_paper}. The algorithm described here is borrowed
+from that work, rather than a new filtering method developed for this thesis.
+
+For an edit limit \(E\), SneakySnake compares the sequences at shifts from
+\(-E\) to \(E\). At the current position it follows the longest matching
+run across these shifts, crosses one mismatch, and repeats. It counts these
+crossings but does not charge for switching between shifts. Its estimate can
+therefore be lower than the true edit distance. If the estimate exceeds
+\(E\), the candidate can be rejected. Otherwise it still needs alignment.
+The filter can save time because it compares runs of equal symbols without
+computing a full matrix of alignment scores or reconstructing a path.
+
+BioseqDB applies the test to mandatory intervals between anchors. It leaves
+the optional outer extensions to the aligner, which may stop before their
+ends. For unequal-length intervals, the current implementation uses only the
+lower bound \(\bigl||Q|-|T|\bigr|\). Surviving candidates are aligned and
+checked against the original edit predicate, such as
+\(\texttt{bioseq.edit(seq)}<10\). Passing the filter alone does not establish
+that this condition holds.
+
+% Existing filter illustrations retained as source material.
+% \begin{figure}[H]
+% \centering
+% \begingroup
+% \small
+% \setlength{\tabcolsep}{4pt}
+% \renewcommand{\arraystretch}{1.2}
+% \newcommand{\mazeMatch}{\cellcolor{white}\(\cdot\)}
+% \newcommand{\mazeObstacle}{\cellcolor{black!70}\textcolor{white}{\(\times\)}}
+% \newcommand{\mazeRoute}{\cellcolor{orange!35}\textcolor{orange!80!black}{\(\rightarrow\)}}
+% \newcommand{\mazeCross}{\cellcolor{orange!70}\(\times\)}
+% \begin{tabular}{c|*{12}{c}}
+%  & 0 & 1 & 2 & 3 & 4 & 5 & 6 & 7 & 8 & 9 & 10 & 11\\
+% \hline
+% \(d=+2\) & \mazeMatch & \mazeMatch & \mazeMatch & \mazeObstacle &
+% \mazeMatch & \mazeMatch & \mazeMatch & \mazeObstacle & \mazeMatch &
+% \mazeMatch & \mazeObstacle & \mazeObstacle\\
+% \(d=+1\) & \mazeMatch & \mazeMatch & \mazeMatch & \mazeObstacle &
+% \mazeMatch & \mazeMatch & \mazeMatch & \mazeObstacle & \mazeMatch &
+% \mazeMatch & \mazeMatch & \mazeObstacle\\
+% \(d=0\) & \mazeRoute & \mazeRoute & \mazeRoute & \mazeCross &
+% \mazeRoute & \mazeRoute & \mazeRoute & \mazeCross & \mazeRoute &
+% \mazeRoute & \mazeRoute & \mazeCross\\
+% \(d=-1\) & \mazeObstacle & \mazeMatch & \mazeMatch & \mazeObstacle &
+% \mazeMatch & \mazeMatch & \mazeMatch & \mazeObstacle & \mazeMatch &
+% \mazeMatch & \mazeMatch & \mazeObstacle\\
+% \(d=-2\) & \mazeObstacle & \mazeObstacle & \mazeMatch & \mazeObstacle &
+% \mazeMatch & \mazeMatch & \mazeMatch & \mazeObstacle & \mazeMatch &
+% \mazeMatch & \mazeMatch & \mazeObstacle\\
+% \end{tabular}
+
+% \vspace{0.4em}
+% \begin{tabular}{clclcl}
+% \cellcolor{white}\(\cdot\) & match &
+% \cellcolor{black!70}\textcolor{white}{\(\times\)} & obstacle &
+% \cellcolor{orange!35}\(\rightarrow\) & selected escape segment
+% \end{tabular}
+% \endgroup
+% \caption{A rejecting SneakySnake chip-maze walk for
+% \(Q=\mathtt{AAAAAAAAAAAA}\), \(T=\mathtt{AAACAAACAAAC}\), and \(E=2\).
+% Each row represents a query-to-target displacement. Amber cells show the
+% successive escape segments and three crossed obstacles on the unshifted row.}
+% \label{fig:prefilter-chip-maze}
+% \end{figure}
+
+% \begin{figure}[H]
+% \centering
+% \small
+% \renewcommand{\arraystretch}{1.15}
+% \begin{tabular}{c}
+% \fbox{\parbox{0.74\textwidth}{\centering
+% Construct the unshifted mismatch mask \(H_0\)}}\\[0.35em]
+% \(\operatorname{popcount}(H_0)\leq E\): retain \qquad
+% \(E=0\): reject by exact Hamming comparison\\[0.35em]
+% \(\Downarrow\) otherwise\\[0.35em]
+% \fbox{\parbox{0.74\textwidth}{\centering
+% Construct the \(2E\) shifted masks, amend each mask independently,\\
+% then set the boundary-adjacent compensation bits}}\\[0.35em]
+% \(\Downarrow\)\\[0.35em]
+% \fbox{\parbox{0.74\textwidth}{\centering
+% Intersect the masks and compute the capped four-bit group estimate}}\\[0.35em]
+% \(\Downarrow\) retain when the estimate is at most \(E\)\\[0.35em]
+% \fbox{\parbox{0.74\textwidth}{\centering
+% For a proposed rejection, evaluate exact thresholded edit distance}}\\[0.35em]
+% \(D(Q,T)\leq E\): retain \qquad \(D(Q,T)>E\): reject
+% \end{tabular}
+% \caption{GateKeeper decision flow in BioSeqDB. The unshifted mask provides an
+% exact rejection certificate when \(E=0\). For positive thresholds, shifted
+% masks can retain a candidate or propose rejection, and the exact threshold
+% guard confirms the proposal.}
+% \label{fig:prefilter-gatekeeper}
+% \end{figure}

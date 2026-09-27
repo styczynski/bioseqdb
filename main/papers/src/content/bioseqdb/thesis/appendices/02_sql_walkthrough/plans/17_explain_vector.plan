@@ -1,0 +1,16 @@
+Custom Scan (VectorAggNode) (actual time=0.067..0.067 rows=1 loops=1)
+  ->  Custom Scan (BioseqScan) on samples (actual time=0.058..0.063 rows=1 loops=1)
+        Bioseq Projected Columns: upload_date, age
+        Bioseq Chunk Group Filters: ((age >= 30) AND (upload_date >= '2026-09-01'::date))
+        Bioseq Chunk Groups Removed by Filter: 0
+        Bioseq Vectorized Filter: ((age >= 30) AND (upload_date >= '2026-09-01'::date))
+        ->  Cache
+              Cache Hits: 0
+              Cache Misses: 2
+              Cache Evictions: 0
+              Cache Writes: 2
+              Cache Maximum Size: 24
+              Cache Ending Size: 24
+              Total Cache Entries: 2
+Planning Time: 0.118 ms
+Execution Time: 0.141 ms

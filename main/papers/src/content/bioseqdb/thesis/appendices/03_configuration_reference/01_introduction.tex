@@ -1,0 +1,21 @@
+\label{sec:appendix-configuration}
+\label{sec:configuration-reference}
+\label{app:configuration-reference}
+
+This appendix lists all runtime settings registered by BioseqDB (GUCs) - their types, defaults, possible values and descriptions.
+Each setting can be viewed and set with the \texttt{SHOW} and \texttt{SET} commands~\autocite{postgresql17_pg_settings,postgresql17_guc_functions}.
+Some settings are hidden so they're not visible with \texttt{SHOW ALL}.
+
+\begin{lstlisting}[style=bioseq-search-sql,
+  caption={Inspecting and settingBioseqDB config values},
+  label={lst:configuration-inspect}]
+SHOW bioseq.aligner.minimizer.algorithm;
+
+SELECT name, setting, boot_val, reset_val,
+       vartype, context, min_val, max_val, enumvals
+FROM pg_settings
+WHERE name = 'bioseq.aligner.minimizer.algorithm';
+
+SET bioseq.aligner.minimizer.algorithm = 'scalar';
+\end{lstlisting}
+

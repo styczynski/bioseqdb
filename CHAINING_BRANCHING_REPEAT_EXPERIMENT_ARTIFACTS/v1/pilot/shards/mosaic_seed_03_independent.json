@@ -1,0 +1,733 @@
+{
+  "case_id": "mosaic_seed_03_independent",
+  "completed_at_utc": "2026-09-02T12:07:43.249Z",
+  "expectation": {
+    "minimum_path_anchors": 64,
+    "mosaic": {
+      "a_to_a_prime_offset": 33280,
+      "expected_group_boundaries": [
+        {
+          "end": 512,
+          "length": 512,
+          "name": "U0",
+          "start": 0
+        },
+        {
+          "end": 33280,
+          "length": 32768,
+          "name": "A",
+          "start": 512
+        },
+        {
+          "end": 33792,
+          "length": 512,
+          "name": "U1",
+          "start": 33280
+        },
+        {
+          "end": 66560,
+          "length": 32768,
+          "name": "A_prime",
+          "start": 33792
+        },
+        {
+          "end": 67072,
+          "length": 512,
+          "name": "U2",
+          "start": 66560
+        }
+      ],
+      "segment_count": 5
+    },
+    "paf": {
+      "minimum_query_coverage_fraction": 0.99,
+      "minimum_record_count": 1,
+      "minimum_target_coverage_fraction": 0.99,
+      "required_query_name": "query_mosaic_seed_03_independent",
+      "required_strand": "+",
+      "required_target_name": "ref_mosaic_seed_03_independent"
+    },
+    "primary_path": {
+      "diagonal": 0,
+      "minimum_fraction_on_declared_path": 1.0,
+      "query_interval": [
+        0,
+        67072
+      ],
+      "strand": "+",
+      "target_interval": [
+        0,
+        67072
+      ],
+      "target_name": "ref_mosaic_seed_03_independent"
+    },
+    "require_no_query_minimizer_filter_loss": true,
+    "require_unique_top_score": true,
+    "seed_frequency": {
+      "allowed_initial_reference_occurrences": [
+        1,
+        2
+      ],
+      "required_initial_filtered_count": 0
+    }
+  },
+  "group": "mosaic",
+  "input_artifacts": {
+    "construction": {
+      "content_sha256": "56a0ccd09890fd4ba660628a62dcc6f8c4a43f0af3d6b20e2e57a943d063d942",
+      "file_sha256": "520726f93ca201cd6a361e71e1902712aed2c3ea4ef776356b9e56253806b52d",
+      "path": "cases/mosaic_seed_03_independent/construction.json"
+    },
+    "query": {
+      "alphabet": "ACGT",
+      "file_sha256": "e263542b9db59f6123e7e6177b041861d8f051352d402e745f8f865e5edb841f",
+      "length": 67072,
+      "name": "query_mosaic_seed_03_independent",
+      "path": "cases/mosaic_seed_03_independent/query.fa",
+      "sequence_sha256": "dd60324395b1c7d8033b0011936076bf2492d476d7e9fe2dbaafd0f298cb36d7"
+    },
+    "reference": {
+      "alphabet": "ACGT",
+      "file_sha256": "65a9dbfa71aa106b5546709707a00ecc1a7fa883e3fb6e94374fdd8408f89ba2",
+      "length": 67072,
+      "name": "ref_mosaic_seed_03_independent",
+      "path": "cases/mosaic_seed_03_independent/reference.fa",
+      "sequence_sha256": "dd60324395b1c7d8033b0011936076bf2492d476d7e9fe2dbaafd0f298cb36d7"
+    }
+  },
+  "order": 32,
+  "parameters": {
+    "a_length": 32768,
+    "a_to_a_prime_offset": 33280,
+    "construction": "mosaic",
+    "similarity_level": "independent_control",
+    "substitution_count": null
+  },
+  "process": {
+    "exit_code": 0,
+    "interrupted": false,
+    "peak_rss_kib": 196,
+    "samples": 1,
+    "timed_out": false,
+    "wall_seconds": 0.21104004490189254
+  },
+  "provenance": {
+    "analysis_source_sha256": {
+      "runl_repeat_common.py": "c55c00f4a87a17de450b4e95c8db3afa01fbf947cdff7d99c81ce4fc45d80aa2",
+      "runl_repeat_run_experiment.py": "d7d054f48fe51f81c58b2b8d1f1b201d9b30e35b01b5194eabfb009e9a271e7d"
+    },
+    "case_identity_sha256": "ec8c14094f0379148aa673a5c13a0ff8039acea2d9dbf46451d480b4a7c1aaee",
+    "manifest_path": "/home/ubuntu/bioseqdb/original-minimap2-code/repeat_disruption_data_pilot/manifest.json",
+    "manifest_sha256": "90c46e2a8dbb065dff117f6d65d64b83bfebf7a55c335585051bba78d2fd0c20",
+    "minimap2_path": "/home/ubuntu/bioseqdb/original-minimap2-code/minimap2",
+    "minimap2_sha256": "6533837743e94e3ec22db01b874e75efbc8b2c6402f232cde0d5709924efd6c3"
+  },
+  "raw_artifacts": {
+    "invocation.json": {
+      "path": "invocation.json",
+      "sha256": "6a6b0492d87100e341040cd0a5c1e0267b95dea00d9b595d07e2c5ad8ce0fbf2",
+      "size_bytes": 1516
+    },
+    "stderr.log": {
+      "path": "stderr.log",
+      "sha256": "ffdc8233613026aa7f93b25c64f69909f0f147569fca69a8e1d4290b9ab80468",
+      "size_bytes": 1506587
+    },
+    "stdout.paf": {
+      "path": "stdout.paf",
+      "sha256": "9b65c8b7fab5907de60940e339add7a8134719f36f16b29fc676590b18bb6e5b",
+      "size_bytes": 159
+    }
+  },
+  "replicate_id": "seed_03",
+  "schema_version": 1,
+  "seed": 9161803,
+  "started_at_utc": "2026-09-02T12:07:42.349Z",
+  "status": "accepted",
+  "validation": {
+    "accepted": true,
+    "dump_artifacts": [
+      {
+        "path": "dumps/runl_call_1_dp.tsv",
+        "sha256": "d5e572b4d6ace64d4ac254f1b30e21626cfaaddadb7d499b549d8af6cd64ab5e",
+        "size_bytes": 451391
+      }
+    ],
+    "errors": [],
+    "first_path": {
+      "by_lane": {
+        "16": {
+          "bounds_fail_both": 3,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 781,
+          "closed_form_oracle_mismatches": {},
+          "closed_form_unit_run_oracle": {
+            "fast_batches": 781,
+            "fast_covered_anchors": 12496,
+            "loop_evaluations": 784,
+            "primary_path_anchors": 12499,
+            "scalar_fallbacks": 3
+          },
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 781,
+          "fast_covered_anchors": 12496,
+          "loop_evaluations": 784,
+          "path_anchor_percent_processed_by_vector_batches": 99.97599807984639,
+          "primary_path_anchors": 12499,
+          "runl_true_percent_of_all_loop_evaluations": 99.61734693877551,
+          "runl_true_percent_when_bounds_allow_vector": 100.0,
+          "scalar_fallbacks": 3,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "telemetry_reconstruction_mismatches": {}
+        },
+        "2": {
+          "bounds_fail_both": 1,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 6249,
+          "closed_form_oracle_mismatches": {},
+          "closed_form_unit_run_oracle": {
+            "fast_batches": 6249,
+            "fast_covered_anchors": 12498,
+            "loop_evaluations": 6250,
+            "primary_path_anchors": 12499,
+            "scalar_fallbacks": 1
+          },
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 6249,
+          "fast_covered_anchors": 12498,
+          "loop_evaluations": 6250,
+          "path_anchor_percent_processed_by_vector_batches": 99.99199935994879,
+          "primary_path_anchors": 12499,
+          "runl_true_percent_of_all_loop_evaluations": 99.984,
+          "runl_true_percent_when_bounds_allow_vector": 100.0,
+          "scalar_fallbacks": 1,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "telemetry_reconstruction_mismatches": {}
+        },
+        "32": {
+          "bounds_fail_both": 19,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 390,
+          "closed_form_oracle_mismatches": {},
+          "closed_form_unit_run_oracle": {
+            "fast_batches": 390,
+            "fast_covered_anchors": 12480,
+            "loop_evaluations": 409,
+            "primary_path_anchors": 12499,
+            "scalar_fallbacks": 19
+          },
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 390,
+          "fast_covered_anchors": 12480,
+          "loop_evaluations": 409,
+          "path_anchor_percent_processed_by_vector_batches": 99.84798783902713,
+          "primary_path_anchors": 12499,
+          "runl_true_percent_of_all_loop_evaluations": 95.35452322738386,
+          "runl_true_percent_when_bounds_allow_vector": 100.0,
+          "scalar_fallbacks": 19,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "telemetry_reconstruction_mismatches": {}
+        },
+        "4": {
+          "bounds_fail_both": 3,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 3124,
+          "closed_form_oracle_mismatches": {},
+          "closed_form_unit_run_oracle": {
+            "fast_batches": 3124,
+            "fast_covered_anchors": 12496,
+            "loop_evaluations": 3127,
+            "primary_path_anchors": 12499,
+            "scalar_fallbacks": 3
+          },
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 3124,
+          "fast_covered_anchors": 12496,
+          "loop_evaluations": 3127,
+          "path_anchor_percent_processed_by_vector_batches": 99.97599807984639,
+          "primary_path_anchors": 12499,
+          "runl_true_percent_of_all_loop_evaluations": 99.90406140070355,
+          "runl_true_percent_when_bounds_allow_vector": 100.0,
+          "scalar_fallbacks": 3,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "telemetry_reconstruction_mismatches": {}
+        },
+        "64": {
+          "bounds_fail_both": 19,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 195,
+          "closed_form_oracle_mismatches": {},
+          "closed_form_unit_run_oracle": {
+            "fast_batches": 195,
+            "fast_covered_anchors": 12480,
+            "loop_evaluations": 214,
+            "primary_path_anchors": 12499,
+            "scalar_fallbacks": 19
+          },
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 195,
+          "fast_covered_anchors": 12480,
+          "loop_evaluations": 214,
+          "path_anchor_percent_processed_by_vector_batches": 99.84798783902713,
+          "primary_path_anchors": 12499,
+          "runl_true_percent_of_all_loop_evaluations": 91.1214953271028,
+          "runl_true_percent_when_bounds_allow_vector": 100.0,
+          "scalar_fallbacks": 19,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "telemetry_reconstruction_mismatches": {}
+        },
+        "8": {
+          "bounds_fail_both": 3,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 1562,
+          "closed_form_oracle_mismatches": {},
+          "closed_form_unit_run_oracle": {
+            "fast_batches": 1562,
+            "fast_covered_anchors": 12496,
+            "loop_evaluations": 1565,
+            "primary_path_anchors": 12499,
+            "scalar_fallbacks": 3
+          },
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 1562,
+          "fast_covered_anchors": 12496,
+          "loop_evaluations": 1565,
+          "path_anchor_percent_processed_by_vector_batches": 99.97599807984639,
+          "primary_path_anchors": 12499,
+          "runl_true_percent_of_all_loop_evaluations": 99.80830670926518,
+          "runl_true_percent_when_bounds_allow_vector": 100.0,
+          "scalar_fallbacks": 3,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "telemetry_reconstruction_mismatches": {}
+        }
+      },
+      "candidate_ordering": {
+        "candidate_count": 12494,
+        "maximum_score_candidate_count": 1,
+        "second_ranked_score": 67071,
+        "top_index": 12498,
+        "top_minus_second_score": 1,
+        "top_rank": 12493,
+        "top_score": 67072,
+        "unique_maximum_score": true
+      },
+      "construction_analysis": {
+        "a_to_a_prime_offset": 33280,
+        "construction_type": "mosaic_exact_full_diagonal",
+        "diagonal_anchor_counts": {
+          "0": 12499
+        },
+        "expected_track_anchor_count": 12499,
+        "other_diagonal_anchor_count": 0,
+        "segment_anchor_matrix": {
+          "A->A": 6085,
+          "A_prime->A_prime": 6132,
+          "U0->U0": 94,
+          "U1->U1": 93,
+          "U2->U2": 95
+        }
+      },
+      "declared_primary_coordinates": {
+        "declared": true,
+        "matching_anchor_count": 12499,
+        "matching_fraction": 1.0,
+        "path_anchor_count": 12499,
+        "required_fraction": 1.0,
+        "start_anchor": {
+          "index": 12498,
+          "printed_diagonal_delta": 0,
+          "query_end": 67071,
+          "span": 15,
+          "strand": "+",
+          "target_end": 67071,
+          "target_name": "ref_mosaic_seed_03_independent"
+        },
+        "terminal_anchor": {
+          "index": 0,
+          "printed_diagonal_delta": 0,
+          "query_end": 14,
+          "span": 15,
+          "strand": "+",
+          "target_end": 14,
+          "target_name": "ref_mosaic_seed_03_independent"
+        }
+      },
+      "dumped_maximal_unit_runs": {
+        "lengths": [
+          12499
+        ],
+        "maximum_length": 12499,
+        "run_count": 1,
+        "runs": [
+          {
+            "length": 12499,
+            "path_offset_end": 12499,
+            "path_offset_start": 0
+          }
+        ],
+        "runs_sha256": "ba8fa36972225cf1204e34dcf49b2423bb9d8589facffc8a02511959c78f0dcf",
+        "total_unit_link_anchors": 12499
+      },
+      "independent_oracle": {
+        "path_anchor_count": 12499,
+        "path_indices_sha256": "e10229315911218e9d8c0e5a17b71da41e11adb6292eccad32e1b9017375ee93",
+        "source": "declared SD coordinate path, independent of dumped p[]",
+        "unit_runs": {
+          "lengths": [
+            12499
+          ],
+          "maximum_length": 12499,
+          "run_count": 1,
+          "total_unit_link_anchors": 12499,
+          "unit_flags_sha256": "53100aaecec5e13d0976a928974bfe189ad4d584ffd7c98b3aec545f9d4ef2df"
+        }
+      },
+      "path_anchor_count": 12499,
+      "path_indices_sha256": "e10229315911218e9d8c0e5a17b71da41e11adb6292eccad32e1b9017375ee93",
+      "predecessor_index_gaps": {
+        "contiguous_link_count": 12498,
+        "contiguous_link_percent": 100.0,
+        "link_count": 12498,
+        "maximum": 1,
+        "mean": 1.0,
+        "median": 1.0,
+        "minimum": 1,
+        "noncontiguous_link_count": 0,
+        "p90": 1.0,
+        "p99": 1.0,
+        "skipped_array_entries_total": 0
+      },
+      "realized_repeat_statistics": {
+        "anchors_in_group_larger_than_one": 0,
+        "duplicate_by_nonunit_gap_contingency": {
+          "duplicate_and_nonunit_gap": 0,
+          "duplicate_and_unit_gap": 0,
+          "singleton_and_nonunit_gap": 0,
+          "singleton_and_unit_gap": 12499
+        },
+        "fraction_in_group_larger_than_one": 0.0,
+        "maximum_same_target_group_size": 1,
+        "phi_correlation_duplicate_vs_nonunit_gap": null,
+        "same_target_group_size_histogram": {
+          "1": 12499
+        },
+        "same_target_group_sizes_sha256": "a8d3b0115d9a202e60f9f95ba4b41fb649a5812e81fbc17e3ee5799a8f00fdf4",
+        "selected_path_anchor_count": 12499
+      }
+    },
+    "paf": {
+      "expected_query_length": 67072,
+      "expected_target_length": 67072,
+      "matching_qualified_record_count": 1,
+      "matching_records": [
+        {
+          "alignment_block_length": 67072,
+          "mapping_quality": 60,
+          "query_end": 67072,
+          "query_length": 67072,
+          "query_name": "query_mosaic_seed_03_independent",
+          "query_start": 0,
+          "residue_matches": 67072,
+          "strand": "+",
+          "target_end": 67072,
+          "target_length": 67072,
+          "target_name": "ref_mosaic_seed_03_independent",
+          "target_start": 0
+        }
+      ],
+      "minimum_required_record_count": 1,
+      "nonempty_line_count": 1,
+      "qualified_record_requirement_declared": true,
+      "valid_record_count": 1
+    },
+    "telemetry": {
+      "initial_dp_call_id": 1,
+      "initial_dp_records": [
+        {
+          "anchor_count": 12499,
+          "bounds_fail_both": 1,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 6249,
+          "call_id": 1,
+          "candidate_end_count": 12494,
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 6249,
+          "fast_covered_anchors": 12498,
+          "has_fast_batch": 1,
+          "has_ranked_end": 1,
+          "lanes": 2,
+          "loop_evaluations": 6250,
+          "min_score": 40,
+          "primary_path_anchors": 12499,
+          "scalar_fallbacks": 1,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "schema_version": 1,
+          "stage": "dp",
+          "start_index": 12498,
+          "start_score": 67072
+        },
+        {
+          "anchor_count": 12499,
+          "bounds_fail_both": 3,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 3124,
+          "call_id": 1,
+          "candidate_end_count": 12494,
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 3124,
+          "fast_covered_anchors": 12496,
+          "has_fast_batch": 1,
+          "has_ranked_end": 1,
+          "lanes": 4,
+          "loop_evaluations": 3127,
+          "min_score": 40,
+          "primary_path_anchors": 12499,
+          "scalar_fallbacks": 3,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "schema_version": 1,
+          "stage": "dp",
+          "start_index": 12498,
+          "start_score": 67072
+        },
+        {
+          "anchor_count": 12499,
+          "bounds_fail_both": 3,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 1562,
+          "call_id": 1,
+          "candidate_end_count": 12494,
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 1562,
+          "fast_covered_anchors": 12496,
+          "has_fast_batch": 1,
+          "has_ranked_end": 1,
+          "lanes": 8,
+          "loop_evaluations": 1565,
+          "min_score": 40,
+          "primary_path_anchors": 12499,
+          "scalar_fallbacks": 3,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "schema_version": 1,
+          "stage": "dp",
+          "start_index": 12498,
+          "start_score": 67072
+        },
+        {
+          "anchor_count": 12499,
+          "bounds_fail_both": 3,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 781,
+          "call_id": 1,
+          "candidate_end_count": 12494,
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 781,
+          "fast_covered_anchors": 12496,
+          "has_fast_batch": 1,
+          "has_ranked_end": 1,
+          "lanes": 16,
+          "loop_evaluations": 784,
+          "min_score": 40,
+          "primary_path_anchors": 12499,
+          "scalar_fallbacks": 3,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "schema_version": 1,
+          "stage": "dp",
+          "start_index": 12498,
+          "start_score": 67072
+        },
+        {
+          "anchor_count": 12499,
+          "bounds_fail_both": 19,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 390,
+          "call_id": 1,
+          "candidate_end_count": 12494,
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 390,
+          "fast_covered_anchors": 12480,
+          "has_fast_batch": 1,
+          "has_ranked_end": 1,
+          "lanes": 32,
+          "loop_evaluations": 409,
+          "min_score": 40,
+          "primary_path_anchors": 12499,
+          "scalar_fallbacks": 19,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "schema_version": 1,
+          "stage": "dp",
+          "start_index": 12498,
+          "start_score": 67072
+        },
+        {
+          "anchor_count": 12499,
+          "bounds_fail_both": 19,
+          "bounds_fail_capacity": 0,
+          "bounds_fail_current": 0,
+          "bounds_pass": 195,
+          "call_id": 1,
+          "candidate_end_count": 12494,
+          "contiguous_mismatch": 0,
+          "emulation_error": 0,
+          "fast_batches": 195,
+          "fast_covered_anchors": 12480,
+          "has_fast_batch": 1,
+          "has_ranked_end": 1,
+          "lanes": 64,
+          "loop_evaluations": 214,
+          "min_score": 40,
+          "primary_path_anchors": 12499,
+          "scalar_fallbacks": 19,
+          "scalar_path_length": 12499,
+          "scalar_validation_error": 0,
+          "schema_version": 1,
+          "stage": "dp",
+          "start_index": 12498,
+          "start_score": 67072
+        }
+      ],
+      "instrumentation_errors": [],
+      "map_records": [
+        {
+          "max_max_occ": 4095,
+          "max_occ": 0,
+          "mid_occ": 10,
+          "occ_dist": 500,
+          "query_length": 67072,
+          "query_minimizers_after_query_filter": 12499,
+          "raw_query_minimizers": 12499,
+          "rep_len": 0,
+          "retained_anchor_count": 12499,
+          "schema_version": 1
+        }
+      ],
+      "parse_errors": [],
+      "query_filter": {
+        "query_minimizers_after_query_filter": 12499,
+        "raw_query_minimizers": 12499,
+        "removed_query_minimizers": 0,
+        "retained_anchor_count": 12499
+      },
+      "runl_record_count": 6,
+      "seed_anchor_count": 12499,
+      "seed_frequency": {
+        "filtered_count": 0,
+        "initial_record_count": 12499,
+        "observed_reference_occurrence_values": [
+          1
+        ],
+        "post_map_rechain_record_count": 0,
+        "reference_occurrence_histogram": {
+          "1": 12499
+        }
+      },
+      "stratified_calls": [
+        {
+          "anchor_count": 12499,
+          "by_lane": {
+            "16": {
+              "fast_batches": 781,
+              "fast_covered_anchors": 12496,
+              "identity_errors": [],
+              "primary_path_anchors": 12499,
+              "runl_true_percent_when_bounds_allow_vector": 100.0,
+              "scalar_fallbacks": 3
+            },
+            "2": {
+              "fast_batches": 6249,
+              "fast_covered_anchors": 12498,
+              "identity_errors": [],
+              "primary_path_anchors": 12499,
+              "runl_true_percent_when_bounds_allow_vector": 100.0,
+              "scalar_fallbacks": 1
+            },
+            "32": {
+              "fast_batches": 390,
+              "fast_covered_anchors": 12480,
+              "identity_errors": [],
+              "primary_path_anchors": 12499,
+              "runl_true_percent_when_bounds_allow_vector": 100.0,
+              "scalar_fallbacks": 19
+            },
+            "4": {
+              "fast_batches": 3124,
+              "fast_covered_anchors": 12496,
+              "identity_errors": [],
+              "primary_path_anchors": 12499,
+              "runl_true_percent_when_bounds_allow_vector": 100.0,
+              "scalar_fallbacks": 3
+            },
+            "64": {
+              "fast_batches": 195,
+              "fast_covered_anchors": 12480,
+              "identity_errors": [],
+              "primary_path_anchors": 12499,
+              "runl_true_percent_when_bounds_allow_vector": 100.0,
+              "scalar_fallbacks": 19
+            },
+            "8": {
+              "fast_batches": 1562,
+              "fast_covered_anchors": 12496,
+              "identity_errors": [],
+              "primary_path_anchors": 12499,
+              "runl_true_percent_when_bounds_allow_vector": 100.0,
+              "scalar_fallbacks": 3
+            }
+          },
+          "call_id": 1,
+          "candidate_end_count": 12494,
+          "path_anchor_count": 12499,
+          "predecessor_index_gaps": {
+            "contiguous_link_count": 12498,
+            "contiguous_link_percent": 100.0,
+            "link_count": 12498,
+            "maximum": 1,
+            "mean": 1.0,
+            "median": 1.0,
+            "minimum": 1,
+            "noncontiguous_link_count": 0,
+            "p90": 1.0,
+            "p99": 1.0,
+            "skipped_array_entries_total": 0
+          },
+          "stage": "dp",
+          "top_index": 12498,
+          "top_score": 67072
+        }
+      ]
+    },
+    "warnings": []
+  }
+}

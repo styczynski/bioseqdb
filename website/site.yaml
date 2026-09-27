@@ -1,0 +1,30 @@
+title: BioseqDB
+short_description: Load FASTA and FASTQ data, store sequences beside metadata, and search them with ordinary SQL.
+# Production serves the published site/ tree at the domain root, so site/index.html
+# is https://bioseqdb.com/index.html. canonical_origin carries no trailing slash --
+# it is concatenated with default_base_path to form canonical/sitemap/og:image URLs.
+canonical_origin: https://bioseqdb.com
+default_base_path: /
+repository_url: https://github.com/styczynski/bioseqdb
+source_url_template: https://github.com/styczynski/bioseqdb/blob/{revision}/{path}#L{line}
+default_social_image: static/media/social_card.png
+status_label: Alpha
+copyright_holder: Bioseq contributors
+copyright_year: 2026
+navigation:
+  documentation: Documentation
+  tutorials: Tutorials
+  reference: Reference
+cpp_public_modules:
+  - module: bioseq.io.reader
+    primary_interface: bioseq/io/reader.cppm
+  - module: bioseq.cache.provider_api
+    primary_interface: common/cache_provider_api/index.cppm
+required_documentation_entities:
+  - sql:type:bioseq.seq
+  - sql:function:bioseq_cache.version()
+  - sql:function:bioseq_cache.stats()
+  - sql:function:bioseq_cache.entries()
+  - sql:function:bioseq_cache.invalidate_all()
+  - sql:function:bioseq_cache.invalidate_relation(regclass)
+  - sql:function:bioseq_cache.reset_stats()

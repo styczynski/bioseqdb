@@ -1,0 +1,234 @@
+\section{Locator implementation}
+\label{sec:pg-storage-sequence-indirection}
+
+Sequence locator are implemented as 40-byte struct in C++. The struct must also include the Postgres header so it's effectively 56 bytes in total.
+The Postgres header stores alphabet code and base storage unit as \texttt{TYPMOD} field (custom field for storing type modifier).
+I don't provide small-sequence optimisation in BioseqDB, because that would complicate the implementation (instead of storing locator for small sequences we can potentially 
+store sequence directly in the user table. This would require storing it's padding so potential maximum sequence length that could be stored inline would be $(40B - 1B)*8/2 = 156$ symbols for DNA4).
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-cpp26,numbers=none,
+  basicstyle=\footnotesize\ttfamily,
+  caption={The 40-byte locator stored after the 16-byte sequence header.},
+  label={lst:storage-sequence-locator}]
+struct sequence_locator {
+  std::uint8_t  payload_version;   // format version used by me to change the locator format (currently it's just set to 3)
+  std::uint8_t  bucket_index;      // length bucket 0..34
+  std::uint16_t reserved_16;       // pad so shard_index is 4-byte aligned, must be 0
+  std::uint32_t shard_index;       // fragment relation inside the bucket
+  std::uint32_t fragment_count;    // consecutive fragment rows
+  std::uint32_t reserved_32;       // pad so logical_length is 8-byte aligned, must be 0
+  std::uint64_t logical_length;    // sequence length in symbols
+  std::uint64_t first_fragment_row;// row of fragment 0
+  std::uint64_t source_epoch;      // immutable source version, must be > 0
+};
+\end{lstlisting}
+\end{minipage}
+
+\begin{itemize}
+  \item the internal tables are divided into groups by sequence length and these groups are divided into shards (so I record both of these value to identify sequence)
+  \item the number of row for sequence first fragment and number of fragments (i.e number of rows occupied by sequence)
+  \item sequence length in symbols (logical length)
+  \item version of the sequence in case it's changed (source epoch)
+  \item version of locator format (not relevant for users)
+\end{itemize}
+
+\info{Locator format optimisation}{
+  Currently locators size could be reduces as I don't need to store version (it was used for developent) and I waste too much space for padding. It's potential oppornunity to optimsie in the future (it wasn't a priority as locators occupy overall small space in comparison to sequences themselves).
+}
+
+Each sequence as mentioned in section desribing sequence interfaces~\ref{sec:compact-sequence-range} has it's alphabet type and base storage unit.
+Base store unit is configurable from SQL. User can declare any power of 2 that is width of supported machine integer:
+
+\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={Examples of different base storage units},label={lst:sql-storage-widths}]
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 64);
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 32);
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 16);
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 8);
+-- Example for DNA5 (floor(64/3) = 21 symbols per unit)
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna5', 64);
+-- This is illegal as there's no uint128_t. 128-bit unit is just equivalent to two 64-bit units.
+SELECT 'ACTGTGCAACCCCTG'::bioseq.seq('dna4', 128);
+\end{lstlisting}
+\end{minipage}
+
+\info{Sequence fragments}{
+\label{info:sequence-fragments}
+Sequences are divided into fragments to enable lazy loading.
+A fragment is $1024$ packed storage units, so actual bytes occupied depend by the width of storage supplied by the user.
+The maximum possible fragment size is for 64-bit storage unit and it's $1024*8B = 8192B$ (note that this goes beyond default postgres page size of $8192B$, because page needs to include the page header as well)
+}
+
+Fragment abstraction is a separate layer above columnar storage.
+Shards for fragments are internally held as \texttt{CREATE TABLE ... (seq bioseq.seq(...)) USING bioseq}, so each fragment is one TAM row in that single sequence column.
+
+\warn{Storage considerations}{
+  \label{warn:storage-considerations}
+  Fragments always storing 1024 storage units which works well for long sequences, however if the sequence is short then only small number of storage units will be occupied, while the rest is filled with zeros.
+  Compression (default is pglz, but zstd is avialable as well and others for manual building) will take care of this problem and shrink the fragment.
+  However it still has measureable effects on processing in the pipeline as BioseqDB will waste space in memory for very short sequences.
+  This along with locator format optimisation is a task for future work.
+  If we assume occupancy rate of 50\% then minimal sequence size for 32-bit storageshould be $1024 * \frac{32}{2} * 0.5 = 8192$ symbols and for smallest possible storage: $1024 * \frac{8}{2} * 0.5 = 2048$ symbols.
+}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,5.85)
+    {40,000 DNA4 symbols, packed in 32-bit units};
+  \node[anchor=east] at (1.4,4.45) {symbols};
+  \draw[draw=black!55,fill=black!4] (1.7,4.05) rectangle (11.9,4.85);
+  \foreach \x in {5.1,8.5} \draw[black!55] (\x,4.05)--(\x,4.85);
+  \draw[fill=black!20,draw=black!55] (10.0,4.05) rectangle (11.9,4.85);
+  \node[align=center] at (3.4,4.45) {fragment\\0};
+  \node[align=center] at (6.8,4.45) {fragment\\1};
+  \node[align=center] at (9.25,4.45) {fragment\\2};
+  \node at (10.95,4.45) {unused};
+  \foreach \x/\n in {1.7/0,5.1/{16\,384},8.5/{32\,768},10/{40\,000}}
+    \node[above=3pt] at (\x,4.85) {$\n$};
+  \draw[storageOrange,line width=3pt] (7.925,3.35)--(8.755,3.35);
+  \draw[storageOrange] (7.925,3.20)--(7.925,3.50);
+  \draw[storageOrange] (8.755,3.20)--(8.755,3.50);
+  \node[anchor=east,text=storageOrange] at (7.55,3.35)
+    {request $[30\,000,34\,000)$};
+  \node[storage cell,fill=storageBlue!12,minimum width=2.4cm]
+    (locator) at (1.75,1.55) {parent locator\\first row $r_0$};
+  \foreach \x/\i/\r in {4.55/0/{r_0},7.6/1/{r_0+1},10.65/2/{r_0+2}} {
+    \node[storage cell,fill=storageGreen!10,minimum width=2.5cm,
+      minimum height=1.15cm] (f\i) at (\x,1.55)
+      {row $\r$\\4,096 payload bytes};
+  }
+  \draw[storage arrow] (locator.east)--(f0.west);
+  \draw[storage arrow,storageOrange] (8.1,3.10)--(f1.north);
+  \draw[storage arrow,storageOrange] (8.65,3.10)--(f2.north);
+
+  \node[anchor=east] at (1.45,-0.55) {pages};
+  \draw[fill=black!20,draw=black!60] (1.70,-0.95) rectangle (2.28,-0.15);
+  \draw[fill=storageGreen!12,draw=black!55] (2.28,-0.95) rectangle (4.39,-0.15);
+  \draw[fill=storageBlue!16,draw=black!55] (4.39,-0.95) rectangle (6.50,-0.15);
+  \node[font=\tiny,align=center] at (1.99,-0.55) {24 B};
+  \node[font=\scriptsize,align=center] at (3.335,-0.55) {$4112$ B\\row $r_0$};
+  \node[font=\scriptsize,align=center] at (5.445,-0.55) {$4056$ B\\row $r_0{+}1$};
+  \node[anchor=north,font=\scriptsize] at (4.10,-1.02) {$8192$ B page};
+
+  \draw[fill=black!20,draw=black!60] (7.00,-0.95) rectangle (7.58,-0.15);
+  \draw[fill=storageBlue!16,draw=black!55] (7.58,-0.95) rectangle (8.18,-0.15);
+  \draw[fill=storageGreen!12,draw=black!55] (8.18,-0.95) rectangle (10.20,-0.15);
+  \draw[fill=black!4,draw=black!55] (10.20,-0.95) rectangle (11.80,-0.15);
+  \node[font=\tiny,align=center] at (7.29,-0.55) {24 B};
+  \node[font=\tiny,align=center] at (7.88,-0.55) {56 B};
+  \node[font=\scriptsize,align=center] at (9.19,-0.55) {$4112$ B\\row $r_0{+}2$};
+  \node[font=\scriptsize] at (11.00,-0.55) {free};
+  \node[anchor=north,font=\scriptsize] at (9.40,-1.02) {$8192$ B page};
+
+  \draw[storage arrow,densely dotted] (f0.south)--(3.335,-0.15);
+  \draw[storage arrow,densely dotted] (f1.south)--(5.445,-0.15);
+  \draw[storage arrow,densely dotted] (f1.south)--(7.88,-0.15);
+  \draw[storage arrow,densely dotted] (f2.south)--(9.19,-0.15);
+  \node[anchor=north west,text=black!65,align=left] at (.5,-1.48)
+    {The scale is purely illustrative and effectively the last fragment 2 will be smaller inside the page after compression};
+\end{tikzpicture}
+\caption{A $40\,000$-symbol DNA4 value with $32$-bit units uses
+$1024 \times 32/2 = 16\,384$ symbols per fragment, so two full fragments and
+one partial fragment. Request $[30\,000,34\,000)$ reads fragments 1 and 2.
+Each stored row is $4112$ bytes ($4096$ payload plus the $16$-byte sequence
+header). The TAM concatenates those in column buffers via writer code~\ref{alg:storage-flush-stripe} and during flush,
+writes them on $8192$-byte pages, skipping the $24$-byte
+\texttt{PageHeaderData} ($8168$ usable bytes). One fragment fits in a page, but two concatenated fragments do not ($8224>8168$), so fragment 1 continues
+after the next header. The compression will shrink the last fragment as it's mostly zeroed, but the illustration assumes no compression happened.}
+\label{fig:sequence-fragment-flow}
+\end{figure}
+
+\subsection{Two levels of sharding}
+
+Postgres tables have limits on the number of stored rows, so in the most
+extreme cases the amount of sequence data can be more than one table can hold,
+especially if we store many full human genomes.
+A (single copy i.e haploid) human genome is about $3.1$ to $3.2$ billion bases ($3.2\times 10^{9}$ symbols and the $32$-bit DNA4 unit from the figure above).
+PostgreSQL documents a maximum table size of $32$ TB at $8192B$ default page size~\autocite{postgresql17_limits}. That
+bound is a result of internal Postgres $32$-bit page index.
+
+\begin{equation}
+\begin{aligned}
+  F &= 1024 \times \frac{32}{2} = 16\,384
+    && \text{symbols per fragment}\\
+  n_{\mathrm{frag}} &= \Bigl\lceil \frac{3.2\times 10^{9}}{F} \Bigr\rceil = 195\,313
+    && \text{fragment rows per genome}\\
+  B &= 16 + 1024 \times 4 = 4\,112
+    && \text{bytes per fragment row}\\
+  P &= 8192 - 24 = 8\,168
+    && \text{usable bytes per page}\\
+  n_{\mathrm{page}} &= \Bigl\lceil \frac{n_{\mathrm{frag}} B}{P} \Bigr\rceil = 98\,327
+    && \text{pages per genome}\\
+  n_{\mathrm{seq}} &= \Bigl\lfloor \frac{4\,294{,}967{,}294}{n_{\mathrm{page}}} \Bigr\rfloor = 43\,680
+    && \text{genomes in one table}
+\end{aligned}
+\label{eq:storage-human-genome-table-cap}
+\end{equation}
+
+Without compression, one fragment table can therefore hold about $43{,}680$
+human-genome sequences before it runs out of pages. Practically compression rates for human genomes were already measured~\cite{kryukov_comparison_of_fasta_hg_compression}
+and zstd is capable of compressing a human genome to effectively $790$ MB ($7.9\times 10^{8}$ bytes).
+With that size, each genome occupies $96{,}719$ pages, so the same limit allows $44{,}406$ genomes in one table.
+
+\info{Table limits}{
+  I present this calculation to present that hitting the table limit isn't very improbable. There exist datasets bigger than this limit.
+  To prvent users from hitting limit and requiring them to manually spli tables, I decided to provide internal sharding.
+}
+
+The internal sharding allows fragments to spill over into multiple tables. If the underlying table achieves $1TB$ limit (which is lower than theoretical $32$ Postgres limit), fragements are stored in newly created columnar relations.
+The sharding is two-level:
+\begin{itemize}
+  \item length bucket: groups sequences by their logical number of symbols - precisely $max(0, min(\left\lfloor log_2(|s|)\right\rfloor - 8, 34))$ is the bucket index.
+  \item shard: inside one length bucket BioseqDB can create multiple tables when existing tables reach $1TB$ limit (potentially to store extremally large datasets)
+\end{itemize}
+
+The current layout has 35 buckets. The first covers lengths $[0, 2^8)$ and each next bucket covers $[2^i, 2^{i+1})$ for $i=8..40$.
+The largest bucket is designated to store sequences longer than $2^{41}$ symbols.
+
+\warn{Sharding limitations}{
+  It's very important to note that current during stream access policy~\ref{fig:sequence-scan-lifecycle} the sequence size is not known until its end is reached, thus my
+  code in BioseqDB decides to store the sequence in the largest bucket (34) even when the sequence is short.
+  This code path is utilised by IO submodule that loads sequences from FASTA file.
+  This means that each sequence loaded from FASTA currently will be stored in the largest bucket.
+  I plan to resolve this problem in the future - solution could be adding ability to IO submodule to search for first sequence end and assume all sequences are similar sizes. Alternatively I could write one sequence and then adjust the bucket after size is known.
+  Both of these solutions however add additional overhead and complexity to the FASTA loader module.
+  Additionally length-based sharding can allow better utilisation of fragments memory (so fragments are smaller even without compression~\ref{warn:storage-considerations} 
+  and they require fewer bytes when allocated in RAM)
+}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \node[anchor=west,font=\bfseries] at (0,4.75)
+    {Length buckets in internal storage};
+  \foreach \x/\b/\range in {1.65/0/{0--256},4.6/1/{257--512},7.55/2/{513--1,024},10.5/34/{over $2^{41}$}} {
+    \draw[rounded corners,black!55,fill=black!3]
+      (\x-1.25,.8) rectangle (\x+1.25,3.8);
+    \node[align=center] at (\x,3.3) {bucket \b\\\range};
+    \draw[fill=storageGreen!12,draw=storageGreen]
+      (\x-1.02,1.2) rectangle (\x+1.02,2.55);
+    \node at (\x,2.22) {one shard};
+  }
+  \node[storage cell,fill=storageBlue!15,minimum width=1.45cm]
+    at (1.65,1.65) {200 symbols};
+  \node[storage cell,fill=storageBlue!15,minimum width=1.45cm]
+    at (4.6,1.65) {300 symbols};
+  \node[storage cell,fill=storageBlue!15,minimum width=1.45cm]
+    at (7.55,1.65) {900 symbols};
+  \node[storage cell,fill=storageOrange!15,minimum width=1.45cm]
+    at (10.5,1.65) {300 symbols};
+  \node[anchor=west,text=storageBlue] at (.4,.22)
+    {Blue: final length known before writing};
+  \node[anchor=west,text=storageOrange] at (.4,-.4)
+    {Orange: streaming input - final length was unknown};
+  \node[anchor=west,align=left] at (.4,-1.25)
+    {Middle buckets are omitted. Every bucket can acquire more shards.\\
+     All fragments of one sequence stay together in one shard.};
+\end{tikzpicture}
+\caption{Length-based buckets are choosen based on the sequence length log 2, however sequences coming from FASTA/FASTQ have no known length and are streamed,
+thus internal code always store them in the largest bucket (34). There are multiple tables (called shards) per one bucket depending if we reach $1TB$ limit.}
+\label{fig:storage-length-buckets}
+\end{figure}
+

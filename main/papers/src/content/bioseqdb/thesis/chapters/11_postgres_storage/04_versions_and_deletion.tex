@@ -1,0 +1,119 @@
+\section{MVCC and deletion for sequence fragments}
+\label{sec:pg-storage-versions}
+
+I discussed MVCC support when talking about Postgres Snapshots in chapter about BioseqDB custom scans~\ref{sec:scan-row-stability}.
+In custom scan case support is rather simple and provided by the Postgres engine itself. It only required me to correctly use it.
+Storing fragments is entirely separate problem to visibility in columnar storage, because multiple queries can operate on locators, while some other process can 
+modify sequence data in the same time. 
+
+Deleting sequence require doing two operations:
+\begin{itemize}
+  \item Deleting row for fragment, which under the hood will mark the row as deleted in the row-mask metadata. 
+  \item As fragment is separate abstraction layer than columnar storage, I also store versions of rows in locators, so deletion just needs to invalidate that version (epoch)
+\end{itemize}
+
+Each epoch has stored separate row in the catalog table (so it's one entry per sequence version):
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-storage-sql,
+  basicstyle=\footnotesize\ttfamily,
+  breaklines=true,breakatwhitespace=true,
+  caption={Heap catalog for one immutable sequence version. Invalidation updates \texttt{state}.},
+  label={lst:storage-source-version}]
+CREATE TABLE bioseq_internal.sequence_source_version (
+  source_epoch bigint PRIMARY KEY, -- immutable version id, must be > 0
+  user_relid oid,                  -- parent user table
+  database_oid oid,                -- parent database
+  tablespace_oid oid,              -- parent tablespace
+  main_relfilenode oid,            -- parent file node
+  main_storage_id bigint,          -- parent TAM storage generation
+  column_attno smallint,           -- 1-based sequence column
+  locator_version smallint,        -- locator format, currently 3
+  bucket_idx smallint,             -- length bucket 0..34
+  shard_idx integer,               -- shard inside the bucket
+  fragment_relid oid,              -- fragment table, NULL if empty
+  fragment_storage_id bigint,      -- fragment TAM storage generation
+  first_sub_row_no bigint,         -- row of fragment 0
+  num_fragments bigint,            -- consecutive fragment rows
+  total_bp_size bigint,            -- sequence length in symbols
+  alphabet_code smallint,          -- packed alphabet
+  storage_unit_byte_width smallint,-- unit width in bytes
+  padding_letters integer,         -- unused letters in last packed unit
+  source_content_checksum bigint,  -- CRC-64 of decoded symbols
+  state smallint                   -- 0 unpublished, 1 ready, 2 invalid
+);
+\end{lstlisting}
+\end{minipage}
+
+The specific epoch's \texttt{state} follows very simple linear transitions:
+\begin{itemize}
+  \item \textbf{Unpublished} ($0$). An insert has allocated an epoch (sequence version) and written fragments.
+   Locator is then filled with state $0$ which is default one. It means that the locator in the user table is not yet written
+   (so the fragment is there, but there's no saved locator that points to it)
+  \item \textbf{Ready} ($1$). Locator was written to a table, so I update the epoch state to mark that this sequence version is used somewhere
+   (not doing that might lead to dangling fragments that occupy storage but have no existing locator). This state is crucial to prevent a situation in which locator write fails or is rolled back, but fragment was written.
+  \item \textbf{Invalid} ($2$). Locator cannot read this row version anymore, the underlying fragment shouldn't be accessed.
+    This happens when user either calls \texttt{DELETE} or \texttt{UPDATE}.
+\end{itemize}
+
+Note that the catalog contains far more information that is neccessary. I decided to save CRC hashes to make sure the fragment is not malformed during operations
+or shard coordinates shared by the locator itself. As each row version requires separate entry this limits the maximum number of sequences stored in the BioseqDB, however
+entries are cheap so I didn't incorporate it into estimate calculations~\ref{eq:storage-human-genome-table-cap}.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize]
+  \draw[storage arrow,black!55] (1.75,4.55)--(12.2,4.55) node[right] {time};
+  \draw[dashed,black!55] (7.25,.1)--(7.25,4.9);
+  \node[above,align=center] at (7.25,4.9) {writer commits\\the update};
+  \node[anchor=east] at (1.5,3.7) {reader A};
+  \draw[storageBlue,line width=2pt] (2.0,3.7)--(10.8,3.7);
+  \fill[storageBlue] (2.0,3.7) circle (2pt);
+  \node[above,text=storageBlue] at (4.3,3.7) {snapshot before update};
+  \node[below,text=storageBlue] at (9.25,3.7) {later read: ACGT};
+  \node[anchor=east] at (1.5,2.55) {reader B};
+  \draw[storageOrange,line width=2pt] (8.1,2.55)--(11.7,2.55);
+  \fill[storageOrange] (8.1,2.55) circle (2pt);
+  \node[above,text=storageOrange] at (9.9,2.55) {snapshot after update};
+  \node[below,text=storageOrange] at (9.9,2.55) {read: TGCA};
+  \node[storage cell,fill=storageBlue!12,minimum width=4.65cm,
+    minimum height=1.15cm] (old) at (4.3,.85)
+    {SQL id 1; internal row 42\\epoch 7: ACGT};
+  \node[storage cell,fill=storageOrange!12,minimum width=4.65cm,
+    minimum height=1.15cm] (new) at (10.0,.85)
+    {SQL id 1; internal row 57\\epoch 8: TGCA};
+  \node[anchor=west] at (1.85,-.2)
+    {After commit, both sets of fragment bytes remain stored.};
+\end{tikzpicture}
+\caption{Postgres snaphot mechanism allows to check visivility of rows in MVCC model, but it's not sufficient on its own.
+Let's assume that reader A and reader B are reading the same sequence before and after other process commited update.
+Using fragments epochs versioning system means that read A will see older locator via snapshot, while reader B will
+get newer locator row with changed epoch. Both of them can complete reads as both epochs are still valid. 
+}
+\label{fig:storage-update-snapshots}
+\end{figure}
+
+Listing~\ref{lst:storage-repeatable-read} gives SQL code for this example:
+
+\begin{lstlisting}[style=bioseq-storage-sql,float=htbp,
+  label={lst:storage-repeatable-read},
+  caption={A repeatable-read transaction keeps the old sequence version.
+    Initially, row id 1 begins with ACGTACGT.}]
+-- Session A
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT bioseq.to_text(seq[0:8]) FROM reads WHERE id = 1;
+-- ACGTACGT
+
+-- Session B, while A remains open
+BEGIN;
+UPDATE reads
+SET seq = repeat('TGCA', 4096)::bioseq.seq('dna4', 32)
+WHERE id = 1;
+COMMIT;
+
+-- Session A
+SELECT bioseq.to_text(seq[0:8]) FROM reads WHERE id = 1;
+-- ACGTACGT
+COMMIT;
+SELECT bioseq.to_text(seq[0:8]) FROM reads WHERE id = 1;
+-- TGCATGCA
+\end{lstlisting}

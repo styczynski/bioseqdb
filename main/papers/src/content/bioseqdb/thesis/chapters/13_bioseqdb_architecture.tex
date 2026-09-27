@@ -1,0 +1,21 @@
+% Keep the architecture chapter's reading order in one place.
+\definecolor{archBlue}{HTML}{366B98}
+\definecolor{archOrange}{HTML}{C77822}
+\definecolor{archGreen}{HTML}{438452}
+\tikzset{
+  arch box/.style={draw=black!60,fill=black!3,align=center,
+    inner sep=4pt,minimum height=.6cm,font=\footnotesize},
+  arch arrow/.style={-{Latex[length=1.8mm]},thick}
+}
+\lstdefinestyle{bioseq-arch-sql}{style=bioseq-search-sql}
+\lstdefinestyle{bioseq-arch-code}{style=bioseq-search-sql,language=C++}
+\raggedbottom
+\input{chapters/13_bioseqdb_architecture/01_core_boundaries}
+\input{chapters/13_bioseqdb_architecture/02_algorithm_selection}
+\input{chapters/13_bioseqdb_architecture/03_scheduling}
+\input{chapters/13_bioseqdb_architecture/04_ingestion}
+\input{chapters/13_bioseqdb_architecture/05_remote_sequences}
+\input{chapters/13_bioseqdb_architecture/06_generation_and_validation}
+\input{chapters/13_bioseqdb_architecture/07_authorship_and_limits}
+\label{sec:arch-end}
+\flushbottom

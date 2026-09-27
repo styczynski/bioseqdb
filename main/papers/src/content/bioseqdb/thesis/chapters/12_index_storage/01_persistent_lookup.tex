@@ -1,0 +1,8 @@
+\section{Keep the lookup work between queries}
+\label{sec:index-storage-role}
+
+In previous chapter~\ref{sec:pg-storage-role} I describe how columnar and sequence storage layers are implemented in BioseqDB. There's however also aspect for storing indexes for sequences.
+We would like to be able to store computed minimizers (seeds/sketches)~\ref{lst:minimap-minimizer-cpp-decl} in a way that enables performant computations of alignments.
+They should be computed once when sequence is loaded from file or updated and then reused for subsequent select queries.
+
+I want to discuss existing aligners' indexing first.

@@ -1,0 +1,30 @@
+{
+  "schema": "bioseq.website.sql_public_identities",
+  "schema_revision": 1,
+  "stable_identities": [
+    "sql:type:bioseq.seq",
+    "sql:function:bioseq.len(bioseq.seq)",
+    "sql:function:bioseq.symbol_count(bioseq.seq,text)",
+    "sql:function:bioseq.query_start(anyelement)",
+    "sql:function:bioseq.query_end(anyelement)",
+    "sql:function:bioseq.target_start(anyelement)",
+    "sql:function:bioseq.target_end(anyelement)",
+    "sql:function:bioseq.cigar(anyelement)",
+    "sql:type:$extension.bioseq_aligner_options",
+    "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
+    "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq,$extension.bioseq_aligner_options)"
+  ],
+  "installed_identities": [
+    "sql:type:bioseq.seq",
+    "sql:function:bioseq.len(bioseq.seq)",
+    "sql:function:bioseq.symbol_count(bioseq.seq,text)",
+    "sql:function:bioseq.query_start(anyelement)",
+    "sql:function:bioseq.query_end(anyelement)",
+    "sql:function:bioseq.target_start(anyelement)",
+    "sql:function:bioseq.target_end(anyelement)",
+    "sql:function:bioseq.cigar(anyelement)",
+    "sql:type:public.bioseq_aligner_options",
+    "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)",
+    "sql:function:public.mmsearch(bioseq.seq,bioseq.seq,public.bioseq_aligner_options)"
+  ]
+}

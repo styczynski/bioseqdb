@@ -1,5 +1,0 @@
-.vscode/
-build*/
-.clangd
-moeller/*
-!moeller/.gitkeep

@@ -1,0 +1,248 @@
+\section{Integrating Postgres}
+\label{sec:mmsearch-sql-rendezvous}
+
+% \texttt{mmsearch} is declared as an ordinary SQL function returning
+% \texttt{boolean}. PostgreSQL can therefore resolve its arguments and accept
+% it in a condition without a new SQL grammar. Its two-argument form uses the
+% session's alignment settings. A third argument can supply typed options.
+% The extra hit rows are part of BioSeqDB's search contract, which every
+% accepted plan must preserve.
+% During planning the call acts as a \emph{marker}: it identifies the search
+% that an owning custom scan must perform. When the plan is constructed, the
+% owner removes that marker from the conditions that PostgreSQL would otherwise
+% execute. An unowned non-null call reaches a function body that reports an
+% unsupported query shape. There is no ordinary scalar alignment fallback.
+
+% \subsection{Inspiration from PostgreSQL extensions}
+
+\subsection{Designing SQL API}
+
+A full text search interface (\texttt{pg\_search}) from ParadeDB was an important motivation for the SQL API design of BioseqDB. 
+ParadeDB is an extension written in Rust that uses custom text storage engine under the hood. I deeply inspected its source code to understand how we can implement our own syntax in BioseqDB.
+ParadeDB resolves similar problem as FTS can also return multiple hits for a single query.\coderef{paradedb/pg_search/src/postgres/customscan/basescan/projections/score.rs}
+{ParadeDB score expression}{score_from_relation}{30}
+
+To return custom results instead of relying on Postgres evaluating the function (We don't want to let Postgres call actual \path{bioseq.score()} function, but rether provide it ourselves. ParadeDB has similar syntax and the same problem)
+ ParadeDB replaces score expressions with typed placeholders.
+These placefolders are filled from the current search result before projection.
+\coderef{paradedb/pg_search/src/postgres/customscan/projections.rs}
+  {ParadeDB placeholder replacement}{inject_placeholders}{493}
+Similar design was used in BioseqDB - described in Section~\ref{sec:match-placeholder-injection}.
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[style=bioseq-search-sql,caption={ParadeDB pg\_search examples},label={lst:paradedb-pg-search-examples}]
+-- Some examples for pg_search
+SELECT id, title, pdb.score(id) AS score
+FROM documents
+WHERE body ||| 'postgresql search'
+ORDER BY score DESC, id;
+
+SELECT id, pdb.snippet(body) AS excerpt
+FROM documents
+WHERE body &&& 'postgresql indexing';
+\end{lstlisting}
+\end{minipage}
+
+Listing~\ref{lst:paradedb-pg-search-examples} shows how similar ParadeDB's problem is to my initial API designs.\autocite{pigsty_pg_search}\autocite{neon_pg_search}
+
+\subsection{Plan lifecycle}
+\label{sec:planner-support-and-ownership}
+\label{sec:custom-path-plan-lifecycle}
+
+To implement custom scan, we must understand different objects in Postgres:
+\begin{enumerate}
+  \item \textbf{Path:} Describes
+    possible inputs, estimated work, output row count, and ordering. The
+    planner compares several paths and keeps the cheapest one~\autocite{postgresql_planner_optimizer}\autocite{conway_postgres_optimizer}.
+    The Genetic Query Optimizer is used only when the number of joins exceeds \texttt{geqo\_threshold}.
+    A single-table \texttt{BioseqScan} is ordinary cost comparison, not GEQO.
+    The path is later converted into a plan. I register my own paths so PostgreSQL knows how to access the table.
+  \item \textbf{Plan:} In our case \texttt{CustomScan} contains child plans, expression trees, and descriptions of the
+    search.
+  \item \textbf{State:} When plan is executed, postgres creates its state via my code. \texttt{CustomScanState} holds the input cursor, alignment
+    buffers for sequences and metadata, and slots for generated hit.
+    Postgres will call scan repeatedly to get new rows, so I use the state to hold any information that needs to be preserved between calls.
+\end{enumerate}
+
+All types of Postgres API described in table earlier~\ref{tab:pg-scan-extension-points} mainly rely on callbacks (in Postgres called \emph{hooks}). Extension fills the structure with function pointers and let postgres know which call is handled by which function.
+In this case PostgreSQL calls \texttt{PlanCustomPath} when it converts a selected custom
+path into a plan and later calls \texttt{CreateCustomScanState} to create the
+executor state\footnote{PostgreSQL
+17, \href{https://www.postgresql.org/docs/17/custom-scan-path.html}
+{Creating Custom Scan Paths} and
+\href{https://www.postgresql.org/docs/17/custom-scan-plan.html}
+{Creating Custom Scan Plans}.}
+Figure~\ref{fig:bioseqscan-hook-lifecycle} shows when PostgreSQL calls those hooks, when \texttt{BioseqScan} runs, and when the columnar table access method returns a tuple.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm,font=\scriptsize,
+  pg/.style={scan box,minimum width=3.15cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  hook/.style={scan hit,minimum width=4.35cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  tam/.style={scan output,minimum width=3.05cm,minimum height=.56cm,
+    font=\scriptsize,align=center,inner sep=2pt,outer sep=0.5pt},
+  actor/.style={draw=scanBlue,fill=scanBlue!8,rounded corners=2.5pt,
+    align=center,font=\scriptsize,inner sep=3pt,outer sep=0.5pt,
+    minimum width=2.15cm,minimum height=1.05cm},
+  stagelab/.style={anchor=north west,font=\scriptsize\bfseries,
+    text=black!45,inner sep=0pt},
+  coltitle/.style={anchor=south,font=\footnotesize\bfseries,inner sep=1pt},
+  callarr/.style={scan arrow}]
+% full-width stage stripes (drawn first, sit behind nodes)
+\fill[scanBlue!9,rounded corners=1.2pt]
+  (0.06,7.275) rectangle (14.58,9.08);
+\node[stagelab] at (0.16,9.00) {Initialization};
+\fill[black!6,rounded corners=1.2pt]
+  (0.06,5.22) rectangle (14.58,7.175);
+\node[stagelab] at (0.16,7.10) {Parsing};
+\fill[scanOrange!8,rounded corners=1.2pt]
+  (0.06,-1.95) rectangle (14.58,5.12);
+\node[stagelab] at (0.16,5.00) {Planning};
+\fill[scanGreen!8,rounded corners=1.2pt]
+  (0.06,-6.845) rectangle (14.58,-2.05);
+\node[stagelab] at (0.16,-2.12) {Execution};
+% column titles sit above the stripes
+\node[coltitle] at (1.20,9.32) {Actor};
+\node[coltitle] at (4.50,9.32) {PostgreSQL};
+\node[coltitle] at (8.77,9.32) {BioSeqDB hooks / \texttt{BioseqScan}};
+\node[coltitle] at (12.97,9.32) {Columnar TAM};
+% initialization
+\node[actor] (loaded) at (1.20,7.90)
+  {{\large\faDesktop}\\[-1pt]Extension loaded\\[-1pt]
+   {\tiny\color{black!55}automatic}};
+\node[pg] (initpg) at (4.50,7.90) {\texttt{\_PG\_init}};
+\node[hook] (init) at (8.77,7.90) {\texttt{initialize\_bioseq\_extension}};
+\node[tam] (tamreg) at (12.97,7.90) {register \texttt{TableAmRoutine}};
+\draw[callarr] (loaded) -- (initpg);
+\draw[callarr] (initpg) -- (init);
+\draw[callarr] (init) -- (tamreg);
+% parsing
+\node[actor] (query) at (1.20,6.20)
+  {{\large\faUser}\\[-1pt]User query};
+\node[pg] (parse) at (4.50,6.20) {parse, analyze, rewrite};
+\node[hook] (util) at (8.77,5.58) {\texttt{ProcessUtility\_hook}};
+\draw[callarr] (query) -- (parse);
+\draw[callarr,dashed] (parse.east) -- ++(0.48,0) |- (util.west);
+\node[anchor=west,text=black!60,font=\scriptsize] at (6.95,5.90)
+  {utility only};
+% planning
+\node[pg] (plhook) at (4.50,4.57) {\texttt{planner\_hook}};
+\node[hook] (colpl) at (8.77,4.57) {\texttt{column\_planner\_hook}};
+\draw[callarr] (parse) -- (plhook);
+\draw[callarr] (plhook) -- (colpl);
+\node[pg] (stdpl) at (4.50,3.55) {\texttt{standard\_planner}};
+\draw[callarr,dashed] (colpl.south) -- ++(0,-0.28) -| (stdpl.east);
+\node[pg] (relinfo) at (4.50,2.53) {relation info};
+\node[hook] (relhook) at (8.77,2.53)
+  {\texttt{get\_relation\_info\_hook}};
+\draw[callarr] (stdpl) -- (relinfo);
+\draw[callarr] (relinfo) -- (relhook);
+\node[pg] (pathlist) at (4.50,1.51) {collect access paths};
+\node[hook] (pathhook) at (8.77,1.51)
+  {\texttt{set\_rel\_pathlist\_hook}};
+\draw[callarr] (relinfo) -- (pathlist);
+\draw[callarr] (pathlist) -- (pathhook);
+\node[pg] (cheap) at (4.50,0.49) {cheapest path};
+\draw[callarr] (pathlist) -- (cheap);
+\node[pg] (planpath) at (4.50,-0.53) {\texttt{create\_plan}};
+\node[hook] (pcp) at (8.77,-0.53) {\texttt{PlanCustomPath}};
+\draw[callarr] (cheap) -- (planpath);
+\draw[callarr] (planpath) -- (pcp);
+\node[hook] (mutate) at (8.77,-1.55) {rewrite plan tree};
+\draw[callarr,dashed] (pcp) -- (mutate);
+% execution
+\node[pg] (mkstate) at (4.50,-2.70) {\texttt{CreateCustomScanState}};
+\node[hook] (state) at (8.77,-2.70) {allocate \texttt{scan\_state}};
+\draw[callarr] (mutate.south west) -- ++(0,-0.22) -| (mkstate.north);
+\draw[callarr] (mkstate) -- (state);
+\node[pg] (begin) at (4.50,-3.72) {\texttt{BeginCustomScan}};
+\node[hook] (beginh) at (8.77,-3.72) {open scan};
+\node[tam] (tbegin) at (12.97,-3.72) {\texttt{scan\_begin}};
+\draw[callarr] (mkstate) -- (begin);
+\draw[callarr] (begin) -- (beginh);
+\draw[callarr] (beginh) -- (tbegin);
+\node[pg] (exec) at (4.50,-4.74) {\texttt{ExecCustomScan}};
+\node[hook] (exech) at (8.77,-4.74) {fetch next row from storage};
+\node[tam] (tnext) at (12.97,-4.74) {\texttt{scan\_getnextslot}};
+\draw[callarr] (begin) -- (exec);
+\draw[callarr] (exec) -- (exech);
+\draw[callarr] (exech) -- (tnext);
+\node[pg] (endc) at (4.50,-6.20) {\texttt{EndCustomScan}};
+\node[hook] (endh) at (8.77,-6.20) {close scan};
+\node[tam] (tend) at (12.97,-6.20) {\texttt{scan\_end}};
+\node[actor] (results) at (1.20,-6.20)
+  {{\large\faUser}\\[-1pt]Return results};
+\draw[callarr] ([xshift=2.5pt]exec.south west) -- ([xshift=2.5pt]endc.north west);
+\draw[callarr] (endc) -- (endh);
+\draw[callarr] (endh) -- (tend);
+\draw[callarr] (endc) -- (results);
+\draw[scan arrow,dashed,rounded corners=2pt]
+  (tnext.south) -- ++(0,-0.50) -|
+  node[pos=0.18,below,font=\scriptsize,text=black!60] {until NULL}
+  (exec.south);
+\end{tikzpicture}
+\caption{Lifecycle of \texttt{BioseqScan} and the columnar table access method.
+Bands mark exeuction states: initialization, parsing, planning, and execution.
+Boxes have various colours: Grey boxes are PostgreSQL, orange boxes are BioSeqDB hooks or the custom scan and green boxes are TAM callbacks.
+Arrows follow the order in which Postgres calls specific hooks.
+\texttt{column\_planner\_hook} calls \texttt{standard\_planner}, then rewrites the finished plan, so we don't explicitly control GQO, but can affect it using costs functions, registering paths and even after plan is choosen, we have complete constrol over it (we are free to rewrite its parts).
+The scan is calling TAM to fetch rows from storage and returns them to Postgres until it returns NULL (no more tuples to fetch)}
+\label{fig:bioseqscan-hook-lifecycle}
+\end{figure}
+
+\texttt{ProcessUtility\_hook} is used for utility statements such as \texttt{CREATE}, \texttt{DROP}, \texttt{COPY}, and \texttt{CREATE INDEX}. This is useful to forbid user from doing certain operations (Currently I only use it to log statements).
+
+The TAM stores the user table in columnar format: A long sequence is not kept in that table row, only a locator is stored there.
+The sequence itself is stored in companion \emph{fragment sub-tables}, and all of them use the bioseq TAM as well. 
+More on storage format is discussed in Chapter~\ref{sec:pg-storage-role}.
+I called the process of fetching fragment from locator "hydration" and TAM is responsible for it.
+
+BioseqDB have control over the plan using \texttt{column\_planner\_hook}.
+This hook is called when PostgreSQL needs to perform planning and SQL query is already parsed. 
+First BioseqDB hook validates \texttt{mmsearch} options, then it calls \texttt{standard\_planner}.
+\texttt{get\_relation\_info\_hook} and \texttt{set\_rel\_pathlist\_hook} hooks, where we set options like disabling parallel scans or index-only scans and register custom access paths for cust scan, run inside that call.
+Then GQO is run and finds the best path that needs to be converted into a plan, so the \texttt{PlanCustomPath} is run.
+When \texttt{standard\_planner} returns we are still in the  \texttt{column\_planner\_hook}, so I'm free to rewrite plan tree freely.
+The rewrite mutor performs the following changes:
+\begin{itemize}
+  \item \textbf{Enable vectorized execution for simple aggregates}
+    Using modernized Citus/Hydra columnar vectorized optimisations I allow simple aggregates on metadta columns to be vectorized (processed in batches) for example: \path{COUNT(*)} or \path{SUM(foo_bar)}.
+    If current node is Postgres \texttt{Agg} it will be replaced by custom aggregator \texttt{VectorAggNode}.
+    If this plan has \texttt{VectorAggNode} as parent, then I return batches of rows instead of single tuples. Rewrite adds falgs to mark that the plan needs to change its output mode.
+    Additionally Postgres \texttt{Agg}
+  \item \textbf{Wrap an index scans on columnar tables}
+    PostgreSQL can still choose a metadata index on a \texttt{USING bioseq} table and use external \texttt{IndexScan}.
+    If that happens this index can read some tuples that shouldn't be red (columnar TAM allows removing rows. If that happens row is marked in bitmask, but index scan can go around it and still read the row, because it's physically there).
+    To prevent that the \texttt{IndexScan} is replaced by custom \texttt{BioseqIndexScan} that hounours bitmask.
+\end{itemize}
+
+As entities like \texttt{bioseq.score(id)} are still ordinary functions, I discourage Postgres by using prohibitive execution costs~\footcite{postgresql17_support_functions}.
+The function implementation itself mostly just emits an error, because it shouldn't be ever called.
+Instead \path{ExecCustomScan} will using special Postgres expression nodes i.e \path{Const*} node to tell Postgres that the scan itself calculated the function's value and it shouldn't evaluate it by itself.
+
+\subsection{Different types of scans}
+
+When I talk about a custom scan I focus on \texttt{BioseqScan}, which is the primary way to read a \texttt{USING bioseq} table, but there are other types of custom scans used for different purposes in BioseqDB, some of them already mentioned earlier.
+All scans types are the following ones:
+\begin{itemize}
+  \item \textbf{Dedicated join support:}
+    \texttt{BioseqBatchJoin} is a custom scan with two children: one child is the target plan, the other is the query plan.
+    Normally Postgres would use nested loop join that would read one target and one query and perform alignment for each pair, however we want to avoid this behaviour as target index can be loaded once (running \texttt{BioseqScan} for each pair would cause index for one table be loaded, then unloaded and loaded again for each query).
+    This scan, dedicated for joins, prepares that target once (open the stored minimizer reader, or build index manually if not available) and runs the same logic as \texttt{BioseqScan} for each query in the batch.
+    Dispatch buffer has separate API for joins, but they mostly effectively do same processing as for \texttt{BioseqScan} (collect queries in batches etc.)
+  \item \textbf{Slices across operations:}
+    \texttt{BioseqSliceProject} wraps a child plan when the query asks for a slice or other piece-tree operation, for example \texttt{SELECT seq[100:200]} or \texttt{mmsearch(t.seq[a:b], q.seq)}.
+    It evaluates those expressions into expanded piece-tree Datums (Section~\ref{sec:sequence-piece-tree}) and sends them to Postgres as read-only expanded objects in a virtual slot. This means that the piece-tree is stored in the tuple itself and can be passed around other scans, joins etc. without translating it into a string yet:
+    later \texttt{BioseqScan} or \texttt{BioseqBatchJoin} can align that slice lazily.
+    When user requests a slice as in \texttt{SELECT seq[100:200]} and it doesn't go through other operation nodes, then it will be "hydrated" from piece-tree into actual byte sequence.
+  \item \textbf{Support for indexing:}
+    \texttt{BioseqIndexScan} is the wrapper around \texttt{IndexScan} described above, that allows to correctly read deleted columnar rows (support for bitmasks).
+  \item \textbf{Sorting by sequence:}
+    \texttt{BioseqBatchSortScan} is only for sorting by the sequence itself, for example \texttt{ORDER BY seq} or \texttt{ORDER BY seq DESC}.
+    The planner will choose it only when there is exactly one \texttt{ORDER BY} key and that key has type \texttt{bioseq.seq}, and only when \path{bioseq.planner.sequence_sort_scan.enabled} is on (\texttt{ORDER BY seq, pk} and \texttt{ORDER BY seq::text} are still ordinary PostgreSQL sorts)
+    This is experimental feature to allow faster sorting by sequence without the need to flatten entire sequence first.
+    The custom scan buffers whole child rows, compares the sequence column as lazy views (not as printed text), and emits those same rows in the resulting permutation.
+\label{lst:bioseqscan-types}
+\end{itemize}
