@@ -1,6 +1,6 @@
 /**
  * @file admin/index_build_runtime_implementation.cppm
- * @brief Implements PostgreSQL minimizer index build runtime checks.
+ * @brief Prepare index-build backends and scope forced test failures.
  */
 module bioseq.postgres.storage.indexing.admin.index_build_runtime;
 

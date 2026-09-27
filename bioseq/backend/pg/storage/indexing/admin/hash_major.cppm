@@ -1,6 +1,6 @@
 /**
  * @file admin/hash_major.cppm
- * @brief Hash-major minimizer generation encoding and publication.
+ * @brief Build minimizer indexes ordered by hash and publish their stored generations.
  */
 module;
 
@@ -64,10 +64,8 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::storage::indexing {
 
-/// Read-only setup and post-measurement inspection returned by the SQL admin
-/// path. The authoritative source locator is derived from the visible
-/// Bioseq row. Callers never supply a source identity or storage-contract
-/// digest.
+/// Stored generation metadata and the source locator read from the visible Bioseq row.
+/// SQL inspection returns these after checking the source and index under one snapshot.
 struct ready_minimizer_generation_inspection {
     ready_minimizer_generation_identity identity{};
     minimizer_generation_source_locator source{};
@@ -78,7 +76,7 @@ struct ready_minimizer_generation_inspection {
     std::int16_t column_attno = 0;
 };
 
-/// Metadata-only evidence that one minimizer index has no physical payload.
+/// Row, shard, and generation counts used to check that a no-index test has no stored index.
 struct cold_no_index_absence_audit {
     std::uint64_t target_rows = 0;
     bool target_cardinality_metadata_only = true;
@@ -90,9 +88,8 @@ struct cold_no_index_absence_audit {
     std::uint64_t generation_objects = 0;
 };
 
-/// One fully authenticated hash-major logical-stream receipt.  The descriptor
-/// fields are publication authority. The exact_catalog_* fields are recomputed
-/// by a bounded, row-aligned reread under the same registered MVCC snapshot.
+/// Published counts and checksum for one hash-major stream, alongside values
+/// recomputed by reading its stored rows under the same snapshot.
 struct hash_major_minimizer_generation_stream_inspection {
     bioseq::indexing::hash_major_minimizer_stream_kind kind =
         bioseq::indexing::hash_major_minimizer_stream_kind::directory;
@@ -105,9 +102,8 @@ struct hash_major_minimizer_generation_stream_inspection {
     std::uint64_t exact_catalog_stream_crc64 = 0;
 };
 
-/// Separate hash-major restart/audit surface.  This must not be folded into the
-/// grouped-SoA inspector: the two sentinels have different identity widths,
-/// metadata sizes, and stream equations.
+/// Metadata and reread results for a hash-major index. This format has its own
+/// 128-bit source identity and separate directory, control, and posting streams.
 struct hash_major_minimizer_generation_inspection {
     Oid database_oid = InvalidOid;
     Oid main_relfilenode = InvalidOid;
@@ -129,22 +125,21 @@ struct hash_major_minimizer_generation_inspection {
     std::array<hash_major_minimizer_generation_stream_inspection, 3> streams{};
 };
 
-/// The execution-receipt alternative is the tag. There is deliberately no independent
-/// mutable index-kind enum that a caller could relabel after an encoder returns.
+/// The variant records whether the fragment or sequence producer built the
+/// generation, keeping that choice together with its execution results.
 using ready_minimizer_generation_execution_receipt =
     std::variant<std::monostate,
                  bioseq::indexing::minimizer_fragment_generation_execution_receipt,
                  bioseq::indexing::minimizer_sequence_generation_execution_receipt>;
 
-/// Physical grouped-SoA producer family authenticated by a publication.
+/// Selects the fragment or sequence producer used for a grouped-SoA index.
 enum class ready_minimizer_generation_index_kind : std::uint8_t {
     fragment,
     sequence,
 };
 
-/// Validated result of the production minimizer generation coordinator.
-/// Metadata age is deliberately absent: callers own that update and may perform
-/// it only after this function returns a published result.
+/// Result returned after the coordinator publishes a grouped-SoA generation.
+/// Callers can update metadata age after receiving this result.
 class ready_minimizer_generation_publication {
   private:
     template <class p_sequence_range>
@@ -268,7 +263,7 @@ class ready_minimizer_generation_publication {
         return published_;
     }
 
-    /// Verify that the producer receipt matches every sealed publication field.
+    /// Check that the producer backend, source binding, and cleanup receipt agree with the publication.
     [[nodiscard]] bool execution_accepted() const noexcept {
         if (!published_ || !binding_.valid()) {
             return false;
@@ -309,7 +304,7 @@ static_assert(!std::is_aggregate_v<ready_minimizer_generation_publication>);
 static_assert(!std::is_default_constructible_v<ready_minimizer_generation_publication>);
 static_assert(!std::is_copy_assignable_v<ready_minimizer_generation_publication>);
 static_assert(!std::is_move_assignable_v<ready_minimizer_generation_publication>);
-/// Detect forbidden public mutation of authenticated publication fields.
+/// Check at compile time that callers cannot change the validated publication fields.
 template <class p_publication>
 concept publicly_relabelable_ready_minimizer_publication =
     requires(p_publication& publication, ready_minimizer_generation_execution_receipt execution) {
@@ -322,20 +317,17 @@ concept publicly_relabelable_ready_minimizer_publication =
 static_assert(
     !publicly_relabelable_ready_minimizer_publication<ready_minimizer_generation_publication>);
 
-/// One bounded first-pass record.  The file is PostgreSQL-owned temporary
-/// scratch and is never a publication artifact, so native words are sufficient:
-/// it is rewound and consumed inside this statement by the same backend.
+/// A hash and its count from the first replay. Native integer layout is sufficient
+/// because the same backend writes and reads this temporary file within one statement.
 struct hash_major_minimizer_count_record {
     std::uint64_t hash = 0;
     std::uint64_t exact_count = 0;
 };
 static_assert(sizeof(hash_major_minimizer_count_record) == 16u);
 
-/// PG BufFile scratch for hash-major's count-before-postings contract.  A first
-/// replay writes one fixed record per distinct hash. The second replay reads
-/// records in lockstep while postings stream directly into the logical encoder.
-/// PostgreSQL's ResourceOwner owns a file after any ERROR.  Success closes it
-/// explicitly. Exception paths only abandon the C++ handle.
+/// Temporary file holding one count per distinct hash. The second replay reads
+/// these counts while the encoder writes positions, so a large group need not fit in memory.
+/// Success closes the file explicitly. PostgreSQL cleans it up after an error.
 class hash_major_minimizer_count_scratch {
   private:
     static constexpr std::size_t k_records_per_io = 4'096u;
@@ -375,7 +367,7 @@ class hash_major_minimizer_count_scratch {
     hash_major_minimizer_count_scratch& operator=(hash_major_minimizer_count_scratch&&) = delete;
     ~hash_major_minimizer_count_scratch() = default;
 
-    /// Buffer one nonempty globally ordered hash count.
+    /// Buffer a nonzero hash count for the second replay.
     void append(const hash_major_minimizer_count_record& record) {
         if (file_ == nullptr || reading_ || records_read_ != 0u || record.exact_count == 0u ||
             record_count_ == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -454,15 +446,15 @@ class hash_major_minimizer_count_scratch {
         }
     }
 
-    /// Abandon the local handle after PostgreSQL assumes file cleanup.
+    /// Clear the file pointer and leave error cleanup to PostgreSQL.
     void abandon_after_pg_error_noexcept() noexcept {
         file_ = nullptr;
     }
 };
 
-/// Validate and count one globally sorted replay without retaining postings.
-/// The single target-wide segment used by the producer is what makes hash
-/// ordering global instead of restarting at every persisted position segment.
+/// Check sorted minimizer events and count positions for each hash.
+/// The producer uses one segment covering the whole sequence, so hash order
+/// continues across the entire replay.
 struct hash_major_minimizer_count_replay {
     hash_major_minimizer_count_scratch* scratch = nullptr;
     std::uint64_t target_length = 0u;
@@ -490,7 +482,7 @@ struct hash_major_minimizer_count_replay {
         return {};
     }
 
-    /// Validate and count one canonical event from the first replay.
+    /// Check event bounds and ordering, then count its position for the current hash.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     accept(const bioseq::indexing::canonical_minimizer_event& event) {
         const std::uint64_t position = event.encoded_position >> 1u;
@@ -536,9 +528,9 @@ struct hash_major_minimizer_count_replay {
     }
 };
 
-/// Consume the second identical replay in lockstep with first-pass count
-/// records.  Only the current 16-byte record and encoder-owned row buffers are
-/// live, even when one hash owns billions of postings.
+/// Replay sorted events into the encoder using the counts saved by the first pass.
+/// Positions go straight to the encoder, so memory use does not grow with the
+/// number of positions belonging to one hash.
 struct hash_major_minimizer_encode_replay {
     hash_major_minimizer_count_scratch* scratch = nullptr;
     bioseq::indexing::hash_major_minimizer_logical_encoder* encoder = nullptr;
@@ -550,7 +542,7 @@ struct hash_major_minimizer_encode_replay {
     std::uint64_t event_count = 0u;
     bool hash_open = false;
 
-    /// Preserve a logical-encoder failure in the owning publication state.
+    /// Save the encoder error so the caller can report why publication failed.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     report_encoding_error(bioseq::indexing::hash_major_minimizer_error error) {
         if (encoding_error != nullptr) {
@@ -588,7 +580,7 @@ struct hash_major_minimizer_encode_replay {
         return {};
     }
 
-    /// Validate and encode one canonical event from the second replay.
+    /// Check the next event and write its position into the current hash group.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     accept(const bioseq::indexing::canonical_minimizer_event& event) {
         const std::uint64_t position = event.encoded_position >> 1u;
@@ -635,9 +627,8 @@ struct hash_major_minimizer_encode_replay {
     }
 };
 
-/// Minimal validated result for the production hash-major publication. The
-/// private storage token has already enforced complete payload/manifest reread
-/// before this value can exist, and the published head is byte-compared below.
+/// Metadata and publication status from a hash-major build. The coordinator
+/// sets published after rereading the stored streams and checking the published head.
 struct ready_hash_major_minimizer_publication {
     std::uint64_t generation_id = 0u;
     std::uint64_t query_key = 0u;
@@ -654,21 +645,23 @@ struct ready_hash_major_minimizer_publication {
 };
 
 /**
- * @brief Build and atomically publish one sequence-wide hash-major generation.
- * @tparam p_sequence_range Compact source sequence range.
- * @param user_relid Source Bioseq relation.
- * @param column_attno Source sequence attribute.
+ * Build and publish a sequence-wide minimizer index ordered by hash.
+ * The first replay counts positions for each hash. The second writes those
+ * positions with their counts, keeping large groups out of memory. Before
+ * publishing the head, check the stored streams and release the temporary runs.
+ * Keep the source's registered snapshot alive throughout the build.
+ * @tparam p_sequence_range Configuration of the packed source sequence.
+ * @param user_relid Source Bioseq table.
+ * @param column_attno One-based sequence column number.
  * @param index_name Registered sequence-wide minimizer index.
- * @param sequence_rowno Source-row ordinal and query key.
- * @param storage PostgreSQL generation storage authority.
- * @param sequence Snapshot-bound lazy sequence view.
- * @param source_binding Locator and source-snapshot binding.
- * @param backend Exact producer backend.
- * @param kernels Required backend kernel table.
- * @return Published hash-major metadata and replacement identity.
- *
- * PostgreSQL-owned spill runs are replayed twice to satisfy exact-count-before-postings.
- * Fragment indexes remain outside this sequence-wide merge seam.
+ * @param sequence_rowno Source row number used as the index query key.
+ * @param storage Storage for this source and index.
+ * @param sequence Lazy sequence view using the source snapshot.
+ * @param source_binding Source locator and registered snapshot.
+ * @param algorithm_identity Algorithm and settings selected before the build.
+ * @param backend Selected minimizer producer.
+ * @param kernels Kernel table required by the selected SIMD backend.
+ * @return Published metadata and the identity of the replaced generation.
  */
 template <class p_sequence_range>
 [[nodiscard]] inline ready_hash_major_minimizer_publication
