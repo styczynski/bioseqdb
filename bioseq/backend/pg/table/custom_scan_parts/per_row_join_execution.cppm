@@ -1,10 +1,10 @@
 /**
  * @file
- * @brief Executes transformed per-row mmsearch joins and owns their child lifecycle.
+ * @brief Aligns target and query expressions from each joined row and returns their matches.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
+// Include Highway here so its target-specific definitions share the same
+// translation-unit context across imported modules.
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -78,7 +78,12 @@ export {
         return state == nullptr ? nullptr : static_cast<per_row_join_runtime*>(state->runtime);
     }
 
-    /** @brief Marks per-row resources abandoned after PostgreSQL error unwinding. */
+    /**
+     * @brief Abandons buffered work and forgets PostgreSQL resources after an error.
+     *
+     * Clear child and relation pointers so later cleanup cannot reuse them.
+     * PostgreSQL handles their error cleanup.
+     */
     void per_row_join_abandon_after_error(CustomScanState* node,
                                           per_row_join_runtime& runtime) noexcept {
         if (runtime.cleanup_done)
@@ -93,7 +98,7 @@ export {
         runtime.cleanup_done = true;
     }
 
-    /** @brief Destroys the per-row runtime from its query-memory-context callback. */
+    /** @brief Abandons remaining work and destroys the C++ runtime when query memory is reset. */
     void per_row_join_runtime_cleanup(void* argument) {
         auto* state = static_cast<per_row_join_state*>(argument);
         if (state == nullptr || state->runtime == nullptr)
@@ -104,7 +109,12 @@ export {
         std::destroy_at(runtime);
     }
 
-    /** @brief Drains asynchronous ownership and releases child and relation resources in order. */
+    /**
+     * @brief Releases buffered rows before closing the child plan and target relation.
+     *
+     * Clear output references first, then clear the buffer and release its slice
+     * owner. The child may free the sequence storage once those references are gone.
+     */
     void per_row_join_release_checked(CustomScanState* node, per_row_join_runtime& runtime) {
         if (runtime.cleanup_done)
             return;
@@ -126,8 +136,14 @@ export {
     }
 
     /**
-     * @brief Validates the serialized per-row recipe and constructs its query-owned runtime.
-     * @throws PostgreSQL ERROR when the plan shape, binding recipe, or child ABI is invalid.
+     * @brief Starts a per-row mmsearch scan from the saved plan.
+     *
+     * Validate operand types and match-helper bindings before initializing the child.
+     * Build the alignment plan using the requested helper outputs, then configure
+     * the buffer to align each child row without a persisted index. Register query
+     * cleanup as soon as the runtime exists.
+     *
+     * @throws PostgreSQL ERROR for an unsupported or inconsistent plan.
      */
     void
     bioseq_per_row_join_begin_custom_scan_impl(CustomScanState* node, EState* estate, int eflags) {
@@ -503,7 +519,12 @@ export {
 #endif
     }
 
-    /** @brief Initializes a per-row join while preserving PostgreSQL and C++ error boundaries. */
+    /**
+     * @brief Starts a per-row scan and cleans up failed initialization before reporting errors.
+     *
+     * Preserve PostgreSQL error details. Convert other C++ failures to PostgreSQL
+     * internal errors after abandoning the partially initialized runtime.
+     */
     void bioseq_per_row_join_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) {
         MemoryContext saved_context = CurrentMemoryContext;
         ErrorData* volatile original_error = nullptr;
@@ -526,7 +547,7 @@ export {
             FlushErrorState();
         }
         PG_END_TRY();
-        // Invalidates partially initialized runtime state before an error is rethrown.
+        // Abandon partial initialization before reporting the saved error.
         auto abandon = [node]() noexcept {
             if (per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
                 runtime != nullptr) {
@@ -567,7 +588,7 @@ export {
         }
     }
 
-    /** @brief Populates match placeholders in the retained child row for parent projection. */
+    /** @brief Combines the saved child row with this match's helper values for projection. */
     [[nodiscard]] TupleTableSlot*
     per_row_join_project_output(CustomScanState* node,
                                 per_row_join_runtime& runtime,
@@ -607,7 +628,13 @@ export {
         return combined;
     }
 
-    /** @brief Feeds child rows through per-row alignment and returns the next completed match. */
+    /**
+     * @brief Returns the next match while feeding joined rows to the alignment buffer.
+     *
+     * Each child row supplies one target/query pair. Skip NULL operands and keep
+     * the row for any matches it produces. Drain completed output before reusing
+     * the buffer, and run the final partial batch when the child is exhausted.
+     */
     TupleTableSlot* bioseq_per_row_join_exec_custom_scan_impl(CustomScanState* node) {
         per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
         if (runtime == nullptr || runtime->child == nullptr) {
@@ -615,10 +642,9 @@ export {
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("BioseqPerRowMmsearch runtime is missing")));
         }
-        /* ExecScan may reject an Access result and call us again without returning
-         * through BioseqPerRowJoin_ExecCustomScan. Clear that prior virtual row on
-         * every Access entry so a subsequent clear_slots() cannot invalidate a
-         * still-parent-visible expanded recipe. */
+        /* ExecScan can reject a row and call this access method again within
+         * one scan step. Clear the previous output each time, before resetting
+         * the buffer can free sequence data still referenced by that row. */
         clear_recipe_scan_parent_tuple_references(node);
         bioseq::postgres::table::alignment_execution::ensure_alignment_node_registered(
             runtime->alignment_registration);
@@ -702,7 +728,7 @@ export {
                 runtime->buffer.submit_scan_with_source_tid(
                     child_slot, source_relation_oid, source_tid_copy);
             } else {
-                // An inherited host recipe must not borrow an incidental parent-slot TID.
+                // Without explicit source columns, ignore any TID left in the parent slot.
                 runtime->buffer.submit_scan_recipe_without_source_tid(child_slot);
             }
             if (runtime->buffer.ready_to_dispatch()) {
@@ -721,18 +747,18 @@ export {
         return bioseq_per_row_join_exec_custom_scan_impl(reinterpret_cast<CustomScanState*>(scan));
     }
 
-    /** @brief Replays the owned alignment recipe for EvalPlanQual replacement rows. */
+    /** @brief Aligns the child's replacement row during an EvalPlanQual recheck. */
     [[nodiscard]] bool bioseq_per_row_join_recheck(ScanState* scan, TupleTableSlot*) {
         auto* custom = reinterpret_cast<CustomScanState*>(scan);
         if (custom->ss.ps.state == nullptr || custom->ss.ps.state->es_epq_active == nullptr)
             return true;
-        /* The child plan is EPQ-aware. Pull its substituted row through the same
-         * owned recipe/alignment pipeline, but return only the scan tuple here:
-         * ExecScan performs the final projection exactly once after recheck. */
+        /* The child supplies the replacement row for EvalPlanQual. Run it
+         * through alignment and return the scan tuple so ExecScan can apply
+         * the final projection once. */
         return !TupIsNull(bioseq_per_row_join_exec_custom_scan_impl(custom));
     }
 
-    /** @brief Executes one per-row join step and contains all errors within PostgreSQL's ABI. */
+    /** @brief Runs a per-row scan step and reports PostgreSQL or C++ failures after cleanup. */
     TupleTableSlot* bioseq_per_row_join_exec_custom_scan(CustomScanState* node) {
         TupleTableSlot* result = nullptr;
         MemoryContext saved_context = CurrentMemoryContext;
@@ -758,7 +784,7 @@ export {
             FlushErrorState();
         }
         PG_END_TRY();
-        // Invalidates executor-owned runtime state before an error is rethrown.
+        // Abandon the runtime before reporting the saved execution error.
         auto abandon = [node]() noexcept {
             if (per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
                 runtime != nullptr) {
@@ -795,7 +821,7 @@ export {
         return result;
     }
 
-    /** @brief Ends the child plan and releases per-row asynchronous ownership. */
+    /** @brief Closes the per-row scan after releasing buffered sequence references. */
     void bioseq_per_row_join_end_custom_scan(CustomScanState* node) {
         per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
         if (runtime == nullptr || runtime->cleanup_done)
@@ -815,7 +841,7 @@ export {
         }
     }
 
-    /** @brief Resets per-row buffers and propagates changed parameters to the owned child. */
+    /** @brief Clears buffered matches and restarts the child with updated query parameters. */
     void bioseq_per_row_join_rescan_custom_scan(CustomScanState* node) {
         per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
         if (runtime == nullptr || runtime->child == nullptr) {
@@ -830,10 +856,9 @@ export {
         runtime->buffer.release_per_row_slice_async_owner_after_drain();
         runtime->source_exhausted = false;
         runtime->pass_fully_drained = false;
-        /* Like SliceProject, this CustomScan owns its child through custom_ps.
-         * Transfer only the parameters relevant to that child's allParam before
-         * ExecReScan; UpdateChangedParamSet performs the required filtering and
-         * unions with any invalidation already owned by the child. */
+        /* Forward parameter changes to the owned child before restarting it.
+         * UpdateChangedParamSet keeps only parameters the child uses and
+         * preserves changes already recorded there. */
         if (node->ss.ps.chgParam != nullptr) {
             UpdateChangedParamSet(runtime->child, node->ss.ps.chgParam);
         }
@@ -841,7 +866,7 @@ export {
         ExecReScan(runtime->child);
     }
 
-    /** @brief Adds per-row ownership, plan-audit, cost, and execution details to EXPLAIN. */
+    /** @brief Shows per-row match execution, child-plan checks, and alignment costs in EXPLAIN. */
     void bioseq_per_row_join_explain_custom_scan(CustomScanState* node, List*, ExplainState* es) {
         per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
         ExplainPropertyText("Bioseq Mmsearch Ownership", "per-row recipe", es);
@@ -860,9 +885,9 @@ export {
                                         get_cached_stub_oids(),
                                         owned_mmsearch);
         }
-        /* A nonzero path count cannot reach plan creation: the exact pointer gate
-         * above runs on the reconstructed Path before copyObject.  The remaining
-         * values are recomputed from the serialized executable plan, not constants. */
+        /* Path construction already rejects a child that still owns this
+         * RestrictInfo, so its path-copy count is zero. Recount executable
+         * mmsearch expressions from the saved child plan for the other fields. */
         ExplainPropertyInteger("Bioseq Owned RestrictInfo Path Copies", nullptr, 0, es);
         ExplainPropertyInteger("Bioseq Executable Mmsearch Qual Copies",
                                nullptr,

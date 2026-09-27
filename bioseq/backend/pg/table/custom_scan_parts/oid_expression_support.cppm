@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates Bioseq OID catalog, expression, restriction, and semantic analysis.
+ * @brief Exposes SQL-function lookup and expression checks used to plan Bioseq scans.
  */
 export module bioseq.postgres.table:custom_scan_oid_expression_support;
 

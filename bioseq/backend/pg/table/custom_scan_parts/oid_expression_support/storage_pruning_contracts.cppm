@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares storage-pruning qualifier filtering without planner walk contracts.
+ * @brief Declares removal of mmsearch-containing filters from storage pruning.
  */
 module;
 extern "C" {
@@ -17,7 +17,7 @@ export module bioseq.postgres.table:custom_scan_oid_expression_support_storage_p
 
 import :custom_scan_oid_expression_support_oid_catalog_core_contracts;
 
-/** @brief Remove all mmsearch expressions from storage-pruning qualifiers. */
+/** @brief Excludes each filter expression that contains an mmsearch call. */
 export [[nodiscard]] List* storage_prunable_quals_without_mmsearch(
     List* quals,
     const bioseq_stub_oids& oids);
