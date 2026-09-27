@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/anchor_planner/03_query_waves_test.cpp
- * @brief Reusable query-wave planning and compact receipts.
+ * @brief Checks reuse of query-batch scratch space and anchor counts.
  */
 
 #include <hwy/highway.h>
@@ -36,7 +36,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 

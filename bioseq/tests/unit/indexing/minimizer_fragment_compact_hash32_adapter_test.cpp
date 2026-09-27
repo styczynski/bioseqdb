@@ -1,6 +1,6 @@
 /**
  * @file minimizer_fragment_compact_hash32_adapter_test.cpp
- * @brief Tests compact-hash32 adaptation from persisted minimizer fragments.
+ * @brief Checks conversion of stored minimizer fragments into a compact direct index.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -14,7 +14,7 @@ namespace {
 
 namespace idx = bioseq::indexing;
 
-/// Encode one unsigned fixture scalar in little-endian order.
+/// Writes an unsigned little-endian value after checking the fixture buffer bounds.
 template <class p_unsigned_integer>
 requires std::is_unsigned_v<p_unsigned_integer>
 void write_le(
@@ -29,7 +29,7 @@ void write_le(
     }
 }
 
-/// Encode one scalar using the selected grouped-SoA width.
+/// Writes a fixture value at the chosen integer width, rejecting values that do not fit.
 void write_shape_scalar(
         std::span<std::byte> output,
         std::size_t offset,
@@ -53,25 +53,25 @@ void write_shape_scalar(
     FAIL("unsupported grouped-SoA scalar width");
 }
 
-/// Describe one segment-local position and strand.
+/// A base position relative to its segment, with a strand flag.
 struct local_position {
     std::uint64_t bp = 0u;
     bool strand_one = false;
 };
 
-/// Describe one hash and its sorted local positions.
+/// One hash with positions sorted by their encoded position-and-strand value.
 struct control_spec {
     std::uint32_t hash = 0u;
     std::vector<local_position> positions{};
 };
 
-/// Describe all controls assigned to one position segment.
+/// Hash groups stored in one directory entry for a position segment.
 struct fragment_spec {
     std::uint32_t position_segment = 0u;
     std::vector<control_spec> controls{};
 };
 
-/// Own a valid grouped-SoA fixture consumed by the adapter.
+/// Owns the fragment payload and metadata passed to the adapter.
 struct minimizer_fragment_fixture {
     idx::minimizer_generation_head head{};
     idx::minimizer_generation_manifest manifest{};
@@ -79,7 +79,7 @@ struct minimizer_fragment_fixture {
     std::vector<std::byte> payload{};
 };
 
-/// Return the positive chunk count required for one encoded extent.
+/// Counts chunks needed for a nonempty extent, failing the test if the count will not fit.
 [[nodiscard]] std::uint32_t chunks_for(std::uint64_t bytes) {
     const std::uint64_t chunks = bytes
             / idx::k_grouped_soa_extent_payload_bytes
@@ -89,7 +89,7 @@ struct minimizer_fragment_fixture {
     return static_cast<std::uint32_t>(chunks);
 }
 
-/// Encode grouped-SoA fragment rows from semantic fixture specifications.
+/// Encodes test hashes and segment-local positions into fragment payloads and directory metadata.
 [[nodiscard]] minimizer_fragment_fixture make_minimizer_fragment_fixture(
         std::uint64_t target_length,
         std::uint64_t segment_span,
@@ -308,10 +308,10 @@ struct minimizer_fragment_fixture {
     return fixture;
 }
 
-/// Hash-to-global-position map used as the adapter oracle.
+/// Reference encoded global positions grouped by hash.
 using oracle_type = std::map<std::uint32_t, std::vector<std::uint64_t>>;
 
-/// Globalize fixture positions and group them by hash.
+/// Converts local positions to target coordinates and groups them by hash and strand.
 [[nodiscard]] oracle_type make_oracle(
         std::uint64_t segment_span,
         std::span<const fragment_spec> fragments) {
@@ -340,13 +340,13 @@ using oracle_type = std::map<std::uint32_t, std::vector<std::uint64_t>>;
     return oracle;
 }
 
-/// Own postings collected for each adapter selection.
+/// Collects encoded positions for each selected target hash.
 struct collected_postings {
     std::vector<std::vector<std::uint64_t>> by_selection{};
     std::uint64_t callbacks = 0u;
 };
 
-/// Append one posting through the erased query callback.
+/// Saves a returned position and checks its decoded strand against the stored low bit.
 bool collect_posting(
         void* opaque,
         const idx::direct_index_posting& posting) {
@@ -361,13 +361,13 @@ bool collect_posting(
         == ((posting.encoded_position & 1u) != 0u);
 }
 
-/// Own sorted runs captured from the adapter source.
+/// Keeps each emitted run's header and positions for comparison.
 struct captured_runs {
     std::vector<idx::compact_hash32_sorted_run_header> headers{};
     std::vector<std::vector<std::uint64_t>> positions{};
 };
 
-/// Begin one captured adapter run.
+/// Saves a run header and starts an empty position list.
 [[nodiscard]] std::expected<void, idx::direct_inverted_index_error>
 capture_begin(
         void* opaque,
@@ -378,7 +378,7 @@ capture_begin(
     return {};
 }
 
-/// Append one positions batch to the active captured run.
+/// Adds positions to the current run, failing if no run header has arrived.
 [[nodiscard]] std::expected<void, idx::direct_inverted_index_error>
 capture_positions(
         void* opaque,
@@ -410,8 +410,7 @@ TEST_CASE(
                 },
                 control_spec{
                     .hash = 10u,
-                    // Same bp on both strands is a real duplicate-bp case,
-                    // while the two encoded grouped-SoA events remain distinct.
+                    // The same base on opposite strands gives two distinct encoded positions.
                     .positions = {
                         {.bp = 15u, .strand_one = false},
                         {.bp = 15u, .strand_one = true},
@@ -419,9 +418,8 @@ TEST_CASE(
                 },
             },
         },
-        // A second directory entry in the same physical fragment exercises
-        // entry-local prefix/position offsets without adding another heap
-        // cursor.
+        // A second directory entry in this segment checks that prefix and position
+        // offsets restart for the new entry while the segment keeps one merge cursor.
         fragment_spec{
             .position_segment = 0u,
             .controls = {
@@ -495,7 +493,7 @@ TEST_CASE(
     REQUIRE(adapter->ready());
     const auto build_options = adapter->compact_build_options(3u);
     REQUIRE(build_options.has_value());
-    // This fixture uses the registered scalar k15 profile (a 30-bit hash domain).
+    // The scalar k=15 profile uses 30 hash bits.
     CHECK(build_options->geometry.hash_domain_bits == 30u);
     CHECK(build_options->geometry.max_hash == 1'073'741'823u);
 
@@ -624,8 +622,8 @@ TEST_CASE(
     CHECK(adapter->prebuild_estimate().emission_chunk_scratch_bytes
         == sizeof(std::uint64_t));
 
-    // The source is issued before the adapter move. Its heap-stable token must
-    // follow the destination adapter and support both deterministic replays.
+    // A source obtained before the adapter moves must still refer to its new owner.
+    // Both scans should return the same positions.
     auto source = adapter->sorted_run_source();
     auto moved_adapter = std::move(*adapter);
     captured_runs captured;
