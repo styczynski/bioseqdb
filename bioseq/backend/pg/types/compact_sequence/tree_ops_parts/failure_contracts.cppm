@@ -1,6 +1,6 @@
 /**
  * @file failure_contracts.cppm
- * @brief Exported piece-tree failure-contract facade.
+ * @brief Export tests for piece-tree errors and cleanup.
  */
 export module bioseq.postgres.types.compact_sequence:tree_ops_failure_contracts;
 

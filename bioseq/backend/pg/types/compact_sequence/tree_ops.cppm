@@ -1,6 +1,6 @@
 /**
  * @file tree_ops.cppm
- * @brief Exported piece-tree facade and SQL contract entry point.
+ * @brief Export piece-tree operations and provide their SQL self-test.
  */
 module;
 
@@ -33,13 +33,13 @@ export import :tree_ops_validation;
 export import :tree_ops_failure_contracts;
 
 
-/* Internal lifetime acceptance seam. It deliberately catches recoverable
- * construction errors and exercises cleanup-quarantine state on local POD
- * fixtures, without poisoning the backend-global production state. */
+/* SQL self-test for piece-tree construction and cleanup. Expected errors are
+ * caught so later checks can run. Tests of corrupt cleanup state use local
+ * records to keep the backend state usable. */
 export namespace bioseq::pg_types::sql_routines {
 
-/// @brief Runs bounded construction, cleanup, corruption, and balancing contracts.
-/// @return `true` when every lifetime and structural contract succeeds without leaked arenas.
+/// @brief Check piece-tree construction, balancing, and cleanup after failures.
+/// @return `true` when all checks pass and no arenas or cleanup failures remain.
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]
@@ -182,9 +182,9 @@ bool piece_tree_self_test() {
     }
     if (million_arena != nullptr) {
       auto *failed_arena = const_cast<piece_tree_arena *>(million_arena);
-      /* Every probe edge is intra-arena.  ERROR may strand temporary
-       * edge tokens in skipped C++ frames, but no external dependency;
-       * collapse those tokens before deleting the failed arena. */
+      /* All edges in this test use the same arena. PostgreSQL ERROR can skip
+       * their C++ cleanup, leaving extra references behind. No other arena
+       * depends on these nodes, so discard those references before freeing it. */
       failed_arena->refcount = 1u;
       release_arena(failed_arena);
       million_arena = nullptr;

@@ -1,6 +1,6 @@
 /**
  * @file factory.cppm
- * @brief Piece-tree factory failure and cleanup contracts.
+ * @brief Test cleanup after failures while constructing piece trees.
  */
 module;
 
@@ -28,7 +28,7 @@ import bioseq.sequences.rank_pack;
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 
-/** Provide the SQL facade with this deterministic piece-tree contract. */
+/** Build a balanced test tree with a positive number of identical literal leaves. */
 [[nodiscard]] inline piece_edge build_balanced_literal_probe(piece_tree_arena& arena,
                                                              literal_piece literal,
                                                              std::uint32_t piece_count) {
@@ -49,7 +49,7 @@ struct factory_failure_observation {
     std::uint32_t arena_tokens_released;
 };
 
-/// Memory-context callback state for an unpublished factory result.
+/// Reset callback state holding a partially built tree and its arena.
 struct factory_failure_pending_root {
     MemoryContextCallback callback;
     piece_tree_arena* destination_arena;
@@ -82,7 +82,7 @@ inline void factory_failure_pending_root_reset(void* argument) noexcept {
     }
 }
 
-/// Bounded source backend and retain counters for factory tests.
+/// Test sequence data and counters for reads and source references.
 struct factory_failure_source_state {
     std::uint32_t retain_calls;
     std::uint32_t release_calls;
@@ -92,7 +92,7 @@ struct factory_failure_source_state {
     bool invalid_read;
 };
 
-/// Record one retained factory test source.
+/// Count one added reference to the test source.
 inline void factory_failure_source_retain(void* argument) noexcept {
     ++static_cast<factory_failure_source_state*>(argument)->retain_calls;
 }
@@ -111,12 +111,12 @@ factory_failure_source_identity(void const* argument) noexcept {
     };
 }
 
-/// Report that the factory test source is backend-thread local.
+/// Report that workers cannot share the test source.
 [[nodiscard]] inline bool factory_failure_source_worker_shareable(void const*) noexcept {
     return false;
 }
 
-/// Read one bounded rank range from the factory test source.
+/// Read test ranks with the requested reversal or complement and record invalid reads.
 [[nodiscard]] inline pg_sequence_source_read_status
 factory_failure_source_read(void const* argument,
                             pg_sequence_read_session&,
@@ -151,7 +151,7 @@ factory_failure_source_read(void const* argument,
     return pg_sequence_source_read_status::ok;
 }
 
-/// Backend operations for the bounded factory test source.
+/// Callbacks for the factory test sequence source.
 constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
     .retain = factory_failure_source_retain,
     .release = factory_failure_source_release,
@@ -180,7 +180,7 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
     };
 }
 
-/// Execute one injected factory failure and verify cleanup counts.
+/// Inject a construction failure and check that reset releases every added reference.
 [[nodiscard]] inline bool
 run_piece_tree_factory_failure_case(piece_tree_injected_failure_point failure_point) {
     const std::uint64_t arena_baseline = live_piece_tree_arenas;
@@ -279,12 +279,8 @@ run_piece_tree_factory_failure_case(piece_tree_injected_failure_point failure_po
         }
         case piece_tree_injected_failure_point::arena_dependency_registration:
             register_arena_dependency(*guard->destination_arena, external_arena);
-            /* Test the dependency operation directly: an exported inline factory
-             * may be instantiated by an importer with a distinct anonymous-
-             * namespace acceptance state.  The helper raises first when it sees
-             * this TU's arm; the immediate fallback preserves the identical
-             * post-registration/pre-publication failure point for any compiler-
-             * emitted state copy. */
+            /* Exercise dependency registration before raising the test error. The
+             * fallback keeps the failure after registration if the helper returns. */
             inject_piece_tree_failure(failure_point);
             break;
         case piece_tree_injected_failure_point::source_dependency_registration:
@@ -373,7 +369,7 @@ run_piece_tree_factory_failure_case(piece_tree_injected_failure_point failure_po
     return result;
 }
 
-/** Provide the SQL facade with this deterministic piece-tree contract. */
+/** Check cleanup at every factory and dependency-registration failure point. */
 [[nodiscard]] inline bool run_piece_tree_factory_failure_matrix() {
     for (std::uint8_t ordinal =
              static_cast<std::uint8_t>(piece_tree_injected_failure_point::arena_factory);

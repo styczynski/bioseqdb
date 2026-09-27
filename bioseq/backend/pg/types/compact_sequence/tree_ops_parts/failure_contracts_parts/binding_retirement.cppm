@@ -1,6 +1,6 @@
 /**
  * @file binding_retirement.cppm
- * @brief Binding-retirement overflow cleanup contracts.
+ * @brief Test cleanup when binding a large tree needs extra retired-root records.
  */
 module;
 
@@ -33,7 +33,7 @@ import :tree_ops_failure_tracked;
 
 namespace {
 
-/// Deep literal tree and baseline counters for retirement tests.
+/// Literal tree and reference counts used to check cleanup after binding.
 struct binding_retirement_fixture {
     piece_tree_arena* arena;
     piece_edge root;
@@ -42,7 +42,7 @@ struct binding_retirement_fixture {
     std::uint64_t live_baseline;
 };
 
-/// Build the bounded binding-retirement fixture.
+/// Build a balanced tree of unequal literal lengths that triggers rotations during binding.
 [[nodiscard]] inline binding_retirement_fixture make_binding_retirement_fixture() {
     constexpr std::uint32_t leaf_count = 4'096u;
     constexpr std::uint64_t long_length = 17'000u;
@@ -87,14 +87,14 @@ struct binding_retirement_fixture {
     };
 }
 
-/// Exact length, rank, and binding counts observed in one tree.
+/// Total length and leaf count, with a flag for correct packed contents.
 struct binding_output_audit {
     std::uint64_t length;
     std::uint32_t leaves;
     bool exact;
 };
 
-/// Inspect binding output without changing ownership.
+/// Check that every bound leaf contains the expected rank and count its letters.
 template <class p_instance>
 [[nodiscard]] inline binding_output_audit audit_binding_output(piece_edge edge,
                                                                std::uint8_t expected_rank) {
@@ -133,7 +133,7 @@ template <class p_instance>
 
 } // namespace
 
-/** Provide the SQL facade with this deterministic piece-tree contract. */
+/** Check retired-root overflow storage and cleanup after its allocation fails. */
 [[nodiscard]] inline bool run_binding_retirement_overflow_regression() {
     binding_retirement_fixture fixture = make_binding_retirement_fixture();
     const compact_sequence_stdc_type_params bound_type{
