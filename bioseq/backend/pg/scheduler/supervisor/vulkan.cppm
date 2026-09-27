@@ -1,6 +1,6 @@
 /**
  * @file scheduler/supervisor/vulkan.cppm
- * @brief Vulkan-typed PostgreSQL scheduler supervision API.
+ * @brief Open the Vulkan runtime after PostgreSQL shader preparation.
  */
 export module bioseq.postgres.scheduler.supervisor.vulkan;
 
@@ -9,10 +9,7 @@ export import bioseq.gpu.vulkan.runtime;
 
 export namespace bioseq::postgres::scheduler {
 
-/**
- * @brief Prepares PostgreSQL runtime state before accessing the Vulkan singleton.
- * @return The process-local Vulkan runtime after provider and cache preparation.
- */
+/** Prepare PostgreSQL shader state, then return this process's Vulkan runtime. */
 [[nodiscard]] inline bioseq::gpu::vulkan::runtime& ensure_pg_vulkan_runtime_ready() {
     prepare_pg_vulkan_runtime_ready();
     return bioseq::gpu::vulkan::runtime::instance();
