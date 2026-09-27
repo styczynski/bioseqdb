@@ -1,6 +1,6 @@
 /**
  * @file continuation.cppm
- * @brief Fragment continuation reset, consume, and finalize operations.
+ * @brief Continues a minimizer sketch across packed sequence fragments.
  */
 module;
 
@@ -26,16 +26,13 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN reset_two_stack_nthash
 /**
- * @brief Resets and validates continuation state for a new logical sequence.
- * @tparam p_window_size Compile-time window size, or zero for runtime selection.
- * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
- * @tparam p_alphabet_traits Packed-sequence alphabet and storage traits.
- * @param state State replaced with a fresh validated continuation.
- * @param runtime_w Requested minimizer window length in k-mers.
- * @param runtime_k Requested k-mer length in biological symbols.
- * @param emitted_position_base Offset added to emitted sequence coordinates.
- * @return Admission status retained in @p state.
- * @note Successful reset selects the generic u64 exact kernel in @p state.
+ * @brief Starts a minimizer sketch with fresh state.
+ *
+ * Checks the alphabet, packing, SIMD width, and requested k-mer and window
+ * sizes. Fixed template sizes must agree with runtime_w and runtime_k.
+ * A successful reset selects the generic u64 kernel.
+ * @param emitted_position_base Offset added to output coordinates.
+ * @return Status stored in state.
  */
 template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_traits>
 [[nodiscard]] inline two_stack_continuation_status reset_two_stack_nthash(
@@ -115,23 +112,19 @@ template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_tr
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN consume_two_stack_nthash_packed_fragment
 /**
- * @brief Consumes a contiguous interval from borrowed packed fragment storage.
- * @tparam p_window_size Compile-time window size, or zero for runtime selection.
- * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
- * @tparam p_minimizer_type Collector record representation.
- * @tparam p_alphabet_traits Packed-sequence alphabet and storage traits.
- * @tparam p_collector_type Collector receiving selected minimizers.
- * @param state Continuation state retained across fragment calls.
- * @param collector Destination for minimizers completed by this interval.
- * @param packed_fragment Borrowed storage units for the enclosing fragment.
- * @param fragment_bp_size Logical symbols available in @p packed_fragment.
- * @param fragment_begin_bp Global coordinate of the fragment's first symbol.
- * @param consume_begin_bp Global coordinate where consumption begins.
- * @param consume_end_bp One past the final global coordinate to consume.
- * @return Continuation status, with failures retained in @p state.
- * @note After the first fragment, @p consume_begin_bp must equal @c state.next_input_position.
- * @note DNA4 input may switch to the exact K15/W10 fast block kernel when compile-time sizes,
- *       storage traits, minimizer representation, and @p state kernel selection all match.
+ * @brief Adds a packed fragment interval to the current minimizer sketch.
+ *
+ * The interval is [consume_begin_bp, consume_end_bp), in sequence coordinates.
+ * It must lie inside the supplied fragment and start where the previous call
+ * ended. The first call sets the input origin.
+ *
+ * Decoded symbols fill the saved k-mer tail and SIMD batches. Ambiguous bases
+ * break valid k-mers. Eligible DNA4 input can use the selected K15/W10 kernel.
+ * @param packed_fragment Borrowed units, valid for this call.
+ * @param fragment_bp_size Number of symbols stored in the fragment.
+ * @param fragment_begin_bp Sequence coordinate of the fragment start.
+ * @param collector Receives selected minimizers.
+ * @return Status saved in state, including errors.
  */
 template<
     std::size_t p_window_size,
@@ -310,9 +303,8 @@ consume_two_stack_nthash_packed_fragment(
                 return two_stack_continuation_status::ok;
             }
         }
-        // Keep the established dna4 decode/staging loop byte-for-byte hot:
-        // dna4 has no ambiguity sentinel, so no run-boundary orchestration is
-        // needed and its resident_vector_stream-relative performance must not regress.
+        // DNA4 has no ambiguous bases, so decoded symbols can go straight into
+        // the k-mer tail and pending batch.
         while (local < local_end) {
             const bool filling_code_tail = state.code_tail_size < k - 1;
             const std::size_t available_capacity = filling_code_tail
@@ -441,20 +433,12 @@ consume_two_stack_nthash_packed_fragment(
 
 
 /**
- * @brief Consumes a contiguous interval from a compact sequence fragment.
- * @tparam p_window_size Compile-time window size, or zero for runtime selection.
- * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
- * @tparam p_minimizer_type Collector record representation.
- * @tparam p_sequence_range Packed fragment configuration.
- * @tparam p_collector_type Collector receiving selected minimizers.
- * @param state Continuation state retained across fragment calls.
- * @param collector Destination for minimizers completed by this interval.
- * @param fragment Borrowed compact fragment storage.
- * @param fragment_begin_bp Global coordinate of the fragment's first symbol.
- * @param consume_begin_bp Global coordinate where consumption begins.
- * @param consume_end_bp One past the final global coordinate to consume.
- * @return Continuation status, with failures retained in @p state.
- * @note Forwards to the packed-fragment consumer and inherits its contiguity and kernel rules.
+ * @brief Adds an interval from a compact sequence range to the sketch.
+ *
+ * Borrows the range storage and passes it to the packed-fragment consumer.
+ * Coordinates are [consume_begin_bp, consume_end_bp), measured from the
+ * sequence start, and must continue immediately after the previous interval.
+ * @return Status saved in state.
  */
 template<
     std::size_t p_window_size,
@@ -493,15 +477,11 @@ consume_two_stack_nthash_fragment(
 
 
 /**
- * @brief Flushes pending candidates and closes a continuation exactly once.
- * @tparam p_window_size Compile-time window size, or zero for runtime selection.
- * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
- * @tparam p_alphabet_traits Packed-sequence alphabet and storage traits.
- * @tparam p_collector_type Collector receiving the final minimizer.
- * @param state Continuation state to finalize.
- * @param collector Destination for pending and final minimizers.
- * @return Final status and accumulated execution evidence.
- * @note Marks @p state finalized on success and rejects later consume or finalize calls.
+ * @brief Finishes pending SIMD work and emits the final minimum if it is valid.
+ *
+ * On success, marks the state finalized. Later consume or finalize calls
+ * report already_finalized. Existing failures are returned without more work.
+ * @return Final status and accumulated execution counters.
  */
 template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_traits, class p_collector_type>
 [[nodiscard]] inline two_stack_finalize_result finalize_two_stack_nthash(
@@ -582,9 +562,9 @@ template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_tr
         state.pending_count = 0;
     }
 
-    // End-of-input follows mm_sketch's unconditional final-current flush, even
-    // when fewer than p_window_size candidates were seen. Ambiguity boundaries deliberately
-    // do not call this helper: they advance a max slot and retain the ring.
+    // Match mm_sketch by emitting a valid current minimum at end of input,
+    // even after a partial window. An ambiguous base instead adds an invalid
+    // candidate and keeps the window history.
     const auto flush_status =
         two_stack_internal::flush_current_minimum<minimizer_type>(
             state, collector);

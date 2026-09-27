@@ -1,6 +1,10 @@
 /**
  * @file minimap2_reference_kernel.cppm
- * @brief Fixed-target minimap2-reference minimizer kernel.
+ * @brief Selects minimizers by scanning circular windows in SIMD lanes.
+ *
+ * Each lane keeps rolling strand hashes and a current minimum. When that
+ * minimum expires, the lane rescans its window and emits tied positions.
+ * Separate strand buffers preserve the strand belonging to each selected position.
  */
 module;
 #include <hwy/highway.h>
@@ -37,7 +41,7 @@ using ::bioseq::minimizers::packed_sequence_kernel_view;
 using ::bioseq::minimizers::minimizer_sink_collector;
 using ::bioseq::minimizers::k_minimizer_output_layout;
 
-/** Trait-owned rolling-state width checked by generated alphabet registrations. */
+/** Bits per alphabet rank in the rolling k-mer state. */
 template<sequence_alphabet p_alphabet>
 inline constexpr std::size_t minimap2_reference_state_bits_per_rank =
     []() constexpr {
@@ -46,15 +50,14 @@ inline constexpr std::size_t minimap2_reference_state_bits_per_rank =
         return alphabet_traits::bits_per_char;
     }();
 
-/// @brief Provides fixed-capacity circular storage for per-lane vectors.
-/// @tparam p_simd_tag Highway descriptor type.
-/// @tparam p_capacity Maximum number of vectors retained.
+/// @brief Circular buffer of SIMD vectors with fixed maximum storage.
+/// p_capacity is the maximum number of slots. The active size is set at construction.
 template<class p_simd_tag, std::size_t p_capacity>
 class reference_minimizer_ring {
 public:
     /** @brief Vector stored at each ring position. */
     using value_type = hn::Vec<p_simd_tag>;
-    /** @brief Physical index within the fixed-capacity storage. */
+    /** @brief Slot number in the circular buffer. */
     using iterator = std::size_t;
 
 private:
@@ -63,10 +66,7 @@ private:
     iterator previous_position_ = 0u;
     std::size_t capacity_ = 0u;
 
-    /// @brief Initializes every target-attributed vector slot as undefined.
-    /// @tparam p_index Static storage indices used to initialize all slots.
-    /// @param simd_tag Active descriptor for the stored vectors.
-    /// @param capacity Runtime capacity within the static allocation.
+    /// @brief Sets the active capacity and leaves vector contents undefined.
     template<std::size_t... p_index>
     HWY_INLINE explicit reference_minimizer_ring(
         p_simd_tag simd_tag,
@@ -90,7 +90,7 @@ public:
         HWY_DASSERT(capacity_ != 0u && capacity_ <= p_capacity);
     }
 
-    /** @brief Returns the first logical ring position. */
+    /** @brief Returns slot zero, used as the initial minimum position. */
     [[nodiscard]] static constexpr iterator get_begin_position() noexcept {
         return 0u;
     }
@@ -101,9 +101,8 @@ public:
     }
 
     /**
-     * @brief Returns the value stored at a physical ring position.
-     * @param position Index below the active capacity.
-     * @return Borrowed reference valid for the lifetime of the ring.
+     * @brief Borrows the vector at position.
+     * @pre position is below the active capacity and the slot has been written.
      */
     [[nodiscard]] HWY_INLINE const value_type& get_value_at(
         const iterator position) const noexcept {
@@ -125,10 +124,7 @@ public:
         return previous_position_;
     }
 
-    /**
-     * @brief Returns the most recently appended value.
-     * @return Mutable reference valid for the lifetime of the ring.
-     */
+    /** @brief Borrows the most recently appended vector. Requires at least one append. */
     [[nodiscard]] HWY_INLINE value_type& get_last_value() noexcept {
         return values_[previous_position_];
     }
@@ -156,7 +152,7 @@ public:
 };
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** @brief Stores fixed-target counters exposed to dispatcher verification. */
+/** @brief Test counters for calls and SIMD work on this CPU target. */
 struct reference_simd_minimizer_test_receipt {
     std::uint64_t kernel_calls = 0u;
     std::uint64_t vector_callback_batches = 0u;
@@ -167,15 +163,12 @@ struct reference_simd_minimizer_test_receipt {
 inline thread_local reference_simd_minimizer_test_receipt
     reference_simd_minimizer_receipt_state{};
 
-/** @brief Resets fixed-target verification counters for the current thread. */
+/** @brief Clears this thread's reference-kernel test counters. */
 inline void reset_reference_simd_minimizer_test_receipt() noexcept {
     reference_simd_minimizer_receipt_state = {};
 }
 
-/**
- * @brief Snapshots fixed-target verification counters for the current thread.
- * @return Copy of the current thread's receipt.
- */
+/** @brief Returns a copy of this thread's reference-kernel test counters. */
 [[nodiscard]] inline reference_simd_minimizer_test_receipt
 reference_simd_minimizer_test_receipt_snapshot() noexcept {
     return reference_simd_minimizer_receipt_state;
@@ -183,19 +176,12 @@ reference_simd_minimizer_test_receipt_snapshot() noexcept {
 #endif
 
 /**
- * @brief Collects minimizers with the fixed-target minimap2 reference kernel.
- * @tparam p_simd_hasher_template SIMD hasher selected for the input alphabet.
- * @tparam p_minimizer_type Collector record representation.
- * @tparam p_sequence_range Packed sequence configuration.
- * @tparam p_iterator Packed storage iterator type.
- * @tparam p_hash_value Per-lane hash and storage value type.
- * @tparam p_collector_type Collector receiving selected minimizers.
- * @param collector Destination for selected minimizers.
- * @param sequence Borrowed resident packed sequence.
- * @param sequence_begin First packed unit in the aligned input segment.
- * @param sequence_end One past the final packed unit in the segment.
- * @param window_size Minimizer window length in k-mers, at most 256.
- * @param kmer_size K-mer length in biological symbols.
+ * @brief Collects minimizers from a packed interval using SIMD window scans.
+ *
+ * Lanes scan overlapping regions and keep a hash and strand for each
+ * window slot. New minima and expiring minima determine when records are
+ * emitted. Palindromic k-mers occupy a slot with an unusable hash.
+ * @pre window_size is between 1 and 256. kmer_size must fit the hasher and output.
  */
 template<
 	template<typename p_hash_alphabet> typename p_simd_hasher_template,
@@ -255,8 +241,7 @@ inline void collect_minimizers_simd(
 	using hash_mask_type = hn::Mask<output_simd_tag_type>;
 	reference_minimizer_ring<output_simd_tag_type, 256> buffer(
         input_simd_tag, window_size);
-	// Parallel per-lane strand state follows the hash ring so both direct emits
-	// and expiry rescans retain the canonical forward/reverse-complement choice.
+	// Keep a strand for every hash slot so rescans recover the matching strand.
 	reference_minimizer_ring<output_simd_tag_type, 256> strand_buffer(
         input_simd_tag, window_size);
 
@@ -269,9 +254,7 @@ inline void collect_minimizers_simd(
 	hash_vector_type current_min_pos = hn::Set(
         input_simd_tag,
         static_cast<hash_value>(buffer.get_begin_position()));
-	// Strand of the per-lane current_min. Mirrors the IfThenElse cascade applied to
-	// `current_min` so the two never go out of sync. Initial value doesn't matter
-	// (the emit guard `temp_buffer1[i] != max_val` skips the sentinel anyway).
+	// Track the strand of each lane's current minimum.
 	hash_vector_type current_min_strand = zero_vec;
 
 	HWY_ALIGN hash_value temp_buffer1[hn::MaxLanes(input_simd_tag)];
@@ -280,14 +263,9 @@ inline void collect_minimizers_simd(
     HWY_ALIGN hash_value temp_buffer4[hn::MaxLanes(input_simd_tag)];
     std::size_t last_pushed_position = 0u;
 
-    // submit_results emits one minimap_sketch_data per lane in `min_mask`, drawing the
-    // hash from `current_min` and the strand from `strand_to_emit` (which lets the
-    // duplicate-hash buffer-walk paths emit the per-slot strand instead of the
-    // current_min's strand). Most call sites pass `current_min_strand`; the
-    // first-window and rescan duplicate-emit paths pass the strand stored at the
-    // matching buffer slot — exactly mirroring the scalar `collector.collect(el)`
-    // behaviour where the buffer slot's full sketch (including its own strand) is
-    // emitted, not the running current_min's strand.
+    // Emit selected lanes using the current hash and the supplied strand.
+    // Tied hashes can belong to different strands, so tie scans pass the
+    // strand from each matching buffer slot.
     auto submit_results = [&current_min,
                            &temp_buffer1,
                            &temp_buffer2,
@@ -310,28 +288,16 @@ inline void collect_minimizers_simd(
         }
         hn::StoreU(strand_to_emit, d, temp_buffer4);
         for(size_t i=0; i<hn::Lanes(d); ++i) {
-            // Skip lanes whose current_min was reset to max_val by a prior emit (mask
-            // transition emit in particular). Without this, once a lane's "final" min
-            // has been emitted and reset to `max_val`, any subsequent submit (e.g. the
-            // finish_fn tail emit) would publish (real_pos, max_val) as a phantom pair
-            // whose hash is the sentinel.
+            // A flushed lane holds the maximum sentinel. Skip it so a later
+            // final flush cannot emit a nonexistent minimizer.
             if (temp_buffer2[i] && temp_buffer1[i] != max_val) {
-                // Strand stored as a per-lane storage_unit (0 or 1). The p_minimizer_type
-                // strand field is 1 bit, so an explicit `& 1` is not strictly
-                // required for the canonical layout, but we mask defensively in case
-                // future code paths ever stash anything other than 0/1 in the strand
-                // lane.
+                // Keep only the strand bit when building the output record.
                 const uint64_t strand_bit =
                     static_cast<uint64_t>(temp_buffer4[i]) & 0x1ULL;
                 if constexpr (p_ignore_distance) {
-                    // The current_min for lane `i` was stored at buffer slot `temp_buffer3[i]` in a
-                    // PREVIOUS iteration. `current_pos` is the slot just written in THIS iteration.
-                    // The number of iterations since current_min was stored is therefore always in
-                    // the inclusive range [1, capacity]. If the two slots are equal it means the
-                    // current_min was stored EXACTLY `capacity` iterations ago (full buffer wrap),
-                    // so distance must be `capacity`, never 0. Using `>=` here conflates
-                    // "just written" (distance 0) with "fully wrapped" (distance capacity) and
-                    // produces the wrong real_pos for the elapsed min.
+                    // This minimum was selected in an earlier iteration. Equal ring
+                    // slots mean a full window has elapsed, so its age is the
+                    // capacity. Newly selected minima use the explicit-distance path.
                     const size_t current_pos = static_cast<hash_value>(
                         buffer.get_last_write_position());
                     const size_t distance = (current_pos > temp_buffer3[i])
@@ -365,23 +331,12 @@ inline void collect_minimizers_simd(
     };
 
     constexpr bool k_is_initializing = true;
-    // Track the mask from the previous handler call so we can detect per-lane
-    // "just became inactive" transitions. When a lane is masked off in the
-    // partial-matrix tail its iterations no longer contribute valid hashes,
-    // and its still-pending current_min will be silently lost (no elapsed
-    // rescan, no finish_fn path reaches it) unless we flush it at the exact
-    // moment it transitions. Initialise to all-false so the first handler
-    // call sees "every active lane just came online" (harmless — current_min
-    // is still max_val and the emit guard in submit_results skips it).
+    // Remember live lanes so each one can emit its pending minimum
+    // when it reaches padding at the end of its region.
     hash_mask_type prev_mask = hn::MaskFalse(input_simd_tag);
-    // Also track the `new_min_mask` from the previous handler call. Needed by
-	// finish_fn: the submit_results<true> distance formula derives `distance`
-	// from buffer-slot arithmetic, which cannot distinguish "current_min was
-	// just set at this iter" (real distance = 0) from "current_min was set
-	// exactly `capacity` iters ago" (real distance = capacity) because both
-	// produce current_min_pos == last_write_pos. At finish_fn we need to
-	// know which case we are in, so we remember the flag for the iter that
-	// just finished.
+    // Remember which lanes selected a new minimum in the latest step.
+	// At finalization, equal ring slots can mean age zero or a full
+	// window of age. The saved selection mask tells those cases apart.
 	hash_mask_type prev_new_min_mask = hn::MaskFalse(input_simd_tag);
     iterate_sequence_bp_simd_offsets<input_simd_tag_type>(
         sequence,
@@ -417,14 +372,8 @@ inline void collect_minimizers_simd(
 #endif
             hash_vector_type hash_vec = hasher.next(d, incoming, outgoing);
 
-            // Per-lane strand (1 = reverse-complement chosen, 0 = forward chosen).
-            // Captured BEFORE the palindrome / out-of-range masks rewrite the hash to
-            // max_val so the strand snapshot stays in sync with whichever state the
-            // hasher's `Min` selected this iteration. Dead lanes (mask false) and
-            // palindromic lanes have their hash forced to max_val below — the emit
-            // guard `temp_buffer1[i] != max_val` then skips them so their strand
-            // value never matters; we therefore skip the redundant strand mask too,
-            // saving one IfThenElse per lane per iteration.
+            // Save the winning strand before excluding palindromes and padding.
+            // Zero means forward and one means reverse complement.
             const hash_mask_type strand_mask = hasher.reverse_strand_mask(d);
             hash_vector_type strand_vec = hn::IfThenElse(strand_mask, one_vec, zero_vec);
 
@@ -432,11 +381,8 @@ inline void collect_minimizers_simd(
             const hash_mask_type palindrome_mask = hasher.palindrome_mask(d);
             const hash_mask_type valid_mask = hn::AndNot(palindrome_mask, mask);
             hash_vec = hn::IfThenElse(valid_mask, hash_vec, max_vec);
-            // Strand only needs to be cleared for palindromes that pass the live
-            // `mask` filter (they would otherwise carry a stale strand bit that a
-            // later submit_results could read). The dead-lane case
-            // (mask=false) is handled by the hash sentinel + emit guard.
-            // Equivalent to `IfThenElse(palindrome_mask & mask, zero, strand)`.
+            // Clear the strand for live palindromes. Padding lanes are already
+            // excluded by the maximum-hash sentinel.
             strand_vec = hn::IfThenZeroElse(hn::And(palindrome_mask, mask), strand_vec);
 
             // iteration_position is zero-based, so the first complete k-mer is
@@ -449,21 +395,10 @@ inline void collect_minimizers_simd(
                 strand_buffer.push_back(std::move(hash_vector_type(zero_vec)));
             }
 
-            // Flush pending current_min for lanes that just became inactive. Equivalent to the
-            // scalar path's "end-of-sequence emit" but for a subset of lanes: each lane reaches
-            // the end of its own slice of the sequence at a different iteration (determined by
-            // offsets × letters_per_unit + valid bps). A lane that's been holding a stable
-            // current_min right up to that boundary would otherwise never be emitted, because:
-            //   - elapsed-rescan is gated by `mask` (so a just-masked lane doesn't trigger),
-            //   - finish_fn emits only lane N-1 and uses stale current_min_pos → wrong real_pos,
-            //   - the window never slides past the lane's current_min so `need_to_push_current_min`
-            //     doesn't fire either.
-            // The emit runs AFTER the push above because submit_results<true> derives distance
-            // from `buffer.get_last_write_position()` — it must be this iteration's slot so the
-            // (slot_of_current_min - slot_now) wraparound distance maps back to the correct
-            // real_pos. After the emit the lane's state is reset to max_val so neither the
-            // subsequent-iteration logic nor finish_fn re-emits the same pair.
-            // Cache the physical write position once for every lane operation below.
+            // Emit a lane's pending minimum when it first reaches padding.
+            // Do this after writing the new ring slot, because position recovery
+            // measures the minimum's age from that slot. Reset the emitted lane
+            // so finalization cannot emit it again.
             const auto last_write_pos_scalar =
                 static_cast<hash_value>(buffer.get_last_write_position());
             const hash_vector_type last_write_pos_vec = hn::Set(d, last_write_pos_scalar);
@@ -474,25 +409,15 @@ inline void collect_minimizers_simd(
                     d, offsets, 0, just_masked, current_min_strand);
                 current_min = hn::IfThenElse(just_masked, max_vec, current_min);
                 current_min_pos = hn::IfThenElse(just_masked, last_write_pos_vec, current_min_pos);
-                // Reset the strand alongside the hash so a subsequent emit on this lane
-                // can't read a stale strand from before the lane went inactive.
+                // Clear the strand together with the emitted minimum.
                 current_min_strand = hn::IfThenElse(just_masked, zero_vec, current_min_strand);
             }
             prev_mask = mask;
 
             if ((iteration_position == window_size + kmer_size - 2u && k_is_initializing)) {
-                // The scalar path emits identical k-mers once in the first full window.
-                // The equivalent sequence position for lane `l` is
-                // `lane_pos + offsets[l] * lpu`, but the SIMD loop counts one position
-                // that increments uniformly across
-                // lanes. Only lane 0 (offset == 0) has `lane_pos == seq_pos`, so its
-                // first-window matches scalar's exactly. For lanes with offset > 0 the
-                // first-window would fire at a seq_pos scalar doesn't special-case
-                // (scalar has already moved past first-window and handles identical
-                // k-mers via the rescan / supersede paths there). Emitting from those
-                // lanes here produces extras — the analogous scalar emits come from
-                // later iterations via the regular paths, not a first-window.
-                // Restrict the emit to lanes whose offset is 0 to mirror scalar.
+                // Emit first-window ties only for regions starting at offset zero.
+                // Later regions overlap an ongoing scalar scan, where the regular
+                // replacement and expiry rules already handle those ties.
                 HWY_ALIGN hash_value offset_zero_mask_bytes[hn::MaxLanes(d)];
                 for (size_t lane = 0; lane < hn::Lanes(d); ++lane) {
                     offset_zero_mask_bytes[lane] = (offsets[lane] == 0)
@@ -509,16 +434,14 @@ inline void collect_minimizers_simd(
                      &submit_results,
                      &offsets,
                      &strand_buffer](const auto& index, const auto& el, const auto& distance) {
-                        // Check if hash is the same, but position different
+                        // Select equal hashes stored in a different ring slot.
                         hash_mask_type values_to_append_mask =
                             hn::And(offset_zero_mask,
                                     hn::And(hn::Eq(el, current_min),
                                             hn::Ne(hn::Set(d, static_cast<hash_value>(index)),
                                                    current_min_pos)));
                         if (!hn::AllFalse(d, values_to_append_mask)) {
-                            // Emit the slot's own strand (mirrors scalar's `collector.collect(el)`
-                            // which collects the buffer slot including its own strand bit, not
-                            // the running current_min's strand).
+                            // Each tied position keeps the strand stored in its own slot.
                             submit_results.template operator()<false>(
                                 d,
                                 offsets,
@@ -534,30 +457,22 @@ inline void collect_minimizers_simd(
                 (iteration_position >= window_size + kmer_size - 1u || !k_is_initializing) &&
                 !hn::AllFalse(d, new_min_mask);
 
-            // Check if we need to update min. `has_elapsed_min` must be gated by `mask` —
-            // otherwise a lane that has just transitioned to padding (its hash was replaced by
-            // `max_vec` above) can still register as "elapsed" on the slot equality check and
-            // drag the rescan path through a phantom update. A masked lane has nothing valid
-            // left to emit, and its buffer slot has been overwritten with `max_vec`, so we
-            // must not treat it as having an elapsed minimum at all.
-            // last_write_pos_vec was hoisted above, reuse here.
+            // Rescan only live lanes whose current minimum has expired.
+            // Lanes entering padding have already emitted their final minimum.
             hash_mask_type has_elapsed_min = hn::And(
                 mask, hn::And(hn::Not(new_min_mask), hn::Eq(current_min_pos, last_write_pos_vec)));
             const bool need_to_rescan = !hn::AllFalse(d, has_elapsed_min);
 
-            // Push current min
+            // Emit the old minimum before replacing it.
             if (need_to_push_current_min) [[unlikely]] {
                 submit_results.template operator()<true>(
                     d, offsets, 0, new_min_mask, current_min_strand);
             }
 
-            // New minima and expired minima occupy disjoint lane sets, so update all
-            // arriving minima before rescanning the expired lanes.
+            // A lane receiving a new minimum cannot also need an expiry rescan.
             current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
             current_min = hn::IfThenElse(new_min_mask, buffer.get_last_value(), current_min);
-            // Strand follows the same IfThenElse cascade as the hash so the per-lane
-            // (kmer, strand) pair stays consistent. The strand snapshot for THIS slot
-            // was just stored in `strand_buffer.get_last_value()` above.
+            // Copy the new minimum's strand from the same ring slot as its hash.
             current_min_strand =
                 hn::IfThenElse(new_min_mask, strand_buffer.get_last_value(), current_min_strand);
 
@@ -568,17 +483,9 @@ inline void collect_minimizers_simd(
                         d, offsets, buffer.get_capacity(), has_elapsed_min, current_min_strand);
                 }
 
-                // Only reset current_min for lanes that need rescanning. Masked or non-elapsed
-                // lanes must retain their existing current_min / current_min_pos so that
-                // subsequent iterations (including finish_fn) emit the right values. Before
-                // the gate was added a single other lane triggering rescan would clobber the
-                // still-valid current_min in a masked (padding-only) lane by running it
-                // through the max_vec-reset-and-rescan sequence below.
+                // Reset only lanes that need a rescan. Other lanes keep their minima.
                 current_min = hn::IfThenElse(has_elapsed_min, max_vec, current_min);
-                // Walk both buffers in lockstep — the strand at slot `index` lives at
-                // `strand_buffer.get_value_at(index)` shares the same slot ordering.
-                // Use the hash buffer as the driver and look up the strand by the same
-                // `index` so we reuse the cache-hot pass.
+                // Scan hashes once and look up each candidate's strand at the matching slot.
                 buffer.for_each_filled_value_unsafe(
                     [&has_elapsed_min,
                      &current_min,
@@ -593,13 +500,12 @@ inline void collect_minimizers_simd(
                         current_min_pos =
                             hn::IfThenElse(rescan_new_mask, new_min_pos_val, current_min_pos);
                         current_min = hn::IfThenElse(rescan_new_mask, el, current_min);
-                        // Pull the strand for slot `index` from the parallel buffer so the
-                        // rescan's recovered current_min has the matching strand attached.
+                        // Keep the replacement minimum's matching strand.
                         current_min_strand = hn::IfThenElse(
                             rescan_new_mask, strand_buffer.get_value_at(index), current_min_strand);
                     });
                 if ((iteration_position >= window_size + kmer_size - 2u || !k_is_initializing)) {
-                    // Need to push any value equal to new min
+                    // Emit other positions tied with the replacement minimum.
                     buffer.for_each_filled_value_unsafe(
                         [&has_elapsed_min,
                          &current_min,
@@ -608,19 +514,14 @@ inline void collect_minimizers_simd(
                          &submit_results,
                          &offsets,
                          &strand_buffer](const auto& index, const auto& el, const auto& distance) {
-                            // Check if hash is the same, but position different. Gate by
-                            // has_elapsed_min — only lanes we just rescanned can have duplicate
-                            // equals emitted.
+                            // Select tied hashes at other slots only in the rescanned lanes.
                             hash_mask_type values_to_append_mask =
                                 hn::And(has_elapsed_min,
                                         hn::And(hn::Eq(el, current_min),
                                                 hn::Ne(hn::Set(d, static_cast<hash_value>(index)),
                                                        current_min_pos)));
                             if (!hn::AllFalse(d, values_to_append_mask)) {
-                                // Emit the slot's own strand (same rationale as the first-window
-                                // duplicate-emit above — scalar's `collector.collect(el)` carries
-                                // the slot's strand, not the rescan's recovered current_min
-                                // strand).
+                                // Emit the strand belonging to this tied position.
                                 submit_results.template operator()<false>(
                                     d,
                                     offsets,
@@ -632,10 +533,8 @@ inline void collect_minimizers_simd(
                 }
             }
 
-            // Remember whether this iter's push was a new minimum for each lane.
-            // We look this up in finish_fn to disambiguate "just set" from the
-            // ambiguous slot-equality that the standard distance formula resolves
-            // to `capacity`.
+            // Save the selection mask so finalization can recognize a minimum
+            // created in this last iteration and give it age zero.
             prev_new_min_mask = new_min_mask;
             ++iteration_position;
         },
@@ -644,17 +543,9 @@ inline void collect_minimizers_simd(
             auto const& offsets, auto& d, auto& mask) {
             hash_mask_type last_lane_mask = hn::Not(hn::FirstN(d, hn::Lanes(d) - 1));
             --iteration_position;
-            // Loop exit. For lane N-1 (the only lane where finish_fn is expected to
-            // flush a pending current_min), the state of `current_min_pos` after the
-            // last handler iteration is ambiguous when it equals `last_write_pos`:
-            // either the last iter set current_min at the just-written slot (dist 0)
-            // or the lane happens to have its min exactly `capacity` iters old
-            // (dist = capacity). Split the emit into two buckets based on
-            // `prev_new_min_mask` so we can feed the correct distance to each:
-            //   - just-set lanes: pass dist=0 via submit_results<false>
-            //   - older lanes: let submit_results<true> reconstruct the distance
-            //     from slot arithmetic (the capacity-wrap formula is correct here
-            //     because the lane never had a new-min flip in the last iter).
+            // A minimum chosen in the last step has age zero. Older minima
+            // recover their age from ring slots, where equal slots mean a
+            // full window. Use the saved mask to choose the right calculation.
             hash_mask_type just_set_mask = hn::And(last_lane_mask, prev_new_min_mask);
             if (!hn::AllFalse(d, just_set_mask)) {
                 submit_results.template operator()<false>(
@@ -668,21 +559,7 @@ inline void collect_minimizers_simd(
         },
         0u);
 }
-/**
- * @brief Invokes the reference SIMD kernel with compile-time window parameters.
- * @tparam p_window_size Minimizer window length in k-mers.
- * @tparam p_kmer_size K-mer length in biological symbols.
- * @tparam p_simd_hasher_template SIMD hasher selected for the input alphabet.
- * @tparam p_minimizer_type Collector record representation.
- * @tparam p_sequence_range Packed sequence configuration.
- * @tparam p_iterator Packed storage iterator type.
- * @tparam p_hash_value Per-lane hash and storage value type.
- * @tparam p_collector_type Collector receiving selected minimizers.
- * @param collector Destination for selected minimizers.
- * @param sequence Borrowed resident packed sequence.
- * @param sequence_begin First packed unit in the aligned input segment.
- * @param sequence_end One past the final packed unit in the segment.
- */
+/** @brief Calls the reference SIMD collector with template-specified window and k-mer sizes. */
 template <
     std::size_t p_window_size, std::size_t p_kmer_size,
     template<typename p_hash_alphabet> typename p_simd_hasher_template,
@@ -719,13 +596,9 @@ inline void collect_minimizers_simd_constexpr(
 
 namespace minimizer_kernel_detail {
 
-/// @brief Runs one typed reference-kernel leaf and flushes its neutral sink.
-/// @tparam p_minimizer_type Selected output representation.
-/// @tparam p_alphabet Packed input alphabet.
-/// @tparam p_storage_unit Packed input storage unit.
-/// @param invocation Type-erased kernel request and sink.
-/// @param result Result populated with status and execution evidence.
-/// @return `true` when the borrowed descriptor is internally consistent.
+/// @brief Runs the typed reference kernel on borrowed input and flushes its output.
+/// Return false if the packed input or requested output format is inconsistent.
+/// result holds the kernel status and committed count.
 template<class p_minimizer_type,
          sequence_alphabet p_alphabet,
          class p_storage_unit,
@@ -747,7 +620,7 @@ template<class p_minimizer_type,
     return ::bioseq::minimizers::kernel_detail::
         with_borrowed_compact_range<p_alphabet, p_storage_unit>(
         invocation.sequence,
-        // Runs the typed reference collector against the borrowed range.
+        // Run the selected record collector while the packed range is borrowed.
         [&invocation, &result]<class p_range>(p_range& range) {
             minimizer_sink_collector<p_minimizer_type> collector{
                 invocation.sink};
@@ -792,12 +665,11 @@ template<class p_minimizer_type,
 }
 
 /**
- * @brief Selects rolling-state lanes independently from packed source units.
+ * @brief Chooses a hash lane wide enough for the packed k-mer state.
  *
- * DNA4 keeps the historical source-width specialization. Other registered
- * alphabets select the narrowest unsigned lane that can hold the complete
- * trait-ranked lexicographic state and the unchanged `2 * K` permutation
- * mask. Packed source units may only widen at the iterator boundary.
+ * DNA4 uses the source word width. Other alphabets use the smallest 32- or
+ * 64-bit lane that fits both their rank bits and the hash mask, while keeping
+ * the lane at least as wide as the source storage word.
  */
 template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_unit>
 [[nodiscard]] bool run_reference(
@@ -847,11 +719,11 @@ template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_u
 } // namespace minimizer_kernel_detail
 
 /**
- * @brief Validates one generated alphabet/source-width reference dispatch.
+ * @brief Checks the input form and sizes before generated reference-kernel dispatch.
  *
- * Generated layout dispatchers call this before invoking their alphabet-owned
- * representation leaf. DNA4 retains its historical source-lane limits;
- * additional registered alphabets may widen their rolling state to uint64.
+ * Requires one complete segment starting at zero. DNA4 k-mers must fit the
+ * source word width. Other alphabets may use wider 64-bit rolling state.
+ * Windows contain between 1 and 256 k-mers.
  */
 template<sequence_alphabet p_alphabet, class p_storage_unit>
 [[nodiscard]] inline bool minimap2_reference_admit(
@@ -898,83 +770,78 @@ template<sequence_alphabet p_alphabet, class p_storage_unit>
     }
 }
 
-/** Generated representation leaf for 15-bit positions and uint32 input. */
+/** Generated kernel using 15-bit positions and 32-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l15_k15_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated representation leaf for 15-bit positions and uint64 input. */
+/** Generated kernel using 15-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l15_k15_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated representation leaf for 28-bit positions and uint32 input. */
+/** Generated kernel using 28-bit positions and 32-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l28_k15_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated representation leaf for 28-bit positions and uint64 input. */
+/** Generated kernel using 28-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l28_k15_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated representation leaf for 33-bit positions and uint32 input. */
+/** Generated kernel using 33-bit positions and 32-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l33_k15_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated representation leaf for 33-bit positions and uint64 input. */
+/** Generated kernel using 33-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l33_k15_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated representation leaf for 63-bit positions and uint32 input. */
+/** Generated kernel using 63-bit positions and 32-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k15_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated representation leaf for 63-bit positions and uint64 input. */
+/** Generated kernel using 63-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k15_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated k20 representation leaf for 20-bit positions and uint64 input. */
+/** Generated kernel using the k20 record format, 20-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l20_k20_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated k20 representation leaf for 23-bit positions and uint64 input. */
+/** Generated kernel using the k20 record format, 23-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l23_k20_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** Generated k20 representation leaf for 63-bit positions and uint64 input. */
+/** Generated kernel using the k20 record format, 63-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k20_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
-/** @brief Generated representation leaf for 7-bit positions and uint32 input. */
+/** Generated kernel using the k7 record format, 7-bit positions and 32-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l7_k7_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** @brief Generated representation leaf for 7-bit positions and uint64 input. */
+/** Generated kernel using the k7 record format, 7-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l7_k7_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** @brief Generated representation leaf for 17-bit positions and uint32 input. */
+/** Generated kernel using the k7 record format, 17-bit positions and 32-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l17_k7_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** @brief Generated representation leaf for 17-bit positions and uint64 input. */
+/** Generated kernel using the k7 record format, 17-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l17_k7_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** @brief Generated representation leaf for 49-bit positions and uint32 input. */
+/** Generated kernel using the k7 record format, 49-bit positions and 32-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l49_k7_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** @brief Generated representation leaf for 49-bit positions and uint64 input. */
+/** Generated kernel using the k7 record format, 49-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l49_k7_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** @brief Generated representation leaf for 63-bit positions and uint32 input. */
+/** Generated kernel using the k7 record format, 63-bit positions and 32-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k7_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** @brief Generated representation leaf for 63-bit positions and uint64 input. */
+/** Generated kernel using the k7 record format, 63-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k7_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** @brief Generated representation leaf for 27-bit positions and uint64 input. */
+/** Generated kernel using the k27 record format, 27-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l27_k27_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
-/** @brief Generated representation leaf for 63-bit positions and uint64 input. */
+/** Generated kernel using the k27 record format, 63-bit positions and 64-bit input words. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k27_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 #endif
 
 /**
- * @brief Dispatches one topology-materialized reference-minimizer case.
+ * @brief Checks a DNA4 reference-kernel request and calls its selected record format.
  *
- * The alphabet and storage width are selected by the generated target binder
- * from the scheduler-owned template-flatten topology. Keeping this leaf typed
- * removes the second hand-maintained runtime alphabet/width registry while the
- * neutral table retains its single concrete function pointer.
- * @tparam p_alphabet Requested sequence alphabet.
- * @tparam p_storage_unit Packed input storage unit.
- * @param invocation Type-erased kernel request for this topology case.
- * @return Common kernel result with reference-kernel evidence.
+ * This dispatcher accepts packed 32- or 64-bit input and one complete segment
+ * starting at zero. Unsupported alphabet, size and output combinations return
+ * an error status. Generated alphabet-specific dispatchers use minimap2_reference_admit.
  */
 template<sequence_alphabet p_alphabet, class p_storage_unit>
 requires (
