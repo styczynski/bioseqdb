@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Aggregates batched-join resources, materialization, tuples, and callbacks.
+ * @brief Export batch-join buffering, cleanup, and execution callbacks.
  */
 export module bioseq.postgres.table:custom_scan_batch_join_execution;
 

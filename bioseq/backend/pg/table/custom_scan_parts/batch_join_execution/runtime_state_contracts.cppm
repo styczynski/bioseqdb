@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines BatchJoin runtime state without importing unrelated scan runtimes.
+ * @brief State used while a batched sequence join executes.
  */
 module;
 
@@ -29,9 +29,9 @@ import :custom_scan_runtime_buffer_contracts;
 import :custom_scan_runtime_match_contracts;
 
 export {
-    /** @brief Owns a materialized query row and any retained expanded sequence wrappers. */
+    /** A buffered query row and its saved expanded sequence values. */
     struct batch_join_query_tuple {
-        /** @brief Retains an expanded sequence attribute in query-tuple memory. */
+        /** Column position and expanded sequence saved in query-tuple memory. */
         struct retained_expanded_attribute {
             AttrNumber attno = InvalidAttrNumber;
             Datum datum = Datum{0};
@@ -45,20 +45,19 @@ export {
         std::vector<retained_expanded_attribute> expanded_sequence_attributes{};
     };
 
-    /* Retaining an expanded sequence copies one EOH wrapper into its own
-     * ALLOCSET_SMALL child context and retains the existing tree edge; it never
-     * copies piece nodes or packed payload.  Admit both the child context's first
-     * block and a conservative parent/context-header block, plus the wrapper
-     * itself, without making the allowance depend on logical sequence length. */
+    /* Saving a lazy sequence copies its expanded-object wrapper and keeps
+     * a reference to the existing tree. Reserve space for that wrapper and its
+     * memory-context overhead. The reservation does not depend on sequence
+     * length because the sequence bytes remain shared. */
     inline constexpr std::uint64_t k_batch_join_retained_recipe_admission_bytes =
         static_cast<std::uint64_t>(2u * ALLOCSET_SMALL_INITSIZE) +
         static_cast<std::uint64_t>(MAXALIGN(sizeof(pg_sequence_expanded)));
 
     /**
-     * @brief Owns child plans, query materialization, buffering, and cleanup for one BatchJoin.
+     * @brief Child plans, buffered queries, and alignment work for one join.
      *
-     * PostgreSQL tuple storage belongs to `query_tuple_context`. The embedded reset callback
-     * guarantees heap cleanup when executor callbacks are bypassed by PostgreSQL ERROR.
+     * query_tuple_context owns PostgreSQL tuple storage. The reset callback
+     * destroys C++ members if an error bypasses the normal executor cleanup.
      */
     struct batch_join_runtime {
         bioseq::scheduler::dispatch_buffer_runtime buffer{k_bioseq_runtime_buffer_reserve};
