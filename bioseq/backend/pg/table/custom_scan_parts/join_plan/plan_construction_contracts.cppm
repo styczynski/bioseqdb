@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares BatchJoin and per-row plan construction without implementation fanout.
+ * @brief Declares the BatchJoin plan builder and shared planner callbacks.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -9,7 +9,7 @@ export module bioseq.postgres.table:custom_scan_join_plan_plan_construction_cont
 
 export import :custom_scan_planner_path_contracts;
 
-/** @brief Build the two-child BatchJoin plan and its serialized executor contract. */
+/** @brief Builds the BatchJoin plan with target and query children and saved executor settings. */
 export Plan* bioseq_batch_join_plan_custom_path(
     PlannerInfo* root,
     RelOptInfo* rel,

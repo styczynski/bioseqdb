@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Declares BatchJoin placeholder registration without importing its implementation.
+ * @brief Declares how BatchJoin assigns output columns to match helpers.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -16,7 +16,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** @brief Accumulates match-result placeholder sites for one BatchJoin plan. */
+    /** @brief The target, output columns, and helper records being assembled for one BatchJoin plan. */
     struct batch_join_placeholder_registration {
         const bioseq_stub_oids* oids = nullptr;
         Index target_relid = 0;
@@ -26,9 +26,9 @@ export {
         List** encoded_sites = nullptr;
         bool invalid = false;
         bool edit_sequence_mismatch = false;
-        /* Helper identities already supplied as match_result columns by a validated
-         * descendant BioseqBatchJoin.  An outer owner may pass these through, but
-         * must neither execute their SQL stubs nor relabel them as its own sites. */
+        /* These helpers already come from a checked child scan. Pass their
+         * result columns through with their existing owner instead of
+         * registering or evaluating them again. */
         List* inherited_helper_identities = NIL;
     };
 
@@ -37,21 +37,21 @@ export {
         Node* expression,
         const bioseq_stub_oids& oids);
 
-    /** @brief Finds an existing placeholder site for the same owner identity and PHV id. */
+    /** @brief Finds the existing output column for this helper expression and PlaceHolderVar id. */
     [[nodiscard]] AttrNumber batch_join_find_same_owner_placeholder_site(
         Node* identity,
         FuncExpr* function,
         Index phid,
         batch_join_placeholder_registration& registration);
 
-    /** @brief Appends a new match-result placeholder column and serialized site record. */
+    /** @brief Registers an output column for this match helper, reusing an existing matching site. */
     void batch_join_register_placeholder_site(
         Node* identity,
         FuncExpr* function,
         Index phid,
         batch_join_placeholder_registration& registration);
 
-    /** @brief Binds an existing scan target position as a match-result placeholder site. */
+    /** @brief Uses an existing scan output column for this match helper. */
     void batch_join_register_existing_placeholder_site(
         Node* identity,
         FuncExpr* function,
@@ -59,29 +59,29 @@ export {
         AttrNumber existing_resno,
         batch_join_placeholder_registration& registration);
 
-    /** @brief Checks whether a helper identity is inherited from a validated descendant. */
+    /** @brief Checks whether a child plan already supplies this match helper. */
     [[nodiscard]] bool batch_join_identity_is_inherited(
         batch_join_placeholder_registration const& registration,
         Node* identity) noexcept;
 
-    /** @brief Checks whether a custom scan structurally owns one helper identity. */
+    /** @brief Checks whether a custom scan has registered an output for this helper expression. */
     [[nodiscard]] bool batch_join_scan_owns_helper_identity(
         CustomScan* scan,
         Node* identity) noexcept;
 
-    /** @brief Recursively checks whether a descendant custom plan owns a helper identity. */
+    /** @brief Checks this plan and its children for a scan that supplies the helper. */
     [[nodiscard]] bool batch_join_descendant_owns_helper_identity(
         Plan* plan,
         Node* identity);
 
-    /** @brief Collects child target identities backed by validated descendant owners. */
+    /** @brief Collects helpers in the child output whose producing scan can be found and checked. */
     [[nodiscard]] List* batch_join_validated_inherited_helper_identities(
         Plan* child_plan,
         const bioseq_stub_oids& oids);
 
-    /** @brief Registers current-owner helpers while preserving inherited identities. */
+    /** @brief Registers helpers belonging to this join and leaves child-owned results with their owner. */
     struct batch_join_placeholder_registration_visitor {
-        /** @brief Validates and registers one plain or PHV-wrapped helper node. */
+        /** @brief Checks and registers a match helper, including a valid PlaceHolderVar wrapper. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
@@ -119,9 +119,9 @@ export {
                                                          registration);
                     return registration.invalid ? pg_walk_step::stop : pg_walk_step::skip_subtree;
                 }
-                /* A generic PHV containing a helper has evaluation/nulling semantics
-                 * that this join cannot reproduce.  Do not descend and accidentally
-                 * register only the inner FuncExpr. */
+                /* This PlaceHolderVar controls when the embedded helper is evaluated
+                 * or becomes NULL. Reject it because registering only the inner
+                 * FuncExpr would lose those rules. */
                 if (registration.oids != nullptr &&
                     batch_join_expression_has_match_helper(
                         reinterpret_cast<Node*>(placeholder->phexpr), *registration.oids)) {

@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Constructs the batched custom join plan and private payload.
+ * @brief Builds the BatchJoin plan, its output columns, and its executor settings.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -45,22 +45,16 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Builds the two-child BatchJoin plan and its serialized executor contract.
+     * @brief Builds the BatchJoin executor plan from its chosen path.
      *
-     * The plan preserves child target identities required by setrefs while assigning each
-     * current-owner match helper to one descriptor-only scan column.
+     * The children are ordered: target locator scan, then query scan. Each helper
+     * owned by this join gets one match_result column. Keep the original output
+     * expressions until setrefs binds parent references, and add any hidden
+     * helper columns those parents need.
      *
-     * @param root Planner context used for plan-only helper ownership validation.
-     * @param rel Join relation whose relids are copied onto the custom scan.
-     * @param best_path Winning path whose custom_private carries the versioned batch-join recipe.
-     * @param tlist Callback target list from setrefs, extended with missing resjunk helper carriers.
-     * @param clauses Join restriction list from which owned mmsearch occurrences are stripped.
-     * @param custom_plans Two child plans in order: locator-owned target column scan, then query scan.
-     * @return CustomScan plan with combined child targetlist, rewritten output expressions, and
-     *         executor ABI in custom_private.
-     * @throws PostgreSQL ERROR when planner inputs, private ABI fields, locator child wiring,
-     *         projection slots, helper site registration, setrefs rewrite, or owned mmsearch
-     *         identity are invalid.
+     * @return CustomScan with both child outputs and versioned executor settings.
+     * @throws PostgreSQL ERROR for invalid inputs, helper bindings, or duplicated
+     * or missing mmsearch ownership.
      */
     Plan* bioseq_batch_join_plan_custom_path(PlannerInfo* root,
                                              RelOptInfo* rel,
@@ -366,13 +360,10 @@ export {
             if (find_plan_tlist_expression_resno(requested_tlist, identity) > 0) {
                 continue;
             }
-            /* The callback tlist already carries whole helper dependencies for an
-             * upper compound Result, while processed_tlist may retain the same helper
-             * inside its authoritative PHV.  Wrapper inequality alone must not append
-             * a second executor site: unwrap both identities and reuse only one unique,
-             * exact function/argument/type match whose authoritative PHV group has one
-             * non-conflicting provenance id.  No match, an ambiguous match, or conflicting
-             * positive phids keeps the authoritative identity as its own resjunk carrier. */
+            /* The callback output may contain a bare helper while processed_tlist
+             * wraps it in a PlaceHolderVar. Reuse a single matching function,
+             * argument, and result type when its phid is unambiguous. Otherwise
+             * keep the original identity as a separate resjunk output for setrefs. */
             bool semantic_match_ambiguous = false;
             TargetEntry* semantic_match =
                 batch_join_find_unique_semantic_helper_entry(requested_tlist,
@@ -455,9 +446,9 @@ export {
         cscan->methods = bioseq_batch_join_scan_methods();
         cscan->flags = best_path->flags;
         cscan->scan.scanrelid = 0;
-        /* Keep the pre-setrefs output expression identities intact.  PostgreSQL
-         * fixes any upper Result/Projection against this child targetlist before
-         * it recurses and maps this CustomScan against custom_scan_tlist. */
+        /* Keep these expressions unchanged until PostgreSQL binds the
+         * parent Result or Projection to them. It then visits this child
+         * and resolves its outputs against custom_scan_tlist. */
         cscan->scan.plan.targetlist = output_tlist;
         postgres_list<RestrictInfo> executable_join_restrictions;
         std::size_t removed_mmsearch_occurrences = 0u;
@@ -491,11 +482,10 @@ export {
         for (Plan* child : postgres_list<Plan>(custom_plans)) {
             per_row_audit_mmsearch_plan(child, ownership_audit, oids);
         }
-        /* PostgreSQL may pass NIL clauses when a fenced upper UPDATE has already
-         * consumed the join RestrictInfo while constructing this exact CustomPath.
-         * In that one case the versioned private recipe is the ownership identity.
-         * Never accept a nonempty clause list without the owned predicate, stacked
-         * copies, or a copy retained anywhere in either executable child tree. */
+        /* An upper UPDATE can consume the join restriction before this
+         * callback, leaving NIL clauses. Accept the checked private mmsearch
+         * expression in that case. Otherwise require exactly one removed
+         * occurrence, with no copy left in either child or the join filters. */
         const bool callback_ownership_valid =
             removed_mmsearch_occurrences == 1u ||
             (removed_mmsearch_occurrences == 0u && clauses == NIL && private_mmsearch_recipe_valid);
