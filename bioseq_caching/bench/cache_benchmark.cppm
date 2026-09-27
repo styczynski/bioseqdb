@@ -33,7 +33,7 @@ import bioseq.test.postgres;
 
 export namespace bioseq::cache_benchmark {
 
-/// @brief Private-cluster workload owned by one benchmark executable.
+/// @brief Workload to run in the benchmark's private PostgreSQL cluster.
 enum class scenario {
     standalone,
     bioseq_2gbp,
@@ -400,7 +400,7 @@ void finalize_build_identity(benchmark_report& report) {
             source.owned_root_sampling_failures};
 }
 
-/// @brief Adapts the shared sampler to stable benchmark report field names.
+/// @brief Collects PostgreSQL memory and cluster-directory sizes for the benchmark report.
 class benchmark_resource_tracker {
 public:
     benchmark_resource_tracker(
@@ -421,8 +421,7 @@ public:
             try {
                 static_cast<void>(finish());
             } catch (...) {
-                // A failing benchmark retains partial resource evidence;
-                // the original workload error remains authoritative.
+                // Keep any samples already recorded without replacing the workload error.
             }
         }
     }
@@ -961,9 +960,8 @@ extension_artifacts(const benchmark_options& options) {
                         postgres_test::host_qualification_requirements{
                             .test_case =
                                 "bioseq cache 2 Gbp native benchmark",
-                            // RAM is telemetry: ticketed allocations, bounded
-                            // chunk caches, and spillable runs enforce the
-                            // workload's actual memory envelope.
+                            // Record RAM sizes without requiring a minimum. The workload manages
+                            // its memory through reservations, bounded caches and disk-backed runs.
                             .minimum_total_ram_bytes = 0,
                             .minimum_available_ram_bytes = 0,
                             .minimum_data_available_bytes =
@@ -2091,7 +2089,7 @@ void write_report(
             std::as_bytes(std::span{
                 serialized.data(), serialized.size()}),
             bioseq::common::durable_file_io::publication_options{
-                .mode = 0666});  // Preserve ofstream mode before umask.
+                .mode = 0666});  // File permissions before applying umask.
     if (!published.has_value()) {
         const bioseq::common::durable_file_io::file_error& error =
             published.error();
@@ -2134,8 +2132,7 @@ void write_failure_report(
         finalize_build_identity(*report);
         write_report(*path, *report);
     } catch (...) {
-        // The process still fails closed when its diagnostic report cannot
-        // be published.
+        // The caller still returns failure if writing this diagnostic report fails.
     }
 }
 
@@ -2143,28 +2140,28 @@ void write_failure_report(
 
 export namespace bioseq::cache_benchmark {
 
-/// @brief Renders deterministic success/failure documents for schema tests.
+/// @brief Builds a fixed success or failure report for schema tests.
 [[nodiscard]] std::string render_report_contract_probe(bool passed) {
     return render_contract_probe(
         passed, "/stage", "/stage/stage-manifest.json",
         std::string(64, 'b'));
 }
 
-/// @brief Renders a passing combined probe with exact 2 Gbp qualification.
+/// @brief Builds a sample passing report for the two-billion-base Bioseq benchmark.
 [[nodiscard]] std::string render_bioseq_report_contract_probe() {
     return render_contract_probe(
         true, "/stage", "/stage/stage-manifest.json",
         std::string(64, 'b'), scenario::bioseq_2gbp);
 }
 
-/// @brief Exercises the fail-closed mixed-cohort report validator.
+/// @brief Builds a report with mixed measurement settings to check that validation rejects it.
 [[nodiscard]] std::string render_mixed_cohort_contract_probe() {
     return render_contract_probe(
         true, "/stage", "/stage/stage-manifest.json",
         std::string(64, 'b'), scenario::bioseq_2gbp, true);
 }
 
-/// @brief Pure resource-sampling acceptance predicate used by contract tests.
+/// @brief Checks that memory and directory-size sampling produced enough valid measurements without errors.
 [[nodiscard]] bool resource_sampling_contract_satisfied(
     std::uint64_t rss_samples,
     std::uint64_t rss_sampling_failures,
@@ -2183,17 +2180,16 @@ export namespace bioseq::cache_benchmark {
                 .temp_sampling_failures = temp_sampling_failures});
 }
 
-/// @brief Runs all deterministic native parser rejection checks.
+/// @brief Checks that invalid benchmark arguments are rejected for the expected reasons.
 [[nodiscard]] bool native_parser_contract_satisfied() {
     validate_native_parser_contract();
     return true;
 }
 
-/// @brief Renders a probe with caller-selected stage provenance.
+/// @brief Builds a sample report with the supplied stage paths and manifest hash.
 ///
-/// This overload exists so contract tests can prove that the stage-manifest
-/// digest participates in build identity while host-dependent stage paths do
-/// not.
+/// Tests use this to check that the manifest hash affects build identity
+/// while machine-specific stage paths do not.
 [[nodiscard]] std::string
 render_report_contract_probe_with_stage_provenance(
     bool passed, std::string_view preinstalled_stage_root,
@@ -2204,7 +2200,7 @@ render_report_contract_probe_with_stage_provenance(
         std::string(stage_manifest), std::string(stage_manifest_sha256));
 }
 
-/// @brief Parse, execute, validate, and report one fixed native benchmark.
+/// @brief Runs the selected benchmark and writes its report. Returns zero on success and one on failure.
 int run_benchmark(
     int argc, char** argv, scenario required_scenario) noexcept {
     const std::optional<std::filesystem::path> report_hint =
