@@ -1,13 +1,11 @@
 /**
  * @file minimizer_fragment_compact_hash32_adapter.cppm
- * @brief Replayable grouped-SoA minimizer generation to compact exact hash32 run adapter.
+ * @brief Read a grouped minimizer generation as sorted runs for a compact hash index.
  *
- * The adapter borrows an already-authenticated manifest, decoded directory,
- * and mapped payload.  It never owns a target-wide control or position image.
- * A source scan retains one cursor with a fixed raw-control lookahead and one
- * heap node per nonempty position fragment, plus at most one runtime-configured
- * light run and one emission chunk. Heavy runs are reread from the immutable
- * mapping instead of being copied into scratch.
+ * A heap merges the next hash from each nonempty fragment. Small position runs
+ * fit in a buffer. Large runs are reread from the mapping to count strands and
+ * emit each strand separately, keeping temporary memory bounded. The caller
+ * keeps the already-validated directory and payload mapping alive throughout.
  */
 module;
 #include <algorithm>
@@ -40,10 +38,10 @@ static_assert(sizeof(std::size_t) <= sizeof(std::uint64_t),
 export namespace bioseq::indexing {
 
 /**
- * @brief Borrows an already-open grouped-SoA minimizer generation.
+ * @brief Borrow the metadata and payload of an opened grouped minimizer generation.
  *
- * The directory and mapped payload must remain alive and immutable through
- * every compact-index replay.
+ * The caller validates these bytes before opening the adapter. Keep directory
+ * entries and the payload mapping alive and unchanged through every replay.
  */
 struct opened_minimizer_fragment_generation_view {
     const minimizer_generation_head* head = nullptr;
@@ -52,28 +50,26 @@ struct opened_minimizer_fragment_generation_view {
     std::span<const std::byte> mapped_payload{};
 };
 
-/** @brief Configures scratch and emission bounds for compact-hash replay. */
+/** @brief Limits for the position buffer and chunks delivered during replay. */
 struct minimizer_fragment_compact_hash32_options {
-    /// Runs at or below this count are buffered once. Larger runs use three
-    /// bounded mapping passes (count, strand zero, strand one). The open path
-    /// clamps this to the authenticated minimizer-fragment occurrence cap. Callers
-    /// normally set it to the compact index's persisted cap.
+    /// Buffer positions when a hash's total count is at most this limit.
+    /// Larger runs are read three times: once to count strands, then once per
+    /// strand for emission. Opening caps this limit at the stored occurrence cap.
     std::uint64_t buffered_run_position_cap =
         k_grouped_soa_default_max_occurrence_cap;
     std::size_t emission_chunk_positions = 4'096u;
-    /// Optional caller-thread checkpoint. PostgreSQL binds this during
-    /// publication; portable readers leave the default no-op binding.
+    /// Optional cancellation check called on the thread performing the scan.
     cooperative_cancellation_checkpoint cancellation_checkpoint{};
 };
 
-/** @brief Records retained-memory and replay-cost estimates computed at open. */
+/** @brief Estimated memory and scalar reads for the compact builder's two source scans. */
 struct minimizer_fragment_compact_hash32_prebuild_estimate {
     std::uint64_t manifest_fragment_count = 0u;
     std::uint64_t nonempty_fragment_count = 0u;
     std::uint64_t directory_entry_count = 0u;
     std::uint64_t fragment_controls_per_source_scan = 0u;
     std::uint64_t control_scalar_bytes_per_source_scan = 0u;
-    /// Persistent O(nonempty fragments) merge plan. It contains no control or posting data.
+    /// Bytes allocated for the fragment merge plan.
     std::uint64_t fragment_plan_owner_capacity_bytes = 0u;
     std::uint64_t source_token_owner_bytes = 0u;
     std::uint64_t compact_prebuild_source_scan_count = 2u;
@@ -81,7 +77,7 @@ struct minimizer_fragment_compact_hash32_prebuild_estimate {
     std::uint64_t prebuild_control_scalar_bytes_read = 0u;
     std::uint64_t minimum_prebuild_position_scalar_reads = 0u;
     std::uint64_t maximum_prebuild_position_scalar_reads = 0u;
-    /// Includes the fixed raw-control lookahead retained by each cursor.
+    /// Cursor bytes, including each cursor's fixed control lookahead.
     std::uint64_t fragment_cursor_scratch_bytes = 0u;
     std::uint64_t merge_heap_scratch_bytes = 0u;
     std::uint64_t matched_fragment_scratch_bytes = 0u;
@@ -90,11 +86,11 @@ struct minimizer_fragment_compact_hash32_prebuild_estimate {
     std::uint64_t maximum_buffered_run_scratch_bytes = 0u;
     std::uint64_t emission_chunk_scratch_bytes = 0u;
     std::uint64_t maximum_logical_scratch_bytes = 0u;
-    /// The adapter borrows the authenticated mapping. This must stay zero.
+    /// Zero because the adapter borrows the complete target image.
     std::uint64_t owned_target_control_or_position_bytes = 0u;
 };
 
-/** @brief Records saturating counters for replayable source scans. */
+/** @brief Counts source scans, decoded scalars, and emitted position chunks. */
 struct minimizer_fragment_compact_hash32_scan_stats {
     std::uint64_t source_scan_attempts = 0u;
     std::uint64_t source_scans_completed = 0u;
@@ -111,10 +107,11 @@ struct minimizer_fragment_compact_hash32_scan_stats {
 };
 
 /**
- * @brief Adapts authenticated grouped-SoA storage into sorted hash runs.
+ * @brief Merge stored fragments into hash runs that can be scanned repeatedly.
  *
- * The adapter borrows generation storage, retains only fragment cursors, and
- * exposes a replayable source accepted by the compact-hash image builder.
+ * The compact builder uses this source to size its output and then fill it.
+ * Each scan reads the same borrowed mapping and emits all positions for a hash,
+ * with strand zero before strand one.
  */
 class minimizer_fragment_compact_hash32_adapter {
 private:
@@ -125,7 +122,7 @@ private:
   static_assert(k_control_lookahead_capacity
       <= (std::numeric_limits<std::uint8_t>::max)());
 
-  /** @brief Provides move-stable dispatch identity to borrowed run sources. */
+  /** @brief Keeps issued source callbacks connected to the adapter after it moves. */
   struct source_token {
       minimizer_fragment_compact_hash32_adapter* owner = nullptr;
   };
@@ -140,7 +137,7 @@ private:
       std::uint64_t core_end_bp = 0u;
   };
 
-  /** @brief Holds one validated grouped-SoA control record. */
+  /** @brief Checked hash, exact count, and position bounds for one stored control. */
   struct decoded_control {
       std::uint32_t hash = 0u;
       std::uint64_t position_begin = 0u;
@@ -152,7 +149,7 @@ private:
       minimizer_scalar_width position_width = minimizer_scalar_width::u16;
   };
 
-  /** @brief Holds one raw grouped-SoA control record in bounded read-ahead. */
+  /** @brief Raw fields held in the cursor's fixed control lookahead. */
   struct raw_control {
       std::uint64_t hash = 0u;
       std::uint64_t position_begin = 0u;
@@ -187,7 +184,7 @@ private:
       std::uint32_t fragment_ordinal = 0u;
   };
 
-  /** @brief Orders merge-heap nodes by hash and fragment ordinal. */
+  /** @brief Compare heap entries by hash, then by fragment order. */
   struct heap_greater {
       /// Place the lowest hash and then lowest fragment ordinal at the heap front.
       [[nodiscard]] bool operator()(const heap_node& left, const heap_node& right) const noexcept {
@@ -207,17 +204,17 @@ private:
     minimizer_fragment_compact_hash32_scan_stats stats_{};
     std::uint64_t total_control_bytes_ = 0u;
     compact_hash32_geometry geometry_{};
-    /// Heap-stable dispatch identity keeps already-issued sources valid when
-    /// the adapter is moved (including the move into `std::expected`).
+    /// Keep the callback token at a fixed address when the adapter moves.
+    /// Its owner pointer is updated by the move constructor.
     std::unique_ptr<source_token> source_token_{};
     bool ready_ = false;
 
-    /// Poll the borrowed cancellation source on the synchronous scan thread.
+    /// Check for cancellation on the thread running the scan.
     void cancellation_checkpoint_() const {
         options_.cancellation_checkpoint();
     }
 
-    /// Add two byte or count quantities without unsigned wraparound.
+    /// Add sizes or counts, returning false on overflow.
     [[nodiscard]] static constexpr bool checked_add_(
             std::uint64_t left,
             std::uint64_t right,
@@ -230,7 +227,7 @@ private:
         return true;
     }
 
-    /// Multiply two byte or count quantities without unsigned wraparound.
+    /// Multiply sizes or counts, returning false on overflow.
     [[nodiscard]] static constexpr bool checked_multiply_(
             std::uint64_t left,
             std::uint64_t right,
@@ -264,7 +261,7 @@ private:
         destination = saturating_add_(destination, value);
     }
 
-    /// Map grouped-generation diagnostics into the compact-index source error domain.
+    /// Translate generation-read errors into the compact builder's error type.
     [[nodiscard]] static constexpr direct_inverted_index_error map_generation_error_(
             minimizer_generation_encoding_error error) noexcept {
         switch (error) {
@@ -287,7 +284,7 @@ private:
         }
     }
 
-    /// Decode one little-endian scalar from the authenticated mapped payload.
+    /// Read one little-endian integer after checking its width and mapped byte range.
     [[nodiscard]] std::expected<std::uint64_t,
         direct_inverted_index_error>
     read_scalar_(
@@ -313,7 +310,7 @@ private:
         return value;
     }
 
-    /// Derive and validate the grouped control-plane layout for a cursor's current entry.
+    /// Set the cursor's array offsets and reset its lookahead for the current directory entry.
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     configure_entry_(fragment_cursor& cursor) const noexcept {
         if (cursor.entry_ordinal >= cursor.entry_end
@@ -339,7 +336,7 @@ private:
         return {};
     }
 
-    /// Read a bounded block of raw controls without exposing them to the merge heap.
+    /// Read the next controls into the fixed lookahead buffer. They are checked when consumed.
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     refill_control_lookahead_(fragment_cursor& cursor) const noexcept {
         const grouped_soa_bucket_directory_entry& entry =
@@ -420,7 +417,7 @@ private:
         return {};
     }
 
-    /// Decode and validate the current control record for one fragment cursor.
+    /// Check the next lookahead record and make it the fragment's current control.
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     load_current_(
             fragment_cursor& cursor,
@@ -528,7 +525,7 @@ private:
         return load_current_(cursor, controls_seen);
     }
 
-    /// Advance a fragment cursor across controls and adjacent directory entries.
+    /// Move to the next control, crossing directory entries until the fragment ends.
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     advance_cursor_(
             fragment_cursor& cursor,
@@ -559,8 +556,8 @@ private:
         return load_current_(cursor, controls_seen);
     }
 
-    /// Decode one control's segment-local positions into ordered global encoded coordinates.
-    /// @tparam p_visitor Callable returning an expected result for each encoded position.
+    /// Convert one control's local positions to global coordinates and check their order.
+    /// @tparam p_visitor Callback returning an expected result for each encoded position.
     template <class p_visitor>
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     visit_positions_(
@@ -621,7 +618,7 @@ private:
         return {};
     }
 
-    /// Merge fragment control streams by hash and replay canonical strand-grouped runs.
+    /// Merge fragments by hash and emit each hash's positions grouped by strand.
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     scan_(const compact_hash32_sorted_run_receiver& receiver) {
         ++stats_.source_scan_attempts;
@@ -741,7 +738,7 @@ private:
                 }
                 ++stats_.run_headers_emitted;
                 emission_chunk.clear();
-                // Deliver the current bounded position chunk and reuse its retained capacity.
+                // Deliver this chunk and keep the buffer capacity for the next one.
                 const auto flush = [this, &emission_chunk, &receiver]()
                     -> std::expected<void, direct_inverted_index_error> {
                     if (emission_chunk.empty())
@@ -754,7 +751,7 @@ private:
                     emission_chunk.clear();
                     return {};
                 };
-                // Append one canonical position and flush at the configured chunk capacity.
+                // Add a position and deliver the chunk when it reaches its size limit.
                 const auto emit =
                     [this, &emission_chunk, &logical_positions_emitted, &flush](
                         std::uint64_t encoded) -> std::expected<void, direct_inverted_index_error> {
@@ -846,7 +843,7 @@ private:
         }
     }
 
-    /// Recover the move-stable adapter owner and dispatch one replay scan.
+    /// Find the adapter through its stable callback token and run one scan.
     [[nodiscard]] static std::expected<void, direct_inverted_index_error>
     scan_thunk_(
             void* context,
@@ -862,11 +859,11 @@ private:
     }
 
 public:
-  /** @brief Creates an unopened adapter. */
+  /** @brief Create an adapter with no opened generation. */
   minimizer_fragment_compact_hash32_adapter() = default;
   /**
-   * @brief Moves an adapter while preserving issued source-token identity.
-   * @param other Adapter to move
+   * @brief Move the adapter and keep previously issued source callbacks valid.
+   * @param other Adapter whose storage and callback token are transferred.
    */
   minimizer_fragment_compact_hash32_adapter(
       minimizer_fragment_compact_hash32_adapter&& other) noexcept
@@ -890,10 +887,14 @@ public:
         const minimizer_fragment_compact_hash32_adapter&) = delete;
 
     /**
-     * @brief Opens and validates a grouped-SoA generation for compact replay.
-     * @param generation Borrowed authenticated generation
-     * @param options Scratch and emission bounds
-     * @return Ready adapter or a validation diagnostic
+     * @brief Prepare an already-validated generation for compact-index replay.
+     *
+     * Check layout, counts, and payload bounds, then plan one cursor per nonempty
+     * fragment. Payload checksums must have been verified by the caller.
+     *
+     * @param generation Metadata and mapping to borrow.
+     * @param options Position buffering, chunk size, and cancellation settings.
+     * @return A ready adapter, or a metadata, size, or allocation error.
      */
     [[nodiscard]] static std::expected<
         minimizer_fragment_compact_hash32_adapter,
@@ -963,9 +964,8 @@ public:
             static_cast<std::uint64_t>(
                 adapter.options_.emission_chunk_positions),
             std::min(manifest.position_count, size_t_position_cap));
-        // A zero-position generation emits nothing, but retaining a one-slot
-        // threshold keeps the scan invariant nonzero and makes reserve,
-        // threshold, and accounting use one identical effective capacity.
+        // Keep a nonzero chunk capacity for empty generations so scan limits
+        // and memory estimates use the same value.
         adapter.options_.emission_chunk_positions =
             static_cast<std::size_t>(
                 bounded_emission_chunk_positions == 0u
@@ -1168,8 +1168,9 @@ public:
     }
 
     /**
-     * @brief Creates a replayable sorted-run source borrowing this adapter.
-     * @return Source valid until adapter destruction
+     * @brief Borrow a source that replays this generation in sorted hash order.
+     * @return Source usable after opening succeeds. Its callbacks remain valid
+     * until the adapter, including any moved-to adapter, is destroyed.
      */
     [[nodiscard]] compact_hash32_sorted_run_source sorted_run_source() noexcept {
         return compact_hash32_sorted_run_source{
@@ -1180,10 +1181,10 @@ public:
     }
 
     /**
-     * @brief Builds compact-index options from the authenticated generation.
-     * @param persisted_max_occ_cap Persisted occurrence cap
-     * @param max_image_bytes Maximum permitted image size
-     * @return Compact build options or a contract diagnostic
+     * @brief Use this generation's identity and hash range to configure the compact builder.
+     * @param persisted_max_occ_cap Positive occurrence limit, at most the source cap.
+     * @param max_image_bytes Maximum output size in bytes.
+     * @return Build settings, or an error if the adapter or cap is invalid.
      */
     [[nodiscard]] std::expected<compact_hash32_build_options,
         direct_inverted_index_error>
@@ -1209,30 +1210,18 @@ public:
         };
     }
 
-    /**
-     * @brief Reports whether open completed successfully.
-     * @return `true` when replay is available
-     */
+    /** @brief Return whether the adapter is ready to replay its generation. */
     [[nodiscard]] bool ready() const noexcept { return ready_; }
 
-    /**
-     * @brief Returns the immutable prebuild estimate.
-     * @return Estimate computed during open
-     */
+    /** @brief Borrow the memory and read estimates calculated during open. */
     [[nodiscard]] const minimizer_fragment_compact_hash32_prebuild_estimate&
     prebuild_estimate() const noexcept { return estimate_; }
 
-    /**
-     * @brief Returns accumulated replay counters.
-     * @return Source-scan counters
-     */
+    /** @brief Borrow the counts accumulated across replay scans. */
     [[nodiscard]] const minimizer_fragment_compact_hash32_scan_stats&
     scan_stats() const noexcept { return stats_; }
 
-    /**
-     * @brief Returns the compact hash-domain geometry.
-     * @return Geometry derived from the authenticated manifest
-     */
+    /** @brief Return the hash bit width and maximum hash used by the compact index. */
     [[nodiscard]] compact_hash32_geometry geometry() const noexcept {
         return geometry_;
     }

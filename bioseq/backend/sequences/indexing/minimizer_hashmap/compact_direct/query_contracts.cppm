@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/query_contracts.cppm
- * @brief Compact-direct query contracts and public value types.
+ * @brief Query records and shared types for compact-index lookup and anchor preparation.
  */
 
 module;
@@ -39,16 +39,16 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
-/// One query sequence and its precomputed minimizer view for fragment seeding.
+/// Query length, k-mer size, and a borrowed view of its precomputed minimizers.
 struct fragment_seed_query {
     ::bioseq::minimizers::minimizer_physical_batch_view minimizers{};
     sequence_size_t query_length = 0u;
     std::int32_t kmer_size = 0;
 };
 
-/// Exact query-set stats produced by the compact-direct occurrence planner.
-/// The checksum uses the CPU prepared key-set FNV byte order so deferred
-/// publication and direct planning compute the same numeric identity.
+/// Query and hash counts recorded by compact-index planning.
+/// The checksum follows the CPU prepared key-set byte order so planning and
+/// deferred publication identify the same set of hashes.
 struct compact_direct_query_set_stats {
     std::uint64_t query_count = 0u;
     std::uint64_t query_occurrence_count = 0u;
@@ -60,7 +60,7 @@ struct compact_direct_query_set_stats {
     operator==(const compact_direct_query_set_stats&) const noexcept = default;
 };
 
-/// FNV-1a offset basis used by the compact-direct query-set checksum.
+/// Initial value used by this project's FNV-style query-set checksum.
 inline constexpr std::uint64_t k_compact_direct_query_set_fnv_offset =
     std::uint64_t{1469598103934665603};
 /// FNV-1a prime used by the compact-direct query-set checksum.
@@ -78,7 +78,7 @@ compact_direct_query_set_fnv_mix_u64(std::uint64_t hash, std::uint64_t value) no
     return hash;
 }
 
-/// Start a query-set checksum with its biological shape and occurrence cap.
+/// Start a query-set checksum with k-mer size, window size, and occurrence limit.
 [[nodiscard]] constexpr std::uint64_t compact_direct_query_set_checksum_prefix(
     std::uint32_t kmer_size, std::uint32_t window_size, std::uint32_t max_occ) noexcept {
     std::uint64_t checksum = k_compact_direct_query_set_fnv_offset;
@@ -87,7 +87,7 @@ compact_direct_query_set_fnv_mix_u64(std::uint64_t hash, std::uint64_t value) no
     return compact_direct_query_set_fnv_mix_u64(checksum, max_occ);
 }
 
-/// Compute the canonical checksum of a sorted unique u32 query-hash set.
+/// Checksum sorted unique 32-bit query hashes together with their seeding settings.
 [[nodiscard]] inline std::uint64_t
 compact_direct_query_set_checksum(std::span<const std::uint32_t> strictly_increasing_unique_hashes,
                                   std::uint32_t kmer_size,
@@ -101,16 +101,15 @@ compact_direct_query_set_checksum(std::span<const std::uint32_t> strictly_increa
     return checksum;
 }
 
-/// Selects grouped-SoA scans or compact-direct lookup for one fragment reader.
+/// Choose control-array scans or direct compact-index lookup for a fragment reader.
 enum class minimizer_fragment_lookup_route : std::uint8_t {
     grouped_soa_control_scans,
     direct_compact_hash_lookup,
 };
 
-/// Borrowed, fail-open bridge from the PostgreSQL-free direct reader to the
-/// mapping owner which can issue asynchronous page advice.  Absolute virtual
-/// page intervals keep the reader independent of file and mmap offsets. The
-/// callback validates and translates them against its stable lease context.
+/// Optional callback asking the mapping owner to prepare a virtual page range for reading.
+/// The owner checks the range against its mapping and translates it to file
+/// offsets. Advice has no result and does not change the lookup result.
 using compact_direct_selected_page_advice_fn = void (*)(void* context,
                                                         std::uintptr_t page_begin,
                                                         std::uintptr_t page_end) noexcept;
@@ -137,7 +136,7 @@ struct compact_direct_selected_page_adviser {
 };
 static_assert(std::is_trivially_copyable_v<compact_direct_selected_page_adviser>);
 
-/// Half-open page-aligned virtual address range selected for advice.
+/// Page-aligned virtual address interval with an exclusive end.
 struct compact_direct_selected_page_range {
     std::uintptr_t begin = 0u;
     std::uintptr_t end = 0u;
@@ -146,7 +145,7 @@ struct compact_direct_selected_page_range {
     operator==(const compact_direct_selected_page_range&) const noexcept = default;
 };
 
-/// Align a nonempty byte range to complete virtual-memory pages.
+/// Expand a nonempty byte interval to whole pages, checking address overflow.
 [[nodiscard]] inline std::expected<compact_direct_selected_page_range, direct_inverted_index_error>
 compact_direct_align_selected_page_range(const std::uintptr_t raw_begin,
                                          const std::size_t raw_bytes,
@@ -178,9 +177,9 @@ compact_direct_align_selected_page_range(const std::uintptr_t raw_begin,
     };
 }
 
-/// Per-layout-shard, fixed-size coalescer. It merges overlap/touch only and
-/// flushes before accepting a genuinely disjoint interval. Callback failure
-/// cannot affect control flow because the adviser ABI is noexcept and void.
+/// Keep one pending page interval and merge overlapping or touching ranges.
+/// Flush it before accepting a disjoint range. Advice remains optional and
+/// returns no status to the lookup code.
 struct compact_direct_selected_page_advice_accumulator {
     compact_direct_selected_page_range pending_range{};
     bool pending = false;
@@ -211,11 +210,10 @@ struct compact_direct_selected_page_advice_accumulator {
 };
 static_assert(std::is_trivially_copyable_v<compact_direct_selected_page_advice_accumulator>);
 
-/// Classify and page-align one span exposed by the authenticated compact
-/// traversal. Descriptor-resident P32 singletons intentionally return no
-/// range. Only spans wholly contained by the authoritative postings section
-/// are eligible. This helper performs no allocation and no operating-system
-/// call, and keeps all arithmetic checks release-active for focused tests.
+/// Return pages containing a selected posting span.
+/// Spans stored inside descriptors need no advice. Other spans must lie fully
+/// within the posting section. This helper checks and aligns addresses without
+/// allocating memory or calling the operating system.
 [[nodiscard]] inline std::expected<std::optional<compact_direct_selected_page_range>,
                                    direct_inverted_index_error>
 compact_direct_select_page_range(const compact_direct_selected_page_adviser adviser,
@@ -278,13 +276,10 @@ compact_direct_select_page_range(const compact_direct_selected_page_adviser advi
     return std::optional<compact_direct_selected_page_range>{*aligned};
 }
 
-/// A compact direct view and its exact image token are one contract.  The
-/// shared pointer must be an alias whose stored pointer is the first byte of
-/// `view.image`. Callers owning a larger mmap create the alias at the direct-
-/// section offset.  A token without a control block is non-owning, so its
-/// caller must retain the external mmap lease for the reader's full lifetime.
-/// Keeping this wrapper intact prevents a validated span from being paired
-/// with an unrelated owner.
+/// Keep a compact-index view with a token pointing to its first byte.
+/// For an index inside a larger mapping, use an aliasing shared pointer at the
+/// section offset. A token with no ownership control block still needs an
+/// external mapping lease kept alive for the reader lifetime.
 class owned_compact_hash32_direct_index_view {
   private:
     std::shared_ptr<const std::byte> image_owner_{};
@@ -299,7 +294,7 @@ class owned_compact_hash32_direct_index_view {
   public:
     owned_compact_hash32_direct_index_view() = delete;
 
-    /// Bind a validated direct view to the owner of its first image byte.
+    /// Pair an already-validated view with a token pointing to its first image byte.
     [[nodiscard]] static std::expected<owned_compact_hash32_direct_index_view,
                                        minimizer_generation_encoding_error>
     bind(std::shared_ptr<const std::byte> image_owner,
@@ -312,24 +307,24 @@ class owned_compact_hash32_direct_index_view {
         return owned_compact_hash32_direct_index_view{std::move(image_owner), view};
     }
 
-    /// Return the bound compact-direct view.
+    /// Borrow the bound compact-index view.
     [[nodiscard]] const compact_hash32_direct_index_view& view() const noexcept {
         return view_;
     }
 
-    /// Return the image lifetime token.
+    /// Borrow the image token, which may rely on an external mapping owner.
     [[nodiscard]] const std::shared_ptr<const std::byte>& owner() const noexcept {
         return image_owner_;
     }
 };
 
-/// Selects the compact or expanded query-occurrence representation.
+/// Choose packed query references or separate query and occurrence ordinals.
 enum class query_occurrence_route : std::uint8_t {
     packed,
     wide,
 };
 
-/// Native H32 compact occurrence with a packed query-and-ordinal word.
+/// A 32-bit hash with query and occurrence ordinals packed into one word.
 struct packed_query_occurrence {
     using hash_type = std::uint32_t;
     std::uint32_t hash = 0u;
@@ -337,7 +332,7 @@ struct packed_query_occurrence {
 };
 static_assert(sizeof(packed_query_occurrence) == 8u);
 
-/// Native H64 compact occurrence with a packed query-and-ordinal word.
+/// A 64-bit hash with query and occurrence ordinals packed into one word.
 struct packed_query_occurrence_h64 {
     using hash_type = std::uint64_t;
     std::uint64_t hash = 0u;
@@ -345,12 +340,11 @@ struct packed_query_occurrence_h64 {
 };
 static_assert(sizeof(packed_query_occurrence_h64) == 16u);
 
-/// The compact-direct split keeps smaller occurrence waves on the measured
-/// serial/in-place radix baseline so pool dispatch cannot dominate them.
+/// Keep small occurrence batches on the in-place serial radix sort to avoid task overhead.
 inline constexpr std::size_t k_compact_direct_parallel_packed_occurrence_radix_min_count = 1u
                                                                                            << 16u;
 
-/// Native H32 expanded occurrence used when the packed ordinal field is too narrow.
+/// A 32-bit hash with separate ordinals when one packed word cannot hold both.
 struct wide_query_occurrence {
     using hash_type = std::uint32_t;
     std::uint32_t hash = 0u;
@@ -359,7 +353,7 @@ struct wide_query_occurrence {
 };
 static_assert(sizeof(wide_query_occurrence) == 12u);
 
-/// Native H64 expanded occurrence used when the packed ordinal field is too narrow.
+/// A 64-bit hash with separate ordinals when one packed word cannot hold both.
 struct wide_query_occurrence_h64 {
     using hash_type = std::uint64_t;
     std::uint64_t hash = 0u;
@@ -368,7 +362,7 @@ struct wide_query_occurrence_h64 {
 };
 static_assert(sizeof(wide_query_occurrence_h64) == 16u);
 
-/// Bit allocation and capacity of a planned packed occurrence word.
+/// Bit widths and limits for packing query and occurrence ordinals into 32 bits.
 struct query_occurrence_packing_layout {
     query_occurrence_route route = query_occurrence_route::packed;
     std::uint32_t query_count = 0u;
@@ -386,7 +380,7 @@ struct query_occurrence_packing_layout {
     operator==(const query_occurrence_packing_layout&) const noexcept = default;
 };
 
-/// Decoded query and within-query ordinal from one occurrence record.
+/// Query number and minimizer number within that query.
 struct query_occurrence_reference {
     std::uint32_t batch_query_ordinal = 0u;
     std::uint32_t query_ordinal = 0u;
@@ -395,7 +389,7 @@ struct query_occurrence_reference {
     operator==(const query_occurrence_reference&) const noexcept = default;
 };
 
-/// Validate every derived field of a packed occurrence layout.
+/// Check the bit widths, mask, and ordinal capacity derived from the query count.
 [[nodiscard]] constexpr bool
 valid_query_occurrence_packing_layout(const query_occurrence_packing_layout& layout) noexcept {
     if (layout.query_bits > 32u || layout.ordinal_bits > 32u ||
@@ -418,8 +412,9 @@ valid_query_occurrence_packing_layout(const query_occurrence_packing_layout& lay
            layout.ordinal_mask == expected_ordinal_mask;
 }
 
-/// Plan the 32-bit packed query/ordinal word without converting a caller's
-/// sizes to 32 bits until every declared query-wave bound is validated.
+/// Choose packed or wide occurrence records after checking the batch size limits.
+/// Packing uses enough bits for the query number and gives the rest to the
+/// minimizer number within that query.
 [[nodiscard]] constexpr std::expected<query_occurrence_packing_layout,
                                       minimizer_generation_encoding_error>
 plan_query_occurrence_packing(std::uint64_t query_count,
@@ -452,7 +447,7 @@ plan_query_occurrence_packing(std::uint64_t query_count,
     };
 }
 
-/// Encode one query occurrence after validating its planned bounds.
+/// Pack a query number and occurrence number after checking the layout and bounds.
 [[nodiscard]] constexpr std::expected<std::uint32_t, minimizer_generation_encoding_error>
 encode_packed_query_occurrence(const query_occurrence_packing_layout& layout,
                                std::uint32_t query_ordinal,
@@ -470,7 +465,8 @@ encode_packed_query_occurrence(const query_occurrence_packing_layout& layout,
     return static_cast<std::uint32_t>(encoded);
 }
 
-/// Encode one occurrence under a caller-validated packing layout.
+/// Pack an occurrence whose layout and bounds were already checked.
+/// Debug builds repeat the checks.
 [[nodiscard, gnu::always_inline]] inline std::uint32_t
 encode_packed_query_occurrence_trusted(const query_occurrence_packing_layout& layout,
                                        std::uint32_t query_ordinal,
@@ -485,7 +481,7 @@ encode_packed_query_occurrence_trusted(const query_occurrence_packing_layout& la
         (static_cast<std::uint64_t>(query_ordinal) << layout.ordinal_bits) | occurrence_ordinal);
 }
 
-/// Decode one word under a caller-validated packing layout.
+/// Unpack a query and occurrence number using a caller-validated layout.
 [[nodiscard]] constexpr query_occurrence_reference
 decode_packed_query_occurrence_trusted(const query_occurrence_packing_layout& layout,
                                        std::uint32_t word) noexcept {
@@ -495,7 +491,7 @@ decode_packed_query_occurrence_trusted(const query_occurrence_packing_layout& la
     };
 }
 
-/// Captures live planner sizes, capacities, and selected occurrence route.
+/// Current occurrence-buffer sizes, capacities, and chosen planning path.
 struct query_occurrence_capacity_snapshot {
     query_occurrence_route route = query_occurrence_route::packed;
     std::size_t packed_size = 0u;
@@ -510,8 +506,8 @@ struct query_occurrence_capacity_snapshot {
     std::uint64_t aggregate_occurrence_capacity_bytes = 0u;
     std::uint64_t query_membership_filter_capacity_bytes = 0u;
     bool occurrence_radix_invoked = false;
-    // Route selection only: SINGLE mode or a nested task scope may execute the
-    // selected split inline without dispatching work to another pool worker.
+    // This records the selected split. Single-thread mode or a nested task
+    // can still run that work inline.
     bool parallel_occurrence_radix_split_selected = false;
     bool bucket_direct_matcher_active = false;
 };
@@ -527,7 +523,7 @@ struct block_query_anchor_layout {
 };
 static_assert(sizeof(block_query_anchor_layout) == 48u);
 
-/// Owns the final ordered anchors and immutable identity of one query.
+/// Own one query's sorted anchors and remember the borrowed minimizer view they came from.
 struct prepared_query_anchors {
     std::unique_ptr<bioseq::chaining::anchor[]> anchors{};
     std::uint64_t anchor_count = 0u;
@@ -538,9 +534,9 @@ struct prepared_query_anchors {
     std::uint64_t sortedness_receipt = 0u;
 };
 
-/// Immutable operation stats for one successful fragment-native query wave.
-/// Work and timing fields are additive across waves. Retained-capacity fields are
-/// peaks because one query_wave_scratch owner is reused serially.
+/// Work, timing, and memory counts for prepared anchor batches.
+/// Merging adds work and time counters, and takes the maximum buffer
+/// capacities because the same scratch buffers are reused between batches.
 struct prepared_fragment_anchor_batch_stats {
     std::uint64_t waves = 0u;
     std::uint64_t queries = 0u;
@@ -776,7 +772,7 @@ struct prepared_fragment_anchor_batch_stats {
     operator==(const prepared_fragment_anchor_batch_stats&) const noexcept = default;
 };
 
-/// Byte and anchor counters produced by one fragment-block wave.
+/// Bytes processed and anchors produced by one fragment-block task.
 struct fragment_block_wave_stats {
     std::uint64_t pass2_matched_count_bytes = 0u;
     std::uint64_t pass2_accepted_prefix_bytes = 0u;
