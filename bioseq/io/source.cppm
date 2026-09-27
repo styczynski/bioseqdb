@@ -23,9 +23,7 @@ struct source_read_result {
     bool has_error = false;
 };
 
-/// Concept: an I/O source supplies bytes via `read_into(dst, cap)` and
-/// surfaces errors via `last_error_message()`. Sources are monomorphic
-/// per template instantiation without virtual dispatch.
+/// Requires a byte source with `read_into(dst, cap)` and `last_error_message()`.
 template <typename p_source>
 concept io_source = requires(p_source& source, std::uint8_t* dst, std::size_t cap) {
     { source.read_into(dst, cap) } -> std::same_as<source_read_result>;

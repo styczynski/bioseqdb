@@ -35,10 +35,8 @@ struct sink_write_result {
     bool has_error = false;
 };
 
-/// Concept: an I/O sink writes a contiguous byte range into a
-/// pre-reserved offset and surfaces errors via
-/// `last_error_message()`. Sinks are monomorphic per template
-/// instantiation without virtual dispatch.
+/// Requires a sink that reserves byte ranges, writes at those offsets,
+/// and provides an error message when a write fails.
 template <typename p_sink>
 concept io_sink =
     requires(p_sink& sink, const std::uint8_t* src, std::size_t size, std::uint64_t offset) {
@@ -47,10 +45,9 @@ concept io_sink =
         { sink.last_error_message() } -> std::convertible_to<std::string>;
     };
 
-/// POSIX `pwrite(2)`-backed sink. Lock-free in the steady state:
-/// callers reserve a disjoint offset range via the atomic counter,
-/// then pwrite into it without contention. Construct via `try_open`
-/// to surface open-time errors via `std::expected`.
+/// Writes reserved file ranges with POSIX pwrite. Producers share an atomic
+/// offset counter, so each successful reservation has a separate range.
+/// Create the sink with `try_open` to receive open errors.
 class posix_pwrite_sink {
   public:
     /// Construct a closed sink without an owned file descriptor.
@@ -104,10 +101,8 @@ class posix_pwrite_sink {
         return sink;
     }
 
-    /// Reserve a disjoint byte range for the caller. Returns the base
-    /// offset of the range. The caller commits the bytes through
-    /// `write_at(bytes, byte_count, base)`. The reservation is lock-free
-    /// — every concurrent caller gets a unique range.
+    /// Reserves a byte range and returns its starting offset for `write_at`.
+    /// Concurrent reservations advance the same atomic counter.
     [[nodiscard]] std::uint64_t reserve_offset(std::size_t byte_count) noexcept {
         return _next_offset.fetch_add(static_cast<std::uint64_t>(byte_count),
                                       std::memory_order_relaxed);
@@ -145,8 +140,7 @@ class posix_pwrite_sink {
         return result;
     }
 
-    /// Close the file descriptor without calling `fsync`. The call is
-    /// idempotent, and callers control any durability barrier separately.
+    /// Closes the file without fsync. Repeated calls after closing succeed.
     [[nodiscard]] std::expected<void, std::string> close() noexcept {
         if (_fd < 0)
             return {};
@@ -161,8 +155,7 @@ class posix_pwrite_sink {
         return {};
     }
 
-    /// Total byte count reserved so far. After every producer's
-    /// final commit this equals the on-disk file size.
+    /// Returns the total bytes reserved, including ranges whose writes failed.
     [[nodiscard]] std::uint64_t reserved_byte_count() const noexcept {
         return _next_offset.load(std::memory_order_relaxed);
     }
@@ -191,16 +184,10 @@ class posix_pwrite_sink {
     std::string _last_error_message;
 };
 
-/// mmap-backed sink. Bypasses the kernel `pwrite` memcpy by writing
-/// directly into a memory-mapped file region. Each producer's
-/// `write_at` becomes a userspace `memcpy` into the mapped region.
-/// the kernel marks pages dirty and writes back asynchronously.
-///
-/// Requires a size hint at open time — the file is `ftruncate`d to
-/// the hint and the whole region mapped at once. After close, the
-/// file is `ftruncate`d to the actual bytes written. The hint should
-/// be a generous upper bound. Over-estimation costs only sparse-file
-/// metadata, not data.
+/// Writes reserved ranges by copying bytes into a shared file mapping.
+/// The capacity hint sets the mapped file size and must cover the output.
+/// `close()` removes the mapping and resizes the file to the reservation
+/// count. Destruction alone releases resources without resizing the file.
 class mmap_pwrite_sink {
   public:
     /// Construct a closed sink without a mapping.
@@ -227,8 +214,8 @@ class mmap_pwrite_sink {
         cleanup();
     }
 
-    /// Open `path` for writing, ftruncate to `capacity_hint`, and
-    /// mmap the region with PROT_WRITE.
+    /// Creates or truncates a file and maps it for reading and writing.
+    /// `capacity_hint` sets its size. Zero requests one 4096-byte region.
     [[nodiscard]] static std::expected<mmap_pwrite_sink, std::string>
     try_open(std::string_view path, std::size_t capacity_hint) {
         std::string null_terminated_path{path};
@@ -260,26 +247,17 @@ class mmap_pwrite_sink {
         return sink;
     }
 
-    /// Reserve `byte_count` bytes for a subsequent `write_at`. The
-    /// reservation atomically advances the global offset and returns
-    /// the base of the claimed range. If the reservation would
-    /// overflow the mmap'd capacity, the offset still advances (so
-    /// concurrent reservations remain disjoint) — `write_at` then
-    /// catches the overflow and stamps an error. Atomicity:
-    /// Relaxed ordering suffices because the counter only assigns
-    /// disjoint ranges. Byte publication does not depend on it.
+    /// Reserves a range by advancing the shared byte counter. Capacity is checked
+    /// later by `write_at`, so even a failed write keeps its reservation.
+    /// The counter assigns offsets only and does not publish the written bytes.
     [[nodiscard]] std::uint64_t reserve_offset(std::size_t byte_count) noexcept {
         return _next_offset.fetch_add(static_cast<std::uint64_t>(byte_count),
                                       std::memory_order_relaxed);
     }
 
-    /// Write `size` bytes at `offset` via memcpy into the mapped
-    /// region. Caller MUST have called `reserve_offset(size)` to
-    /// claim this range. Overflow of the mmap'd capacity is caught
-    /// here and surfaced via `sink_write_result::has_error` — the offset
-    /// counter still advanced for concurrent callers but no memory
-    /// is touched, so the file is left valid up to the last
-    /// successful write.
+    /// Copies bytes into a range previously claimed with `reserve_offset`.
+    /// Returns an error if the range ends beyond the mapping. The reservation
+    /// remains counted after that failure.
     [[nodiscard]] sink_write_result
     write_at(const std::uint8_t* src, std::size_t size, std::uint64_t offset) noexcept {
         sink_write_result result;
@@ -298,7 +276,7 @@ class mmap_pwrite_sink {
         return result;
     }
 
-    /// Unmap the sink, truncate it to the written size, and close it.
+    /// Unmaps the file, resizes it to the reserved byte count, and closes it.
     [[nodiscard]] std::expected<void, std::string> close() noexcept {
         if (_fd < 0)
             return {};
@@ -329,7 +307,7 @@ class mmap_pwrite_sink {
         return _next_offset.load(std::memory_order_relaxed);
     }
 
-    /// Return the most recent mapping or write diagnostic.
+    /// Returns the most recent write diagnostic.
     [[nodiscard]] std::string last_error_message() const {
         return _last_error_message;
     }

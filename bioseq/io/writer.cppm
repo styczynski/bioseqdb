@@ -38,12 +38,8 @@ import bioseq.io.sinks;
 
 export namespace bioseq::io {
 
-/// Raw byte buffer for the writer's per-thread output chunk. Unlike
-/// `std::vector<uint8_t>`, a `resize`/`extend` call does NOT
-/// zero-initialise the new bytes — the writer's append paths
-/// immediately overwrite them with decoded ASCII / qualities. This avoids the
-/// initialization writes that `std::vector::resize`
-/// would perform before the bytes are overwritten.
+/// Growable output bytes for one producer. New capacity is uninitialized
+/// because the writer fills it immediately with sequence or quality text.
 struct writer_byte_buffer {
     std::unique_ptr<std::uint8_t[]> data;
     std::size_t size = 0;
@@ -61,9 +57,8 @@ struct writer_byte_buffer {
         capacity = cap;
     }
 
-    /// Reserve `bytes` bytes at the end and return a pointer to the
-    /// first new byte. Bytes are uninitialised and the caller must overwrite
-    /// them before the next `extend` / `clear` / `pwrite` cycle.
+    /// Appends uninitialized space and returns its first byte. Fill the space
+    /// before flushing. A later buffer growth invalidates this pointer.
     [[nodiscard]] std::uint8_t* extend(std::size_t bytes) {
         if (size + bytes > capacity) {
             const std::size_t needed = size + bytes;
@@ -99,17 +94,15 @@ struct writer_byte_buffer {
     }
 };
 
-/// Per-producer-thread state. Each thread fills its own `chunk` then
-/// flushes via `pwrite` at a sink-reserved offset. The state is
-/// allocated on first use per (writer, thread) and pinned for the
-/// writer's lifetime. The writer's destructor drains every active
-/// producer.
+/// Output and decode buffers owned by one producer thread. The writer creates
+/// this state on first use and keeps it until the writer is destroyed.
+/// Each flush writes the output buffer to a newly reserved file range.
 struct writer_producer_state {
     writer_byte_buffer chunk;          ///< current output bytes (not yet flushed)
     writer_byte_buffer decode_scratch; ///< intermediate decoded bytes for wrapped path
 };
 
-/// Thread-safe FASTA / FASTQ writer.
+/// FASTA/FASTQ writer with per-thread buffers for concurrent record and batch writes.
 template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> class sequence_writer {
   public:
     /// Packed alphabet configuration accepted by this writer.
@@ -182,19 +175,17 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
     /// Writers cannot copy sink or producer ownership.
     sequence_writer& operator=(const sequence_writer&) = delete;
 
-    /// Flush every residual producer chunk before releasing the sink.
+    /// Attempts to flush pending output before releasing the sink.
     ~sequence_writer() {
-        // Drain every active producer's residual chunk. close() may
-        // have been called already. If so, _sink is null and this is
-        // a no-op.
+        // An explicitly closed writer has no sink left to drain.
         if (_sink) {
             (void)close();
         }
     }
 
-    /// Append one record to the output. Thread-safe: many producers
-    /// may call concurrently. Returns false if a previous flush
-    /// errored.
+    /// Appends a complete record. Concurrent producers keep their records intact.
+    /// Returns false for a saved write error, a quality-length error, or a
+    /// failed flush. The writer must be open.
     [[nodiscard]] bool write_record(std::string_view header,
                                     const sequence_view& seq,
                                     std::span<const std::uint8_t> quality = {}) {
@@ -215,14 +206,8 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
             }
         }
 
-        // Flush BEFORE starting a new record. This ensures every flushed
-        // chunk ends at a record boundary — never mid-header, mid-body,
-        // or between header and body. With multi-thread writers, chunks
-        // from different producers interleave on disk via pwrite at
-        // disjoint offsets. Any non-record-aligned chunk would leave a
-        // record split across threads' chunks, producing malformed
-        // FASTQ on disk. Pre-record flushing keeps every produced byte
-        // sequence valid.
+        // Flush only between records. A flush in the middle of this record could
+        // let another producer write between its header and trailing bytes.
         if (producer.chunk.size >= _options.flush_threshold_bytes) {
             if (!flush_producer(producer))
                 return false;
@@ -236,7 +221,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
             const std::size_t qsize = std::min(quality.size(), total_letters);
             const std::size_t pad_count = total_letters - qsize;
             const std::size_t total_qual_bytes = qsize + pad_count;
-            // 3 sigils ('\n+\n') + qual bytes + trailing '\n'.
+            // Separator bytes, quality bytes, and the final newline.
             std::uint8_t* dst = producer.chunk.extend(3 + total_qual_bytes + 1);
             dst[0] = static_cast<std::uint8_t>('\n');
             dst[1] = static_cast<std::uint8_t>('+');
@@ -252,15 +237,13 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         return true;
     }
 
-    /// Append one record while bounding peak memory to a
-    /// single `max_body_bp`-letter slice. Unlike `write_record` (which
-    /// decodes the whole body into one ASCII buffer — fine for ≤5 Mbp, but a
-    /// 6 Gbp reference would materialise a >6 GB buffer), this emits the
-    /// header once, then SIMD-decodes storage-unit-aligned slices of the view,
-    /// carrying FASTA line-wrap state across slices, and flushes the producer
-    /// between slices so RSS never exceeds ~one slice + the chunk capacity.
-    /// It flushes mid-record, so one producer must own the record until the
-    /// call returns. Returns false on a prior or current flush error.
+    /// Writes a large record in word-aligned slices, flushing after each slice.
+    /// Decodes one slice at a time and reuses this thread's output buffers. FASTA
+    /// wrapping continues across slices. FASTQ uses '!' for every quality byte.
+    /// Returns false after a write error.
+    ///
+    /// No other producer may write through this writer until the call returns,
+    /// because the record spans several separately reserved file ranges.
     [[nodiscard]] bool write_record_streamed(std::string_view header,
                                              const sequence_view& seq,
                                              std::size_t max_body_bp) {
@@ -270,8 +253,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         auto& producer = acquire_producer_state();
         const std::size_t total_letters = seq.size() * letters_per_unit - seq.padding();
 
-        // Flush any pending bytes so the header begins a clean chunk (keeps
-        // every flushed chunk record-aligned at the boundary).
+        // Flush earlier records before beginning this streamed record.
         if (!producer.chunk.empty()) {
             if (!flush_producer(producer))
                 return false;
@@ -314,15 +296,14 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
                                                                                letters_per_unit>(
                         words_ptr, slice_letters, wrap_width, line_position, scratch, dst);
             }
-            // Flush this slice to disk before decoding the next — bounded RSS.
+            // Write this slice before decoding the next one.
             if (!flush_producer(producer))
                 return false;
         }
 
         if constexpr (p_file_format == sequence_file_format::fastq) {
-            // No quality is supplied on the streamed path. Emit a Phred-0
-            // ('!') quality of matching length in bounded chunks. (Quality is
-            // dropped on bioseq.load anyway.) Layout: '\n' '+' '\n' <qual> '\n'.
+            // This interface has no quality input. Write one '!' per sequence
+            // position in chunks, followed by a newline.
             std::uint8_t* sep = producer.chunk.extend(3);
             sep[0] = static_cast<std::uint8_t>('\n');
             sep[1] = static_cast<std::uint8_t>('+');
@@ -346,7 +327,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         return true;
     }
 
-    /// Append a whole batch while retaining decoder state across records.
+    /// Writes every record in a batch using this thread's reusable output buffers.
     [[nodiscard]] bool write_batch(const batch_t& batch) {
         if (_failed.load(std::memory_order_relaxed))
             return false;
@@ -400,13 +381,9 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         return true;
     }
 
-    /// Drain every active producer's residual chunk to the sink.
-    /// MUST be called from a quiescent point — caller is responsible
-    /// for ensuring no other thread is mid-`write_record` /
-    /// `write_batch` when `flush()` runs (typically by joining
-    /// producer threads first). The call locks `_producers_mutex`
-    /// while iterating but does NOT serialise against producers
-    /// already past the mutex inside an in-flight write.
+    /// Flushes pending output from every producer. Call after all producer writes
+    /// have stopped, such as after joining their threads. The map mutex protects
+    /// the producer list, while each write continues outside that mutex.
     [[nodiscard]] bool flush() {
         if (_failed.load(std::memory_order_relaxed))
             return false;
@@ -419,7 +396,9 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         return true;
     }
 
-    /// Flush + close the underlying file. Idempotent.
+    /// Flushes pending output and closes the file. Producers must have stopped.
+    /// A flush error is returned with the sink still open. Closing an already
+    /// closed writer succeeds.
     [[nodiscard]] std::expected<void, std::string> close() {
         if (!_sink)
             return {};
@@ -432,8 +411,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         return close_outcome;
     }
 
-    /// Total bytes reserved through the sink so far. After all
-    /// flushes complete this matches the on-disk file size.
+    /// Returns the sink's reserved byte count, or zero after the writer closes.
     [[nodiscard]] std::uint64_t bytes_reserved() const noexcept {
         if (!_sink)
             return 0;
@@ -441,16 +419,9 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
     }
 
   private:
-    /// Fetch (or lazily create) this thread's producer state. The
-    /// producer state lives in the writer's `_producers` map. The
-    /// only contention is on the map's mutex on each access (a single
-    /// hash lookup — bounded cost).
-    ///
-    /// We deliberately do NOT use a thread_local pointer cache: the
-    /// writer is templated, so across multiple writer instances of
-    /// the same template the thread_local pointer would be shared and
-    /// could outlive its owner. The mutex-guarded lookup keeps the
-    /// producer lifetime tied to its writer.
+    /// Finds this thread's buffers, creating them on first use.
+    /// The writer owns them in its map, so each writer instance has separate
+    /// producer state with the same lifetime as its owner.
     [[nodiscard]] writer_producer_state& acquire_producer_state() {
         const std::thread::id thread_id = std::this_thread::get_id();
         std::lock_guard guard{*_producers_mutex};
@@ -466,8 +437,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         return *raw;
     }
 
-    /// Append the FASTA `>` / FASTQ `@` sigil + header + newline to
-    /// `chunk`. Single bulk extend to amortise the size update.
+    /// Appends the format's header marker, header text, and newline.
     inline void emit_header(writer_byte_buffer& chunk, std::string_view header) {
         constexpr std::uint8_t sigil = (p_file_format == sequence_file_format::fasta)
                                            ? static_cast<std::uint8_t>('>')
@@ -478,20 +448,10 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         dst[1 + header.size()] = static_cast<std::uint8_t>('\n');
     }
 
-    /// Decode `total_letters` of `seq` into `producer.chunk` with
-    /// optional FASTA line-wrapping. Single-shot decode — the whole
-    /// record's body lands in the chunk in one call. The chunk's
-    /// `extend` doubles capacity if needed, so very large records
-    /// transiently grow the per-thread chunk to record_size + previous
-    /// chunk content. Mid-record flushing was removed: with
-    /// multi-thread writers, a flush issued mid-record would commit a
-    /// chunk that ended without the record's trailing bytes (e.g.
-    /// `\n+\n<qual>\n` for FASTQ), and another thread's chunk
-    /// reserved at a later offset would land between the two halves on
-    /// disk, splitting one record across non-contiguous file regions.
-    /// The pre-record flush in `write_record`/`write_batch` ensures
-    /// the chunk is empty (or contains only complete records) before
-    /// each new record begins.
+    /// Decodes the entire sequence body into the producer's output buffer.
+    /// FASTA line wrapping uses a temporary ASCII buffer. Capacity grows for
+    /// large records, and flushing stays with the caller so a concurrent
+    /// producer cannot split this record's output.
     inline void emit_body(writer_producer_state& producer,
                           const sequence_view& seq,
                           std::size_t total_letters) {
@@ -547,8 +507,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         return true;
     }
 
-    /// First-error capture: subsequent failures are dropped to keep
-    /// shutdown deterministic.
+    /// Saves and logs the first error. Later failures leave its message unchanged.
     void stamp_error(std::string&& msg) {
         std::lock_guard guard{*_error_mutex};
         if (!_failed.exchange(true, std::memory_order_acq_rel)) {
