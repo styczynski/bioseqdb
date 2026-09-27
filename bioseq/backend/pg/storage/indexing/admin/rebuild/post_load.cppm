@@ -1,6 +1,6 @@
 /**
  * @file admin/rebuild/post_load.cppm
- * @brief Post-load policy lookup and index maintenance.
+ * @brief Read index policies and rebuild enabled indexes after a table load.
  */
 module;
 
@@ -36,11 +36,7 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::storage::indexing {
 
-/**
- * @brief Check whether an index name is present in the PostgreSQL registry.
- * @param name Logical index name.
- * @return True only for a registered name.
- */
+/** Return whether this index name is registered. */
 [[nodiscard]] bool name_is_registered(std::string_view name) {
     for (const auto& type : pg_supported_indexes::list_types()) {
         if (type.first == name) {
@@ -50,11 +46,7 @@ export namespace bioseq::storage::indexing {
     return false;
 }
 
-/**
- * @brief Check whether inserts may maintain one registered index.
- * @param name Logical index name.
- * @return True only when the registry enables insertion-time maintenance.
- */
+/** Return whether the registry allows this index to be maintained during insertion. */
 [[nodiscard]] bool index_allows_update_on_insert(std::string_view name) {
     const auto flags = pg_supported_indexes::allows_on_insert_flags();
     const auto types = pg_supported_indexes::list_types();
@@ -66,16 +58,12 @@ export namespace bioseq::storage::indexing {
     return false;
 }
 
-/**
- * @brief Return the physical layout registered for one PostgreSQL index name.
- * @param name Registered logical index name.
- * @return Its compile-time registry layout.
- */
+/** Return the storage layout registered for this index name. */
 [[nodiscard]] bioseq::indexing::sequence_index_layout layout_of_name(std::string_view name) {
     return pg_supported_indexes::layout_of(name);
 }
 
-/// Raise a post-load maintenance SPI failure with its owning operation.
+/// Report which post-load maintenance operation failed and why.
 [[noreturn]] inline void load_index_spi_error_as_cpp(std::string_view operation,
                                                      std::string_view detail) {
     bioseq::postgres::support::invoke_pg_as_cpp([operation, detail] {
@@ -92,13 +80,9 @@ export namespace bioseq::storage::indexing {
 }
 
 /**
- * @brief Execute one SPI scalar query and require exactly one nonnull result.
- * @tparam p_decoder Trivial noexcept Datum decoder.
- * @param sql Complete scalar statement.
- * @param read_only SPI read-only mode.
- * @param operation Diagnostic operation name.
- * @param decode Decoder invoked before SPI_finish.
- * @return The decoded scalar value.
+ * Run a scalar query and require one non-null result. Decode it before closing
+ * SPI, then return the copied value. The decoder must not throw, and its result
+ * must be trivially copyable so it can outlive the SPI session.
  */
 template <class p_decoder>
 [[nodiscard]] inline auto strict_spi_select_one(const std::string& sql,
@@ -154,7 +138,7 @@ template <class p_decoder>
     return state.result;
 }
 
-/// Load validated registered policy rows for post-load maintenance.
+/// Read settings for registered indexes, rejecting null fields and SPI failures.
 [[nodiscard]] inline std::vector<policy_row>
 load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int16_t attno) {
     constexpr std::size_t k_max_policy_rows = pg_supported_indexes::list_types().size();
@@ -264,18 +248,17 @@ load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int
 }
 
 /**
- * @brief Rebuild every enabled update-on-insert index after a streamed table load.
- * @param main_relid Loaded Bioseq relation.
- * @return Sum of rows reported by the invoked index rebuilds.
+ * Rebuild enabled update-on-insert indexes after a streamed table load.
+ *
+ * @return The sum of the row counts returned by all index rebuilds.
  */
 [[nodiscard]] std::int64_t build_policy_update_on_insert_indexes(Oid main_relid) {
     const relation_identity rid = index_relation_identity(main_relid);
     pg_supported_indexes idx;
     idx.apply_table_defaults();
 
-    // Overlay the persisted per-table policy. set_index_policy_impl stamps every
-    // seq column identically, so the first seq column is a faithful table-level
-    // proxy; if none is found the registry defaults stand.
+    // Use the first sequence column's policy. The policy command writes the same
+    // settings for every sequence column, so this selects the table's indexes.
     const std::string attno_sql =
         fmt::format("SELECT a.attnum FROM pg_attribute a JOIN pg_type t "
                     "ON a.atttypid=t.oid JOIN pg_namespace n ON t.typnamespace=n.oid "
@@ -301,8 +284,8 @@ load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int
             continue;
         if (idx.policy[i] != bioseq::indexing::index_update_policy::update_on_insert)
             continue;
-        // Use a distinct SPI portal/executor frame so sidecar DDL, snapshot
-        // changes, and relcache invalidations are contained before bioseq.load resumes.
+        // Run each rebuild in its own SPI executor frame so index-table changes
+        // and snapshot cleanup finish before bioseq.load continues.
         const std::string index_name{k_index_types[i].first};
         const char* quoted_name = bioseq::postgres::support::invoke_pg_as_cpp(
             [&index_name] { return quote_literal_cstr(index_name.c_str()); });

@@ -1,6 +1,6 @@
 /**
  * @file admin/rebuild/generation_route_implementation.cppm
- * @brief Implements locator-backed grouped-SoA and hash-major rebuild publication.
+ * @brief Choose and publish the stored format for a minimizer rebuild.
  */
 module;
 
@@ -33,17 +33,9 @@ import bioseq.postgres.storage.indexing.handles;
 namespace bioseq::storage::indexing::rebuild_detail {
 
 /**
- * @brief Select and verify the exact persisted representation for one lazy source.
- * @tparam p_sequence_range Concrete sequence representation selected from the datum.
- * @param request Borrowed rebuild authority and source identity.
- * @param storage Open fragment storage that owns publication cleanup.
- * @param sequence Snapshot-bound lazy source view.
- * @param source_binding Locator and source-snapshot binding for publication.
- *
- * Fragment-scoped indexes and unsupported hash-major profiles retain grouped-SoA.
- * A hash-major publication is accepted only when every returned identity and count
- * matches the requested source. Failures propagate through the existing publisher
- * and PostgreSQL error boundaries.
+ * Use hash-major storage for supported sequence-wide CPU builds. Fragment
+ * indexes, Vulkan builds, and other unsupported profiles use grouped-SoA.
+ * After publication, check the source identity and counts in the returned metadata.
  */
 template <class p_sequence_range>
 inline void build_and_verify_hash_major_minimizer_generation(
@@ -56,9 +48,8 @@ inline void build_and_verify_hash_major_minimizer_generation(
     using source_binding_type = bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>;
     const sequence_locator& locator = source_binding.locator();
     constexpr std::uint16_t k_alphabet_code = source_binding_type::alphabet_code();
-    // The selected MPS Vulkan reader consumes authenticated grouped-SoA, not
-    // hash-major controls. Preserve the selected sketch numerics and publish
-    // the existing physical format its actual consumer supports.
+    // The Vulkan sequence reader uses grouped-SoA. Publish that format while
+    // keeping the selected GPU minimizer algorithm.
     if (request.index_name == k_minimizers_per_fragment_index_name ||
         request.backend == bioseq::minimizers::minimizer_sketch_backend::vulkan_segment) {
         build_and_verify_grouped_soa_minimizer_generation_pg(request.user_relation_oid,

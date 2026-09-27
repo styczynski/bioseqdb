@@ -1,6 +1,6 @@
 /**
  * @file admin/rebuild.cppm
- * @brief Exported index-rebuild facade.
+ * @brief Exports the index-rebuild interface.
  */
 export module bioseq.postgres.storage.indexing.admin:rebuild;
 
