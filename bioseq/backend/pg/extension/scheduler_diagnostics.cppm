@@ -1,6 +1,6 @@
 /**
  * @file scheduler_diagnostics.cppm
- * @brief Implements scheduler statistics and test-control SQL routines.
+ * @brief SQL functions for scheduler statistics and worker failure tests.
  */
 module;
 
@@ -97,7 +97,7 @@ last_minimizer_sequence_build_stats() {
             std::move(rows)};
 }
 
-/** @return The scheduler's latest minimizer-sequence build statistics. */
+/** @return Latest asynchronous minimizer build statistics, including worker settings. */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::scheduler_minimizer_sequence_build_stats_row>
 scheduler_minimizer_sequence_build_stats() {
@@ -139,8 +139,8 @@ scheduler_minimizer_sequence_build_stats() {
 
 
 /**
- * @brief Arms one named worker-boundary failure for the test build.
- * @return True when the failure point was armed.
+ * @brief Arrange for the selected staging or worker operation to fail once.
+ * @return true if armed. Unknown names and production builds raise SQL errors.
  */
 bool arm_async_minimizer_sequence_worker_failure(std::string failure_point) {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -200,7 +200,7 @@ bool arm_async_minimizer_sequence_worker_failure(std::string failure_point) {
 }
 
 
-/** @brief Disarms every worker and staging failure point in the test build. */
+/** @brief Clear both staging and worker failure selectors in a test build. */
 void disarm_async_minimizer_sequence_worker_failure() {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::postgres::scheduler::disarm_async_minimizer_sequence_worker_pg_failure();
@@ -218,7 +218,7 @@ void disarm_async_minimizer_sequence_worker_failure() {
 }
 
 
-/** @return Worker-boundary call and failure statistics. */
+/** @return PostgreSQL call counts, injected failures and cleanup results for the worker. */
 bioseq::postgres::support::table_rows<
 	bioseq::postgres::sql_rows::async_minimizer_sequence_worker_boundary_stats_row>
 async_minimizer_sequence_worker_boundary_stats() {
@@ -257,12 +257,12 @@ async_minimizer_sequence_worker_boundary_stats() {
 			std::move(rows)};
 }
 
-/** @brief Requests a scheduler supervisor restart. */
+/** @brief Restart this backend's worker pool with current settings and reset scheduler statistics. */
 void scheduler_restart() {
 	bioseq::postgres::scheduler::restart_cluster();
 }
 
-/** @return A snapshot of scheduler queues, rates, and memory admission. */
+/** @return Current worker settings, queued work, throughput and reserved index memory. */
 bioseq::postgres::support::table_rows<
 	bioseq::postgres::sql_rows::scheduler_stats_row>
 scheduler_stats() {

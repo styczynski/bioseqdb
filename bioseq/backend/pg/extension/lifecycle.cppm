@@ -1,6 +1,6 @@
 /**
  * @file lifecycle.cppm
- * @brief Owns PostgreSQL extension initialization and logging integration.
+ * @brief Initialize the extension and send Bioseq messages through PostgreSQL logging.
  */
 module;
 
@@ -144,21 +144,17 @@ void initialize_extension()
 		return;
 	}
 
-	/* Load the companion library once through PostgreSQL's DSO registry.
-	 * Its query-cache GUC remains disabled. When bioseq itself is preloaded,
-	 * this also lets the companion reserve shared memory at the proper phase.
-	 * A backend-only LOAD does not pretend that shared memory was preloaded.
-	 */
+	/* Load bioseq_cache through PostgreSQL's shared-library registry. Query
+	 * caching stays disabled by default. Preloading Bioseq also loads the
+	 * companion early enough to reserve shared memory. A later LOAD cannot
+	 * reserve that shared memory. */
 #if !defined(BIOSEQ_TEST_INDEXES)
 	load_file("bioseq_cache", false);
 #endif
 
-	/*
-	 * Resolve DSO ownership before registering GUCs, CustomScan methods, or
-	 * hooks.  Publication is deferred until every ordinary initializer below
-	 * has succeeded, so a failed _PG_init never exposes a half-initialized
-	 * provider directory.
-	 */
+	/* Check ownership of the cache-provider lookup slot before installing
+	 * settings or hooks. Publish the directory after initialization succeeds,
+	 * so the cache cannot call a partly initialized provider. */
 	bioseq::postgres::extension::cache_provider::
 		bioseq_cache_provider_preflight();
 	bioseq_register_postgres_logging_sink({
@@ -197,9 +193,9 @@ PG_MODULE_MAGIC;
 void _PG_init();
 
 /**
- * _PG_init is PostgreSQL's extension entry point. It runs when the shared
- * library is loaded into a backend, before any SQL function in the extension
- * is callable.
+ * @brief Initialize Bioseq when PostgreSQL loads its shared library.
+ * Convert C++ failures back into PostgreSQL errors after C++ cleanup has run.
+ * Captured PostgreSQL errors keep their original details.
  */
 void
 _PG_init()
