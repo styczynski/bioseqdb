@@ -1,16 +1,13 @@
 /**
  * @file
- * @brief Declares custom-scan runtime buffer sizing without importing runtime state.
+ * @brief Defines the row-count estimate used when allocating custom-scan buffers.
  */
 module;
 #include <cstddef>
 
 export module bioseq.postgres.table:custom_scan_runtime_buffer_contracts;
 
-/*
- * Initial reservation hint passed to tuple_dispatch_buffer when a
- * bioseq_scan_runtime is constructed. Sized for the typical small-result
- * scan; the buffer reallocates linearly past this if a query produces
- * more buffered tuples.
- */
+/* Row-count estimate passed to custom-scan dispatch buffers at construction.
+ * It matches the 8192-row dispatch batch size. The buffer uses this estimate
+ * to reserve storage before rows arrive. */
 export inline constexpr std::size_t k_bioseq_runtime_buffer_reserve = 8192;

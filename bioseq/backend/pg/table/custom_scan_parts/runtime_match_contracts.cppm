@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines stable match-owner and helper payload fields without importing runtimes.
+ * @brief Defines saved match-binding fields and the helper columns filled during execution.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -8,7 +8,7 @@ module;
 export module bioseq.postgres.table:custom_scan_runtime_match_contracts;
 
 export {
-    /** @brief Defines stable fields in a serialized match-owner descriptor. */
+    /** @brief Gives the field positions in a saved match-owner descriptor. */
     enum match_owner_descriptor_index : int {
         k_match_owner_magic = 0,
         k_match_owner_version = 1,
@@ -18,7 +18,12 @@ export {
         k_match_owner_base_relid = 5,
     };
 
-    /** @brief Classifies how a match helper resolves to its finalized execution owner. */
+    /**
+     * @brief Records how a helper identifies the scan that supplies its result.
+     *
+     * It can name the complete target expression or a source column that identifies
+     * one owner. unresolved is used until final plan binding.
+     */
     enum class match_helper_binding_kind : int {
         unresolved = 0,
         exact_recipe = 1,
@@ -26,7 +31,7 @@ export {
     };
 
     inline constexpr int k_bioseq_match_helper_site_fields = 8;
-    /** @brief Defines stable fields in one serialized match-helper call site. */
+    /** @brief Gives the field positions in a saved match-helper binding. */
     enum match_helper_site_index : int {
         k_match_site_resno = 0,
         k_match_site_funcid = 1,
@@ -38,7 +43,7 @@ export {
         k_match_site_stable_id = 7,
     };
 
-    /** @brief Defines stable fields in a base-scan match-owner plan payload. */
+    /** @brief Gives the field positions for a base scan's planner and executor match bindings. */
     enum base_match_owner_plan_index : int {
         k_base_match_plan_magic = 0,
         k_base_match_plan_version = 1,
@@ -49,7 +54,7 @@ export {
         k_base_match_plan_executor_sites = 6,
     };
 
-    /** @brief Defines stable fields in a per-row join planner-to-executor payload. */
+    /** @brief Gives the private-data field positions in a per-row join plan. */
     enum per_row_join_private_index : int {
         k_per_row_version = 0,
         k_per_row_target_relation_oid = 1,
@@ -74,7 +79,7 @@ export {
         k_per_row_target_source_tableoid_resno = 20,
     };
 
-    /** @brief Defines stable fields in a batched-join planner-to-executor payload. */
+    /** @brief Gives the private-data field positions in a two-child batch-join plan. */
     enum batch_join_private_index : int {
         k_batch_join_version = 0,
         k_batch_join_token = 1,
@@ -96,7 +101,7 @@ export {
         k_batch_join_match_owner_descriptor = 17,
     };
 
-    /** @brief Identifies one match-result placeholder populated for a batched join row. */
+    /** @brief Identifies a helper-result column filled for each batch or per-row join match. */
     struct batch_join_placeholder_site {
         AttrNumber resno = InvalidAttrNumber;
         Oid funcid = InvalidOid;
