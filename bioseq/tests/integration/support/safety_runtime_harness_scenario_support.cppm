@@ -1,6 +1,6 @@
 /**
  * @file safety_runtime_harness_scenario_support.cppm
- * @brief Provide activation-receipt, probe, SQL, and server-log scenario support.
+ * @brief Checks test-build records, probe results, and backend-exit logs.
  */
 
 module;
@@ -55,7 +55,7 @@ import :manifest_support;
 
 export namespace bioseq::tests::integration::safety_runtime_harness {
 
-/// Convert a JSON array into a duplicate-free string set.
+/// Read a JSON string array as a set, rejecting duplicates.
 [[nodiscard]] std::set<std::string, std::less<>>
 string_set(
         const json& value,
@@ -75,7 +75,7 @@ string_set(
     return result;
 }
 
-/// Resolve and validate the ledger site bound to one catalog case.
+/// Find the case's ledger entry by SQL identity and site hash, and require ERROR severity.
 [[nodiscard]] json resolve_ledger_site(
         const json& ledger,
         const json& catalog,
@@ -175,7 +175,7 @@ string_set(
     return *matching_site;
 }
 
-/// Validated activation receipt and its control-DSO binding.
+/// Checked activation record with the control library's path and SHA-256.
 struct activation_receipt final {
     json value;
     std::string sha256;
@@ -183,7 +183,7 @@ struct activation_receipt final {
     std::string control_dso_sha256;
 };
 
-/// Load an activation receipt and validate every request binding.
+/// Check that an activation record matches the requested build, settings, and helper library.
 [[nodiscard]] activation_receipt load_activation_receipt(
         const json& request,
         const fs::path& active_dso,
@@ -388,7 +388,7 @@ struct activation_receipt final {
         .control_dso_sha256 = control_dso_sha256};
 }
 
-/// Parsed lifecycle counters and events reported by the control DSO.
+/// Function-call counters and cleanup events reported by the control library.
 struct probe_observation final {
     std::string profile;
     std::uint64_t start_count = 0;
@@ -431,7 +431,7 @@ struct probe_observation final {
     return result;
 }
 
-/// Parse and validate a revision-two probe observation stream.
+/// Parse the version 2 probe report and reject malformed headers or duplicate events.
 [[nodiscard]] probe_observation parse_probe_observation(
         std::string_view value) {
     const std::vector<std::string_view> lines = split(value, '\n');
@@ -538,7 +538,7 @@ struct probe_observation final {
     return result;
 }
 
-/// Require a request path and digest to bind the same regular file.
+/// Require the request's file path to contain the bytes named by its SHA-256.
 void verify_file_binding(
         const json& request,
         std::string_view path_field,
@@ -561,7 +561,7 @@ void verify_file_binding(
     }
 }
 
-/// Resolve exactly one requested case from a validated catalog.
+/// Find one case after checking the catalog profile and compiled-plan hash.
 [[nodiscard]] const json& catalog_entry(
         const json& catalog,
         std::string_view case_id_value) {
@@ -614,7 +614,7 @@ void require_equal_field(
     }
 }
 
-/// Resolve a target regprocedure to its non-null PostgreSQL OID.
+/// Look up a SQL function signature and return its OID, failing if it is missing.
 [[nodiscard]] std::uint64_t resolve_target_oid(
         const pg_connection& connection,
         std::string_view regprocedure) {
@@ -629,7 +629,7 @@ void require_equal_field(
         "target regprocedure OID");
 }
 
-/// Require the PostgreSQL connection to be transaction-idle.
+/// Require the connection to be outside a transaction.
 void require_idle(
         const pg_connection& connection,
         std::string_view context) {
@@ -640,7 +640,7 @@ void require_idle(
     }
 }
 
-/// Load the control DSO and create its temporary SQL bindings.
+/// Load the control library and create temporary functions to arm, inspect, and disarm probes.
 void create_probe_bindings(
         const pg_connection& connection,
         const fs::path& control_dso) {
@@ -687,7 +687,7 @@ void create_probe_bindings(
         "create probe disarm binding");
 }
 
-/// Require every expected runtime event to occur exactly once.
+/// Require exactly the expected events, with each event recorded once.
 void verify_event_set(
         const std::map<
             std::string,
@@ -712,7 +712,7 @@ void verify_event_set(
     }
 }
 
-/// Validate a parsed observation against the catalog's causal contract.
+/// Check the probe's function calls, fault ordering, and cleanup events against the case.
 void verify_probe_observation(
         const probe_observation& observation,
         std::string_view expected_profile,
@@ -821,7 +821,8 @@ void verify_probe_observation(
     return result;
 }
 
-/// Execute an ordered SQL list while enforcing transaction-state boundaries.
+/// Run SQL statements in order, requiring success and a usable transaction state.
+/// Each statement must leave the session idle unless open transactions are allowed.
 void execute_sql_list(
         const pg_connection& connection,
         const std::vector<std::string>& statements,
@@ -850,7 +851,7 @@ void execute_sql_list(
     }
 }
 
-/// Map a terminal fault key to its expected durable guard marker.
+/// Return the marker kind expected for a fault that ends the backend.
 [[nodiscard]] std::optional<std::string_view>
 terminal_guard_kind(std::string_view fault_key) noexcept {
     if (fault_key
@@ -864,14 +865,14 @@ terminal_guard_kind(std::string_view fault_key) noexcept {
     return std::nullopt;
 }
 
-/// Stable identity and byte offset for an append-only server log interval.
+/// Server-log file identity and the byte offset where a test begins.
 struct server_log_checkpoint final {
     std::uint64_t device{};
     std::uint64_t inode{};
     std::uint64_t offset{};
 };
 
-/// Capture the current end of an authorized private-cluster server log.
+/// Record the identity and current size of the owned server-log file.
 [[nodiscard]] server_log_checkpoint capture_server_log(
         const fs::path& path) {
     struct stat metadata {};
@@ -891,7 +892,8 @@ struct server_log_checkpoint final {
     };
 }
 
-/// Read the exact bounded server-log interval appended after a checkpoint.
+/// Read bytes added since the checkpoint, rejecting a replaced or truncated log
+/// and an interval larger than the allowed limit.
 [[nodiscard]] std::string read_server_log_suffix(
         const fs::path& path,
         const server_log_checkpoint& checkpoint) {
@@ -947,7 +949,7 @@ struct server_log_checkpoint final {
     return result;
 }
 
-/// Wait for and validate the intended backend-exit server-log record.
+/// Wait for this backend's exit-code-1 log record and reject crash diagnostics.
 [[nodiscard]] json wait_for_terminal_server_log(
         const fs::path& path,
         const server_log_checkpoint& checkpoint,
@@ -1009,7 +1011,7 @@ void require_terminal_marker_absent(const fs::path& path) {
     }
 }
 
-/// Read and validate the durable marker emitted by a terminal guard.
+/// Read the cleanup marker and check its file metadata and test case identifiers.
 [[nodiscard]] json read_terminal_marker(
         const fs::path& path,
         std::string_view token,
