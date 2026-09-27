@@ -34,7 +34,7 @@ import :row_hash;
 
 export namespace bioseq::postgres_test {
 
-/// @brief Build outputs required to install one extension in a private cluster.
+/// Build outputs needed to install one extension in a private test cluster.
 struct extension_install_source {
     std::string name;
     std::filesystem::path control_file;
@@ -42,7 +42,7 @@ struct extension_install_source {
     std::filesystem::path dso;
 };
 
-/// @brief Source/staged paths and SHA-256 evidence for one extension triple.
+/// Source and staged paths, with SHA-256 hashes of the extension files.
 struct staged_extension_files {
     std::string name;
     std::filesystem::path source_control_file;
@@ -57,7 +57,7 @@ struct staged_extension_files {
     sha256_digest staged_control_digest;
 };
 
-/// @brief Exact private directories holding staged extension artifacts.
+/// Directories and extension files prepared for a private test cluster.
 struct extension_stage_layout {
     std::filesystem::path stage_root;
     std::optional<std::filesystem::path> manifest_file;
@@ -98,11 +98,11 @@ struct manifest_json_value {
     std::map<std::string, manifest_json_value, std::less<>> object;
 };
 
-/// @brief Small strict JSON reader for the CMake-owned stage manifest.
-///
-/// PostgreSQL test support intentionally has no production JSON dependency.
-/// This reader accepts the complete JSON grammar, rejects duplicate members,
-/// and exposes only the typed fields used by the stage attestation below.
+/**
+ * Read the CMake stage manifest as JSON without a production JSON library.
+ * Reject duplicate object members and malformed syntax. The helpers below
+ * check the types and values of the manifest fields.
+ */
 class manifest_json_reader {
 public:
     explicit manifest_json_reader(std::string_view input) : input_(input) {}
@@ -1804,13 +1804,15 @@ inline void validate_runtime_closure(
 
 export namespace bioseq::postgres_test {
 
-/// @brief Validates and selects artifacts from one immutable preinstalled stage.
-///
-/// The caller's artifact vector is a name-unique subset whose caller order is
-/// preserved; it need not follow manifest order. It remains mandatory because
-/// its source paths are independently hashed.
-/// Only a name present in @p allowed_runtime_dso_overrides may substitute a
-/// different DSO; its control and SQL always remain the suite-stage files.
+/**
+ * Check a preinstalled PostgreSQL stage and select the requested extensions
+ * in caller order. Validate the manifest, staged files and caller-supplied
+ * source files. Each selected name must be unique.
+ *
+ * An allowed DSO override is copied into a separate runtime directory. Its
+ * control and SQL files still come from the preinstalled stage, and every
+ * listed override must be used.
+ */
 [[nodiscard]] inline extension_stage_layout validate_preinstalled_extension_stage(
     const std::filesystem::path& stage_root,
     const std::filesystem::path& stage_manifest,
@@ -2147,7 +2149,7 @@ export namespace bioseq::postgres_test {
 
 namespace bioseq::postgres_test::artifact_detail {
 
-/// @brief Rejects names that cannot safely become SQL/configuration identities.
+/// Require up to 63 lowercase letters, digits or underscores, starting with a letter or underscore.
 inline void validate_extension_name(std::string_view name) {
     if (name.empty() || name.size() > 63
         || !(std::islower(static_cast<unsigned char>(name.front()))
@@ -2164,7 +2166,7 @@ inline void validate_extension_name(std::string_view name) {
     }
 }
 
-/// @brief Resolves a non-symlink regular artifact file.
+/// Resolve a regular file, rejecting a symlink at the final path component.
 [[nodiscard]] inline std::filesystem::path require_regular_file(
     const std::filesystem::path& path,
     std::string_view label) {
@@ -2186,7 +2188,7 @@ inline void validate_extension_name(std::string_view name) {
     return canonical;
 }
 
-/// @brief Returns the platform suffix that PostgreSQL's loader will append.
+/// Extract a recognized shared-library suffix, including any following version text.
 [[nodiscard]] inline std::string shared_library_suffix(
     const std::filesystem::path& source) {
     const std::string filename = source.filename().string();
@@ -2202,7 +2204,7 @@ inline void validate_extension_name(std::string_view name) {
                                 + source.string());
 }
 
-/// @brief Overwrites only one explicit destination with one source artifact.
+/// Replace the named destination with a copy of the source file.
 inline void copy_exact(const std::filesystem::path& source,
                        const std::filesystem::path& destination) {
     std::error_code error;
@@ -2217,7 +2219,7 @@ inline void copy_exact(const std::filesystem::path& source,
     }
 }
 
-/// @brief Escapes a PostgreSQL configuration/control quoted string.
+/// Quote a control-file value, doubling single quotes and rejecting newlines.
 [[nodiscard]] inline std::string control_literal(std::string_view value) {
     if (value.find('\n') != std::string_view::npos
         || value.find('\r') != std::string_view::npos) {
@@ -2234,12 +2236,11 @@ inline void copy_exact(const std::filesystem::path& source,
     return escaped;
 }
 
-/// @brief Copies a control file and pins MODULE_PATHNAME to the staged DSO stem.
-///
-/// The staged control/install files form the fixture's immutable artifact
-/// bundle. Rewriting only the staged control copy directs MODULE_PATHNAME to
-/// the per-case DSO without mutating the source artifact or relying on a
-/// server-version-specific control-file search setting.
+/**
+ * Copy a control file and set module_pathname to the staged library path.
+ * This makes MODULE_PATHNAME in the install SQL load the test's library.
+ * Only the staged control file is rewritten.
+ */
 inline void stage_control_file(
     const std::filesystem::path& source,
     const std::filesystem::path& destination,
@@ -2292,7 +2293,11 @@ inline void stage_control_file(
 
 export namespace bioseq::postgres_test {
 
-/// @brief Validates and stages extension triples without glob deletion.
+/**
+ * Prepare extension control, SQL and library files under a private test root.
+ * Validate names and source files, copy each extension, and rewrite its staged
+ * control file to load the staged library. Return the paths and file hashes.
+ */
 [[nodiscard]] inline extension_stage_layout materialize_extension_stage(
     const std::filesystem::path& root,
     std::span<const extension_install_source> artifacts) {

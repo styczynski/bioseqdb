@@ -52,13 +52,17 @@ inline void close_descriptor(int& descriptor) noexcept {
     }
 }
 
-/// @brief Serializes the portable pipe+fcntl fallback with every local spawn.
+/**
+ * Use one lock for local process launches and pipe setup.
+ * The pipe-plus-fcntl fallback needs this lock so another local spawn cannot
+ * inherit an endpoint before close-on-exec is set.
+ */
 [[nodiscard]] inline std::mutex& spawn_serialization_mutex() noexcept {
     static std::mutex mutex;
     return mutex;
 }
 
-/// @brief Creates a pipe whose endpoints cannot leak across an exec.
+/// Create a pipe with close-on-exec set on both endpoints.
 [[nodiscard]] inline bool create_cloexec_pipe(
     int (&descriptors)[2]) noexcept {
 #if defined(__linux__) && defined(O_CLOEXEC)
@@ -140,7 +144,11 @@ inline void close_descriptor(int& descriptor) noexcept {
 #endif
 }
 
-/// @brief Writes one broker release byte without leaking SIGPIPE to callers.
+/**
+ * Release the launch broker with one byte while blocking SIGPIPE.
+ * Consume a SIGPIPE caused by this write before restoring the thread's
+ * previous signal mask. Preserve a signal that was already pending.
+ */
 [[nodiscard]] inline bool release_launch_broker(int descriptor) noexcept {
     if (descriptor < 0) {
         return false;
@@ -190,19 +198,19 @@ inline void close_descriptor(int& descriptor) noexcept {
 
 export namespace bioseq::postgres_test {
 
-/// @brief Failure raised by a lifecycle subprocess.
+/// Failure while launching or managing a test subprocess.
 class process_error : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
-/// @brief Deadline failure raised after the owned process group is terminated.
+/// Deadline failure reported after attempting to stop the owned process group.
 class process_timeout : public process_error {
 public:
     using process_error::process_error;
 };
 
-/// @brief Explicit input to one shell-free posix_spawn invocation.
+/// Executable, arguments and settings for a process launched without a shell.
 struct process_launch_options {
     std::filesystem::path executable;
     std::vector<std::string> arguments;
@@ -224,7 +232,11 @@ struct process_exit_status {
     }
 };
 
-/// @brief Produces an allowlisted environment with all ambient PG routing removed.
+/**
+ * Copy selected environment variables for test subprocesses, then apply the
+ * caller's overrides. Omit inherited PostgreSQL settings and reject PG-prefixed
+ * override names. Optionally put a validated directory first in PATH.
+ */
 [[nodiscard]] inline std::vector<std::pair<std::string, std::string>>
 build_sanitized_process_environment(
     std::span<const std::pair<std::string, std::string>> overrides = {},
@@ -301,10 +313,18 @@ build_sanitized_process_environment(
     return result;
 }
 
-/// @brief Move-only posix_spawn child with process-group and log ownership.
+/**
+ * Own a child process, its process group and its capture-file path.
+ * Ownership can be moved. Destruction attempts to stop the group and remove
+ * a log created for this object. It keeps logs at caller-supplied paths.
+ */
 class owned_process {
 public:
-    /// @brief Spawns an absolute executable in a new process group without a shell.
+    /**
+     * Launch an absolute executable in a new process group without a shell.
+     * Redirect stdin to /dev/null and stdout and stderr to one file. Supervised
+     * launches wait in a broker until the parent has recorded them for cleanup.
+     */
     [[nodiscard]] static owned_process spawn(const process_launch_options& options) {
         std::scoped_lock spawn_lock{
             process_detail::spawn_serialization_mutex()};
@@ -662,7 +682,7 @@ public:
         remove_owned_log();
     }
 
-    /// @brief Waits until the absolute deadline or terminates and raises on timeout.
+    /// Wait for completion until the deadline, then attempt cleanup and throw process_timeout.
     [[nodiscard]] process_exit_status wait_until(
         std::chrono::steady_clock::time_point deadline) {
         while (std::chrono::steady_clock::now() < deadline) {
@@ -676,7 +696,7 @@ public:
                               + captured_output());
     }
 
-    /// @brief Waits for a positive relative budget.
+    /// Wait for the given positive duration, attempting cleanup if it expires or is invalid.
     [[nodiscard]] process_exit_status wait_for(std::chrono::milliseconds budget) {
         if (budget <= std::chrono::milliseconds::zero()) {
             terminate(std::chrono::seconds(2));
@@ -685,7 +705,11 @@ public:
         return wait_until(std::chrono::steady_clock::now() + budget);
     }
 
-    /// @brief Polls until the leader is reaped and its owned group is absent.
+    /**
+     * Poll without waiting for the child.
+     * Return its exit status once the leader is reaped, its group is absent and
+     * its supervision record has been removed.
+     */
     [[nodiscard]] std::optional<process_exit_status> try_wait() noexcept {
         poll_leader();
         if (!exit_ || !is_owned_group_absent()) {
@@ -698,7 +722,10 @@ public:
         return exit_;
     }
 
-    /// @brief Sends SIGTERM to the child group, then SIGKILLs bounded survivors.
+    /**
+     * Try SIGTERM, wait for the grace period, then try SIGKILL.
+     * Stop waiting after the final cleanup timeout even if a process remains.
+     */
     void terminate(std::chrono::milliseconds grace) noexcept {
         if (try_wait()) {
             return;
@@ -727,7 +754,7 @@ public:
         static_cast<void>(try_wait());
     }
 
-    /// @brief Returns all captured combined stdout/stderr currently on disk.
+    /// Read the combined stdout and stderr capture, or return empty if it cannot be opened.
     [[nodiscard]] std::string captured_output() const {
         std::ifstream input(output_file_, std::ios::binary);
         if (!input) {
@@ -737,22 +764,22 @@ public:
                            std::istreambuf_iterator<char>());
     }
 
-    /// @brief Returns the capture path, which persists when caller-supplied.
+    /// Return the capture path. Caller-supplied files are kept after destruction.
     [[nodiscard]] const std::filesystem::path& output_file() const noexcept {
         return output_file_;
     }
 
-    /// @brief Returns the live child pid, or -1 after it has been reaped.
+    /// Return the child PID while unreaped, or -1 after reaping.
     [[nodiscard]] std::int64_t pid() const noexcept {
         return static_cast<std::int64_t>(pid_);
     }
 
-    /// @brief Returns the PGID pinned by this still-unreaped direct child.
+    /// Return the recorded process-group ID, or -1 once it has been cleared.
     [[nodiscard]] std::int64_t process_group() const noexcept {
         return static_cast<std::int64_t>(process_group_);
     }
 
-    /// @brief Observes direct-child exit without reaping or releasing its PID.
+    /// Check for leader exit without reaping it, or return a previously recorded exit.
     [[nodiscard]] bool has_unreaped_exited_leader() const noexcept {
         if (pid_ <= 1) {
             return exit_.has_value();
@@ -768,7 +795,11 @@ public:
             && information.si_pid == pid_;
     }
 
-    /// @brief Signals the owned PGID while its direct-child leader pins reuse.
+    /**
+     * Signal the process group while the direct child remains unreaped.
+     * Keeping that child unreaped prevents reuse of its PID as another group
+     * identifier.
+     */
     [[nodiscard]] bool signal_owned_group_while_unreaped(
         int signal_number) noexcept {
         if (pid_ <= 1 || process_group_ <= 1
@@ -782,11 +813,12 @@ public:
         return status == 0 || errno == ESRCH;
     }
 
-    /// @brief Reaps only after the caller verifies the owned target tree ended.
-    ///
-    /// Unlike try_wait(), this deliberately clears the recorded PGID at reap:
-    /// the caller has already established target-tree termination while the
-    /// unreaped direct child still prevented PID/PGID reuse.
+    /**
+     * Reap the leader after the caller has verified that its target process
+     * tree has ended. Clear the saved process-group ID at the same time and
+     * remove the supervision record. Until this call, keep the leader unreaped
+     * so its PID cannot be reused.
+     */
     [[nodiscard]] bool reap_after_verified_target_termination(
         std::chrono::milliseconds deadline) noexcept {
         const auto finish = std::chrono::steady_clock::now()
@@ -921,7 +953,7 @@ private:
         return result;
     }
 
-    /// @brief Removes only a capture path allocated internally by this object.
+    /// Attempt to remove an internally created capture file and discard filesystem errors.
     void remove_owned_log() noexcept {
         if (!remove_output_ || output_file_.empty()) {
             return;

@@ -22,13 +22,13 @@ import bioseq.libpq.client;
 
 export namespace bioseq::postgres_test {
 
-/// @brief Strict JSON parse/type error for EXPLAIN documents.
+/// Invalid JSON or an unexpected EXPLAIN result shape.
 class explain_error : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
-/// @brief Owning JSON value used by the source-neutral EXPLAIN walker.
+/// Own a parsed JSON value used to inspect EXPLAIN output.
 class explain_json_value {
 public:
     using array = std::vector<explain_json_value>;
@@ -67,7 +67,7 @@ public:
         return std::get_if<object>(&value_);
     }
 
-    /// @brief Returns an object property, or null when absent/not an object.
+    /// Find an object property, or return nullptr if this is not an object or the key is absent.
     [[nodiscard]] const explain_json_value* find(std::string_view key) const noexcept {
         const object* properties = as_object();
         if (properties == nullptr) {
@@ -85,7 +85,7 @@ private:
 
 namespace bioseq::postgres_test::explain_detail {
 
-/// @brief Recursive-descent parser for the complete JSON value grammar.
+/// Parse nested JSON values for EXPLAIN, rejecting duplicate object keys.
 class parser {
 public:
     explicit parser(std::string_view input) : input_(input) {}
@@ -102,7 +102,7 @@ public:
     }
 
 private:
-    /// @brief Parses one recursively nested value.
+    /// Parse a JSON value and reject nesting beyond the depth limit.
     [[nodiscard]] explain_json_value parse_value(std::size_t depth) {
         if (depth > 256) {
             fail("nesting exceeds 256 levels");
@@ -237,7 +237,7 @@ private:
         fail("unterminated string");
     }
 
-    /// @brief Parses one JSON integer or finite floating-point number.
+    /// Read a JSON number as int64 when possible, otherwise as a finite double.
     [[nodiscard]] explain_json_value parse_number() {
         const std::size_t begin = position_;
         consume_if('-');
@@ -341,7 +341,7 @@ private:
         }
     }
 
-    /// @brief Consumes one exact punctuation character.
+    /// Skip whitespace and require the expected character.
     void consume(char expected) {
         skip_whitespace();
         if (position_ >= input_.size() || input_[position_] != expected) {
@@ -350,7 +350,7 @@ private:
         ++position_;
     }
 
-    /// @brief Conditionally consumes one punctuation character.
+    /// Consume the expected character if it is next, without skipping whitespace.
     [[nodiscard]] bool consume_if(char expected) noexcept {
         if (position_ < input_.size() && input_[position_] == expected) {
             ++position_;
@@ -389,7 +389,7 @@ private:
     std::size_t position_{};
 };
 
-/// @brief Recursively collects every object representing a plan node.
+/// Collect nested objects with a Node Type or Custom Plan Provider property.
 inline void collect_plan_nodes(
     const explain_json_value& value,
     std::vector<const explain_json_value*>& output) {
@@ -413,7 +413,7 @@ inline void collect_plan_nodes(
 
 export namespace bioseq::postgres_test {
 
-/// @brief Owning parsed EXPLAIN (FORMAT JSON) document with recursive queries.
+/// Own an EXPLAIN JSON document and search its nested plan nodes.
 class explain_plan_document {
 public:
     /// @brief Parses a complete JSON document.
@@ -421,7 +421,7 @@ public:
         return explain_plan_document(explain_detail::parser(json).parse());
     }
 
-    /// @brief Converts the single-cell text result returned by PostgreSQL.
+    /// Parse an EXPLAIN result containing exactly one non-null text cell.
     [[nodiscard]] static explain_plan_document from_result(
         const bioseq::libpq::command_result& result) {
         if (result.row_count() != 1 || result.column_count() != 1
@@ -432,7 +432,11 @@ public:
         return parse(result.text_value(0, 0));
     }
 
-    /// @brief Returns all plan-node objects in recursive document order.
+    /**
+     * Return borrowed pointers to all detected plan nodes.
+     * Object children are visited in property-name order, and array children in
+     * array order. The pointers remain valid while this document stays alive.
+     */
     [[nodiscard]] std::vector<const explain_json_value*> plan_nodes() const {
         std::vector<const explain_json_value*> result;
         explain_detail::collect_plan_nodes(root_, result);
@@ -454,7 +458,7 @@ public:
         return matches;
     }
 
-    /// @brief Returns the owning JSON root for specialized assertions.
+    /// Borrow the JSON root for additional test assertions.
     [[nodiscard]] const explain_json_value& root() const noexcept { return root_; }
 
 private:
@@ -462,7 +466,7 @@ private:
     explain_json_value root_;
 };
 
-/// @brief Returns one string-valued plan property when present and typed.
+/// Borrow a string property, or return nullopt if it is absent or has another type.
 [[nodiscard]] inline std::optional<std::string_view>
 read_plan_string_property(
     const explain_json_value& object, std::string_view name) noexcept {
@@ -472,7 +476,7 @@ read_plan_string_property(
         : std::nullopt;
 }
 
-/// @brief Returns one integer-valued plan property when present and typed.
+/// Read an integer property, or return nullopt if it is absent or has another type.
 [[nodiscard]] inline std::optional<std::int64_t>
 read_plan_integer_property(
     const explain_json_value& object, std::string_view name) noexcept {
@@ -498,7 +502,7 @@ read_plan_integer_property(
     return std::nullopt;
 }
 
-/// @brief Returns one Boolean plan property when present and typed.
+/// Read a Boolean property, or return nullopt if it is absent or has another type.
 [[nodiscard]] inline std::optional<bool> read_plan_boolean_property(
     const explain_json_value& object, std::string_view name) noexcept {
     const explain_json_value* value = object.find(name);
@@ -507,7 +511,11 @@ read_plan_integer_property(
         : std::nullopt;
 }
 
-/// @brief Executes and parses EXPLAIN JSON through the shared libpq client.
+/**
+ * Run EXPLAIN in JSON format and parse the result.
+ * When analyze is true, execute the SQL as well and include runtime and
+ * buffer statistics.
+ */
 [[nodiscard]] inline explain_plan_document execute_explain(
     bioseq::libpq::client_connection& connection,
     std::string_view sql,

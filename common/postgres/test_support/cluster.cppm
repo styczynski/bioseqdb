@@ -39,7 +39,7 @@ import :supervision;
 
 export namespace bioseq::postgres_test {
 
-/// @brief Exact marker-owned paths available immediately before initdb.
+/// @brief Cluster directories borrowed by the callback that runs before initdb.
 struct pre_initdb_paths {
     const std::filesystem::path& root_directory;
     const std::filesystem::path& data_directory;
@@ -47,14 +47,14 @@ struct pre_initdb_paths {
     const std::filesystem::path& log_directory;
 };
 
-/// @brief Optional source-neutral Boolean gate after extension installation.
+/// @brief SQL readiness check to poll after installing extensions.
 struct extension_readiness_check {
     std::string sql;
     std::chrono::milliseconds deadline{60'000};
     std::chrono::milliseconds poll_interval{20};
 };
 
-/// @brief Complete source-neutral configuration for one private PostgreSQL node.
+/// @brief Programs, extension files and startup settings for a private test cluster.
 struct private_cluster_options {
     std::filesystem::path postgres_bin_dir;
     std::filesystem::path preinstalled_stage_root;
@@ -70,7 +70,7 @@ struct private_cluster_options {
     std::chrono::seconds stop_timeout{30};
 };
 
-/// @brief Explicit lifecycle states for a private cluster.
+/// @brief Stages in a private cluster's lifetime.
 enum class private_cluster_state {
     constructed,
     initialized,
@@ -78,13 +78,13 @@ enum class private_cluster_state {
     stopped,
 };
 
-/// @brief Terminal no-throw cleanup result for one owned private cluster.
+/// @brief Whether cluster cleanup succeeded, with a diagnostic message.
 struct private_cluster_cleanup_result {
     bool succeeded{};
     std::string detail;
 };
 
-/// @brief Deterministic fault points for the topology-controller contract.
+/// @brief Failures that tests can inject into the process-tree controller model.
 enum class process_tree_controller_fault {
     none,
     reject_second_descendant_stop,
@@ -93,7 +93,7 @@ enum class process_tree_controller_fault {
     reject_root_group_kill,
 };
 
-/// @brief Trace produced by the non-signalling controller contract model.
+/// @brief Signal order and outcomes recorded by the controller simulation.
 struct process_tree_controller_trace {
     bool freeze_succeeded{};
     bool resume_attempted{};
@@ -109,7 +109,7 @@ struct process_tree_controller_trace {
 
 namespace bioseq::postgres_test::cluster_detail {
 
-/// @brief Validates options before any temporary directory is allocated.
+/// @brief Checks deadlines and required PostgreSQL paths before creating a test root.
 [[nodiscard]] inline private_cluster_options validate_options(private_cluster_options options) {
     if (options.startup_timeout <= std::chrono::seconds::zero()
         || options.stop_timeout <= std::chrono::seconds::zero()) {
@@ -163,7 +163,8 @@ namespace bioseq::postgres_test::cluster_detail {
     return options;
 }
 
-/// @brief True only when candidate is a proper descendant of root.
+/// @brief Checks whether candidate extends root by at least one path component.
+/// Callers must normalize the paths first.
 [[nodiscard]] inline bool is_path_strictly_within(
     const std::filesystem::path& root,
     const std::filesystem::path& candidate) {
@@ -180,7 +181,7 @@ namespace bioseq::postgres_test::cluster_detail {
     return candidate_part != candidate.end();
 }
 
-/// @brief Revalidates the attested sharedir immediately before initdb.
+/// @brief Checks that initdb's shared directory is a canonical directory inside the stage.
 [[nodiscard]] inline std::filesystem::path
 require_initdb_shared_directory(const extension_stage_layout& stage) {
     const auto require_canonical_directory =
@@ -225,7 +226,7 @@ require_initdb_shared_directory(const extension_stage_layout& stage) {
     return shared_directory;
 }
 
-/// @brief Creates a unique short root suitable for Unix-domain socket paths.
+/// @brief Creates a temporary cluster directory and its ownership marker.
 [[nodiscard]] inline std::filesystem::path make_private_root() {
     std::string pattern =
         (std::filesystem::temp_directory_path()
@@ -248,7 +249,8 @@ require_initdb_shared_directory(const extension_stage_layout& stage) {
     return root;
 }
 
-/// @brief Removes a just-created marker-owned root before any process exists.
+/// @brief Removes a new cluster root after checking its name, marker and temporary parent.
+/// Use only before starting any process in it.
 [[nodiscard]] inline bool remove_preprocess_private_root(
     const std::filesystem::path& root) noexcept try {
     std::error_code error;
@@ -275,7 +277,7 @@ require_initdb_shared_directory(const extension_stage_layout& stage) {
     return false;
 }
 
-/// @brief Reads one complete positive postmaster PID from the owned PGDATA.
+/// @brief Reads the PID on the first line of postmaster.pid, or returns -1.
 [[nodiscard]] inline std::int64_t read_postmaster_pid(
     const std::filesystem::path& data_directory) noexcept {
     try {
@@ -300,7 +302,8 @@ require_initdb_shared_directory(const extension_stage_layout& stage) {
     }
 }
 
-/// @brief Obtains an ephemeral local port; the server itself listens on Unix only.
+/// @brief Chooses a port number using a temporary loopback socket.
+/// The cluster uses this number in its Unix socket name. The probe releases the port.
 [[nodiscard]] inline int available_port() {
     const int descriptor = ::socket(AF_INET, SOCK_STREAM, 0);
     if (descriptor < 0) {
@@ -325,7 +328,7 @@ require_initdb_shared_directory(const extension_stage_layout& stage) {
     return static_cast<int>(ntohs(address.sin_port));
 }
 
-/// @brief Quotes one postgresql.conf string literal.
+/// @brief Quotes a postgresql.conf value and rejects embedded newlines.
 [[nodiscard]] inline std::string configuration_literal(std::string_view value) {
     if (value.find('\n') != std::string_view::npos
         || value.find('\r') != std::string_view::npos) {
@@ -342,7 +345,7 @@ require_initdb_shared_directory(const extension_stage_layout& stage) {
     return escaped;
 }
 
-/// @brief Restricts startup GUC names to PostgreSQL identifier components.
+/// @brief Allows letters, digits, underscores and dots in a startup setting name.
 inline void validate_guc_name(std::string_view name) {
     if (name.empty()) {
         throw std::invalid_argument("startup GUC name is empty");
@@ -360,7 +363,7 @@ inline void validate_guc_name(std::string_view name) {
     }
 }
 
-/// @brief Validates a preload library's unqualified PostgreSQL name.
+/// @brief Checks a preload library name for allowed characters and length.
 inline void validate_library_name(std::string_view name) {
     if (name.empty() || name.size() > 63) {
         throw std::invalid_argument("invalid preload library name");
@@ -377,7 +380,7 @@ inline void validate_library_name(std::string_view name) {
     }
 }
 
-/// @brief PID-reuse-resistant snapshot of a stable postmaster process tree.
+/// @brief A captured process identity with its parent PID and depth in the tree.
 struct supervised_process_tree_member {
     supervised_process_identity process;
     std::uint64_t parent_pid{};
@@ -407,7 +410,8 @@ struct process_tree_freeze_result {
     }
 };
 
-/// @brief Matches the captured run even if that process changed groups.
+/// @brief Checks that the PID still has the saved process start token.
+/// Changes to its process group are allowed.
 [[nodiscard]] inline bool is_process_identity_current(
     const supervised_process_identity& process) noexcept {
     const auto current = capture_supervised_process_identity(
@@ -487,7 +491,11 @@ process_tree_depths(
     return depths;
 }
 
-/// @brief Captures the complete parent-linked tree twice around identities.
+/**
+ * Captures process identities between two scans of the parent-child tree.
+ * Retries when the scans disagree or an identity cannot be read. A matching
+ * pair gives the cleanup controller a tree ordered by depth and PID.
+ */
 [[nodiscard]] inline std::optional<supervised_process_tree>
 capture_process_tree(
     const supervised_process_identity& anchor) noexcept try {
@@ -569,7 +577,7 @@ capture_process_tree(
     return std::nullopt;
 }
 
-/// @brief Signals the broker-owned postmaster group while its leader pins reuse.
+/// @brief Signals the postmaster group through the launch-broker process owned by this cluster.
 [[nodiscard]] inline bool signal_owned_postmaster_group(
     const supervised_process_tree& tree,
     int signal_number,
@@ -684,7 +692,7 @@ template <typename p_descendant_resume, typename p_root_resume>
     return resume_root();
 }
 
-/// @brief Resumes children before parents and the broker-owned group last.
+/// @brief Tries to resume descendants from deepest to shallowest, then the postmaster group.
 [[nodiscard]] inline bool resume_process_tree(
     const supervised_process_tree& tree,
     owned_process* owned_group_leader = nullptr) noexcept {
@@ -739,7 +747,13 @@ template <typename p_descendant_resume, typename p_root_resume>
         .tree = std::move(tree)};
 }
 
-/// @brief Freezes a stable anchored tree before any force-cleanup decision.
+/**
+ * Stops the postmaster group, then stops descendants from parents to
+ * children and checks the tree again. Stopped parents keep child PIDs from
+ * being reused while cleanup decides whether it can send signals safely.
+ * If freezing fails, the function attempts to resume the processes already
+ * stopped and reports whether that recovery finished.
+ */
 [[nodiscard]] inline process_tree_freeze_result
 freeze_process_tree(
     const supervised_process_identity& anchor,
@@ -845,7 +859,7 @@ freeze_process_tree(
     }
 }
 
-/// @brief Refuses an unanchored capture that cannot establish a live fixed point.
+/// @brief Refuses to freeze a tree when its postmaster identity is unavailable.
 [[nodiscard]] inline process_tree_freeze_result
 refuse_unanchored_process_tree_freeze(
     const supervised_process_tree&,
@@ -855,7 +869,7 @@ refuse_unanchored_process_tree_freeze(
         .tree = std::nullopt};
 }
 
-/// @brief True only after every exact captured identity is gone.
+/// @brief Returns true when none of the captured process identities still match.
 [[nodiscard]] inline bool has_no_process_tree_members(
     const supervised_process_tree& tree) noexcept {
     return std::all_of(
@@ -865,7 +879,7 @@ refuse_unanchored_process_tree_freeze(
         });
 }
 
-/// @brief True only after every captured identity and process group is gone.
+/// @brief Checks that captured identities no longer match and every saved group is absent.
 [[nodiscard]] inline bool is_process_tree_absent(
     const supervised_process_tree& tree) noexcept {
     const bool members_absent =
@@ -878,7 +892,7 @@ refuse_unanchored_process_tree_freeze(
     return members_absent && groups_absent;
 }
 
-/// @brief Waits a bounded interval for every captured identity to vanish.
+/// @brief Polls until no captured identity matches, or the timeout expires.
 [[nodiscard]] inline bool wait_for_process_tree_members_absence(
     const supervised_process_tree& tree,
     std::chrono::milliseconds deadline) noexcept {
@@ -893,7 +907,7 @@ refuse_unanchored_process_tree_freeze(
     return has_no_process_tree_members(tree);
 }
 
-/// @brief Waits a bounded interval for the captured tree and groups to vanish.
+/// @brief Polls for tree and group absence until the timeout expires.
 [[nodiscard]] inline bool wait_for_process_tree_absence(
     const supervised_process_tree& tree,
     std::chrono::milliseconds deadline) noexcept {
@@ -942,7 +956,12 @@ terminate_process_tree_child_first(
     return progress.finish(true, root_group_signaled);
 }
 
-/// @brief Crosses the commit boundary at first SIGKILL, then never rolls back.
+/**
+ * Sends SIGKILL to the frozen tree from children to parents, then kills
+ * the postmaster group. Once a kill is delivered, the result records that
+ * cleanup has committed even if a later signal fails. Callers must retry
+ * termination after that point instead of resuming the remaining tree.
+ */
 [[nodiscard]] inline process_tree_termination_result
 force_kill_process_tree(
     const supervised_process_tree& tree,
@@ -1008,11 +1027,12 @@ force_kill_process_tree(
 
 export namespace bioseq::postgres_test {
 
-/// @brief Exercises controller ordering/commit policy without sending signals.
-///
-/// The caller supplies a real complete topology snapshot; injected outcomes
-/// then traverse the same `(depth, pid)` ordering and shared commit tracker as
-/// the signalling controller.
+/**
+ * Tests process stopping, resuming and killing without sending signals.
+ * The supplied parent-child tree is ordered by depth and PID. Injected
+ * failures run through the same traversal helpers and kill-progress tracker
+ * as real cleanup.
+ */
 [[nodiscard]] inline process_tree_controller_trace
 simulate_process_tree_controller(
     std::vector<postgres_process_tree_member> topology,
@@ -1173,13 +1193,18 @@ simulate_process_tree_controller(
     return trace;
 }
 
-/// @brief Renders version-portable settings for one staged private cluster.
-/// @param port Private postmaster port paired with its Unix socket directory.
-/// @param socket_directory Private Unix-domain socket directory.
-/// @param runtime_library_directory Authorized per-case DSO directory, if any.
-/// @param preload_libraries Validated shared-preload library names.
-/// @param startup_gucs Additional settings validated for postmaster arguments.
-/// @return Complete configuration text appended after initdb.
+/**
+ * Builds postgresql.conf settings for the private socket and extension
+ * libraries. Startup settings are checked here and passed to postgres as
+ * separate -c arguments by start().
+ *
+ * @param port Port number used with the private Unix socket directory.
+ * @param socket_directory Directory for the cluster socket.
+ * @param runtime_library_directory Optional directory searched before $libdir.
+ * @param preload_libraries Library names to preload.
+ * @param startup_gucs Settings to validate for the postgres command line.
+ * @return Configuration text to append after initdb.
+ */
 [[nodiscard]] inline std::string render_private_cluster_configuration(
     int port,
     const std::filesystem::path& socket_directory,
@@ -1214,9 +1239,8 @@ simulate_process_tree_controller(
         configuration += "shared_preload_libraries = "
             + cluster_detail::configuration_literal(preloads) + '\n';
     }
-    // PostgreSQL's file grammar rejects multi-component custom GUC names.
-    // Validate here, then carry every setting as a distinct postmaster -c
-    // argument in start().
+    // Pass custom settings as separate -c arguments in start() so names
+    // with multiple dots can be used. Check names and values here.
     for (const auto& [name, value] : startup_gucs) {
         cluster_detail::validate_guc_name(name);
         static_cast<void>(
@@ -1225,7 +1249,8 @@ simulate_process_tree_controller(
     return configuration;
 }
 
-/// @brief Polls PGDATA until one stable executable-bound postmaster is verified.
+/// @brief Waits for a postmaster PID whose executable and data directory match.
+/// Returns nullopt on timeout or a failed identity check.
 [[nodiscard]] inline std::optional<supervised_process_identity>
 capture_supervised_postmaster_identity(
     const std::filesystem::path& expected_executable,
@@ -1272,7 +1297,12 @@ capture_supervised_postmaster_identity(
     }
 }
 
-/// @brief RAII owner of a staged, private PostgreSQL cluster.
+/**
+ * Owns a private PostgreSQL test cluster and its temporary files. The
+ * caller initializes and starts it explicitly. Cleanup stops the server
+ * and removes the root only after the lifecycle checks permit removal.
+ * The destructor attempts cleanup, and cleanup() returns its outcome.
+ */
 class private_cluster {
 public:
     explicit private_cluster(private_cluster_options options)
@@ -1306,7 +1336,7 @@ public:
     private_cluster(const private_cluster&) = delete;
     private_cluster& operator=(const private_cluster&) = delete;
 
-    /// @brief Validates the suite stage, initializes PGDATA, and writes settings.
+    /// @brief Validates the extension stage, runs the pre-initdb callback and initializes the database.
     void initialize() {
         if (cleanup_attempted_) {
             throw std::logic_error(
@@ -1355,7 +1385,7 @@ public:
         state_ = private_cluster_state::initialized;
     }
 
-    /// @brief Starts the initialized or previously stopped postmaster.
+    /// @brief Starts postgres and waits for a matching process identity and a working socket connection.
     void start() {
         if (cleanup_attempted_) {
             throw std::logic_error(
@@ -1491,7 +1521,7 @@ public:
         }
     }
 
-    /// @brief Stops and starts the same PGDATA with a bounded lifecycle.
+    /// @brief Stops and restarts the server using the same data directory.
     void restart() {
         require_state(private_cluster_state::running, "restart");
         stop();
@@ -1502,7 +1532,8 @@ public:
         start();
     }
 
-    /// @brief Simulates an unclean postmaster death for crash-recovery tests.
+    /// @brief Kills the postmaster tree without a clean shutdown for recovery tests.
+    /// Keeps the data directory and records incomplete termination for later cleanup.
     void crash_postmaster() {
         require_state(private_cluster_state::running, "crash_postmaster");
         if (!postmaster_identity_) {
@@ -1573,7 +1604,13 @@ public:
         publish_stopped_state();
     }
 
-    /// @brief Stops the owned postmaster; never throws from cleanup paths.
+    /**
+     * Attempt to stop the postmaster and its descendants. Use pg_ctl for a
+     * verified running server, then try to freeze and kill its process tree if
+     * needed. Later calls continue any unfinished cleanup. Failures are recorded
+     * in cleanup_error(), and unresolved processes keep the cluster in the
+     * running state so its files are kept.
+     */
     void stop() noexcept try {
         if (state_ != private_cluster_state::running) {
             return;
@@ -1838,7 +1875,8 @@ public:
             "private cluster stop failed while recording diagnostics");
     }
 
-    /// @brief Retries bounded stop/removal until cleanup is verified complete.
+    /// @brief Attempts to stop the cluster and remove its root, returning the cleanup result.
+    /// A later call retries failed cleanup.
     [[nodiscard]] const private_cluster_cleanup_result& cleanup() noexcept try {
         if (cleanup_result_.succeeded) {
             return cleanup_result_;
@@ -1881,7 +1919,7 @@ public:
         return cleanup_result_;
     }
 
-    /// @brief Opens a Unix-socket connection under the caller deadline.
+    /// @brief Opens a connection to the cluster's private Unix socket within the given timeout.
     [[nodiscard]] bioseq::libpq::client_connection connect(
         std::chrono::milliseconds deadline) const {
         require_state(private_cluster_state::running, "connect");
@@ -1893,35 +1931,36 @@ public:
         return connection;
     }
 
-    /// @brief Requests cancellation of one backend through a dedicated admin session.
+    /// @brief Requests backend cancellation through a new admin connection.
     void cancel_backend(std::int32_t pid) {
         run_backend_signal("pg_cancel_backend", pid);
     }
 
-    /// @brief Requests termination of one backend through a dedicated admin session.
+    /// @brief Requests backend termination through a new admin connection.
     void terminate_backend(std::int32_t pid) {
         run_backend_signal("pg_terminate_backend", pid);
     }
 
-    /// @brief Returns the current explicit lifecycle state.
+    /// @brief Returns the recorded cluster state.
     [[nodiscard]] private_cluster_state state() const noexcept { return state_; }
 
-    /// @brief Returns the exact PGDATA owned by this fixture.
+    /// @brief Returns the cluster data directory.
     [[nodiscard]] const std::filesystem::path& data_directory() const noexcept {
         return data_directory_;
     }
 
-    /// @brief Returns the short Unix-socket directory used by libpq.
+    /// @brief Returns the directory used for the cluster's Unix socket.
     [[nodiscard]] const std::filesystem::path& socket_directory() const noexcept {
         return socket_directory_;
     }
 
-    /// @brief Returns the exact root containing data, stage, and logs.
+    /// @brief Returns the temporary root containing the cluster files and logs.
     [[nodiscard]] const std::filesystem::path& root_directory() const noexcept {
         return root_;
     }
 
-    /// @brief Returns the staged artifact/digest inventory after initialize().
+    /// @brief Returns the validated extension-stage inventory.
+    /// Throws if stage validation has not produced an inventory.
     [[nodiscard]] const extension_stage_layout& staged_artifacts() const {
         if (!stage_) {
             throw std::logic_error("extension artifacts have not been staged");
@@ -1929,12 +1968,12 @@ public:
         return *stage_;
     }
 
-    /// @brief Returns the most recent no-throw cleanup diagnostic.
+    /// @brief Returns the latest cleanup diagnostic.
     [[nodiscard]] std::string_view cleanup_error() const noexcept {
         return cleanup_error_;
     }
 
-    /// @brief Returns the private cluster port paired with its unique socket path.
+    /// @brief Returns the port number used with the cluster's private socket directory.
     [[nodiscard]] int port() const noexcept { return port_; }
 
 private:
@@ -1944,7 +1983,7 @@ private:
             ? &*postmaster_process_ : nullptr;
     }
 
-    /// @brief Reaps the retained broker only after its target tree is gone.
+    /// @brief Waits for target identities to disappear, then reaps the broker and checks the groups.
     [[nodiscard]] bool finalize_postmaster_termination(
         const cluster_detail::supervised_process_tree& tree,
         std::chrono::milliseconds deadline) noexcept {
@@ -1989,7 +2028,7 @@ private:
         return physically_absent && supervision_released;
     }
 
-    /// @brief Durably publishes the physically verified stopped state.
+    /// @brief Records a stopped cluster after termination has been verified by the caller.
     void publish_stopped_state() {
         std::error_code pidfile_error;
         std::filesystem::remove(
@@ -2016,7 +2055,7 @@ private:
         cleanup_error_.clear();
     }
 
-    /// @brief Requires one exact lifecycle state.
+    /// @brief Throws if the cluster is in the wrong state for the operation.
     void require_state(private_cluster_state expected, std::string_view operation) const {
         if (state_ != expected) {
             throw std::logic_error(std::string(operation)
@@ -2024,7 +2063,7 @@ private:
         }
     }
 
-    /// @brief Resolves one required PostgreSQL lifecycle executable.
+    /// @brief Finds a PostgreSQL program in the configured bin directory.
     [[nodiscard]] std::filesystem::path program(std::string_view name) const {
         const std::filesystem::path candidate =
             options_.postgres_bin_dir / name;
@@ -2036,7 +2075,7 @@ private:
         return std::filesystem::canonical(candidate);
     }
 
-    /// @brief Runs one lifecycle executable in an owned process group.
+    /// @brief Starts a supervised PostgreSQL helper and waits within the given timeout.
     [[nodiscard]] process_exit_status run_program(
         std::string_view name,
         std::vector<std::string> arguments,
@@ -2053,7 +2092,7 @@ private:
         return child.wait_for(deadline);
     }
 
-    /// @brief Writes only validated private-cluster configuration settings.
+    /// @brief Appends the private socket and extension settings to postgresql.conf.
     void write_configuration() {
         if (!stage_) {
             throw std::logic_error("cannot configure before artifact staging");
@@ -2072,7 +2111,7 @@ private:
         }
     }
 
-    /// @brief Reads a lifecycle log without throwing during diagnostics.
+    /// Read log text for diagnostics, returning empty if opening fails or an exception occurs.
     [[nodiscard]] static std::string read_file(
         const std::filesystem::path& path) noexcept {
         try {
@@ -2084,7 +2123,7 @@ private:
         }
     }
 
-    /// @brief Executes one typed backend signal and requires a true result.
+    /// @brief Calls a PostgreSQL backend-signal function and requires a true result.
     void run_backend_signal(std::string_view function, std::int32_t pid) {
         require_state(private_cluster_state::running, function);
         if (pid <= 0) {
@@ -2103,7 +2142,7 @@ private:
         }
     }
 
-    /// @brief Records cleanup diagnostics without allowing allocation failures out.
+    /// @brief Tries to save the first cleanup error, ignoring allocation failures.
     void set_cleanup_error_noexcept(std::string_view message) noexcept {
         try {
             if (cleanup_error_.empty()) {
@@ -2113,7 +2152,7 @@ private:
         }
     }
 
-    /// @brief Removes only a marker-verified root allocated by this instance.
+    /// @brief Checks the root name, marker and parent before removing its supervision entry and files.
     void remove_owned_root() noexcept {
         try {
             if (root_.empty()
