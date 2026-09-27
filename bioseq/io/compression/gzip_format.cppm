@@ -1,9 +1,9 @@
 /**
  * @file gzip_format.cppm
- * @brief Parses gzip member headers and footers.
+ * @brief Reads gzip member headers and footers.
  *
- * Optional header fields are skipped according to FLG. Footer values retain
- * their little-endian CRC32 and modulo-2^32 size semantics.
+ * Optional header fields are skipped according to the flags. The footer stores
+ * the CRC-32 checksum and the uncompressed byte count modulo 2^32.
  */
 module;
 
@@ -50,11 +50,9 @@ struct gzip_footer {
     std::uint32_t isize_low32 = 0;
 };
 
-/// Parse a gzip member header from `reader`. Reader MUST be byte-aligned
-/// on entry. On success, advances the reader past the header and
-/// returns a populated `gzip_header`. On failure, the reader is left at
-/// some intermediate position. The caller should treat the stream as
-/// invalid.
+/// Reads a gzip header and advances to the first DEFLATE block.
+/// The reader must start at a byte boundary. On failure, its position may
+/// have advanced. Optional header checksums are skipped without verification.
 [[nodiscard]] inline std::expected<gzip_header, std::string>
 parse_gzip_header(bit_reader& reader, std::span<const std::uint8_t> compressed_view) {
     if (reader.bits_buffered() < 8)
@@ -118,7 +116,7 @@ parse_gzip_header(bit_reader& reader, std::span<const std::uint8_t> compressed_v
                 return {};
             }
         }
-        // Fallback path.
+        // Read bytes individually when a direct scan is unavailable.
         for (std::size_t safety = 0; safety < 65536; ++safety) {
             const std::uint64_t byte = reader.read<8>();
             if (byte == 0)
@@ -146,7 +144,7 @@ parse_gzip_header(bit_reader& reader, std::span<const std::uint8_t> compressed_v
     return header;
 }
 
-/// Parse the 8-byte gzip footer. Reader MUST be byte-aligned on entry.
+/// Aligns the reader to the next byte boundary and reads the 8-byte gzip footer.
 [[nodiscard]] inline std::expected<gzip_footer, std::string> parse_gzip_footer(bit_reader& reader) {
     reader.align_to_byte_boundary();
     gzip_footer footer;

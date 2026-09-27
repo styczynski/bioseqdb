@@ -1,6 +1,6 @@
 /**
  * @file parallel_gzip_decoder.cppm
- * @brief Drains decoded gzip chunks with optional checksum verification.
+ * @brief Copies decoded gzip chunks to the caller and optionally calculates their CRC.
  */
 module;
 
@@ -34,15 +34,16 @@ struct gzip_member_checksum_state {
     bool seen_bfinal_block = false;
 };
 
-/// Presents ordered decompressed bytes from independently decoded gzip chunks.
+/// Copies decoded gzip chunks to the caller in file order.
 ///
-/// The compressed view must outlive the decoder. Chunks remain owned by the
-/// fetcher until their bytes have been copied to the caller.
+/// The compressed view must outlive the decoder. The fetcher owns each chunk
+/// until all its bytes have been copied. CRC calculation is optional, and
+/// the current decoder does not check the result against the gzip footer.
 class parallel_gzip_decoder {
   public:
     /// Construct a decoder over caller-owned compressed bytes.
     ///
-    /// @param[in] compressed_view Bytes retained for the decoder lifetime
+    /// @param[in] compressed_view Bytes the caller keeps alive for the decoder lifetime
     /// @param[in] worker_count Maximum concurrent chunk decoders
     /// @param[in] chunk_decompressed_target_bytes Target output bytes per chunk
     /// @param[in] verify_crc Whether to update member checksums while draining
@@ -57,7 +58,7 @@ class parallel_gzip_decoder {
     /// Decoders exclusively own their fetcher state.
     parallel_gzip_decoder(const parallel_gzip_decoder&) = delete;
 
-    /// Decoders cannot share or replace active fetcher state.
+    /// Prevents copy assignment of the decoder and its active fetcher.
     parallel_gzip_decoder& operator=(const parallel_gzip_decoder&) = delete;
 
     /// Copy up to `cap` decompressed bytes into caller-owned storage.
@@ -95,15 +96,14 @@ class parallel_gzip_decoder {
             const std::size_t to_copy = std::min(available, cap - emitted);
 
             if (chunk.uses_marker_storage) {
-                // Marker-mode chunk: narrow uint16 → uint8 into dst.
-                // Reserved for the marker-mode parallel decode path.
+                // The fetcher has resolved every marker. Copy the low byte of each
+                // 16-bit entry into the caller's buffer.
                 bioseq::io::simd::narrow_lower_bytes_to_dst(chunk.marker_storage.data.get() +
                                                                 _current_chunk_drain_offset,
                                                             dst + emitted,
                                                             to_copy);
             } else {
-                // Direct-decode chunk: bytes already resolved. Single
-                // memcpy into the caller's slab.
+                // Byte storage can be copied directly into the caller's buffer.
                 std::memcpy(dst + emitted,
                             chunk.byte_storage.data.get() + _current_chunk_drain_offset,
                             to_copy);
@@ -125,10 +125,7 @@ class parallel_gzip_decoder {
                 _fetcher.release_chunk(_current_chunk);
                 _current_chunk = nullptr;
                 if (was_member_final) {
-                    // Reset the member CRC/ISIZE accumulators for the
-                    // next member. zlib auto-handles multi-member
-                    // streams under this backend. Reset our own
-                    // tracking.
+                    // Start fresh CRC and size counts for the next gzip member.
                     _current_member = gzip_member_checksum_state{};
                 }
             }
@@ -145,7 +142,7 @@ class parallel_gzip_decoder {
     [[nodiscard]] std::optional<std::span<const std::uint8_t>> next_decoded_chunk_view() noexcept {
         return std::nullopt;
     }
-    /// Complete the source protocol when no borrowed chunk is exposed.
+    /// No action is needed because callers never borrow a chunk.
     void release_chunk() noexcept {}
 
   private:

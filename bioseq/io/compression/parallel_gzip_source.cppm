@@ -38,7 +38,7 @@ class parallel_gzip_source {
     /// Sources exclusively own their mapping and decoder.
     parallel_gzip_source(const parallel_gzip_source&) = delete;
 
-    /// Sources cannot share or replace active decoder state.
+    /// Prevents copying the mapping and active decoder by assignment.
     parallel_gzip_source& operator=(const parallel_gzip_source&) = delete;
 
     /// Transfer the mapping and decoder into a new source.
@@ -50,15 +50,13 @@ class parallel_gzip_source {
     /// Release the decoder before its backing mapping.
     ~parallel_gzip_source() = default;
 
-    /// Open from an already-opened memory mapping.
-    ///
-    /// @param[in] mmap_in Mapping transferred into the returned source
-    /// @param[in] options Chunk size, worker count, and checksum policy
-    /// @return Ready source or a construction diagnostic
+    /// Takes ownership of an open mapping and creates its gzip decoder.
+    /// @param[in] mmap_in Mapping transferred into the returned source.
+    /// @param[in] options Chunk size, worker count, and CRC calculation setting.
+    /// @return Source that begins decoding on its first read.
     [[nodiscard]] static std::expected<parallel_gzip_source, std::string>
     try_open_from_mmap(mmap_source mmap_in, const reader_options& options) noexcept {
-        // Take a direct view of the mmap for the decoder. The mmap
-        // outlives the decoder — both live in the impl.
+        // The implementation owns the mapping until after the decoder is destroyed.
         auto direct = mmap_in.direct_view();
         std::span<const std::uint8_t> compressed_view{direct.first, direct.second};
 
@@ -67,7 +65,7 @@ class parallel_gzip_source {
         source._impl->mapped_source = std::move(mmap_in);
         source._impl->compressed_view = compressed_view;
 
-        // Compute chunk target / worker count from options.
+        // Use the configured chunk size and worker count, with defaults for zero.
         std::size_t chunk_bytes = options.io.parallel_gzip_chunk_bytes;
         if (chunk_bytes == 0) {
             chunk_bytes = 4 * 1024 * 1024; // default_parallel_gzip_chunk_size
@@ -118,7 +116,7 @@ class parallel_gzip_source {
     }
 
   private:
-    /// Couples the mapping lifetime to every decoder view derived from it.
+    /// Owns the mapping before the decoder so borrowed compressed bytes stay valid.
     struct impl {
         mmap_source mapped_source;
         std::span<const std::uint8_t> compressed_view;
