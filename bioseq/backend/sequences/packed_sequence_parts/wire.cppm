@@ -1,6 +1,6 @@
 /**
  * @file wire.cppm
- * @brief Standard-layout compact-sequence wire storage and factories.
+ * @brief Compact sequence headers, inline packed storage, and conversion callbacks.
  */
 module;
 
@@ -47,16 +47,15 @@ import :packed_sequence_range;
 
 export {
 
-// The sequences module owns the storage-neutral compact header layout;
-// PostgreSQL bindings provide allocation and wire callbacks without changing
-// the packed representation.
+// Sequence storage defines the compact header and packed layout. PostgreSQL
+// supplies allocation and input/output callbacks for that representation.
 
 namespace compact_sequence_stdc_detail {
 
 /**
- * @brief Selects a standard-layout field for an alignment deficit.
- * @tparam p_deficit Padding bytes required before the payload.
- * @return Type identity with exactly the requested byte width.
+ * @brief Chooses a field type for the required header padding.
+ * @tparam p_deficit Number of padding bytes.
+ * @return Type identity for that width, or void when no padding is needed.
  */
 template<std::size_t p_deficit>
 consteval auto pick_alignment_reserved_type() {
@@ -68,11 +67,11 @@ consteval auto pick_alignment_reserved_type() {
 }
 
 /**
- * @brief Computes padding needed to align payload bytes to 64 bits.
- * @tparam p_varlena_bytes Varlena header width.
- * @tparam p_code_bytes Alphabet code width.
- * @tparam p_bp_size_bytes Biological length field width.
- * @return Required padding bytes in the fixed header.
+ * @brief Calculates header padding for an eight-byte payload boundary.
+ * @tparam p_varlena_bytes Length-header bytes.
+ * @tparam p_code_bytes Alphabet-code bytes.
+ * @tparam p_bp_size_bytes Sequence-length bytes.
+ * @return Padding bytes to add to the fixed fields.
  */
 template<size_t p_varlena_bytes, size_t p_code_bytes, size_t p_bp_size_bytes>
 consteval size_t reserved_deficit() {
@@ -85,12 +84,12 @@ consteval size_t reserved_deficit() {
     return (target - (fixed_bytes % target)) % target;
 }
 
-/** @brief Field type occupying one fixed-header alignment deficit. */
+/** Type used for a header padding field of the requested size. */
 template <std::size_t p_deficit>
 using alignment_reserved_for_type =
     typename decltype(pick_alignment_reserved_type<p_deficit>())::type;
 
-/** @brief Stores the fixed-header bytes required before the payload. */
+/** Stores padding bytes before the packed payload. */
 template<std::size_t p_deficit>
 struct alignment_reserved_holder {
     alignment_reserved_for_type<p_deficit> reserved;
@@ -102,10 +101,11 @@ struct alignment_reserved_holder<0> { };
 }  // namespace compact_sequence_stdc_detail
 
 /**
- * @brief Allocator for a standard-layout compact sequence allocation.
+ * @brief Allocation callback returning storage for a compact sequence value.
  *
- * A conforming allocator accepts a byte count and returns suitably aligned
- * storage convertible to `p_allocated_type*`, or `nullptr` on failure.
+ * Accepts a byte count and returns a pointer convertible to p_allocated_type*.
+ * The caller requires alignment suitable for the header and packed words. A null
+ * pointer reports allocation failure.
  */
 template<class p_allocator_type, class p_allocated_type>
 concept stdc_allocator = requires (
@@ -131,10 +131,10 @@ concept is_compact_sequence_stdc =
         typename p_candidate_type::supported_storage_unit_byte_widths_type>;
 
 /**
- * @brief Compile-time specialization of a runtime compact-sequence header.
- * @tparam p_stdc_type Standard-layout compact-sequence header type.
- * @tparam p_alphabet Pinned alphabet.
- * @tparam p_storage_unit_byte_width Pinned packed-unit width in bytes.
+ * @brief Gives a compact header a compile-time alphabet and word size.
+ * @tparam p_stdc_type Compact header type.
+ * @tparam p_alphabet Supported alphabet.
+ * @tparam p_storage_unit_byte_width Enabled word size in bytes.
  */
 template<
     class p_stdc_type,
@@ -151,15 +151,14 @@ requires (
 struct compact_sequence_stdc_instance;
 
 /**
- * @brief Stores a C-compatible packed-sequence header and inline payload.
+ * @brief Stores sequence metadata followed by packed words in the same allocation.
  *
- * The fixed header aligns `data` to a 64-bit boundary. Runtime alphabet and
- * storage-width fields dispatch to an exact `compact_sequence_stdc_instance`.
- *
- * @tparam p_alphabet_set_type Closed set of supported alphabets.
- * @tparam p_base_pair_size_type Integer type storing biological length.
- * @tparam p_varlena_header_type Integer type storing the varlena header.
- * @tparam p_storage_width_set_type Closed set of supported storage widths.
+ * The header records the alphabet and word size so runtime data can be passed
+ * to a matching typed range. Payload alignment includes reserved header bytes.
+ * @tparam p_alphabet_set_type Supported alphabets.
+ * @tparam p_base_pair_size_type Integer type for symbol counts.
+ * @tparam p_varlena_header_type Integer type for the allocation-length field.
+ * @tparam p_storage_width_set_type Allowed packed-word sizes.
  */
 template<
     class p_alphabet_set_type,
@@ -191,7 +190,7 @@ public:
             sizeof(bp_size_t)
         >();
 
-    /** @brief PostgreSQL four-byte uncompressed varlena header. */
+    /** Allocation length encoded with PostgreSQL varlena format bits. */
     varlena_header_t      vl_len_;
     /** @brief Alphabet index in supported_alphabets_type. */
     alphabet_code_t       alphabet_code;
@@ -213,9 +212,9 @@ public:
     }
 
     /**
-     * @brief Encodes a four-byte uncompressed PostgreSQL varlena length.
-     * @param total_bytes Complete allocation size including the fixed header.
-     * @return Length shifted above the two varlena format bits.
+     * @brief Encodes the allocation length above the two varlena format bits.
+     * @param total_bytes Complete size, including the header, fitting in 30 bits.
+     * @return Encoded length field.
      */
     [[nodiscard]] static constexpr varlena_header_t
     encode_varlena_header(std::size_t total_bytes) noexcept {
@@ -224,11 +223,12 @@ public:
     }
 
     /**
-     * @brief Dispatches runtime alphabet and storage width to one exact instance.
-     * @tparam p_handler_type Handler invoked with an instance template argument.
-     * @param alpha_code Runtime alphabet index.
-     * @param byte_width Runtime packed-unit width.
-     * @param handler Handler invoked exactly once.
+     * @brief Calls a handler with the header type for a runtime alphabet and word size.
+     * @param alpha_code Alphabet index in the supported set.
+     * @param byte_width Enabled word size in bytes.
+     * @param handler Callable with the matching instance type as a template argument.
+     *
+     * Invalid codes or widths fail an assertion.
      */
     template<class p_handler_type>
     [[gnu::always_inline]]
@@ -263,16 +263,18 @@ public:
     }
 
     /**
-     * @brief Receives validated packed units into a new standard-layout value.
-     * @tparam p_alphabet_type Logical sequence alphabet.
-     * @param target_storage_byte_width Packed-unit width in the incoming stream.
-     * @param in_padding_letters Unused rank slots in the final unit.
-     * @param in_bp_size Biological symbol count.
-     * @param in_unit_count Packed-unit count.
-     * @param receive_context Context passed to the receiver.
-     * @param receiver Typed packed-unit receiver.
-     * @param allocator Allocation callback for the complete value.
-     * @return Allocated value, or null when allocation fails.
+     * @brief Allocates a compact value and reads its packed words through a callback.
+     *
+     * Checks that the supplied word count and padding agree with the symbol count.
+     * The callback supplies valid ranks in the selected packed layout.
+     * @param target_storage_byte_width Incoming word size in bytes.
+     * @param in_padding_letters Unused final-word symbol slots.
+     * @param in_bp_size Sequence symbol count.
+     * @param in_unit_count Packed-word count.
+     * @param receive_context Context passed to receiver.
+     * @param receiver Reads one word as uint64_t for the supplied alphabet and width.
+     * @param allocator Allocates the complete header and payload.
+     * @return New value, or null when allocation fails.
      */
     template<
         sequence_alphabet p_alphabet_type,
@@ -295,12 +297,14 @@ public:
         p_allocator_type&& allocator);
 
     /**
-     * @brief Allocates an empty header with a requested packed-unit capacity.
-     * @tparam p_alphabet_type Logical sequence alphabet.
-     * @param target_storage_byte_width Packed-unit width in bytes.
-     * @param unit_count_value Reserved packed-unit count.
-     * @param allocator Allocation callback for the complete value.
-     * @return Allocated empty value, or null when allocation fails.
+     * @brief Allocates a compact header with space for the requested packed words.
+     *
+     * Sets the logical sequence length to zero and leaves payload initialization
+     * to the caller.
+     * @param target_storage_byte_width Enabled word size in bytes.
+     * @param unit_count_value Capacity in words.
+     * @param allocator Allocates the header and rounded payload capacity.
+     * @return Empty value, or null when allocation fails.
      */
     template<
         sequence_alphabet p_alphabet_type,
@@ -317,9 +321,9 @@ public:
         p_allocator_type&& allocator);
 
     /**
-     * @brief Sends every packed unit through a width-aware callback.
-     * @param send_context Context passed to the sender.
-     * @param sender Typed packed-unit sender.
+     * @brief Sends every packed word through a callback in storage order.
+     * @param send_context Context passed to sender.
+     * @param sender Receives each word as uint64_t with its original byte width.
      */
     template<class p_send_context_type, class p_sender_type>
     void send_to(
@@ -327,18 +331,24 @@ public:
         p_sender_type&& sender) const;
 
     /**
-     * @brief Hands a typed zero-copy range to one dispatched handler.
-     * @param handler Handler invoked with the exact instance type and range.
+     * @brief Calls a handler with a typed range over this value's existing bytes.
+     * @param handler Callable with the instance type and a temporary borrowed range.
+     *
+     * The header and payload must outlive use of the range.
      */
     template<class p_handler_type>
     [[gnu::always_inline]]
     void convert_to(p_handler_type&& handler) const;
 
     /**
-     * @brief Recasts packed bytes to another compatible storage-unit width.
-     * @param target_byte_width Destination packed-unit width.
-     * @param allocator Allocation callback for the destination value.
-     * @return Fresh value with unchanged payload bytes, or null on allocation failure.
+     * @brief Copies packed bytes into a value with a different word width.
+     *
+     * Recalculates the word count and final padding. The caller must ensure the
+     * layouts are compatible and the source has enough readable payload bytes.
+     * This function copies bytes without repacking individual ranks.
+     * @param target_byte_width Enabled destination word size.
+     * @param allocator Allocates the new value.
+     * @return New value, or null when allocation fails.
      */
     template<class p_allocator_type>
     requires (stdc_allocator<p_allocator_type, compact_sequence_stdc>)
@@ -347,7 +357,7 @@ public:
         std::uint8_t target_byte_width,
         p_allocator_type&& allocator) const;
 
-    /** @brief Returns the logical packed-unit count for the runtime shape. */
+    /** Returns the packed-word count for the stored alphabet and word size. */
     [[nodiscard]] size_t unit_count() const noexcept;
 
     /** @brief Returns payload bytes excluding trailing allocation alignment. */
@@ -391,10 +401,10 @@ static_assert(data_offset_check<supported_alphabets<alphabet_entry<seq::dna4, "d
 }  // namespace compact_sequence_stdc_detail
 
 /**
- * @brief Pins one runtime compact header to an alphabet and storage width.
- * @tparam p_stdc_type Standard-layout compact header.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_storage_unit_byte_width Packed-unit width in bytes.
+ * @brief Associates a compact header with one alphabet and packed-word type.
+ * @tparam p_stdc_type Compact header type.
+ * @tparam p_alphabet Supported alphabet.
+ * @tparam p_storage_unit_byte_width Enabled word size in bytes.
  */
 template<
     class p_stdc_type,
@@ -411,9 +421,9 @@ requires (
 struct compact_sequence_stdc_instance {
     using compact_sequence_stdc_type = p_stdc_type;
     using alphabet_type              = p_alphabet;
-    // Fixed-width standard types keep Highway lane selection identical across
-    // LP64 platforms, where Boost's least-width type may choose another C++
-    // spelling with the same bit width.
+    // Use standard fixed-width integer types so Highway selects the same lane
+    // types across LP64 platforms. Boost can choose a different C++ type with
+    // the same width.
     using storage_unit =
         std::conditional_t<p_storage_unit_byte_width == 8, std::uint64_t,
         std::conditional_t<p_storage_unit_byte_width == 4, std::uint32_t,
@@ -424,7 +434,7 @@ struct compact_sequence_stdc_instance {
     static constexpr size_t letter_bit_width  =
         seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>);
 
-    // The pack lookup pins the display name at the type level.
+    // Look up the alphabet name at compile time.
     static constexpr auto alphabet_name =
         p_stdc_type::supported_alphabets_type::template name_of<p_alphabet>();
     static constexpr std::string_view alphabet_name_sv = alphabet_name.view();
@@ -433,8 +443,8 @@ struct compact_sequence_stdc_instance {
 };
 
 /**
- * @brief Borrows a typed zero-copy range from a standard-layout compact value.
- * @tparam p_instance_type Header type pinned to one alphabet and storage width.
+ * @brief Borrows the packed payload of a compact value as a typed range.
+ * @tparam p_instance_type Header type with a fixed alphabet and word size.
  */
 template<typename p_instance_type>
 requires (is_compact_sequence_stdc_instance<p_instance_type>)
@@ -460,8 +470,10 @@ private:
 
 public:
     /**
-     * @brief Construct a zero-copy typed view over a compact header.
-     * @param storage Header and packed payload whose lifetime outlives the view.
+     * @brief Borrows a compact value whose alphabet and layout match this instance.
+     * @param storage Header and payload that must outlive the view.
+     *
+     * Debug checks verify word width, symbol count, and final padding.
      */
     explicit constexpr compact_sequence_range(
         const typename p_instance_type::compact_sequence_stdc_type& storage)
@@ -534,7 +546,7 @@ public:
         return it;
     }
 
-    /** @brief Tests biological length and packed payload equality. */
+    /** Compares sequence length and all payload bytes, including final-word padding bits. */
     [[nodiscard]] friend constexpr bool operator==(
         const compact_sequence_range<p_instance_type>& lhs,
         const compact_sequence_range<p_instance_type>& rhs)
@@ -546,11 +558,9 @@ public:
     }
 };
 
-// Disambiguation: the instance type must NOT also satisfy the two
-// concepts that drive the existing compact_sequence_range partial
-// specialisations. A future edit that broke this would manifest as an
-// "ambiguous partial specialisation" diagnostic at every use site;
-// catch it here with a one-line message instead.
+// Keep instance types separate from custom alphabet configurations and
+// alphabet containers so exactly one compact_sequence_range specialization
+// matches. These assertions catch an overlap at its definition.
 namespace compact_sequence_stdc_detail {
 using checked_instance_type = compact_sequence_stdc_instance<
     compact_sequence_stdc<supported_alphabets<alphabet_entry<seq::dna4, "dna4">, alphabet_entry<seq::dna5, "dna5">>>,

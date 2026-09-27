@@ -1,12 +1,11 @@
 /**
  * @file gatekeeper.cppm
- * @brief Implements the scalar GateKeeper oracle and its rank-range adapters.
+ * @brief GateKeeper sequence filtering on CPU.
  *
- * Equal-length inputs of at most 128 ranks and thresholds of at most eight edits use the
- * GateKeeper shifted-mismatch masks. Internal match runs of one or two ranks are amended before
- * the masks are intersected and scored as low-to-high four-bit groups. Every mask-based rejection
- * is confirmed by the exact threshold predicate, so unsupported geometry and unequal lengths
- * remain conservative.
+ * Compares equal-length inputs through shifted mismatch masks. Short internal
+ * match runs are changed to mismatches before the masks are combined and scored.
+ * An exact edit-distance check confirms mask-based rejections. Unequal lengths
+ * use their length difference, and unsupported inputs remain candidates.
  */
 module;
 
@@ -32,14 +31,13 @@ inline constexpr std::size_t k_maximum_length = 128u;
 /** Maximum edit threshold for which all shifted GateKeeper diagonals are evaluated. */
 inline constexpr std::uint32_t k_maximum_edits = 8u;
 
-/** Fixed-width logical mask covering every supported rank position. */
+/** One mismatch bit per supported sequence position. */
 using mask_type = std::bitset<k_maximum_length>;
 
 /**
- * @brief Builds the validity mask for one logical rank span.
- * @param[in] length Number of low-order positions belonging to the span.
- * @return A mask with exactly the first `length` positions set.
- * @pre `length` is no greater than @ref k_maximum_length.
+ * @brief Marks the sequence positions used in a mismatch mask.
+ * @param length Number of positions, at most k_maximum_length.
+ * @return Mask with the first length bits set.
  */
 [[nodiscard]] inline mask_type valid_mask(std::size_t length)
 {
@@ -51,11 +49,11 @@ using mask_type = std::bitset<k_maximum_length>;
 }
 
 /**
- * @brief Compares two unshifted rank spans by numeric-rank equality.
- * @param[in] query Query ranks in logical order.
- * @param[in] target Target ranks aligned to the query.
- * @return A mask whose set positions identify mismatching ranks.
- * @pre Both spans have the same size, no greater than @ref k_maximum_length.
+ * @brief Marks unequal ranks at matching query and target positions.
+ * @param query Query ranks.
+ * @param target Target ranks.
+ * @return Mismatch mask.
+ * @pre Equal lengths of at most k_maximum_length.
  */
 [[nodiscard]] inline mask_type mismatch_mask(
     std::span<const std::uint8_t> query,
@@ -71,17 +69,13 @@ using mask_type = std::bitset<k_maximum_length>;
 }
 
 /**
- * @brief Compares one shifted query-to-target diagonal.
- * @param[in] query Query ranks in logical order.
- * @param[in] target Target ranks in logical order.
- * @param[in] distance Positive diagonal displacement in ranks.
- * @param[in] shift_query_right Selects the query-right diagonal when `true` and the query-left
- * diagonal otherwise.
- * @return A mismatch mask with vacant diagonal positions left clear.
- * @pre The spans have equal size and `distance` does not exceed that size.
- *
- * Vacant positions stay zero rather than borrowing a sentinel value from the alphabet's rank
- * domain.
+ * @brief Marks mismatches after shifting the query relative to the target.
+ * @param query Query ranks.
+ * @param target Target ranks.
+ * @param distance Shift in symbols.
+ * @param shift_query_right Shift right when true, left otherwise.
+ * @return Mismatch bits with uncovered positions left zero.
+ * @pre Equal lengths of at most k_maximum_length, with distance no larger than the length.
  */
 [[nodiscard]] inline mask_type shifted_mismatch_mask(
     std::span<const std::uint8_t> query,
@@ -110,10 +104,10 @@ using mask_type = std::bitset<k_maximum_length>;
 }
 
 /**
- * @brief Amends bounded internal match runs of length one or two into mismatches.
- * @param[in] mismatches Mismatch mask for one diagonal.
- * @param[in] valid Mask identifying logical positions in the rank span.
- * @return The amended mismatch mask, restricted to valid positions.
+ * @brief Fills one- or two-symbol match gaps bounded by mismatches.
+ * @param mismatches Mismatch bits for one shift.
+ * @param valid Bits belonging to the sequence.
+ * @return Amended mismatch mask within the valid positions.
  */
 [[nodiscard]] inline mask_type amend_short_zero_runs(
     const mask_type& mismatches,
@@ -131,11 +125,11 @@ using mask_type = std::bitset<k_maximum_length>;
 }
 
 /**
- * @brief Extracts one logical low-to-high four-bit group from a mask.
- * @param[in] mask Mask to sample.
- * @param[in] first_position First logical position in the group.
- * @param[in] length Logical mask length. Positions beyond it remain clear.
- * @return The four-bit group with `first_position` in its least-significant bit.
+ * @brief Reads four consecutive mask bits, starting with the lowest position.
+ * @param mask Source mask.
+ * @param first_position First position to read.
+ * @param length Sequence length.
+ * @return Four-bit value, with positions beyond length left zero.
  */
 [[nodiscard]] inline std::uint8_t nibble_at(
     const mask_type& mask,
@@ -154,10 +148,11 @@ using mask_type = std::bitset<k_maximum_length>;
 }
 
 /**
- * @brief Computes the GateKeeper cost of one four-bit group without a lookup table.
- * @param[in] nibble Four-bit mismatch group.
- * @return Zero for an empty group, two for the six specified two-cost patterns, and one for every
- * other nonzero pattern.
+ * @brief Returns GateKeeper's score for a four-bit mismatch pattern.
+ *
+ * An empty pattern scores zero. Selected mixed patterns score two, and other
+ * nonempty patterns score one.
+ * @param nibble Four-bit pattern.
  */
 [[nodiscard]] constexpr inline std::uint32_t nibble_cost(
     std::uint8_t nibble) noexcept
@@ -178,12 +173,11 @@ using mask_type = std::bitset<k_maximum_length>;
 }
 
 /**
- * @brief Accumulates final-mask group costs in the CPU/GPU-defined order.
- * @param[in] final_mask Intersected and amended GateKeeper mask.
- * @param[in] length Number of logical positions represented by the mask.
- * @param[in] max_edits Threshold used to cap the estimate.
- * @return The accumulated estimate, or `max_edits + 1` immediately after the threshold is
- * exceeded.
+ * @brief Sums four-bit mask scores until they exceed the allowed edits.
+ * @param final_mask Combined GateKeeper mismatch mask.
+ * @param length Number of sequence positions.
+ * @param max_edits Edit threshold.
+ * @return Score, capped at max_edits + 1.
  */
 [[nodiscard]] inline std::uint32_t capped_mask_estimate(
     const mask_type& final_mask,
@@ -208,9 +202,8 @@ using mask_type = std::bitset<k_maximum_length>;
 export namespace bioseq::prefilter {
 
 /**
- * @brief Reports whether a job can use the direct scalar GateKeeper geometry.
- * @param[in] job Rank-slice geometry and edit threshold to validate.
- * @return `true` for nonempty equal lengths up to 128 ranks and thresholds up to eight edits.
+ * @brief Checks whether a job fits the scalar GateKeeper mask limits.
+ * @return True for nonempty equal lengths up to 128 symbols and at most eight edits.
  */
 [[nodiscard]] constexpr inline bool gatekeeper_geometry_supported(
     const prefilter_job& job) noexcept
@@ -222,16 +215,16 @@ export namespace bioseq::prefilter {
 }
 
 /**
- * @brief Evaluates one pair of materialized rank spans with scalar GateKeeper masks.
- * @param[in] query_ranks Query ranks in logical order.
- * @param[in] target_ranks Target ranks in logical order.
- * @param[in] max_edits Maximum accepted edit distance.
- * @return A conservative prefilter result with GateKeeper diagnostics when the geometry is
- * supported.
+ * @brief Tests whether a rank pair can be rejected by GateKeeper.
  *
- * Unequal lengths return their exact length difference under the conservative-unequal status.
- * Supported equal lengths use the GateKeeper mask estimate, and every candidate rejection is
- * confirmed by the exact threshold predicate before it becomes observable.
+ * Passing this filter keeps the pair for alignment. It does not establish a match.
+ * Equal-length inputs use shifted mismatch masks, and an exact edit-distance
+ * check confirms any rejection proposed by those masks. Unequal lengths use
+ * only their length difference. Unsupported sizes keep the candidate.
+ * @param query_ranks Query ranks in sequence order.
+ * @param target_ranks Target ranks using the same encoding.
+ * @param max_edits Allowed edit distance.
+ * @return Keep/reject decision, a safe lower bound, and optional mask diagnostics.
  */
 [[nodiscard]] inline prefilter_result gatekeeper_scalar(
     std::span<const std::uint8_t> query_ranks,
@@ -337,11 +330,9 @@ export namespace bioseq::prefilter {
 }
 
 /**
- * @brief Evaluates a flat rank batch in job order after validating every slice.
- * @param[in] input Flat query/target rank buffers and ordered jobs.
- * @return One result per input job in the original order.
- *
- * An out-of-bounds job produces an unsupported conservative result without loading its slices.
+ * @brief Evaluates rank-buffer jobs in their original order.
+ * @param input Query/target rank buffers and slices.
+ * @return One result per job. Out-of-bounds slices are kept without evaluation.
  */
 [[nodiscard]] inline std::vector<prefilter_result> gatekeeper_scalar_batch(
     const prefilter_batch_input& input)
@@ -363,16 +354,13 @@ export namespace bioseq::prefilter {
 }
 
 /**
- * @brief Materializes two compact ranges as ranks and delegates to the scalar core.
- * @tparam p_query_range_type Query range representation accepted by `compact_sequence_range`.
- * @tparam p_target_range_type Target range representation accepted by `compact_sequence_range`.
- * @param[in] query Compact query sequence.
- * @param[in] target Compact target sequence.
- * @param[in] max_edits Maximum accepted edit distance.
- * @return The scalar GateKeeper result for the two materialized rank spans.
+ * @brief Decodes two compact sequences and applies scalar GateKeeper.
  *
- * Numeric ranks are compared only after the two compact ranges are proven to use the identical
- * alphabet type.
+ * Both ranges must use the same alphabet type so equal ranks mean equal symbols.
+ * @param query Query sequence.
+ * @param target Target sequence.
+ * @param max_edits Allowed edit distance.
+ * @return GateKeeper decision and diagnostics.
  */
 template <supports_compact_sequence_range p_query_range_type,
           supports_compact_sequence_range p_target_range_type>

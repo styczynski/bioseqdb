@@ -46,11 +46,11 @@ import :packed_sequence_packing;
 export {
 
 /**
- * @brief Supplies packed-symbol iteration and conversion to derived ranges.
- * @tparam p_derived_range Concrete range exposing packed-unit iterators.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_packed_unit Packed storage word type.
- * @tparam p_bits_per_character Stored rank width, or zero for one rank per unit.
+ * @brief Adds symbol iteration and conversion methods to a packed range.
+ * @tparam p_derived_range Range supplying packed-unit iterators.
+ * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_packed_unit Packed word type.
+ * @tparam p_bits_per_character Bits per rank, or zero for one rank per word.
  */
 template<typename p_derived_range,
          typename p_alphabet,
@@ -61,7 +61,7 @@ struct compact_sequence_range_base {
     using self_type = compact_sequence_range_base<
         p_derived_range, p_alphabet, p_packed_unit, p_bits_per_character>;
 
-    /** @brief Compile-time alphabet and packed-unit geometry. */
+    /** Alphabet settings and the number of symbols stored in each word. */
     struct traits {
         using alphabet_type = p_alphabet;
         using storage_unit = p_packed_unit;
@@ -77,9 +77,8 @@ struct compact_sequence_range_base {
 
         static constexpr storage_unit char_mask = (static_cast<storage_unit>(1) << bits_per_char) - 1;
         static constexpr size_t rev_char_mask = char_mask << (bits_per_char * (letters_per_unit - 1));
-        // unit_used_bits can equal unit_width (when the alphabet packs exactly
-        // — e.g. dna4 into uint8). `1 << unit_width` on a storage_unit-wide
-        // integer is UB, so branch on the leftover-bits case.
+        // A full word needs an all-ones mask. Building it by shifting one past
+        // the word width would be undefined for types that do not promote wider.
         static constexpr storage_unit used_storage_mask =
             (unit_leftover_bits == 0)
                 ? static_cast<storage_unit>(~static_cast<storage_unit>(0))
@@ -89,8 +88,8 @@ struct compact_sequence_range_base {
             seqan3::alphabet_size<p_alphabet>;
         static constexpr size_t alphabet_size_n = alphabet_size + 1;
 
-        using letter_unit = typename boost::uint_t<seqan3::detail::ceil_log2(alphabet_size)>::least; // smallest type to hold single letter of this alphabet. This is useful when you want to hold each letter separately for processing
-        static constexpr size_t bits_per_char_unit = sizeof(letter_unit) * 8; // width in bits of letter_unit. bits_per_char_unit should always be greater or equal to bits_per_char
+        using letter_unit = typename boost::uint_t<seqan3::detail::ceil_log2(alphabet_size)>::least; // Smallest unsigned type that can hold one alphabet rank.
+        static constexpr size_t bits_per_char_unit = sizeof(letter_unit) * 8; // Width of a separately stored rank, in bits.
 
         static_assert(bits_per_char_unit >= bits_per_char);
         static_assert(sizeof(storage_unit) >= sizeof(letter_unit));
@@ -111,10 +110,11 @@ struct compact_sequence_range_base {
         };
 
         /**
-         * @brief Builds the low-bit mask for a k-mer of a given length.
+         * @brief Builds a mask for the packed bits of a k-mer.
          * @tparam p_other_storage_unit Unsigned mask type.
          * @param length K-mer length in symbols.
-         * @return Low-bit k-mer mask, saturated when the length exceeds the type.
+         *
+         * Lengths beyond the type's symbol capacity return its maximum value.
          */
         template<typename p_other_storage_unit>
         [[always_inline]] static constexpr p_other_storage_unit kmer_mask(const size_t& length) noexcept {
@@ -145,14 +145,14 @@ struct compact_sequence_range_base {
         static constexpr bool value = true;
     };
 
-    /** @brief Returns the concrete range through the CRTP base. */
+    /** Returns this object as the derived range type. */
     inline constexpr derived_range_type const* super() const {
         return static_cast<derived_range_type const*>(this);
     };
 
-    // forward bp iterator
+    // Forward symbol iteration.
 
-    /** @brief Selects the dereference value for a packed iterator mode. */
+    /** Chooses integer ranks or alphabet objects as iterator values. */
     template<iterator_mode p_mode>
     struct packed_iterator_traits {
         using dereference_type = std::conditional_t<
@@ -162,9 +162,9 @@ struct compact_sequence_range_base {
     };
 
     /**
-     * @brief Iterates logical ranks or symbols over LSB-first packed units.
-     * @tparam p_base_iterator_type Random-access packed-unit iterator.
-     * @tparam p_selected_mode Dereference representation.
+     * @brief Walks symbols within packed words, starting from the low bits.
+     * @tparam p_base_iterator_type Iterator over packed words.
+     * @tparam p_selected_mode Return ranks or alphabet objects.
      */
     template <typename p_base_iterator_type, iterator_mode p_selected_mode>
     class packed_sequence_iterator
@@ -199,11 +199,11 @@ struct compact_sequence_range_base {
         packed_sequence_iterator() = default;
 
         /**
-         * @brief Builds an iterator at a packed unit and rank slot.
-         * @param it Current packed-unit iterator.
-         * @param end One-past-last packed-unit iterator.
-         * @param rank_slot Rank slot within the current unit.
-         * @param current_unit Shifted current packed word.
+         * @brief Starts at a symbol slot within a packed word.
+         * @param it Current word iterator.
+         * @param end Iterator past the last word.
+         * @param rank_slot Symbol slot in the current word.
+         * @param current_unit Current word shifted so the selected rank occupies the low bits.
          */
         explicit packed_sequence_iterator(
             p_base_iterator_type it,
@@ -229,7 +229,7 @@ struct compact_sequence_range_base {
             }
         }
 
-        /** @brief Tests packed-unit and rank-slot identity. */
+        /** Checks whether two iterators select the same symbol position. */
         constexpr bool operator==(
             const packed_sequence_iterator& other) const {
             if constexpr (traits::letters_per_unit == 1) {
@@ -241,8 +241,8 @@ struct compact_sequence_range_base {
         }
 
         /**
-         * @brief Dereferences through a selected logical representation.
-         * @tparam p_dereference_mode Rank or alphabet-symbol representation.
+         * @brief Reads the current symbol as a rank or alphabet object.
+         * @tparam p_dereference_mode Requested result form.
          */
         template <iterator_mode p_dereference_mode>
         typename packed_iterator_traits<p_dereference_mode>::dereference_type _dereference() const {
@@ -273,7 +273,7 @@ struct compact_sequence_range_base {
             if constexpr (traits::letters_per_unit == 1) {
                 ++this->base_reference();
             } else if (rank_slot_ == traits::letters_per_unit - 1) {
-                // Need to increment
+                // Continue at the first symbol of the next packed word.
                 ++this->base_reference();
                 if (this->base() != end_) {
                     current_unit_ = *this->base();
@@ -296,7 +296,7 @@ struct compact_sequence_range_base {
         }
     };
 
-    /** @brief Borrowed begin/end pair for one packed iterator mode. */
+    /** Begin and end iterators for a borrowed sequence of symbols. */
     template<typename p_iterator_type>
     struct packed_iterator_range {
     private:
@@ -322,11 +322,13 @@ struct compact_sequence_range_base {
     };
 
     /**
-     * @brief Converts a packed-unit iterator to one logical iterator mode.
-     * @tparam p_mode Rank or alphabet-symbol representation.
-     * @tparam p_iterator_type Iterator accepted by the derived range.
-     * @param iterator Packed-unit iterator.
-     * @return Logical iterator preserving trailing padding semantics.
+     * @brief Converts a packed-word iterator into a symbol iterator.
+     *
+     * For the range end, selects the first padding slot so symbol iteration stops
+     * before trailing padding.
+     * @tparam p_mode Return ranks or alphabet objects.
+     * @param iterator Iterator accepted by the derived range.
+     * @return Symbol iterator.
      */
     template<iterator_mode p_mode, typename p_iterator_type>
     requires (valid_derived_iterator<p_iterator_type>::value == true)
@@ -353,8 +355,8 @@ struct compact_sequence_range_base {
     };
 
     /**
-     * @brief Returns the complete logical iterator range for one mode.
-     * @tparam p_mode Rank or alphabet-symbol representation.
+     * @brief Returns symbol iterators over the complete range.
+     * @tparam p_mode Return ranks or alphabet objects.
      */
     template<iterator_mode p_mode>
     constexpr inline auto iterable() const {
@@ -365,22 +367,16 @@ struct compact_sequence_range_base {
     };
 
     /**
-     * @brief Find an alphabet-symbol subsequence within a packed iterator range.
-     * @tparam p_iterator_type Valid iterator type for the derived range.
-     * @param begin First packed unit to inspect.
-     * @param end One-past-last packed unit.
-     * @param subsequence Alphabet symbols to locate.
-     * @param start_position First logical-symbol position considered.
-     * @return Logical-symbol offset of the first match, or `std::nullopt`.
+     * @brief Finds a symbol subsequence in a packed-word interval.
+     *
+     * Decodes the interval and pattern to strings before searching.
+     * @param begin First packed word.
+     * @param end Iterator past the last word.
+     * @param subsequence Symbols to find.
+     * @param start_position First symbol offset to search, relative to begin.
+     * @return Offset of the first match within the interval, or no value.
      */
-    /**
-     * @brief Decodes a packed-unit interval to characters.
-     * @tparam p_iterator_type Iterator accepted by the derived range.
-     * @param begin First packed unit.
-     * @param end One-past-last packed unit.
-     * @param split_units Insert a separator before each packed unit.
-     * @return Decoded characters in logical order.
-     */
+    
     template<typename p_iterator_type>
     requires (valid_derived_iterator<p_iterator_type>::value == true)
     constexpr std::optional<std::size_t> find_symbol_subsequence(
@@ -418,7 +414,7 @@ struct compact_sequence_range_base {
         return result;
     }
 
-    /** @brief Decodes the complete range to alphabet characters. */
+    /** Decodes the range to characters, optionally separating packed words with |. */
     constexpr std::string to_string(bool split_units = false) const {
         return to_string(super()->cbegin(), super()->cend(), split_units);
     }
@@ -434,15 +430,13 @@ struct compact_sequence_range_base {
     }
 
     /**
-     * @brief Split packed storage into unit-aligned record descriptors.
+     * @brief Describes unit-aligned chunks of packed storage without copying symbols.
      *
-     * No ranks are decoded or copied. Only the final descriptor carries the
-     * range's trailing padding.
-     *
-     * @param record_bp Maximum logical symbols per record. Must be a multiple
-     * of `traits::letters_per_unit`.
+     * Only the last chunk carries trailing padding. Empty input produces one empty
+     * chunk descriptor.
+     * @param record_bp Maximum symbols per chunk, a multiple of letters_per_unit.
      * @return Tuples of unit offset, unit count, and trailing padding.
-     * @throws std::invalid_argument If `record_bp` is zero or not unit-aligned.
+     * @throws std::invalid_argument If record_bp is zero or not unit-aligned.
      */
     [[nodiscard]] std::vector<std::tuple<std::size_t, std::size_t, std::size_t>>
     split_units(std::size_t record_bp) const {
@@ -485,23 +479,15 @@ struct compact_sequence_range_base {
     }
 
     /**
-     * @brief Extract all base-pair rank values to a vector of uint8_t.
+     * @brief Copies sequence ranks into one byte per symbol.
      *
-     * Each element in the returned vector is the rank value (0..alphabet_size-1)
-     * of one nucleotide in left-to-right order. This is the format required by
-     * algorithms like KSW2 that operate on raw rank arrays.
-     *
-     * For compact_sequence_range<std::vector<seq::dna4>>, the ranks are:
-     *   A=0, C=1, G=2, T=3 (matching seqan3::to_rank).
-     *
-     * @return Vector of uint8_t rank values, one per nucleotide
+     * Used by alignment code such as KSW2. DNA4 ranks are A=0, C=1, G=2, T=3.
+     * The alphabet ranks must fit in uint8_t.
+     * @return Rank bytes in sequence order.
      */
     [[nodiscard]] std::vector<uint8_t> to_encoded_vector() const {
         const size_t sequence_length = bp_size();
-        // iterable<logical_rank>() constructs both endpoint iterators through
-        // iter(),
-        // whose representation dereferences the underlying iterator.
-        // Avoid forming those iterators for an empty packed range.
+        // Empty input needs no rank iterators or output allocation.
         if (sequence_length == 0u) return {};
         std::vector<uint8_t> encoded_ranks;
         encoded_ranks.reserve(sequence_length);
@@ -512,15 +498,14 @@ struct compact_sequence_range_base {
     }
 
     /**
-     * @brief Extract a sub-region of the sequence as rank values, with optional
-     *        reverse-complement transformation.
+     * @brief Copies an interval into one byte per rank.
+     * @tparam p_is_reversed Select coordinates in the full reverse complement when true.
+     * @param bp_from First symbol, inclusive, in the selected orientation.
+     * @param bp_to Last symbol, exclusive, in the selected orientation.
+     * @return Rank bytes, or an empty vector if bp_from >= bp_to.
      *
-     * @tparam p_is_reversed  When false, encodes [bp_from, bp_to) in forward order.
-     *                      When true, produces the same result as slicing the full
-     *                      reverse-complement encoding at [bp_from, bp_to).
-     * @param bp_from  Start position (inclusive, 0-based)
-     * @param bp_to    End position (exclusive, 0-based)
-     * @return Vector of uint8_t rank values for the requested region
+     * The interval must lie within the sequence, and ranks must fit in uint8_t.
+     * Reverse-complement output requires an alphabet with complementation.
      */
     template<bool p_is_reversed>
     [[nodiscard]] std::vector<uint8_t> to_encoded_vector(size_t bp_from, size_t bp_to) const {
@@ -539,8 +524,8 @@ struct compact_sequence_range_base {
                 ++pos;
             }
         } else {
-            // Reverse-complement maps each output rank to its mirrored input.
-            // read forward, complemented, written in reverse order.
+            // Read the mirrored source interval, complement its ranks, and write them
+            // in reverse order.
             const size_t sequence_length = bp_size();
             const size_t orig_from = sequence_length - bp_to;
             const size_t orig_to = sequence_length - bp_from;
@@ -561,20 +546,18 @@ struct compact_sequence_range_base {
     }
 
     /**
-     * @brief Encode a sub-region directly into caller-provided storage.
+     * @brief Writes an interval as rank bytes into caller-owned storage.
      *
-     * Same output as `to_encoded_vector<p_is_reversed>(bp_from, bp_to)` but
-     * writes into a span owned by the caller. Used by KSW2 to skip the
-     * per-call std::vector allocation. The caller allocates
-     * the destination from its own align arena and passes the span in.
+     * Alignment code can reuse its work buffer instead of allocating a vector for
+     * each interval. Decoding starts at the requested packed word.
+     * @tparam p_is_reversed Interpret coordinates in the full reverse complement.
+     * @tparam p_write_reversed Reverse the selected output before writing it.
+     * @param dst Destination with at least bp_to - bp_from bytes.
+     * @param bp_from First symbol, inclusive.
+     * @param bp_to Last symbol, exclusive.
      *
-     * The destination span must be at least `bp_to - bp_from` bytes.
-     *
-     * Iteration seeks directly to `bp_from`, so runtime and memory traffic are
-     * proportional to the selected region rather than the complete sequence.
-     * The current implementation seeks directly to `bp_from` via index
-     * arithmetic on the bit-packed storage, then walks exactly
-     * `region_length` letters.
+     * The interval must lie within the sequence and ranks must fit in uint8_t.
+     * An empty interval or undersized destination leaves dst unchanged.
      */
     template<bool p_is_reversed, bool p_write_reversed = false>
     void to_encoded_into(std::span<uint8_t> dst, size_t bp_from, size_t bp_to) const {
@@ -585,61 +568,22 @@ struct compact_sequence_range_base {
         constexpr size_t lpu = traits::letters_per_unit;
         constexpr size_t bpc = traits::bits_per_char;
 
-        // The output of this method is the cross product of two flips:
-        //   * letter complement (p_is_reversed)
-        //   * write-pointer direction (the canonical rc has both flipped)
-        //
-        // To make the matrix legible:
-        //
-        //   <false, false>  forward     dst[i] = src[from+i]
-        //   <false, true>   reverse     dst[i] = src[to-1-i]              (no rc, just mirror)
-        //   <true,  false>  rc          dst[i] = complement(src[to-1-i])  (canonical rc)
-        //   <true,  true>   complement  dst[i] = complement(src[from+i])  (rc twice cancels)
-        //
-        // The KSW2 / Block aligner pipelines pre-reverse the query before the
-        // DP loop. When the alignment region is on the reverse strand
-        // (p_is_reversed == true) the existing code path materialised a
-        // reverse-complement buffer and then mirror-copied it into the DP
-        // state — a wasteful round trip. With this template parameter we can
-        // emit the alignment-ready orientation directly: the DP query buffer
-        // wants the *complement only* form (rc twice = identity on order),
-        // which is exactly <true, true> below.
-        //
-        // Translate to forward-domain coordinates. p_is_reversed reads through
-        // the mirrored window of the source so that "complement + mirror"
-        // produces the canonical rc; p_write_reversed only changes the
-        // destination write order, not the source coordinates.
+        // Coordinates refer to the forward sequence or its full reverse complement,
+        // according to p_is_reversed. Map the latter interval back to source words.
+        // p_write_reversed changes output order without changing that source interval.
+        // With both flags true, alignment receives complemented ranks in source order.
         const size_t fwd_from = p_is_reversed ? (bp_size() - bp_to)   : bp_from;
         [[maybe_unused]] const size_t fwd_to =
             p_is_reversed ? (bp_size() - bp_from) : bp_to;
 
-        // The four orientations collapse to two output orderings in this
-        // implementation: <true, false> and <false, true> both write
-        // descending; <false, false> and <true, true> both write ascending.
-        // Letter complement is applied iff p_is_reversed (mirroring how the
-        // forward-window is interpreted). Branch is constexpr so the
-        // generated code paths stay specialised per call site.
+        // Reverse-complement output writes ranks backward. Reversing the requested
+        // output again restores forward writing, while complementation stays enabled.
         constexpr bool descending_write = (p_is_reversed && !p_write_reversed)
             || (!p_is_reversed && p_write_reversed);
 
-        // -----------------------------------------------------------
-        // Fast path: alphabet packs exactly into storage_unit
-        // (`unit_leftover_bits == 0`) and the requested window is at
-        // least one full unit. Decompose each storage_unit via the
-        // constexpr `extract_ranks_from_unit<>` helper and stream
-        // into the destination buffer with no per-letter shift loop.
-        //
-        // For dna4 / sequence_custom_alphabet<dna4, uint64_t> this is
-        // 32 letters per uint64_t, so a 1 Mbp KSW2 region encode
-        // collapses ~62k unit reads + 62k inlined decompositions
-        // into a tight loop the compiler can keep in registers and
-        // vectorize against the destination span.
-        //
-        // The fallback below handles dna5 (5 letters → 3 bits has 2
-        // leftover bits per uint8) and any future alphabet that
-        // doesn't pack cleanly. Both code paths are gated by
-        // `if constexpr` so each instantiation gets exactly one body.
-        // -----------------------------------------------------------
+        // When symbols fill each word exactly, decode whole words between the
+        // partial first and last words. DNA4 in uint64_t holds 32 symbols per word.
+        // Alphabets with unused bits in each word use the scalar path below.
         constexpr bool unit_aligned = (traits::unit_leftover_bits == 0);
 
         auto base_iter = super()->cbegin();
@@ -647,11 +591,7 @@ struct compact_sequence_range_base {
         size_t bit_no = fwd_from % lpu;
 
         if constexpr (unit_aligned) {
-            // The fast path requires the source iterator to be
-            // unit-aligned at the start. If `bp_from` lands mid-unit
-            // we walk a few letters scalar-style until we reach the
-            // next unit boundary, then switch to the unit-decomposed
-            // bulk loop. Same idea on the tail.
+            // Decode the partial first word before entering the whole-word loop.
             size_t produced = 0;
 
             auto emit_letter = [&dst, &region_length, &produced](
@@ -667,12 +607,7 @@ struct compact_sequence_range_base {
                 ++produced;
             };
 
-            // Walk to the next unit boundary, scalar-shift style.
-            // bioseq encodes the FIRST input letter at the unit's LSB
-            // slot (see `extract_ranks_from_unit` header comment).
-            // To advance past `bit_no` earlier letters we drop
-            // the bottom `bit_no * bpc` bits and continue masking the
-            // LSB — the same invariant held by packed_sequence_iterator.
+            // Discard earlier slots so the first requested rank occupies the low bits.
             if (bit_no != 0 && produced < region_length) {
                 typename traits::storage_unit unit_val =
                     static_cast<typename traits::storage_unit>(*base_iter);
@@ -685,37 +620,27 @@ struct compact_sequence_range_base {
                         unit_val >> bpc);
                     ++bit_no;
                 }
-                // Only advance to the next unit if we consumed the
-                // current one. Otherwise (region ended mid-unit) stay
-                // put — the bulk loop has bulk_units==0 in that case
-                // and the tail loop also has produced==region_length,
-                // so no dereference happens; we keep the iterator
-                // valid as a defensive measure for future refactors.
+                // Advance only if the first partial word was consumed completely.
                 if (bit_no == lpu) {
                     ++base_iter;
                     bit_no = 0;
                 }
             }
 
-            // Bulk loop: each iteration consumes one entire unit and
-            // emits `lpu` letters. The decomposition is fully
-            // constexpr — the compiler unrolls into a fixed pattern
-            // of mask + shift + store instructions per unit.
+            // Decode complete words using the fixed number of symbols per word.
             const size_t bulk_units = (region_length - produced) / lpu;
             for (size_t u = 0; u < bulk_units; ++u) {
                 const auto ranks = extract_ranks_from_unit<
                     typename traits::storage_unit, bpc, lpu>(
                         static_cast<typename traits::storage_unit>(*base_iter));
-                // Index 0 of `ranks` is the left-most symbol of the
-                // unit — this matches the canonical sequence order.
+                // ranks[0] is the first sequence symbol in this word.
                 for (size_t k = 0; k < lpu; ++k) {
                     emit_letter(ranks[k]);
                 }
                 ++base_iter;
             }
 
-            // Tail: a final partial unit, if region_length wasn't a
-            // multiple of lpu after the alignment walk above.
+            // Decode any symbols left in the final partial word.
             if (produced < region_length) {
                 typename traits::storage_unit unit_val =
                     static_cast<typename traits::storage_unit>(*base_iter);
@@ -729,16 +654,8 @@ struct compact_sequence_range_base {
             return;
         }
 
-        // -----------------------------------------------------------
-        // Generic path (alphabets with leftover bits, e.g. dna5 in
-        // uint8). Walks letter-by-letter via a scalar shift loop —
-        // same logical-rank and padding contract as the aligned path.
-        // -----------------------------------------------------------
-        // For the letters_per_unit == 1 case, every unit holds exactly one
-        // letter; iter<logical_rank>() is a thin wrapper around
-        // dereferencing the underlying storage. For multi-letter units,
-        // pre-shift the unit so the bp_from-th letter sits in the bottom
-        // char_mask bits — the packed iterator invariant.
+        // For layouts with unused bits in each word, extract ranks one at a time
+        // and restart at the next packed word after its last complete symbol.
         typename traits::storage_unit unit_val{};
         if constexpr (lpu == 1) {
             unit_val = static_cast<typename traits::storage_unit>(*base_iter);
@@ -753,8 +670,7 @@ struct compact_sequence_range_base {
                 static_cast<typename traits::storage_unit>(unit_val & traits::char_mask);
             if constexpr (lpu == 1) {
                 ++base_iter;
-                // Defer dereference to the next iteration's read; only
-                // refresh `unit_val` if we're going to read it.
+                // The refresh helper loads the next word.
                 unit_val = 0;
             } else {
                 ++bit_no;
@@ -770,9 +686,8 @@ struct compact_sequence_range_base {
             return out;
         };
 
-        // Refresh the unit at the *start* of each new storage word; the
-        // letters_per_unit == 1 path needs this on every step, the multi
-        // path only when bit_no wraps to 0.
+        // Refresh after moving to a new word. Multi-symbol words are reloaded
+        // only when more output remains.
         auto refresh_unit_if_needed =
             [&unit_val, &base_iter, &bit_no, &region_length](size_t step_idx) {
                 if constexpr (lpu == 1) {
@@ -810,15 +725,10 @@ struct compact_sequence_range_base {
     }
 
     /**
-     * @brief Extract reverse-complement base-pair rank values to a vector of uint8_t.
+     * @brief Returns the reverse complement as one byte per rank.
      *
-     * Iterates the sequence left-to-right, complements each nucleotide using
-     * the alphabet's complement operation (e.g. A<->T, C<->G for DNA), and
-     * writes into the result vector in reverse order.
-     *
-     * Requires the alphabet to support seqan3::complement (nucleotide alphabets).
-     *
-     * @return Vector of uint8_t rank values representing the reverse complement
+     * Requires alphabet complementation and ranks that fit in uint8_t.
+     * @return Complemented ranks in reverse sequence order.
      */
     [[nodiscard]] std::vector<uint8_t> to_reverse_complement_encoded_vector() const {
         const size_t sequence_length = bp_size();
@@ -834,9 +744,11 @@ struct compact_sequence_range_base {
     }
 
     /**
-     * @brief Reinterprets the range through a compatible packed-unit width.
-     * @tparam p_other_storage_unit Requested packed storage word type.
-     * @return Borrowed bit-cast view preserving symbols and padding.
+     * @brief Borrows the same packed bytes through a different word width.
+     * @tparam p_other_storage_unit Requested word type.
+     * @return View with the same symbols and padding recalculated for the new width.
+     *
+     * The source range must outlive the view.
      */
     template<
         typename p_other_storage_unit,
@@ -856,11 +768,10 @@ struct compact_sequence_range_base {
 };
 
 /**
- * @brief Borrows an unpacked alphabet range through the compact sequence API.
- * @tparam p_range_type Contiguous or iterable alphabet-symbol source.
+ * @brief Borrows an unpacked alphabet container through the compact sequence API.
  *
- * Each source element represents one logical symbol, so iteration and size
- * retain the source range's order without allocating packed storage.
+ * Each element is one symbol. The adapter reads its rank without packing a copy.
+ * @tparam p_range_type Sized random-access alphabet range that outlives the adapter.
  */
 template<typename p_range_type>
 requires (
@@ -886,14 +797,14 @@ public:
         return 0;
     }
 
-    /** @brief Binds an rvalue range whose lifetime exceeds this adapter. */
+    /** Borrows an rvalue range without extending its lifetime. Keep the range alive externally. */
     explicit constexpr compact_sequence_range(p_range_type&& base_range)
         : data_(std::move(base_range)) {}
     /** @brief Binds a borrowed alphabet-symbol range. */
     explicit constexpr compact_sequence_range(p_range_type& base_range)
         : data_(base_range) {}
 
-    /** @brief Rank-projecting iterator over an unpacked alphabet range. */
+    /** Reads integer ranks from an unpacked alphabet container. */
     class unpacked_rank_iterator : public boost::iterator_adaptor<
         unpacked_rank_iterator,
         base_iterator_type,
@@ -922,7 +833,7 @@ public:
         explicit unpacked_rank_iterator(base_iterator_type const& it)
             : super_t(it) {}
 
-        /** @brief Orders iterators by their source positions. */
+        
         auto operator <=>(const unpacked_rank_iterator&) const = default;
 
         /** @brief Returns the integer rank of the current alphabet symbol. */
@@ -938,12 +849,12 @@ public:
 
     using iterator = unpacked_rank_iterator;
 
-    /** @brief Returns a mutable adapter iterator to the first symbol. */
+    /** Returns a read-only rank iterator to the first symbol. */
     unpacked_rank_iterator begin() {
         return unpacked_rank_iterator(data_.cbegin());
     }
 
-    /** @brief Returns a mutable adapter iterator past the final symbol. */
+    /** Returns a read-only rank iterator past the last symbol. */
     unpacked_rank_iterator end() {
         return unpacked_rank_iterator(data_.cend());
     }
@@ -968,7 +879,7 @@ public:
         return unpacked_rank_iterator(data_.cend());
     }
 
-    /** @brief Orders adapters by their borrowed ranges. */
+    
     auto operator <=>(const compact_sequence_range<p_range_type>&) const = default;
 
     /** @brief Returns the rank at a logical symbol index. */
@@ -989,7 +900,12 @@ public:
         return a.data_ == b.data_;
     }
 
-    /** @brief Returns a rank-sized pointer to the current source element. */
+    /**
+     * @brief Returns the current symbol's address cast to the rank-storage pointer type.
+     *
+     * Requires equal symbol and storage sizes and a standard-layout alphabet type.
+     * The cast leaves the backing object's C++ type unchanged.
+     */
     constexpr static const typename traits::storage_unit* read_cptr(
         const unpacked_rank_iterator& it) {
         static_assert(sizeof(typename traits::alphabet_type)
@@ -1003,8 +919,8 @@ public:
 };
 
 /**
- * @brief Owns alphabet ranks packed LSB-first under one configuration.
- * @tparam p_configuration Alphabet, storage word, and rank-width configuration.
+ * @brief Owns packed alphabet ranks, with the first symbol in each word's low bits.
+ * @tparam p_configuration Alphabet, word type, and bits per symbol.
  */
 template<typename p_configuration>
 requires (is_sequence_custom_alphabet<p_configuration>)
@@ -1032,9 +948,9 @@ public:
     compact_sequence_range() = default;
 
     /**
-     * @brief Pack a sized alphabet range into LSB-first storage units.
-     * @param input_sequence Symbols to pack in iteration order.
-     * @return Packed units and the number of unused final-unit slots.
+     * @brief Packs a sized alphabet range into words in sequence order.
+     * @param input_sequence Symbols to pack.
+     * @return Packed words and unused symbol slots in the final word.
      */
     template <typename p_input_range>
     requires (
@@ -1108,10 +1024,12 @@ public:
     }
 
     /**
-     * @brief Adopt already-packed LSB-first storage without re-encoding.
-     * @param units Packed units whose first symbol occupies the low bits.
-     * @param padding Unused symbol slots in the final unit.
-     * @return Compact sequence owning the supplied storage.
+     * @brief Takes ownership of already-packed words without encoding them again.
+     * @param units Words with the first symbol in each word's low bits.
+     * @param padding Unused final-word slots, less than letters_per_unit.
+     * @return Sequence owning the supplied vector.
+     *
+     * An empty vector requires zero padding.
      */
     [[nodiscard]] static constexpr compact_sequence_range from_packed(
         base_container&& units,
@@ -1145,10 +1063,10 @@ public:
     /** @brief Returns the number of packed storage units. */
     auto constexpr size() const { return packed_units.size(); }
 
-    /** @brief Orders ranges by packed units and padding. */
+    
     auto operator <=> (
         const compact_sequence_range<p_configuration>&) const = default;
-    /** @brief Tests packed units and padding for equality. */
+    
     bool constexpr operator==(
         const compact_sequence_range<p_configuration>&) const = default;
 
