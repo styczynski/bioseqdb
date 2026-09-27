@@ -1,9 +1,10 @@
 /**
  * @file external/ebi.cppm
- * @brief EBI Search OpenAPI descriptor assembled from provider partitions.
+ * @brief Assembles the OpenAPI document used to generate the EBI Search client.
  *
- * This primary module is the generated client source key.
- * The spec_fragments declaration defines the complete descriptor byte sequence.
+ * The fragment order joins the document header, paths, schemas, and Bioseq
+ * client settings into one string. The generator uses this module as the
+ * client's source file.
  */
 module;
 
@@ -23,12 +24,7 @@ import :result_schemas;
 import :support_schemas;
 import :integration;
 
-/**
- * @brief Counts bytes in an ordered descriptor fragment list.
- * @tparam p_fragment_count Number of fragments in the list.
- * @param fragments Fragment views in composition order.
- * @return Sum of the fragment byte counts.
- */
+/** Sums the byte lengths of the supplied descriptor fragments. */
 template <std::size_t p_fragment_count>
 [[nodiscard]] consteval std::size_t
 descriptor_size(const std::array<std::string_view, p_fragment_count>& fragments) noexcept {
@@ -40,11 +36,10 @@ descriptor_size(const std::array<std::string_view, p_fragment_count>& fragments)
 }
 
 /**
- * @brief Copies ordered descriptor fragments into null-terminated storage.
- * @tparam p_payload_size Combined descriptor byte count.
- * @tparam p_fragment_count Number of fragments in the list.
- * @param fragments Fragment views in composition order.
- * @return Constant storage containing every fragment in order.
+ * Joins descriptor fragments in order and adds a terminating zero byte.
+ *
+ * p_payload_size must equal the combined fragment length. The returned array
+ * owns the document bytes and its terminator.
  */
 template <std::size_t p_payload_size, std::size_t p_fragment_count>
 [[nodiscard]] consteval auto
@@ -57,7 +52,7 @@ concatenate_descriptor(const std::array<std::string_view, p_fragment_count>& fra
     return descriptor;
 }
 
-/** @brief Raw descriptor fragments in parser and composition order. */
+/** OpenAPI fragments in the order required to form the complete document. */
 static constexpr auto spec_fragments = std::to_array<std::string_view>({
     bioseq::external::ebi::descriptor::document_preamble,
     bioseq::external::ebi::descriptor::autocomplete_path,
@@ -77,9 +72,9 @@ static constexpr auto spec_fragments = std::to_array<std::string_view>({
 static constexpr auto spec_storage =
     concatenate_descriptor<descriptor_size(spec_fragments)>(spec_fragments);
 
-/** @brief Exact OpenAPI document consumed by EBI Search client generation. */
+/** Complete OpenAPI text, excluding its terminating zero byte. */
 static constexpr std::string_view spec{spec_storage.data(), spec_storage.size() - 1};
 
-/** @brief Code-generation anchor for the EBI Search client. */
+/** Declaration whose attributes request generation of the EBI client. */
 [[bioseq::api_client(spec)]] [[bioseq::api_client_fragments(
     spec_fragments)]] export struct bioseq_external_api_client;
