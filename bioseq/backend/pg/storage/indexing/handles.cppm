@@ -1,6 +1,6 @@
 /**
  * @file handles.cppm
- * @brief Creates PostgreSQL index handles and resolves active-read policy.
+ * @brief Create index storage handles and read minimizer index settings.
  */
 module;
 
@@ -63,26 +63,27 @@ export namespace bioseq::storage::indexing {
 using bioseq::indexing::index_sub_key_t;
 using bioseq::indexing::k_directory_sub_key;
 using bioseq::indexing::sequence_index_layout;
-/// @brief Row codec for the extension-owned index policy catalog.
+/// Read and write rows in the index policy catalog.
 using index_policy_codec = bioseq::postgres::storage::indexing::sql_row_codecs::index_policy_codec;
-/// @brief Decoded representation of one persisted index policy row.
+/// Values from one index policy row.
 using index_policy_row = index_policy_codec::row_type;
 
 /**
- * @brief Opens a sequence-scoped index storage handle for one locator.
+ * @brief Create a handle for one sequence's index.
  *
- * @param[in] user_relid User relation whose index metadata is addressed.
- * @param[in] db Database OID in the physical storage identity.
- * @param[in] spc Tablespace OID in the physical storage identity.
- * @param[in] relfn Main relation relfilenode in the storage identity.
- * @param[in] attno One-based PostgreSQL column number.
- * @param[in] index_name Stable index policy name borrowed for the handle lifetime.
- * @param[in] loc Locator that selects the sequence bucket and shard.
- * @param[in] sequence_rowno Logical sequence row number used as the query key.
- * @param[in] caches Borrowed relation cache state, which must outlive the handle.
- * @param[in] mctx Parent for the handle-owned child memory context.
- * @return A handle that requires checked close on success or explicit
- * abandonment after a PostgreSQL error.
+ * The handle borrows the index name and caches and owns a child memory context,
+ * so call close_checked after use or abandon_after_pg_error_noexcept after a PostgreSQL error.
+ *
+ * @param[in] user_relid Parent table OID.
+ * @param[in] db Database OID.
+ * @param[in] spc Tablespace OID.
+ * @param[in] relfn Parent table file number.
+ * @param[in] attno Column number, starting at one.
+ * @param[in] index_name Borrowed index name.
+ * @param[in] loc Sequence bucket and shard.
+ * @param[in] sequence_rowno Sequence row number.
+ * @param[in] caches Borrowed relation caches.
+ * @param[in] mctx Parent memory context.
  */
 [[nodiscard]] inline sequence_index_storage open_sequence_storage(Oid user_relid,
                                                                   Oid db,
@@ -99,18 +100,19 @@ using index_policy_row = index_policy_codec::row_type;
 }
 
 /**
- * @brief Opens a table-scoped index storage handle.
+ * @brief Create a handle for a table's chunked index.
  *
- * @param[in] user_relid User relation whose index metadata is addressed.
- * @param[in] db Database OID in the physical storage identity.
- * @param[in] spc Tablespace OID in the physical storage identity.
- * @param[in] relfn Main relation relfilenode in the storage identity.
- * @param[in] attno One-based PostgreSQL column number.
- * @param[in] index_name Stable index policy name borrowed for the handle lifetime.
- * @param[in] caches Borrowed relation cache state, which must outlive the handle.
- * @param[in] mctx Parent for the handle-owned child memory context.
- * @return A handle that requires checked close on success or explicit
- * abandonment after a PostgreSQL error.
+ * The handle borrows the index name and caches and owns a child memory context,
+ * so call close_checked after use or abandon_after_pg_error_noexcept after a PostgreSQL error.
+ *
+ * @param[in] user_relid Parent table OID.
+ * @param[in] db Database OID.
+ * @param[in] spc Tablespace OID.
+ * @param[in] relfn Parent table file number.
+ * @param[in] attno Column number, starting at one.
+ * @param[in] index_name Borrowed index name.
+ * @param[in] caches Borrowed relation caches.
+ * @param[in] mctx Parent memory context.
  */
 [[nodiscard]] inline table_index_storage open_table_storage(Oid user_relid,
                                                             Oid db,
@@ -125,9 +127,9 @@ using index_policy_row = index_policy_codec::row_type;
 }
 
 /**
- * @brief Raises an internal PostgreSQL error for an invalid policy state.
- * @param[in] message Primary diagnostic text.
- * @param[in] detail Optional diagnostic detail.
+ * @brief Report an invalid index policy as a PostgreSQL error wrapped in a C++ exception.
+ * @param[in] message Error message.
+ * @param[in] detail Optional details.
  */
 [[noreturn]] inline void active_read_policy_error_as_cpp(std::string_view message,
                                                          std::string_view detail = {}) {
@@ -150,17 +152,17 @@ using index_policy_row = index_policy_codec::row_type;
 }
 
 /**
- * @brief Resolves persisted minimizer policy under a registered MVCC snapshot.
+ * @brief Read minimizer enablement and update-on-insert settings.
  *
- * The extension catalog and its primary index are held under `AccessShareLock`
- * for the bounded scan and are closed before return. Missing minimizer rows use
- * their declared defaults.
+ * Use the caller's registered MVCC snapshot. Missing catalog rows use the
+ * index defaults. Check the catalog schema and primary key, and release the
+ * AccessShareLock locks on both relations before returning.
  *
- * @param[in] user_relid User relation named by the policy rows.
- * @param[in] relfilenode Current main-relation relfilenode.
- * @param[in] attno One-based PostgreSQL column number.
- * @param[in] registered_snapshot Registered MVCC snapshot used for the scan.
- * @return Effective enablement and insert-maintenance flags for each minimizer index.
+ * @param[in] user_relid Parent table OID.
+ * @param[in] relfilenode Parent table file number.
+ * @param[in] attno Column number, starting at one.
+ * @param[in] registered_snapshot Registered MVCC snapshot.
+ * @return Enabled and update-on-insert flags for each minimizer index.
  */
 [[nodiscard]] inline minimizer_persistence_policy_resolution
 resolve_minimizer_persistence_policy_implementation(Oid user_relid,
@@ -188,7 +190,7 @@ resolve_minimizer_persistence_policy_implementation(Oid user_relid,
             bioseq::indexing::is_default_update_on_insert_index(minimizers[i]);
     }
 
-    // Tracks PostgreSQL resources that require best-effort closure if the scan fails.
+    // Keep handles for cleanup if the policy scan fails.
     struct policy_scan_state {
         Relation volatile relation = nullptr;
         Relation volatile primary = nullptr;
