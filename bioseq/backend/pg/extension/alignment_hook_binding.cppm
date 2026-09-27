@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_binding.cppm
- * @brief PostgreSQL executor-hook alignment-frame binding and cleanup lifecycle.
+ * @brief Connect alignment scans to their query statistics and release query state.
  */
 module;
 
@@ -22,7 +22,9 @@ namespace bioseq::pg::detail {
 
 namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 
-/** @brief Destroys an unregistered frame and detaches its cleanup token. */
+/** @brief Remove a frame from the registries and delete it.
+ * Clear its cleanup token so a later memory-context reset cannot delete it again.
+ */
 void destroy_alignment_frame(alignment_executor_frame* frame) noexcept
 {
 	if (frame == nullptr) {
@@ -57,9 +59,9 @@ void alignment_frame_context_cleanup(void* argument)
 } // namespace
 
 /**
- * @brief Registers query-context cleanup for an executor frame once.
- * @param[in,out] frame Frame whose heap lifetime is tied to the query context.
- * @param[in] estate Executor state that owns the query memory context.
+ * @brief Arrange to delete the frame when PostgreSQL resets the query context.
+ * @param[in,out] frame Frame allocated with new. Register cleanup only once.
+ * @param[in] estate Executor state with the owning query memory context.
  */
 void ensure_alignment_frame_cleanup(
 		alignment_executor_frame* frame,
@@ -81,10 +83,15 @@ void ensure_alignment_frame_cleanup(
 }
 
 /**
- * @brief Attaches an alignment scan node to the executor frame running it.
- * @param[in] estate Executor state for the scan node.
- * @param[in] scan_node_id Statement-local scan-node identifier.
- * @return A borrowed registration handle valid until its frame is retired.
+ * @brief Connect an alignment scan to its statement's statistics collector.
+ *
+ * During ExecutorStart, use the frame being started. A scan started later
+ * must belong to the currently running frame. EvalPlanQual may use its
+ * parent executor's frame.
+ *
+ * @param[in] estate Executor state for the scan.
+ * @param[in] scan_node_id Plan-node id within the statement.
+ * @return Borrowed handle, valid until the frame is retired.
  */
 [[nodiscard]] alignment_exec::alignment_node_registration_handle
 bind_alignment_node_to_starting_frame(
@@ -133,8 +140,9 @@ bind_alignment_node_to_starting_frame(
 }
 
 /**
- * @brief Marks an executor frame finished and releases it when cleanup no longer owns it.
- * @param[in,out] frame Frame to unlink, or null when no frame was registered.
+ * @brief Stop tracking a finished frame.
+ * Leave deletion to query-context cleanup when it is registered. Otherwise
+ * delete the frame now. Null is accepted.
  */
 void retire_alignment_frame(alignment_executor_frame* frame) noexcept
 {

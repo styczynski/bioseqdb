@@ -1,6 +1,6 @@
 /**
  * @file alignment_hook_callbacks.cppm
- * @brief PostgreSQL executor Start/Finish callbacks and hook installation.
+ * @brief Start and finish collection of alignment statistics for a query.
  */
 module;
 
@@ -47,7 +47,10 @@ void call_previous_or_standard_executor_finish(QueryDesc* query_desc)
 	}
 }
 
-/** @brief Creates and registers the alignment frame surrounding ExecutorStart. */
+/** @brief Create a frame before starting PostgreSQL execution.
+ * Nested queries share the running statement's collector. Register the frame
+ * after ExecutorStart supplies its EState, and destroy it if startup fails.
+ */
 void bioseq_alignment_executor_start(QueryDesc* query_desc, int eflags)
 {
 	auto* frame = new alignment_executor_frame{};
@@ -90,7 +93,9 @@ void bioseq_alignment_executor_start(QueryDesc* query_desc, int eflags)
 	PG_END_TRY();
 }
 
-/** @brief Publishes and retires the alignment frame surrounding ExecutorFinish. */
+/** @brief Finish PostgreSQL execution and publish the root query's statistics.
+ * Remove the frame on success or error. A failed finish does not publish results.
+ */
 void bioseq_alignment_executor_finish(QueryDesc* query_desc)
 {
 	alignment_executor_frame* frame = find_alignment_frame(query_desc);
@@ -117,7 +122,9 @@ void bioseq_alignment_executor_finish(QueryDesc* query_desc)
 }
 } // namespace
 
-/** @brief Installs the three executor hooks and the scan-node binder. */
+/** @brief Install Start, Run and Finish hooks, preserving the previous hooks.
+ * Also register the callback that connects alignment scans to their frames.
+ */
 void install_alignment_execution_hooks()
 {
 	previous_executor_start_hook = ExecutorStart_hook;
