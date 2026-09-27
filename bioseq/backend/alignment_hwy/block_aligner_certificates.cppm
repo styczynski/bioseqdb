@@ -1,6 +1,6 @@
 /**
  * @file block_aligner_certificates.cppm
- * @brief Implements exact adaptive-block shortcut certificates.
+ * @brief Skip dynamic programming when a sequence scan proves the diagonal is the best alignment.
  */
 module;
 
@@ -39,13 +39,13 @@ namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
 /**
- * @brief Checks whether a score matrix has the generated diagonal layout.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_alphabet_dimension Matrix dimension including the sentinel rank.
- * @param[in] scoring_matrix Matrix inspected for uniform biological scores.
- * @param[out] match_score Uniform biological diagonal score.
- * @param[out] mismatch_score Uniform biological off-diagonal score.
- * @return `true` when every matrix entry matches the generated layout.
+ * @brief Check that matching and mismatched symbols have uniform scores.
+ *
+ * Matching symbols must share a nonnegative score. All mismatches share
+ * another score, and the padding row and column have one constant score.
+ * Every entry must be at most the match score for the diagonal bound to hold.
+ *
+ * @return Whether these conditions hold. The output scores are valid on success.
  */
 template<sequence_alphabet p_alphabet,
          size_t p_alphabet_dimension = seqan3::alphabet_size<p_alphabet> + 1u>
@@ -53,8 +53,8 @@ template<sequence_alphabet p_alphabet,
         const scoring_matrix<p_alphabet>& scoring_matrix,
         std::int8_t& match_score,
         std::int8_t& mismatch_score) noexcept {
-    // The final alphabet rank is the padding sentinel. All biological diagonal
-    // entries and all biological off-diagonal entries must be uniform.
+    // The last rank is padding. Matching symbols must share one score,
+    // and mismatched symbols must share another.
     if constexpr (p_alphabet_dimension < 3) return false;
     constexpr size_t biological_ranks = p_alphabet_dimension - 1;
     match_score = scoring_matrix.at(0, 0);
@@ -77,9 +77,9 @@ template<sequence_alphabet p_alphabet,
 }
 
 /**
- * @brief Returns a low-bit mask for up to 32 packed two-bit DNA4 symbols.
- * @param[in] symbol_count Number of two-bit symbols represented by the mask.
- * @return Low `2 * symbol_count` bits set.
+ * @brief Make a mask covering the lowest symbol_count packed DNA4 bases.
+ * @param[in] symbol_count Number of bases, from 0 to 32.
+ * @return The lowest 2 * symbol_count bits set to one.
  */
 [[nodiscard]] constexpr std::uint64_t low_dna4_symbol_mask(
         size_t symbol_count) noexcept {
@@ -89,14 +89,14 @@ template<sequence_alphabet p_alphabet,
 }
 
 /**
- * @brief Loads up to 32 LSB-first DNA4 ranks from an arbitrary coordinate.
- * @param[in] packed_units Contiguous packed DNA4 storage.
- * @param[in] base_position Logical start coordinate.
- * @param[in] symbol_count Number of ranks to load.
- * @return Requested ranks in the low two-bit groups.
+ * @brief Read a packed DNA4 window starting at any base position.
+ * @param[in] packed_units Contiguous 64-bit units, with earlier bases in lower bits.
+ * @param[in] base_position First base to read within this storage.
+ * @param[in] symbol_count Number of bases to read, from 1 to 32.
+ * @return The requested bases packed into the lowest bits.
  *
- * The second storage unit is touched only when the window crosses the first
- * unit boundary, so the final partial unit is never over-read.
+ * Read the next storage unit only if the window crosses a unit boundary.
+ * This keeps reads within the units containing the requested bases.
  */
 [[nodiscard]] HWY_INLINE std::uint64_t load_forward_dna4_window(
         const std::uint64_t* packed_units,
@@ -115,11 +115,11 @@ template<sequence_alphabet p_alphabet,
 }
 
 /**
- * @brief Reverses 32 two-bit groups while retaining each rank's bit order.
- * @param[in] packed LSB-first DNA4 ranks.
- * @return Ranks in reverse group order.
+ * @brief Reverse the order of 32 packed DNA4 bases.
+ * @param[in] packed Bases stored two bits each, with earlier bases in lower bits.
+ * @return The bases in reverse order, preserving the two bits within each base.
  *
- * DNA4 complementation is a subsequent XOR with two set bits per rank.
+ * The caller can complement the bases by flipping both bits in each pair.
  */
 [[nodiscard]] constexpr std::uint64_t reverse_dna4_groups(
         std::uint64_t packed) noexcept {
@@ -131,13 +131,13 @@ template<sequence_alphabet p_alphabet,
 }
 
 /**
- * @brief Loads one forward or reverse-complement packed DNA4 window.
- * @tparam p_is_reversed Whether to read reverse-complement orientation.
- * @param[in] packed_units Contiguous packed DNA4 storage.
- * @param[in] total_symbols Total symbols represented by the storage view.
- * @param[in] logical_start Start coordinate in the requested orientation.
- * @param[in] symbol_count Number of ranks to load.
- * @return Requested oriented ranks in the low two-bit groups.
+ * @brief Read a packed DNA4 window on the forward or reverse-complement strand.
+ * @tparam p_is_reversed Whether to use the reverse-complement strand.
+ * @param[in] packed_units Contiguous packed DNA4 units.
+ * @param[in] total_symbols Number of bases covered by the storage view.
+ * @param[in] logical_start First base in the requested strand's coordinates.
+ * @param[in] symbol_count Number of bases to read, from 1 to 32.
+ * @return The requested bases packed into the lowest bits, in the requested order.
  */
 template<bool p_is_reversed>
 [[nodiscard]] HWY_INLINE std::uint64_t load_oriented_dna4_window(
@@ -161,24 +161,14 @@ template<bool p_is_reversed>
 }
 
 /**
- * @brief Certifies a unique coordinate-diagonal global alignment.
- * @tparam p_is_reversed Whether query ranks use reverse orientation.
- * @tparam p_alphabet Logical sequence alphabet.
- * @tparam p_alphabet_dimension Matrix dimension including the sentinel rank.
- * @param[in] query_seq Query sequence facade.
- * @param[in] target_seq Target sequence facade.
- * @param[in] query_start Inclusive query coordinate.
- * @param[in] query_end Exclusive query coordinate.
- * @param[in] target_start Inclusive target coordinate.
- * @param[in] target_end Exclusive target coordinate.
- * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
- * @param[in] parameters Alignment contract.
- * @return Certificate with score, edit distance, and SIMD work counts.
+ * @brief Prove that the diagonal is the unique best alignment.
  *
- * The scan consumes the same encoded ranks as dynamic programming. For equal
- * lengths, any different path contains an insertion and a deletion. A
- * diagonal score above that alternative-score bound establishes a unique
- * observable CIGAR, while equality remains ineligible because ties are visible.
+ * For equal-length intervals, any gapped alignment pays for an insertion and
+ * a deletion and has at least one fewer aligned pair, which bounds its score.
+ * The diagonal must beat that bound. Ties need dynamic programming.
+ * Intervals are half-open. Query coordinates follow the selected strand.
+ *
+ * @return The score, mismatch count and scan counters, or an uncertified result.
  */
 template<
     bool p_is_reversed,
@@ -214,8 +204,8 @@ try_global_diagonal_certificate(
         std::numeric_limits<std::uint32_t>::max() >> 4u);
     if (parameters.is_trace_enabled && sequence_length > packed_cigar_limit) return result;
 
-    // The scan classifies equal and unequal biological ranks, so admit only a
-    // matrix layout that this classification scores exactly.
+    // This scan scores only matches and mismatches. Check that every
+    // matrix entry agrees with those two scores and the padding rules.
     if constexpr (p_alphabet_dimension < 3) return result;
     constexpr size_t biological_ranks = p_alphabet_dimension - 1;
     std::int8_t match_score = 0;
@@ -225,11 +215,11 @@ try_global_diagonal_certificate(
         return result;
     }
 
-    // Encode bounded chunks in the same orientation as the DP. Certified calls
-    // avoid arena-backed padded, scratch, and trace storage.
+    // Read small chunks in DP order. A successful check avoids allocating
+    // padded sequences, DP scratch space and traceback storage.
     constexpr size_t scan_chunk_symbols = 1024u;
-    // Every inspected byte is written by the encoder. Only the inactive tail
-    // of a masked hardware load is initialized below.
+    // The encoder writes every active byte. Initialize only the unused
+    // tail that a masked load may still read.
     alignas(64) std::array<std::uint8_t, scan_chunk_symbols> query_chunk;
     alignas(64) std::array<std::uint8_t, scan_chunk_symbols> target_chunk;
     const hn::Rebind<uint8_t, block_aligner_simd_tag> byte_tag;
@@ -249,10 +239,9 @@ try_global_diagonal_certificate(
             std::span<std::uint8_t>{target_chunk.data(), chunk_size},
             target_start + chunk_offset,
             target_start + chunk_offset + chunk_size);
-        // Highway's masked load is permitted to issue a full hardware load
-        // (notably on NEON). Initialise only the inactive bytes of the one
-        // partial vector so that load never observes indeterminate storage.
-        // Full chunks are lane-aligned for every admitted lane shape.
+        // A Highway masked load may read the whole vector on NEON. Zero the
+        // unused tail so those reads stay within initialized storage.
+        // Full chunks contain a whole number of vectors.
         const size_t tail_lanes = chunk_size % lane_count;
         if (tail_lanes != 0) {
             const size_t tail_padding = lane_count - tail_lanes;
@@ -306,22 +295,15 @@ try_global_diagonal_certificate(
 }
 
 /**
- * @brief Attempts resident packed DNA4 certification without byte ranks.
- * @tparam p_is_reversed Whether query ranks use reverse orientation.
- * @tparam p_alphabet Logical sequence alphabet.
- * @param[in] query_seq Query sequence facade.
- * @param[in] target_seq Target sequence facade.
- * @param[in] query_start Inclusive query coordinate.
- * @param[in] query_end Exclusive query coordinate.
- * @param[in] target_start Inclusive target coordinate.
- * @param[in] target_end Exclusive target coordinate.
- * @param[in] plan Prepared matrix and alignment contract.
- * @return Three-way attempt result with SIMD work counts.
+ * @brief Check the diagonal directly in resident packed DNA4 storage.
  *
- * `not_eligible` means no packed scan ran and the byte-rank path remains
- * available. `rejected` means the packed scan ran but did not certify the
- * diagonal, so dynamic programming starts without repeating that scan.
- * `certified` carries the exact score, endpoints, edit distance, and match run.
+ * Count mismatches in packed words and apply the strict score bound from the
+ * byte-based check. The prepared plan supplies scoring and parameter checks.
+ * Intervals are half-open. Query coordinates follow the selected strand.
+ *
+ * @return not_eligible when packed reading is unavailable, allowing the byte
+ * check. rejected means the scan ran and dynamic programming is needed.
+ * certified supplies the diagonal score, mismatch count and scan counters.
  */
 template<
     bool p_is_reversed,
@@ -362,11 +344,9 @@ try_packed_global_gap_certificate(
             return attempt;
         }
 
-        // Borrow the complete logical facade descriptors.  Region-only probes
-        // lose the logical totals required by reverse orientation and expose
-        // nonzero leading offsets for ordinary unaligned slices.  The packed
-        // loader already handles arbitrary symbol coordinates, so retain each
-        // descriptor's physical leading offset explicitly.
+        // Borrow each complete sequence view so reverse-strand coordinates
+        // still have the full length. Keep its leading offset because slices
+        // can start inside a packed unit.
         const auto query_region = query_seq.try_resident_packed(
             0u, query_seq.bp_size(), 8u);
         const auto target_region = target_seq.try_resident_packed(
@@ -399,10 +379,9 @@ try_packed_global_gap_certificate(
         const size_t query_physical_total =
             query_leading + query_logical_total;
 
-        // Extraction handles arbitrary base offsets one word at a time.  The
-        // staging arrays are completely initialized before each masked load;
-        // Highway then collapses and popcounts two-bit mismatches across the
-        // native packed-word lane_count.
+        // Load windows at arbitrary base offsets into initialized word arrays.
+        // Collapse each differing two-bit pair to one bit, then count those
+        // bits with SIMD to get the number of mismatched bases.
         const hn::Repartition<std::uint64_t, block_aligner_simd_tag> packed_word_tag;
         const size_t lane_count = hn::Lanes(packed_word_tag);
         constexpr size_t max_packed_lanes = 4u;

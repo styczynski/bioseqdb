@@ -1,10 +1,9 @@
 /**
  * @file block_aligner.cppm
- * @brief Provides the public adaptive-block alignment facade.
+ * @brief Export the shared alignment parameters and result types for Block Aligner callers.
  *
- * @details Re-exports `bioseq.alignment.contracts` through the public
- * `bioseq.alignment.block_aligner` module. Target selection and algorithm implementation
- * remain outside this facade.
+ * This module re-exports bioseq.alignment.contracts. CPU target selection and
+ * the alignment implementation are in the generated kernel modules.
  */
 export module bioseq.alignment.block_aligner;
 
