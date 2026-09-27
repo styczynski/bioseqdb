@@ -1,13 +1,11 @@
 /**
  * @file write_state_row_mask.cppm
- * @brief Transaction-scoped write state for row-mask catalog records.
+ * @brief Buffer deletion-mask changes within each subtransaction.
  *
- * Manages row-mask catalog records used to
- * aggregate row-mask updates (DELETEs against columnar stripes). Commits
- * flush the pending mask deltas into bioseq.row_mask via flush_row_mask_cache.
- *
- * The transaction_scoped_hash_table owns one linked stack of subtransaction
- * frames for each relation file number.
+ * Repeated DELETEs update cached masks. Flushing saves them in
+ * bioseq_internal.row_mask and updates chunk-group deletion counts.
+ * Each relation file has a stack of subtransaction frames so abort can
+ * discard pending changes.
  */
 module;
 
@@ -30,11 +28,8 @@ using row_mask_codec =
 	bioseq::postgres::storage::metadata::sql_row_codecs::row_mask_codec;
 export using row_mask_row = row_mask_codec::row_type;
 
-/*
- * Per-subtransaction node. row_mask_rows accumulates the pending row-mask
- * deltas; last_row_mask is a one-slot cache
- * so repeated lookups for the same row number hit the fast path.
- */
+/* Pending masks for one subtransaction. Remember the last mask so nearby
+ * row deletions can reuse it without searching the list. */
 struct row_mask_subtransaction_write_frame
 {
 	SubTransactionId subtransaction_id;
@@ -61,10 +56,9 @@ static bioseq::postgres::support::transaction_scoped_hash_table<
 	row_mask_write_state_map_entry> row_mask_state_cache{"row mask state map"};
 
 
-/** @brief Allocates a pending row-mask catalog entry and owns a mask copy.
- *
- * Copies the supplied mask into the row-mask cache context. The caller fills
- * the row range, stripe and chunk identifiers, and deleted-row count.
+/** @brief Copy a mask into a new pending catalog entry.
+ * Allocate in the current context, which the caller sets to the mask cache.
+ * The caller fills the row range, ids and deleted-row count.
  */
 static row_mask_row*
 allocate_row_mask_entry(uint64_t storage_id, bytea* mask)
@@ -81,10 +75,8 @@ allocate_row_mask_entry(uint64_t storage_id, bytea* mask)
 	return row_mask;
 }
 
-/*
- * flush_pending_row_mask_writes iterates a list of accumulated entries and
- * flushes each one into bioseq.row_mask. Also updates chunk-group deleted
- * counters so query planning stays in sync.
+/** @brief Save pending masks and their chunk-group deletion counts.
+ * Free each copied mask after its catalog update.
  */
 static void
 flush_pending_row_mask_writes(List* row_mask_write_state_list)
@@ -105,10 +97,8 @@ flush_pending_row_mask_writes(List* row_mask_write_state_list)
 }
 
 
-/** @brief Appends a pending row-mask write to a subtransaction frame.
- *
- * Returns the new entry so the caller can fill its identifiers and row range
- * before the frame is flushed.
+/** @brief Add a copied mask to the current subtransaction's pending writes.
+ * Return its entry so the caller can fill the catalog id, row range and counts.
  */
 export row_mask_row*
 append_row_mask_write(Oid relation_file_number,
@@ -162,10 +152,8 @@ append_row_mask_write(Oid relation_file_number,
 	return row_mask_write_state;
 }
 
-/** @brief Flushes pending row masks for one relation and subtransaction.
- *
- * Leaves the empty stack frame in place so subsequent operations in the same
- * subtransaction can continue accumulating.
+/** @brief Save a relation's pending masks for the current subtransaction.
+ * Clear the saved entries and last-mask lookup, keeping the frame for later writes.
  */
 export void flush_row_mask_write_state_for_relation_file(Oid relation_file_number,
 										  SubTransactionId current_sub_xid) {
@@ -186,9 +174,8 @@ export void flush_row_mask_write_state_for_relation_file(Oid relation_file_numbe
 }
 
 
-/** @brief Finds the pending mask containing a row identifier.
- *
- * Consults last_row_mask before scanning the current subtransaction's list.
+/** @brief Find a pending mask covering a row number, or return nullptr.
+ * Check the most recently used mask before searching this subtransaction's list.
  */
 export row_mask_row*
 find_pending_row_mask(Oid relation_file_number, SubTransactionId current_sub_xid,
@@ -236,10 +223,9 @@ find_pending_row_mask(Oid relation_file_number, SubTransactionId current_sub_xid
 }
 
 
-/** @brief Finalizes pending row-mask writes for one subtransaction.
- *
- * Flushes matching frames on commit and discards them on abort. Drop markers
- * propagate to the parent on commit and are reverted on abort.
+/** @brief Finish a subtransaction's pending deletion-mask writes.
+ * Flush on commit and discard on abort. Commit passes DROP markers to the
+ * parent, while abort clears them.
  */
 export void
 pop_all_row_mask_write_states(SubTransactionId current_sub_xid,
@@ -249,9 +235,8 @@ pop_all_row_mask_write_states(SubTransactionId current_sub_xid,
 	row_mask_state_cache.for_each(
 		[current_sub_xid, parent_sub_xid, commit](
 				row_mask_write_state_map_entry* entry) {
-		/* The drop marker outlives the final row-mask write frame.  Process it
-		 * first so an ERROR during DROP followed by transaction abort restores
-		 * the relation's backend-local visibility state. */
+		/* Handle DROP even when no write frame remains. Aborting a failed DROP
+		 * must restore this backend's relation state. */
 		if (entry->dropped)
 		{
 			if (entry->drop_subtransaction_id == current_sub_xid)
@@ -283,8 +268,7 @@ pop_all_row_mask_write_states(SubTransactionId current_sub_xid,
 }
 
 
-/** @brief Marks a row-mask state as dropped in a subtransaction.
- */
+/** @brief Mark an existing relation entry as dropped by this subtransaction. */
 export void
 mark_row_mask_relation_dropped(Oid relation_file_number, SubTransactionId current_sub_xid)
 {
@@ -299,8 +283,7 @@ mark_row_mask_relation_dropped(Oid relation_file_number, SubTransactionId curren
 }
 
 
-/** @brief Removes row-mask state for a relation dropped outside transaction cleanup.
- */
+/** @brief Remove a relation's mask-cache entry outside transaction callbacks. */
 export void
 drop_row_mask_state_outside_transaction(Oid relation_file_number)
 {
@@ -308,8 +291,7 @@ drop_row_mask_state_outside_transaction(Oid relation_file_number)
 }
 
 
-/** @brief Tests whether an ancestor owns pending row-mask writes.
- */
+/** @brief Check for pending masks in frames owned by parent subtransactions. */
 export bool
 row_mask_writes_pending_in_parent_transactions(
 	Oid relation_file_number,
@@ -337,7 +319,8 @@ row_mask_writes_pending_in_parent_transactions(
 }
 
 
-/// @brief Returns the context owning transaction-scoped row-mask writes.
+/// @brief Return the memory context that owns pending masks.
+/// @return A context reset at transaction end, or nullptr before the first entry.
 export MemoryContext
 row_mask_write_memory_context()
 {
@@ -345,7 +328,8 @@ row_mask_write_memory_context()
 }
 
 
-/// @brief Records a row deletion, loading its persisted mask on first access.
+/// @brief Mark a row deleted in its cached mask, loading the mask when needed.
+/// Return false if the row has no stored mask or is already marked deleted.
 export bool
 update_row_mask(RelFileLocator relfilelocator, uint64_t storage_id,
 			  Snapshot snapshot, uint64_t row_number)
@@ -403,9 +387,7 @@ update_row_mask(RelFileLocator relfilelocator, uint64_t storage_id,
 												 GetCurrentSubTransactionId(),
 												 *stored_row.mask);
 			pfree(*stored_row.mask);
-			/*
-			 * Populate row mask cache with values from heap table
-			 */
+			/* Keep the catalog identifiers and counts with the copied mask. */
 			row_mask_entry->id = stored_row.id;
 			row_mask_entry->storage_id = stored_row.storage_id;
 			row_mask_entry->stripe_id = stored_row.stripe_id;
@@ -419,10 +401,7 @@ update_row_mask(RelFileLocator relfilelocator, uint64_t storage_id,
 		}
 		else
 		{
-			/*
-			* If the heap tuple is invalid, that likely means that we have
-			* encountered a speculative insert.
-			*/
+			/* A speculative insert may have no persisted row mask yet. */
 			systable_endscan_ordered(scan_descriptor);
 			index_close(index, AccessShareLock);
 			table_close(row_mask_relation, AccessShareLock);

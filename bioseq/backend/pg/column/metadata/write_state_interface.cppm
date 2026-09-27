@@ -1,12 +1,9 @@
 /**
  * @file write_state_interface.cppm
- * @brief Unified transaction-lifecycle dispatch for column and row-mask writes.
+ * @brief Handle column and deletion-mask state at transaction boundaries.
  *
- * Forwards transaction-lifecycle events
- * (flush/discard on subtransaction commit or abort, relation-file drop,
- * pending-write checks) to both the columnar write-state module and the
- * row-mask write-state module. Exists so higher layers only have to call
- * one function per event.
+ * Callers use one function per commit, abort or relation drop. These helpers
+ * pass the event to both stores and check both for pending parent writes.
  */
 module;
 
@@ -18,14 +15,15 @@ import :write_state;            // pop_all_column_write_states, flush_relation_w
 import :write_state_row_mask;   // pop_all_row_mask_write_states, mark_row_mask_relation_dropped, ...
 import bioseq.postgres.support;
 
-/** @brief Flushes relation writes and refreshes an owned MVCC snapshot.
+/** @brief Flush a relation's column writes and refresh its reader snapshot.
  *
- * If the caller supplied an MVCC snapshot, replaces it with a registered copy
- * whose curcid includes the just-flushed rows.
+ * For an MVCC snapshot, register a copy with the current command id so the
+ * reader can see rows just flushed by this transaction.
  *
- * @param[in] relation_file_number Physical relation owning the pending writes.
- * @param[in,out] snapshot Snapshot handle to refresh after the flush.
- * @param[out] snapshot_registered_by_us Set when this function registers a replacement.
+ * @param[in] relation_file_number Relation file number with pending writes.
+ * @param[in,out] snapshot Replaced only when it is an MVCC snapshot.
+ * @param[in,out] snapshot_registered_by_us Set to true when a copy is registered.
+ * The caller must unregister that copy.
  */
 export void
 flush_write_state_with_fresh_snapshot(Oid relation_file_number,
@@ -39,12 +37,8 @@ flush_write_state_with_fresh_snapshot(Oid relation_file_number,
 		return;
 	}
 
-	/*
-	 * Ensure the flushed writes are visible to us by bumping the active
-	 * snapshot's curcid. We push a copy only so UpdateActiveSnapshotCommandId
-	 * is legal; we pop it immediately because column_read_state holds the
-	 * reference and RegisterSnapshot keeps it alive.
-	 */
+	/* Update the command id on a temporary active copy. Registration keeps
+	 * that copy alive after it is removed from the active-snapshot stack. */
 	PushCopiedSnapshot(*snapshot);
 
 	UpdateActiveSnapshotCommandId();
@@ -59,9 +53,9 @@ flush_write_state_with_fresh_snapshot(Oid relation_file_number,
 
 
 /**
- * @brief Commits pending column and row-mask writes for a subtransaction.
- * @param[in] current_sub_xid Subtransaction whose state is being completed.
- * @param[in] parent_sub_xid Parent that inherits committed state.
+ * @brief Flush a subtransaction's column and deletion-mask writes.
+ * @param[in] current_sub_xid Subtransaction being completed.
+ * @param[in] parent_sub_xid Parent that inherits committed DROP markers.
  */
 export void
 flush_all_relation_write_states(SubTransactionId current_sub_xid, SubTransactionId parent_sub_xid)
@@ -72,9 +66,9 @@ flush_all_relation_write_states(SubTransactionId current_sub_xid, SubTransaction
 
 
 /**
- * @brief Discards pending column and row-mask writes for a subtransaction.
- * @param[in] current_sub_xid Aborted subtransaction whose state is discarded.
- * @param[in] parent_sub_xid Parent used to locate nested state.
+ * @brief Discard an aborted subtransaction's column and deletion-mask writes.
+ * @param[in] current_sub_xid Aborted subtransaction.
+ * @param[in] parent_sub_xid Parent id passed to both cleanup functions.
  */
 export void
 discard_all_relation_write_states(SubTransactionId current_sub_xid, SubTransactionId parent_sub_xid)
@@ -85,9 +79,9 @@ discard_all_relation_write_states(SubTransactionId current_sub_xid, SubTransacti
 
 
 /**
- * @brief Marks both write-state stores as dropped for a relation.
- * @param[in] relation_file_number Physical relation removed by the transaction.
- * @param[in] current_sub_xid Subtransaction that owns the drop marker.
+ * @brief Mark a relation as dropped in both write-state caches.
+ * @param[in] relation_file_number Relation file number.
+ * @param[in] current_sub_xid Subtransaction that owns the DROP markers.
  */
 export void
 mark_write_state_relation_dropped(Oid relation_file_number, SubTransactionId current_sub_xid)
@@ -98,8 +92,8 @@ mark_write_state_relation_dropped(Oid relation_file_number, SubTransactionId cur
 
 
 /**
- * @brief Removes relation state outside subtransaction lifecycle callbacks.
- * @param[in] relation_file_number Physical relation whose transient state is released.
+ * @brief Remove a relation from both caches outside transaction callbacks.
+ * @param[in] relation_file_number Relation file number to remove.
  */
 export void
 drop_write_state_outside_transaction(Oid relation_file_number)
@@ -109,10 +103,10 @@ drop_write_state_outside_transaction(Oid relation_file_number)
 }
 
 /**
- * @brief Tests whether an ancestor subtransaction owns pending writes.
- * @param[in] relation_file_number Physical relation to inspect.
- * @param[in] current_sub_xid Current subtransaction excluded from the ancestor search.
- * @return `true` when either metadata store contains writes owned by an ancestor.
+ * @brief Check for pending column or deletion-mask writes in parent subtransactions.
+ * @param[in] relation_file_number Relation file number.
+ * @param[in] current_sub_xid Current subtransaction to exclude.
+ * @return true if either cache contains pending parent writes.
  */
 export bool
 writes_pending_in_parent_transactions(

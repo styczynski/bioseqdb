@@ -1,31 +1,13 @@
 /**
  * @file storage_physical.cppm
- * @brief Physical page, WAL, and metapage operations for columnar storage.
+ * @brief Read and write columnar data through PostgreSQL pages and WAL.
  *
- * Low-level storage layer for the bioseq columnar table format.
- *   - Translates columnar read/write operations on logical offsets into
- *     operations on pages/blocks.
- *   - Emits WAL.
- *   - Reads/writes the columnar metapage.
- *   - Reserves data offsets, stripe numbers, and row offsets.
- *   - Truncation.
+ * Logical offsets skip page headers. Block 0 holds the metapage and block 1
+ * is reserved, so data starts in block 2 at first_logical_offset.
  *
- * Higher-level columnar operations deal with logical offsets and large
- * contiguous buffers of data that need to be stored. But the buffer
- * manager and WAL depend on formatted pages with headers, so these
- * large buffers need to be written across many pages. This module
- * translates the contiguous buffers into individual block reads/writes,
- * and performs WAL when necessary.
- *
- * Storage layout: metapage in block 0, empty page in block 1, logical
- * data starting at the first byte after the page header in block 2
- * (logical offset first_logical_offset). A columnar table always
- * has at least 2 blocks.
- *
- * Reservation uses a relation extension lock and is concurrency-safe,
- * so callers only need an ordinary lock on the relation. Initializing
- * the metapage or truncating the relation requires AccessExclusiveLock.
- *
+ * A relation-extension lock protects reservations for bytes, rows and stripe
+ * ids. Callers hold their normal relation lock during reads and writes.
+ * Initialization and truncation require AccessExclusiveLock.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -43,22 +25,20 @@ import bioseq.common.checked_arithmetic;
 import bioseq.common.logging;
 import bioseq.postgres.support;
 
-/// @brief On-disk column format identity written to every metapage.
+/// @brief Columnar format version stored in each metapage.
 export constexpr uint32_t column_storage_format_major = 2;
 export constexpr uint32_t column_storage_format_minor = 0;
 /// @brief Payload bytes available after a PostgreSQL page header.
 export constexpr Size usable_column_bytes_per_page =
 	BLCKSZ - SizeOfPageHeaderData;
 
-/// @brief Sentinel and first valid identities for logical column rows.
+/// @brief Zero marks an invalid row number. Valid row numbers start at one.
 export constexpr uint64_t invalid_column_row_number = static_cast<uint64_t>(0);
 export constexpr uint64_t first_column_row_number = static_cast<uint64_t>(1);
 
-/*
- * Number of valid ItemPointer offsets and block numbers for the row-number
- * mapping. PostgreSQL restricts OffsetNumber to
- * [FirstOffsetNumber, MaxHeapTuplesPerPage] and BlockNumber to
- * [0, MaxBlockNumber].
+/* Limits used to encode a logical row number in a PostgreSQL item pointer.
+ * Keep its offset within the heap-tuple range and its block number within
+ * the valid PostgreSQL block range.
  */
 export constexpr uint64_t item_pointer_row_capacity =
 	static_cast<uint64_t>(MaxHeapTuplesPerPage - FirstOffsetNumber + 1);
@@ -71,17 +51,11 @@ constexpr uint64_t maximum_column_row_reservation =
 	maximum_column_row_number + 1;
 
 
-/*
- * Logical offsets never fall on the first two physical pages. See
- * comments in bioseq_storage.c.
- */
+/* Data offsets skip the metapage and the reserved second page. */
 export constexpr uint64_t invalid_logical_offset = 0;
 export constexpr uint64_t first_logical_offset = ((BLCKSZ - SizeOfPageHeaderData) * 2);
-/*
- * Buffered relation extension rejects a resulting page count greater than or
- * equal to MaxBlockNumber. Keep reservations within the largest page count
- * that ReadBuffer(P_NEW) can materialize.
- */
+/* Leave room below PostgreSQL's relation-extension page-count limit.
+ * Every reserved page must be creatable through ReadBuffer(P_NEW). */
 constexpr uint64_t maximum_column_storage_page_count =
 	static_cast<uint64_t>(MaxBlockNumber) - 1;
 constexpr uint64_t maximum_logical_reservation =
@@ -103,38 +77,21 @@ is_valid_logical_reservation(uint64_t logical_reservation) noexcept
 		&& logical_reservation <= maximum_logical_reservation;
 }
 
-/*
- * Content of the first page in main fork, which stores metadata at file
- * level.
- */
+/** @brief Storage id, format version and reservation counters in block 0. */
 struct column_metapage
 {
 	/* Persistent format identity used to reject incompatible metapages. */
 	uint32_t format_major;
 	uint32_t format_minor;
 
-	/*
-	 * Each of the metadata table rows are identified by a storage_id.
-	 * We store it also in the main fork so we can link metadata rows
-	 * with data files.
-	 */
+	/* Link this data file to its rows in the metadata catalogs. */
 	uint64_t storage_id;
 
 	uint64_t next_stripe_id; /* first unused stripe id */
 	uint64_t next_row_number; /* first unused row number */
-	uint64_t next_logical_offset; /* first unused byte offset */
+	uint64_t next_logical_offset; /* first unused logical byte offset */
 
-	/*
-	 * Flag set to true in the init fork. After an unlogged table reset (due
-	 * to a crash), the init fork will be copied over the main fork. When
-	 * trying to read an unlogged table, if this flag is set to true, we must
-	 * clear the metadata for the table (because the actual data is gone,
-	 * too), and clear the flag. We can cross-check that the table is
-	 * UNLOGGED, and that the main fork is at the minimum size (no actual
-	 * data).
-	 *
-	 * Reserved ABI slot for unlogged-reset handling; writers keep it false.
-	 */
+	/* Reserved field for unlogged-table reset handling. Writers keep it false. */
 	bool requires_unlogged_reset;
 };
 
@@ -149,7 +106,7 @@ static_assert(offsetof(column_metapage, next_logical_offset) == 32);
 static_assert(offsetof(column_metapage, requires_unlogged_reset) == 40);
 
 
-/* represents a "physical" block+offset address */
+/** @brief A physical block number and byte offset within its page. */
 struct physical_address
 {
 	BlockNumber block_number;
@@ -157,11 +114,7 @@ struct physical_address
 };
 
 
-/*
- * Layout constants for the metapage and the first data page. The metapage
- * always lives at block 0; block 1 is reserved (empty) and logical data
- * starts at block 2 (see first_logical_offset).
- */
+/* Block 0 stores metadata. Block 1 stays empty, and data begins in block 2. */
 inline constexpr BlockNumber metadata_block_number = 0;
 inline constexpr BlockNumber reserved_empty_block_number = 1;
 inline constexpr uint64_t first_stripe_id = 1;
@@ -172,9 +125,7 @@ inline constexpr const char* incompatible_format_hint =
 
 
 
-/*
- * Map logical offsets to a physical page and offset where the data is kept.
- */
+/** @brief Convert a logical byte offset to a page address, skipping its header. */
 static inline physical_address
 logical_to_physical_address(uint64_t logical_offset)
 {
@@ -290,10 +241,9 @@ validate_logical_storage_range(
 	}
 }
 
-/*
- * read_from_block - read bytes from a page at the given offset. If 'force' is
- * true, don't check pd_lower; useful when reading a metapage whose format
- * has not yet been validated.
+/** @brief Copy bytes from a page while holding a shared buffer lock.
+ * force skips the written-data boundary check for metapage inspection.
+ * The read must always fit within the page.
  */
 static void read_from_block(Relation rel,
                             BlockNumber block_number,
@@ -328,12 +278,10 @@ static void read_from_block(Relation rel,
     UnlockReleaseBuffer(buffer);
 }
 
-/*
- * write_to_block - append data to a block, initializing if necessary, and emit
- * WAL. If 'clear' is true, always clear the data on the page and reinitialize
- * it first, and offset must be SizeOfPageHeaderData. Otherwise, offset must
- * be equal to pd_lower and pd_lower will be set to the end of the written
- * data.
+/** @brief Write bytes to a page and record the change with generic WAL.
+ * A clear write reinitializes the page and starts after its header. Other
+ * writes may append at pd_lower or overwrite from an earlier offset.
+ * The end of this write becomes the page's written-data boundary.
  */
 static void write_to_block(Relation rel,
                            BlockNumber block_number,
@@ -375,8 +323,8 @@ static void write_to_block(Relation rel,
 			});
 	}
 
-	/* A rolled-back append may leave pd_lower beyond the reserved offset.
-	 * Rewind it before deterministically overwriting those abandoned bytes. */
+	/* An abandoned append can leave pd_lower past our reserved offset.
+	 * Move it back before overwriting those bytes. */
 	if (phdr->pd_lower > offset)
 	{
 		bioseq_report_pg(DEBUG4)
@@ -393,7 +341,8 @@ static void write_to_block(Relation rel,
 	UnlockReleaseBuffer(buffer);
 }
 
-/// @brief Advances an unused logical offset to a page payload boundary.
+/// @brief Round a reservation up to the next page payload boundary.
+/// Return no value if the offset is invalid or rounding exceeds storage limits.
 static std::optional<uint64_t>
 align_storage_reservation(uint64_t previous_reservation)
 {
@@ -421,7 +370,7 @@ align_storage_reservation(uint64_t previous_reservation)
 	return aligned_reservation;
 }
 
-/// @brief Tests whether a metapage has the required storage format identity.
+/// @brief Check whether the metapage uses the current format version.
 static bool
 column_metapage_uses_current_format(const column_metapage* metapage) noexcept
 {
@@ -429,7 +378,7 @@ column_metapage_uses_current_format(const column_metapage* metapage) noexcept
 			metapage->format_minor == column_storage_format_minor);
 }
 
-/// @brief Tests whether a stored format precedes the required format.
+/// @brief Check whether the metapage format is older than this build's format.
 static bool
 column_metapage_format_is_older(const column_metapage* metapage) noexcept
 {
@@ -438,7 +387,7 @@ column_metapage_format_is_older(const column_metapage* metapage) noexcept
 			 metapage->format_minor < column_storage_format_minor));
 }
 
-/// @brief Tests whether a stored format succeeds the required format.
+/// @brief Check whether the metapage format is newer than this build's format.
 static bool
 column_metapage_format_is_newer(const column_metapage* metapage) noexcept
 {
@@ -447,7 +396,7 @@ column_metapage_format_is_newer(const column_metapage* metapage) noexcept
 			 metapage->format_minor > column_storage_format_minor));
 }
 
-/// @brief Rejects a metapage whose format identity is not supported.
+/// @brief Reject a metapage whose format differs from this build's format.
 static void
 validate_column_metapage_format(Relation rel, column_metapage *metapage)
 {
@@ -475,15 +424,11 @@ validate_column_metapage_format(Relation rel, column_metapage *metapage)
 	}
 }
 
-/*
- * read_column_metapage - read the current contents of the metapage. Error if
- * it does not exist. Throw an error if the metapage format is incompatible,
- * unless 'force' is true.
+/**
+ * @brief Read the metapage, checking its format unless force is true.
  *
- * It is safe to read a different format revision because fields are append-only.
- * However, callers must not depend on fields introduced after the stored
- * revision being initialized. Forced reads are restricted to format
- * transitions and diagnostics.
+ * A missing metapage raises an error. Forced reads support format changes
+ * and diagnostics. Callers must only use fields defined by the stored version.
  */
 static column_metapage
 read_column_metapage(Relation rel, bool force)
@@ -504,11 +449,8 @@ read_column_metapage(Relation rel, bool force)
 			});
 	}
 
-	/*
-	 * Regardless of "force" parameter, always force read metapage block.
-	 * We will check the metapage format in validate_column_metapage_format
-	 * depending on "force".
-	 */
+	/* Read the metapage without trusting pd_lower. Validate its format below
+	 * unless the caller requested a forced read. */
 	constexpr bool force_block_read = true;
 	column_metapage metapage;
 	read_from_block(rel, metadata_block_number, SizeOfPageHeaderData,
@@ -522,14 +464,11 @@ read_column_metapage(Relation rel, bool force)
 	return metapage;
 }
 
-/*
- * overwrite_column_metapage writes given metapage back to metapage
- * for given relation.
- */
+/** @brief Replace the metapage contents and record the change in WAL. */
 static void
 overwrite_column_metapage(Relation relation, const column_metapage& metapage)
 {
-	/* clear metapage because we are overwriting */
+	/* Reinitialize the page before replacing its contents. */
 	constexpr bool clear = true;
 	write_to_block(relation, metadata_block_number, SizeOfPageHeaderData,
 				 reinterpret_cast<const char*>(&metapage), sizeof(column_metapage), clear);
@@ -538,9 +477,8 @@ overwrite_column_metapage(Relation relation, const column_metapage& metapage)
 
 
 /**
- * @brief Initializes an empty relation with a columnar metapage.
- *
- * @pre The caller holds `AccessExclusiveLock` and the main fork is empty.
+ * @brief Create the metapage and reserved empty page for a new columnar relation.
+ * @pre The caller holds AccessExclusiveLock and the main fork is empty.
  */
 export void
 initialize_column_storage(SMgrRelation srel, uint64_t storage_id)
@@ -561,7 +499,7 @@ initialize_column_storage(SMgrRelation srel, uint64_t storage_id)
 			});
 	}
 
-	/* create two pages */
+	/* Create the metapage and reserved second page. */
 	PGIOAlignedBlock block;
 	Page page = block.data;
 
@@ -605,20 +543,17 @@ initialize_column_storage(SMgrRelation srel, uint64_t storage_id)
 #endif
 	smgrextend(srel, MAIN_FORKNUM, reserved_empty_block_number, page, true);
 
-	/*
-	 * An immediate sync is required even if we xlog'd the page, because the
-	 * write did not go through shared_buffers and therefore a concurrent
-	 * checkpoint may have moved the redo pointer past our xlog record.
-	 */
+	/* These pages bypass shared_buffers. Sync them now because a concurrent
+	 * checkpoint could advance its redo point past the WAL records before
+	 * the direct writes reach disk. */
 	bioseq_log<logging_level::debug>("[bioseq] pg: initialize_column_storage() requesting smgr immediate sync");
 	smgrimmedsync(srel, MAIN_FORKNUM);
 }
 
 
-/** @brief Rewrites an existing metapage with the required format identity.
- *
- * The direction flag rejects a source format on the wrong side of the target.
- * The caller must ensure that the relation already has a metapage.
+/** @brief Update a metapage's format and reconstructed reservation counters.
+ * Require an existing metapage. is_upgrade allows an older source version,
+ * while a downgrade allows a newer one. The storage id stays unchanged.
  */
 export void
 update_column_storage_format(Relation rel, bool is_upgrade, uint64_t next_stripe_id,
@@ -630,7 +565,7 @@ update_column_storage_format(Relation rel, bool is_upgrade, uint64_t next_stripe
 
 	if (column_metapage_uses_current_format(&metapage))
 	{
-		/* nothing to do */
+		/* The metapage already uses the requested format. */
 		UnlockRelationForExtension(rel, ExclusiveLock);
 		return;
 	}
@@ -670,10 +605,9 @@ update_column_storage_format(Relation rel, bool is_upgrade, uint64_t next_stripe
 
 
 /**
- * @brief Reads the storage identity from a relation's metapage.
- *
- * @param force Skip the current-format check when true.
- * @return Persistent storage identity for the relation.
+ * @brief Read the relation's persistent storage id from its metapage.
+ * @param force Skip the format-version check when true.
+ * @return Storage id. A missing metapage still raises an error.
  */
 export uint64_t
 column_storage_id(Relation rel, bool force)
@@ -701,8 +635,8 @@ column_storage_uses_current_format(Relation rel)
 
 
 /**
- * @brief Atomically reserves a consecutive range of logical row numbers.
- * @return First row number in the reserved range.
+ * @brief Reserve consecutive row numbers while holding the extension lock.
+ * @return First row number in the range. Reject ranges beyond TID capacity.
  */
 export uint64_t
 reserve_column_row_numbers(Relation rel, uint64_t nrows)
@@ -732,8 +666,8 @@ reserve_column_row_numbers(Relation rel, uint64_t nrows)
 
 
 /**
- * @brief Atomically reserves the next stripe identity.
- * @return Reserved stripe identity. Row numbers are reserved separately.
+ * @brief Reserve a stripe id while holding the relation-extension lock.
+ * @return The reserved id. Row numbers are reserved separately.
  */
 export uint64_t
 reserve_column_stripe_id(Relation rel)
@@ -761,7 +695,8 @@ reserve_column_stripe_id(Relation rel)
 
 
 /**
- * @brief Atomically reserves aligned logical storage for a write.
+ * @brief Reserve a separate page-aligned byte range for a columnar write.
+ * Extend the relation to contain the range while holding the extension lock.
  * @return First logical byte offset, or invalid_logical_offset for zero bytes.
  */
 export uint64_t
@@ -792,14 +727,14 @@ reserve_column_storage_bytes(Relation rel, uint64_t amount)
 	}
 	metapage.next_logical_offset = *next_reservation;
 
-	/* write new reservation */
+	/* Save the new end of reserved storage. */
 	overwrite_column_metapage(rel, metapage);
 
-	/* last used physical_address of new reservation */
+	/* Find the page containing the range's last byte. */
 	const physical_address final =
 		logical_to_physical_address(*next_reservation - 1);
 
-	/* extend with new pages */
+	/* Add enough pages to hold the reserved range. */
 	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 
 	while (nblocks <= final.block_number)
@@ -824,7 +759,7 @@ reserve_column_storage_bytes(Relation rel, uint64_t amount)
 export void
 read_column_storage(Relation rel, uint64_t logical_offset, char *data, uint32_t amount)
 {
-	/* if there's no work to do, succeed even with invalid offset */
+	/* A zero-length read accepts any offset. */
 	if (amount == 0)
 	{
 		return;
@@ -849,11 +784,11 @@ read_column_storage(Relation rel, uint64_t logical_offset, char *data, uint32_t 
 }
 
 
-/** @brief Writes a logical byte range across the required PostgreSQL pages. */
+/** @brief Write a reserved logical byte range across PostgreSQL pages. */
 export void
 write_column_storage(Relation rel, uint64_t logical_offset, const char *data, uint32_t amount)
 {
-	/* if there's no work to do, succeed even with invalid offset */
+	/* A zero-length write accepts any offset. */
 	if (amount == 0)
 	{
 		return;
@@ -879,10 +814,10 @@ write_column_storage(Relation rel, uint64_t logical_offset, const char *data, ui
 
 
 /**
- * @brief Truncates storage after the last page needed by a reservation.
- *
- * @pre The caller holds `AccessExclusiveLock` on the relation.
- * @return True when physical pages were removed.
+ * @brief Reduce the reserved byte range and remove pages beyond its end.
+ * @pre The caller holds AccessExclusiveLock on the relation.
+ * @return true if pages were removed. The reservation can shrink within
+ * the last page while this function returns false.
  */
 export bool
 truncate_column_storage(Relation rel, uint64_t new_data_reservation)
@@ -892,8 +827,8 @@ truncate_column_storage(Relation rel, uint64_t new_data_reservation)
 		raise_logical_storage_reservation_error(
 			rel, "truncate column storage at", new_data_reservation);
 	}
-	// An empty data reservation retains the metapage and reserved page, but
-	// has no valid final data byte to pass to logical_to_physical_address.
+	// Empty data still keeps the metapage and reserved page.
+ // It has no final data byte to convert to a physical address.
 	const BlockNumber final_block = new_data_reservation == first_logical_offset
 		? reserved_empty_block_number
 		: logical_to_physical_address(new_data_reservation - 1).block_number;
@@ -913,7 +848,7 @@ truncate_column_storage(Relation rel, uint64_t new_data_reservation)
 	BlockNumber old_rel_pages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 	if (old_rel_pages == 0)
 	{
-		/* nothing to do */
+		/* The relation has no pages to truncate. */
 		return false;
 	}
 
@@ -951,22 +886,19 @@ truncate_column_storage(Relation rel, uint64_t new_data_reservation)
 
 	if (metapage.next_logical_offset == new_data_reservation)
 	{
-		/* nothing to do */
+		/* The reservation already ends at this offset. */
 		UnlockRelationForExtension(rel, ExclusiveLock);
 		return false;
 	}
 
 	metapage.next_logical_offset = new_data_reservation;
 
-	/* write new reservation */
+	/* Save the reduced reservation before removing pages. */
 	overwrite_column_metapage(rel, metapage);
 
 	UnlockRelationForExtension(rel, ExclusiveLock);
 
-	/*
-	 * Truncate the storage. Note that RelationTruncate() takes care of
-	 * Write Ahead Logging.
-	 */
+	/* RelationTruncate records page removal in WAL. */
 	if (new_rel_pages < old_rel_pages)
 	{
 		RelationTruncate(rel, new_rel_pages);
