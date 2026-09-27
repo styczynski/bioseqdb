@@ -1,6 +1,6 @@
 /**
  * @file prepared_reader.cppm
- * @brief Stable partition facade for prepared grouped-SoA readers.
+ * @brief Exports the grouped index reader and its checked-row and directory types.
  */
 export module bioseq.indexing.minimizer_hashmap:prepared_reader;
 

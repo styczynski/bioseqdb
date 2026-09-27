@@ -1,6 +1,6 @@
 /**
  * @file pair_sort.cppm
- * @brief SIMD sorting implementation for packed minimizer-pair runs.
+ * @brief Sorts packed minimizer hash/position pairs with the selected SIMD sorter.
  */
 module;
 
@@ -14,10 +14,11 @@ import bioseq.simd.sorting;
 namespace bioseq::indexing::detail {
 
 /**
- * @brief Sorts packed minimizer pairs through the selected SIMD policy.
- * @param[in,out] keys Array of `key_count` packed keys sorted in ascending order
- * @param[in] key_count Number of keys available at `keys`
- * @param[in] sort_implementation Stable sorter ordinal from `pair_run_sort_implementation`
+ * Sort unsigned 128-bit pair keys in ascending order using the selected sorter.
+ * The hash occupies the high half, so pairs are ordered by hash and then position.
+ * @param keys Array of key_count keys to sort in place.
+ * @param key_count Number of keys.
+ * @param sort_implementation Value from pair_run_sort_implementation.
  */
 void sort_minimizer_pair_run_keys(hwy::uint128_t* keys,
                                   std::size_t key_count,
@@ -43,12 +44,7 @@ void sort_minimizer_pair_run_keys(hwy::uint128_t* keys,
 
 } // namespace bioseq::indexing::detail
 
-/**
- * @brief Sorts packed minimizer pairs for the module caller using the C linkage boundary.
- * @param[in,out] keys Array of `key_count` packed keys sorted in ascending order
- * @param[in] key_count Number of keys available at `keys`
- * @param[in] sort_implementation Stable sorter ordinal from `pair_run_sort_implementation`
- */
+/** Sort packed hash/position keys through the C-linkage entry point. */
 extern "C" void bioseq_sort_pair_run_u128_keys(hwy::uint128_t* keys,
                                                std::size_t key_count,
                                                int sort_implementation) noexcept {

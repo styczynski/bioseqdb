@@ -1,10 +1,9 @@
 /**
  * @file minimizer_index.cppm
- * @brief Shared minimizer lookup/persistence concepts and runtime segment range.
+ * @brief Defines shared minimizer lookup interfaces and sequence-segment bounds.
  *
- * Lives in `bioseq::indexing`. Highway-namespace consumers reference it
- * cross-namespace (the concept names only a POD value type plus a concept, not
- * Highway intrinsics). NO_POSTGRES.
+ * These types live in bioseq::indexing and are also used by Highway code.
+ * NO_POSTGRES.
  */
 module;
 #include <span>
@@ -25,18 +24,17 @@ export namespace bioseq::indexing {
 using bioseq::minimizers::minimap_sketch_data;
 
 /**
- * @brief Reports failure to produce a complete authenticated lookup result.
- *
- * PostgreSQL callers catch this named type before crossing the longjmp error
- * boundary.
+ * @brief Reports an incomplete or invalid saved-index lookup.
+ * PostgreSQL callers catch this exception before raising a PostgreSQL error,
+ * so C++ objects are destroyed before PostgreSQL uses longjmp.
  */
 class persisted_minimizer_lookup_error final : public std::runtime_error {
 public:
-  /** @brief Classifies failures that require distinct caller handling. */
+  /** Identifies lookup failures that need different handling. */
   enum class reason : std::uint8_t {
       /// @brief Failure without a more specific classification.
       unspecified,
-      /// @brief Memory admission or allocation prevented a complete result.
+      /// Memory could not be reserved or allocated for the result.
       admission_or_allocation,
   };
 
@@ -44,42 +42,32 @@ private:
     reason reason_ = reason::unspecified;
 
 public:
-    /// @brief Creates an unclassified lookup error from a diagnostic message.
+    /// Create a lookup error with a message and an unspecified reason.
     using std::runtime_error::runtime_error;
 
-    /**
-     * @brief Creates a classified persisted-lookup error.
-     * @param reason Failure classification
-     * @param message Diagnostic message
-     */
+    /** Create a lookup error with a reason and diagnostic message. */
     persisted_minimizer_lookup_error(
             reason reason,
             const char* message)
         : std::runtime_error(message), reason_(reason) {}
 
-    /**
-     * @brief Returns the failure classification.
-     * @return Classification supplied at construction
-     */
+    /** Return the reason supplied at construction. */
     [[nodiscard]] reason failure_reason() const noexcept {
         return reason_;
     }
 };
 
-/** @brief Borrows one chronologically encoded position run for a hash. */
+/** Borrows one ordered run of encoded positions for a hash. */
 struct minimizer_position_span {
-    /// @brief Chronologically encoded positions owned by the source index.
+    /// Encoded positions in increasing order, owned by the source index.
     std::span<const std::uint64_t> positions{};
 };
 
 /**
- * @brief Borrows either one contiguous position run or segmented runs.
- *
- * Segment-local results can contain several persisted runs.
- * `global_occurrence_count` is
- * authoritative even when high-frequency positions were deliberately not
- * loaded. A consumer may prune on that count before requiring complete spans.
- * The source storage for every borrowed span must outlive this view.
+ * @brief Borrows one position array or several ordered position runs for a hash.
+ * The occurrence count remains available when positions were skipped because
+ * the hash occurs too frequently. Seed collection can reject such a hash from
+ * its count alone. Every borrowed array and run descriptor must outlive this view.
  */
 class minimizer_lookup_spans {
 private:
@@ -90,7 +78,7 @@ private:
     std::uint8_t contiguous_width_bytes_ = 0u;
     bool positions_complete_ = true;
 
-    /** @brief Creates a lookup view from its validated shape components. */
+    /** Store the lookup shape supplied by the public factory functions. */
     constexpr minimizer_lookup_spans(
             const void* contiguous_data,
             std::size_t contiguous_size,
@@ -109,22 +97,14 @@ public:
   /** @brief Creates an empty, complete lookup result. */
   constexpr minimizer_lookup_spans() noexcept = default;
 
-  /**
-   * @brief Borrows one contiguous packed-64 position run.
-   * @param positions Chronologically encoded positions whose storage outlives the result
-   * @return Complete contiguous lookup result
-   */
+  /** Borrow an ordered array of 64-bit encoded positions. Its storage must outlive the result. */
   [[nodiscard]] static constexpr minimizer_lookup_spans
   contiguous(std::span<const std::uint64_t> positions) noexcept {
       return minimizer_lookup_spans{
           positions.data(), positions.size(), sizeof(std::uint64_t), {}, positions.size(), true};
   }
 
-  /**
-   * @brief Borrows one contiguous packed-32 position run.
-   * @param positions Chronologically encoded positions whose storage outlives the result
-   * @return Complete contiguous lookup result
-   */
+  /** Borrow an ordered array of 32-bit encoded positions. Its storage must outlive the result. */
   [[nodiscard]] static constexpr minimizer_lookup_spans
   contiguous(std::span<const std::uint32_t> positions) noexcept {
       return minimizer_lookup_spans{
@@ -132,11 +112,9 @@ public:
   }
 
   /**
-   * @brief Borrows segmented packed-64 position runs.
-   * @param spans Chronologically ordered runs whose descriptors and payloads outlive the result
-   * @param global_occurrence_count Authoritative total occurrence count
-   * @param positions_complete Whether all counted positions are present
-   * @return Segmented lookup result
+   * Borrow ordered 64-bit position runs and their total occurrence count.
+   * The run descriptors and their arrays must outlive the result.
+   * positions_complete states whether every counted position is present.
    */
   [[nodiscard]] static constexpr minimizer_lookup_spans
   segmented(std::span<const minimizer_position_span> spans,
@@ -146,36 +124,23 @@ public:
           nullptr, 0u, 0u, spans, global_occurrence_count, positions_complete};
   }
 
-  /**
-   * @brief Creates a count-only result whose positions were not loaded.
-   * @param global_occurrence_count Authoritative total occurrence count
-   * @return Incomplete count-only lookup result
-   */
+  /** Return the occurrence count with positions marked unavailable. */
   [[nodiscard]] static constexpr minimizer_lookup_spans
   positions_unavailable(std::uint64_t global_occurrence_count) noexcept {
       return minimizer_lookup_spans{nullptr, 0u, 0u, {}, global_occurrence_count, false};
   }
 
-  /**
-   * @brief Returns the authoritative occurrence count.
-   * @return Count across all persisted segments
-   */
+  /** Return the total occurrence count, including positions that were not loaded. */
   [[nodiscard]] constexpr std::uint64_t global_occurrence_count() const noexcept {
       return global_occurrence_count_;
   }
 
-  /**
-   * @brief Reports whether every counted position is available.
-   * @return `true` for complete lookup results
-   */
+  /** Return whether every counted position is available. */
   [[nodiscard]] constexpr bool positions_complete() const noexcept {
       return positions_complete_;
   }
 
-  /**
-   * @brief Returns the packed-64 contiguous run when present.
-   * @return Borrowed run or an empty span for another result shape
-   */
+  /** Borrow the 64-bit position array, or return an empty span for another result format. */
   [[nodiscard]] std::span<const std::uint64_t> contiguous_positions() const noexcept {
       return contiguous_width_bytes_ == sizeof(std::uint64_t)
                  ? std::span<const std::uint64_t>{static_cast<const std::uint64_t*>(
@@ -184,10 +149,7 @@ public:
                  : std::span<const std::uint64_t>{};
   }
 
-  /**
-   * @brief Returns the packed-32 contiguous run when present.
-   * @return Borrowed run or an empty span for another result shape
-   */
+  /** Borrow the 32-bit position array, or return an empty span for another result format. */
   [[nodiscard]] std::span<const std::uint32_t> contiguous_positions32() const noexcept {
       return contiguous_width_bytes_ == sizeof(std::uint32_t)
                  ? std::span<const std::uint32_t>{static_cast<const std::uint32_t*>(
@@ -196,18 +158,16 @@ public:
                  : std::span<const std::uint32_t>{};
   }
 
-  /**
-   * @brief Returns the segmented packed-64 runs when present.
-   * @return Borrowed segment descriptors
-   */
+  /** Borrow the position-run descriptors, or return an empty span for a contiguous result. */
   [[nodiscard]] constexpr std::span<const minimizer_position_span>
   segmented_positions() const noexcept {
       return segmented_;
   }
 
   /**
-   * @brief Validates shape exclusivity, segment contents, and total count.
-   * @return `true` when the borrowed result is internally consistent
+   * Check that the result uses one storage format and its span sizes agree
+   * with the occurrence count. An incomplete result must contain no positions.
+   * Position values and their order are checked by the index reader.
    */
   [[nodiscard]] constexpr bool well_formed() const noexcept {
       const unsigned active_shapes = static_cast<unsigned>(contiguous_size_ != 0u) +
@@ -237,7 +197,7 @@ public:
 };
 
 /**
- * @brief Checks for a read-only contiguous minimizer lookup interface.
+ * @brief Requires a const lookup(hash) returning a span of 64-bit positions.
  * @tparam p_index Candidate index type
  */
 template <typename p_index>
@@ -247,7 +207,7 @@ concept contiguous_minimizer_lookup_index =
     };
 
 /**
- * @brief Checks for a read-only segmented minimizer lookup interface.
+ * @brief Requires a const lookup_spans(hash) returning a minimizer_lookup_spans view.
  * @tparam p_index Candidate index type
  */
 template <typename p_index>
@@ -257,7 +217,7 @@ concept segmented_minimizer_lookup_index =
     };
 
 /**
- * @brief Checks for any read-only minimizer lookup shape used by seeding.
+ * @brief Requires a target length and a minimizer lookup usable by seed collection.
  * @tparam p_index Candidate index type
  */
 template <typename p_index>
@@ -266,7 +226,7 @@ concept minimizer_lookup_index = requires(const p_index& const_index) {
 } && (contiguous_minimizer_lookup_index<p_index> || segmented_minimizer_lookup_index<p_index>);
 
 /**
- * @brief Checks for a reader that prepares one query wave into final anchors.
+ * @brief Requires a reader that prepares seed anchors for a batch of fragment queries.
  * @tparam p_index Candidate prepared reader type
  */
 template <typename p_index>
@@ -285,7 +245,7 @@ concept prepared_fragment_anchor_batch_reader =
     };
 
 /**
- * @brief Checks for a per-query view over prepared canonical anchors.
+ * @brief Requires a query view that returns prepared seed anchors in order.
  * @tparam p_index Candidate query-view type
  */
 template <typename p_index>
@@ -303,7 +263,7 @@ concept prepared_fragment_anchor_query_index =
     };
 
 /**
- * @brief Checks for either target-index shape accepted by the seed stage.
+ * @brief Accepts indexes that provide minimizer positions or prepared seed anchors.
  * @tparam p_index Candidate target index type
  */
 template <typename p_index>
@@ -311,11 +271,10 @@ concept minimizer_seed_index =
     minimizer_lookup_index<p_index> || prepared_fragment_anchor_query_index<p_index>;
 
 /**
- * @brief Adapts either ordinary lookup interface to borrowed lookup spans.
+ * @brief Return a borrowed position view through either supported lookup interface.
  * @tparam p_index Read-only minimizer lookup type
  * @param index Index to query
  * @param kmer_hash Hash to look up
- * @return Borrowed positions and authoritative count
  */
 template <minimizer_lookup_index p_index>
 [[nodiscard]] inline minimizer_lookup_spans lookup_minimizer_spans(
@@ -329,7 +288,7 @@ template <minimizer_lookup_index p_index>
 }
 
 /**
- * @brief Checks for a lookup index with direct binary persistence support.
+ * @brief Requires an index that can build from sketches and read or write its binary form.
  * @tparam p_index Candidate index type
  */
 template <typename p_index>
@@ -347,15 +306,15 @@ concept persistable_minimizer_index =
         { p_index::deserialize_from_binary(input_buffer, input_size) } -> std::same_as<p_index>;
     };
 
-/** @brief Carries collection and core bounds shared by Highway targets. */
+/** Sequence range to collect and the inner base range allowed to emit minimizers. */
 struct segment_unit_range {
-    /// @brief First collection storage unit.
+    /// First packed storage unit to collect.
     bioseq::storage::sequence_size_t cs_u;
-    /// @brief One-past-last collection storage unit.
+    /// Packed storage unit just past the collection range.
     bioseq::storage::sequence_size_t ce_u;
-    /// @brief First base in the emission core.
+    /// First base in the range allowed to emit minimizers.
     bioseq::storage::sequence_size_t core_lo_bp;
-    /// @brief One-past-last base in the emission core.
+    /// Base just past the range allowed to emit minimizers.
     bioseq::storage::sequence_size_t core_hi_bp;
 };
 
