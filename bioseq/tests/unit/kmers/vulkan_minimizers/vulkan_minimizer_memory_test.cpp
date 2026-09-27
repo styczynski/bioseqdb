@@ -1,6 +1,6 @@
 /**
  * @file vulkan_minimizer_memory_test.cpp
- * @brief Vulkan minimizer admission and memory-lifetime tests.
+ * @brief Check memory budgets as minimizer data moves between GPU results and host indexes.
  */
 #include <hwy/highway.h>
 #include <cstring>
@@ -194,8 +194,9 @@ TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host resu
     REQUIRE(split_dispatch_bytes < simultaneous_reservation_bytes);
     REQUIRE(simultaneous_reservation_bytes - dispatch_without_host_result == 2'400'003'072u);
 
-    // The runtime-derived arena and resident requirements are held constant;
-    // the two calculations differ only in the 500-Mbp dna4 staging ownership.
+    // Keep the GPU allocations fixed and compare host staging for the same
+    // 500-million-letter dna4 input. A fixed-size allocation needs less spare
+    // capacity than a growing vector.
     constexpr std::uint64_t captured_required_bytes = 1'492'942'336u;
     constexpr std::uint64_t captured_allocatable_bytes = 1'419'423'232u;
     constexpr std::uint64_t captured_packed_sequence_bytes = 125'000'000u;
@@ -247,8 +248,8 @@ TEST_CASE("vulkan minimizer: zero-copy handoff fits captured memory pressure",
     REQUIRE(captured_allocatable_before_host - fixed_host_admission == 653'942'292u);
     REQUIRE(growable_collector_host_admission - captured_allocatable_before_host == 92'463'340u);
 
-    // The tighter process ceiling exercises the same route contrast: exact
-    // staging fits while the growable-vector 2x reservation cannot be admitted.
+    // Check a tighter process budget too. Fixed-size staging still fits,
+    // while reserving twice the payload for vector growth exceeds the budget.
     constexpr std::uint64_t captured_tight_budget_ceiling = 2'479'079'424u;
     constexpr std::uint64_t captured_tight_allocatable_before_host =
         captured_tight_budget_ceiling - captured_reserved_before_host;
@@ -257,10 +258,9 @@ TEST_CASE("vulkan minimizer: zero-copy handoff fits captured memory pressure",
     REQUIRE(growable_collector_host_admission - captured_tight_allocatable_before_host ==
             214'540'524u);
 
-    // The opaque Boost FOA geometry is pinned and measured by the index's
-    // allocator. Reserving the full possible-distinct count produces one 2-GiB
-    // table allocation; a half-size reserve produces a 1-GiB table
-    // and then overlapped it with the 2-GiB growth rehash.
+    // Reserve the hash table once for all possible distinct minimizers.
+    // Starting at half that size would need space for both the old table and
+    // its replacement during growth.
     const auto table_plan = idx::plan_minimizer_hashmap_table_allocation(emitted_minimizers);
     REQUIRE(table_plan.valid);
     REQUIRE(table_plan.group_count == 8'388'608u);
@@ -271,10 +271,9 @@ TEST_CASE("vulkan minimizer: zero-copy handoff fits captured memory pressure",
     REQUIRE(half_table_plan.valid);
     REQUIRE(half_table_plan.allocation_bytes == 1'073'741'824u);
 
-    // After download, serialized materialization reconciles the exact host
-    // vector into live RSS and releases its temporary permit. The device owner
-    // is then dropped. A fresh permit covers only allocations not yet is_present
-    // in that footprint: positions plus the one-shot table.
+    // Model the handoff after the downloaded host vector is counted in process
+    // memory and the device result is freed. Reserve new memory for positions
+    // and the hash table.
     const std::uint64_t position_headroom = vk::vulkan_exact_host_allocation_admission_bytes(
         emitted_minimizers * sizeof(std::uint64_t));
     const std::uint64_t table_headroom =
@@ -283,9 +282,8 @@ TEST_CASE("vulkan minimizer: zero-copy handoff fits captured memory pressure",
         bioseq::common::saturating_add(position_headroom, table_headroom);
     REQUIRE(target_index_build_permit == 2'894'085'888u);
 
-    // Reconcile the captured pressure sample by subtracting the newly-live host
-    // footprint, adding the released device allocation, and adding the arena
-    // high-water now physically trimmed before host materialization.
+    // Update the available budget for the host vector now in process memory,
+    // the freed device result, and the released arena allocation.
     constexpr std::uint64_t captured_arena_high_water_bytes = 187'533'824u;
     const std::uint64_t reconciled_build_ceiling = captured_budget_ceiling - host_payload_bytes +
                                                    device_output_bytes +
@@ -303,9 +301,8 @@ TEST_CASE("vulkan minimizer: zero-copy handoff fits captured memory pressure",
 
 TEST_CASE("vulkan minimizer: replacement authority admits dense resident upload",
           "[component:bioseq][layer:unit][feature:minimizer]") {
-    // A full CPU-index reservation covers both positions and the FOA table, so
-    // the subsequent sorted-dense GPU upload exceeds the remaining budget by
-    // 106,379,618 bytes.
+    // Keeping separate reservations for both CPU index arrays leaves too little
+    // room for the GPU upload in this captured budget.
     constexpr std::uint64_t retained_position_bytes = 746'471'168u;
     constexpr std::uint64_t retained_table_bytes = 2'147'483'648u;
     constexpr std::uint64_t retained_index_bytes = 2'893'954'816u;
@@ -323,10 +320,9 @@ TEST_CASE("vulkan minimizer: replacement authority admits dense resident upload"
                    resident_upload_bytes - full_index_allocatable_bytes);
     STATIC_REQUIRE(resident_upload_bytes > full_index_allocatable_bytes);
 
-    // The dense source host vector was nonempty, exact-size, fully touched and
-    // already reflected in process footprint.  Once it is deallocated, the
-    // exactly equal, fully initialized positions allocation consumes that
-    // one-use authority.  Only the table remains permit-accounted.
+    // Model replacing a freed host vector with a fully initialized positions
+    // array of the same size. Its bytes are already counted in process memory,
+    // so only the hash table keeps a separate reservation.
     constexpr std::uint64_t transferred_position_footprint_bytes = retained_position_bytes;
     constexpr std::uint64_t retained_index_permit_bytes =
         retained_index_bytes - transferred_position_footprint_bytes;
@@ -369,8 +365,8 @@ TEST_CASE("vulkan target index: 500-Mbp ungated count replaces C-sized main peak
         vk::estimate_vulkan_minimizer_capacity(bp_size, window_size);
     REQUIRE(pessimistic_capacity == 150'000'192u);
 
-    // The capacity-sized route holds three 8-byte streams plus one 16-byte
-    // bucket stream, an exact 6,000,007,680-byte request.
+    // Compare buffers sized from the estimated capacity with buffers sized from
+    // the measured minimizer count. The estimate exceeds this memory budget.
     const std::uint64_t capacity_stream_floor =
         bioseq::common::saturating_mul(pessimistic_capacity, 40u);
     const std::uint64_t exact_count_stream_floor =
@@ -535,8 +531,8 @@ TEST_CASE("vulkan minimizer: split admission retains exact device and host bytes
         exact_host_size_bytes, bioseq::parallelism::k_vector_preallocation_headroom_factor);
     calibration.reset();
     const std::uint64_t cache_metadata_after = runtime.pipeline_cache_metadata_reserved_bytes();
-    // Pipeline cache entries are retained by the process runtime; query result
-    // device/host ownership must still be gone when its result is destroyed.
+    // Destroying the result must release its host and device reservations.
+    // Pipeline-cache entries stay with the process runtime.
     REQUIRE(cache_metadata_after > 0u);
     REQUIRE(cache_metadata_after >= cache_metadata_before);
     const std::uint64_t cache_metadata_delta = cache_metadata_after - cache_metadata_before;
@@ -544,19 +540,16 @@ TEST_CASE("vulkan minimizer: split admission retains exact device and host bytes
             bioseq::common::saturating_add(baseline, cache_metadata_delta));
     const std::uint64_t operation_baseline = admission.reserved_bytes();
 
-    // Recompute after calibration so pipeline-cache metadata and allocator
-    // requirements reflect the live runtime. The request-scoped Vulkan arena
-    // itself must already be physically empty.
+    // Recompute the required memory after calibration has populated the pipeline
+    // cache. The request's arena allocations should already be freed.
     const std::uint64_t dispatch_peak = dispatch_admission_bytes();
     const std::uint64_t host_materialization_peak =
         vk::vulkan_sketch_host_materialization_admission_bytes(actual_device_allocation_bytes,
                                                                exact_host_headroom_bytes);
     const std::uint64_t split_admission_peak = std::max(dispatch_peak, host_materialization_peak);
-    // Compare both lifetime models against the same allocator-rounded dispatch
-    // peak. The Vulkan arena is persistent and may have an arbitrary physical
-    // high-water, so reconstructing a peak from logical bytes would undercount.
-    // The simultaneous model keeps the pessimistic host result alive during
-    // dispatch; the split model materializes the exact result after dispatch.
+    // Use the same dispatch-memory requirement for both lifetime models.
+    // Reserving the host result during dispatch raises the peak. Copying it
+    // afterward allows the temporary GPU arena to be freed first.
     const std::uint64_t simultaneous_reservation_peak =
         bioseq::common::saturating_add(dispatch_peak, pessimistic_initial_host_bytes);
     REQUIRE(split_admission_peak < simultaneous_reservation_peak);
