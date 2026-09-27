@@ -1,6 +1,6 @@
 /**
  * @file reads_sidecars.cppm
- * @brief Fragmented sequence reads and co-sharded sidecar storage.
+ * @brief Read complete sequences from fragments and store their sidecar blobs.
  */
 module;
 
@@ -82,16 +82,14 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.indexing.storage;
-import bioseq.common.seqan_adapter;  // ceil_log2 used in letters_per_unit_for
+import bioseq.common.seqan_adapter;  
 import bioseq.storage.size;
 import bioseq.storage.coordinates;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.storage.manager.sql_rows;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_manager_sequence_storage_manager.entity_handles;
-// The PG-free bucket math and sequence_locator value live in their own
-// module so the unit-test TU can link them without the Postgres backend.
-// Re-exported here so existing `import bioseq_storage` consumers are unchanged.
+// Share locator types and bucket calculations with standalone code.
 import bioseq.storage.layout;
 import :sequence_storage_catalog;
 import :sequence_storage_layout_cache;
@@ -100,11 +98,11 @@ import :sequence_storage_streamed_writes;
 
 namespace bioseq::storage {
 
-/// Open a random-access column reader for one sequence shard.
-/// @param shard Open relation whose relcache reference remains caller-owned.
-/// @param payload_mctx Memory context that owns the returned reader state.
-/// @param snapshot Explicit snapshot used for fragment visibility.
-/// @return Reader state that must eventually be passed to `end_column_read`.
+/// Open a fragment reader using the caller's snapshot.
+/// @param shard Open fragment table, kept open by the caller.
+/// @param payload_mctx Memory context for reader state.
+/// @param snapshot Snapshot used to check row visibility.
+/// @return Reader to close with `end_column_read`.
 [[nodiscard]] inline column_read_state*
 begin_sequence_payload_read(Relation shard,
                             MemoryContext payload_mctx,
@@ -127,21 +125,25 @@ begin_sequence_payload_read(Relation shard,
     return read_state;
 }
 
-/// Materialize all fragments named by a locator as one flat sequence varlena.
-/// @tparam p_length_type Unsigned type used for configured sequence lengths.
-/// @tparam p_bucket_minimum_length_bits Smallest configured bucket exponent.
-/// @tparam p_bucket_maximum_length_bits Largest configured bucket exponent.
-/// @param db_oid Database identity used to resolve the physical shard.
-/// @param spc_oid Tablespace identity used to resolve the physical shard.
-/// @param main_relfilenode Main-relation file identity used in the shard key.
-/// @param column_attno One-based sequence column attribute number.
-/// @param loc Locator whose logical length is measured in sequence letters.
-/// @param snapshot Explicit snapshot governing every fragment read.
-/// @param out_mctx Memory context that owns the returned varlena.
-/// @param cache Caller-owned relation and reader cache. It must outlive this call.
-/// @return Flat sequence storage allocated in `out_mctx`.
-/// @throws PostgreSQL ERROR if geometry is corrupt, a fragment is absent, or
-/// the materialized varlena would exceed PostgreSQL allocation limits.
+/// Read all locator fragments into one complete sequence value.
+///
+/// Each fragment is checked against the expected alphabet, storage width and
+/// length before its bytes are copied. The complete value must fit within
+/// PostgreSQL's allocation limit. Use a scanner for larger sequences.
+///
+/// @tparam p_length_type Unsigned type used for sequence lengths.
+/// @tparam p_bucket_minimum_length_bits Smallest bucket exponent.
+/// @tparam p_bucket_maximum_length_bits Largest bucket exponent.
+/// @param db_oid Database containing the parent table.
+/// @param spc_oid Parent tablespace.
+/// @param main_relfilenode Parent table file number.
+/// @param column_attno One-based sequence column number.
+/// @param loc Locator to read.
+/// @param snapshot Snapshot for all fragment reads. Must be non-null.
+/// @param out_mctx Memory context for the returned value.
+/// @param cache Relation and reader cache, kept alive by the caller.
+/// @return Complete sequence allocated in `out_mctx`.
+/// @throws PostgreSQL ERROR for missing or malformed fragments or an oversized value.
 template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
@@ -166,24 +168,18 @@ sequence_storage_manager<
     validate_locator_flat_materialization_length(loc);
     const bool registered_mvcc_snapshot =
         IsMVCCSnapshot(snapshot) && snapshot->regd_count != 0;
-    // SnapshotAny is backend-lifetime static state. Other non-MVCC snapshots
-    // (especially caller-stack Dirty snapshots) get a per-call reader so no
-    // cache entry can outlive their owner.
-    // An unregistered MVCC value can still be used for this synchronous call,
-    // but cannot be retained beyond it.
+    // Keep readers only for registered MVCC snapshots or the permanent
+    // SnapshotAny object. Other snapshots, including stack-allocated Dirty
+    // snapshots, need a reader that closes before this call returns.
     const bool retain_read_state =
         registered_mvcc_snapshot || snapshot == SnapshotAny;
 
-    // Empty sequence (num_fragments == 0). The locator is the
-    // only on-disk artefact; there are no sub-table rows to fetch. Return a
-    // minimal empty bioseq::pg_types::seq in `out_mctx`.
+    // An empty sequence has no fragment rows. Return an empty sequence header.
     if (loc.fragment_count == 0) {
         bioseq::postgres::support::memory_context_scope ctx{out_mctx};
         bioseq::pg_types::seq* out = static_cast<bioseq::pg_types::seq*>(palloc0(bioseq::pg_types::seq::header_bytes()));
         SET_VARSIZE(out, bioseq::pg_types::seq::header_bytes());
-        // alphabet/width/bp_size/padding are all zero — caller-side stub
-        // hydration sees an empty payload (compact_sequence_range handles
-        // size=0 correctly).
+        // The empty header has zero length, width, alphabet code and padding.
         return out;
     }
 
@@ -202,9 +198,8 @@ sequence_storage_manager<
     column_read_state* read_state = nullptr;
     bool transient_read_state = false;
     if (retain_read_state) {
-        // Key reuse by the caller-owned source snapshot, not the
-        // read-state pointer: flushing may replace read_state->snapshot with
-        // its own refreshed registered copy while the owner remains the same.
+        // Match the snapshot supplied by the caller. Flushing can replace the
+        // reader's own snapshot copy while the caller's snapshot stays the same.
         if (entry.read_state != nullptr
             && entry.read_snapshot_source != snapshot) {
             end_column_read(entry.read_state);
@@ -223,8 +218,7 @@ sequence_storage_manager<
         transient_read_state = true;
     }
 
-    // Derive fragment shape from logical alphabet and width on
-    // first sub-table row.
+    // Read the first fragment to determine the alphabet and storage width.
     Datum first_vals[1]  = { 0 };
     bool  first_nulls[1] = { true };
     if (!read_column_row_by_number(read_state, loc.first_fragment_row,
@@ -297,8 +291,7 @@ sequence_storage_manager<
         first_raw_bytes, expected_fragment_bytes,
         loc.first_fragment_row);
 
-    // Compute exact payload/flat sizes without overflowing before either
-    // PostgreSQL's Size or MaxAllocSize boundary can reject the request.
+    // Check size arithmetic before allocating the complete sequence.
     const std::uint64_t total_units_u64 = checked_ceil_div(
         loc.logical_length, static_cast<std::uint64_t>(lpu));
     const Size total_units = checked_size_cast(total_units_u64);
@@ -359,8 +352,7 @@ sequence_storage_manager<
         static_cast<std::uint16_t>(expected_last_padding);
 
     for (std::uint32_t fragment_no = 1; fragment_no < loc.fragment_count; ++fragment_no) {
-        // Full hydration of a multi-Gbp target into one varlena walks
-        // tens of thousands of fragment rows. Make it cancellable and observable.
+        // Let long sequence reads respond to cancellation and report progress.
         CHECK_FOR_INTERRUPTS();
         if (bioseq::settings::diagnostics::logging::enabled && (fragment_no & 0x3FFF) == 0) {
             bioseq_log_progress<logging_level::debug>("[fetch_payload] hydrated {}/{} fragments",
@@ -425,26 +417,24 @@ sequence_storage_manager<
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// Bulk fetch.
-// ---------------------------------------------------------------------------
+// Batched sequence reads.
 
-/// Materialize a batch of locators after ordering reads by shard and row.
-/// @tparam p_length_type Unsigned type used for configured sequence lengths.
-/// @tparam p_bucket_minimum_length_bits Smallest configured bucket exponent.
-/// @tparam p_bucket_maximum_length_bits Largest configured bucket exponent.
-/// @param db_oid Database identity used to resolve physical shards.
-/// @param spc_oid Tablespace identity used to resolve physical shards.
-/// @param main_relfilenode Main-relation file identity used in shard keys.
-/// @param column_attno One-based sequence column attribute number.
-/// @param bucket_idx Compatibility value. Each request locator supplies its bucket.
-/// @param requests Requests whose `out_slot` values address `out_payloads`.
-/// @param out_payloads Destination slots for pointers allocated in `out_mctx`.
-/// @param sort_scratch Mutable storage with at least `requests.size()` elements.
-/// @param snapshot Explicit snapshot governing every fragment read.
-/// @param out_mctx Memory context owning each returned sequence.
-/// @param cache Caller-owned relation and reader cache.
-/// @throws PostgreSQL ERROR if scratch space is short or any request fails.
+/// Read a batch in shard and fragment-row order, preserving output positions.
+/// @tparam p_length_type Unsigned type used for sequence lengths.
+/// @tparam p_bucket_minimum_length_bits Smallest bucket exponent.
+/// @tparam p_bucket_maximum_length_bits Largest bucket exponent.
+/// @param db_oid Database containing the parent table.
+/// @param spc_oid Parent tablespace.
+/// @param main_relfilenode Parent table file number.
+/// @param column_attno One-based sequence column number.
+/// @param bucket_idx Unused. Each locator contains its bucket.
+/// @param requests Locators paired with indices into `out_payloads`.
+/// @param out_payloads Output slots for sequences allocated in `out_mctx`.
+/// @param sort_scratch Writable space for at least `requests.size()` requests.
+/// @param snapshot Non-null snapshot for all fragment reads.
+/// @param out_mctx Memory context for the sequences.
+/// @param cache Relation and reader cache.
+/// @throws PostgreSQL ERROR if scratch space is too small or a sequence read fails.
 template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
@@ -462,7 +452,7 @@ sequence_storage_manager<
     MemoryContext                  out_mctx,
     seq_caches*                    cache)
 {
-    (void)bucket_idx;  // The bucket is implicit in each locator; carried for symmetry.
+    (void)bucket_idx;  // Each locator supplies its bucket.
     if (snapshot == nullptr) {
         bioseq_log<logging_level::error, logging_target::postgres>(
             "bioseq storage: fetch_payload_bulk requires an explicit snapshot");
@@ -492,18 +482,15 @@ sequence_storage_manager<
     }
 }
 
-// ---------------------------------------------------------------------------
-// DROP cascade.
-// ---------------------------------------------------------------------------
+// Remove storage owned by a dropped parent table.
 
-/// Validate the internal catalogs needed before a main-relation drop.
-/// @tparam p_length_type Unsigned type used for configured sequence lengths.
-/// @tparam p_bucket_minimum_length_bits Smallest configured bucket exponent.
-/// @tparam p_bucket_maximum_length_bits Largest configured bucket exponent.
-/// @throws PostgreSQL ERROR if either catalog is absent or has an invalid schema.
-///
-/// Relcache references are closed while both `AccessShareLock` locks remain
-/// owned by the current transaction.
+/// Check and lock both catalogs before PostgreSQL drops a parent table.
+/// The locks last until transaction end, preventing schema changes or removal
+/// of either catalog between this check and fragment-table cleanup.
+/// @tparam p_length_type Unsigned type used for sequence lengths.
+/// @tparam p_bucket_minimum_length_bits Smallest bucket exponent.
+/// @tparam p_bucket_maximum_length_bits Largest bucket exponent.
+/// @throws PostgreSQL ERROR if a catalog is missing or has the wrong schema.
 template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
@@ -513,12 +500,8 @@ sequence_storage_manager<
     p_bucket_minimum_length_bits,
     p_bucket_maximum_length_bits>::validate_drop_catalog_contracts()
 {
-    // Acquire both catalog locks in the same order as the mutating OAT_DROP
-    // cleanup and retain them to transaction end. ALTER/DROP of either catalog
-    // therefore cannot race between this preflight and PostgreSQL's relation
-    // deletion. This function deliberately performs no row deletion, command
-    // counter increment, relfilenode bookkeeping, or recursive utility call:
-    // an ERROR here must leave every target in a multi-table DROP untouched.
+    // Take catalog locks in the same order as the drop hook. This check must
+    // leave all target tables untouched if a multi-table DROP fails.
     Relation registry_guard = fragment_registry_detail::open_catalog(
         /*allow_missing_during_extension_teardown=*/false);
 
@@ -535,23 +518,21 @@ sequence_storage_manager<
     }
     source_version_detail::validate_catalog_schema(source_guard);
 
-    // Release relcache pins but retain the AccessShare locks. OAT_DROP still
-    // revalidates under its own locks as defence in depth.
+    // Release relation references and keep the locks until transaction end.
     table_close(source_guard, NoLock);
     table_close(registry_guard, NoLock);
 }
 
-/// Drop fragment and sidecar tables registered for one main relation.
-/// @tparam p_length_type Unsigned type used for configured sequence lengths.
-/// @tparam p_bucket_minimum_length_bits Smallest configured bucket exponent.
-/// @tparam p_bucket_maximum_length_bits Largest configured bucket exponent.
-/// @param db_oid Database component of the main-relation identity.
-/// @param spc_oid Tablespace component of the main-relation identity.
-/// @param main_relfilenode File component of the main-relation identity.
-/// @param allow_missing_during_extension_teardown Whether a missing registry is
-/// accepted while PostgreSQL removes the extension.
-/// @throws PostgreSQL ERROR for catalog validation or SPI failures reported by
-/// PostgreSQL.
+/// Remove a parent table's source versions, fragment shards and sidecar tables.
+/// @tparam p_length_type Unsigned type used for sequence lengths.
+/// @tparam p_bucket_minimum_length_bits Smallest bucket exponent.
+/// @tparam p_bucket_maximum_length_bits Largest bucket exponent.
+/// @param db_oid Parent database.
+/// @param spc_oid Parent tablespace.
+/// @param main_relfilenode Parent table file number.
+/// @param allow_missing_during_extension_teardown Allow an absent registry
+/// while PostgreSQL is removing the extension.
+/// @throws PostgreSQL ERROR if catalog checks or table removal fail.
 template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
@@ -563,10 +544,8 @@ sequence_storage_manager<
     Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     const bool allow_missing_during_extension_teardown)
 {
-    // Keep the validated registry relation locked across the manager calls
-    // below. Those calls return an empty set when the
-    // relation disappears; the guard makes that benign only for the explicit
-    // extension-teardown context and closes the validation-to-use race.
+    // Hold the registry lock while finding and dropping its child tables.
+    // A missing registry is allowed only during extension removal.
     Relation registry_guard = fragment_registry_detail::open_catalog(
         allow_missing_during_extension_teardown);
     if (registry_guard == nullptr) {
@@ -631,16 +610,13 @@ sequence_storage_manager<
     table_close(registry_guard, AccessShareLock);
 }
 
-// Explicit instantiation of the default alias so non-template TUs see the
-// out-of-line definitions.
+// Compile the default storage manager so other modules can call these methods.
 template struct sequence_storage_manager<sequence_size_t, 8, 42>;
 
-// ---------------------------------------------------------------------------
-// Per-shard sidecar I/O.
-// ---------------------------------------------------------------------------
+// Sidecar blobs stored alongside each fragment shard.
 
-/// Resolve the sidecar relation registered for one physical sequence shard.
-/// @return Relation OID, or `InvalidOid` when the shard has no registry row.
+/// Find the sidecar table registered for a fragment shard.
+/// @return Table OID, or `InvalidOid` if the shard is absent.
 static Oid lookup_sidecar_relid(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                                 std::int16_t column_attno,
                                 std::int16_t bucket_idx, std::int32_t shard_idx)
@@ -653,14 +629,14 @@ static Oid lookup_sidecar_relid(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     return row->sidecar_relid;
 }
 
-/// Insert an owning copy of a locator's sidecar bytes into its shard table.
-/// @param column_attno One-based sequence column attribute number.
-/// @param loc Locator whose first fragment row is the sidecar key.
-/// @param blob Bytes copied into a PostgreSQL `bytea` before insertion.
-/// @param cache Reserved cache argument. This implementation does not retain it.
+/// Store a copy of sidecar bytes under the locator's first fragment row.
+/// @param column_attno One-based sequence column number.
+/// @param loc Locator identifying the shard and sidecar key.
+/// @param blob Bytes to copy into a PostgreSQL `bytea`.
+/// @param cache Unused.
 ///
-/// The function acquires and releases `RowExclusiveLock`. It returns without
-/// writing when the registry row or physical sidecar relation is absent.
+/// Opens the table with RowExclusiveLock and releases it after insertion.
+/// If the registry entry or sidecar table is missing, nothing is written.
 void sidecar_write_blob(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                         std::int16_t column_attno, const sequence_locator& loc,
                         std::span<const std::uint8_t> blob, seq_caches* /*cache*/)
@@ -695,14 +671,13 @@ void sidecar_write_blob(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     relation_close(rel, RowExclusiveLock);
 }
 
-/// Read an owning copy of a locator's sidecar bytes.
-/// @param column_attno One-based sequence column attribute number.
-/// @param loc Locator whose first fragment row is the sidecar key.
-/// @param cache Reserved cache argument. This implementation does not retain it.
-/// @return Blob bytes, or no value when the relation or keyed row is absent or
-/// the stored blob is SQL NULL.
+/// Read a copy of a locator's sidecar bytes.
+/// @param column_attno One-based sequence column number.
+/// @param loc Locator identifying the shard and sidecar key.
+/// @param cache Unused.
+/// @return Bytes, or no value if the table, row or blob is missing.
 ///
-/// The relation is held with `AccessShareLock` only for the duration of the scan.
+/// Holds AccessShareLock for the scan and closes the table before returning.
 std::optional<std::vector<char>>
 sidecar_read_blob(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                   std::int16_t column_attno, const sequence_locator& loc,
@@ -752,14 +727,14 @@ sidecar_read_blob(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     return out;
 }
 
-/// Read a batch of sidecar blobs after ordering requests by shard and row.
-/// @param bucket_idx Compatibility value. Each request locator supplies its bucket.
-/// @param requests Requests whose `out_slot` values address `out_blobs`.
-/// @param out_blobs Owning result slots indexed by each request's `out_slot`.
-/// @param sort_scratch Mutable storage with at least `requests.size()` elements.
-/// @param out_mctx Reserved memory-context argument. Results use C++ ownership.
-/// @param cache Cache forwarded to each scalar read.
-/// @throws PostgreSQL ERROR if scratch storage is shorter than the request span.
+/// Read sidecars in shard and row order, preserving each request's output slot.
+/// @param bucket_idx Unused. Each locator supplies its bucket.
+/// @param requests Locators paired with indices into `out_blobs`.
+/// @param out_blobs Slots for the returned byte vectors.
+/// @param sort_scratch Writable space for at least `requests.size()` requests.
+/// @param out_mctx Unused. Results own their C++ memory.
+/// @param cache Forwarded to the individual reads.
+/// @throws PostgreSQL ERROR if scratch space is too small.
 void sidecar_read_blob_bulk(
     Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     std::int16_t column_attno, std::int16_t /*bucket_idx*/,
@@ -778,7 +753,7 @@ void sidecar_read_blob_bulk(
                "(have {} need {})", sort_scratch.size(), requests.size());
     }
     std::copy(requests.begin(), requests.end(), sort_scratch.begin());
-    // Keep the comparator readable while preserving the manager's request type.
+    
     using fetch_request_type = sequence_storage_manager<sequence_size_t, 8, 42>::fetch_request;
     // Group physical reads by shard and then by sidecar key.
     std::sort(sort_scratch.begin(), sort_scratch.begin() + requests.size(),
@@ -794,6 +769,6 @@ void sidecar_read_blob_bulk(
     }
 }
 
-// ---------------------------------------------------------------------------
+
 
 }  // namespace bioseq::storage
