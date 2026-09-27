@@ -1,6 +1,6 @@
 /**
  * @file result_materialization_test.cppm
- * @brief Checks compile-time SQL result materialization contracts.
+ * @brief Checks which C++ results can be converted to SQL rows.
  */
 module;
 
@@ -86,7 +86,7 @@ concept encodable_result_field =
             std::forward<p_value>(value));
     };
 
-/** @brief Matches owned result values accepted by SQL materialization. */
+/** @brief Checks whether encode_result accepts an owned result and encoder. */
 template<class p_result, class p_encoder>
 concept materializable_owned_result =
     requires(
@@ -101,7 +101,7 @@ concept materializable_owned_result =
         } -> std::same_as<Datum>;
     };
 
-/** @brief Matches borrowed result values accepted by SQL materialization. */
+/** @brief Checks whether encode_result accepts a borrowed result. */
 template<class p_result, class p_encoder>
 concept materializable_borrowed_result =
     requires(

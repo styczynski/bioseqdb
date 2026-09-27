@@ -1,6 +1,6 @@
 /**
  * @file sql_boundary_template_producer_test.cppm
- * @brief Instantiates generated SQL-boundary templates for compile checks.
+ * @brief Exports SQL result and row-conversion templates for an import test.
  */
 module;
 
@@ -49,7 +49,7 @@ using minimizer_generation_storage_codec =
     bioseq::postgres::storage::manager::sql_row_codecs::
         minimizer_generation_storage_codec;
 
-/** @brief Minimal PostgreSQL boundary callable used for template instantiation. */
+/** @brief Dummy callback used to compile the PostgreSQL callback adapter. */
 struct boundary_callable final {
     [[nodiscard]] Datum operator()() const noexcept {
         return static_cast<Datum>(0);
@@ -62,25 +62,25 @@ using boundary_signature = Datum (*)(boundary_callable&&);
 inline constexpr boundary_signature boundary_instantiation =
     &bioseq::postgres::support::invoke_postgres_callback<boundary_callable>;
 
-/** @return A representative scalar set result. */
+/** @return A scalar set containing 1 and 2. */
 [[nodiscard]] inline setof_result make_setof_result() {
     return setof_result{
         std::vector<std::int32_t>{1, 2}};
 }
 
-/** @return A representative table result. */
+/** @return A table result with one row whose value is 3. */
 [[nodiscard]] inline table_result make_table_result() {
     return table_result{
         std::vector<result_row>{{.value = 3}}};
 }
 
-/** @return A representative named set result. */
+/** @return A named set result with one row whose value is 4. */
 [[nodiscard]] inline named_set_result make_named_set_result() {
     return named_set_result{
         std::vector<result_row>{{.value = 4}}};
 }
 
-/** @return A representative named scalar result. */
+/** @return A named result whose value is 5. */
 [[nodiscard]] inline named_result make_named_result() {
     return named_result{result_row{.value = 5}};
 }

@@ -1,6 +1,6 @@
 /**
  * @file sql_boundary_template_consumer_test.cpp
- * @brief Verifies generated SQL-boundary templates from an ordinary importer.
+ * @brief Checks that imported SQL result and row-conversion templates can be used.
  */
 #include <bioseq/pg_compat.h>
 
@@ -67,8 +67,7 @@ static_assert(!std::is_copy_constructible_v<
               contract::named_result>);
 static_assert(contract::boundary_instantiation != nullptr);
 
-// Every generated row-codec storage group must remain reachable through the
-// imported producer BMI.
+// Check that the producer exports the row codecs needed by its importers.
 static_assert(std::same_as<
               contract::chunk_group_codec::member_type<
                   &chunk_group_row::storage_id>,
@@ -122,8 +121,8 @@ static_assert(!publicly_constructible_encoded_row<
               contract::chunk_group_codec::encoded_row,
               chunk_group_row>);
 
-// Instantiate scalar, OID, timestamp, XID8, NAME, bytea, and text update
-// paths, both scan-key forms, and the explicit-context deformation surface.
+// Check updates for each SQL field type, both scan-key forms, and reading
+// a tuple into a row using an explicit memory context.
 static_assert(requires(
     contract::chunk_group_codec::update& update,
     std::int64_t scalar) {
@@ -186,7 +185,7 @@ static_assert(requires(
 });
 
 /**
- * Force imported template bodies to instantiate in an ordinary consumer TU.
+ * Compiles the imported result factories and PostgreSQL callback adapter.
  */
 [[maybe_unused]] void instantiate_boundary_templates() {
     auto setof_rows = contract::make_setof_result();
