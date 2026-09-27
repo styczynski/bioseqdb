@@ -1,6 +1,6 @@
 /**
  * @file lookup.cppm
- * @brief Selected-route Vulkan seed lookup and completion ownership.
+ * @brief Vulkan seed lookup and conversion of GPU results into chaining anchors.
  */
 module;
 
@@ -41,27 +41,25 @@ import bioseq.storage.size;
 
 export namespace bioseq::seeding {
 
-// ===========================================================================
-// Seed-hit lookup entry point
-// ===========================================================================
+// Seed lookup and result ownership.
 
-/// Move-only completion state and retained output-memory reservation.
+/// Lookup completion with any memory reservation kept for output anchors.
 struct vulkan_seed_lookup_completion {
-    /** Whether lookup finished without a recorded decline. */
+    /** Whether lookup and result checks succeeded. */
     bool is_successful = false;
-    /** Legacy unhooked permit covering retained canonical-anchor slab growth. */
+    /** Output-buffer reservation for callers without context allocation hooks. */
     bioseq::parallelism::memory_permit retained_anchor_permit{};
-    /** Bytes covered by @ref retained_anchor_permit after shrink reconciliation. */
+    /** Bytes held by the output-buffer reservation. */
     std::uint64_t retained_anchor_bytes = 0u;
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
-    // Retain the existing causal proofs through the selected host suffix.
-    // These are moved from the authenticated runtime result, never reissued.
+    // Keep the runtime operation records for benchmark checks in later host
+    // stages. Move the original records with the completed result.
     bioseq::gpu::vulkan::runtime_pipeline_operation_token query_operation_receipt{};
     bioseq::gpu::vulkan::runtime_pipeline_operation_token seed_operation_receipt{};
 #endif
 
     vulkan_seed_lookup_completion() = default;
-    /** @param completed Initial success flag for a mapped-prefix completion handoff. */
+    /** @param completed Initial success flag. */
     vulkan_seed_lookup_completion(bool completed) noexcept
         : is_successful(completed) {}
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
@@ -90,11 +88,16 @@ struct vulkan_seed_lookup_completion {
     vulkan_seed_lookup_completion& operator=(
         const vulkan_seed_lookup_completion&) = delete;
 
-    /// Return whether lookup completed without a recorded decline.
+    /// Reports whether lookup and result checks succeeded.
     [[nodiscard]] operator bool() const noexcept { return is_successful; }
 };
 
-/** Publish the required single empty job without binding an anchor arena. */
+/**
+ * @brief Returns one empty query job without allocating an anchor buffer.
+ *
+ * job_storage must be empty. Existing capacity can be reused.
+ * @return True when the empty job matches submitted_ordinal.
+ */
 [[nodiscard]] inline bool publish_empty_canonical_seed_batch(
     std::uint32_t submitted_ordinal,
     bioseq::simd::canonical_seed_batch& batch_out,
@@ -117,22 +120,20 @@ struct vulkan_seed_lookup_completion {
 }
 
 /**
- * @brief Authenticate and decode one MPF `seed_anchor_wire` readback.
+ * @brief Checks one MPF seed download and converts it to chaining anchors.
  *
- * This is deliberately MPF-specific. It never accepts the distinct MPS
- * `gpu_anchor_wire` representation and never copies a wire object representation
- * into a canonical anchor. Publication is atomic: @p batch_out is cleared first
- * and receives one job only after byte extent, audit, digest, order, coordinates,
- * span, flags, and segment ownership all pass.
- *
- * @param[in] readback Completed MPF seed lookup readback and producer audit.
- * @param[in] target_position_offset Absolute first coordinate of the target segment.
- * @param[in] target_length Number of reference coordinates in that segment.
- * @param[in] query_length Query length in symbols.
- * @param[in] decoded_query_span Frozen seed span expected in every wire record.
- * @param[in] submitted_ordinal Global ordinal of the submitted single query.
- * @param[out] batch_out Fresh canonical owner, empty on authentication failure.
- * @return `true` only after publishing one complete canonical job.
+ * MPF uses seed_anchor_wire records. Rechecks byte size, anchor order, and the
+ * producer digest before validating each coordinate and constructing anchors field
+ * by field. batch_out remains empty if validation fails.
+ * @param readback Downloaded records and producer checks.
+ * @param target_position_offset Absolute start of the target interval.
+ * @param target_length Target interval length.
+ * @param query_length Query length in symbols.
+ * @param decoded_query_span Expected span of each seed.
+ * @param submitted_ordinal Original query ordinal.
+ * @param batch_out Receives one complete query job on success.
+ * @param job_storage Empty job vector whose capacity can be reused.
+ * @return True when all record and job checks pass.
  */
 [[nodiscard]] inline bool authenticate_mpf_seed_anchor_readback(
     const bioseq::gpu::vulkan::seed_lookup_result& readback,
@@ -240,13 +241,16 @@ struct vulkan_seed_lookup_completion {
 }
 
 /**
- * @brief Consume, authenticate, and decode completed MPS `gpu_anchor_wire` jobs.
+ * @brief Checks an MPS batch download and converts its jobs to chaining anchors.
  *
- * This boundary is intentionally distinct from MPF. It consumes the move-only
- * MPS result, re-audits typed wires without byte reinterpretation, verifies the
- * seed-only causal token and exact query partition, and constructs canonical
- * anchors field by field once. The final job vector arrives as fresh,
- * caller-admitted storage. Publication remains atomic.
+ * Consumes gpu_anchor_wire records with their runtime completion record. Checks
+ * query partitions, memory accounting, and each job's anchor digest and order,
+ * then validates coordinates while constructing host anchors field by field.
+ *
+ * job_storage must be empty with enough reserved capacity for every query.
+ * batch_out receives the full batch only after all checks pass and remains empty
+ * on failure.
+ * @return Successful completion, or false when validation fails.
  */
 [[nodiscard]] inline vulkan_seed_lookup_completion authenticate_mps_seed_anchor_readback(
     bioseq::gpu::vulkan::grouped_soa_seed_anchor_result&& readback,
@@ -410,7 +414,7 @@ struct vulkan_seed_lookup_completion {
     return completion;
 }
 
-/** @brief MPS completion adapter; authentication failure never selects a CPU seeder. */
+/** Validates completed MPS GPU results and returns their chaining-anchor batch. */
 [[nodiscard]] inline vulkan_seed_lookup_completion collect_seed_hits_vulkan(
     bioseq::gpu::vulkan::grouped_soa_seed_anchor_result&& readback,
     std::span<const bioseq::gpu::vulkan::gpu_seed_query_record_wire>
@@ -435,28 +439,30 @@ struct vulkan_seed_lookup_completion {
 }
 
 /**
- * @brief Collect canonical anchors through the selected Vulkan seed route.
+ * Looks up target matches for query minimizers and returns sorted chaining anchors.
  *
- * The function never silently selects a CPU lookup. It returns a false
- * completion only for a structured, caller-visible decline and propagates
- * runtime failures once GPU execution begins.
+ * Uses the selected GPU path. The fused path counts and sorts on the GPU, while
+ * the other path builds output offsets from a mapped index or host hash map
+ * before submitting seed lookup. Results are checked before anchors_out receives
+ * a complete query job.
+ * @param query_minimizers Host records used for counts and optional upload.
+ * @param device_minimizers Optional device records with the same count.
+ * @param target_index Host index used when prefix counting needs it.
+ * @param resident_index Target index in device memory.
+ * @param vulkan_enabled Whether Vulkan lookup is enabled.
+ * @param query_len Query length in symbols.
+ * @param max_occ Skip hashes with more occurrences. Negative values produce no anchors
+ * on the prefix path and are rejected by the fused path.
+ * @param kmer_size Seed span to validate.
+ * @param submitted_ordinal Original query ordinal.
+ * @param anchors_out Receives the completed query job.
+ * @param context_backing_is_admitted Context allocation hooks already reserve backing memory.
+ * @param fused_frontend Select GPU counting and sorting.
+ * @param decline_out Optional rejection details.
+ * @return Completion state, possibly holding an output-memory reservation.
  *
- * @tparam p_minimizer_type Query minimizer record and device wire representation.
- * @param[in] query_minimizers Host minimizers when no device span is supplied.
- * @param[in] device_minimizers Optional device-resident minimizer words.
- * @param[in] target_index Optional host hashmap used only for non-mapped prefix counting.
- * @param[in] resident_index GPU-resident target index for lookup dispatch.
- * @param[in] vulkan_enabled Whether the selected execution policy permits Vulkan.
- * @param[in] query_len Query length in logical symbols.
- * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
- * @param[in] kmer_size Selected k-mer size for lookup validation.
- * @param[in] submitted_ordinal Global ordinal of the submitted query.
- * @param[out] anchors_out Fresh canonical single-job owner receiving emitted anchors.
- * @param[in] context_backing_is_admitted Whether the current context's physical
- *            backing blocks are already governed by its allocation hook.
- * @param[in] fused_frontend Whether the fused count-and-sort frontend is selected.
- * @param[out] decline_out Optional structured decline and telemetry sink.
- * @return Success completion, or a declined completion when @p decline_out is set.
+ * Input or planning failures can return false. Runtime and result-validation
+ * failures can throw. Keep the completion reservation until the output anchors are freed.
  */
 template <class p_minimizer_type>
 [[nodiscard]] vulkan_seed_lookup_completion collect_seed_hits_vulkan(
@@ -502,7 +508,7 @@ template <class p_minimizer_type>
             decline_out->reason = reason;
         }
     };
-    // Source-direct indices may run with zero query minimizers.
+    // Source-direct indexes still validate an empty query through the prefix path.
     const bool source_direct_empty_minimizer_query =
         query_minimizers.empty()
         && resident_index != nullptr
@@ -567,9 +573,8 @@ template <class p_minimizer_type>
         return false;
     }
 
-    // The fused frontend counts, emits, and sorts anchors on the GPU without a
-    // CPU prefix prepass or CPU anchor sort. Once selected, any failure is a
-    // hard error; the prefix-driven path is used only when it is not selected.
+    // The fused path counts, emits, and sorts anchors on the GPU. Planning
+    // failures are reported before dispatch, and runtime failures propagate.
     if (fused_frontend && max_occ >= 0) {
         const std::uint64_t reserve =
             vulkan_fused_seed_lookup_reservation_bytes<p_minimizer_type>(
@@ -1038,10 +1043,9 @@ template <class p_minimizer_type>
 #endif
         }
 
-        // Prefix/result host vectors and runtime-owned seed temporaries have
-        // left scope. A hooked context already retained any physical backing
-        // growth. Only an unhooked legacy caller transfers the exact canonical
-        // slab extent from this aggregate permit to its adjacent owner.
+        // Temporary prefix and download buffers have been released. Context hooks
+        // keep any backing-memory reservation they created. Other callers keep
+        // the output anchor reservation in the returned completion object.
         vulkan_seed_lookup_completion completion{
             !post_allocation_invariant_failed};
         if (!context_backing_is_admitted) {

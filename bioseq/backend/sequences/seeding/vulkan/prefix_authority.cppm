@@ -1,6 +1,6 @@
 /**
  * @file prefix_authority.cppm
- * @brief Validated mapped and host prefix-count authorities for seed lookup.
+ * @brief Counts target matches and builds seed-output offsets from mapped or host indexes.
  */
 module;
 
@@ -33,15 +33,13 @@ import bioseq.gpu.vulkan.runtime;
 
 export namespace bioseq::seeding {
 
-// ===========================================================================
-// Non-allocating prefix prepass
-// ===========================================================================
+// Count matches before allocating the prefix array.
 
-/// Allocation-free count-pass result for the exclusive seed prefix.
+/// Counts needed to allocate the seed prefix and anchor output.
 struct seed_prefix_plan {
     /** Exclusive-prefix entry count (`query_minimizers + 1`). */
     std::uint64_t prefix_len = 0;
-    /** Exact anchors after per-minimizer occurrence capping. */
+    /** Anchors contributed by hashes whose occurrence count is within max_occ. */
     std::uint64_t exact_anchor_count = 0;
     /** Mapped-index hash lookups performed during the count pass. */
     std::uint64_t mapped_lookup_count = 0;
@@ -49,9 +47,9 @@ struct seed_prefix_plan {
     std::uint64_t mapped_comparison_count = 0;
 };
 
-/// Materialized prefix plus mapped-index validation work counters.
+/// Prefix array and the index-lookup work used to build it.
 struct seed_prefix_build_result {
-    /** Exclusive-prefix array materialized after admission. */
+    /** Output offsets allocated after memory has been reserved. */
     std::vector<std::uint32_t> prefix;
     /** Mapped-index hash lookups performed during the build pass. */
     std::uint64_t mapped_lookup_count = 0u;
@@ -59,22 +57,22 @@ struct seed_prefix_build_result {
     std::uint64_t mapped_comparison_count = 0u;
 };
 
-/// Raised when mapped sorted-dense authority changes or fails validation.
+/// Reports invalid mapped-index data or disagreement between count and build passes.
 struct mapped_prefix_invalid_error final : std::exception {
-    /** @return Stable exception description for prefix authority failure. */
+    /** @return Fixed description of a mapped-index prefix failure. */
     [[nodiscard]] const char* what() const noexcept override {
         return "mapped sorted-dense prefix authority is invalid";
     }
 };
 
-/// Validated, non-owning mapped view used by both prefix passes.
+/// Checked mapped control table, optionally keeping its resident index owner alive.
 struct mapped_sorted_dense_prefix_view {
-    /** Resident index owning the mapped control and position buffers. */
+    /** Optional owner keeping the mapped index buffers alive. */
     std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index>
         resident;
-    /** Sorted-dense control table mapped from the resident index. */
+    /** Sorted hash entries with offsets and counts into the target-position array. */
     const bioseq::indexing::gpu_minimizer_slot* controls = nullptr;
-    /** Number of control buckets in @ref controls. */
+    /** Number of sorted hash entries in controls. */
     std::uint32_t bucket_count = 0u;
     /** Number of encoded target positions backing the controls. */
     std::uint32_t position_count = 0u;
@@ -84,30 +82,29 @@ struct mapped_sorted_dense_prefix_view {
     std::uint64_t comparison_count = 0u;
 };
 
-/// Full mapped-payload validation result and checksum.
+/// Results of checking the complete mapped index payload.
 struct mapped_sorted_dense_payload_validation {
     /** Rolling checksum over control and position payload words. */
     std::uint64_t checksum =
         bioseq::indexing::k_gpu_source_direct_checksum_seed;
     /** Positions covered by validated control runs. */
     std::uint64_t covered_position_count = 0u;
-    /** Whether canonical hash and coordinate order was inspected. */
+    /** Whether the payload-validation pass was requested. */
     bool canonical_order_checked = false;
-    /** Whether payload layout and checksum matched the expected authority. */
+    /** Whether layout, coordinate bounds, and checksum checks passed. */
     bool is_valid = false;
 };
 
 /**
- * @brief Revalidate a mapped sorted-dense control and position payload.
+ * @brief Checks sorted hash entries, position bounds, and the mapped-payload checksum.
  *
- * Stored metadata is not sufficient: this re-reads the complete mapped control
- * and position payload so mutation between count/build passes fails closed.
- *
- * @param[in] controls Sorted control table for the resident index.
- * @param[in] positions Encoded target positions referenced by @p controls.
- * @param[in] target_len Target length used to bound encoded coordinates.
- * @param[in] expected_checksum Authority checksum recorded with the resident index.
- * @return Validation counters and a validity flag without allocating.
+ * Reads the full payload. Hash entries must increase strictly and cover the
+ * position array without gaps. Encoded positions must lie within the target.
+ * @param controls Sorted hash entries.
+ * @param positions Encoded target positions.
+ * @param target_len Target length in symbols.
+ * @param expected_checksum Checksum recorded for the index.
+ * @return Checksum, covered position count, and success flag. No allocation is needed.
  */
 [[nodiscard]] inline mapped_sorted_dense_payload_validation
 validate_mapped_sorted_dense_payload(
@@ -159,18 +156,16 @@ validate_mapped_sorted_dense_payload(
 }
 
 /**
- * @brief Validate span-backed sorted-dense payload and open a prefix view.
+ * @brief Checks borrowed index spans and opens a view for prefix counting.
  *
- * Host-only validation seam shared by the runtime-resident path and bounded
- * prefix tests. Callers must keep both spans alive through the complete
- * count/build pass.
- *
- * @param[in] controls Sorted control table for the resident index.
- * @param[in] positions Encoded target positions referenced by @p controls.
- * @param[in] target_len Target length used to bound encoded coordinates.
- * @param[in] expected_checksum Authority checksum recorded with the resident index.
- * @return Non-owning prefix view ready for count and build passes.
- * @throws mapped_prefix_invalid_error When span bounds or payload authority fail.
+ * Runs the full payload check and verifies that counts fit the GPU interface.
+ * Callers must keep the spans alive throughout use of the view.
+ * @param controls Sorted hash entries.
+ * @param positions Encoded target positions.
+ * @param target_len Target length in symbols.
+ * @param expected_checksum Recorded payload checksum.
+ * @return Borrowed control-table view.
+ * @throws mapped_prefix_invalid_error If sizes or payload checks fail.
  */
 [[nodiscard]] inline mapped_sorted_dense_prefix_view
 validated_mapped_sorted_dense_prefix_view(
@@ -199,11 +194,15 @@ validated_mapped_sorted_dense_prefix_view(
 }
 
 /**
- * @brief Authenticate a completed runtime resident and open its read-only prefix view.
- * @param[in] vulkan_runtime Runtime that must own the mapped buffers.
- * @param[in] resident GPU-resident sorted-dense minimizer index.
- * @return Non-owning prefix view bound to the resident mapped payload.
- * @throws mapped_prefix_invalid_error When residency, ABI, or materialization authority fail.
+ * @brief Opens a checked prefix-counting view of a resident GPU index.
+ *
+ * Checks runtime ownership, mapped-buffer sizes, index format, and memory
+ * accounting. The resident index saves the earlier payload-check result and
+ * must remain read-only during lookup. This view keeps its owner alive.
+ * @param vulkan_runtime Runtime owning the buffers.
+ * @param resident Resident sorted target index.
+ * @return View over its mapped hash entries.
+ * @throws mapped_prefix_invalid_error If resident metadata or buffer checks fail.
  */
 [[nodiscard]] inline mapped_sorted_dense_prefix_view
 validated_mapped_sorted_dense_prefix_view(
@@ -276,14 +275,9 @@ validated_mapped_sorted_dense_prefix_view(
             actual_allocation_sum)) {
         throw mapped_prefix_invalid_error{};
     }
-    // Completed resident materialization already checked the entire payload
-    // against source_stream_checksum and recorded its mapped traversal. The
-    // resident is read-only throughout lookup. Repeating that target-wide scan
-    // in both prefix passes costs O(queries * target positions), even though
-    // every query borrows the same authenticated resident.
-    //
-    // Keep the ownership, representation, bounds and materialization checks
-    // above. Untrusted span callers still use the full-payload overload.
+    // The resident index was checked against its source checksum when built
+    // and stays read-only during lookup. Reuse that result so each query avoids
+    // rescanning all target positions. Borrowed spans still use the full check.
     if (resident->target_len == 0u) {
         throw mapped_prefix_invalid_error{};
     }
@@ -297,11 +291,11 @@ validated_mapped_sorted_dense_prefix_view(
 }
 
 /**
- * @brief Look up the capped posting count for one minimizer hash.
- * @param[in,out] view Validated mapped prefix view accumulating lookup counters.
- * @param[in] hash Minimizer hash to resolve in the sorted control table.
- * @return Posting count for @p hash, or zero when the hash is absent.
- * @throws mapped_prefix_invalid_error When a matched control references invalid positions.
+ * @brief Finds the number of target positions for a minimizer hash.
+ * @param view Checked control table and lookup counters.
+ * @param hash Hash to find.
+ * @return Full occurrence count, or zero if absent.
+ * @throws mapped_prefix_invalid_error If the matching entry references invalid positions.
  */
 [[nodiscard]] inline std::uint32_t mapped_sorted_dense_position_count(
     mapped_sorted_dense_prefix_view& view,
@@ -332,12 +326,15 @@ validated_mapped_sorted_dense_prefix_view(
 }
 
 /**
- * @brief Count exclusive-prefix length and exact anchors over a mapped view.
- * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
- * @param[in] query_minimizers Query minimizers addressed by the prefix.
- * @param[in] view Validated mapped sorted-dense prefix view.
- * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
- * @return Allocation-free prefix plan and mapped lookup counters.
+ * @brief Counts output anchors before allocating a prefix array.
+ *
+ * Each query minimizer contributes all target occurrences when their count is
+ * at most max_occ. More frequent hashes are skipped.
+ * @param query_minimizers Query records exposing kmer().
+ * @param view Checked mapped index.
+ * @param max_occ Occurrence limit. Negative values skip all lookups and count zero anchors.
+ * @return Prefix length, anchor count, and lookup counters.
+ * @throws seed_lookup_too_large If counts exceed the 32-bit GPU limits.
  */
 template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_plan count_seed_prefix_plan(
@@ -369,14 +366,14 @@ template <class p_minimizer_type>
 }
 
 /**
- * @brief Count prefix geometry from a runtime-resident sorted-dense index.
- * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
- * @param[in] query_minimizers Query minimizers addressed by the prefix.
- * @param[in] vulkan_runtime Runtime that must own the resident mapped buffers.
- * @param[in] resident GPU-resident sorted-dense minimizer index.
- * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
- * @return Allocation-free prefix plan and mapped lookup counters.
- * @throws mapped_prefix_invalid_error When resident payload authority fails validation.
+ * @brief Counts anchors using a checked resident sorted target index.
+ * @param query_minimizers Query minimizers.
+ * @param vulkan_runtime Runtime owning the mapped buffers.
+ * @param resident Target index.
+ * @param max_occ Maximum allowed occurrences per hash. Negative values count zero anchors.
+ * @return Counts and lookup measurements without allocating a prefix array.
+ * @throws mapped_prefix_invalid_error If resident-index checks fail.
+ * @throws seed_lookup_too_large If counts exceed GPU limits.
  */
 template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_plan count_seed_prefix_plan(
@@ -393,14 +390,17 @@ template <class p_minimizer_type>
 }
 
 /**
- * @brief Materialize exclusive-prefix counts over a validated mapped view.
- * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
- * @param[in] query_minimizers Query minimizers addressed by the prefix.
- * @param[in] view Validated mapped sorted-dense prefix view.
- * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
- * @param[in] plan Count-pass plan whose exact anchor total must be reproduced.
- * @return Prefix array and mapped lookup counters from the build pass.
- * @throws mapped_prefix_invalid_error When the build total diverges from @p plan.
+ * @brief Builds output offsets after the caller reserves prefix memory.
+ *
+ * The first entry is zero. Each next entry adds the previous minimizer's target
+ * occurrences, skipping hashes with counts above max_occ. The final entry must
+ * match the earlier anchor count.
+ * @param query_minimizers Query records from the count pass.
+ * @param view Checked mapped index.
+ * @param max_occ Occurrence limit. Negative values produce an all-zero prefix.
+ * @param plan Matching count-pass plan for these inputs.
+ * @return Prefix array and lookup counters.
+ * @throws mapped_prefix_invalid_error If the anchor total changed.
  */
 template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_build_result
@@ -432,15 +432,14 @@ build_seed_prefix_counts_after_admission(
 }
 
 /**
- * @brief Materialize prefix counts from a runtime-resident sorted-dense index.
- * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
- * @param[in] query_minimizers Query minimizers addressed by the prefix.
- * @param[in] vulkan_runtime Runtime that must own the resident mapped buffers.
- * @param[in] resident GPU-resident sorted-dense minimizer index.
- * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
- * @param[in] plan Count-pass plan whose exact anchor total must be reproduced.
- * @return Prefix array and mapped lookup counters from the build pass.
- * @throws mapped_prefix_invalid_error When resident authority or build totals fail.
+ * @brief Builds output offsets using a checked resident sorted target index.
+ * @param query_minimizers Query records from the count pass.
+ * @param vulkan_runtime Runtime owning the mapped buffers.
+ * @param resident Target index.
+ * @param max_occ Occurrence limit. Negative values produce an all-zero prefix.
+ * @param plan Matching count-pass plan.
+ * @return Prefix array and lookup counters.
+ * @throws mapped_prefix_invalid_error If resident checks or the final count fail.
  */
 template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_build_result
@@ -459,12 +458,14 @@ build_seed_prefix_counts_after_admission(
 }
 
 /**
- * @brief Count prefix geometry from a host hashmap fragment index.
- * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
- * @param[in] query_minimizers Query minimizers addressed by the prefix.
- * @param[in] target_index Host minimizer hashmap used for occurrence lookup.
- * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
- * @return Allocation-free prefix plan for the hashmap authority path.
+ * @brief Counts output anchors from a host minimizer index without allocating offsets.
+ *
+ * Hashes with target-position counts above max_occ contribute no anchors.
+ * @param query_minimizers Query records.
+ * @param target_index Host target index.
+ * @param max_occ Occurrence limit. Negative values count zero anchors.
+ * @return Required prefix length and anchor count.
+ * @throws seed_lookup_too_large If counts exceed GPU limits.
  */
 template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_plan count_seed_prefix_plan(
@@ -492,13 +493,15 @@ template <class p_minimizer_type>
 }
 
 /**
- * @brief Materialize exclusive-prefix counts from a host hashmap fragment index.
- * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
- * @param[in] query_minimizers Query minimizers addressed by the prefix.
- * @param[in] target_index Host minimizer hashmap used for occurrence lookup.
- * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
- * @param[in] plan Count-pass plan whose exact anchor total must be reproduced.
- * @return Exclusive-prefix array for the hashmap authority path.
+ * @brief Builds output offsets from a host minimizer index after memory reservation.
+ *
+ * Skips hashes whose occurrence count exceeds max_occ. Debug builds check the
+ * final anchor count against the earlier plan.
+ * @param query_minimizers Query records from the count pass.
+ * @param target_index Host target index.
+ * @param max_occ Occurrence limit. Negative values produce an all-zero prefix.
+ * @param plan Matching count-pass plan.
+ * @return Prefix starting at zero and ending at the total anchor count.
  */
 template <class p_minimizer_type>
 [[nodiscard]] std::vector<std::uint32_t> build_seed_prefix_counts_after_admission(

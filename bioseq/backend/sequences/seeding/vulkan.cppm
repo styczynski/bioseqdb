@@ -1,20 +1,19 @@
 /**
  * @file vulkan.cppm
- * @brief Stable facade for Vulkan seed-hit lookup.
+ * @brief Vulkan target lookup for matching query minimizers.
  *
- * @details Re-exports diagnostics, prefix-count authorities, exact memory
- * reservations, and selected-route lookup entry points for device seed
- * intersection queries.
+ * Exports lookup entry points, prefix counting, memory planning, and failure
+ * diagnostics. Returned GPU seeds are checked and converted to chaining anchors.
  */
 module;
 
 export module bioseq.seeding.vulkan;
 
-/** Seed-lookup ABI checks, decline diagnostics, and checked bounds. */
+/** Seed record layout checks, rejection details, and count limits. */
 export import :diagnostics;
-/** Mapped and host prefix-count authorities validated for seed lookup. */
+/** Prefix counts and offsets from mapped or host target indexes. */
 export import :prefix_authority;
-/** Host, device, and retained-output seed reservation plans. */
+/** Device, host, and output-buffer memory plans. */
 export import :reservation;
-/** Selected-route Vulkan seed lookup and completion ownership. */
+/** GPU lookup, result checks, and output ownership. */
 export import :lookup;
