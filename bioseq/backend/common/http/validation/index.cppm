@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Allocation-free validation for HTTP field names, values, hosts, and targets.
+ * @brief Checks HTTP header text, DNS hosts and request-target bytes.
  */
 module;
 
@@ -13,9 +13,9 @@ export module bioseq.common.http.validation;
 export namespace bioseq::common::http::validation {
 
 /**
- * @brief Checks whether a byte is forbidden in an origin-form request target.
- * @param[in] character Byte interpreted as unsigned ASCII.
- * @return `true` for controls, spaces, non-ASCII bytes, and backslashes.
+ * @brief Rejects control bytes, spaces, non-ASCII bytes and backslashes.
+ * @param[in] character Request-target byte to check.
+ * @return True if the byte is forbidden.
  */
 [[nodiscard]] inline bool
 is_invalid_request_target_byte(char character) noexcept {
@@ -24,9 +24,9 @@ is_invalid_request_target_byte(char character) noexcept {
 }
 
 /**
- * @brief Validates an RFC 9110 field-name token.
- * @param[in] name Candidate header name.
- * @return `true` when the name is nonempty and contains only token bytes.
+ * @brief Checks that a header name is a nonempty HTTP token.
+ *
+ * Accepts ASCII letters, digits and the punctuation allowed in field names.
  */
 [[nodiscard]] inline bool is_valid_header_name(std::string_view name) noexcept {
   if (name.empty())
@@ -40,9 +40,9 @@ is_invalid_request_target_byte(char character) noexcept {
 }
 
 /**
- * @brief Checks a field value for prohibited control bytes.
- * @param[in] value Candidate header value.
- * @return `true` when every byte is visible ASCII or a horizontal tab.
+ * @brief Rejects control bytes in a header value, except horizontal tabs.
+ *
+ * Spaces and bytes above ASCII are accepted. An empty value is valid.
  */
 [[nodiscard]] inline bool
 is_valid_header_value(std::string_view value) noexcept {
@@ -53,9 +53,10 @@ is_valid_header_value(std::string_view value) noexcept {
 }
 
 /**
- * @brief Validates the ASCII DNS-name subset used by TLS hostname checking.
- * @param[in] host Candidate host with an optional trailing root dot.
- * @return `true` for a bounded, nonnumeric DNS name with valid labels.
+ * @brief Checks the ASCII hostname form accepted by the TLS client.
+ *
+ * Checks label lengths and characters, allowing a trailing root dot.
+ * Rejects dotted names made entirely of digits to exclude IPv4-style input.
  */
 [[nodiscard]] inline bool is_valid_dns_host(std::string_view host) noexcept {
   if (host.empty())
@@ -93,9 +94,10 @@ is_valid_header_value(std::string_view value) noexcept {
 }
 
 /**
- * @brief Validates raw bytes in an origin-form request target.
- * @param[in] target Candidate target without URI-fragment decoding.
- * @return `true` when the target has no fragment or forbidden byte.
+ * @brief Checks a request target for forbidden bytes and a raw fragment marker.
+ *
+ * Percent-encoded bytes are left unchanged. This check does not require
+ * a leading slash or a nonempty target.
  */
 [[nodiscard]] inline bool
 is_valid_request_target(std::string_view target) noexcept {

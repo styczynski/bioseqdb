@@ -1,6 +1,6 @@
 /**
  * @file seqan_adapter.cppm
- * @brief SeqAn alphabet adapter and formatting integration.
+ * @brief Exports SeqAn alphabet helpers and formats symbols as characters.
  */
 module;
 
@@ -43,21 +43,18 @@ export {
 #include <seqan3/alphabet/concept.hpp>
 
 /**
- * @brief Formats a non-integral SeqAn alphabet symbol as its character representation.
+ * @brief Prints a SeqAn alphabet symbol as a character.
  *
- * @tparam p_alphabet SeqAn alphabet type accepted by `seqan3::to_char`.
+ * Integral types keep their normal fmt formatting.
+ * @tparam p_alphabet SeqAn alphabet type accepted by seqan3::to_char.
  */
 template <typename p_alphabet>
     requires seqan3::alphabet<std::remove_cvref_t<p_alphabet>> &&
              (!std::integral<std::remove_cvref_t<p_alphabet>>)
 struct fmt::formatter<p_alphabet> : formatter<std::string> {
     /**
-     * @brief Writes one alphabet symbol through the string formatter.
-     *
-     * @tparam p_format_context fmt output-context type.
-     * @param[in] symbol Alphabet symbol to render.
-     * @param[in,out] context Destination formatting context.
-     * @return Iterator immediately following the rendered character.
+     * @brief Converts one symbol to a character and applies fmt string formatting.
+     * @return Iterator after the formatted character.
      */
     template <typename p_format_context>
     auto format(p_alphabet symbol, p_format_context& context) const {
@@ -65,5 +62,5 @@ struct fmt::formatter<p_alphabet> : formatter<std::string> {
     }
 };
 
-/// @brief Concise namespace alias for the SeqAn API exported by this adapter.
+/// @brief Short name for the exported SeqAn namespace.
 export namespace seq = seqan3;
