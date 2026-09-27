@@ -416,8 +416,8 @@ TEST_CASE("zero TTL ABA recheck preserves only one waiter entitlement",
     REQUIRE(rebound_before_commit.readable);
     REQUIRE(rebound_before_commit.consume_just_completed_entitlement);
     REQUIRE_FALSE(completed_ttl_decision(timestamps, 0, 0, 499, true, false).readable);
-    // A later read cannot reuse the converted waiter's consumed entitlement.
+    // The waiter has already used its one read of this TTL-zero generation.
     REQUIRE_FALSE(completed_ttl_decision(timestamps, 0, 0, 501, true, true).readable);
-    // A second reader never registered against the in-flight generation.
+    // This reader did not register while the generation was being built.
     REQUIRE_FALSE(completed_ttl_decision(timestamps, 0, 0, 500, false, false).readable);
 }

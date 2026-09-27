@@ -60,9 +60,8 @@ inline constinit bioseq_cache_planner_bridge g_fake_planner_bridge{
 };
 
 /*
- * This table is deliberately complete and callable but carries the wrong ABI
- * revision. A consumer that validates the current header must warn and decline it
- * before requesting a registration token.
+ * Publish working callbacks with a deliberately wrong ABI revision.
+ * Bioseq must warn and reject this table before calling register_provider.
  */
 inline bioseq_cache_api g_incompatible_cache_api{
     .struct_size =
