@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader_codec/02_grouped_reader_test.cpp
- * @brief Grouped reader widths, corruption checks, and fragment blocks.
+ * @brief Checks grouped index readers with wide values, corrupt data, and large segments.
  */
 
 #include <hwy/highway.h>
@@ -38,7 +38,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -57,9 +57,8 @@ TEST_CASE("fragment-native anchors are canonical and match ordinary lookup",
           "[component:bioseq][layer:unit][feature:seeding]") {
     using namespace bioseq::indexing;
     constexpr std::uint64_t segment_span = k_minimizer_preferred_segment_span_bp;
-    // grouped-SoA directory segments use an int32 ordinal, so a mapped reader
-    // fixture cannot encode the synthetic 2^63 boundary above. This position
-    // is still well beyond 32 bits and leaves a large run of empty segments.
+    // Segment numbers use int32. This position fits that limit while testing
+    // a coordinate above 32 bits and a long gap of empty segments.
     constexpr std::uint64_t high_reference_position = (std::uint64_t{1} << 40u) + 19u;
     constexpr auto packed = [](std::uint64_t position, std::uint64_t strand) {
         return (position << 1u) | strand;
@@ -81,7 +80,7 @@ TEST_CASE("fragment-native anchors are canonical and match ordinary lookup",
 
     const std::vector<minimap_sketch_data> query{
         minimap_sketch_data{/*kmer=*/7u, /*pos=*/20u, /*strand=*/0u},
-        // The duplicate produces byte-identical equal canonical keys.
+        // Repeating this minimizer should produce identical anchors.
         minimap_sketch_data{/*kmer=*/7u, /*pos=*/20u, /*strand=*/0u},
         minimap_sketch_data{/*kmer=*/7u, /*pos=*/33u, /*strand=*/1u},
         minimap_sketch_data{/*kmer=*/9u, /*pos=*/44u, /*strand=*/0u},
@@ -733,7 +732,7 @@ TEST_CASE("registered scalar K20 H64 reader produces authenticated anchors",
     const auto query_layout =
         ::bioseq::minimizers::select_minimizer_physical_layout<seq::dna4, std::uint64_t>(
             minimizer_algorithm::scalar, 100u, 20u, 15u);
-    // Target and query may use different position carriers for the same hash domain.
+    // Query and target positions can use different widths with the same hash type.
     REQUIRE(query_layout.record_id != generation->manifest.algorithm_identity.physical_record_id);
     const bool checked = ::bioseq::minimizers::visit_minimizer_physical_layout(
         query_layout,
@@ -773,8 +772,8 @@ TEST_CASE("registered scalar K20 H64 reader produces authenticated anchors",
             REQUIRE(snapshot.bucket_direct_matcher_active);
             scratch->complete_wave_after_join();
 
-            // The sole selected hash has bit 39 set. A literal anchor receipt
-            // exercises the H64 oracle plan without a production/oracle parity claim.
+            // Check the baseline matcher with a hash that needs 64 bits. Each expected
+            // anchor field is checked below.
             auto oracle_batch = reader->prepare_fragment_anchor_batch(
                 admission,
                 queries,
@@ -967,15 +966,14 @@ TEST_CASE("fragment blocks preserve segment runs beyond ordinal 128",
     for (std::uint64_t hash = 1u; hash <= 130u; ++hash) {
         pairs.emplace_back(hash, packed(hash + 1u, 0u));
     }
-    // Hash 1 straddles the oversized segment-0 block and the block after the
-    // empty segment-1 gap. max_occ therefore has to be reduced globally.
+    // Hash 1 occurs on both sides of the empty segment. Its total count must
+    // decide whether max_occ rejects it.
     pairs.emplace_back(1u, packed(2u * segment_span + 4u, 0u));
     pairs.emplace_back(500u, packed(2u * segment_span + 5u, 1u));
 
-    // The planner's fixed-width limit shrinks physical segment geometry; it
-    // does not split one segment into directory entries. Build the exact valid
-    // wire image here so the reader really sees an equal-segment run crossing
-    // its 128-entry block target.
+    // Build 130 entries in segment 0 by hand so they cross the reader
+    // block target of 128 entries. The encoder would change the segment
+    // size when given a smaller width limit.
     vector_replay_minimizer_producer producer{pairs};
     collecting_minimizer_row_sink sink;
     const auto generation = encode_minimizer_generation(

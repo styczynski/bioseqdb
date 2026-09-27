@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/anchor_planner/07_query_identity_test.cpp
- * @brief Canonical query-set checksum identity.
+ * @brief Checks the checksum of sorted query hashes and search parameters.
  */
 
 #include <cstdint>
@@ -37,7 +37,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 

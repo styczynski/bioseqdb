@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/anchor_planner/09_admission_test.cpp
- * @brief Anchor admission failure and owner reuse.
+ * @brief Checks that failed anchor-memory reservations leave scratch space reusable.
  */
 
 #include <hwy/highway.h>
@@ -36,7 +36,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 
