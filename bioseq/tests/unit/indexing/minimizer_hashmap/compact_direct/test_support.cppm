@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/test_support.cppm
- * @brief Shared compact-direct reader and planner fixtures.
+ * @brief Builds compact index fixtures and compares their query results.
  */
 module;
 
@@ -52,18 +52,18 @@ using namespace minimizer_hashmap_test_support;
 
 export namespace compact_direct_test_support {
 
-/// Own one sorted compact-direct run and its encoded positions.
+/// A hash run with its encoded target positions.
 struct fragment_compact_direct_run {
     bioseq::indexing::compact_hash32_sorted_run_header header{};
     std::vector<std::uint64_t> encoded_positions{};
 };
 
-/// Own all sorted runs exposed by a compact-direct source callback.
+/// Hash runs supplied to the compact index builder.
 struct fragment_compact_direct_source {
     std::vector<fragment_compact_direct_run> runs{};
 };
 
-/// Replay sorted compact-direct runs through the erased source callback.
+/// Pass each stored run to the receiver, stopping on its first error.
 [[nodiscard]] std::expected<void, bioseq::indexing::direct_inverted_index_error>
 scan_fragment_compact_direct_runs(
     void* opaque, const bioseq::indexing::compact_hash32_sorted_run_receiver& receiver) {
@@ -87,7 +87,8 @@ struct fragment_compact_direct_test_index {
     bioseq::indexing::compact_hash32_direct_index_view view{};
 };
 
-/// Build and validate a compact-direct image for one grouped-SoA identity.
+/// Build a compact index from hash-position pairs using the generation identity.
+/// Positions are grouped by hash, then sorted by strand and coordinate.
 [[nodiscard]] fragment_compact_direct_test_index make_fragment_compact_direct_test_index(
     const bioseq::indexing::minimizer_generation_head& head,
     const bioseq::indexing::minimizer_generation_manifest& manifest,
@@ -162,7 +163,7 @@ struct fragment_compact_direct_test_index {
     };
 }
 
-/// Bind a compact-direct view to the shared fixture image owner.
+/// Keep the fixture image alive while a reader uses its view.
 [[nodiscard]] bioseq::indexing::owned_compact_hash32_direct_index_view
 own_fragment_compact_direct_test_index(
     const fragment_compact_direct_test_index& compact,
@@ -177,7 +178,7 @@ own_fragment_compact_direct_test_index(
     return std::move(*owned);
 }
 
-/// Record selected-page advice without allocating in the callback.
+/// Collect page-read hints in a fixed buffer for test assertions.
 struct selected_page_advice_recorder {
     static constexpr std::size_t capacity = 128u;
     std::array<bioseq::indexing::compact_direct_selected_page_range, capacity> records{};
@@ -185,7 +186,7 @@ struct selected_page_advice_recorder {
     std::atomic<bool> overflow{false};
     std::atomic<bool> drop_advice{false};
 
-    /// Append one advised page interval when recording remains enabled.
+    /// Record a page range, or mark overflow when the fixed buffer is full.
     static void advise(void* const opaque,
                        const std::uintptr_t page_begin,
                        const std::uintptr_t page_end) noexcept {
@@ -203,7 +204,7 @@ struct selected_page_advice_recorder {
         };
     }
 
-    /// Return the erased adviser token bound to this recorder.
+    /// Connect this recorder to a reader with the requested page size.
     [[nodiscard]] bioseq::indexing::compact_direct_selected_page_adviser
     token(const std::size_t page_bytes = 1u) noexcept {
         return bioseq::indexing::compact_direct_selected_page_adviser{
@@ -213,7 +214,7 @@ struct selected_page_advice_recorder {
         };
     }
 };
-/// Assemble mapped grouped-SoA payload bytes in directory order.
+/// Join all control data, followed by all positions, in directory order.
 [[nodiscard]] std::shared_ptr<std::vector<std::byte>>
 make_grouped_soa_mapped_payload(const bioseq::indexing::encoded_grouped_soa_generation& generation,
                                 std::span<const collected_minimizer_row> rows) {
@@ -231,7 +232,7 @@ make_grouped_soa_mapped_payload(const bioseq::indexing::encoded_grouped_soa_gene
     return payload;
 }
 
-/// Own a sparsely committed virtual mapping used by width-boundary tests.
+/// A shared memory mapping for tests with large offsets and counts.
 struct sparse_mapped_test_payload {
     std::shared_ptr<std::byte> owner{};
     std::size_t size = 0u;
@@ -242,10 +243,9 @@ struct sparse_mapped_test_payload {
     }
 };
 
-/// Reserve a zero-filled virtual address range without materializing its
-/// untouched pages. O64/C64 boundary fixtures read only the small control
-/// prefix and demonstrate that the multi-gigabyte position extent is
-/// not visited after max-occ rejection.
+/// Reserve zero-filled virtual memory for tests with large offsets and counts.
+/// Tests can describe gigabyte position ranges while touching only a small
+/// control prefix. An invalid size or failed mapping returns no value.
 [[nodiscard]] std::optional<sparse_mapped_test_payload>
 make_sparse_mapped_test_payload(std::uint64_t byte_count) {
     if (byte_count == 0u || byte_count > (std::numeric_limits<std::size_t>::max)()) {
@@ -265,7 +265,7 @@ make_sparse_mapped_test_payload(std::uint64_t byte_count) {
     };
 }
 
-/// Open a grouped-SoA fragment reader over captured mapped payload rows.
+/// Assemble stored rows and open a reader that keeps their bytes alive.
 [[nodiscard]] std::expected<bioseq::indexing::prepared_minimizer_fragment_reader,
                             bioseq::indexing::minimizer_generation_encoding_error>
 open_grouped_soa_fragment_query_reader(
@@ -289,7 +289,7 @@ open_grouped_soa_fragment_query_reader(
         std::move(compact_direct));
 }
 
-/// Produce the ordinary transient-index anchors used as a query oracle.
+/// Build an in-memory hash index and collect reference anchors for comparison.
 [[nodiscard]] std::vector<bioseq::chaining::anchor>
 ordinary_seed_anchors(std::span<const std::pair<std::uint64_t, std::uint64_t>> pairs,
                       std::uint64_t target_length,
@@ -311,7 +311,7 @@ ordinary_seed_anchors(std::span<const std::pair<std::uint64_t, std::uint64_t>> p
     return std::vector<bioseq::chaining::anchor>{anchors.data(), anchors.data() + anchors.size()};
 }
 
-/// Require byte identity and canonical ordering for two anchor ranges.
+/// Check that anchor bytes match and the result is in canonical order.
 void require_anchor_bytes_equal(std::span<const bioseq::chaining::anchor> actual,
                                 std::span<const bioseq::chaining::anchor> expected) {
     REQUIRE(actual.size() == expected.size());
@@ -319,7 +319,7 @@ void require_anchor_bytes_equal(std::span<const bioseq::chaining::anchor> actual
     REQUIRE(std::ranges::is_sorted(actual, bioseq::chaining::canonical_anchor_less{}));
 }
 
-/// Require identical hot-loop counters for the direct path and its oracle.
+/// Compare scan, sorting, and memory counters with the baseline matcher.
 void require_hot_loop_differential_evidence_equal(
     const bioseq::indexing::prepared_fragment_anchor_batch_stats& actual,
     const bioseq::indexing::prepared_fragment_anchor_batch_stats& oracle) {
@@ -350,14 +350,14 @@ void require_hot_loop_differential_evidence_equal(
     REQUIRE(oracle.forbidden_buffers_are_zero());
     REQUIRE(actual.saturated == oracle.saturated);
 }
-/// Own rebuilt head, manifest, and directory metadata.
+/// Replacement directory bytes and the head and manifest that describe them.
 struct rebuilt_generation_metadata {
     bioseq::indexing::minimizer_generation_head head{};
     bioseq::indexing::minimizer_generation_manifest manifest{};
     std::vector<std::byte> directory_bytes;
 };
 
-/// Rebuild checksummed metadata for a replacement directory.
+/// Update directory metadata and checksums after replacing directory entries.
 [[nodiscard]] rebuilt_generation_metadata rebuild_generation_metadata(
     const bioseq::indexing::encoded_grouped_soa_generation& original,
     std::span<const bioseq::indexing::grouped_soa_bucket_directory_entry> entries) {

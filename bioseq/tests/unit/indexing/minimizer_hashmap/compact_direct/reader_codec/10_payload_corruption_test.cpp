@@ -1,6 +1,6 @@
 /**
  * @file compact_direct/reader_codec/10_payload_corruption_test.cpp
- * @brief Trusted payload corruption rejection.
+ * @brief Checks that anchor preparation rejects corrupt counts in a mapped index.
  */
 
 #include <hwy/highway.h>
@@ -36,7 +36,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 
