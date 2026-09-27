@@ -1,10 +1,10 @@
 /**
  * @file external/io/datasets_stream.cppm
- * @brief NCBI Datasets archive stream selection and decoding.
+ * @brief Downloads NCBI Datasets ZIP packages and emits verified FASTA chunks.
  */
 module;
 
-/// Streams bounded NCBI Datasets packages through archive validation.
+
 
 #include <array>
 #include <chrono>
@@ -36,12 +36,20 @@ export namespace bioseq::external::io {
 namespace prov = bioseq::external::provider;
 namespace tx = bioseq::external::transport;
 
-/// Returns whether an accession selects the NCBI Datasets archive path.
+/// Selects the Datasets path for accessions beginning with GCF_ or GCA_.
 [[nodiscard]] inline bool is_datasets_package_accession(std::string_view accession) {
     return accession.starts_with("GCF_") || accession.starts_with("GCA_");
 }
 
-/// Downloads, validates, and streams one NCBI Datasets archive.
+/**
+ * Downloads an assembly's NCBI Datasets package and emits its selected FASTA chunks.
+ *
+ * Buffers the ZIP before extraction. Retryable HTTP failures can restart the
+ * download up to the attempt limit, while extraction failures return directly
+ * because earlier members may already have emitted rows. Each member's MD5
+ * is checked before its own rows are sent to sink.
+ * @return Transfer and row statistics, or a download, extraction, or sink error.
+ */
 [[nodiscard]] inline std::expected<prov::provider_statistics, prov::external_error>
 run_ncbi_datasets_stream(std::string_view accession,
                          prov::query_target target,
@@ -59,7 +67,7 @@ run_ncbi_datasets_stream(std::string_view accession,
                                       "NCBI package retrieval requires an accession predicate"));
     }
     if (options.maximum_wire_bytes == 0) {
-        options.maximum_wire_bytes = 64ull * 1024 * 1024; // bound the download
+        options.maximum_wire_bytes = 64ull * 1024 * 1024; // Default compressed download limit.
     }
 
     std::string url = "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/";
@@ -72,9 +80,8 @@ run_ncbi_datasets_stream(std::string_view accession,
     candidate.is_replayable = true;
     candidate.is_idempotent = true;
 
-    // Download the ZIP into a bounded buffer, retrying transient failures with
-    // backoff. Retry only the download before any row is emitted. Extraction
-    // emits rows and is therefore terminal on failure.
+    // Retry HTTP 408, 429, and server errors before extraction starts.
+    // Once rows can reach the sink, a failure ends this operation.
     std::vector<std::uint8_t> zip;
     constexpr int k_max_attempts = 5;
     for (int attempt = 0; attempt < k_max_attempts; ++attempt) {
@@ -132,14 +139,13 @@ run_ncbi_datasets_stream(std::string_view accession,
 
     stats.wire_bytes = zip.size();
 
-    // Extract + verify + emit. The reader's own limits cap per-member/total
-    // decoded bytes and the zip-bomb expansion ratio. The wire cap already
-    // bounded the compressed download.
+    // Limit decoded sequence data and its expansion relative to the ZIP.
+    // The transport has already limited the compressed download.
     archive_read_limits limits;
     limits.maximum_total_decoded_bytes = 512ull * 1024 * 1024;
-    // Key every emitted chunk by the queried assembly accession so the PG scan's
-    // `accession = '<assembly>'` filter matches (the FASTA record's own accession
-    // differs from the assembly accession, e.g. NC_045512.2 vs GCF_009858895.2).
+    // Use the queried assembly accession for emitted chunks so the SQL filter
+    // matches. FASTA record accessions can differ, such as NC_045512.2 within
+    // assembly GCF_009858895.2.
     auto extracted = extract_fasta_members_from_zip_archive(
         std::span<const std::uint8_t>(zip.data(), zip.size()),
         limits,

@@ -1,6 +1,6 @@
 /**
  * @file external/io/gzip_decode_source.cppm
- * @brief Pull-based gzip decoder with bounded input and output accounting.
+ * @brief Incrementally decodes gzip or zlib input while counting encoded and decoded bytes.
  */
 module;
 
@@ -15,10 +15,16 @@ export module bioseq.external.io.gzip_decode_source;
 
 import bioseq.io.sources; // io_source concept, source_read_result
 
-/// Incrementally inflates gzip bytes from any compatible source.
+/// Sources that decompress gzip or zlib data as callers request bytes.
 export namespace bioseq::external::io {
 
-/// Encoded, decoded, expansion, and input-buffer limits for gzip decoding.
+/**
+ * Byte caps, expansion ratio, and input-buffer size for decompression.
+ *
+ * Zero disables either byte cap. A zero expansion denominator disables the
+ * ratio check. Configure limits so counter, multiplication, and addition
+ * arithmetic fits uint64_t, and keep input chunks within zlib's uInt range.
+ */
 struct gzip_decode_limits {
     std::uint64_t maximum_encoded_bytes = 0;  // 0 = unbounded
     std::uint64_t maximum_decoded_bytes = 0;  // 0 = unbounded
@@ -28,13 +34,19 @@ struct gzip_decode_limits {
     std::size_t input_chunk_bytes = 128 * 1024;
 };
 
-/// Pull-based gzip decoder over an owning compatible source.
+/**
+ * Decodes one gzip or zlib stream from an owned source.
+ *
+ * Stops at the first compressed stream end. It does not restart zlib for
+ * concatenated gzip members or require the underlying source to be exhausted.
+ */
 template <bioseq::io::io_source p_source_type> class gzip_decode_source {
   public:
     gzip_decode_source(const gzip_decode_source&) = delete;
     gzip_decode_source& operator=(const gzip_decode_source&) = delete;
 
-    /// Constructs a decoder with fixed accounting limits.
+    /// Takes ownership of the source and initializes decoding with the supplied limits.
+    /// A zero input-chunk size selects the default buffer size.
     gzip_decode_source(p_source_type source, gzip_decode_limits limits)
         : source_(std::move(source)), limits_(limits) {
         input_.resize(limits_.input_chunk_bytes == 0 ? 128 * 1024 : limits_.input_chunk_bytes);
@@ -52,7 +64,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
         }
     }
 
-    /// Transfers an initialized decoder and its source.
+    /// Transfers the stored source, decoder state, and counters.
     gzip_decode_source(gzip_decode_source&& other) noexcept {
         adopt_state_from(std::move(other));
     }
@@ -64,12 +76,19 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
         }
         return *this;
     }
-    /// Releases the retained zlib stream.
+    /// Releases the owned zlib stream.
     ~gzip_decode_source() {
         release_zlib_state();
     }
 
-    /// Reads decoded bytes into caller-owned storage.
+    /**
+     * Reads decompressed bytes into destination.
+     *
+     * capacity must fit zlib's uInt range. Errors are terminal and reported through
+     * has_error and last_error_message(). A failed call can modify destination,
+     * so callers must discard that call's bytes. End of stream is reported on the
+     * next read after the final nonempty result.
+     */
     [[nodiscard]] bioseq::io::source_read_result read_into(std::uint8_t* destination,
                                                            std::size_t capacity) {
         bioseq::io::source_read_result result;
@@ -120,7 +139,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
                 if (stream_.avail_out == 0) {
                     break;
                 }
-                continue; // needs another input refill
+                continue; // Continue until more input or output space is needed.
             }
             if (zlib_status != Z_OK) {
                 record_failure(stream_.msg != nullptr ? stream_.msg : "zlib inflate error");
@@ -145,23 +164,24 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
         return error_message_;
     }
 
-    /// Returns compressed bytes consumed from the source.
+    /// Returns compressed bytes fetched from the source, including buffered unread input.
     [[nodiscard]] std::uint64_t count_encoded_bytes() const noexcept {
         return encoded_total_;
     }
-    /// Returns decoded bytes delivered to callers.
+    /// Returns decoded bytes counted so far, including a block that exceeded a configured limit.
     [[nodiscard]] std::uint64_t count_decoded_bytes() const noexcept {
         return decoded_total_;
     }
 
   private:
-    /// Returns whether decoded size and expansion accounting remain admitted.
+    /// Checks decoded-byte and expansion limits against the current counters.
     [[nodiscard]] bool is_within_limits() const noexcept {
         if (limits_.maximum_decoded_bytes != 0 && decoded_total_ > limits_.maximum_decoded_bytes) {
             return false;
         }
         if (limits_.expansion_denominator != 0) {
-            // decoded <= grace + encoded * num / den, computed to avoid overflow.
+            // Split the encoded-byte division before scaling. The configured ratio
+            // and counters must still keep these products and sums within uint64_t.
             const std::uint64_t scaled =
                 encoded_total_ / limits_.expansion_denominator * limits_.expansion_numerator +
                 (encoded_total_ % limits_.expansion_denominator) * limits_.expansion_numerator /
@@ -174,7 +194,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
         return true;
     }
 
-    /// Records the first terminal decoder failure.
+    /// Marks the decoder as failed and keeps the first nonempty error message.
     void record_failure(std::string message) {
         has_failed_ = true;
         if (error_message_.empty()) {
@@ -182,7 +202,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
         }
     }
 
-    /// Transfers source, zlib state, and accounting from another decoder.
+    /// Moves source storage and copies the zlib state and accounting fields.
     void adopt_state_from(gzip_decode_source&& other) noexcept {
         source_ = std::move(other.source_);
         limits_ = other.limits_;

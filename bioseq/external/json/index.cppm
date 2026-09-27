@@ -1,6 +1,6 @@
 /**
  * @file external/json/index.cppm
- * @brief Owned JSON value model used at external-provider boundaries.
+ * @brief JSON values that own the data returned by external providers.
  */
 module;
 
@@ -16,7 +16,7 @@ export module bioseq.external.json;
 
 export namespace bioseq::external::json {
 
-/// Classifies the representation stored by an owned JSON value.
+/// Identifies the JSON value stored in this object.
 enum class value_kind : std::uint8_t {
     null,
     boolean,
@@ -31,7 +31,7 @@ enum class value_kind : std::uint8_t {
 /// Forward declaration for recursive object members.
 struct object_member;
 
-/// Owns one JSON value and all strings and descendants reachable from it.
+/// Owns a JSON value, including its strings and child values.
 struct value {
     value_kind kind{value_kind::null};
     bool boolean{};
@@ -47,26 +47,26 @@ struct value {
         return kind == value_kind::null;
     }
 
-    /// Returns whether this value owns a JSON object.
+    /// Returns whether this value is a JSON object.
     [[nodiscard]] bool is_object() const noexcept {
         return kind == value_kind::object;
     }
 
-    /// Returns whether this value owns a JSON array.
+    /// Returns whether this value is a JSON array.
     [[nodiscard]] bool is_array() const noexcept {
         return kind == value_kind::array;
     }
 
-    /// Returns whether this value owns a JSON string.
+    /// Returns whether this value is a JSON string.
     [[nodiscard]] bool is_string() const noexcept {
         return kind == value_kind::string;
     }
 
-    /// Finds an object member by key, or returns null for a non-object/miss.
-    /// The definition follows `object_member` to resolve the recursive type.
+    /// Finds the first object member with this key. Returns nullptr for a
+    /// missing key or a value that is not an object.
     [[nodiscard]] const value* find_member(std::string_view key) const noexcept;
 
-    /// Reads a string value without allocating.
+    /// Returns a view of the stored string, or no value for another JSON type.
     [[nodiscard]] std::optional<std::string_view> read_string() const noexcept {
         if (kind == value_kind::string) {
             return std::string_view{string};
@@ -74,7 +74,7 @@ struct value {
         return std::nullopt;
     }
 
-    /// Reads an exactly representable signed integer.
+    /// Reads an integer that fits in int64_t. Other JSON types return no value.
     [[nodiscard]] std::optional<std::int64_t> read_signed_integer() const noexcept {
         if (kind == value_kind::signed_integer) {
             return signed_integer;
@@ -87,7 +87,7 @@ struct value {
         return std::nullopt;
     }
 
-    /// Reads an exactly representable unsigned integer.
+    /// Reads a nonnegative integer that fits in uint64_t. Other types return no value.
     [[nodiscard]] std::optional<std::uint64_t> read_unsigned_integer() const noexcept {
         if (kind == value_kind::unsigned_integer) {
             return unsigned_integer;
@@ -98,7 +98,7 @@ struct value {
         return std::nullopt;
     }
 
-    /// Reads a numeric value as double.
+    /// Reads a number as double. Large integers may lose precision.
     [[nodiscard]] std::optional<double> read_floating_point() const noexcept {
         if (kind == value_kind::floating_point) {
             return floating_point;
@@ -112,7 +112,7 @@ struct value {
         return std::nullopt;
     }
 
-    /// Reads a boolean value.
+    /// Reads a boolean, or returns no value for another JSON type.
     [[nodiscard]] std::optional<bool> read_boolean() const noexcept {
         if (kind == value_kind::boolean) {
             return boolean;
@@ -146,7 +146,7 @@ struct value {
         return std::nullopt;
     }
 
-    /// Reads this string, or the first string in this array.
+    /// Reads a string value or a string in the first array element.
     [[nodiscard]] std::optional<std::string_view> read_first_string() const noexcept {
         if (kind == value_kind::string) {
             return std::string_view{string};
@@ -157,7 +157,7 @@ struct value {
         return std::nullopt;
     }
 
-    /// Finds an object member and reads its first string value.
+    /// Reads a member as a string or as an array whose first element is a string.
     [[nodiscard]] std::optional<std::string_view>
     read_first_string_member(std::string_view key) const noexcept {
         if (const value* child = find_member(key)) {
@@ -166,12 +166,12 @@ struct value {
         return std::nullopt;
     }
 
-    /// Returns the array elements or an empty vector for a non-array value.
+    /// Returns the stored array elements.
     [[nodiscard]] const std::vector<value>& get_elements() const noexcept {
         return array_elements;
     }
 
-    /// Returns the object members or an empty vector for a non-object value.
+    /// Returns the stored object members.
     [[nodiscard]] const std::vector<object_member>& get_members() const noexcept {
         return object_members;
     }
