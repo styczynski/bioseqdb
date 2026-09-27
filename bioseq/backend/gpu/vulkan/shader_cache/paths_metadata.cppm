@@ -1,6 +1,6 @@
 /**
  * @file paths_metadata.cppm
- * @brief Defines shader-cache paths, metadata, immutable seed contracts, and file identity.
+ * @brief Cache filenames, shader metadata, and checks for loading a fixed shader seed.
  */
 module;
 
@@ -25,8 +25,8 @@ import std;
 export namespace bioseq::gpu::vulkan {
 
 #if defined(__APPLE__)
-/// @brief Resolve a packaged loader beside its owning image, or the build-owned loader.
-/// Only module initialization uses this path; shader and numerical kernels are unchanged.
+/// @brief Finds the packaged Vulkan loader beside the current library.
+/// Falls back to the loader selected at build time and returns its canonical path.
 [[nodiscard]] std::filesystem::path selected_vulkan_loader_path(std::error_code& error) {
     static const unsigned char image_anchor = 0;
     Dl_info owner{};
@@ -42,10 +42,7 @@ export namespace bioseq::gpu::vulkan {
 }
 #endif
 
-/// @brief Formats one shader-cache diagnostic without constraining argument types.
-/// @tparam p_argument_types Stream-insertable diagnostic argument types.
-/// @param[in] arguments Values appended in order.
-/// @return Concatenated diagnostic text.
+/// @brief Joins values into a shader-cache error message using stream insertion.
 template <class... p_argument_types>
 [[nodiscard]] inline std::string shader_cache_message(p_argument_types&&... arguments) {
     std::ostringstream out;
@@ -53,7 +50,7 @@ template <class... p_argument_types>
     return out.str();
 }
 
-/// @brief Stable error categories returned by shader-cache orchestration.
+/// @brief Errors reported while compiling and loading cached shaders.
 enum class shader_cache_error : std::uint32_t {
     ok = 0,                     ///< Operation completed successfully.
     no_toolchain = 1,           ///< Required compiler toolchain is unavailable.
@@ -61,16 +58,16 @@ enum class shader_cache_error : std::uint32_t {
     spirv_to_msl = 3,           ///< SPIR-V-to-MSL translation failed.
     metal_spawn = 4,            ///< Metal compiler process could not be started.
     metal_exit = 5,             ///< Metal compiler process returned failure.
-    metallib_write = 6,         ///< Metal library artifact could not be written.
+    metallib_write = 6,         ///< Could not write the compiled Metal library.
     metadata_io = 7,            ///< Metadata read or write failed.
-    abi_scan = 8,               ///< Compiled shader layout violated its host ABI.
+    abi_scan = 8,               ///< Shader data layout differs from the C++ buffer layout.
     dynamic_symbol_missing = 9, ///< Required runtime symbol is unavailable.
     queue_full = 10,            ///< Compiler service queue has no capacity.
     supervisor_gone = 11,       ///< Compiler supervisor is no longer reachable.
-    timeout = 12,               ///< Bounded compiler operation expired.
+    timeout = 12,               ///< Compiler operation exceeded its time limit.
 };
 
-/// @brief Fixed metadata stored next to one compiled shader artifact.
+/// @brief Shader key, workgroup size, and entry-name length stored beside a compiled shader.
 struct shader_cache_metadata {
     std::uint32_t magic = 0xB10C0CACu;
     std::uint32_t wire_revision = 1u;
@@ -89,7 +86,7 @@ struct msl_version {
     std::uint32_t patch = 0;
 };
 
-/// @brief Static inputs that define a shader-cache build identity.
+/// @brief Build settings used to distinguish shader caches.
 struct shader_cache_build_inputs {
     vulkan_static_variant_inputs variants{};
     msl_version msl{};
@@ -97,18 +94,18 @@ struct shader_cache_build_inputs {
     std::string device_uuid = "conservative";
 };
 
-/// @brief Serialized artifact categories in a sealed shader-cache seed.
+/// @brief File types listed in a fixed shader-cache seed.
 enum class sealed_shader_cache_artifact_kind : std::uint32_t {
-    // Wire value 0 remains reserved and cannot identify a seed artifact.
+    // Zero is reserved and cannot identify a seed file.
     reserved_command_metallib = 0,        ///< Reserved wire value.
     shader_meta = 1,                      ///< Shader metadata record.
     shader_metallib = 2,                  ///< Compiled Metal library.
     metal_binary_archive = 3,             ///< Metal binary archive.
-    metal_binary_archive_qualification = 4, ///< Archive qualification receipt.
-    moltenvk_command_library = 5,         ///< Exact source/options/metallib/provenance bundle.
+    metal_binary_archive_qualification = 4, ///< Record of the checks performed on a Metal archive.
+    moltenvk_command_library = 5,         ///< MoltenVK command source, options, compiled library, and build identity.
 };
 
-/// @brief Manifest descriptor for one sealed shader-cache artifact.
+/// @brief Filename, type, size, and hash for one file in the seed.
 struct sealed_shader_cache_artifact {
     sealed_shader_cache_artifact_kind kind =
         sealed_shader_cache_artifact_kind::reserved_command_metallib;
@@ -121,7 +118,7 @@ struct sealed_shader_cache_artifact {
     [[nodiscard]] bool operator==(const sealed_shader_cache_artifact&) const noexcept = default;
 };
 
-/// @brief Canonical manifest for one immutable shader-cache seed.
+/// @brief Lists the shader variants and verified files that make up a fixed cache seed.
 struct sealed_shader_cache_manifest {
     std::string cache_digest;
     std::vector<shader_variant_key> keys;
@@ -131,62 +128,62 @@ struct sealed_shader_cache_manifest {
     std::uint64_t manifest_checksum = 0;
 };
 
-/// @brief Manifest descriptor paired with the exact retained artifact bytes.
+/// @brief A seed-file descriptor paired with the bytes kept in memory.
 struct sealed_shader_cache_artifact_image {
     sealed_shader_cache_artifact descriptor;
     std::vector<std::byte> bytes;
 };
 
-/// @brief Loader-generated validation receipt for one complete process-local seed image.
-/// Construction is private: runtime configuration cannot manufacture the
-/// counters or copy them from manifest metadata without executing the loader.
+/// @brief Records the seed files kept in memory, load time, and memory reservation.
+/// Only the seed loader can create this receipt. Read counts cover the saved
+/// manifest and file images, excluding preliminary format and identity checks.
 class sealed_shader_cache_seed_receipt {
   public:
-    /// @brief Returns the nonzero loader receipt identity.
+    /// @brief Returns the ID assigned to this seed load.
     [[nodiscard]] std::uint64_t identity() const noexcept {
         return identity_;
     }
-    /// @brief Returns the number of complete seed loads represented by the receipt.
+    /// @brief Returns the number of seed loads recorded here.
     [[nodiscard]] std::uint64_t load_count() const noexcept {
         return load_count_;
     }
-    /// @brief Returns the number of manifest reads.
+    /// @brief Returns the complete manifest reads recorded for the loaded image.
     [[nodiscard]] std::uint64_t manifest_read_count() const noexcept {
         return manifest_read_count_;
     }
-    /// @brief Returns the number of artifact reads.
+    /// @brief Returns the number of files read into the loaded seed image.
     [[nodiscard]] std::uint64_t artifact_read_count() const noexcept {
         return artifact_read_count_;
     }
-    /// @brief Returns the loaded manifest extent.
+    /// @brief Returns the byte size of the saved manifest.
     [[nodiscard]] std::uint64_t manifest_bytes() const noexcept {
         return manifest_bytes_;
     }
-    /// @brief Returns the aggregate loaded artifact extent.
+    /// @brief Returns the combined byte size of loaded files, excluding the manifest.
     [[nodiscard]] std::uint64_t artifact_bytes() const noexcept {
         return artifact_bytes_;
     }
-    /// @brief Returns the measured seed load duration.
+    /// @brief Returns the seed loading time in nanoseconds.
     [[nodiscard]] std::uint64_t load_ns() const noexcept {
         return load_ns_;
     }
-    /// @brief Returns the number of memory-admission operations.
+    /// @brief Returns the number of memory reservations made for the seed.
     [[nodiscard]] std::uint64_t admission_count() const noexcept {
         return admission_count_;
     }
-    /// @brief Returns the peak admitted byte count.
+    /// @brief Returns the largest memory reservation held while loading.
     [[nodiscard]] std::uint64_t peak_admitted_bytes() const noexcept {
         return peak_admitted_bytes_;
     }
-    /// @brief Returns the retained process-image capacity.
+    /// @brief Returns the bytes charged for the seed data kept in memory.
     [[nodiscard]] std::uint64_t retained_capacity_bytes() const noexcept {
         return retained_capacity_bytes_;
     }
-    /// @brief Reports whether byte accounting saturated.
+    /// @brief Reports whether the memory charge overflowed or exceeded its reservation.
     [[nodiscard]] bool admission_saturated() const noexcept {
         return admission_saturated_;
     }
-    /// @brief Validates load counts, byte counts, timing, and admission accounting.
+    /// @brief Checks that one seed load has valid read counts, timing, and memory accounting.
     [[nodiscard]] bool is_accepted() const noexcept {
         return identity_ != 0u && load_count_ == 1u && manifest_read_count_ == 1u &&
                artifact_read_count_ != 0u && manifest_bytes_ != 0u && artifact_bytes_ != 0u &&
@@ -221,9 +218,9 @@ class sealed_shader_cache_seed_receipt {
     friend class sealed_shader_cache_seed_image;
 };
 
-/// @brief Complete immutable shader seed retained by one backend process. Every
-/// consumer receives spans into these exact verified reads. No consumer needs
-/// to reopen a cache pathname after this image is installed.
+/// @brief Owns the validated shader seed for the lifetime of a backend process.
+/// Shader loaders borrow the bytes kept here, so later loads use the same data
+/// that passed validation even if files in the cache directory change.
 class sealed_shader_cache_seed_image {
   public:
     sealed_shader_cache_seed_image(const sealed_shader_cache_seed_image&) = delete;
@@ -231,28 +228,28 @@ class sealed_shader_cache_seed_image {
     sealed_shader_cache_seed_image(sealed_shader_cache_seed_image&&) noexcept = default;
     sealed_shader_cache_seed_image& operator=(sealed_shader_cache_seed_image&&) noexcept = delete;
 
-    /// @brief Returns the retained validated manifest.
+    /// @brief Returns the validated manifest kept by this image.
     [[nodiscard]] const sealed_shader_cache_manifest& manifest() const noexcept {
         return manifest_;
     }
-    /// @brief Returns the exact retained manifest bytes.
+    /// @brief Returns the manifest bytes saved during loading.
     [[nodiscard]] std::span<const std::byte> manifest_bytes() const noexcept {
         return manifest_bytes_;
     }
-    /// @brief Returns retained artifact images in manifest order.
+    /// @brief Returns the seed files in manifest order.
     [[nodiscard]] std::span<const sealed_shader_cache_artifact_image> artifacts() const noexcept {
         return artifacts_;
     }
-    /// @brief Returns the loader-issued seed receipt.
+    /// @brief Returns the receipt for loading this seed.
     [[nodiscard]] const sealed_shader_cache_seed_receipt& receipt() const noexcept {
         return receipt_;
     }
-    /// @brief Returns one retained artifact by ordinal.
+    /// @brief Returns the file at `ordinal`, or null if it is out of range.
     [[nodiscard]] const sealed_shader_cache_artifact_image*
     artifact(std::size_t ordinal) const noexcept {
         return ordinal < artifacts_.size() ? &artifacts_[ordinal] : nullptr;
     }
-    /// @brief Validates retained artifacts, receipt counts, and memory admission.
+    /// @brief Checks that file counts, loaded byte totals, and the current reservation agree.
     [[nodiscard]] bool is_accepted() const noexcept {
         return receipt_.is_accepted() && artifacts_.size() == manifest_.artifacts.size() &&
                receipt_.artifact_read_count() == artifacts_.size() &&
@@ -260,7 +257,8 @@ class sealed_shader_cache_seed_image {
                receipt_.manifest_bytes() == manifest_bytes_.size() && permit_ &&
                permit_.bytes() == receipt_.retained_capacity_bytes();
     }
-    /// @brief Computes process-owned storage retained by the seed image.
+    /// @brief Returns the memory charge for this image and the container capacities it owns.
+    /// Returns the largest 64-bit value if the total overflows.
     [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
         using bioseq::common::saturating_add;
         using bioseq::common::saturating_mul;
@@ -321,8 +319,8 @@ class sealed_shader_cache_seed_image {
         return true;
     }
 
-    // Declared first so reverse member destruction releases every admitted
-    // allocation before returning the lifetime permit to the controller.
+    // Destroy the owned data before releasing its memory reservation. Members
+    // are destroyed in reverse declaration order.
     bioseq::parallelism::memory_permit permit_;
     sealed_shader_cache_manifest manifest_;
     std::vector<std::byte> manifest_bytes_;
@@ -335,9 +333,9 @@ class sealed_shader_cache_seed_image {
                                             std::span<const shader_variant_key>);
 };
 
-/// @brief Exact immutable inputs retained from the same reads whose sizes and
-/// SHA-256 values were checked against the sealed manifest. Module creation
-/// consumes these bytes directly and never reopens a cache pathname.
+/// @brief Owns validated metadata and Metal library bytes for one shader variant.
+/// Module creation reads these bytes directly, keeping it tied to the files
+/// checked against the seed manifest.
 struct sealed_shader_cache_key_image {
     sealed_shader_cache_manifest manifest;
     shader_variant_key key{};
@@ -346,8 +344,8 @@ struct sealed_shader_cache_key_image {
     std::vector<std::byte> metallib_bytes;
 };
 
-/// @brief Borrowed view into a process-owned seed image. The caller must keep the
-/// seed alive until module creation returns.
+/// @brief Borrows a shader's Metal library bytes from a loaded seed.
+/// Keep the seed alive until module creation finishes.
 struct sealed_shader_cache_key_view {
     shader_variant_key key{};
     shader_cache_metadata meta{};
@@ -355,43 +353,33 @@ struct sealed_shader_cache_key_view {
     std::span<const std::byte> metallib_bytes;
 };
 
-/// @brief Compile service accepted by the runtime cache loader.
-/// @tparam p_service Service type exposing `ensure_variant_compiled`.
+/// @brief Requires a compiler service that can prepare a requested shader variant.
+/// `ensure_variant_compiled` must return success or a string error.
 template <class p_service>
 concept is_runtime_compile_service = requires(p_service& service, shader_variant_key key) {
     { service.ensure_variant_compiled(key) } -> std::same_as<std::expected<void, std::string>>;
 };
 
-/// @brief Resolves the compiled Metal library path for one shader variant.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] key Shader variant identity.
-/// @return Variant Metal library path.
+/// @brief Returns the `.metallib` path for this shader variant.
 [[nodiscard]] inline std::filesystem::path
 cache_metallib_path(const std::filesystem::path& cache_dir, const shader_variant_key& key) {
     return cache_dir / (cache_file_stem(key) + ".metallib");
 }
 
-/// @brief Resolves the primary Metal binary archive path for one shader variant.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] key Shader variant identity.
-/// @return Primary archive path.
+/// @brief Returns the primary Metal binary archive path for this variant.
 [[nodiscard]] inline std::filesystem::path
 cache_binary_archive_path(const std::filesystem::path& cache_dir, const shader_variant_key& key) {
     return cache_dir / (cache_file_stem(key) + ".metalar");
 }
 
-/// @brief Resolves the qualification receipt adjacent to a Metal archive.
-/// @param[in] archive_path Metal archive path.
-/// @return Qualification receipt path.
+/// @brief Returns the check-record path beside a Metal archive.
 [[nodiscard]] inline std::filesystem::path
 cache_binary_archive_qualification_path(const std::filesystem::path& archive_path) {
     return archive_path.string() + ".qualification";
 }
 
-/// @brief Enumerates exact and conservative-thread archive paths for a variant.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] key Shader variant identity.
-/// @return Ordered archive paths accepted for the variant.
+/// @brief Lists archives for the exact workgroup size and MoltenVK's 256-thread limit.
+/// If those sizes match, returns only the primary archive path.
 [[nodiscard]] inline std::vector<std::filesystem::path>
 cache_binary_archive_paths(const std::filesystem::path& cache_dir, const shader_variant_key& key) {
     constexpr std::uint32_t k_conservative_moltenvk_cap = 256u;
@@ -407,26 +395,19 @@ cache_binary_archive_paths(const std::filesystem::path& cache_dir, const shader_
     return paths;
 }
 
-/// @brief Resolves the immutable MoltenVK command-library bundle path.
-/// @param[in] cache_dir Shader-cache directory.
-/// @return Global command-library artifact path for the seed.
+/// @brief Returns the MoltenVK command-library bundle path for this cache.
 [[nodiscard]] inline std::filesystem::path
 cache_moltenvk_command_library_path(const std::filesystem::path& cache_dir) {
     return cache_dir / "moltenvk_command.sealed";
 }
 
-/// @brief Resolves the metadata path for one shader variant.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] key Shader variant identity.
-/// @return Variant metadata path.
+/// @brief Returns the metadata path for this shader variant.
 [[nodiscard]] inline std::filesystem::path cache_meta_path(const std::filesystem::path& cache_dir,
                                                            const shader_variant_key& key) {
     return cache_dir / (cache_file_stem(key) + ".meta");
 }
 
-/// @brief Resolves the sealed seed manifest path in a cache directory.
-/// @param[in] cache_dir Shader-cache directory.
-/// @return Sealed manifest path.
+/// @brief Returns the manifest path for the fixed shader seed.
 [[nodiscard]] inline std::filesystem::path
 sealed_shader_cache_manifest_path(const std::filesystem::path& cache_dir) {
     return cache_dir / "bioseq_shader_cache.sealed";
@@ -434,7 +415,7 @@ sealed_shader_cache_manifest_path(const std::filesystem::path& cache_dir) {
 
 namespace sealed_shader_cache_detail {
 
-/// @brief Incremental SHA-256 state used for sealed artifact identities.
+/// @brief Computes SHA-256 incrementally for seed files and manifest identities.
 class sha256_hasher {
   private:
     std::array<std::uint32_t, 8> state_{0x6a09e667u,
@@ -461,8 +442,8 @@ class sha256_hasher {
         0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u, 0x90befffau, 0xa4506cebu, 0xbef9a3f7u,
         0xc67178f2u};
 
-    /// @brief Compresses one complete 64-byte SHA-256 block.
-    /// @param[in] block Pointer to 64 readable bytes.
+    /// @brief Updates the SHA-256 state with one complete 64-byte block.
+    /// `block` must point to 64 readable bytes.
     void transform(const std::byte* block) noexcept {
         std::array<std::uint32_t, 64> words{};
         for (std::size_t index = 0; index < 16u; ++index) {
@@ -518,8 +499,7 @@ class sha256_hasher {
     }
 
   public:
-    /// @brief Appends raw bytes to the digest state.
-    /// @param[in] bytes Bytes consumed before return.
+    /// @brief Adds these bytes to the hash, keeping any unfinished block.
     void update(std::span<const std::byte> bytes) noexcept {
         for (const std::byte value : bytes) {
             buffer_[buffered_++] = value;
@@ -531,14 +511,12 @@ class sha256_hasher {
         }
     }
 
-    /// @brief Appends string bytes to the digest state.
-    /// @param[in] text Text bytes consumed before return.
+    /// @brief Adds the string's bytes to the hash without a terminator.
     void update(std::string_view text) noexcept {
         update(std::as_bytes(std::span{text.data(), text.size()}));
     }
 
-    /// @brief Appends one unsigned value in canonical little-endian order.
-    /// @param[in] value Value serialized as eight bytes.
+    /// @brief Hashes the value as eight bytes in little-endian order.
     void update_little_endian(std::uint64_t value) noexcept {
         std::array<std::byte, 8> bytes{};
         for (std::size_t index = 0; index < bytes.size(); ++index) {
@@ -548,8 +526,7 @@ class sha256_hasher {
         update(bytes);
     }
 
-    /// @brief Finalizes the accumulated bytes.
-    /// @return SHA-256 digest bytes.
+    /// @brief Adds SHA-256 padding and returns the final 32-byte digest.
     [[nodiscard]] std::array<std::uint8_t, 32> finalize() noexcept {
         const std::uint64_t bit_length = total_bytes_ * 8u;
         buffer_[buffered_++] = std::byte{0x80};
@@ -578,9 +555,8 @@ class sha256_hasher {
     }
 };
 
-/// @brief Computes the nonzero FNV checksum stored in a sealed manifest.
-/// @param[in] bytes Serialized manifest bytes before the checksum field.
-/// @return Nonzero manifest checksum.
+/// @brief Computes the manifest checksum over bytes preceding its checksum field.
+/// Uses FNV-1a and replaces a zero result with a fixed nonzero value.
 [[nodiscard]] inline std::uint64_t manifest_checksum(std::span<const std::byte> bytes) noexcept {
     std::uint64_t hash = 14695981039346656037ull;
     for (const std::byte value : bytes) {
@@ -592,10 +568,8 @@ class sha256_hasher {
 
 } // namespace sealed_shader_cache_detail
 
-/// @brief Serializes fixed shader metadata followed by its entrypoint bytes.
-/// @param[in] meta Fixed metadata header.
-/// @param[in] entry_name Metal entrypoint name.
-/// @return Serialized metadata payload.
+/// @brief Copies the metadata header and entry-point name into one byte array.
+/// The caller must set `meta.entry_len` to the name length.
 [[nodiscard]] inline std::vector<std::byte> meta_to_bytes(const shader_cache_metadata& meta,
                                                           std::string_view entry_name) {
     std::vector<std::byte> bytes(sizeof(shader_cache_metadata) + entry_name.size());
@@ -604,10 +578,9 @@ class sha256_hasher {
     return bytes;
 }
 
-/// @brief Parses fixed shader metadata and its bounded entrypoint name.
-/// @param[in] bytes Serialized metadata payload.
-/// @param[out] entry_name Optional destination for the entrypoint name.
-/// @return Parsed metadata or a wire-format diagnostic.
+/// @brief Parses the metadata header and checks the stored entry-name length.
+/// Verifies the format marker and revision. If `entry_name` is non-null, copies
+/// the name there. Variant and workgroup checks happen separately.
 [[nodiscard]] inline std::expected<shader_cache_metadata, std::string>
 parse_cache_meta_bytes(std::span<const std::byte> bytes, std::string* entry_name) {
     if (bytes.size() < sizeof(shader_cache_metadata)) {
@@ -629,10 +602,8 @@ parse_cache_meta_bytes(std::span<const std::byte> bytes, std::string* entry_name
     return meta;
 }
 
-/// @brief Reads and parses one shader metadata file.
-/// @param[in] path Metadata file path.
-/// @param[out] entry_name Optional destination for the entrypoint name.
-/// @return Parsed metadata or an I/O or wire-format diagnostic.
+/// @brief Reads a metadata file and parses its header and entry-point name.
+/// Returns an error if reading or parsing fails.
 [[nodiscard]] inline std::expected<shader_cache_metadata, std::string>
 read_meta(const std::filesystem::path& path, std::string* entry_name) {
     std::ifstream input(path, std::ios::binary);
@@ -653,11 +624,8 @@ read_meta(const std::filesystem::path& path, std::string* entry_name) {
     return parse_cache_meta_bytes(bytes, entry_name);
 }
 
-/// @brief Validates parsed metadata against an exact shader variant.
-/// @param[in] bytes Serialized metadata payload.
-/// @param[in] key Expected shader variant identity.
-/// @param[out] entry_name Optional destination for the validated entrypoint.
-/// @return Validated metadata or the first identity mismatch.
+/// @brief Checks cached metadata against the requested shader and workgroup size.
+/// Requires a nonempty entry-point name and copies it to `entry_name` when supplied.
 [[nodiscard]] inline std::expected<shader_cache_metadata, std::string>
 validated_cache_meta_from_bytes(std::span<const std::byte> bytes,
                                 const shader_variant_key& key,
@@ -694,11 +662,8 @@ validated_cache_meta_from_bytes(std::span<const std::byte> bytes,
     return *meta;
 }
 
-/// @brief Reads and validates cached metadata for one shader variant.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] key Expected shader variant identity.
-/// @param[out] entry_name Optional destination for the validated entrypoint.
-/// @return Validated metadata or an I/O or identity diagnostic.
+/// @brief Reads metadata and checks its shader key, workgroup size, and entry-point name.
+/// Returns the metadata or a read/validation error.
 [[nodiscard]] inline std::expected<shader_cache_metadata, std::string>
 read_validated_cache_meta(const std::filesystem::path& cache_dir,
                           const shader_variant_key& key,
@@ -721,10 +686,8 @@ read_validated_cache_meta(const std::filesystem::path& cache_dir,
     return validated_cache_meta_from_bytes(bytes, key, entry_name);
 }
 
-/// @brief Requires a cache artifact to exist with a nonzero size.
-/// @param[in] path Artifact path.
-/// @param[in] artifact Human-readable artifact kind for diagnostics.
-/// @return Success or a filesystem diagnostic.
+/// @brief Checks that the cache file exists and contains bytes.
+/// Uses `artifact` as the file description in error messages.
 [[nodiscard]] inline std::expected<void, std::string>
 require_nonempty_cache_file(const std::filesystem::path& path, std::string_view artifact) {
     std::error_code ec;
@@ -747,10 +710,8 @@ require_nonempty_cache_file(const std::filesystem::path& path, std::string_view 
     return {};
 }
 
-/// @brief Validates metadata and Metal library presence for one variant.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] key Shader variant identity.
-/// @return Success or the first cache-entry diagnostic.
+/// @brief Checks a variant's metadata and that its Metal library file is nonempty.
+/// Returns the first error found.
 [[nodiscard]] inline std::expected<void, std::string>
 cache_metallib_entry_status(const std::filesystem::path& cache_dir, const shader_variant_key& key) {
     if (auto meta = read_validated_cache_meta(cache_dir, key, nullptr); !meta) {
@@ -760,10 +721,7 @@ cache_metallib_entry_status(const std::filesystem::path& cache_dir, const shader
     return require_nonempty_cache_file(cache_metallib_path(cache_dir, key), "metallib");
 }
 
-/// @brief Reports whether one variant has valid metadata and a Metal library.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] key Shader variant identity.
-/// @return `true` when the Metal library entry is complete.
+/// @brief Reports whether the metadata is valid and the Metal library file is nonempty.
 [[nodiscard]] inline bool cache_metallib_entry_complete(const std::filesystem::path& cache_dir,
                                                         const shader_variant_key& key) {
     return cache_metallib_entry_status(cache_dir, key).has_value();
@@ -771,28 +729,28 @@ cache_metallib_entry_status(const std::filesystem::path& cache_dir, const shader
 
 namespace sealed_shader_cache_detail {
 
-/// @brief Sealed seed manifest magic.
+/// @brief File marker identifying the seed manifest format.
 inline constexpr std::string_view k_manifest_magic = "BSCSEED4";
-/// @brief Current sealed seed manifest wire revision.
+/// @brief Seed manifest format version.
 inline constexpr std::uint32_t k_manifest_wire_revision = 4u;
 /// @brief Maximum accepted serialized manifest size.
 inline constexpr std::size_t k_maximum_manifest_bytes = 16u << 20u;
-/// @brief Maximum accepted size of one seed artifact.
+/// @brief Maximum accepted size of one seed file.
 inline constexpr std::size_t k_maximum_seed_artifact_bytes = 1u << 30u;
-/// @brief Maximum aggregate artifact bytes retained by one process seed.
+/// @brief Maximum total seed-file bytes kept in memory.
 inline constexpr std::uint64_t k_maximum_seed_image_bytes = 512ull << 20u;
-/// @brief Maximum artifact count retained by one process seed.
+/// @brief Maximum seed files kept in memory.
 inline constexpr std::size_t k_maximum_seed_image_artifacts = 16'384u;
-/// @brief Maximum shader-key count encoded by a manifest.
+/// @brief Maximum shader variants listed in a manifest.
 inline constexpr std::uint32_t k_maximum_manifest_keys = 4096u;
-/// @brief Maximum artifact count encoded by a manifest.
+/// @brief Maximum files listed in a manifest.
 inline constexpr std::uint32_t k_maximum_manifest_artifacts = 65536u;
-/// @brief Maximum bytes in one manifest artifact filename.
+/// @brief Maximum bytes in a manifest filename.
 inline constexpr std::uint32_t k_maximum_manifest_filename_bytes = 512u;
-/// @brief Test hook invoked immediately before final seal identity checks.
+/// @brief Test callback run before the final file-identity checks when sealing.
 using seal_before_identity_check_hook = void (*)() noexcept;
 
-/// @brief Canonical artifact identity derived from one sealed shader key.
+/// @brief Expected type, filename, and path of a file listed in the seed.
 struct expected_artifact {
     sealed_shader_cache_artifact_kind kind =
         sealed_shader_cache_artifact_kind::reserved_command_metallib;
@@ -801,19 +759,15 @@ struct expected_artifact {
     std::filesystem::path path;
 };
 
-/// @brief Orders shader keys by every serialized identity selector.
-/// @param[in] lhs First key.
-/// @param[in] rhs Second key.
-/// @return `true` when `lhs` precedes `rhs`.
+/// @brief Orders shader variants by kind, tile size, workgroup size, and maximum span.
 [[nodiscard]] inline bool shader_key_less(const shader_variant_key& lhs,
                                           const shader_variant_key& rhs) noexcept {
     return std::tie(lhs.kind, lhs.tile_size, lhs.local_size, lhs.max_span) <
            std::tie(rhs.kind, rhs.tile_size, rhs.local_size, rhs.max_span);
 }
 
-/// @brief Validates, sorts, and deduplicates a sealed seed key set.
-/// @param[in] requested Requested shader keys.
-/// @return Canonical key order or a validation diagnostic.
+/// @brief Validates and sorts shader keys for a seed manifest.
+/// Rejects an empty list, invalid keys, duplicates, or a list exceeding the limit.
 [[nodiscard]] inline std::expected<std::vector<shader_variant_key>, std::string>
 canonical_keys(std::span<const shader_variant_key> requested) {
     if (requested.empty()) {
@@ -837,18 +791,15 @@ canonical_keys(std::span<const shader_variant_key> requested) {
     return keys;
 }
 
-/// @brief Validates the lowercase hexadecimal cache digest form.
-/// @param[in] digest Candidate digest.
-/// @return `true` for a sixteen-character lowercase hexadecimal digest.
+/// @brief Checks for exactly 16 lowercase hexadecimal characters.
 [[nodiscard]] inline bool valid_digest(std::string_view digest) noexcept {
     return digest.size() == 16u && std::all_of(digest.begin(), digest.end(), [](char value) {
                return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
            });
 }
 
-/// @brief Validates a manifest filename as one bounded path component.
-/// @param[in] filename Candidate artifact filename.
-/// @return `true` when the filename cannot escape the cache directory.
+/// @brief Checks that a filename fits the limit and is a single path component.
+/// Rejects empty names, `.` and `..`, separators, and embedded null bytes.
 [[nodiscard]] inline bool safe_filename(std::string_view filename) noexcept {
     return !filename.empty() && filename.size() <= k_maximum_manifest_filename_bytes &&
            filename != "." && filename != ".." && filename.find('/') == std::string_view::npos &&
@@ -856,16 +807,15 @@ canonical_keys(std::span<const shader_variant_key> requested) {
            filename.find('\0') == std::string_view::npos;
 }
 
-/// @brief Derives the complete ordered artifact set for canonical shader keys.
-/// @param[in] cache_dir Shader-cache directory.
-/// @param[in] canonical Canonical shader key order.
-/// @return Expected artifacts or a filename or count diagnostic.
+/// @brief Lists all files required by the sorted shader keys, in manifest order.
+/// Includes the command-library bundle and each variant's metadata, library,
+/// archives, and archive checks. Rejects invalid or duplicate filenames.
 [[nodiscard]] inline std::expected<std::vector<expected_artifact>, std::string>
 expected_artifacts(const std::filesystem::path& cache_dir,
                    std::span<const shader_variant_key> canonical) {
     std::vector<expected_artifact> artifacts;
     artifacts.reserve(3u + canonical.size() * 6u);
-    // Adds one artifact using its filename as the manifest path component.
+    // Store the filename in the manifest and keep the full path for reading.
     const auto append = [&artifacts](sealed_shader_cache_artifact_kind kind,
                                      std::uint32_t key_index,
                                      const std::filesystem::path& path) {
@@ -923,12 +873,10 @@ expected_artifacts(const std::filesystem::path& cache_dir,
     return artifacts;
 }
 
-/// @brief Reads one bounded regular file without following symbolic links.
-/// @param[in] path Artifact path.
-/// @param[in] artifact Human-readable artifact kind for diagnostics.
-/// @param[in] maximum_bytes Maximum accepted file size.
-/// @param[in] exact_bytes Optional exact accepted file size.
-/// @return Complete file bytes or an identity, size, or I/O diagnostic.
+/// @brief Reads a nonempty file after checking its type and size.
+/// Rejects a symlink found by the initial path check. `maximum_bytes` bounds
+/// allocation, and `exact_bytes` optionally requires a specific size. This
+/// helper does not check that the path stays unchanged during the read.
 [[nodiscard]] inline std::expected<std::vector<std::byte>, std::string>
 read_regular_file(const std::filesystem::path& path,
                   std::string_view artifact,
@@ -982,7 +930,7 @@ read_regular_file(const std::filesystem::path& path,
     return bytes;
 }
 
-/// @brief Stable filesystem identity captured before and after an artifact read.
+/// @brief Device, inode, size, and timestamps used to detect file changes.
 struct regular_file_identity {
     std::uint64_t device = 0u;
     std::uint64_t inode = 0u;
@@ -992,33 +940,32 @@ struct regular_file_identity {
     std::int64_t changed_seconds = 0;
     std::int64_t changed_nanoseconds = 0;
 
-    /// @brief Compares every stable file-identity field.
+    /// @brief Compares every recorded file-identity field.
     [[nodiscard]] bool operator==(const regular_file_identity&) const noexcept = default;
 };
 
-/// @brief File bytes paired with the identity observed after a stable read.
+/// @brief File bytes and the identity checked before and after reading.
 struct stable_regular_file_image {
     std::vector<std::byte> bytes;
     regular_file_identity identity{};
 };
 
-/// @brief Owns one descriptor used for stable artifact reads.
+/// @brief Closes a file descriptor when its owner leaves scope.
 class scoped_file_descriptor {
   public:
-    /// @brief Adopts one open descriptor.
-    /// @param[in] fd Descriptor closed on destruction unless closed earlier.
+    /// @brief Takes ownership of `fd` and closes it on destruction unless closed earlier.
     explicit scoped_file_descriptor(int fd) noexcept : fd_(fd) {}
     /// @brief Prevents copying descriptor ownership.
     scoped_file_descriptor(const scoped_file_descriptor&) = delete;
-    /// @brief Prevents copy assignment of descriptor ownership.
+    /// @brief Prevents assignment from duplicating descriptor ownership.
     scoped_file_descriptor& operator=(const scoped_file_descriptor&) = delete;
-    /// @brief Closes the descriptor when ownership remains.
+    /// @brief Closes the descriptor if it is still owned.
     ~scoped_file_descriptor() {
         if (fd_ >= 0)
             (void)::close(fd_);
     }
-    /// @brief Closes the descriptor and relinquishes ownership.
-    /// @return Result from `close`, or zero when already closed.
+    /// @brief Closes the descriptor and clears ownership.
+    /// Returns the result of `close`, or zero if already closed.
     [[nodiscard]] int close_now() noexcept {
         const int fd = std::exchange(fd_, -1);
         return fd >= 0 ? ::close(fd) : 0;
@@ -1028,9 +975,7 @@ class scoped_file_descriptor {
     int fd_ = -1;
 };
 
-/// @brief Converts platform stat fields to the canonical file identity.
-/// @param[in] value Platform stat record.
-/// @return Canonical regular-file identity.
+/// @brief Copies file identity and timestamps from the platform's `stat` fields.
 [[nodiscard]] inline regular_file_identity
 regular_file_identity_from_stat(const struct stat& value) noexcept {
     regular_file_identity result{
@@ -1052,12 +997,10 @@ regular_file_identity_from_stat(const struct stat& value) noexcept {
     return result;
 }
 
-/// @brief Reads exact bytes while requiring an unchanged regular-file identity.
-/// @param[in] path Artifact path.
-/// @param[in] artifact Human-readable artifact kind for diagnostics.
-/// @param[in] exact_bytes Required file size.
-/// @param[in] maximum_bytes Maximum admitted file size.
-/// @return Stable file image or an identity, size, or I/O diagnostic.
+/// @brief Reads a file of the required size through one open descriptor.
+/// Refuses a symlink at the final path component and checks the descriptor's
+/// identity before and after reading. `maximum_bytes` bounds the allocation.
+/// Returns the bytes and identity, or an error.
 [[nodiscard]] inline std::expected<stable_regular_file_image, std::string>
 read_stable_regular_file(const std::filesystem::path& path,
                          std::string_view artifact,
@@ -1109,10 +1052,8 @@ read_stable_regular_file(const std::filesystem::path& path,
     return image;
 }
 
-/// @brief Compares the current regular-file identity with an accepted snapshot.
-/// @param[in] path Artifact path.
-/// @param[in] expected Accepted identity.
-/// @return `true` when the current identity matches exactly.
+/// @brief Checks whether the path still names a regular file with the recorded identity.
+/// Refuses a symlink at the final path component.
 [[nodiscard]] inline bool
 same_regular_file_identity(const std::filesystem::path& path,
                            const regular_file_identity& expected) noexcept {
@@ -1126,18 +1067,16 @@ same_regular_file_identity(const std::filesystem::path& path,
     return accepted;
 }
 
-/// @brief Streamed file size, digest, and stable identity.
+/// @brief File size, SHA-256 digest, and identity recorded while streaming the file.
 struct stable_regular_file_digest {
     std::uint64_t size = 0u;
     std::array<std::uint8_t, 32> sha256{};
     regular_file_identity identity{};
 };
 
-/// @brief Streams and hashes a bounded regular file under identity checks.
-/// @param[in] path Artifact path.
-/// @param[in] artifact Human-readable artifact kind for diagnostics.
-/// @param[in] maximum_bytes Maximum accepted file size.
-/// @return Stable digest record or an identity, size, or I/O diagnostic.
+/// @brief Hashes a nonempty file in chunks and checks its identity before and after reading.
+/// Refuses a symlink at the final path component. Rejects files that exceed
+/// `maximum_bytes`, change during the read, or cannot be read completely.
 [[nodiscard]] inline std::expected<stable_regular_file_digest, std::string>
 stream_stable_regular_file_digest(const std::filesystem::path& path,
                                   std::string_view artifact,
@@ -1196,9 +1135,7 @@ stream_stable_regular_file_digest(const std::filesystem::path& path,
     };
 }
 
-/// @brief Computes SHA-256 for one in-memory byte range.
-/// @param[in] bytes Bytes to hash.
-/// @return SHA-256 digest.
+/// @brief Returns the SHA-256 digest of these bytes.
 [[nodiscard]] inline std::array<std::uint8_t, 32>
 sha256(std::span<const std::byte> bytes) noexcept {
     sha256_hasher hasher;
@@ -1206,11 +1143,9 @@ sha256(std::span<const std::byte> bytes) noexcept {
     return hasher.finalize();
 }
 
-/// @brief Computes the canonical sealed seed digest and aggregate artifact size.
-/// @param[in] cache_digest Cache-build digest.
-/// @param[in] keys Canonical shader keys.
-/// @param[in] artifacts Canonical artifact descriptors.
-/// @return Seed digest and byte size, or an overflow diagnostic.
+/// @brief Hashes the cache build ID, ordered shader keys, and file descriptors into a seed ID.
+/// Includes each file's name, size, and SHA-256 digest. Also returns total
+/// file bytes, or an error if that total overflows.
 [[nodiscard]] inline std::expected<std::pair<std::array<std::uint8_t, 32>, std::uint64_t>,
                                    std::string>
 seed_identity(std::string_view cache_digest,
@@ -1244,14 +1179,14 @@ seed_identity(std::string_view cache_digest,
     return std::pair{hasher.finalize(), seed_size};
 }
 
-/// @brief Appends one 32-bit value in canonical little-endian order.
+/// @brief Appends a 32-bit value in little-endian order.
 inline void append_u32(std::vector<std::byte>& bytes, std::uint32_t value) {
     for (unsigned shift = 0u; shift < 32u; shift += 8u) {
         bytes.push_back(static_cast<std::byte>((value >> shift) & 0xffu));
     }
 }
 
-/// @brief Appends one 64-bit value in canonical little-endian order.
+/// @brief Appends a 64-bit value in little-endian order.
 inline void append_u64(std::vector<std::byte>& bytes, std::uint64_t value) {
     for (unsigned shift = 0u; shift < 64u; shift += 8u) {
         bytes.push_back(static_cast<std::byte>((value >> shift) & 0xffu));
@@ -1264,22 +1199,22 @@ inline void append_text(std::vector<std::byte>& bytes, std::string_view text) {
     bytes.insert(bytes.end(), view.begin(), view.end());
 }
 
-/// @brief Appends one fixed SHA-256 digest.
+/// @brief Appends the 32 bytes of a SHA-256 digest.
 inline void append_digest(std::vector<std::byte>& bytes,
                           const std::array<std::uint8_t, 32>& digest) {
     const auto view = std::as_bytes(std::span{digest});
     bytes.insert(bytes.end(), view.begin(), view.end());
 }
 
-/// @brief Bounds-checked little-endian reader for sealed cache records.
+/// @brief Reads seed-record fields while checking that enough bytes remain.
+/// Integers use little-endian order.
 class manifest_reader {
   private:
     std::span<const std::byte> bytes_;
     std::size_t cursor_ = 0u;
 
   public:
-    /// @brief Starts a reader over borrowed manifest bytes.
-    /// @param[in] bytes Storage that must outlive the reader.
+    /// @brief Starts reading `bytes`, which must stay alive while the reader uses them.
     explicit manifest_reader(std::span<const std::byte> bytes) noexcept : bytes_(bytes) {}
 
     /// @brief Returns the next unread byte offset.
@@ -1291,9 +1226,9 @@ class manifest_reader {
         return cursor_ == bytes_.size();
     }
 
-    /// @brief Consumes one bounded byte range.
-    /// @param[in] count Number of bytes to consume.
-    /// @return Borrowed subspan or a truncation diagnostic.
+    /// @brief Returns the next `count` bytes and advances the read position.
+    /// The returned span borrows the input. A truncated field returns an error
+    /// and leaves the position unchanged.
     [[nodiscard]] std::expected<std::span<const std::byte>, std::string> take(std::size_t count) {
         if (count > bytes_.size() - cursor_) {
             return std::unexpected("sealed shader cache manifest is truncated");
@@ -1329,8 +1264,8 @@ class manifest_reader {
         return value;
     }
 
-    /// @brief Reads an owned text field of the requested length.
-    /// @param[in] count Number of text bytes.
+    /// @brief Copies the next `count` bytes into a string.
+    /// Returns an error if the field is truncated.
     [[nodiscard]] std::expected<std::string, std::string> text(std::size_t count) {
         auto raw = take(count);
         if (!raw)
@@ -1338,7 +1273,7 @@ class manifest_reader {
         return std::string(reinterpret_cast<const char*>(raw->data()), raw->size());
     }
 
-    /// @brief Reads one fixed 32-byte SHA-256 digest.
+    /// @brief Reads a 32-byte SHA-256 digest, or reports a truncated field.
     [[nodiscard]] std::expected<std::array<std::uint8_t, 32>, std::string> digest() {
         auto raw = take(32u);
         if (!raw)
