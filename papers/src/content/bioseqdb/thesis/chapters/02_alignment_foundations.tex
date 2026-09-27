@@ -376,9 +376,9 @@ In most of the software due to simplicity truly cannonical minimizers aren't use
     \node[stage, right=of sketch] (lookup) {index lookup\\seed occurrences};
     \node[datum, right=of lookup] (anchors) {anchors\\\((r,q,o,\ell)\)};
     \node[stage, below=1.62cm of anchors] (chain)
-      {chaining DP\\collinear subsets};
+      {chaining DP};
     \node[datum, left=of chain] (regions) {regions};
-    \node[stage, left=of regions] (extend) {base-level DP\\traceback};
+    \node[stage, left=of regions] (extend) {base-level alignment};
     \node[stage, left=of extend] (post) {postprocess};
     \node[datum, left=of post] (result) {score, coordinates\\CIGAR};
 
@@ -391,100 +391,19 @@ In most of the software due to simplicity truly cannonical minimizers aren't use
     \draw[->] (extend) -- (post);
     \draw[->] (post) -- (result);
 
-    \node[note, below=0.36cm of sketch] {reduces sequence\\to a sparse sketch};
+    \node[note, below=0.36cm of sketch] {reduces sequence to set of minimizers};
     \node[note, below=0.36cm of chain]
       {suppresses random and\\inconsistent hits};
     \node[note, below=0.36cm of extend]
-      {recovers symbol-level\\edit path};
+      {runs the usual DP alignment};
   \end{tikzpicture}
-  \caption{The seed--chain--extend decomposition}
+  \caption{The seed--chain--extend approach in minimap2}
   \label{fig:seed-chain-extend}
 \end{figure}
 
-In case of Minimap2 and BioseqDB $S_{X \cap Y}$ is represented as tuple \((r,q,o,\ell)\) which holds reference coordinate \(r\), query coordinate \(q\),
-orientation \(o\) and span \(\ell\) (length).
-
-After sorting anchors by
-ending reference coordinate, with implementation-specific tie keys, a
-chaining score can be written
-\begin{equation}
- f(i)=\max\left(
-     w_i,\ 
-     \max_{j<i}\{f(j)+\alpha(j,i)-\beta(j,i)\}
-   \right),
- \label{eq:minimap2-chain}
-\end{equation}
-where \(\alpha\) rewards newly covered matching bases and \(\beta\) penalizes
-large gaps and diagonal changes. A representative minimap2 reward is
-\[
-  \alpha(j,i)=
-  \min\bigl(
-    \min(y_i-y_j,\ x_i-x_j),\ w_i
-  \bigr).
-\]
-
-Testing every \(j<i\) is \(O(A^2)\) for \(A\) anchors.
-Minimap2 scans a bounded recent window and stops after a configured number of
-unproductive indices, making the practical cost much smaller \cite{minimap2_paper}.
-
-\begin{algorithm}[H]
-  \caption{Conceptual bounded predecessor chaining}
-  \label{alg:anchor-chaining}
-  \begin{enumerate}
-    \item \textbf{Input.} Anchors \(a_1,\ldots,a_A\) in canonical coordinate
-      order.
-    \item \textbf{Endpoint loop.} For each \(i=1,\ldots,A\), perform the
-      following steps:
-      \begin{enumerate}
-        \item Initialize \(f[i]\gets\operatorname{span}(a_i)\) and
-          \(p[i]\gets\bot\).
-        \item For each candidate \(j<i\) in the active distance and iteration
-          window, perform the following steps:
-          \begin{enumerate}
-            \item If \(a_j\) and \(a_i\) have valid order, strand, gap, and
-              bandwidth, compute
-              \[
-                v\gets f[j]+\operatorname{reward}(a_j,a_i)
-                  -\operatorname{gapPenalty}(a_j,a_i).
-              \]
-            \item If the candidate is valid and \(v>f[i]\), set
-              \(f[i]\gets v\) and \(p[i]\gets j\).
-            \item Optionally stop the predecessor loop after the configured
-              skip heuristic fires.
-          \end{enumerate}
-      \end{enumerate}
-    \item \textbf{Backtracking.} Backtrack from high-scoring endpoints through
-      \(p\).
-    \item \textbf{Result.} Return the chains that remain after filtering by
-      score, seed count, and overlap.
-  \end{enumerate}
-\end{algorithm}
-
-% \section{Linear and graph reference models}
-% \label{sec:graph-approaches}
-
-% A linear reference provides one coordinate order for chaining. A variation
-% graph can represent shared sequence through common nodes and branch where
-% alternatives differ. A query alignment then chooses both a path through the
-% graph and an edit path against that path \cite{garrison_variation_graph_2018}.
-% A de Bruijn
-% graph represents local \(k\)-mer adjacency, commonly with \((k-1)\)-mers as
-% nodes and observed \(k\)-mers as edges \cite{pevzner_tang_waterman_2001}. It is
-% useful for assembly, but a graph walk is not itself an alignment.
-
-% Dynamic programming over an acyclic sequence graph can follow a topological
-% node order \cite{lee_partial_order_2002}. Cycles, repeated nodes, and many
-% equivalent paths require further constraints or search. Graph mappers still
-% need candidate reduction because one seed may occur on many paths. A graph
-% position identifies a node, offset, and orientation. Path identifiers and
-% graph versions are also needed when results use persistent path coordinates.
-
-% BioSeqDB presently chains anchors in a linear reference coordinate system. A
-% graph-native route would require graph positions in the seed index and
-% reachability-aware chaining. It would also require graph alignment or local
-% subgraph extraction, plus stable path identifiers in SQL results. The graph
-% model is therefore a change to the search object, not a substitute for scoring,
-% seeding, or alignment.
+In cases of both chaining and base alignment we operate on very similar score definitions like in Equation~\ref{eq:linear-gap-dp} or Equation~\ref{eq:affine-dp}.
+The algorithms are conceptually similar, but they have different methods of terminating the search, scoring function which punish gaps harder (base aliugnment doesn't need to care about large gaps that can occur in chaining stage).
+I provide overview of literature and my own implementations in next chapters.
 
 \section{Limitations of existing tools}
 \label{sec:limitations-existing-tools}
