@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Target-local Highway lane materialization utilities.
+ * @brief Copies Highway vector lanes into ordinary C++ vectors.
  */
 module;
 
@@ -20,17 +20,14 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/// @brief Makes the canonical compile-time index loop available to SIMD consumers.
+/// @brief Makes the shared compile-time index loop available in this SIMD namespace.
 using ::bioseq::common::templating::for_each_index;
 
 /**
- * @brief Materializes the active lanes of a Highway vector.
- *
+ * @brief Copies the active SIMD lanes into a C++ vector in lane order.
+ * @param[in] simd_tag Highway descriptor giving the active lane count.
+ * @param[in] vector Vector to copy.
  * @tparam p_value_type Scalar lane type.
- * @tparam p_simd_tag Highway descriptor type.
- * @param[in] simd_tag Highway descriptor defining the active lane count.
- * @param[in] vector Source vector.
- * @return Scalar values in increasing lane order.
  */
 template <typename p_value_type, typename p_simd_tag>
 HWY_INLINE auto extract_lanes(const p_simd_tag& simd_tag, const hn::Vec<p_simd_tag>& vector)
@@ -49,13 +46,10 @@ HWY_INLINE auto extract_lanes(const p_simd_tag& simd_tag, const hn::Vec<p_simd_t
 }
 
 /**
- * @brief Materializes a Highway mask as zero or all-one scalar lanes.
+ * @brief Copies a SIMD mask into a C++ vector.
  *
- * @tparam p_value_type Scalar lane type.
- * @tparam p_simd_tag Highway descriptor type.
- * @param[in] simd_tag Highway descriptor defining the active lane count.
- * @param[in] mask Source mask.
- * @return Mask lanes in Highway's vector-mask scalar representation.
+ * Each false lane has all bits clear. Each true lane has all bits set, using
+ * Highway's vector representation of the mask. Lane order is preserved.
  */
 template <typename p_value_type, typename p_simd_tag>
 HWY_INLINE auto extract_lanes(const p_simd_tag& simd_tag, const hn::Mask<p_simd_tag>& mask)

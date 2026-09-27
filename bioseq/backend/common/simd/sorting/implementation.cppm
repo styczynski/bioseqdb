@@ -1,6 +1,6 @@
 /**
  * @file implementation.cppm
- * @brief Highway-target implementation for `bioseq.simd.sorting`.
+ * @brief Sorting implementations for the compiled Highway CPU target.
  */
 module;
 
@@ -24,12 +24,12 @@ import bioseq.simd.vector_stream;
 
 HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::sorting {
-/// Active Highway target namespace for the static sorting implementation.
+/// Highway functions for the compiled CPU target.
 namespace highway_target = hwy::HWY_NAMESPACE;
 
 namespace detail {
 
-/// Active target namespace for shared vector-stream primitives.
+/// Vector-stream helpers for the same CPU target.
 namespace vector_stream_target = ::bioseq::simd::HWY_NAMESPACE;
 
 /** @brief Returns whether `left` precedes `right` in ascending 128-bit order. */
@@ -105,9 +105,9 @@ inline void insertion_sort_unsigned_128(
 #if HWY_TARGET != HWY_SCALAR || HWY_IDE
 
 /**
- * @brief Represents independent 128-bit keys across vector-stream slots.
- * @tparam p_descriptor_type Highway descriptor type for 64-bit halves.
- * @tparam p_stream_width Number of vectors forming each logical key stream.
+ * @brief A group of vectors, each holding one 128-bit key.
+ * @tparam p_descriptor_type Highway descriptor for the two 64-bit halves.
+ * @tparam p_stream_width Number of independent key vectors.
  */
 template <class p_descriptor_type, std::size_t p_stream_width>
 using unsigned_128_vector_stream = vector_stream_target::vector_stream<
@@ -116,14 +116,9 @@ using unsigned_128_vector_stream = vector_stream_target::vector_stream<
     p_stream_width>;
 
 /**
- * @brief Compares each pair of 128-bit vector-stream keys in the requested order.
- * @tparam p_ascending Whether smaller keys precede larger keys.
- * @tparam p_descriptor_type Highway descriptor type for 64-bit halves.
- * @tparam p_stream_width Number of vectors forming each logical key stream.
- * @param[in] descriptor Active 64-bit Highway descriptor.
- * @param[in] left Left logical key stream.
- * @param[in] right Right logical key stream.
- * @return One comparison mask per stream slot.
+ * @brief Compares corresponding 128-bit keys from two vector groups.
+ * @tparam p_ascending Selects ascending or descending order.
+ * @return One comparison mask per vector.
  */
 template <bool p_ascending,
           class p_descriptor_type,
@@ -159,12 +154,7 @@ auto unsigned_128_stream_precedes(
 }
 
 /**
- * @brief Broadcasts one 128-bit key across every slot in a vector stream.
- * @tparam p_descriptor_type Highway descriptor type for 64-bit halves.
- * @tparam p_stream_width Number of vectors forming the result stream.
- * @param[in] descriptor Active 64-bit Highway descriptor.
- * @param[in] key Scalar 128-bit key.
- * @return Stream whose slots all contain the requested key.
+ * @brief Copies one 128-bit key into every vector in the group.
  */
 template <class p_descriptor_type, std::size_t p_stream_width>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
@@ -184,13 +174,9 @@ auto broadcast_unsigned_128_stream(
 }
 
 /**
- * @brief Loads consecutive 128-bit keys into a forward vector stream.
- * @tparam p_descriptor_type Highway descriptor type for 64-bit halves.
- * @tparam p_stream_width Number of vectors forming the result stream.
- * @param[in] descriptor Active 64-bit Highway descriptor.
- * @param[in] keys Readable key array.
- * @param[in] base_index Index loaded into the first stream slot.
- * @return Forward-ordered stream of keys.
+ * @brief Loads consecutive keys starting at `base_index`.
+ *
+ * Each vector holds one key, in increasing array-index order.
  */
 template <class p_descriptor_type, std::size_t p_stream_width>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
@@ -214,13 +200,9 @@ auto load_unsigned_128_forward_stream(
 }
 
 /**
- * @brief Loads consecutive 128-bit keys in reverse into a vector stream.
- * @tparam p_descriptor_type Highway descriptor type for 64-bit halves.
- * @tparam p_stream_width Number of vectors forming the result stream.
- * @param[in] descriptor Active 64-bit Highway descriptor.
- * @param[in] keys Readable key array.
- * @param[in] base_index Index loaded into the first stream slot.
- * @return Reverse-ordered stream of keys.
+ * @brief Loads consecutive keys backwards from `base_index`.
+ *
+ * Each vector holds one key, in decreasing array-index order.
  */
 template <class p_descriptor_type, std::size_t p_stream_width>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
@@ -246,13 +228,8 @@ auto load_unsigned_128_reverse_stream(
 }
 
 /**
- * @brief Returns the first stream slot whose mask has no set lanes.
- * @tparam p_descriptor_type Highway descriptor type for the masks.
- * @tparam p_stream_width Number of masks in the stream.
- * @tparam p_mask_stream_type Target-local mask-stream type.
- * @param[in] descriptor Active Highway descriptor.
- * @param[in] masks Mask stream to scan.
- * @return First all-false slot, or `p_stream_width` when none exists.
+ * @brief Finds the first vector whose comparison mask is entirely false.
+ * @return Its stream index, or `p_stream_width` if every vector has a true lane.
  */
 template <class p_descriptor_type,
           std::size_t p_stream_width,
@@ -306,7 +283,13 @@ template <bool p_ascending>
     return middle_candidate;
 }
 
-/** @brief Partitions 128-bit keys around a pivot with streamed comparison scans. */
+/**
+ * @brief Partitions keys around a pivot by scanning from both ends.
+ *
+ * SIMD comparisons skip groups already on the correct side. When both
+ * scans stop, their keys are swapped. Scanning continues until the indices
+ * cross, then the function returns the first index of the right partition.
+ */
 template <std::size_t p_stream_width,
           bool p_ascending,
           class p_descriptor_type>
@@ -427,7 +410,7 @@ template <std::size_t p_stream_width,
     return static_cast<std::size_t>(left_index);
 }
 
-/** @brief Computes the depth limit used by the streamed introsort. */
+/** @brief Limits partition depth so uneven splits can switch to standard sorting. */
 [[nodiscard]] inline std::size_t introsort_depth_limit(
     std::size_t key_count) noexcept
 {
@@ -439,7 +422,14 @@ template <std::size_t p_stream_width,
     return depth * 2u;
 }
 
-/** @brief Implements streamed 128-bit introsort for a non-scalar Highway target. */
+/**
+ * @brief Sorts 128-bit keys with SIMD partition scans.
+ *
+ * The pivot is the median of three keys. Recursion handles the smaller
+ * partition while the loop handles the larger one, limiting stack use. Small
+ * ranges use insertion sort. A depth limit or an unusable split switches to
+ * `std::sort`.
+ */
 template <std::size_t p_stream_width, bool p_ascending>
 void sort_unsigned_128_vector_stream_impl(
     hwy::uint128_t* HWY_RESTRICT keys,
@@ -508,7 +498,7 @@ void sort_unsigned_128_vector_stream_impl(
 
 #endif // HWY_TARGET != HWY_SCALAR || HWY_IDE
 
-/** @brief Selects the scalar or streamed 128-bit sorting path by input size. */
+/** @brief Uses insertion sort for small arrays and the vector-stream sorter for larger ones. */
 template <std::size_t p_stream_width, bool p_ascending>
 inline void sort_unsigned_128_vector_stream(
     hwy::uint128_t* HWY_RESTRICT keys,
@@ -527,7 +517,7 @@ inline void sort_unsigned_128_vector_stream(
         introsort_depth_limit(key_count));
 }
 
-/** @brief Ascending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Sorts ascending with one independent vector per scan. */
 void sort_unsigned_128_ascending_stream_width_1(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -535,7 +525,7 @@ void sort_unsigned_128_ascending_stream_width_1(
     sort_unsigned_128_vector_stream<1u, true>(keys, key_count);
 }
 
-/** @brief Ascending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Sorts ascending with two independent vectors per scan. */
 void sort_unsigned_128_ascending_stream_width_2(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -543,7 +533,7 @@ void sort_unsigned_128_ascending_stream_width_2(
     sort_unsigned_128_vector_stream<2u, true>(keys, key_count);
 }
 
-/** @brief Ascending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Sorts ascending with three independent vectors per scan. */
 void sort_unsigned_128_ascending_stream_width_3(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -551,7 +541,7 @@ void sort_unsigned_128_ascending_stream_width_3(
     sort_unsigned_128_vector_stream<3u, true>(keys, key_count);
 }
 
-/** @brief Ascending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Sorts ascending with four independent vectors per scan. */
 void sort_unsigned_128_ascending_stream_width_4(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -559,7 +549,7 @@ void sort_unsigned_128_ascending_stream_width_4(
     sort_unsigned_128_vector_stream<4u, true>(keys, key_count);
 }
 
-/** @brief Descending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Sorts descending with one independent vector per scan. */
 void sort_unsigned_128_descending_stream_width_1(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -567,7 +557,7 @@ void sort_unsigned_128_descending_stream_width_1(
     sort_unsigned_128_vector_stream<1u, false>(keys, key_count);
 }
 
-/** @brief Descending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Sorts descending with two independent vectors per scan. */
 void sort_unsigned_128_descending_stream_width_2(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -575,7 +565,7 @@ void sort_unsigned_128_descending_stream_width_2(
     sort_unsigned_128_vector_stream<2u, false>(keys, key_count);
 }
 
-/** @brief Descending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Sorts descending with three independent vectors per scan. */
 void sort_unsigned_128_descending_stream_width_3(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -583,7 +573,7 @@ void sort_unsigned_128_descending_stream_width_3(
     sort_unsigned_128_vector_stream<3u, false>(keys, key_count);
 }
 
-/** @brief Descending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Sorts descending with four independent vectors per scan. */
 void sort_unsigned_128_descending_stream_width_4(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -679,7 +669,7 @@ void sort_key_value_32_descending(
         hwy::SortDescending());
 }
 
-/** @brief Partially sorts packed 32-bit key/value records descending. */
+/** @brief Sorts the selected number of largest keys at the front of the array. */
 void partial_sort_key_value_32_descending(
     hwy::K32V32* HWY_RESTRICT records,
     std::size_t record_count,

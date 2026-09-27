@@ -1,10 +1,10 @@
 /**
  * @file index.cppm
- * @brief Primary interface for Highway-backed SIMD sorting.
+ * @brief SIMD sorting functions built on Highway.
  *
- * The interface exposes stable declarations and compile-time stream-width
- * dispatch only. Highway implementation headers remain in the same-module
- * implementation unit, keeping target-local definitions out of this BMI.
+ * The public module declares the sorting functions and selects stream widths
+ * at compile time. Highway's CPU-specific implementation headers are included
+ * in the implementation unit.
  */
 module;
 
@@ -29,23 +29,22 @@ inline constexpr std::size_t vqsort_minimum_keys =
     vqsort_minimum_bytes / sizeof(p_key_type);
 
 /**
- * VQSort selection for 128-bit keys is explicitly disabled. A 128-bit NEON
- * vector contains one key, so callers use the vector-stream sorter unless they
- * invoke the VQSort-specific entry point directly.
+ * Automatic VQSort selection is disabled for 128-bit keys. A NEON vector
+ * holds just one such key, so the default sorter compares several independent
+ * vectors at a time. The explicit VQSort entry points remain available.
  */
 template <>
 inline constexpr std::size_t vqsort_minimum_keys<hwy::uint128_t> =
     static_cast<std::size_t>(-1);
 
-/** @brief Default independent-vector count for streamed 128-bit partition scans. */
+/** @brief Number of independent vectors compared together by the default 128-bit sorter. */
 inline constexpr std::size_t unsigned_128_default_stream_width = 2u;
 
 /** @brief Largest 128-bit key count handled by the scalar insertion-sort path. */
 inline constexpr std::size_t unsigned_128_scalar_key_limit = 8u;
 
 /**
- * @brief Accepts stream widths implemented by the fixed dispatch bridge.
- * @tparam p_stream_width Independent-vector count.
+ * @brief Allows one to four independent vectors per partition scan.
  */
 template <std::size_t p_stream_width>
 concept supported_unsigned_128_stream_width =
@@ -85,7 +84,7 @@ auto sort_unsigned_128_descending_stream_width_3(hwy::uint128_t* HWY_RESTRICT ke
 auto sort_unsigned_128_descending_stream_width_4(hwy::uint128_t* HWY_RESTRICT keys,
                                                  std::size_t key_count) -> void;
 
-/** @brief Dispatches an ascending streamed sort to its fixed-width implementation. */
+/** @brief Calls the ascending sorter for the chosen stream width. */
 template <std::size_t p_stream_width>
 inline auto dispatch_unsigned_128_ascending_stream(hwy::uint128_t* HWY_RESTRICT keys,
                                                    std::size_t key_count) -> void {
@@ -101,7 +100,7 @@ inline auto dispatch_unsigned_128_ascending_stream(hwy::uint128_t* HWY_RESTRICT 
     }
 }
 
-/** @brief Dispatches a descending streamed sort to its fixed-width implementation. */
+/** @brief Calls the descending sorter for the chosen stream width. */
 template <std::size_t p_stream_width>
 inline auto dispatch_unsigned_128_descending_stream(hwy::uint128_t* HWY_RESTRICT keys,
                                                     std::size_t key_count) -> void {
@@ -150,13 +149,13 @@ auto sort_unsigned_128_descending_vqsort(hwy::uint128_t* HWY_RESTRICT keys, std:
     -> void;
 
 /**
- * @brief Sorts unsigned 128-bit keys ascending with streamed partition scans.
- * @tparam p_stream_width Independent-vector count used by each partition scan.
+ * @brief Sorts unsigned 128-bit keys in ascending order.
+ * @tparam p_stream_width Number of independent vectors compared per scan, from 1 to 4.
  * @param keys Mutable key array.
  * @param key_count Number of keys.
  *
- * Ordering is lexicographic by `(hi, lo)`, matching Highway's 128-bit
- * comparison convention.
+ * The sorter compares `hi` first, then `lo` when the high halves are equal.
+ * Partition scans process several keys together using SIMD comparisons.
  */
 template <std::size_t p_stream_width = unsigned_128_default_stream_width>
     requires supported_unsigned_128_stream_width<p_stream_width>
@@ -168,12 +167,13 @@ inline auto sort_unsigned_128_ascending_vector_stream(hwy::uint128_t* HWY_RESTRI
 }
 
 /**
- * @brief Sorts unsigned 128-bit keys descending with streamed partition scans.
- * @tparam p_stream_width Independent-vector count used by each partition scan.
+ * @brief Sorts unsigned 128-bit keys in descending order.
+ * @tparam p_stream_width Number of independent vectors compared per scan, from 1 to 4.
  * @param keys Mutable key array.
  * @param key_count Number of keys.
  *
- * Ordering is reverse lexicographic by `(hi, lo)`.
+ * The sorter compares `hi` first, then `lo` when the high halves are equal.
+ * Larger keys come first.
  */
 template <std::size_t p_stream_width = unsigned_128_default_stream_width>
     requires supported_unsigned_128_stream_width<p_stream_width>
@@ -219,10 +219,10 @@ auto sort_key_value_32_descending(hwy::K32V32* HWY_RESTRICT records, std::size_t
     -> void;
 
 /**
- * @brief Places the largest packed 32-bit key/value records first.
+ * @brief Places records with the largest 32-bit keys first, in descending order.
  * @param records Mutable `K32V32` array.
  * @param record_count Number of records.
- * @param selected_count Number of largest records to order at the front.
+ * @param selected_count Number of records to sort at the front.
  */
 auto partial_sort_key_value_32_descending(hwy::K32V32* HWY_RESTRICT records,
                                           std::size_t record_count,
