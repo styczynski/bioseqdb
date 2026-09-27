@@ -1,12 +1,10 @@
 /**
  * @file highway_minimizer_contract.cppm
- * @brief Target-neutral ABI between the scheduler and generated minimizers.
+ * @brief Shared input and output types for scheduled minimizer kernels.
  *
- * @details Re-exports the representation, collector, execution, and kernel
- * partitions that describe packed inputs, sink callbacks, status codes, and
- * exact record layouts. No Highway type is reachable from this module.
- * Generated fixed-target modules consume these records, while neutral
- * scheduler code owns their storage and lifetime.
+ * Defines packed inputs, record formats, collectors and result status.
+ * The scheduler owns the buffers passed to CPU-specific generated kernels.
+ * These interfaces can be used without Highway vector types.
  */
 module;
 
@@ -32,11 +30,11 @@ import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.storage.size;
 
-/** Exact minimizer record layouts and representability bounds. */
+/** Packed minimizer formats and the values they can store. */
 export import :representation;
-/** Collectors, output-layout dispatch, and SIMD record constraints. */
+/** Collectors and the supported output formats. */
 export import :collectors;
-/** Backend identities, continuation statuses, and execution counters. */
+/** Algorithm choices, continuation state and work counters. */
 export import :execution;
-/** Packed sequence views, sink callbacks, and kernel dispatch contracts. */
+/** Borrowed sequence views and callbacks for invoking a selected kernel. */
 export import :kernel;

@@ -1,9 +1,9 @@
 /**
  * @file highway_minimap_int_kernel.cppm
- * @brief Fixed-target Highway minimap2 integer hasher.
+ * @brief Computes minimap2 integer hashes in SIMD lanes.
  *
- * @details Applies minimap2's width-clamped seven-step permutation to canonical k-mer vectors and
- * forwards strand and palindrome state from the lexicographic rolling hasher.
+ * The rolling hasher chooses the smaller strand code before mixing its bits.
+ * Strand and palindrome masks still describe the original k-mer codes.
  */
 module;
 #include <hwy/highway.h>
@@ -23,27 +23,20 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/**
- * @brief Adds a fixed-target minimap2 integer permutation to the lexicographic hasher.
- * @tparam p_alphabet Sequence alphabet processed independently in each vector lane.
- */
+/** @brief Adds SIMD minimap2 hashing to the scalar hasher for an alphabet. */
 template <sequence_alphabet p_alphabet>
 struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
   public:
-    /** @brief Lexicographic SIMD hasher that owns canonical rolling state. */
+    /** @brief SIMD hasher that keeps the forward and reverse-complement codes. */
     using base_hasher_type = lexic_hasher<p_alphabet>;
 
-    /**
-     * @brief Maintains a rolling canonical k-mer and emits its permuted SIMD hash.
-     * @tparam p_input_type Unsigned lane type holding a packed k-mer code.
-     * @tparam p_simd_tag Highway descriptor for the generated target.
-     */
+    /** @brief Updates each lane's k-mer code and converts it to a minimap2 hash. */
     template <typename p_input_type, typename p_simd_tag>
     class simd_hash : public simd_hasher_base<p_alphabet, p_input_type, p_simd_tag> {
       public:
-        /** @brief Fixed-target SIMD base supplying vector traits. */
+        /** @brief Shared alphabet and SIMD vector types. */
         using base_type = simd_hasher_base<p_alphabet, p_input_type, p_simd_tag>;
-        /** @brief Lane, mask, and alphabet limits for this specialization. */
+        /** @brief Alphabet limits and vector types for this hasher. */
         using traits = typename base_type::traits;
 
       private:
@@ -52,9 +45,8 @@ struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
 
       public:
         /**
-         * @brief Initializes the lexicographic state and k-mer mask.
-         * @param[in] simd_tag Highway descriptor selecting the fixed-target operations.
-         * @param[in] kmer_length Positive k-mer width representable by `p_input_type`.
+         * @brief Initializes the rolling k-mer state and hash-width mask.
+         * @pre kmer_length is positive and twice its value is smaller than the lane bit width.
          */
         explicit simd_hash(const typename traits::input_simd_tag_type& simd_tag,
                            std::size_t kmer_length)
@@ -63,19 +55,15 @@ struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
                             (static_cast<typename traits::input_type>(1) << (2u * kmer_length)) -
                                 1u)) {}
 
-        /**
-         * @brief Clamps one permutation shift to the selected lane width.
-         * @tparam p_offset Requested compile-time shift distance.
-         */
+        /** @brief Limits a requested bit shift to one less than the lane width. */
         template <std::size_t p_offset>
         static constexpr std::size_t k_shift = std::min(p_offset, sizeof(p_input_type) * 8u - 1u);
 
         /**
-         * @brief Advances each rolling k-mer and applies the minimap2 integer permutation.
-         * @param[in] simd_tag Highway descriptor selecting the fixed-target operations.
-         * @param[in] incoming Alphabet rank entering the right edge of each lane's k-mer.
-         * @param[in] outgoing Alphabet rank leaving the left edge of each lane's k-mer.
-         * @return Per-lane permuted canonical hashes masked to the k-mer width.
+         * @brief Advances each lane's strand codes and hashes the smaller code.
+         * @param incoming Rank appended to the forward code.
+         * @param outgoing Rank whose complement is prepended to the reverse code.
+         * @return Hashes limited to the configured k-mer bit width.
          */
         HWY_INLINE typename traits::hasher_return_type
         next(const typename traits::input_simd_tag_type& simd_tag,
@@ -95,21 +83,13 @@ struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
             return hn::And(hn::Add(key, hn::ShiftLeft<k_shift<31>>(key)), mask_);
         }
 
-        /**
-         * @brief Forwards the canonical state's palindrome classification.
-         * @param[in] simd_tag Highway descriptor forwarded to the lexicographic hasher.
-         * @return Per-lane mask identifying equal forward and reverse-complement codes.
-         */
+        /** @brief Marks lanes with equal forward and reverse-complement k-mer codes. */
         [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag>
         palindrome_mask(const p_simd_tag& simd_tag) const {
             return base_hasher_.palindrome_mask(simd_tag);
         }
 
-        /**
-         * @brief Forwards the canonical state's strict reverse-strand classification.
-         * @param[in] simd_tag Highway descriptor forwarded to the lexicographic hasher.
-         * @return Per-lane mask identifying a strictly smaller reverse-complement code.
-         */
+        /** @brief Marks lanes where the reverse-complement k-mer code is smaller. */
         [[nodiscard]] HWY_INLINE hn::Mask<p_simd_tag>
         reverse_strand_mask(const p_simd_tag& simd_tag) const {
             return base_hasher_.reverse_strand_mask(simd_tag);
@@ -117,19 +97,15 @@ struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
     };
 
     /**
-     * @brief Applies the scalar-equivalent seven-step integer mix to every SIMD lane.
-     * @tparam p_simd_tag Highway descriptor whose lane type determines shift clamping.
-     * @param[in] simd_tag Fixed-target Highway descriptor.
-     * @param[in] key Per-lane canonical k-mer codes.
-     * @param[in] mask Per-lane mask limiting results to the k-mer bit width.
-     * @return Per-lane mixed hashes ready for two-stack window selection.
+     * @brief Applies the scalar minimap2 integer hash to every lane.
+     * mask limits the result to the selected k-mer bit width.
      */
     template <class p_simd_tag>
     [[nodiscard, gnu::always_inline]] static HWY_INLINE hn::Vec<p_simd_tag>
     scramble_simd(p_simd_tag simd_tag, hn::Vec<p_simd_tag> key, hn::Vec<p_simd_tag> mask) {
         using lane_type = hn::TFromD<p_simd_tag>;
         constexpr size_t k_max_storage_shift = sizeof(lane_type) * 8 - 1;
-        // Clamps permutation shifts to the lane bit width.
+        // Keep shifts within the lane width, including for narrow lane types.
         constexpr auto clamp = [](size_t shift) constexpr -> size_t {
             return shift > k_max_storage_shift ? k_max_storage_shift : shift;
         };
