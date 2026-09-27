@@ -71,7 +71,7 @@ inline void iterate_sequence_bp_simd_offsets(
 ) {
     using sequence_traits = compact_sequence_range<p_sequence_range>::traits;
 
-    
+
     const auto [context_units, context_padding] = ::bioseq::simd::iteration_geometry::int_div_ceil(
         context_bps, sequence_traits::letters_per_unit);
     (void)context_padding;
@@ -296,7 +296,7 @@ inline void iterate_sequence_bp_simd_offsets(
 			}
 			buffer.advance_position(buffer_write_pos);
 		}
-		
+
     }
 
     DEBUG_ASSERT(static_cast<std::size_t>(end - iter) * sequence_traits::letters_per_unit -

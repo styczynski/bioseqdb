@@ -376,7 +376,7 @@ struct compact_sequence_range_base {
      * @param start_position First symbol offset to search, relative to begin.
      * @return Offset of the first match within the interval, or no value.
      */
-    
+
     template<typename p_iterator_type>
     requires (valid_derived_iterator<p_iterator_type>::value == true)
     constexpr std::optional<std::size_t> find_symbol_subsequence(
@@ -833,7 +833,7 @@ public:
         explicit unpacked_rank_iterator(base_iterator_type const& it)
             : super_t(it) {}
 
-        
+
         auto operator <=>(const unpacked_rank_iterator&) const = default;
 
         /** @brief Returns the integer rank of the current alphabet symbol. */
@@ -879,7 +879,7 @@ public:
         return unpacked_rank_iterator(data_.cend());
     }
 
-    
+
     auto operator <=>(const compact_sequence_range<p_range_type>&) const = default;
 
     /** @brief Returns the rank at a logical symbol index. */
@@ -1063,10 +1063,10 @@ public:
     /** @brief Returns the number of packed storage units. */
     auto constexpr size() const { return packed_units.size(); }
 
-    
+
     auto operator <=> (
         const compact_sequence_range<p_configuration>&) const = default;
-    
+
     bool constexpr operator==(
         const compact_sequence_range<p_configuration>&) const = default;
 

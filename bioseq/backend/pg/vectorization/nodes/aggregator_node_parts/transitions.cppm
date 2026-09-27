@@ -370,7 +370,7 @@ static void process_ordered_aggregate_multi(AggState* aggregate_state,
             /* Fetch the columns passed as transition-function inputs. */
             slot_getsomeattrs(current_slot, num_transition_inputs);
 
-            
+
             /* Argument zero holds the state. Row inputs start at argument one. */
             for (int input_index = 0; input_index < num_transition_inputs; ++input_index) {
                 call_info->args[input_index + 1].value = current_slot->tts_values[input_index];

@@ -41,7 +41,7 @@ import bioseq.sequences;                       // compact_sequence_range
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
-import bioseq.parallelism.pool; 
+import bioseq.parallelism.pool;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.postgres.scheduler.supervisor; // Initialize the PostgreSQL Vulkan runtime.
 import bioseq.postgres.scheduler.supervisor.vulkan;

@@ -162,7 +162,7 @@ struct fake_fragment_storage {
     // Storage methods for fragment chunks.
     /** Counts stored subkeys in generation 0, excluding directory and temporary-run keys. */
     [[nodiscard]] std::size_t number_of_sub_keys() const {
-        
+
         std::size_t count = 0;
         std::int64_t last = 0; bool have_last = false;
         for (const auto& kv : chunks_) {
@@ -232,7 +232,7 @@ struct fake_fragment_storage {
             index_sub_key_t lo,
             index_sub_key_t hi,
             p_callback&& callback) {
-        if (hi <= lo) return;   
+        if (hi <= lo) return;
         for (index_sub_key_t sub_key = lo; sub_key < hi; ++sub_key) {
             const std::size_t nc = number_of_chunks(sub_key);
             for (std::size_t chunk_no = 0; chunk_no < nc; ++chunk_no) {
@@ -840,7 +840,7 @@ struct fake_fragment_storage {
             std::size_t j = i;
             while (j < n && all[j].first == kmer) {
                 if (positions.empty() || positions.back() != all[j].second)
-                    positions.push_back(all[j].second);   
+                    positions.push_back(all[j].second);
                 ++j;
             }
             cursor current{&positions};
