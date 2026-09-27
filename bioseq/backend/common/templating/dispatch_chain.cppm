@@ -1,10 +1,10 @@
 /**
  * @file dispatch_chain.cppm
- * @brief Composable runtime-to-template dispatch steps.
+ * @brief Chooses template arguments from runtime settings, one step at a time.
  *
- * A chain pins one compile-time value per step before invoking a leaf. Each
- * step supplies a target type, a default value, an activation predicate, and a
- * dispatch function that invokes the continuation with its selected value.
+ * Each step selects a value and passes it to the remaining steps. Once all
+ * values are selected, the chain calls the matching leaf template. An inactive
+ * step contributes its default value.
  */
 module;
 
@@ -36,11 +36,7 @@ concept chain_arguments_are_references =
     (std::is_reference_v<p_argument_types> && ...);
 
 /**
- * @brief Adapts an integral-constant dispatch callback to a chain continuation.
- * @tparam p_result_type Result returned by the leaf.
- * @tparam p_parameter_type Shared runtime-parameter type.
- * @tparam p_continuation_type Remaining chain stage.
- * @tparam p_target_type Type of the value selected by this step.
+ * @brief Passes a selected integral constant to the next dispatch step.
  */
 template <class p_result_type,
           class p_parameter_type,
@@ -51,12 +47,9 @@ struct continuation_adapter {
     p_continuation_type continuation;
 
     /**
-     * @brief Forwards one selected compile-time value into the continuation.
-     * @tparam p_value Selected compile-time value.
-     * @tparam p_argument_types Reference argument types forwarded to the leaf.
-     * @param[in] parameters Shared runtime parameters.
-     * @param[in,out] arguments Reference arguments forwarded without ownership transfer.
-     * @return Result produced by the remaining chain and leaf.
+     * @brief Runs the remaining steps with this selected value.
+     *
+     * The shared parameters and argument references are passed to the final call.
      */
     template <p_target_type p_value, class... p_argument_types>
     BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
@@ -74,11 +67,9 @@ struct continuation_adapter {
 } // namespace detail_dispatch_chain
 
 /**
- * @brief Pins step values in order and invokes a templated leaf.
- * @tparam p_result_type Leaf result type.
- * @tparam p_leaf_type Leaf template exposing `call`.
- * @tparam p_parameter_type Shared runtime-parameter type.
- * @tparam p_step_types Ordered dispatch-step types.
+ * @brief Selects template arguments in order, then calls the leaf.
+ * @tparam p_leaf_type Template whose `call` receives the selected values.
+ * @tparam p_step_types Steps in selection order.
  */
 template <class p_result_type,
           template <auto... p_leaf_values> class p_leaf_type,
@@ -86,18 +77,15 @@ template <class p_result_type,
           class... p_step_types>
 struct dispatch_chain;
 
-/// Terminal `dispatch_chain` specialization that invokes the leaf.
+/// End of the chain, where the selected leaf is called.
 template <class p_result_type,
           template <auto... p_leaf_values> class p_leaf_type,
           class p_parameter_type>
 struct dispatch_chain<p_result_type, p_leaf_type, p_parameter_type> {
     /**
-     * @brief Invokes the leaf with all previously selected values.
-     * @tparam p_pinned_values Values selected by preceding steps.
-     * @tparam p_argument_types Reference argument types forwarded to the leaf.
-     * @param parameters Shared runtime parameters.
-     * @param arguments Reference arguments forwarded to the leaf.
-     * @return Result produced by the leaf.
+     * @brief Calls the leaf with every selected template value.
+     *
+     * Additional arguments must be references and are forwarded to the leaf.
      */
     template <auto... p_pinned_values, class... p_argument_types>
         requires detail_dispatch_chain::chain_arguments_are_references<
@@ -113,7 +101,7 @@ struct dispatch_chain<p_result_type, p_leaf_type, p_parameter_type> {
     }
 };
 
-/// Recursive `dispatch_chain` specialization that selects the next value.
+/// Selects one template value before running the remaining steps.
 template <class p_result_type,
           template <auto... p_leaf_values> class p_leaf_type,
           class p_parameter_type,
@@ -126,18 +114,14 @@ struct dispatch_chain<
     p_head_step,
     p_remaining_steps...> {
     /**
-     * @brief Carries previously selected values into the remainder of the chain.
-     * @tparam p_pinned_values Values selected by preceding steps.
+     * @brief Keeps the values selected by earlier steps.
      */
     template <auto... p_pinned_values>
     struct continuation {
         /**
-         * @brief Selects one value and resumes the remaining steps.
-         * @tparam p_value Value selected by the current step.
-         * @tparam p_argument_types Reference argument types forwarded to the leaf.
-         * @param[in] parameters Shared runtime parameters.
-         * @param[in,out] arguments Reference arguments forwarded without ownership transfer.
-         * @return Result produced by the remaining chain and leaf.
+         * @brief Adds this value to the selected arguments and continues.
+         *
+         * Parameters and argument references pass through to the final call.
          */
         template <auto p_value, class... p_argument_types>
         BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
@@ -158,12 +142,10 @@ struct dispatch_chain<
     };
 
     /**
-     * @brief Selects the head-step value and resumes the chain.
-     * @tparam p_pinned_values Values selected by preceding steps.
-     * @tparam p_argument_types Reference argument types forwarded to the leaf.
-     * @param parameters Shared runtime parameters.
-     * @param arguments Reference arguments forwarded through every step.
-     * @return Result produced by the remaining chain and leaf.
+     * @brief Runs this step, or uses its default when the step is inactive.
+     *
+     * The selected value becomes the next template argument. Additional arguments
+     * must be references and are forwarded through the chain.
      */
     template <auto... p_pinned_values, class... p_argument_types>
         requires detail_dispatch_chain::chain_arguments_are_references<
@@ -197,9 +179,9 @@ struct dispatch_chain<
 };
 
 /**
- * @brief Dispatch step selecting an exact enumeration value or its default.
- * @tparam p_registry_type Registry exposing `target_t`, `value_list`,
- *         `default_value`, and `read_field`.
+ * @brief Selects a registered enum value, using the default for unknown values.
+ * @tparam p_registry_type Provides `target_t`, `value_list`, `default_value`,
+ *         and `read_field`.
  */
 template <class p_registry_type>
 struct enum_step {
@@ -210,21 +192,15 @@ struct enum_step {
     static constexpr target_t default_value =
         p_registry_type::default_value;
 
-    /// Enumeration dispatch is active for every preceding selection.
+    /// This step is enabled regardless of earlier selections.
     template <auto... p_prior_values>
     static constexpr bool active_v = true;
 
     /**
-     * @brief Dispatches the runtime field and resumes the chain.
-     * @tparam p_result_type Result returned by the leaf.
-     * @tparam p_parameter_type Shared runtime-parameter type.
-     * @tparam p_pinned_values Values selected by preceding steps.
-     * @tparam p_continuation_type Remaining chain stage.
-     * @tparam p_argument_types Reference argument types forwarded to the leaf.
-     * @param parameters Shared runtime parameters.
-     * @param continuation Next chain stage.
-     * @param arguments Reference arguments forwarded through the chain.
-     * @return Result produced by the remaining chain and leaf.
+     * @brief Reads the enum setting and continues with its selected value.
+     *
+     * Unknown values use the registry default. Argument references pass through
+     * to the next step.
      */
     template <class p_result_type,
               class p_parameter_type,
@@ -266,34 +242,28 @@ struct enum_step {
 };
 
 /**
- * @brief Dispatch step selecting the first registered bucket not below a field.
- * @tparam p_registry_type Registry exposing `value_list`, `default_value`, and
- *         `read_field`.
+ * @brief Selects the first bucket at least as large as the runtime value.
+ *
+ * The registry must provide ordered `value_list` entries, `default_value`,
+ * and `read_field`. Values above the last bucket select that last bucket.
  */
 template <class p_registry_type>
 struct bucket_step {
     /// Type selected by this step.
     using target_t = std::size_t;
 
-    /// Value selected when the step is inactive in a guarded chain.
+    /// Value selected when a condition skips this step.
     static constexpr target_t default_value =
         p_registry_type::default_value;
 
-    /// Bucket dispatch is active for every preceding selection.
+    /// This step is enabled regardless of earlier selections.
     template <auto... p_prior_values>
     static constexpr bool active_v = true;
 
     /**
-     * @brief Dispatches the runtime field and resumes the chain.
-     * @tparam p_result_type Result returned by the leaf.
-     * @tparam p_parameter_type Shared runtime-parameter type.
-     * @tparam p_pinned_values Values selected by preceding steps.
-     * @tparam p_continuation_type Remaining chain stage.
-     * @tparam p_argument_types Reference argument types forwarded to the leaf.
-     * @param parameters Shared runtime parameters.
-     * @param continuation Next chain stage.
-     * @param arguments Reference arguments forwarded through the chain.
-     * @return Result produced by the remaining chain and leaf.
+     * @brief Reads the runtime value and continues with the selected bucket.
+     *
+     * The last bucket also handles values larger than every registered bucket.
      */
     template <class p_result_type,
               class p_parameter_type,
@@ -322,37 +292,32 @@ struct bucket_step {
 };
 
 /**
- * @brief Bucket step whose candidates and field depend on prior selections.
- * @tparam p_registry_type Registry exposing `value_list_for`, `read_field_for`,
+ * @brief Selects a bucket using values chosen by earlier steps.
+ * @tparam p_registry_type Provides `value_list_for`, `read_field_for`,
  *         and `default_value`.
  *
- * Place this step after the values on which its bucket set depends. The
- * selected values are forwarded to both registry templates.
+ * Place this step after the selections it needs. Both registry templates
+ * receive those values. Bucket lists must be ordered, and inputs above the
+ * last bucket select that bucket.
  */
 template <class p_registry_type>
 struct dependent_bucket_step {
     /// Type selected by this step.
     using target_t = std::size_t;
 
-    /// Value selected when the step is inactive in a guarded chain.
+    /// Value selected when a condition skips this step.
     static constexpr target_t default_value =
         p_registry_type::default_value;
 
-    /// Dependent bucket dispatch is active for every preceding selection.
+    /// This step is enabled regardless of earlier selections.
     template <auto... p_prior_values>
     static constexpr bool active_v = true;
 
     /**
-     * @brief Dispatches against the bucket set for prior selected values.
-     * @tparam p_result_type Result returned by the leaf.
-     * @tparam p_parameter_type Shared runtime-parameter type.
-     * @tparam p_pinned_values Values selected by preceding steps.
-     * @tparam p_continuation_type Remaining chain stage.
-     * @tparam p_argument_types Reference argument types forwarded to the leaf.
-     * @param parameters Shared runtime parameters.
-     * @param continuation Next chain stage.
-     * @param arguments Reference arguments forwarded through the chain.
-     * @return Result produced by the remaining chain and leaf.
+     * @brief Selects a bucket from the list chosen by earlier steps.
+     *
+     * The registry reads the runtime value using the same earlier selections.
+     * The chosen bucket and argument references pass to the next step.
      */
     template <class p_result_type,
               class p_parameter_type,
@@ -384,33 +349,26 @@ struct dependent_bucket_step {
 };
 
 /**
- * @brief Applies a compile-time activation condition to another step.
- * @tparam p_inner_step Step used when active.
- * @tparam p_active_condition Whether the inner step participates in the chain.
+ * @brief Enables a dispatch step only when a compile-time condition is true.
+ *
+ * The chain uses the inner step's default when the condition is false.
  */
 template <class p_inner_step, bool p_active_condition>
 struct guarded_step {
-    /// Type selected by the guarded step.
+    /// Value type selected by the wrapped step.
     using target_t = typename p_inner_step::target_t;
 
-    /// Value pinned when the guarded step is inactive.
+    /// Value selected when this step is disabled.
     static constexpr target_t default_value = p_inner_step::default_value;
 
-    /// Compile-time activation predicate consumed by `dispatch_chain`.
+    /// Whether `dispatch_chain` should run this step.
     template <auto... p_prior_values>
     static constexpr bool active_v = p_active_condition;
 
     /**
-     * @brief Delegates active dispatch to the wrapped step.
-     * @tparam p_result_type Result returned by the leaf.
-     * @tparam p_parameter_type Shared runtime-parameter type.
-     * @tparam p_pinned_values Values selected by preceding steps.
-     * @tparam p_continuation_type Remaining chain stage.
-     * @tparam p_argument_types Reference argument types forwarded to the leaf.
-     * @param parameters Shared runtime parameters.
-     * @param continuation Next chain stage.
-     * @param arguments Reference arguments forwarded through the chain.
-     * @return Result produced by the wrapped step, remaining chain, and leaf.
+     * @brief Runs the wrapped step.
+     *
+     * `dispatch_chain` calls this only when the step is enabled.
      */
     template <class p_result_type,
               class p_parameter_type,
