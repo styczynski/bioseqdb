@@ -1,10 +1,9 @@
 /**
  * @file types.cppm
- * @brief Shared columnar metadata data types and ABI guards.
+ * @brief Shared types for columnar metadata, readers and buffered writes.
  *
- * Table I/O, transaction state, and catalog operations depend on this leaf
- * partition without pulling
- * in catalog implementation details.
+ * Keep these definitions separate from catalog access so table I/O and
+ * transaction callbacks can share them without importing catalog operations.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -18,8 +17,8 @@ export module bioseq.postgres.storage.metadata:types;
 import bioseq.postgres.configuration.core;
 export import bioseq.postgres.storage.parallel_scan_contract;
 
-// Field order and types in the scan and write-state records are ABI-shared.
-// The layout assertions below must remain synchronized with these definitions.
+// Other modules share these scan and write-state layouts.
+// Keep the layout checks below consistent with any field changes.
 
 /// @brief Resolved options for reading or writing a column table.
 export struct column_options
@@ -33,37 +32,27 @@ export struct column_options
 /// @brief Statistics and storage locations for one column chunk.
 export struct chunk_skip_node
 {
-	/* statistics about values of a column chunk */
+	/* Value range and row count used when filtering this chunk. */
 	bool has_min_max;
 	Datum minimum_value;
 	Datum maximum_value;
 	uint64 row_count;
 
-	/*
-	 * Offsets and sizes of value and exists streams in the column data.
-	 * These enable us to skip reading suppressed row chunks, and start reading
-	 * a chunk without reading previous chunks.
-	 */
+	/* Locate the value and presence-bit streams without reading earlier chunks. */
 	uint64 value_stream_offset;
 	uint64 value_stream_length;
 	uint64 exists_stream_offset;
 	uint64 exists_stream_length;
 
-	/*
-	 * This is used for (1) determining destination size when decompressing,
-	 * (2) calculating compression rates when logging stats.
-	 */
+	/* Original value-buffer size, used for decompression and compression statistics. */
 	uint64 value_decompressed_length;
 
 	bioseq::compression_algorithm value_compression_algorithm;
 	int value_compression_level;
 };
 
-/** @brief Chunk metadata used to skip irrelevant row groups.
- *
- * Contains a column chunk skip node for each chunk of each column.
- * chunk_skip_nodes[column][chunk]
- * is the entry for the specified column chunk.
+/** @brief Chunk metadata used to skip row groups that cannot match a query.
+ * Access a column chunk through chunk_skip_nodes[column][chunk].
  */
 export struct stripe_skip_list
 {
@@ -75,20 +64,17 @@ export struct stripe_skip_list
 	uint32 chunk_count;
 };
 
-/// @brief Reusable PostgreSQL string buffer with an ownership marker.
+/// @brief String buffer marked when its storage belongs to the backend chunk cache.
 export struct cached_string_info
 {
 	StringInfoData data;
 	bool cached;
 };
 
-/** @brief Decompressed values and presence bits for a row chunk.
+/** @brief Decoded values and presence flags for a chunk group.
  *
- * values_by_column stores the values, and present_values records whether a
- * value is present.
- * value_buffer is used to store (uncompressed) serialized values referenced by
- * Datum's in values_by_column. It is only used for by-reference Datum's. There is a
- * one-to-one correspondence between values_by_column and present_values.
+ * present_values and values_by_column have matching [column][row] entries.
+ * referenced_value_buffers keeps the bytes pointed to by by-reference Datums.
  */
 export struct chunk_data
 {
@@ -102,16 +88,13 @@ export struct chunk_data
 	bool **present_values;
 	Datum **values_by_column;
 
-	/* value_buffer keeps actual data for type-by-reference datums from values_by_column. */
+	/* Keep bytes referenced by values_by_column alive. */
 	StringInfo *referenced_value_buffers;
 };
 
-/** @brief Serialized presence and value streams for a column chunk.
- *
- * value_buffer stores the serialized values of data, and presence_buffer stores
- * serialized value of presence information. value_compression_algorithm contains
- * compression type if value_buffer is compressed. Finally row_count has the
- * number of rows in this chunk.
+/** @brief Serialized values and presence bits for one column chunk.
+ * value_compression_algorithm describes the value buffer. The saved original
+ * byte length lets readers allocate space for decompression.
  */
 export struct chunk_buffers
 {
@@ -121,10 +104,7 @@ export struct chunk_buffers
 	uint64 value_decompressed_length;
 };
 
-/** @brief Serialized chunks for one column in a stripe.
- *
- * column is made of multiple column chunks.
- */
+/** @brief Serialized chunks belonging to one column in a stripe. */
 export struct column_buffers
 {
 	chunk_buffers **chunks;
@@ -143,23 +123,16 @@ export struct stripe_buffers
 	uint32 *selected_chunk_group_deleted_rows;
 };
 
-/// @brief Transaction visibility state of a stripe catalog row.
+/// @brief Whether a stripe is flushed, aborted or still buffered by a writer.
 export enum class stripe_write_state
 {
-	/* stripe write is flushed to disk, so it's readable */
+	/* Stripe data has been flushed and can be read under a suitable snapshot. */
 	flushed,
 
-	/*
-	 * Writer transaction did abort either before inserting into
-	 * bioseq.stripe or after.
-	 */
+	/* The transaction that reserved the stripe aborted. */
 	aborted,
 
-	/*
-	 * Writer transaction is still in-progress. Note that it is not certain
-	 * if it is being written by current backend's current transaction or
-	 * another backend.
-	 */
+	/* The stripe is still buffered by this transaction or another writer. */
 	in_progress
 };
 
@@ -187,14 +160,10 @@ export struct stripe_metadata
 	uint64 id;
 	uint64 first_row_number;
 
-	/* see stripe_write_state_for */
+	/* The transaction that inserted the stripe row aborted. */
 	bool aborted;
 
-	/*
-	 * If write operation is in-progress (i.e. stripe_write_state_for returned
-	 * stripe_write_state::in_progress), then inserted_by_current_transaction is used to
-	 * distinguish whether it's being written by current transaction or not.
-	 */
+	/* Identify our own unflushed stripes when checking their visibility. */
 	bool inserted_by_current_transaction;
 };
 
@@ -214,7 +183,7 @@ export struct chunk_group_read_state
 	List *projected_columns;  /* borrowed reference */
 	chunk_data *chunk_group_data;
 	bytea *row_mask;
-	bool row_mask_cached; /* If row_mask metadata is cached and borrowed */
+	bool row_mask_cached; /* True when row_mask is borrowed from the cache. */
 	uint32 stripe_row_offset;
 	uint32 chunk_group_deleted_rows;
 };
@@ -244,10 +213,7 @@ export struct column_read_state
 	stripe_metadata *current_stripe;
 	stripe_read_state *stripe_state;
 
-	/*
-	 * Integer list of attribute numbers (1-indexed) for columns needed by the
-	 * query.
-	 */
+	/* Needed column numbers, starting at one. */
 	List *projected_columns;
 
 	List *filter_clauses;
@@ -256,10 +222,7 @@ export struct column_read_state
 	MemoryContext stripe_read_context;
 	int64 filtered_chunk_groups;
 
-	/*
-	 * Memory context guaranteed to be not freed during scan so we can safely
-	 * use for any memory allocations regarding column_read_state itself.
-	 */
+	/* Owns scan allocations and must remain alive until the scan ends. */
 	MemoryContext scan_context;
 
 	Snapshot snapshot;
@@ -286,29 +249,21 @@ export struct column_write_state
 
 	List *chunk_group_row_counts;
 
-	/*
-	 * compression_buffer buffer is used as temporary storage during data value
-	 * compression operation. It is kept here to minimize memory allocations.
-	 * It lives in stripe_write_context and gets deallocated when memory context
-	 * is reset.
-	 */
+	/* Reuse this scratch buffer for compression within a stripe.
+	 * Resetting stripe_write_context releases it. */
 	StringInfo compression_buffer;
 
-	/*
-	 * Per-write sequence-subtable cache. Opaque void* keeps this ABI record
-	 * decoupled
-	 * from bioseq::storage; the actual `bioseq::storage::seq_caches*` is
-	 * placement-new'd into stripe_write_context's stable owning parent and
-	 * destroyed by the registered teardown hook. It must outlive every reset
-	 * of the stripe scratch context and retains the per-write cap snapshot.
-	 */
+	/* Sequence-shard caches for this writer. Keep their allocation in the
+	 * parent of stripe_write_context so stripe resets leave them alive.
+	 * The registered cleanup hook closes and destroys the caches. void*
+	 * avoids a module dependency on bioseq::storage::seq_caches. */
 	void *seq_caches;
 };
 
-// ABI mirrors pin size and representative offsets. The parallel state has a
-// flexible array, so its fixed-header offset is checked instead of sizeof.
+// Compare shared record sizes and selected field offsets. For the parallel
+// state, check where the trailing snapshot begins because its size varies.
 namespace {
-/// @brief Mirrors the cross-module `column_read_state` ABI for layout assertions.
+/// @brief Reference layout used to check column_read_state across modules.
 struct column_read_state_layout
 {
 	TupleDesc tuple_descriptor;
@@ -331,7 +286,7 @@ static_assert(std::is_standard_layout_v<column_read_state> &&
 			  offsetof(column_read_state, parallel_scan) == offsetof(column_read_state_layout, parallel_scan),
 			  "column_read_state layout drift (reinterpret_cast'd across modules)");
 
-/// @brief Mirrors the cross-module `column_write_state` ABI for layout assertions.
+/// @brief Reference layout used to check column_write_state across modules.
 struct column_write_state_layout
 {
 	TupleDesc tuple_descriptor;
