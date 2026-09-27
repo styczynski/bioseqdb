@@ -1,6 +1,6 @@
 /**
  * @file scanner/source_scanner/test_contracts.cppm
- * @brief Deterministic source-scanner failure and lifecycle contracts.
+ * @brief Test source-reader thread checks, reference counts and cleanup.
  */
 module;
 
@@ -34,18 +34,18 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
-import bioseq.common.seqan_adapter;     // seq::dna4 in static_assert below
-import bioseq.postgres.storage.manager; // seq_caches + open_sub_table_for_locator
-import bioseq.storage.scanner;          // scanner concepts
-import bioseq.storage.lazy_sequence;    // lazy_sequence + with_postgres_lazy_sequence
+import bioseq.common.seqan_adapter;     
+import bioseq.postgres.storage.manager; 
+import bioseq.storage.scanner;          // Source domains and read sessions used by the tests.
+import bioseq.storage.lazy_sequence;    
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.physical;
-import bioseq.storage.size;              // sequence_size_t
-import bioseq.postgres.storage.metadata; // stripe_metadata/find_stripe_by_row_number
-import bioseq.sequences;                 // compact_sequence_range, compact_sequence_stdc_instance
+import bioseq.storage.size;              
+import bioseq.postgres.storage.metadata; 
+import bioseq.sequences;                 
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.table.io; // begin_column_read/read_column_row_by_number
+import bioseq.postgres.table.io; 
 import bioseq.parallelism.pool;
 import bioseq.postgres.storage.scanner.fragment_scanner;
 import :source_registry;
@@ -55,16 +55,16 @@ export import :source_scanner_promotion;
 export namespace bioseq::storage {
 #ifdef BIOSEQ_TEST_INDEXES
 /**
- * Validate on a real TBB arena worker that the source callback rejects
- * before any PostgreSQL API, cache, snapshot, or logging side effect.
- * @return Whether the worker observed the `wrong_thread` status.
+ * Run a source read on a TBB worker and check that it returns `wrong_thread`.
+ * The thread check runs before PostgreSQL calls or reader access.
+ * @return Whether the worker observed `wrong_thread`.
  */
 [[nodiscard]] inline bool validate_pg_sequence_source_wrong_thread() {
     sequence_source_detail::pg_sequence_source_domain domain{};
     domain.backend_thread = pg_sequence_backend_thread_token::capture();
     pg_sequence_read_session session{};
     session.backend_thread = pg_sequence_backend_thread_token::capture();
-    /// Backend-owned pointers passed opaquely to the worker probe.
+    /// Backend pointers used by the worker to test the thread check.
     struct validation_argument {
         sequence_source_detail::pg_sequence_source_domain* domain;
         pg_sequence_read_session* session;
@@ -84,16 +84,16 @@ export namespace bioseq::storage {
                    pg_sequence_source_read_status::wrong_thread;
         });
     if (rejected) {
-        /* Worker diagnostics are thread-local; mirror the observed rejection
-         * once on the backend so SQL can assert it without reading worker TLS. */
+        /* Copy the observed rejection into the backend's counter. SQL tests
+         * read that counter, while the worker has its own thread-local counters. */
         ++g_pg_sequence_source_stats.wrong_thread_rejections;
     }
     return rejected;
 }
 
 /**
- * @brief Exercise fail-closed retain accounting and merge rollback.
- * @return Whether overflow, transaction cleanup, and lifecycle counters agree.
+ * Check reference-count overflow, route-merge rollback and transaction cleanup.
+ * @return Whether the expected failures occur and resource counters balance.
  */
 [[nodiscard]] inline bool validate_pg_sequence_source_fault_contract() noexcept {
     sequence_source_detail::pg_sequence_source_domain domain{};
@@ -178,11 +178,9 @@ export namespace bioseq::storage {
         return false;
     }
 
-    /* Build one real, readable source control, retain it as a piece
-     * tree leaf does, and drive the production transaction cleanup callback.
-     * The registry token is dropped by cleanup while the retained control
-     * survives with refcount one, so the subsequent read reaches the expected
-     * transaction-ended guard rather than a test-only approximation. */
+    /* Hold a counted reference to a real read domain, as a sequence piece would,
+     * then run transaction cleanup. Its control object must survive while read
+     * resources close. A later read should report that the transaction has ended. */
     const auto stats_before_xact_end = sequence_source_detail::collect_pg_sequence_source_stats();
     MemoryContext saved_context = CurrentMemoryContext;
     pg_sequence_source_registry* volatile pending_registry = nullptr;
@@ -319,9 +317,11 @@ export namespace bioseq::storage {
            stats_after_xact_end.live_snapshots == stats_before_xact_end.live_snapshots;
 }
 
-/** Validate that self-join aliases retain independent routes while the
- * relation-only lookup refuses to guess between them.
- * @return Whether generation-qualified lookup distinguishes both aliases.
+/**
+ * Check that a self join keeps separate routes for both scans of the table.
+ * A table-only lookup must be ambiguous, while each provider generation
+ * selects its own route.
+ * @return Whether generation lookup selects both scans correctly.
  */
 [[nodiscard]] inline bool validate_pg_sequence_source_route_aliases() noexcept {
     constexpr Oid relation_oid = static_cast<Oid>(1u);
@@ -368,9 +368,9 @@ export namespace bioseq::storage {
 }
 
 /**
- * @brief Install one inert live token and drive the real PRE_PREPARE switch.
- * @throws PostgreSQL ERROR when prepared-transaction rejection is observed or
- * when the expected rejection does not occur.
+ * Add a test domain and call the transaction prepare callback.
+ * @throws PostgreSQL ERROR when live domains block PREPARE TRANSACTION,
+ * or a different error if that expected rejection does not happen.
  */
 inline void validate_pg_sequence_source_pre_prepare() {
     using namespace sequence_source_detail;
