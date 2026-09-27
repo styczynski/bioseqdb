@@ -1,8 +1,8 @@
 /**
  * @file grouped_soa_test.cpp
- * @brief Tests grouped-SoA geometry, records, emission, and count widths.
+ * @brief Checks grouped index layouts, count widths, and row decoding.
  *
- * The tests run inside `bioseq::simd::HWY_NAMESPACE` for fixed-target coverage.
+ * Highway compiles these tests for the selected SIMD target.
  */
 
 #include <hwy/highway.h>
@@ -40,7 +40,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -667,9 +667,9 @@ TEST_CASE("grouped-SoA fixed records reject every extension corruption class",
         REQUIRE_FALSE(decode_minimizer_generation_manifest(corrupt));
     }
     {
-        /* max_occ_cap is a caller-selected storage-contract parameter, not a
-         * bound derivable from K/span.  A same-width value remains a valid
-         * standalone manifest but must fail the reader's expected identity. */
+        /* The caller chooses max_occ_cap. Changing it within the same count
+         * width still produces a decodable manifest, but the reader must
+         * reject a cap different from the one it expects. */
         const auto expected = expected_grouped_soa_generation_identity_for_backend(
             minimizer_generation_layout::grouped_soa_segment_local,
             minimizer_sketch_backend::scalar,
@@ -690,8 +690,8 @@ TEST_CASE("grouped-SoA fixed records reject every extension corruption class",
                            minimizer_generation_encoding_error::storage_contract_mismatch);
     }
     {
-        /* Crossing the u16/u32 count-width boundary while retaining the
-         * encoded u16 shape is intrinsically inconsistent and fails decode. */
+        /* The count above this cap needs 32 bits. The manifest still declares
+         * 16-bit counts, so decoding must reject it. */
         auto incompatible_cap_width = good_manifest;
         test_write_le<std::uint64_t>(incompatible_cap_width, 152u, 65'535u);
         require_wire_error(decode_minimizer_generation_manifest(incompatible_cap_width),
@@ -744,8 +744,8 @@ TEST_CASE("grouped-SoA emits exact SoA and prepared reader rejects corruption",
     const std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers{
         {1u, (3u << 1u) | 1u},
         {1u, (9u << 1u)},
-        // A new hash may restart below the previous hash's last coordinate.
-        // This checks that the reader's strict-order state resets per control.
+        // Position order starts again for each hash. Hash 2 can begin before
+        // the last position of hash 1.
         {2u, (1u << 1u) | 1u},
     };
     vector_replay_minimizer_producer producer{minimizers};
@@ -806,7 +806,7 @@ TEST_CASE("grouped-SoA emits exact SoA and prepared reader rejects corruption",
 
     SECTION("padding byte") {
         auto corrupt = control_bytes;
-        // H32*2 ends at 8; prefixes occupy [8,14), so [14,16) is padding.
+        // Bytes 14 and 15 pad the prefix array to the next aligned field.
         corrupt[14] = std::byte{1};
         require_wire_error(
             decode_grouped_soa_controls(corrupt, entry, generation->directory.profile()),
@@ -861,9 +861,8 @@ TEST_CASE("grouped-SoA emits exact SoA and prepared reader rejects corruption",
         test_write_le<std::uint16_t>(
             corrupt.bytes, 2u, test_read_le<std::uint16_t>(corrupt.bytes, 0u));
         recompute_row_checksum(corrupt);
-        // Hash 1 is deliberately absent from the query union: every control
-        // boundary must still enforce strict order without retaining the
-        // 16-byte route-and-boundary record beside it.
+        // Hash 1 is absent from the query, but its stored positions must
+        // still be checked for duplicates and ordering.
         const std::array<std::uint64_t, 1> unqueried_hash{2u};
         auto made = prepared_grouped_soa_query_reader::begin(
             admission,

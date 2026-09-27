@@ -38,7 +38,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -54,19 +54,19 @@ using bioseq::storage::lazy_sequence;
 
 /// Packed DNA4 alphabet with 32 symbols per storage unit.
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-/// Resident range used by the DNA4 fixtures.
+/// A sequence range packed into 64-bit DNA4 storage units.
 using range_t = compact_sequence_range<dna4_u64>;
 /// Packed DNA5 alphabet used for ambiguous-symbol fixtures.
 using dna5_u64 = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
-/// Resident range used by the DNA5 fixtures.
+/// A sequence range packed into 64-bit DNA5 storage units.
 using dna5_range_t = compact_sequence_range<dna5_u64>;
 
-/// Return the fixed-target minimizer kernel table used by unit tests.
+/// Return minimizer kernels for the SIMD target selected by the test build.
 [[nodiscard]] const ::bioseq::minimizers::minimizer_kernels* fixed_minimizer_kernels() {
     return &::bioseq::simd_dispatch::highway_test_kernel_table().minimizers;
 }
 
-/// Resolve the fixed-target code for one packed alphabet.
+/// Find the alphabet code in the selected SIMD kernel table.
 template <sequence_alphabet p_alphabet> [[nodiscard]] std::uint8_t fixed_alphabet_code() {
     const auto& table = ::bioseq::simd_dispatch::highway_test_kernel_table();
     const auto* identity =
@@ -78,7 +78,7 @@ template <sequence_alphabet p_alphabet> [[nodiscard]] std::uint8_t fixed_alphabe
     return identity->alphabet_code;
 }
 
-/// Select fixed-target kernels only for backends that require them.
+/// Return test kernels for exact SIMD and bounded ntHash, or null otherwise.
 [[nodiscard]] const ::bioseq::minimizers::minimizer_kernels*
 minimizer_kernels_for_backend(const minimizer_sketch_backend backend) {
     return backend == minimizer_sketch_backend::exact_simd ||
@@ -87,7 +87,7 @@ minimizer_kernels_for_backend(const minimizer_sketch_backend backend) {
                : nullptr;
 }
 
-/// Derived minimap grouped-SoA profile used by test manifests.
+/// Derive the minimap layout used by test manifests.
 inline constexpr auto k_test_grouped_soa_profile_result =
     bioseq::indexing::derive_grouped_soa_minimizer_profile(
         bioseq::indexing::k_minimap_scheme_identity,
@@ -96,9 +96,9 @@ inline constexpr auto k_test_grouped_soa_profile_result =
         32'768u,
         65'534u);
 static_assert(k_test_grouped_soa_profile_result.has_value());
-/// Validated minimap grouped-SoA profile used by test manifests.
+/// The minimap layout checked by the assertion above.
 inline constexpr auto k_test_grouped_soa_profile = *k_test_grouped_soa_profile_result;
-/// Derived bounded-ntHash grouped-SoA profile used by test manifests.
+/// Derive the bounded ntHash layout used by test manifests.
 inline constexpr auto k_test_bounded_grouped_soa_profile_result =
     bioseq::indexing::derive_grouped_soa_minimizer_profile(
         bioseq::indexing::k_bounded_nthash_u32_r7_sum_scheme_identity,
@@ -107,11 +107,11 @@ inline constexpr auto k_test_bounded_grouped_soa_profile_result =
         32'768u,
         65'534u);
 static_assert(k_test_bounded_grouped_soa_profile_result.has_value());
-/// Validated bounded-ntHash grouped-SoA profile used by test manifests.
+/// The bounded ntHash layout checked by the assertion above.
 inline constexpr auto k_test_bounded_grouped_soa_profile =
     *k_test_bounded_grouped_soa_profile_result;
 
-/// Copy all authenticated layout fields from a profile into a manifest.
+/// Copy the stored layout and minimizer scheme from a profile into a manifest.
 constexpr void
 assign_grouped_soa_profile(bioseq::indexing::minimizer_generation_manifest& manifest,
                            const bioseq::indexing::grouped_soa_minimizer_profile& profile) {
@@ -153,7 +153,7 @@ static_assert(
             std::declval<const bioseq::indexing::packed_bounded_nthash_index_bridge_request&>())),
         bioseq::indexing::packed_bounded_nthash_index_bridge_result>);
 
-/// Generate deterministic DNA4 symbols from a seeded linear recurrence.
+/// Generate repeatable DNA4 test data from a seed.
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t symbol_count,
                                                std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
     std::vector<seq::dna4> symbols(symbol_count);
@@ -167,7 +167,7 @@ static_assert(
     return symbols;
 }
 
-/// Collect canonical DNA5 events with the independent minimap2 baseline.
+/// Collect DNA5 reference events with the minimap2 baseline.
 [[nodiscard]] std::vector<bioseq::indexing::canonical_minimizer_event> baseline_dna5_events(
     const std::vector<seq::dna5>& data, std::size_t window_size, std::size_t kmer_size) {
     std::string bases;
@@ -190,7 +190,7 @@ static_assert(
     return events;
 }
 
-/// Collect whole-sequence minimizers with builder-compatible global positions.
+/// Sketch the whole sequence using positions relative to its start.
 template <class p_range>
 [[nodiscard]] std::vector<minimap_sketch_data>
 whole_sequence_minimizers(p_range& range, std::size_t w, std::size_t k) {
@@ -246,7 +246,7 @@ test_write_le(std::span<std::byte> bytes, std::size_t offset, p_uint value) noex
     }
 }
 
-/// Require a wire operation to fail with one exact error.
+/// Check that a codec operation fails with the expected error.
 template <class p_t>
 void require_wire_error(
     const std::expected<p_t, bioseq::indexing::minimizer_generation_encoding_error>& value,
@@ -255,7 +255,7 @@ void require_wire_error(
     REQUIRE(value.error() == expected);
 }
 
-/// Select one complete generated algorithm identity for a test producer.
+/// Choose the algorithm and record layout for a test producer.
 template <sequence_alphabet p_alphabet = seq::dna4, class p_storage_unit = std::uint64_t>
 [[nodiscard]] constexpr bioseq::indexing::minimizer_generation_algorithm_identity
 test_generation_algorithm_identity(
@@ -271,7 +271,7 @@ test_generation_algorithm_identity(
     return *identity;
 }
 
-/// Construct the byte-pinned grouped-SoA manifest fixture.
+/// Build a manifest with fixed values for byte-layout tests.
 [[nodiscard]] constexpr bioseq::indexing::minimizer_generation_manifest
 golden_generation_manifest() noexcept {
     auto manifest = bioseq::indexing::minimizer_generation_manifest{
@@ -305,7 +305,7 @@ golden_generation_manifest() noexcept {
     return manifest;
 }
 
-/// Construct baseline grouped-SoA generation options for one target length.
+/// Set up a test generation for the chosen sequence and minimizer algorithm.
 template <sequence_alphabet p_alphabet = seq::dna4, class p_storage_unit = std::uint64_t>
 [[nodiscard]] constexpr bioseq::indexing::grouped_soa_generation_options
 test_generation_options(
@@ -336,7 +336,7 @@ test_generation_options(
     };
 }
 
-/// Construct grouped-SoA generation options with an explicit occurrence cap.
+/// Set up a test generation with a chosen maximum occurrence count.
 template <sequence_alphabet p_alphabet = seq::dna4, class p_storage_unit = std::uint64_t>
 [[nodiscard]] constexpr bioseq::indexing::grouped_soa_generation_options
 test_grouped_soa_generation_options(
@@ -353,7 +353,7 @@ test_grouped_soa_generation_options(
     return options;
 }
 
-/// Construct the expected scalar grouped-SoA storage identity.
+/// Describe the scalar minimap index expected by test readers.
 [[nodiscard]] constexpr bioseq::indexing::expected_minimizer_generation_identity
 test_expected_storage_contract() noexcept {
     return {
@@ -372,7 +372,7 @@ test_expected_storage_contract() noexcept {
     };
 }
 
-/// Construct the expected grouped-SoA identity for one occurrence cap.
+/// Describe the test reader layout with a chosen occurrence cap.
 [[nodiscard]] constexpr bioseq::indexing::expected_minimizer_generation_identity
 test_grouped_soa_expected_storage_contract(std::uint64_t max_occ_cap = 65'534u) noexcept {
     auto expected = test_expected_storage_contract();
@@ -390,14 +390,14 @@ struct collected_minimizer_row {
     std::uint64_t row_checksum = 0;
 };
 
-/// Capture ordinary and direct grouped-SoA row writes with their checksums.
+/// Keep rows from both storage callbacks and count direct payload writes.
 struct collecting_minimizer_row_sink {
     std::vector<collected_minimizer_row> rows;
     std::size_t max_callback_bytes = 0;
     std::uint64_t grouped_soa_payload_write_calls = 0;
     std::uint64_t grouped_soa_row_crc_bytes = 0;
 
-    /// Copy one checksummed row into the sink.
+    /// Copy a row and record the largest callback size.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     write(const bioseq::indexing::minimizer_generation_row_view& row) {
         max_callback_bytes = std::max(max_callback_bytes, row.bytes.size());
@@ -437,7 +437,7 @@ struct collecting_minimizer_row_sink {
     }
 };
 
-/// Replay an owned canonical-event vector under a fixed producer identity.
+/// Replay stored minimizer events with the configured scheme and backend.
 struct vector_replay_minimizer_producer {
     std::vector<bioseq::indexing::canonical_minimizer_event> events;
     std::size_t scan_count = 0;
@@ -447,7 +447,7 @@ struct vector_replay_minimizer_producer {
         bioseq::indexing::minimizer_producer_backend_identity_for_backend(
             bioseq::simd::minimizer_sketch_backend::scalar);
 
-    /// Construct a replay producer from hash and encoded-position pairs.
+    /// Copy hash-position pairs and choose a backend identity for their scheme.
     explicit vector_replay_minimizer_producer(
         std::span<const std::pair<std::uint64_t, std::uint64_t>> pairs,
         bioseq::indexing::minimizer_scheme_identity scheme_identity =
@@ -480,7 +480,7 @@ struct vector_replay_minimizer_producer {
         return producer_backend;
     }
 
-    /// Sort events by segment and emit them through the receiver.
+    /// Sort a copy by segment, hash, and encoded position, then emit each event.
     [[nodiscard]] std::expected<void, bioseq::indexing::minimizer_generation_encoding_error>
     scan_sorted_events(std::uint64_t span,
                        bioseq::indexing::canonical_minimizer_event_receiver receiver) {
@@ -538,7 +538,7 @@ collect_encoded_extent(std::span<const collected_minimizer_row> rows,
     return bytes;
 }
 
-/// Compare two generations after normalizing physical producer identity.
+/// Compare encoded results after removing generation and producer identity differences.
 void require_encoded_generations_equal_normalized(
     const bioseq::indexing::encoded_grouped_soa_generation& lhs,
     std::span<const collected_minimizer_row> lhs_rows,
@@ -550,10 +550,8 @@ void require_encoded_generations_equal_normalized(
     rhs_manifest.generation_id = 1;
     lhs_manifest.payload_checksum = 0;
     rhs_manifest.payload_checksum = 0;
-    // This helper compares canonical biological payloads across physical
-    // producers. Producer identity is independently attested by each original
-    // head/manifest and is therefore an intentional difference for scalar
-    // versus Exact SIMD and fragment-position versus sequence-position comparisons.
+    // First check each original storage checksum. Then remove the producer
+    // identity so results from different backends can be compared.
     REQUIRE(lhs.head.storage_contract_checksum ==
             compute_minimizer_generation_storage_contract_checksum(lhs.manifest));
     REQUIRE(rhs.head.storage_contract_checksum ==
@@ -593,7 +591,7 @@ row_view(const collected_minimizer_row& row) noexcept {
     };
 }
 
-/// Construct the stateful validator for an encoded generation.
+/// Create a row validator for the generation, failing the test if invalid.
 [[nodiscard]] bioseq::indexing::minimizer_generation_row_validator
 make_generation_row_validator(const bioseq::indexing::encoded_grouped_soa_generation& generation) {
     auto made = bioseq::indexing::minimizer_generation_row_validator::create(generation);
@@ -601,7 +599,7 @@ make_generation_row_validator(const bioseq::indexing::encoded_grouped_soa_genera
     return std::move(*made);
 }
 
-/// Require that all captured rows complete the generation validator.
+/// Check that the publication head is accepted only after all rows validate.
 void require_complete_generation_rows(
     const bioseq::indexing::encoded_grouped_soa_generation& generation,
     std::span<const collected_minimizer_row> rows) {
@@ -626,7 +624,7 @@ void require_complete_generation_rows(
                 .has_value());
 }
 
-/// Encode one checksummed fixed row from a byte span.
+/// Copy bytes into a fixed row and compute its address-dependent checksum.
 [[nodiscard]] bioseq::indexing::encoded_minimizer_fixed_row
 make_test_fixed_row(const bioseq::indexing::index_chunk_address& address,
                     std::span<const std::byte> bytes) {
@@ -644,7 +642,7 @@ make_test_fixed_row(const bioseq::indexing::index_chunk_address& address,
     return row;
 }
 
-/// Encode one checksummed fixed row from a fixed-size byte array.
+/// Build a checksummed fixed row from a byte array.
 template <std::size_t p_size>
 [[nodiscard]] bioseq::indexing::encoded_minimizer_fixed_row
 make_test_fixed_row(const bioseq::indexing::index_chunk_address& address,
@@ -652,7 +650,7 @@ make_test_fixed_row(const bioseq::indexing::index_chunk_address& address,
     return make_test_fixed_row(address, std::span<const std::byte>{bytes});
 }
 
-/// Refresh fixed manifest and unpublished-head rows after fixture mutation.
+/// Re-encode the manifest and unpublished head after changing test metadata.
 void refresh_test_generation_fixed_rows(
     bioseq::indexing::encoded_grouped_soa_generation& generation) {
     using namespace bioseq::indexing;

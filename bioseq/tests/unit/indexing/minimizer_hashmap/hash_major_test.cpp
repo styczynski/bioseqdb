@@ -1,9 +1,8 @@
 /**
  * @file hash_major_test.cpp
- * @brief Tests hash-major minimizer wire codecs and selective readers.
+ * @brief Checks index bytes grouped by hash and reads of selected hashes.
  *
- * The tests run inside `bioseq::simd::HWY_NAMESPACE` because they share the
- * fixed-target minimizer test environment.
+ * Tests use the selected Highway SIMD namespace.
  */
 
 #include <hwy/highway.h>
@@ -40,7 +39,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -55,7 +54,7 @@ using namespace minimizer_hashmap_test_support;
 
 namespace {
 
-/// Construct the byte-pinned generation-head fixture.
+/// Build a generation head with fixed values for byte-layout tests.
 [[nodiscard]] constexpr bioseq::indexing::minimizer_generation_head
 golden_generation_head() noexcept {
     return {
@@ -69,9 +68,9 @@ golden_generation_head() noexcept {
 }
 } // namespace
 
-/// In-memory source and sink for the three hash-major logical streams.
+/// Store directory, control, and posting bytes in memory and record test reads.
 struct hash_major_memory_image {
-    /// Record one logical read and its byte interval.
+    /// The stream and byte range read by a callback.
     struct read_event {
         bioseq::indexing::hash_major_minimizer_stream_kind kind{};
         std::uint64_t offset = 0;
@@ -93,13 +92,13 @@ struct hash_major_memory_image {
     std::size_t size_calls = 0u;
     bool use_wave_callbacks = true;
 
-    /// Convert a persisted stream kind to its fixture-array index.
+    /// Find the array slot for a stream kind.
     [[nodiscard]] static std::size_t
     index(bioseq::indexing::hash_major_minimizer_stream_kind kind) {
         return static_cast<std::size_t>(kind) - 1u;
     }
 
-    /// Append bytes to one logical stream.
+    /// Append bytes and remember which stream was written.
     static bool append_callback(void* context,
                                 bioseq::indexing::hash_major_minimizer_stream_kind kind,
                                 std::span<const std::byte> bytes) {
@@ -110,7 +109,8 @@ struct hash_major_memory_image {
         return true;
     }
 
-    /// Read one checked byte interval and record the operation.
+    /// Copy a valid byte range and record the read. A directory read can
+    /// also lower the memory cap for admission tests.
     static bool read_callback(void* context,
                               bioseq::indexing::hash_major_minimizer_stream_kind kind,
                               std::uint64_t offset,
@@ -134,7 +134,7 @@ struct hash_major_memory_image {
         return true;
     }
 
-    /// Return one logical stream size and record the query.
+    /// Return the stream size and count the request.
     static std::uint64_t size_callback(void* context,
                                        bioseq::indexing::hash_major_minimizer_stream_kind kind) {
         auto& self = *static_cast<hash_major_memory_image*>(context);
@@ -142,7 +142,7 @@ struct hash_major_memory_image {
         return self.streams[index(kind)].size();
     }
 
-    /// Deliver authorized control ranges through the wave callback.
+    /// Pass each requested control range to the consumer and record the reads.
     static bool control_wave_callback(
         void* context,
         std::span<const bioseq::indexing::hash_major_minimizer_authorized_control_range> ranges,
@@ -175,7 +175,7 @@ struct hash_major_memory_image {
         return true;
     }
 
-    /// Deliver authorized posting ranges in bounded read slabs.
+    /// Pass requested posting ranges to the consumer in bounded chunks.
     static bool posting_wave_callback(
         void* context,
         std::span<const bioseq::indexing::hash_major_minimizer_authorized_posting_range> ranges,
@@ -214,7 +214,7 @@ struct hash_major_memory_image {
         return true;
     }
 
-    /// Return the erased logical-stream sink bound to this image.
+    /// Return write callbacks for this in-memory index.
     [[nodiscard]] bioseq::indexing::hash_major_minimizer_logical_stream_sink_ref sink() {
         return {
             .context = this,
@@ -222,7 +222,7 @@ struct hash_major_memory_image {
         };
     }
 
-    /// Return the erased logical-stream source bound to this image.
+    /// Return read callbacks, with batch reads enabled by use_wave_callbacks.
     [[nodiscard]] bioseq::indexing::hash_major_minimizer_logical_stream_source_ref source() {
         return {
             .context = this,
@@ -244,7 +244,7 @@ struct hash_major_memory_image {
     }
 };
 
-/// Construct hash-major generation options for one target length.
+/// Set up a hash-major test generation with position width chosen for its length.
 [[nodiscard]] bioseq::indexing::hash_major_minimizer_generation_options
 hash_major_test_options(std::uint64_t target_length) {
     return bioseq::indexing::hash_major_minimizer_generation_options{
@@ -287,7 +287,7 @@ hash_major_expected(const bioseq::indexing::hash_major_minimizer_generation_opti
     };
 }
 
-/// Describe a canonical 32-bit hash query for one storage profile.
+/// Wrap 32-bit query hashes with their storage profile checksum.
 [[nodiscard]] bioseq::indexing::canonical_query_hash_view hash_major_query_view(
     std::span<const std::uint32_t> hashes,
     const bioseq::indexing::hash_major_minimizer_storage_profile& storage_profile) {
@@ -300,7 +300,7 @@ hash_major_expected(const bioseq::indexing::hash_major_minimizer_generation_opti
     };
 }
 
-/// Describe a canonical 64-bit hash query for one storage profile.
+/// Wrap 64-bit query hashes with their storage profile checksum.
 [[nodiscard]] bioseq::indexing::canonical_query_hash_view hash_major_query_view(
     std::span<const std::uint64_t> hashes,
     const bioseq::indexing::hash_major_minimizer_storage_profile& storage_profile) {
@@ -326,7 +326,7 @@ hash_major_expected(const bioseq::indexing::hash_major_minimizer_generation_opti
     return output;
 }
 
-/// Recompute a mutated hash-major control block checksum.
+/// Recompute a control block checksum after changing its bytes.
 void recompute_hash_major_control_crc(std::vector<std::byte>& bytes) {
     using bioseq::indexing::crc64_ecma182_accumulator;
     REQUIRE(bytes.size() >= bioseq::indexing::k_hash_major_minimizer_control_header_bytes);
@@ -337,7 +337,7 @@ void recompute_hash_major_control_crc(std::vector<std::byte>& bytes) {
     test_write_le<std::uint64_t>(std::span<std::byte>{bytes}, 48u, crc.checksum());
 }
 
-/// Own a small encoded hash-major image and its source pairs.
+/// An encoded test index, its metadata, and the pairs used to build it.
 struct hash_major_fixture {
     hash_major_memory_image image{};
     bioseq::indexing::hash_major_minimizer_generation_options options{};
@@ -446,9 +446,8 @@ TEST_CASE("hash-major exact wire codecs preserve the grouped-SoA layout",
     REQUIRE(decoded_head->manifest_address_bound_row_crc64 == 0x8fdbf93d04832856ULL);
     REQUIRE(decoded_head->head_crc64 == 0xdc5d0729f8d20fc8ULL);
 
-    // These are independent full-byte wire images, not values round-tripped
-    // through the implementation under test. They pin every reserved byte,
-    // descriptor ordinal, checksum field, and packed control tail.
+    // Compare every encoded byte with fixed expected images, including
+    // padding, checksums, and control records.
     REQUIRE(hash_major_hex(fixture.metadata.encoded_head) ==
             "42534551474836000600e000000000005b000000000000001100000000000000"
             "17000000000000009ee739aa80f743dc1ff3353ea504e3aaefcdab8967452301"

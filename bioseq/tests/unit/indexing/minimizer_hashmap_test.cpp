@@ -1,9 +1,8 @@
 /**
  * @file minimizer_hashmap_test.cpp
- * @brief Tests exact-SIMD and transient minimizer indexes.
+ * @brief Checks SIMD minimizer collection and in-memory hash indexes.
  *
- * The tests run inside `bioseq::simd::HWY_NAMESPACE` because they call the
- * selected minimizer collectors directly.
+ * Tests call minimizer collectors in the selected Highway SIMD namespace.
  */
 
 #include <hwy/highway.h>
@@ -39,7 +38,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.common.hashing; //  shared SHA-256
+import bioseq.common.hashing; 
 
 import bioseq.tests.support.indexing_storage_fakes;
 
@@ -53,7 +52,7 @@ using namespace minimizer_hashmap_test_support;
 
 namespace {
 
-/// Build a sorted hash-to-position map for an explicit query set.
+/// Look up each distinct query hash and sort its positions for comparison.
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
 lookup_map(const bioseq::indexing::minimizer_hashmap_fragment_index& idx,
            const std::vector<std::uint64_t>& kmers) {
@@ -185,7 +184,7 @@ TEST_CASE("exact_simd indexing bridge preserves DNA5 nt4 reset behavior and stat
 
     constexpr std::array<std::size_t, 5> n_positions{97, 1023, 2048, 3071, 4095};
     for (const std::size_t position : n_positions) {
-        data[position].assign_rank(3); // SeqAn dna5 N rank
+        data[position].assign_rank(3); // N in the SeqAn DNA5 alphabet.
     }
     dna5_range_t with_n_range(data);
     auto with_n_owner = bioseq::storage::make_resident_lazy_sequence(with_n_range);
@@ -223,8 +222,8 @@ TEST_CASE("exact_simd indexing bridge preserves DNA5 nt4 reset behavior and stat
 
 TEST_CASE("minimizer_hashmap_fragment_index build(vector) + lookup",
           "[component:bioseq][layer:unit][feature:index]") {
-    // Hand-built sketches; positions kept small so the 28-bit pos field of
-    // minimap_sketch_data{kmer,pos,strand} is never truncated.
+    // Keep these test positions within the sketch record
+    // position limit.
     std::vector<minimap_sketch_data> sketches{
         minimap_sketch_data{/*kmer*/ 100, /*pos*/ 5, /*strand*/ 0},
         minimap_sketch_data{/*kmer*/ 100, /*pos*/ 9, /*strand*/ 1},
@@ -238,7 +237,7 @@ TEST_CASE("minimizer_hashmap_fragment_index build(vector) + lookup",
 
     auto enc = [](std::uint64_t pos, std::uint64_t strand) { return (pos << 1) | strand; };
 
-    { // kmer 100 has three positions
+    { // Hash 100 has three positions.
         auto span = idx.lookup(100);
         std::vector<std::uint64_t> got(span.begin(), span.end());
         std::sort(got.begin(), got.end());
@@ -246,12 +245,12 @@ TEST_CASE("minimizer_hashmap_fragment_index build(vector) + lookup",
         std::sort(want.begin(), want.end());
         REQUIRE(got == want);
     }
-    { // kmer 7 single position
+    { // Hash 7 has one position.
         auto span = idx.lookup(7);
         REQUIRE(span.size() == 1u);
         REQUIRE(span[0] == enc(2, 0));
     }
-    { // kmer 42 single position
+    { // Hash 42 has one position.
         auto span = idx.lookup(42);
         REQUIRE(span.size() == 1u);
         REQUIRE(span[0] == enc(13, 1));
@@ -297,9 +296,8 @@ TEST_CASE("transient minimizer index preserves the 128-bit representation kmer d
     static_assert(
         std::is_same_v<decltype(std::declval<const wide_minimizer_type&>().kmer()), std::uint64_t>);
 
-    // The 128-bit representation's public kmer() word carries 56 significant
-    // bits beside its eight-bit span field.  Exercise values above uint32 so
-    // this test rejects any accidental narrowing of its radix key.
+    // Use hashes above 32 bits to catch narrowing during radix sorting.
+    // This record exposes 56 hash bits beside its eight-bit span.
     constexpr std::uint64_t low_key = 0x0000'0001'2345'6789ULL;
     constexpr std::uint64_t high_key = 0x00FE'DCBA'9876'5432ULL;
     std::vector<wide_minimizer_type> sketches{
@@ -353,9 +351,7 @@ TEST_CASE("transient minimizer index consumes source and releases storage",
     REQUIRE(idx.lookup(100).size() == 2u);
     REQUIRE(idx.lookup(7).size() == 1u);
     REQUIRE(idx.target_length() == 1000);
-    // This is the deliberately unchanged minimap_manifest half-reserve path, not the
-    // admitted one-shot full-table path exercised below.  Its allocator
-    // counters still have to report a self-consistent non-zero lifetime.
+    // Check allocation counters while the index owns its table.
     REQUIRE(idx.table_allocation_bytes() != 0u);
     REQUIRE(idx.table_peak_allocation_bytes() == idx.table_allocation_bytes());
 
@@ -405,8 +401,8 @@ TEST_CASE("one-shot transient minimizer index stays inside its retained permit",
     auto reserved = admission.try_reserve(build_permit_bytes);
     REQUIRE(reserved.has_value());
 
-    // Declaration order mirrors the pipeline caller: index storage dies before
-    // the permit can release on implicit unwind.
+    // Declare the index after the memory permit so its storage is freed
+    // before the reservation on stack unwinding.
     bioseq::parallelism::memory_permit permit = std::move(*reserved);
     bioseq::indexing::minimizer_hashmap_fragment_index index;
     index.build_consuming_full_table(std::move(sketches), /*target_length=*/count);
@@ -468,7 +464,7 @@ TEST_CASE("minimizer_hashmap_fragment_index serialize/deserialize round-trip",
     REQUIRE(round.positions.size() == idx.positions.size());
     REQUIRE(round.table_size() == idx.table_size());
 
-    // Per-kmer position sets must survive the wire round-trip exactly.
+    // Serialization must preserve the positions stored for every query hash.
     std::vector<std::uint64_t> kmers;
     for (const auto& m : sketches)
         kmers.push_back(m.kmer());
@@ -504,17 +500,16 @@ TEST_CASE("build_from_pairs equals build(vector) over equivalent pairs",
 
 TEST_CASE("assemble_segment over fragmented storage equals whole-sequence build",
           "[component:bioseq][layer:unit][feature:index]") {
-    // frag_units = 1024 -> frag_bp = 1024 * 32 = 32768; a ~40000 bp dna4
-    // sequence therefore spans 2 fragments (multi-fragment build path).
+    // The 40,000-base sequence crosses two 32,768-base fragments.
     constexpr std::size_t fragment_units = 1024;
-    constexpr std::size_t frag_bp = fragment_units * 32; // 32768
+    constexpr std::size_t frag_bp = fragment_units * 32; 
     using chunked = chunked_span_sequence_scanner<std::uint64_t, fragment_units>;
 
     auto data = make_dna4(40000, 0xABC123);
     range_t range(data);
     const auto total_bp = range.bp_size();
     const std::size_t nfrag = static_cast<std::size_t>((total_bp + frag_bp - 1) / frag_bp);
-    REQUIRE(nfrag >= 2u); // multi-fragment
+    REQUIRE(nfrag >= 2u); 
 
     fake_fragment_storage<> storage;
     lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
@@ -534,16 +529,14 @@ TEST_CASE("assemble_segment over fragmented storage equals whole-sequence build"
             total_bp,
             scratch);
 
-    // The whole-sequence baseline: a single minimizer_hashmap_fragment_index over
-    // every minimizer collected from the whole range.
+    // Build a reference index from a sketch of the whole sequence.
     auto whole = whole_sequence_minimizers(range, 10, 15);
     bioseq::indexing::minimizer_hashmap_fragment_index baseline;
     baseline.build(whole, total_bp);
 
     REQUIRE(assembled.target_length() == total_bp);
 
-    // dna4 (no N) => EXACT set equality of (kmer -> sorted positions). Build the
-    // union of kmers from both sides and compare their lookup maps.
+    // Compare positions for every hash in the whole-sequence sketch.
     std::vector<std::uint64_t> kmers;
     for (const auto& minimizer : whole)
         kmers.push_back(minimizer.kmer());
@@ -553,8 +546,8 @@ TEST_CASE("assemble_segment over fragmented storage equals whole-sequence build"
 TEST_CASE("exact_simd fragmented-index build preserves scalar segment lookups",
           "[component:bioseq][layer:unit][feature:index][resource:highway]") {
     constexpr std::size_t fragment_units = 2;
-    // fragment persistence owns fixed 32 KiBP logical fragments independently of
-    // the much smaller source-scanner fragments used to stress lazy reads.
+    // Stored index fragments cover 32,768 bases. The scanner reads much
+    // smaller pieces here to exercise loading across read boundaries.
     constexpr std::size_t frag_bp = 32'768u;
     using chunked = chunked_span_sequence_scanner<std::uint64_t, fragment_units>;
     using index_type = bioseq::indexing::minimizers_per_fragment_index<fake_fragment_storage<>>;

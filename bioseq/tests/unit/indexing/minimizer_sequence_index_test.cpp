@@ -1,9 +1,8 @@
 /**
  * @file minimizer_sequence_index_test.cpp
- * @brief Tests spill-backed minimizers-per-sequence generation and selective reads.
+ * @brief Checks sequence index builds with temporary sorted runs and reads of selected hashes.
  *
- * The tests run inside `bioseq::simd::HWY_NAMESPACE` because they call the
- * selected minimizer collectors directly.
+ * Tests call minimizer collectors in the selected Highway SIMD namespace.
  */
 
 #include <hwy/highway.h>
@@ -32,7 +31,7 @@ import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
-import bioseq.gpu.vulkan.runtime;   //   — hardware Vulkan skip guard
+import bioseq.gpu.vulkan.runtime;   // Check whether Vulkan hardware is available.
 import bioseq.gpu.vulkan.abi;
 
 import bioseq.tests.support.indexing_storage_fakes;
@@ -50,16 +49,16 @@ using bioseq::indexing::test::fake_fragment_storage;
 
 /// Packed DNA4 alphabet used by sequence-index fixtures.
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-/// Resident DNA4 range used by sequence-index fixtures.
+/// A sequence range packed into 64-bit DNA4 storage units.
 using range_t = compact_sequence_range<dna4_u64>;
 
-/// Return the fixed-target minimizer kernel table used by unit tests.
+/// Return minimizer kernels for the SIMD target selected by the test build.
 [[nodiscard]] const ::bioseq::minimizers::minimizer_kernels*
 fixed_minimizer_kernels() {
     return &::bioseq::simd_dispatch::highway_test_kernel_table().minimizers;
 }
 
-/// Resolve the fixed-target code for one packed alphabet.
+/// Find the alphabet code in the selected SIMD kernel table.
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint8_t fixed_alphabet_code() {
     const auto& table =
@@ -75,7 +74,7 @@ template <sequence_alphabet p_alphabet>
     return identity->alphabet_code;
 }
 
-/// Generate deterministic DNA4 symbols from a seeded linear recurrence.
+/// Generate repeatable DNA4 test data from a seed.
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t symbol_count,
                                                std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
     std::vector<seq::dna4> symbols(symbol_count);
@@ -89,7 +88,7 @@ template <sequence_alphabet p_alphabet>
     return symbols;
 }
 
-/// Collect whole-sequence minimizers for a resident range.
+/// Sketch the full sequence held in memory.
 template <class p_range>
 [[nodiscard]] std::vector<minimap_sketch_data>
 whole_sequence_minimizers(p_range& range, std::size_t window_size, std::size_t kmer_size) {
@@ -102,23 +101,18 @@ whole_sequence_minimizers(p_range& range, std::size_t window_size, std::size_t k
 /// Fake spill storage shared by sequence-index fixtures.
 using test_fragment_storage = fake_fragment_storage<>;
 
-/// Build a deterministic packed range aligned to complete storage units.
+/// Build repeatable test data that fills complete packed storage units.
 template <class p_config>
 [[nodiscard]] compact_sequence_range<p_config>
 make_deterministic_test_range(std::size_t symbol_count) {
-    // Draw ranks from the non-ambiguous letters only (ACGT, ranks
-    // 0..3) so persisted-index coverage checks focus on Vulkan routing and
-    // storage assembly rather than N-reset density. A letters_per_unit-multiple
-    // length also avoids scalar/GPU disagreement over trailing padding slots.
+    // Draw ranks from the first four alphabet symbols, or all symbols
+    // for smaller alphabets. DNA5 rank 3 is N.
     constexpr std::uint8_t k_non_ambiguous_rank_count =
         compact_sequence_range<p_config>::traits::alphabet_size < 4u
             ? static_cast<std::uint8_t>(compact_sequence_range<p_config>::traits::alphabet_size)
             : 4u;
-    // Round down to a whole number of storage units so the trailing unit has
-    // ZERO padding — otherwise the scalar unit-iterator sub-range over the final
-    // fragment processes the last unit's padding slots (decoded as A) as
-    // spurious minimizers that the GPU (which honours tail_padding) omits,
-    // breaking exact parity for dna5 (letters_per_unit=21 ∤ 8Mi).
+    // Round down to complete storage units so CPU and GPU comparisons
+    // do not depend on how the final unit padding is handled.
     constexpr std::size_t k_letters_per_unit =
         compact_sequence_range<p_config>::traits::letters_per_unit;
     symbol_count -= symbol_count % k_letters_per_unit;
@@ -133,7 +127,7 @@ make_deterministic_test_range(std::size_t symbol_count) {
     return compact_sequence_range<p_config>(std::move(letters));
 }
 
-/// Collect the fixed whole-target query minimizers for a packed range.
+/// Sketch the full target with the test window and k-mer sizes.
 template <class p_config>
 [[nodiscard]] std::vector<minimap_sketch_data>
 make_deterministic_query_minimizers(compact_sequence_range<p_config>& range) {
@@ -143,7 +137,7 @@ make_deterministic_query_minimizers(compact_sequence_range<p_config>& range) {
     return collector.extract_sketches_data();
 }
 
-/// Build a sorted and deduplicated lookup map for explicit hashes.
+/// Look up each distinct hash and sort its unique positions.
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
 lookup_map(const bioseq::indexing::minimizer_hashmap_fragment_index& idx,
            const std::vector<std::uint64_t>& kmers) {
@@ -159,7 +153,7 @@ lookup_map(const bioseq::indexing::minimizer_hashmap_fragment_index& idx,
     return out;
 }
 
-/// Build the whole-sequence lookup oracle under the query occurrence cap.
+/// Build expected query results from the whole-sequence sketch, applying max_occ.
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
 baseline_for_query(const std::vector<minimap_sketch_data>& whole,
                    const std::vector<std::uint64_t>& query_kmers,
@@ -175,7 +169,7 @@ baseline_for_query(const std::vector<minimap_sketch_data>& whole,
         if (out.count(kmer)) continue;
         auto it = per_kmer.find(kmer);
         std::vector<std::uint64_t> v = (it == per_kmer.end()) ? std::vector<std::uint64_t>{} : it->second;
-        if (v.size() > max_occ) v.clear();   // over-frequent kmer dropped
+        if (v.size() > max_occ) v.clear();   
         out.emplace(kmer, std::move(v));
     }
     return out;
@@ -219,7 +213,8 @@ void require_lookup_maps_cover_scalar(
     }
 }
 
-/// Require scalar coverage while classifying allowed tile-boundary additions.
+/// Check scalar positions are present and bound the total number of extra
+/// positions using the GPU tile count.
 void require_lookup_maps_cover_scalar_with_tile_extras(
         const std::map<std::uint64_t, std::vector<std::uint64_t>>& actual,
         const std::map<std::uint64_t, std::vector<std::uint64_t>>& expected,
@@ -406,7 +401,7 @@ TEST_CASE("assemble_for_query equals whole-sequence build restricted to query km
 
     fake_fragment_storage<> storage;
     fake_fragment_storage<> exact_storage;
-    storage.run_buffer_bytes_ = 4096;   // TINY -> forces multiple spilled runs
+    storage.run_buffer_bytes_ = 4096;   // Force several temporary sorted runs.
     exact_storage.run_buffer_bytes_ = 4096;
     {
         lazy_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
@@ -429,10 +424,10 @@ TEST_CASE("assemble_for_query equals whole-sequence build restricted to query km
                 nullptr,
                 fixed_alphabet_code<::seq::dna4>());
     }
-    REQUIRE(storage.runs_.empty());   // build() calls release_runs() at the end
+    REQUIRE(storage.runs_.empty());   // The build releases its temporary runs.
     REQUIRE(exact_storage.runs_.empty());
 
-    // Query = the whole sequence's own minimizers; max_occ wide-open.
+    // Query the target with its own minimizers and a cap above all counts.
     auto query = whole_sequence_minimizers(range, 10, 15);
     bioseq::indexing::minimizer_assembly_scratch scratch;
     auto idx = bioseq::indexing::direct_minimizer_bucket_index<fake_fragment_storage<>>::assemble_for_query(
@@ -594,7 +589,7 @@ TEST_CASE("exact_simd per-sequence collection accepts fragmented DNA5 with N res
         data[index].assign_rank(acgt_ranks[(index * 3u + index / 7u) % 4u]);
     }
     for (const std::size_t position : {41u, 42u, 43u, 127u, 211u}) {
-        data[position].assign_rank(3); // SeqAn dna5 N rank
+        data[position].assign_rank(3); // N in the SeqAn DNA5 alphabet.
     }
     dna5_range range(data);
     lazy_sequence<dna5_u64, chunked> lazy{
@@ -640,7 +635,7 @@ TEST_CASE("assemble_for_query drops an over-frequent kmer under a tiny max_occ",
 
     auto query = whole_sequence_minimizers(range, 10, 15);
 
-    // Find a kmer whose global DEDUPED count is > 1 (an over-frequent kmer).
+    // Find a hash with at least two distinct stored positions.
     std::map<std::uint64_t, std::vector<std::uint64_t>> per_kmer;
     for (const auto& m : query) per_kmer[m.kmer()].push_back(m.pos_strand_encoded());
     std::uint64_t over_freq_kmer = 0;
@@ -650,17 +645,17 @@ TEST_CASE("assemble_for_query drops an over-frequent kmer under a tiny max_occ",
         v.erase(std::unique(v.begin(), v.end()), v.end());
         if (v.size() > 1) { over_freq_kmer = kmer; found = true; break; }
     }
-    REQUIRE(found);   // a 40 kbp random dna4 sequence has repeated minimizers
+    REQUIRE(found);   // This fixture must contain a repeated minimizer.
 
     bioseq::indexing::minimizer_assembly_scratch scratch;
     auto idx = bioseq::indexing::direct_minimizer_bucket_index<fake_fragment_storage<>>::assemble_for_query(
         storage, std::span<const minimap_sketch_data>(query), total_bp, /*max_occ*/ 1, scratch);
 
-    // Under max_occ=1 the over-frequent kmer is dropped entirely.
+    // A cap of one excludes every position for this repeated hash.
     REQUIRE(idx.lookup(over_freq_kmer).empty());
 }
 
-// Both persisted minimizer index layouts built with Vulkan must cover scalar lookups.
+// Both Vulkan index layouts must include all scalar reference positions.
 TEST_CASE("persisted minimizer indexes built with Vulkan cover scalar lookups",
           "[component:bioseq][layer:unit][feature:index][resource:gpu]") {
     if (!bioseq::gpu::vulkan::hardware_device_available(
@@ -678,8 +673,8 @@ TEST_CASE("persisted minimizer indexes built with Vulkan cover scalar lookups",
             storage_unit,
             bioseq::storage::default_fragment_storage_units>;
     using lazy_t = lazy_sequence<config_t, scanner_t>;
-    // The fragment index owns canonical 32 KiBP logical fragments; scanner chunk
-    // width is an input-access detail and must not drive assembly geometry.
+    // Assemble stored fragments using their 32,768-base size. Scanner
+    // read sizes are independent of these fragment boundaries.
     constexpr std::size_t frag_bp = 32'768u;
 
     cfg_range_t target = make_deterministic_test_range<config_t>(8u << 20);
