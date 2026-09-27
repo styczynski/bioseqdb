@@ -40,18 +40,18 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
-import bioseq.common.seqan_adapter;              
+import bioseq.common.seqan_adapter;
 import bioseq.postgres.storage.manager;     // Fragment reader caches.
-import bioseq.storage.scanner;              
+import bioseq.storage.scanner;
 import bioseq.storage.lazy_sequence;        // Lazy sequence source types and test counters.
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.physical;
-import bioseq.storage.size;        
-import bioseq.postgres.storage.metadata;    
-import bioseq.sequences;           
+import bioseq.storage.size;
+import bioseq.postgres.storage.metadata;
+import bioseq.sequences;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.table.io;            
+import bioseq.postgres.table.io;
 import bioseq.parallelism.pool;
 
 export namespace bioseq::storage {

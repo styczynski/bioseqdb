@@ -35,18 +35,18 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
-import bioseq.common.seqan_adapter;     
-import bioseq.postgres.storage.manager; 
+import bioseq.common.seqan_adapter;
+import bioseq.postgres.storage.manager;
 import bioseq.storage.scanner;          // Sequence source callbacks and read sessions.
 import bioseq.storage.lazy_sequence;    // Source-backed sequence types.
 import bioseq.storage.coordinates;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.physical;
-import bioseq.storage.size;              
-import bioseq.postgres.storage.metadata; 
+import bioseq.storage.size;
+import bioseq.postgres.storage.metadata;
 import bioseq.sequences;                 // Packed sequence types and alphabet traits.
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.table.io; 
+import bioseq.postgres.table.io;
 import bioseq.parallelism.pool;
 import bioseq.postgres.storage.scanner.fragment_scanner;
 import :source_registry;
