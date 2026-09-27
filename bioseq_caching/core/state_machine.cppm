@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/state_machine.cppm
- * @brief Single normative cache-generation transition graph and counters.
+ * @brief Allowed cache states and the reader and waiter counts that control eviction.
  */
 module;
 
@@ -36,7 +36,7 @@ inline constexpr std::array<state_transition, 11> k_legal_state_transitions{{
     {cache_entry_state::evicting, cache_entry_state::absent},
 }};
 
-/** Return whether one explicit state transition belongs to the graph. */
+/** Check whether the cache allows this state change. */
 [[nodiscard]] constexpr bool legal_state_transition(cache_entry_state from,
                                                     cache_entry_state to) noexcept {
     for (const state_transition transition : k_legal_state_transitions) {
@@ -47,10 +47,10 @@ inline constexpr std::array<state_transition, 11> k_legal_state_transitions{{
     return false;
 }
 
-/** Pure production/test model enforcing generation identity, pins, and waits. */
+/** Tracks one cache generation, its state and its reader and waiter references. */
 class generation_state_machine {
   public:
-    /** Claim an absent slot with a nonzero ABA generation and claim sequence. */
+    /** Reserve an empty slot using nonzero generation and claim identifiers. */
     [[nodiscard]] bool claim(std::uint64_t generation, std::uint64_t claim_sequence) noexcept {
         if (state_ != cache_entry_state::absent || generation == 0 || claim_sequence == 0) {
             return false;
@@ -61,21 +61,21 @@ class generation_state_machine {
         return transition(cache_entry_state::claimed);
     }
 
-    /** Move the matching initialized producer from CLAIMED to BUILDING. */
+    /** Mark the matching claim as building. */
     [[nodiscard]] bool begin_build(std::uint64_t generation,
                                    std::uint64_t claim_sequence) noexcept {
         return identity_matches(generation, claim_sequence) &&
                transition(cache_entry_state::building);
     }
 
-    /** Publish a fully sealed matching generation. */
+    /** Mark the matching building generation as complete. */
     [[nodiscard]] bool publish_complete(std::uint64_t generation,
                                         std::uint64_t claim_sequence) noexcept {
         return identity_matches(generation, claim_sequence) &&
                transition(cache_entry_state::complete);
     }
 
-    /** Publish a bounded failure for a matching in-flight generation. */
+    /** Record why the matching claim or build failed. */
     [[nodiscard]] bool
     publish_failed(std::uint64_t generation,
                    std::uint64_t claim_sequence,
@@ -88,13 +88,13 @@ class generation_state_machine {
         return true;
     }
 
-    /** Invalidate a matching complete/building generation. */
+    /** Invalidate the matching generation while it is building or complete. */
     [[nodiscard]] bool invalidate(std::uint64_t generation, std::uint64_t claim_sequence) noexcept {
         return identity_matches(generation, claim_sequence) &&
                transition(cache_entry_state::invalidated);
     }
 
-    /** Register one reader pin unless eviction/absence has begun. */
+    /** Pin a matching complete generation for one reader, unless the count is full. */
     [[nodiscard]] bool pin_reader(std::uint64_t generation, std::uint64_t claim_sequence) noexcept {
         if (!identity_matches(generation, claim_sequence) ||
             state_ != cache_entry_state::complete ||
@@ -115,7 +115,7 @@ class generation_state_machine {
         return true;
     }
 
-    /** Register one waiter reference on CLAIMED or BUILDING. */
+    /** Register a waiter while the matching generation is claimed or building. */
     [[nodiscard]] bool register_waiter(std::uint64_t generation,
                                        std::uint64_t claim_sequence) noexcept {
         if (!identity_matches(generation, claim_sequence) ||
@@ -137,7 +137,7 @@ class generation_state_machine {
         return true;
     }
 
-    /** Atomically model waiter-to-reader conversion after full validation. */
+    /** Replace one waiter reference with a reader pin once the matching generation completes. */
     [[nodiscard]] bool convert_waiter_to_reader(std::uint64_t generation,
                                                 std::uint64_t claim_sequence) noexcept {
         if (!identity_matches(generation, claim_sequence) ||
@@ -150,7 +150,7 @@ class generation_state_machine {
         return true;
     }
 
-    /** Begin physical eviction only after every reference drains. */
+    /** Start evicting a complete, failed or invalidated generation after all references are released. */
     [[nodiscard]] bool begin_evict(std::uint64_t generation,
                                    std::uint64_t claim_sequence) noexcept {
         if (!identity_matches(generation, claim_sequence) || reader_pins_ != 0 ||
@@ -160,7 +160,7 @@ class generation_state_machine {
         return transition(cache_entry_state::evicting);
     }
 
-    /** Finish eviction and clear the slot while preserving ABA monotonicity externally. */
+    /** Clear the matching slot after eviction. The caller assigns the next generation identifier. */
     [[nodiscard]] bool finish_evict(std::uint64_t generation,
                                     std::uint64_t claim_sequence) noexcept {
         if (!identity_matches(generation, claim_sequence) ||
@@ -198,13 +198,13 @@ class generation_state_machine {
     }
 
   private:
-    /** Match both ABA components required for producer/waiter operations. */
+    /** Check both identifiers so an old claim cannot act on a replacement generation. */
     [[nodiscard]] bool identity_matches(std::uint64_t generation,
                                         std::uint64_t claim_sequence) const noexcept {
         return generation_ == generation && claim_sequence_ == claim_sequence;
     }
 
-    /** Apply a transition only through the one normative graph. */
+    /** Change state only when the transition is allowed. */
     [[nodiscard]] bool transition(cache_entry_state destination) noexcept {
         if (!legal_state_transition(state_, destination)) {
             return false;
@@ -221,7 +221,10 @@ class generation_state_machine {
     std::uint32_t waiter_references_ = 0;
 };
 
-/** Return true only for the strictly descending claim-sequence wait DAG. */
+/**
+ * Allow waiting on a nonzero claim only if every owned claim is newer.
+ * Descending claim numbers prevent cycles between waiting producers.
+ */
 [[nodiscard]] inline bool
 claim_sequence_wait_allowed(std::uint64_t target_claim_sequence,
                             std::span<const std::uint64_t> owned_claim_sequences) noexcept {
@@ -236,7 +239,7 @@ claim_sequence_wait_allowed(std::uint64_t target_claim_sequence,
     return true;
 }
 
-/** Identify transient failures for which one new generation may take over. */
+/** Allow a replacement producer after cancellation or producer exit. */
 [[nodiscard]] constexpr bool failure_allows_takeover(cache_failure_code failure) noexcept {
     return failure == cache_failure_code::producer_cancelled ||
            failure == cache_failure_code::producer_exited;

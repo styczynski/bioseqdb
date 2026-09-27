@@ -1,11 +1,11 @@
 /**
  * @file bioseq_caching/core/reusable_registry.cppm
- * @brief Offset-backed unified exact-result and reusable-coverage registry.
+ * @brief Shared registry for exact query results and reusable cached sources.
  *
- * The region contains no process pointer, PostgreSQL Node, Datum, or lock.
- * A PostgreSQL adapter allocates the exact byte count during preload and owns
- * the membership/directory locks.  Tests can attach the same engine to an
- * aligned byte vector and supply no-op partition callbacks.
+ * The PostgreSQL adapter allocates the region at server startup and
+ * provides its locks. Shared records use offsets instead of process
+ * pointers. Tests can use an aligned byte buffer and callbacks that
+ * leave locking to the test.
  */
 module;
 
@@ -47,7 +47,7 @@ inline constexpr std::uint32_t k_reusable_producer_plan_capacity = 4U << 20;
 inline constexpr std::uint32_t k_invalid_reusable_registry_slot =
     (std::numeric_limits<std::uint32_t>::max)();
 
-/** Every failure is fail-open to ordinary provider execution. */
+/** Registry errors that let the adapter fall back to normal query execution. */
 enum class reusable_registry_error : std::uint32_t {
     none = 0,
     invalid_argument,
@@ -76,7 +76,7 @@ enum class reusable_registry_error : std::uint32_t {
     no_reclaimable_generation,
 };
 
-/** Fixed postmaster configuration normalized before shmem is requested. */
+/** Registry capacities fixed at server startup, before shared memory is allocated. */
 struct reusable_registry_config {
     std::uint32_t max_generations = k_default_reusable_registry_generations;
     std::uint32_t exact_directory_capacity = 0;
@@ -86,7 +86,7 @@ struct reusable_registry_config {
     std::uint32_t reserved = 0;
 };
 
-/** Exact offsets returned before PostgreSQL's RequestAddinShmemSpace call. */
+/** Byte offsets and total size used to allocate the registry's shared region. */
 struct reusable_registry_layout {
     std::uint32_t total_bytes = 0;
     std::uint32_t exact_directory_offset = 0;
@@ -98,7 +98,7 @@ struct reusable_registry_layout {
     std::uint32_t reserved = 0;
 };
 
-/** Adapter-facing resource request, including caller-owned named locks. */
+/** Shared-memory layout and lock counts requested from the PostgreSQL adapter. */
 struct reusable_registry_preload_request {
     reusable_registry_config config{};
     reusable_registry_layout layout{};
@@ -108,7 +108,7 @@ struct reusable_registry_preload_request {
     std::uint32_t reserved = 0;
 };
 
-/** Explicit security namespace precedes the bounded 64-member budget. */
+/** Separates cache entries by database, user and security settings before applying the per-domain entry limit. */
 struct reusable_security_namespace {
     std::uint32_t database_oid = 0;
     std::uint32_t current_role_oid = 0;
@@ -121,21 +121,17 @@ struct reusable_security_namespace {
     [[nodiscard]] bool operator==(const reusable_security_namespace&) const noexcept = default;
 };
 
-/** Explicit provider-independent namespace value; it is still serialized. */
+/** Security digest used when no provider-specific security state contributes to the key. */
 inline constexpr cache_digest_256 k_provider_independent_security_digest{};
 
-/**
- * Validate every fixed security field before hashing or directory access.
- * OID zero and a non-Boolean row-security value are invalid sentinels.
- */
+/** Checks that database and role IDs are set, row security is Boolean, and the reserved field is zero. */
 [[nodiscard]] constexpr bool
 valid_reusable_security_namespace(const reusable_security_namespace& value) noexcept {
     return value.database_oid != 0 && value.current_role_oid != 0 && value.session_user_oid != 0 &&
            (value.row_security_mode == 0 || value.row_security_mode == 1) && value.reserved == 0;
 }
 
-/** Fixed coverage-directory key; digest collisions still compare domain bytes.
- */
+/** Identifies a reusable domain by security settings and digest. Lookup also compares the full domain key. */
 struct reusable_coverage_directory_key {
     reusable_security_namespace security_namespace{};
     cache_digest_256 coverage_domain_digest{};
@@ -143,7 +139,7 @@ struct reusable_coverage_directory_key {
     [[nodiscard]] bool operator==(const reusable_coverage_directory_key&) const noexcept = default;
 };
 
-/** Stable POD mirror of storage::manifest_handle. */
+/** Storage manifest identity copied into the registry without a storage-module dependency. */
 struct reusable_manifest_handle {
     std::uint32_t slot = k_invalid_reusable_registry_slot;
     std::uint32_t reserved = 0;
@@ -158,7 +154,7 @@ struct reusable_manifest_handle {
     }
 };
 
-/** Liveness identity copied from PostgreSQL fixed-width scalar fields. */
+/** Backend identity used to check whether a cache producer is still running. */
 struct reusable_producer_identity {
     std::uint32_t proc_number = k_invalid_reusable_registry_slot;
     std::int32_t pid = 0;
@@ -173,17 +169,17 @@ struct reusable_producer_identity {
     [[nodiscard]] bool operator==(const reusable_producer_identity&) const noexcept = default;
 };
 
-/** Whether bounded producer-plan text is absent, planned, or instrumented. */
+/** Indicates whether producer-plan text is missing, planned, or includes execution measurements. */
 enum class reusable_plan_snapshot_status : std::uint8_t {
     unavailable = 0,
     planned = 1,
     analyzed = 2,
 };
 
-/** Generic backend identity used by every waiter/planner/reader reference. */
+/** Backend identity shared by waiter, planner and reader references. */
 using reusable_reference_owner = reusable_producer_identity;
 
-/** Region-relative immutable bytes. Offset zero is always invalid. */
+/** Byte range measured from the start of the shared region. Zero offsets are invalid. */
 struct reusable_shared_byte_range {
     std::uint32_t offset = 0;
     std::uint32_t length = 0;
@@ -193,7 +189,7 @@ struct reusable_shared_byte_range {
     }
 };
 
-/** Result-semantic and cache-matching facts retained with every generation. */
+/** Provider, schema and dependency information saved with a cached generation, plus its size and expiry policy. */
 struct reusable_generation_metadata {
     std::uint32_t provider_id = 0;
     std::uint32_t provider_abi_revision = 0;
@@ -215,10 +211,10 @@ struct reusable_generation_metadata {
 };
 
 /**
- * One conservative capability retained outside the logical plan vector.
- * It never contributes to metadata.dependency_count or the plan envelope.
- * The completion count is an in-flight/publication guard only; COMPLETE hits
- * validate the retained dependency entry against a fresh snapshot handshake.
+ * Adds a database-wide dependency check alongside the plan's individual
+ * dependencies. It is counted separately from the plan dependency list.
+ * The completion counter detects writes during production. A completed
+ * cache hit checks the saved dependency against the consumer's snapshot.
  */
 struct reusable_conservative_guard {
     dependency_vector_entry dependency{};
@@ -239,7 +235,7 @@ struct reusable_conservative_guard {
     [[nodiscard]] bool operator==(const reusable_conservative_guard&) const noexcept = default;
 };
 
-/** ABA-safe public identity; callers never persist a region address. */
+/** Identifies a cache generation by slot and sequence, letting lookups reject references to an earlier use of the slot. */
 struct reusable_generation_reference {
     cache_entry_id id{};
     std::uint32_t generation_slot = k_invalid_reusable_registry_slot;
@@ -254,7 +250,7 @@ struct reusable_generation_reference {
     }
 };
 
-/** Producer-owned diagnostic text update; neither field participates in identity. */
+/** SQL and plan text supplied by the producer for diagnostics. The text does not affect cache identity. */
 struct reusable_diagnostic_text_update {
     reusable_generation_reference reference{};
     reusable_producer_identity producer{};
@@ -270,7 +266,7 @@ struct reusable_diagnostic_text_update {
     std::array<std::uint8_t, 3> reserved{};
 };
 
-/** Metadata returned before caller-owned buffers receive authorized text. */
+/** Text lengths, plan statuses and truncation flags returned when copying diagnostics. */
 struct reusable_diagnostic_text_copy {
     reusable_plan_snapshot_status canonical_plan_status =
         reusable_plan_snapshot_status::unavailable;
@@ -291,7 +287,7 @@ enum class reusable_reference_kind : std::uint8_t {
     reader_pin = 3,
 };
 
-/** One fixed shared owner record; sequence prevents slot reuse ABA. */
+/** Records a reference owner in shared memory. Its sequence distinguishes successive uses of the same slot. */
 struct reusable_shared_reference_owner {
     reusable_reference_owner owner{};
     std::uint64_t owner_sequence = 0;
@@ -300,7 +296,7 @@ struct reusable_shared_reference_owner {
     std::array<std::uint8_t, 6> reserved{};
 };
 
-/** Backend-local ownership token; release clears active before mutation. */
+/** Backend-local token identifying one owned waiter, planner or reader reference. */
 struct reusable_reference_token {
     reusable_generation_reference reference{};
     reusable_reference_owner owner{};
@@ -313,7 +309,7 @@ struct reusable_reference_token {
     [[nodiscard]] bool operator==(const reusable_reference_token&) const noexcept = default;
 };
 
-/** Bounded lock-stable copy of every waiter attached to one generation. */
+/** Snapshot of the waiters attached to one cache generation. */
 struct reusable_waiter_owner_batch {
     std::array<reusable_reference_token, k_reusable_reference_owners_per_generation> waiters{};
     reusable_registry_error error = reusable_registry_error::none;
@@ -325,10 +321,9 @@ struct reusable_waiter_owner_batch {
 };
 
 /**
- * One lock-stable liveness subject copied before PostgreSQL probes ProcArray.
- * Producer observations carry a generation ABA reference and full owner
- * identity. Reference observations additionally carry the exact shared owner
- * token, including its slot and monotonically assigned sequence.
+ * Saves a producer or reference owner for a liveness check after
+ * registry locks are released. The generation and owner sequences let
+ * cleanup detect a slot that has since been reused.
  */
 struct reusable_janitor_owner_observation {
     reusable_generation_reference reference{};
@@ -338,7 +333,7 @@ struct reusable_janitor_owner_observation {
     bool producer = false;
     std::array<std::uint8_t, 6> reserved{};
 
-    /** Reject malformed, partial, and unknown-kind observations. */
+    /** Checks that the observation contains a complete producer identity or reference token of a recognized kind. */
     [[nodiscard]] bool valid() const noexcept {
         const bool known_kind = entry_kind == cache_entry_kind::exact_final_result ||
                                 entry_kind == cache_entry_kind::reusable_coverage;
@@ -378,7 +373,7 @@ enum class reusable_record_membership : std::uint32_t {
     retired = 2,
 };
 
-/** Dependency-reference ownership state for one unified generation. */
+/** Tracks whether a cache generation still owns dependency references or has begun releasing them. */
 enum class reusable_dependency_release_state : std::uint8_t {
     none = 0,
     retained = 1,
@@ -387,7 +382,7 @@ enum class reusable_dependency_release_state : std::uint8_t {
     released = 4,
 };
 
-/** Open-addressed exact digest bucket; full generation bytes prove equality. */
+/** Hash-table bucket for generations with the same digest. Full key bytes distinguish hash collisions. */
 struct reusable_exact_bucket {
     directory_slot_state slot_state = directory_slot_state::empty;
     std::uint32_t reserved = 0;
@@ -398,7 +393,7 @@ struct reusable_exact_bucket {
     std::uint32_t reserved2 = 0;
 };
 
-/** Open-addressed domain bucket with the explicit security namespace. */
+/** Hash-table bucket for a reusable domain and its security identity. */
 struct reusable_coverage_bucket {
     directory_slot_state slot_state = directory_slot_state::empty;
     std::uint32_t reserved = 0;
@@ -409,13 +404,13 @@ struct reusable_coverage_bucket {
     std::uint32_t reserved2 = 0;
 };
 
-/** One free byte-arena extent, always sorted and coalesced. */
+/** Free byte range in the registry arena. The allocator keeps these ranges sorted and merges neighbors. */
 struct reusable_free_extent {
     std::uint32_t offset = 0;
     std::uint32_t length = 0;
 };
 
-/** Fixed-width shared record; all variable data are region-relative ranges. */
+/** Shared cache-generation record. Variable-length data are stored as offsets and lengths within the region. */
 struct reusable_shared_generation {
     reusable_record_membership membership = reusable_record_membership::free;
     cache_entry_kind entry_kind = cache_entry_kind::reusable_coverage;
@@ -465,7 +460,7 @@ struct reusable_shared_generation {
     reusable_shared_byte_range producer_plan{};
 };
 
-/** Header occupies offset zero; every other structure is layout-addressed. */
+/** Header at the start of the region, with offsets to the other shared structures. */
 struct reusable_registry_header {
     std::uint32_t magic = 0;
     std::uint32_t abi_revision = 0;
@@ -491,7 +486,7 @@ struct reusable_registry_header {
     std::uint32_t invalidations = 0;
 };
 
-/** Process-local view of a validated region; this pointer is never shared. */
+/** Process-local view of the shared registry bytes. */
 struct reusable_registry_attachment {
     std::span<std::byte> region{};
 
@@ -500,7 +495,7 @@ struct reusable_registry_attachment {
     }
 };
 
-/** Adapter callbacks enforce membership -> exact -> coverage lock order. */
+/** Callbacks for exact-result and coverage partition locks. The caller acquires the membership lock first. */
 struct reusable_registry_partition_callbacks {
     void* context = nullptr;
     void (*acquire_exact)(void*, std::uint32_t) noexcept = nullptr;
@@ -679,13 +674,13 @@ free_extents(const reusable_registry_attachment& attachment) noexcept {
            state == cache_entry_state::invalidated;
 }
 
-/** Accept only the two wire-stable cache products served by this registry. */
+/** Recognizes exact-result and reusable-coverage entries. */
 [[nodiscard]] constexpr bool known_entry_kind(cache_entry_kind kind) noexcept {
     return kind == cache_entry_kind::exact_final_result ||
            kind == cache_entry_kind::reusable_coverage;
 }
 
-/** Only reusable coverage participates in candidate-domain discovery. */
+/** Reports whether an entry belongs in the reusable-domain directory. */
 [[nodiscard]] constexpr bool has_coverage_membership(cache_entry_kind kind) noexcept {
     return kind == cache_entry_kind::reusable_coverage;
 }
@@ -730,7 +725,7 @@ inline void release_coverage(const reusable_registry_partition_callbacks& callba
 
 } // namespace reusable_registry_detail
 
-/** Compute and normalize the exact shared-memory request. */
+/** Calculates the shared-memory and lock requirements, filling in default directory capacities. */
 [[nodiscard]] inline std::expected<reusable_registry_preload_request, reusable_registry_error>
 make_reusable_registry_preload_request(reusable_registry_config requested = {}) noexcept {
     using namespace reusable_registry_detail;
@@ -810,7 +805,7 @@ make_reusable_registry_preload_request(reusable_registry_config requested = {}) 
     };
 }
 
-/** Validate layout metadata without traversing mutable directory membership. */
+/** Checks the shared header and layout before accessing directory records. */
 [[nodiscard]] inline reusable_registry_error
 validate_reusable_registry_attachment(const reusable_registry_attachment& attachment) noexcept {
     if (attachment.region.size() < sizeof(reusable_registry_header)) {
@@ -848,7 +843,7 @@ validate_reusable_registry_attachment(const reusable_registry_attachment& attach
     return reusable_registry_error::none;
 }
 
-/** Attach one process-local view to an already initialized region. */
+/** Validates an initialized region and returns this process's view of its registry bytes. */
 [[nodiscard]] inline std::expected<reusable_registry_attachment, reusable_registry_error>
 attach_reusable_registry(std::span<std::byte> region) noexcept {
     reusable_registry_attachment attachment{.region = region};
@@ -861,7 +856,7 @@ attach_reusable_registry(std::span<std::byte> region) noexcept {
     return attachment;
 }
 
-/** Initialize a new region or validate an existing startup-hook allocation. */
+/** Initializes a new registry region or attaches to an existing one with matching startup settings. */
 [[nodiscard]] inline std::expected<reusable_registry_attachment, reusable_registry_error>
 startup_reusable_registry(std::span<std::byte> region,
                           std::uint64_t boot_nonce,
@@ -935,7 +930,7 @@ startup_reusable_registry(std::span<std::byte> region,
     return attachment;
 }
 
-/** Return the exact-directory partition selected by a SHA-256 digest. */
+/** Returns the exact-result partition selected by the cache-key digest. */
 [[nodiscard]] inline std::uint32_t
 reusable_exact_partition(const reusable_registry_attachment& attachment,
                          const cache_digest_256& digest) noexcept {
@@ -944,8 +939,7 @@ reusable_exact_partition(const reusable_registry_attachment& attachment,
         (reusable_registry_detail::header(attachment).config.partition_count - 1U));
 }
 
-/** Return the coverage partition after hashing every explicit namespace field.
- */
+/** Returns the coverage partition selected by the domain digest and security identity. */
 [[nodiscard]] inline std::uint32_t
 reusable_coverage_partition(const reusable_registry_attachment& attachment,
                             const reusable_coverage_directory_key& key) noexcept {
@@ -954,8 +948,7 @@ reusable_coverage_partition(const reusable_registry_attachment& attachment,
         (reusable_registry_detail::header(attachment).config.partition_count - 1U));
 }
 
-/** Borrow immutable shared bytes only while the corresponding reference lives.
- */
+/** Returns a view of shared bytes. The caller must hold the corresponding reference while using them. */
 [[nodiscard]] inline std::span<const std::byte>
 reusable_shared_bytes(const reusable_registry_attachment& attachment,
                       reusable_shared_byte_range range) noexcept {
@@ -968,7 +961,7 @@ reusable_shared_bytes(const reusable_registry_attachment& attachment,
     };
 }
 
-/** Immutable request copied into a newly claimed unified generation. */
+/** Inputs for finding an existing result or claiming a new cache generation. */
 struct reusable_claim_request {
     cache_entry_kind entry_kind = cache_entry_kind::reusable_coverage;
     reusable_coverage_directory_key coverage_directory_key{};
@@ -1010,9 +1003,10 @@ struct reusable_claim_result {
 };
 
 /**
- * ABA token for one lock-dropped dependency-release attempt. The copied
- * envelope is bound by its byte count and payload checksum. `first_reference`
- * is an ordinal across plan entries followed by the optional guard.
+ * Identifies one attempt to release a retired generation's dependency
+ * references after registry locks are dropped. The byte count and
+ * checksum identify the copied dependency data. first_reference skips
+ * references already released, with the database-wide dependency last.
  */
 struct reusable_dependency_release_ticket {
     reusable_generation_reference reference{};
@@ -1040,7 +1034,7 @@ struct reusable_dependency_release_ticket {
     operator==(const reusable_dependency_release_ticket&) const noexcept = default;
 };
 
-/** Result of copying and claiming one retired generation's release work. */
+/** Reports whether dependency-release work was claimed and how many bytes were copied or required. */
 struct reusable_dependency_release_preparation {
     reusable_registry_error error = reusable_registry_error::none;
     reusable_dependency_release_ticket ticket{};
@@ -1059,7 +1053,7 @@ enum class reusable_lookup_mode : std::uint8_t {
     pin_complete = 2,
 };
 
-/** Fixed snapshot returned without exposing the shared record address. */
+/** Copy of a cache generation's state, using byte offsets for shared data. */
 struct reusable_generation_snapshot {
     reusable_generation_reference reference{};
     cache_entry_kind entry_kind = cache_entry_kind::reusable_coverage;
@@ -1094,7 +1088,7 @@ struct reusable_lookup_result {
     }
 };
 
-/** Coverage lookup input; schema mapping remains a provider callback. */
+/** Describes the cached domain and provider features needed by a query. Column mapping is checked separately by the provider. */
 struct reusable_candidate_request {
     reusable_coverage_directory_key coverage_directory_key{};
     std::span<const std::byte> canonical_domain_key{};
@@ -1105,8 +1099,7 @@ struct reusable_candidate_request {
     std::uint64_t required_capability_mask = 0;
 };
 
-/** One planner-pinned candidate suitable for existing select_candidates input.
- */
+/** Candidate cache generation with a planner reference that must be released after use. */
 struct reusable_candidate_snapshot {
     reusable_generation_snapshot generation{};
     reusable_reference_token planner_pin{};
@@ -1125,8 +1118,7 @@ struct reusable_candidate_batch {
     bool selection_truncated = false;
 };
 
-/** Publish input binds the registry generation to one storage manifest handle.
- */
+/** Information used to publish a completed generation and its storage manifest. */
 struct reusable_publish_request {
     reusable_generation_reference reference{};
     reusable_manifest_handle manifest{};
@@ -1137,9 +1129,10 @@ struct reusable_publish_request {
 };
 
 /**
- * One bounded commit-time invalidation selector. Database scope is mandatory;
- * every other equality gate is opt-in. Database-wide coarse fallback is
- * mutually exclusive with every precise gate.
+ * Selects cache entries to invalidate within one database. Optional
+ * fields narrow the match by provider, security settings or dependency
+ * metadata. Database-wide invalidation requires all of those filters
+ * to be disabled.
  */
 struct reusable_invalidation_selector {
     std::uint32_t database_oid = 0;
@@ -1165,10 +1158,7 @@ struct reusable_invalidation_selector {
     std::array<std::uint8_t, 7> reserved{};
 };
 
-/**
- * Deterministic bounded invalidation output. Affected manifests are identities
- * only; this operation never retires, frees, or otherwise mutates storage.
- */
+/** Counts and entry identities from an invalidation scan. Storage cleanup is left to the caller. */
 struct reusable_invalidation_result {
     reusable_registry_error error = reusable_registry_error::none;
     std::uint32_t next_cursor = 0;
@@ -1211,7 +1201,7 @@ struct reusable_registry_snapshot {
     std::uint32_t invalidations = 0;
 };
 
-/** Pointer-free, redacted admin row for one currently indexed generation. */
+/** Diagnostic values for an indexed generation, excluding SQL text, key bytes and shared pointers. */
 struct reusable_generation_diagnostics_row {
     reusable_generation_reference reference{};
     reusable_manifest_handle manifest{};
@@ -1253,7 +1243,7 @@ struct reusable_generation_diagnostics_row {
     std::array<std::uint8_t, 2> reserved_diagnostic{};
 };
 
-/** Counts for one caller-bounded diagnostics copy. */
+/** Number of diagnostic rows copied, with a flag for output that did not fit. */
 struct reusable_generation_diagnostics_result {
     reusable_registry_error error = reusable_registry_error::none;
     std::uint32_t indexed_generation_count = 0;
@@ -1269,7 +1259,7 @@ struct reusable_janitor_callbacks {
     reusable_janitor_owner_alive owner_alive = nullptr;
 };
 
-/** Counts returned after copying one caller-bounded janitor scan window. */
+/** Counts and scan position for a batch of backend liveness checks. */
 struct reusable_janitor_liveness_snapshot {
     reusable_registry_error error = reusable_registry_error::none;
     std::size_t count = 0;
@@ -1297,7 +1287,7 @@ struct reusable_janitor_sweep_result {
 
 namespace reusable_registry_detail {
 
-/** Remember one ABA-safe state transition exactly once for lock-drop wakeup. */
+/** Saves each affected generation once so waiters can be notified after registry locks are released. */
 [[nodiscard]] inline bool
 remember_janitor_affected_reference(reusable_janitor_sweep_result& result,
                                     const reusable_generation_reference& reference) noexcept {
@@ -1331,7 +1321,7 @@ struct generation_byte_bundle {
     reusable_shared_byte_range dependency_vector{};
 };
 
-/** Three independently replaceable diagnostic arena allocations. */
+/** Separate shared-memory ranges for SQL text, the canonical plan and the producer plan. */
 struct diagnostic_byte_bundle {
     reusable_shared_byte_range display_sql{};
     reusable_shared_byte_range canonical_plan{};
@@ -1638,7 +1628,7 @@ make_reference(const reusable_shared_generation& generation, std::uint32_t slot)
     };
 }
 
-/** Copy one in-flight producer as a generation-bound liveness subject. */
+/** Copies the producer and generation identities needed for a later liveness check. */
 [[nodiscard]] inline reusable_janitor_owner_observation
 make_producer_observation(const reusable_shared_generation& generation,
                           std::uint32_t slot) noexcept {
@@ -1650,7 +1640,7 @@ make_producer_observation(const reusable_shared_generation& generation,
     };
 }
 
-/** Copy one active reference owner with its complete ABA release token. */
+/** Copies a reference owner and its full release token for a later liveness check. */
 [[nodiscard]] inline reusable_janitor_owner_observation
 make_reference_owner_observation(const reusable_shared_generation& generation,
                                  std::uint32_t slot,
@@ -1699,7 +1689,7 @@ make_snapshot(const reusable_shared_generation& generation, std::uint32_t slot) 
     };
 }
 
-/** Copy only scalar/digest diagnostics, never shared byte ranges or pointers. */
+/** Copies diagnostic values while leaving SQL text and shared byte ranges out of the result. */
 [[nodiscard]] inline reusable_generation_diagnostics_row
 make_diagnostics_row(const reusable_shared_generation& generation, std::uint32_t slot) noexcept {
     return reusable_generation_diagnostics_row{
@@ -2017,8 +2007,7 @@ candidate_order_key(const reusable_candidate_snapshot& candidate) noexcept {
 
 } // namespace reusable_registry_detail
 
-/** Copy one indexed record by ABA-safe reference under the caller's membership
- * lock. */
+/** Copies an indexed generation after checking its slot sequence and identity. The caller holds the membership lock. */
 [[nodiscard]] inline std::expected<reusable_generation_snapshot, reusable_registry_error>
 snapshot_reusable_generation(const reusable_registry_attachment& attachment,
                              const reusable_generation_reference& reference) noexcept {
@@ -2235,7 +2224,7 @@ deactivate_reference_owner(reusable_shared_generation& generation,
     return reusable_registry_error::none;
 }
 
-/** Reject unknown/stale observability enum values before policy checks. */
+/** Checks that the write-tracking mode is a recognized enum value. */
 [[nodiscard]] inline bool write_observability_valid(write_observability observability) noexcept {
     return observability == write_observability::none ||
            observability == write_observability::provider_complete ||
@@ -2610,7 +2599,7 @@ shared_diagnostic_text_valid(const reusable_registry_attachment& attachment,
     return true;
 }
 
-/** Publish already-copied ranges after final ABA and ownership validation. */
+/** Assigns previously copied diagnostic ranges after the caller validates generation identity and ownership. */
 inline void
 assign_diagnostic_text_unchecked(reusable_shared_generation& generation,
                                  const diagnostic_byte_bundle& bundle,
@@ -2752,7 +2741,12 @@ admission_victim_eligible(const reusable_shared_generation& generation) noexcept
            generation.planner_pin_count == 0 && generation.reader_pin_count == 0;
 }
 
-/** Select without mutation while the exact partition is held. */
+/**
+ * Chooses an unreferenced terminal entry to remove from a full exact
+ * bucket. Expired, invalidated and failed entries come first, followed
+ * by the least recently used completed entry. The caller holds the
+ * exact partition lock.
+ */
 [[nodiscard]] inline admission_victim_selection
 select_exact_admission_victim(reusable_registry_attachment& attachment,
                               const cache_digest_256& digest,
@@ -2809,7 +2803,11 @@ select_exact_admission_victim(reusable_registry_attachment& attachment,
     return result;
 }
 
-/** Select without mutation while the coverage partition is held. */
+/**
+ * Chooses an unreferenced terminal entry to remove from a full coverage
+ * bucket, using the same expiry and last-use order as exact buckets.
+ * The caller holds the coverage partition lock.
+ */
 [[nodiscard]] inline admission_victim_selection
 select_coverage_admission_victim(reusable_registry_attachment& attachment,
                                  const reusable_coverage_directory_key& key,
@@ -2902,8 +2900,9 @@ retire_reusable_generation(reusable_registry_attachment& attachment,
                            const reusable_registry_partition_callbacks& callbacks = {}) noexcept;
 
 /**
- * Collision-safe generation lookup for either cache product. The
- * caller holds shared membership; only the exact partition is acquired.
+ * Finds a matching generation and optionally registers a waiter or reader.
+ * Full key bytes distinguish hash collisions. The caller holds the shared
+ * membership lock while this function locks the exact partition.
  */
 [[nodiscard]] inline reusable_lookup_result
 lookup_cache_generation(reusable_registry_attachment& attachment,
@@ -2969,7 +2968,7 @@ lookup_cache_generation(reusable_registry_attachment& attachment,
     return result;
 }
 
-/** Reusable-coverage convenience overload retaining the provider API shape. */
+/** Looks up a reusable-coverage generation and optionally registers a waiter or reader. */
 [[nodiscard]] inline reusable_lookup_result
 lookup_reusable_generation(reusable_registry_attachment& attachment,
                            const reusable_coverage_directory_key& coverage_key,
@@ -2991,9 +2990,9 @@ lookup_reusable_generation(reusable_registry_attachment& attachment,
 }
 
 /**
- * Coalesce an exact in-flight generation or atomically link a new claim.
- * The caller holds exclusive membership; exact and coverage callbacks are
- * invoked sequentially and are never held at the same time.
+ * Shares matching work already in progress or a completed result, or
+ * claims a new generation. The caller holds membership exclusively.
+ * Exact and coverage partitions are locked separately.
  */
 [[nodiscard]] inline reusable_claim_result
 claim_reusable_generation(reusable_registry_attachment& attachment,
@@ -3234,7 +3233,7 @@ claim_reusable_generation(reusable_registry_attachment& attachment,
     return result;
 }
 
-/** Pin one generation by ABA-safe identity under its exact partition. */
+/** Acquires a waiter, planner or reader reference after checking the generation identity. */
 [[nodiscard]] inline std::expected<reusable_reference_token, reusable_registry_error>
 pin_reusable_generation(reusable_registry_attachment& attachment,
                         const reusable_generation_reference& reference,
@@ -3264,7 +3263,10 @@ pin_reusable_generation(reusable_registry_attachment& attachment,
     return token;
 }
 
-/** Idempotently release exactly the counter tagged in a local token. */
+/**
+ * Clears the local token and releases its matching shared reference.
+ * Repeated calls with the cleared token do nothing.
+ */
 [[nodiscard]] inline reusable_registry_error
 release_reusable_reference(reusable_registry_attachment& attachment,
                            reusable_reference_token& token,
@@ -3306,8 +3308,7 @@ release_reusable_reference(reusable_registry_attachment& attachment,
     return release_error;
 }
 
-/** Atomically convert an in-flight waiter entitlement to a complete reader pin.
- */
+/** Converts a registered waiter into a reader once its generation is complete, under the exact partition lock. */
 [[nodiscard]] inline reusable_registry_error convert_reusable_waiter_to_reader(
     reusable_registry_attachment& attachment,
     reusable_reference_token& token,
@@ -3357,8 +3358,7 @@ release_reusable_reference(reusable_registry_attachment& attachment,
     return reusable_registry_error::none;
 }
 
-/** Observe state/owner/failure while a waiter decides whether to sleep again.
- */
+/** Reads the generation state so a waiter can decide whether to wait again. */
 [[nodiscard]] inline std::expected<reusable_generation_snapshot, reusable_registry_error>
 wait_reusable_generation(reusable_registry_attachment& attachment,
                          const reusable_generation_reference& reference,
@@ -3388,9 +3388,9 @@ wait_reusable_generation(reusable_registry_attachment& attachment,
 }
 
 /**
- * Copy all active waiter capabilities while the exact partition is stable.
- * Callers that must exclude new waiters also hold exclusive membership across
- * this snapshot and the terminal publication that consumes it.
+ * Copies the active waiter tokens for later wakeups. To exclude new
+ * waiters, the caller holds membership exclusively from this snapshot
+ * until it publishes the completed or failed state.
  */
 [[nodiscard]] inline reusable_waiter_owner_batch snapshot_reusable_waiter_owners(
     reusable_registry_attachment& attachment,
@@ -3452,8 +3452,9 @@ wait_reusable_generation(reusable_registry_attachment& attachment,
 }
 
 /**
- * Snapshot at most 64 full-domain-equal candidates in deterministic order.
- * Every returned candidate owns one planner pin until explicitly released.
+ * Collects and orders up to 64 cached sources with matching domain keys
+ * and provider features. Each returned candidate owns a planner
+ * reference that the caller must release.
  */
 [[nodiscard]] inline std::expected<reusable_candidate_batch, reusable_registry_error>
 snapshot_reusable_candidates(reusable_registry_attachment& attachment,
@@ -3603,7 +3604,7 @@ snapshot_reusable_candidates(reusable_registry_attachment& attachment,
     return result;
 }
 
-/** Release every planner pin retained by a candidate batch. */
+/** Releases every planner reference in a candidate batch and returns the first error, if any. */
 [[nodiscard]] inline reusable_registry_error release_reusable_candidate_batch(
     reusable_registry_attachment& attachment,
     reusable_candidate_batch& batch,
@@ -3673,9 +3674,10 @@ rollback_diagnostic_bundle(reusable_registry_attachment& attachment,
 }
 
 /**
- * Allocate outside the exact lock, then publish only after full ABA, kind,
- * producer, state, and status revalidation. Membership EXCLUSIVE stabilizes
- * arena ownership across both exact-lock windows.
+ * Allocates replacement diagnostic text, then checks that the same
+ * producer still owns the generation before saving it. The caller
+ * holds membership exclusively so the shared allocations stay valid
+ * while the exact partition lock is released.
  */
 [[nodiscard]] inline reusable_registry_error
 mutate_diagnostic_text(reusable_registry_attachment& attachment,
@@ -3749,10 +3751,9 @@ mutate_diagnostic_text(reusable_registry_attachment& attachment,
 } // namespace reusable_registry_detail
 
 /**
- * Transition CLAIMED to BUILDING with explicit unavailable plan statuses.
- * New producer paths should use the diagnostic overload below so BUILDING is
- * first published with the initialized child's planned snapshot. The caller
- * holds membership EXCLUSIVE because diagnostics allocate from the arena.
+ * Marks a claimed generation as building with SQL and plan diagnostics
+ * marked unavailable. Use begin_reusable_build_with_diagnostics when
+ * the child plan is available. The caller holds membership exclusively.
  */
 [[nodiscard]] inline reusable_registry_error
 begin_reusable_build(reusable_registry_attachment& attachment,
@@ -3789,9 +3790,9 @@ begin_reusable_build(reusable_registry_attachment& attachment,
 }
 
 /**
- * Publish initialized-child diagnostics and BUILDING atomically. The caller
- * holds membership EXCLUSIVE; the state becomes observable only after text and
- * status are complete under the exact partition lock.
+ * Saves the child plan diagnostics and marks the generation as building
+ * under the same exact partition lock. The caller holds membership
+ * exclusively while diagnostic text is allocated.
  */
 [[nodiscard]] inline reusable_registry_error begin_reusable_build_with_diagnostics(
     reusable_registry_attachment& attachment,
@@ -3803,9 +3804,9 @@ begin_reusable_build(reusable_registry_attachment& attachment,
 }
 
 /**
- * Store bounded producer-owned diagnostic text after child initialization.
- * The caller holds membership EXCLUSIVE; arena allocation precedes a second
- * exact-lock validation; replaced ranges are reclaimed only after publication.
+ * Replaces a producer's diagnostic text after checking generation
+ * identity and ownership. The caller holds membership exclusively.
+ * The old text is freed after the replacement is saved.
  */
 [[nodiscard]] inline reusable_registry_error store_reusable_diagnostic_text(
     reusable_registry_attachment& attachment,
@@ -3816,10 +3817,9 @@ begin_reusable_build(reusable_registry_attachment& attachment,
 }
 
 /**
- * Copy diagnostic text only after the PostgreSQL adapter authorizes this row.
- * The caller holds membership SHARED across validation and copying, so an
- * exclusive replacement or retired-range reclaim cannot race the byte copy.
- * No canonical key, predicate serialization, or shared pointer is returned.
+ * Copies SQL and plan diagnostics into caller buffers after the
+ * PostgreSQL adapter authorizes access to the row. The caller holds
+ * shared membership throughout the copy so the text stays allocated.
  */
 [[nodiscard]] inline std::expected<reusable_diagnostic_text_copy, reusable_registry_error>
 copy_reusable_diagnostic_text(
@@ -3891,8 +3891,9 @@ copy_reusable_diagnostic_text(
 }
 
 /**
- * Publish a sealed storage manifest and make COMPLETE visible last. The caller
- * holds exclusive membership while terminal counts are updated in lock order.
+ * Publishes the result of a completed build. The caller seals its
+ * storage manifest first and holds membership exclusively. The
+ * generation becomes COMPLETE after its manifest and counts are saved.
  */
 [[nodiscard]] inline reusable_registry_error
 publish_reusable_generation(reusable_registry_attachment& attachment,
@@ -3935,7 +3936,7 @@ publish_reusable_generation(reusable_registry_attachment& attachment,
     return reusable_registry_error::none;
 }
 
-/** Publish a bounded producer failure and retain the generation for waiters. */
+/** Records a producer failure while keeping the generation available to its waiters. */
 [[nodiscard]] inline reusable_registry_error
 fail_reusable_generation(reusable_registry_attachment& attachment,
                          const reusable_generation_reference& reference,
@@ -3968,7 +3969,7 @@ fail_reusable_generation(reusable_registry_attachment& attachment,
     return reusable_registry_error::none;
 }
 
-/** Invalidate a BUILDING or COMPLETE generation without admitting new pins. */
+/** Marks a generation invalid so it cannot acquire new references. Existing references stay in place. */
 [[nodiscard]] inline reusable_registry_error invalidate_reusable_generation(
     reusable_registry_attachment& attachment,
     const reusable_generation_reference& reference,
@@ -4005,9 +4006,9 @@ fail_reusable_generation(reusable_registry_attachment& attachment,
 }
 
 /**
- * Scan a bounded slot interval and invalidate matching reusable generations.
- * The caller holds membership EXCLUSIVE. Matching uses only immutable fields;
- * no manifest is retired or freed, so existing pins may finish normally.
+ * Invalidates matching cache entries in a bounded scan. Existing
+ * references and storage blocks stay in place for their current users.
+ * The caller holds membership exclusively.
  */
 [[nodiscard]] inline reusable_invalidation_result invalidate_reusable_generations(
     reusable_registry_attachment& attachment,
@@ -4107,9 +4108,9 @@ fail_reusable_generation(reusable_registry_attachment& attachment,
 }
 
 /**
- * Unlink every index owned by the entry kind and move one unreferenced
- * terminal generation to the bounded retired list. Exact results own only the
- * digest membership; coverage results own digest plus coverage membership.
+ * Removes an unreferenced generation from the lookup directories and
+ * queues it for cleanup. Its bytes stay allocated until dependency
+ * references have been released.
  */
 [[nodiscard]] inline std::expected<reusable_manifest_handle, reusable_registry_error>
 retire_reusable_generation(reusable_registry_attachment& attachment,
@@ -4257,10 +4258,10 @@ dependency_release_ticket_matches(const reusable_registry_attachment& attachment
 } // namespace reusable_registry_detail
 
 /**
- * Under exclusive membership, copy and mark one retired generation's pending
- * dependency-release work. The caller must drop every registry lock before it
- * decodes the copied envelope or calls the dependency-directory release API.
- * A short output reports the exact byte requirement without claiming work.
+ * Copies a retired generation's dependency data and claims its release
+ * work while the caller holds membership exclusively. The caller drops
+ * all registry locks before decoding the copy and releasing those
+ * dependencies. A short output buffer reports the required size.
  */
 [[nodiscard]] inline reusable_dependency_release_preparation
 prepare_reusable_dependency_release(reusable_registry_attachment& attachment,
@@ -4361,10 +4362,10 @@ prepare_reusable_dependency_release(reusable_registry_attachment& attachment,
 }
 
 /**
- * Persist the exact successfully-applied prefix after external release calls.
- * `released_dependencies` counts directory mutations with `applied == true`,
- * even when the directory also reports a diagnostic/fallback error. A partial
- * prefix returns the record to Pending so the next ticket starts after it.
+ * Records the consecutive dependency releases that took effect,
+ * including releases that also reported a diagnostic error. Count
+ * each call with `applied == true`. A partial release leaves the next
+ * attempt starting at the first unreleased dependency.
  */
 [[nodiscard]] inline std::expected<bool, reusable_registry_error>
 record_reusable_dependency_release_progress(reusable_registry_attachment& attachment,
@@ -4409,9 +4410,10 @@ record_reusable_dependency_release_progress(reusable_registry_attachment& attach
 }
 
 /**
- * ABA-revalidate a completed release ticket, unlink its arbitrary retired-list
- * position, free all generation bytes, and return the slot to the free list.
- * The caller holds exclusive membership; no directory callback is made here.
+ * Frees a retired generation's bytes and returns its slot for reuse
+ * after all dependency references are released. The ticket must still
+ * identify the same generation and release attempt. The caller holds
+ * membership exclusively.
  */
 [[nodiscard]] inline std::expected<reusable_manifest_handle, reusable_registry_error>
 finalize_reusable_generation_reclaim(reusable_registry_attachment& attachment,
@@ -4494,11 +4496,10 @@ finalize_reusable_generation_reclaim(reusable_registry_attachment& attachment,
 }
 
 /**
- * Copy every producer/reference-owner token in the next janitor window.
- * The adapter holds membership shared; partition callbacks make each record
- * internally consistent. Liveness probing happens only after those locks drop.
- * A short destination is reported as truncated and must disable reaping for
- * that sample.
+ * Copies producer and reference-owner identities for the next cleanup
+ * scan. The caller holds shared membership and checks backend liveness
+ * after releasing all registry locks. If the output is truncated,
+ * skip reference cleanup for this sample.
  */
 [[nodiscard]] inline reusable_janitor_liveness_snapshot snapshot_reusable_janitor_liveness(
     const reusable_registry_attachment& attachment,
@@ -4578,8 +4579,10 @@ finalize_reusable_generation_reclaim(reusable_registry_attachment& attachment,
 }
 
 /**
- * Run one bounded database-independent sweep. The liveness callback must be a
- * nonblocking scalar check and is never persisted in the shared region.
+ * Cleans up a bounded group of cache entries by releasing references
+ * left by dead owners and retiring unused expired, failed or invalid
+ * results. The liveness callback must return without waiting because
+ * it runs under an exact partition lock.
  */
 [[nodiscard]] inline reusable_janitor_sweep_result janitor_reusable_registry(
     reusable_registry_attachment& attachment,
@@ -4756,8 +4759,9 @@ finalize_reusable_generation_reclaim(reusable_registry_attachment& attachment,
 }
 
 /**
- * Copy a caller-bounded redacted view while membership is held shared.
- * Optional partition callbacks make each indexed row internally consistent.
+ * Copies diagnostic rows without SQL text or cache key bytes. The
+ * caller holds shared membership. Each row is copied under its exact
+ * partition lock when lock callbacks are supplied.
  */
 [[nodiscard]] inline reusable_generation_diagnostics_result
 snapshot_reusable_generation_diagnostics(
@@ -4823,7 +4827,7 @@ snapshot_reusable_generation_diagnostics(
     return result;
 }
 
-/** Snapshot bounded diagnostics without exposing query or canonical bytes. */
+/** Counts generations, references and free space for registry diagnostics, excluding query text and cache keys. */
 [[nodiscard]] inline reusable_registry_snapshot
 snapshot_reusable_registry(const reusable_registry_attachment& attachment) noexcept {
     using namespace reusable_registry_detail;
@@ -4879,8 +4883,9 @@ snapshot_reusable_registry(const reusable_registry_attachment& attachment) noexc
 }
 
 /**
- * Deep structural audit for startup repair, tests, and operator diagnostics.
- * The adapter must hold exclusive membership and quiesce both directories.
+ * Checks generation records, lookup directories and shared-memory
+ * allocations for inconsistencies. The caller holds membership
+ * exclusively and prevents changes to both directories during the check.
  */
 [[nodiscard]] inline reusable_registry_error
 validate_reusable_registry(const reusable_registry_attachment& attachment) noexcept {

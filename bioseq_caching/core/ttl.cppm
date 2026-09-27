@@ -1,6 +1,6 @@
 /**
  * @file bioseq_caching/core/ttl.cppm
- * @brief Clock-independent cache TTL and waiter-entitlement arithmetic.
+ * @brief Cache expiration rules, including the first read by an existing waiter.
  */
 module;
 
@@ -24,7 +24,7 @@ struct ttl_decision {
     bool consume_just_completed_entitlement = false;
 };
 
-/** Return monotonic age, rejecting an impossible backwards clock sample. */
+/** Return the elapsed time since completion, or no value if the clock moved backwards. */
 [[nodiscard]] constexpr std::optional<std::uint64_t>
 monotonic_age_ns(std::uint64_t completed_ns, std::uint64_t now_ns) noexcept {
     if (now_ns < completed_ns) {
@@ -33,19 +33,19 @@ monotonic_age_ns(std::uint64_t completed_ns, std::uint64_t now_ns) noexcept {
     return now_ns - completed_ns;
 }
 
-/** Convert milliseconds to nanoseconds with saturation. */
+/** Convert milliseconds to nanoseconds, using the largest uint64_t value on overflow. */
 [[nodiscard]] constexpr std::uint64_t ttl_nanoseconds(std::uint64_t ttl_ms) noexcept {
     const auto value = checked_mul(ttl_ms, std::uint64_t{1'000'000});
     return value.value_or((std::numeric_limits<std::uint64_t>::max)());
 }
 
-/** Apply the smaller producer-retention and current-consumer TTL. */
+/** Use the shorter time limit for reusing a result, as set by the producer and reader. */
 [[nodiscard]] constexpr std::uint64_t effective_ttl_ms(std::uint64_t producer_ttl_ms,
                                                        std::uint64_t consumer_ttl_ms) noexcept {
     return std::min(producer_ttl_ms, consumer_ttl_ms);
 }
 
-/** BUILDING remains coalescible independently of the result-retention TTL. */
+/** A caller can wait for an unfinished build regardless of how long its result can be reused. */
 [[nodiscard]] constexpr bool eligible_inflight(std::uint64_t) noexcept {
     return true;
 }
@@ -55,7 +55,7 @@ monotonic_age_ns(std::uint64_t completed_ns, std::uint64_t now_ns) noexcept {
     return ttl_ms == 0;
 }
 
-/** Determine ordinary completed-entry expiration without waiter privilege. */
+/** Check whether a completed entry has expired for an ordinary reader. */
 [[nodiscard]] constexpr bool expired(const cache_timestamps& timestamps,
                                      std::uint64_t producer_ttl_ms,
                                      std::uint64_t consumer_ttl_ms,
@@ -71,8 +71,8 @@ monotonic_age_ns(std::uint64_t completed_ns, std::uint64_t now_ns) noexcept {
 }
 
 /**
- * Apply TTL plus the one-time entitlement of a waiter registered against the
- * same in-flight generation. Other validation remains the adapter's duty.
+ * Check expiration and allow an existing waiter one read when the TTL is zero.
+ * The caller must still validate the generation and its dependencies.
  */
 [[nodiscard]] constexpr ttl_decision
 completed_ttl_decision(const cache_timestamps& timestamps,
