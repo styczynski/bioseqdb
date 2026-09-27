@@ -1,7 +1,7 @@
 /**
  * @file source_domain_transaction_lifetime_test.cpp
- * @brief Exercises cancellation, transactions, transformed ownership, and error cleanup.
- * @note CMake compiles this source only when BIOSEQ_TEST_INDEXES is enabled.
+ * @brief Tests sequence-reader cleanup after cancellation, transactions, and errors.
+ * @note Compiled only when BIOSEQ_TEST_INDEXES is enabled.
  */
 
 #include <libpq-fe.h>
@@ -122,10 +122,8 @@ TEST_CASE("retained source control fails closed after transaction end",
     auto ctx = fresh_context();
     reset_source_counters(ctx);
 
-    /* The existing native probe retains a real source-domain control across
-     * the production PRE_COMMIT cleanup callback, then accepts success only
-     * after the production read guard reports SQLSTATE 55000 and the exact
-     * transaction-ended diagnostic. */
+    /* Keep a source control alive across transaction cleanup. The probe must
+     * reject a later read with the transaction-ended error. */
     REQUIRE(query_scalar(ctx,
         "SELECT bioseq_internal.sequence_source_fault_contract_probe();")
         == "t");
@@ -343,10 +341,8 @@ TEST_CASE("materialized spill aggregate COPY generated and parallel routes are s
         const auto parallel_plan = explain_text<false>(ctx, parallel_sql);
         REQUIRE(plan_contains(parallel_plan, "Gather"));
 
-        /* Leader participation is disabled, so these actual counters can
-         * reach the leader only through SliceProject's DSM worker slots.  A
-         * full 96-call aggregate is process-shared evidence that the workers
-         * collectively executed every source-backed slice and conversion. */
+        /* With leader participation off, workers must report all 96 conversions
+         * through the shared SliceProject counters. */
         constexpr auto worker_materialization_sql =
             "SELECT bioseq.to_text(s[0:64]) "
             "FROM source_lifetime_source_boundaries;";
@@ -400,11 +396,8 @@ TEST_CASE("ordinary CTAS owns transformed source values",
     REQUIRE(plan_contains(
         ctas_plan, "Custom Scan (BioseqSliceProject)"));
     REQUIRE(plan_contains(ctas_plan, "Slice Materialization:"));
-    /* CTAS is planned as CMD_SELECT, so its declared result-datum boundaries
-     * are the two client serialization formats.  The CTAS receiver invokes
-     * neither; core heap ownership performs exactly one packed-full executor
-     * copy instead.  Keep both halves exact so a client-output detour or a
-     * second payload copy cannot masquerade as durable ownership. */
+    /* CTAS plans text and binary output paths, but stores the result through
+     * a single packed sequence copy. Neither client output path should run. */
     REQUIRE(plan_line_count(ctas_plan, "Mechanism: text") == 1u);
     REQUIRE(plan_line_count(ctas_plan, "Mechanism: binary") == 1u);
     REQUIRE(plan_line_count(ctas_plan, "Reason: client output") == 2u);
@@ -424,8 +417,7 @@ TEST_CASE("ordinary CTAS owns transformed source values",
     REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
     require_source_resources_balanced(ctx);
 
-    /* The durable heap tuple must no longer depend on the provider, relation,
-     * statement registry, or snapshot that produced the lazy expression. */
+    /* Dropping the input table must leave the copied sequence readable. */
     exec_sql(ctx, "DROP TABLE source_lifetime_source_ctas_input;");
     reset_source_counters(ctx);
     const auto durable = query_one(ctx,
@@ -460,13 +452,9 @@ TEST_CASE("caught late binding errors release sliced source ownership",
         "RETURNS text LANGUAGE plpgsql VOLATILE STRICT AS $$ "
         "BEGIN RETURN value; END $$;");
 
-    /* Expression evaluation opens the source-backed left edge before the
-     * volatile RHS conversion.  The level-0 public profile's runtime input
-     * parser rejects N while constructing the intermediate unbound sequence.
-     * Richer profiles admit DNA5, then resolve_concat_type rejects the bound
-     * DNA4/DNA5 pair before literal-ledger construction.  The exact
-     * source-domain counts below confirm that neither error happened before the
-     * provider-backed left edge was opened. */
+    /* Open the left-hand slice before the right-hand conversion fails.
+     * DNA4-only builds reject N during parsing. Builds with DNA5 reject the
+     * mixed-alphabet concatenation. Both cases must release the opened source. */
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     constexpr std::string_view late_rhs =
         "pg_temp.source_lifetime_source_runtime_text('N')"

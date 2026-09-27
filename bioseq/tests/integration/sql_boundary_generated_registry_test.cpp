@@ -1,6 +1,6 @@
 /**
  * @file sql_boundary_generated_registry_test.cpp
- * @brief Exercises generated comparison, aggregate, call, and catalog registries.
+ * @brief Tests generated SQL comparisons, aggregates, argument handling, and catalog entries.
  */
 
 #include <libpq-fe.h>
@@ -811,9 +811,8 @@ TEST_CASE("generated SQL preserves the extension catalog surface",
       "  FROM pg_catalog.pg_settings "
       " WHERE name LIKE 'bioseq.%';");
   REQUIRE(guc_profile.size() == 1);
-  // The generated registries own 73 production and 76 test-profile GUCs.
-  // Eleven production and fourteen test-profile controls deliberately carry
-  // GUC_NO_SHOW_ALL, leaving the same public pg_settings cardinality in both.
+  // Both build profiles expose 62 bioseq settings in pg_settings.
+  // GUC_NO_SHOW_ALL hides the internal controls, including those added for tests.
   REQUIRE(guc_profile[0].value() == "62");
 
   const auto profile_guc = query_one(

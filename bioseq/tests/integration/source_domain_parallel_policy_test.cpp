@@ -1,7 +1,7 @@
 /**
  * @file source_domain_parallel_policy_test.cpp
- * @brief Exercises parallel source routes, planner metadata, and security policy.
- * @note CMake compiles this source only when BIOSEQ_TEST_INDEXES is enabled.
+ * @brief Tests parallel sequence reads, planner metadata, and row security.
+ * @note Compiled only when BIOSEQ_TEST_INDEXES is enabled.
  */
 
 #include <libpq-fe.h>
@@ -33,9 +33,8 @@ TEST_CASE("BatchSort keeps child resnos distinct from physical attnos",
         " repeat('TGCA',1024)::bioseq.seq('dna4',32)"
         ");");
 
-    /* The scan projects only wanted: child resno 1 therefore names physical
-     * attribute 3, while physical attribute 1 is a different SEQ locator.
-     * Confusing those namespaces returns the pad slice (AAAAAAAA). */
+    /* wanted is the first output column but the third table column. Mixing
+     * those numbers would read pad and return AAAAAAAA. */
     constexpr auto sql =
         "SELECT bioseq.to_text(wanted[0:8]) "
         "FROM source_lifetime_batch_sort_attno_namespace;";
@@ -146,10 +145,8 @@ TEST_CASE("parallel stripe claiming skips aborted same-relation gaps",
         "CREATE TABLE source_lifetime_parallel_stripe_gaps "
         " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
 
-    /* Stripe ids are relation-local.  A first row reserves the next id in the
-     * relation metapage, which is not rolled back with its MVCC metadata row.
-     * Burn ids 2 and 4 in aborted transactions so the reader must claim
-     * visible stripes 1, 3 and 5 without duplicating a gap successor. */
+    /* Aborted inserts leave gaps in the stripe IDs. Create visible stripes
+     * 1, 3, and 5, then check that parallel readers visit each exactly once. */
     exec_sql(ctx,
         "INSERT INTO source_lifetime_parallel_stripe_gaps "
         "SELECT g, repeat('ACGT',16)::bioseq.seq('dna4',32) "
@@ -282,9 +279,8 @@ TEST_CASE("parallel worker ERROR preserves DSM cleanup and original error",
     require_source_resources_balanced(ctx);
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 
-    /* A fresh forced-parallel cycle must attach, publish and detach cleanly
-     * after the failed cycle.  With leader participation disabled, all 256
-     * successful conversion deltas must arrive through worker DSM slots. */
+    /* After the worker error, another parallel scan must report all 256
+     * conversions. Leader participation is off, so workers must supply them. */
     reset_source_counters(ctx);
     const auto recovered = explain_text<true>(ctx,
         "SELECT bioseq.to_text(s[0:64]) "
@@ -335,10 +331,8 @@ TEST_CASE("production source routes never invoke PostgreSQL off backend",
     REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
     require_source_resources_balanced(ctx);
 
-    /* Exercise all four lazy-facade cursor orientations on a non-centered,
-     * non-palindromic subrange.  The planner evidence and source counters pin the
-     * diagnostic to a real provider-backed expanded value; the probe flattens
-     * only a separate compact oracle. */
+    /* Test forward, reverse, and complemented reads on an off-center slice.
+     * The source counters must show that the probe read the stored sequence. */
     constexpr auto orientation_sql =
         "SELECT bioseq_internal.sequence_facade_orientation_probe("
         "s[32749:32786]) FROM source_lifetime_source_routes WHERE id=1;";
@@ -389,12 +383,9 @@ TEST_CASE("production source routes never invoke PostgreSQL off backend",
     REQUIRE(source_counter(ctx, "scanner_entries_created") >= 1);
     REQUIRE(source_counter(ctx, "facade_source_stream_callbacks") > 0);
 
-    /* The source callbacks above are backend-thread-only.  This immutable
-     * execution snapshot confirms the selected scalar tuple completed without
-     * fallback or unattested work while the task-parallel pool exposed at
-     * least two CPU slots.  The cross-thread return-value probe below is the
-     * authoritative worker-thread tripwire evidence; the backend-local TLS
-     * counter is not used as a substitute for it. */
+    /* Confirm scalar execution with at least two CPU worker slots and no
+     * fallback. The separate probe below checks that a worker thread cannot
+     * read through PostgreSQL source callbacks. */
     const auto task_evidence = query_one(ctx,
         "SELECT effective_cpu_workers::text, requested_backend, "
         "       actual_backend, is_completed::text, is_partial::text, "
@@ -436,9 +427,8 @@ TEST_CASE("production source routes never invoke PostgreSQL off backend",
     require_source_resources_balanced(ctx);
 
     reset_source_counters(ctx);
-    /* The SQL boolean carries the status written by the spawned std::thread
-     * after join.  The TLS counter increment is deliberately replayed on the
-     * backend thread and remains only a local diagnostic assertion. */
+    /* The probe returns the worker's rejection result. It copies that result
+     * into the backend's diagnostic counter so SQL can check it too. */
     REQUIRE(query_scalar(
         ctx, "SELECT bioseq_internal.sequence_source_wrong_thread_probe();")
         == "t");
@@ -516,9 +506,9 @@ TEST_CASE("locator columns never trust physical minmax metadata",
         "ON l.s OPERATOR(bioseq.=) r.s ORDER BY 1;")
         == std::vector<long long>{11, 15, 22, 33, 36, 44, 51, 55, 63, 66});
 
-    /* Forge hasMinMax=true with structurally valid varlena bytes borrowed from
-     * the text column. The seq reader must ignore them before comparison. The
-     * transaction-local catalog mutation is rolled back after the read. */
+    /* Copy text min/max values into the sequence metadata. Sequence
+     * comparisons must ignore these invalid bounds. Roll back the catalog
+     * change after checking the result. */
     exec_sql(ctx,
         "BEGIN;"
         "WITH donor AS ("

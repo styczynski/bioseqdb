@@ -1,6 +1,6 @@
 /**
  * @file sql_boundary_bpchar_test.cpp
- * @brief Exercises BPCHAR physical forms, comparisons, and collation behavior.
+ * @brief Tests BPCHAR storage forms, comparisons, and collations.
  */
 
 #include <libpq-fe.h>
@@ -33,14 +33,14 @@ TEST_CASE(
       "ALTER TABLE {} SET (toast_tuple_target = 128);",
       k_bpchar_physical_table);
 
-  // EXTENDED allows heap formation to select the one-byte short header.
+  // The short value can use PostgreSQL's one-byte header.
   exec_sqlf(
       ctx,
       "INSERT INTO {} VALUES "
       "    (1, ('a' || repeat(' ', 3))::bpchar);",
       k_bpchar_physical_table);
-  // PLAIN forbids compression/toasting and the payload is too large for a
-  // one-byte header, forcing a 4-byte uncompressed datum.
+  // PLAIN storage keeps this 200-byte value uncompressed with a four-byte
+  // header.
   exec_sqlf(
       ctx,
       "ALTER TABLE {} ALTER COLUMN value SET STORAGE PLAIN;",
@@ -50,7 +50,7 @@ TEST_CASE(
       "INSERT INTO {} VALUES "
       "    (2, ('b' || repeat(' ', 199))::bpchar);",
       k_bpchar_physical_table);
-  // MAIN permits inline compression but not ordinary external storage.
+  // MAIN storage favors keeping this compressible value inside the row.
   exec_sqlf(
       ctx,
       "ALTER TABLE {} ALTER COLUMN value SET STORAGE MAIN;",
@@ -60,8 +60,8 @@ TEST_CASE(
       "INSERT INTO {} VALUES "
       "    (3, ('c' || repeat(' ', 3999))::bpchar);",
       k_bpchar_physical_table);
-  // EXTERNAL disables compression, so this oversized value must be stored in
-  // the table's TOAST relation and presented as an on-disk external pointer.
+  // EXTERNAL storage leaves this large value uncompressed in the TOAST
+  // table. The row holds a pointer to it.
   exec_sqlf(
       ctx,
       "ALTER TABLE {} ALTER COLUMN value SET STORAGE EXTERNAL;",
@@ -85,9 +85,8 @@ TEST_CASE(
           "    'bpchar_physical_probe:{}');",
           relation_oid));
 
-  // The probe resets and reuses a dedicated memory context before returning.
-  // A normal catalog read and scalar BPCHAR operation verify the backend and
-  // the source table remain usable after every vector payload was released.
+  // After the probe resets its memory context, check that the table and
+  // BPCHAR comparisons still work.
   REQUIRE(query_scalar(
               ctx,
               fmt::format(
