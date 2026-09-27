@@ -1,6 +1,6 @@
 /**
  * @file core.cppm
- * @brief Defines Vulkan device, buffer, submission, and shader-provider contracts.
+ * @brief Defines Vulkan buffers, device properties, and shared runtime result types.
  */
 module;
 
@@ -32,41 +32,40 @@ export namespace bioseq::gpu::vulkan {
 class runtime;
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** @brief Test-build-only latch around the real GPU frontend upload/submit/fence path.
- * Normal builds do not contain this API or its branches. */
+/** @brief Failures that tests can inject after a real GPU submission.
+ * This API is compiled only with BIOSEQ_TEST_INDEXES. */
 enum class vulkan_submission_test_fault : std::uint8_t {
     none,                        ///< No fault is armed.
-    cancellation_after_submit,   ///< Request cancellation after submit returns.
-    upload_failure_after_submit, ///< Latch an upload failure after submit returns.
+    cancellation_after_submit,   ///< Report cancellation after the submitted work finishes.
+    upload_failure_after_submit, ///< Report an upload failure after the submitted work finishes.
 };
 
-/// @brief Observable state of the test-only submission fault seam.
+/// @brief Test counters and wait states for an injected submission failure.
 struct vulkan_submission_test_snapshot {
     vulkan_submission_test_fault fault{vulkan_submission_test_fault::none}; ///< Armed fault kind.
-    std::uint64_t upload_latches = 0u;   ///< Upload paths that entered the seam.
-    std::uint64_t submissions = 0u;      ///< Submissions observed by the seam.
-    std::uint64_t fence_drains = 0u;     ///< Fence drains completed by the seam.
-    std::uint64_t delivered_faults = 0u; ///< Faults released to callers.
-    bool waiting_after_submit = false;   ///< Whether a submission waits after submit.
-    bool waiting_after_drain = false;    ///< Whether a submission waits after drain.
+    std::uint64_t upload_latches = 0u;   ///< Uploads observed while a test fault was armed.
+    std::uint64_t submissions = 0u;      ///< Submissions observed while a test fault was armed.
+    std::uint64_t fence_drains = 0u;     ///< Completed fence waits observed by the test.
+    std::uint64_t delivered_faults = 0u; ///< Injected failures reported to callers.
+    bool waiting_after_submit = false;   ///< Whether the test has paused after queue submission.
+    bool waiting_after_drain = false;    ///< Whether the test has paused after the fence wait.
     bool cancellation_requested = false; ///< Whether cancellation was requested.
-    bool upload_failure_latched = false; ///< Whether an upload failure was latched.
+    bool upload_failure_latched = false; ///< Whether the upload reached the point where its failure is recorded.
 };
 
-/// @brief Arms one test-only fault for the next Vulkan submission.
+/// @brief Resets test counters and arms a failure for the next matching submission.
 void arm_vulkan_submission_test_seam(vulkan_submission_test_fault fault) noexcept;
-/// @brief Releases a test submission waiting at its fence seam.
+/// @brief Lets the paused submission finish waiting for its fence.
 void release_vulkan_submission_test_fence() noexcept;
-/// @brief Releases delivery of a fault latched by the test seam.
+/// @brief Lets the test report its failure after the fence wait.
 void release_vulkan_submission_test_delivery() noexcept;
-/// @brief Restores the test submission seam to its idle state.
+/// @brief Clears the injected failure and counters, releasing any test waits.
 void reset_vulkan_submission_test_seam() noexcept;
-/// @brief Captures a consistent snapshot of the test submission seam.
-/// @return Current fault, gate, and submission counters.
+/// @brief Reads the current test fault, wait states, and counters.
 [[nodiscard]] vulkan_submission_test_snapshot capture_vulkan_submission_test_snapshot() noexcept;
 #endif
 
-/// @brief Host-owned results from one batched alignment and CIGAR dispatch.
+/// @brief Alignment results and packed CIGAR operations copied from the GPU.
 struct alignment_cigar_batch_result {
     alignment_cigar_batch_result() = default;
     alignment_cigar_batch_result(const alignment_cigar_batch_result&) = delete;
@@ -78,7 +77,7 @@ struct alignment_cigar_batch_result {
               std::exchange(other.committed_submission_count, std::uint64_t{0})) {}
     alignment_cigar_batch_result& operator=(alignment_cigar_batch_result&& other) noexcept {
         if (this != &other) {
-            // Release both owned capacities while their old permit is live.
+            // Free both vectors before returning their memory reservation.
             std::vector<gpu_alignment_cigar_result_wire>{}.swap(results);
             std::vector<std::uint32_t>{}.swap(packed_cigar);
             capacity_permit = {};
@@ -91,18 +90,18 @@ struct alignment_cigar_batch_result {
         return *this;
     }
 
-    // Declared first so both vectors release their admitted capacities before
-    // the permit is returned to the process-wide controller.
+    // Declared first so the vectors are destroyed before their memory
+    // reservation is returned.
     bioseq::parallelism::memory_permit capacity_permit{};
-    std::vector<gpu_alignment_cigar_result_wire> results{}; ///< Per-job alignment wire records.
-    std::vector<std::uint32_t> packed_cigar{};     ///< Compact actual CIGAR words for all jobs.
-    std::uint64_t committed_submission_count = 0u; ///< Physical GPU submissions in this result.
+    std::vector<gpu_alignment_cigar_result_wire> results{}; ///< Alignment result for each job.
+    std::vector<std::uint32_t> packed_cigar{};     ///< Packed CIGAR operations from all jobs.
+    std::uint64_t committed_submission_count = 0u; ///< Completed GPU submissions used to produce these results.
 };
 
 static_assert(!std::is_copy_constructible_v<alignment_cigar_batch_result>);
 static_assert(std::is_nothrow_move_constructible_v<alignment_cigar_batch_result>);
 
-/// @brief Host-owned physical post-alignment MAPQ readback and receipt count.
+/// @brief Mapping-quality results copied from the GPU after alignment.
 struct gpu_mapq_batch_result {
     gpu_mapq_batch_result() = default;
     gpu_mapq_batch_result(const gpu_mapq_batch_result&) = delete;
@@ -114,7 +113,7 @@ struct gpu_mapq_batch_result {
               std::exchange(other.committed_submission_count, std::uint64_t{0})) {}
     gpu_mapq_batch_result& operator=(gpu_mapq_batch_result&& other) noexcept {
         if (this != &other) {
-            // Release all admitted capacities while their old permit is still live.
+            // Free the vectors before returning their memory reservation.
             std::vector<gpu_chain_candidate_header_wire>{}.swap(headers);
             std::vector<gpu_chain_candidate_wire>{}.swap(candidates);
             std::vector<gpu_mapq_result_wire>{}.swap(results);
@@ -129,7 +128,7 @@ struct gpu_mapq_batch_result {
         return *this;
     }
 
-    // Declared first so vector capacity is released before the permit.
+    // Declared first so the vectors are destroyed before their memory reservation.
     bioseq::parallelism::memory_permit capacity_permit{};
     std::vector<gpu_chain_candidate_header_wire> headers{};
     std::vector<gpu_chain_candidate_wire> candidates{};
@@ -141,29 +140,29 @@ static_assert(!std::is_copy_constructible_v<gpu_mapq_batch_result>);
 static_assert(std::is_nothrow_move_constructible_v<gpu_mapq_batch_result>);
 static_assert(std::is_nothrow_move_assignable_v<gpu_mapq_batch_result>);
 
-/// @brief Capabilities probed once at init. `available == false` means there is no
-/// usable Vulkan device and selected GPU algorithms must fail.
+/// @brief Device properties collected during runtime initialization.
+/// A false available flag means a selected Vulkan operation must report failure.
 struct vulkan_feature_set {
     bool available = false;           ///< Whether a usable Vulkan device was found.
     bool shader_int64 = false;        ///< Whether 64-bit integer shaders are supported.
     bool scalar_block_layout = false; ///< Whether scalar block layout is supported.
     bool timeline_semaphore = false;  ///< Whether timeline semaphores are supported.
-    bool software_device = false;     ///< Whether the selected device is software rasterized.
+    bool software_device = false;     ///< Whether Vulkan reports the selected device as a CPU implementation.
     std::uint32_t device_type = 0;    ///< Vulkan physical-device type enum value.
     std::uint32_t api_version = 0;    ///< Packed Vulkan API version reported by the device.
     std::uint32_t driver_version = 0; ///< Driver version reported by the device.
-    std::uint32_t vendor_id = 0;      ///< PCI vendor identifier.
-    std::uint32_t device_id = 0;      ///< PCI device identifier.
+    std::uint32_t vendor_id = 0;      ///< Vendor identifier reported by Vulkan.
+    std::uint32_t device_id = 0;      ///< Device identifier reported by Vulkan.
     std::uint32_t max_workgroup_invocations = 0; ///< Maximum invocations per workgroup.
     std::uint32_t max_workgroup_size_x = 0;      ///< Maximum local size along X.
     std::uint32_t max_workgroup_size_y = 0;      ///< Maximum local size along Y.
     std::uint32_t max_workgroup_size_z = 0;      ///< Maximum local size along Z.
     std::uint32_t max_workgroup_count_x = 0;     ///< Maximum dispatched workgroups along X.
     std::uint32_t max_shared_memory_bytes = 0;   ///< Maximum shared memory per workgroup in bytes.
-    std::uint64_t max_storage_buffer_range = 0;  ///< Maximum storage-buffer span in bytes.
+    std::uint64_t max_storage_buffer_range = 0;  ///< Largest storage-buffer range a shader can bind, in bytes.
     std::uint64_t min_storage_buffer_offset_alignment =
         1;                                ///< Required storage-buffer offset alignment.
-    std::uint64_t device_local_bytes = 0; ///< Device-local heap size in bytes.
+    std::uint64_t device_local_bytes = 0; ///< Size of the largest device-local memory heap in bytes.
     std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{}; ///< Stable Vulkan device UUID bytes.
     std::array<std::uint8_t, VK_UUID_SIZE>
         pipeline_cache_uuid{}; ///< Pipeline-cache compatibility UUID.
@@ -171,15 +170,13 @@ struct vulkan_feature_set {
         device_name{}; ///< NUL-terminated device name.
 };
 
-/// @brief Count of fixed rank-prefilter replay slots exercised by recorded-command tests.
+/// @brief Number of recorded-command slots for the supported rank-prefilter variants.
 inline constexpr std::size_t k_rank_prefilter_replay_route_count = 7u;
 
-/// @brief Resolve the fixed recorded-command slot for one rank-prefilter shader and
-/// push mode. Keeping this mapping pure makes the seven non-aliasing replay
-/// identities independently testable without a Vulkan device.
-/// @param[in] kind Rank-prefilter shader identity.
-/// @param[in] push_mode Shader push mode encoded in the recorded command.
-/// @return The matching replay slot, or no value for an unsupported route.
+/// @brief Finds the recorded-command slot for a rank-prefilter shader and mode.
+/// @param[in] kind Shader to run.
+/// @param[in] push_mode Mode passed to the shader.
+/// @return A slot index, or no value when that shader and mode are unsupported.
 [[nodiscard]] constexpr std::optional<std::size_t>
 rank_prefilter_replay_index(shader_kind kind, std::uint32_t push_mode) noexcept {
     if (kind == shader_kind::sneaky_snake_rank_batch) {
@@ -207,18 +204,19 @@ rank_prefilter_replay_index(shader_kind kind, std::uint32_t push_mode) noexcept 
     }
 }
 
-/// @brief Shader identity and replay slot selected for one GateKeeper batch.
+/// @brief GateKeeper shader and recorded-command slot chosen for a batch.
 struct gatekeeper_rank_batch_route {
-    shader_kind kind = shader_kind::gatekeeper_rank_batch; ///< Selected GateKeeper shader identity.
-    std::size_t replay_index = 2u; ///< Recorded-command replay slot for the route.
+    shader_kind kind = shader_kind::gatekeeper_rank_batch; ///< GateKeeper shader to run.
+    std::size_t replay_index = 2u; ///< Slot holding the recorded commands for this shader.
 
     constexpr bool operator==(const gatekeeper_rank_batch_route&) const noexcept = default;
 };
 
-/// @brief Select a specialized GateKeeper shader only for a homogeneous, word-aligned
-/// production batch. Every other shape deliberately retains the generic key.
-/// @param[in] jobs Borrowed prefilter jobs whose geometry selects the route.
-/// @return The specialized or generic GateKeeper route.
+/// @brief Chooses a GateKeeper shader suited to the whole batch.
+/// Uses a specialized shader when every query and target has the same supported
+/// length and edit limit, with 4-byte-aligned offsets. Other batches use the generic shader.
+/// @param[in] jobs Prefilter jobs to inspect.
+/// @return Shader and recorded-command slot for the batch.
 [[nodiscard]] inline gatekeeper_rank_batch_route resolve_gatekeeper_rank_batch_route(
     std::span<const bioseq::prefilter::prefilter_job> jobs) noexcept {
     if (jobs.empty())
@@ -262,18 +260,18 @@ struct gatekeeper_rank_batch_route {
     };
 }
 
-/// @brief Canonical allocation-free Vulkan driver identity used by SQL/report receipt.
-/// Numeric fields avoid unstable marketing strings and preserve the exact
-/// pipeline-cache compatibility UUID byte order reported by Vulkan.
-/// @param[in] features Immutable Vulkan device feature snapshot.
-/// @return A fixed-width canonical driver identity string.
+/// @brief Formats device and driver identifiers for reports and cache checks.
+/// Uses numeric Vulkan properties and the pipeline-cache UUID in a fixed buffer,
+/// so formatting needs no heap allocation.
+/// @param[in] features Device properties collected at initialization.
+/// @return A null-terminated identifier, or an empty array if it does not fit.
 [[nodiscard]] inline std::array<char, 128>
 canonical_vulkan_driver_identity(const vulkan_feature_set& features) noexcept {
     std::array<char, 128> result{};
     constexpr char hex[] = "0123456789abcdef";
     std::size_t cursor = 0u;
     const auto append_literal = [&result, &cursor](std::string_view value) {
-        // Append one ASCII literal fragment into the fixed identity buffer.
+        // Append text while leaving room for the final null character.
         if (cursor > result.size() - value.size() - 1u)
             return false;
         for (const char ch : value)
@@ -281,7 +279,7 @@ canonical_vulkan_driver_identity(const vulkan_feature_set& features) noexcept {
         return true;
     };
     const auto append_u32 = [&result, &cursor](std::uint32_t value) {
-        // Append one lowercase hexadecimal u32 field into the identity buffer.
+        // Write a 32-bit field as eight lowercase hexadecimal digits.
         constexpr char digits[] = "0123456789abcdef";
         if (cursor > result.size() - 9u)
             return false;
@@ -309,21 +307,21 @@ canonical_vulkan_driver_identity(const vulkan_feature_set& features) noexcept {
     return result;
 }
 
-/// @brief RAII owner for one (VkBuffer, VkDeviceMemory) pair. Move-only. Destruction
-/// routes through `runtime::destroy_buffer` (the single cleanup path).
+/// @brief Owns a Vulkan buffer and its device memory.
+/// Moving transfers ownership. Destruction frees the allocation through the runtime.
 struct buffer {
     /// @brief Creates an empty buffer owner.
     buffer() = default;
 
-    /// @brief Adopts one Vulkan buffer allocation and its accounting state.
-    /// @param[in] owner Runtime responsible for releasing the allocation.
+    /// @brief Own an existing Vulkan allocation.
+    /// @param[in] owner Runtime that frees it.
     /// @param[in] buffer_handle Vulkan buffer handle.
-    /// @param[in] memory Vulkan device-memory handle backing the buffer.
-    /// @param[in] bytes Logical buffer extent.
-    /// @param[in] allocation_bytes Allocator-reported memory extent.
-    /// @param[in] memory_properties Vulkan properties of the selected memory type.
-    /// @param[in] process_footprint_reflected Whether process accounting includes the allocation.
-    /// @param[in] mapped Persistent host mapping, or `nullptr` for device-only memory.
+    /// @param[in] memory Backing device memory.
+    /// @param[in] bytes Buffer size in bytes.
+    /// @param[in] allocation_bytes Physical allocation size.
+    /// @param[in] memory_properties Vulkan memory-type properties.
+    /// @param[in] process_footprint_reflected Whether process memory accounting includes this allocation.
+    /// @param[in] mapped Existing host mapping, or nullptr if unmapped.
     buffer(runtime* owner,
            VkBuffer buffer_handle,
            VkDeviceMemory memory,
@@ -339,18 +337,16 @@ struct buffer {
     /// @brief Prevents two owners from releasing the same Vulkan allocation.
     buffer(const buffer&) = delete;
 
-    /// @brief Prevents copy assignment of Vulkan allocation ownership.
+    /// @brief Keeps Vulkan allocation ownership from being copied by assignment.
     buffer& operator=(const buffer&) = delete;
 
-    /// @brief Transfers Vulkan allocation ownership from another buffer.
-    /// @param[in,out] other Buffer whose handles and accounting state are consumed.
+    /// @brief Takes another buffer's allocation, leaving that buffer empty.
     buffer(buffer&& other) noexcept {
         move_from(other);
     }
 
-    /// @brief Releases the current allocation and transfers another buffer into this owner.
-    /// @param[in,out] other Buffer whose handles and accounting state are consumed.
-    /// @return This buffer owner.
+    /// @brief Frees this allocation and takes another buffer's allocation.
+    /// The source is left empty.
     buffer& operator=(buffer&& other) noexcept {
         if (this != &other) {
             reset();
@@ -359,22 +355,21 @@ struct buffer {
         return *this;
     }
 
-    /// @brief Releases the owned Vulkan allocation through the runtime owner.
+    /// @brief Frees this allocation through its runtime.
     ~buffer() {
         reset();
     }
 
-    /// @brief Releases any owned Vulkan handles and clears their accounting state.
+    /// @brief Frees the allocation and clears its handles, mapping, and sizes.
     void reset() noexcept;
 
-    /// @brief Checks whether this owner contains a Vulkan buffer handle.
-    /// @return Whether `buffer_handle` is non-null.
+    /// @brief Returns whether this object holds a Vulkan buffer handle.
     [[nodiscard]] bool is_valid() const noexcept {
         return buffer_handle != VK_NULL_HANDLE;
     }
 
-    /// @brief Checks whether host accesses need neither explicit mapping nor cache maintenance.
-    /// @return Whether the memory is both host-visible and host-coherent.
+    /// @brief Checks for host-visible, host-coherent memory.
+    /// These properties allow host access without explicit cache flushes.
     [[nodiscard]] bool is_host_visible_coherent() const noexcept {
         constexpr VkMemoryPropertyFlags required =
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -384,16 +379,15 @@ struct buffer {
     runtime* owner = nullptr;                    ///< Runtime that releases this allocation.
     VkBuffer buffer_handle = VK_NULL_HANDLE;     ///< Vulkan buffer handle.
     VkDeviceMemory memory = VK_NULL_HANDLE;      ///< Device memory backing the buffer.
-    std::uint64_t bytes = 0;                     ///< Logical buffer extent in bytes.
-    std::uint64_t allocation_bytes = 0;          ///< Allocator-reported memory extent in bytes.
+    std::uint64_t bytes = 0;                     ///< Size of the Vulkan buffer in bytes.
+    std::uint64_t allocation_bytes = 0;          ///< Physical allocation size in bytes.
     VkMemoryPropertyFlags memory_properties = 0; ///< Vulkan memory-type properties.
     bool process_footprint_reflected =
         false;              ///< Whether process accounting includes the allocation.
-    void* mapped = nullptr; ///< Persistent host mapping, or null for device-only memory.
+    void* mapped = nullptr; ///< Host mapping, or null when the allocation is not mapped.
 
   private:
-    /// @brief Moves every handle and accounting field, then clears the source.
-    /// @param[in,out] other Buffer state to transfer into this owner.
+    /// @brief Transfers allocation details and leaves the source empty.
     void move_from(buffer& other) noexcept {
         owner = other.owner;
         buffer_handle = other.buffer_handle;
@@ -414,10 +408,10 @@ struct buffer {
     }
 };
 
-/// @brief Converts a Vulkan dispatchable or non-dispatchable handle to stable bits.
-/// @tparam p_handle_type Vulkan handle type to encode without dereferencing it.
-/// @param[in] handle Vulkan handle to encode without dereferencing it.
-/// @return Stable unsigned handle bits.
+/// @brief Copy a Vulkan handle's bytes into a zero-initialized 64-bit identifier.
+/// Accepts pointer and integer handle types without dereferencing them.
+/// @param[in] handle Handle to identify.
+/// @return Copied handle representation.
 template <class p_handle_type>
 [[nodiscard]] inline std::uint64_t vulkan_handle_identity(const p_handle_type handle) noexcept {
     static_assert(sizeof(p_handle_type) <= sizeof(std::uint64_t));
@@ -426,19 +420,18 @@ template <class p_handle_type>
     return identity;
 }
 
-/// @brief Immutable snapshot of one runtime-owned allocation.  The object address is
-/// insufficient because buffer is move-assignable. Operation receipt therefore
-/// binds its owner, Vulkan allocation handles, and physical/logical sizes too.
+/// @brief Records which allocation a buffer object held for an operation.
+/// A move assignment can replace that allocation at the same object address,
+/// so checks also compare the Vulkan handles, runtime, and sizes.
 struct runtime_buffer_identity {
     const buffer* object = nullptr;      ///< Borrowed buffer object whose identity is captured.
-    const runtime* owner = nullptr;      ///< Runtime owner recorded for receipt binding.
+    const runtime* owner = nullptr;      ///< Runtime that owned the allocation when recorded.
     std::uint64_t buffer_handle = 0u;    ///< Encoded Vulkan buffer handle bits.
     std::uint64_t memory_handle = 0u;    ///< Encoded Vulkan device-memory handle bits.
-    std::uint64_t bytes = 0u;            ///< Logical buffer extent in bytes.
-    std::uint64_t allocation_bytes = 0u; ///< Allocator-reported memory extent in bytes.
+    std::uint64_t bytes = 0u;            ///< Recorded Vulkan buffer size in bytes.
+    std::uint64_t allocation_bytes = 0u; ///< Recorded physical allocation size in bytes.
 
-    /// @brief Checks that every receipt identity field is populated and consistent.
-    /// @return Whether the identity can bind an operation receipt.
+    /// @brief Checks for nonempty handles and a buffer size that fits the allocation.
     [[nodiscard]] constexpr bool is_valid() const noexcept {
         return object != nullptr && owner != nullptr && buffer_handle != 0u &&
                memory_handle != 0u && bytes != 0u && allocation_bytes >= bytes;
@@ -446,9 +439,9 @@ struct runtime_buffer_identity {
     constexpr bool operator==(const runtime_buffer_identity&) const noexcept = default;
 };
 
-/// @brief Captures the allocation identity required by operation receipts.
-/// @param[in] allocation Runtime-owned allocation to capture.
-/// @return The allocation identity, or an empty identity for null input.
+/// @brief Records a buffer's allocation details for later comparison.
+/// @param[in] allocation Buffer to inspect.
+/// @return Its recorded identity, or an empty identity for null input.
 [[nodiscard]] inline runtime_buffer_identity
 make_runtime_buffer_identity(const buffer* allocation) noexcept {
     if (allocation == nullptr)
@@ -463,26 +456,26 @@ make_runtime_buffer_identity(const buffer* allocation) noexcept {
     };
 }
 
-/// @brief One independent hard chaining range = one dispatched workgroup.
+/// @brief Consecutive anchors that the GPU chains as one independent group.
 struct gpu_chain_range {
     std::uint32_t begin = 0;  ///< Inclusive start index within the chained batch.
-    std::uint32_t length = 0; ///< Number of elements covered by one workgroup dispatch.
+    std::uint32_t length = 0; ///< Number of anchors in the group.
 };
 
-/// @brief Thrown on any per-run Vulkan failure once the device is usable. Selected
-/// Vulkan algorithms must propagate this rather than silently using CPU work.
+/// @brief Reports a Vulkan operation failure.
+/// A selected GPU algorithm passes this error to its caller instead of falling back to CPU work.
 class vulkan_runtime_error : public std::runtime_error {
   public:
     using std::runtime_error::runtime_error;
 };
 
-/// @brief Optional supervisor-owned provider for precompiled MoltenVK metallibs.
-/// When installed, runtime pipeline creation asks this hook for a shader module
-/// instead of invoking glslang/spirv-cross on the backend worker thread.
+/// @brief Loads precompiled MoltenVK shaders supplied by the supervisor.
+/// The runtime uses this provider when installed, so the backend worker can
+/// create shader modules without running glslang or spirv-cross.
 struct runtime_shader_provider {
-    /// @brief Prepares supervisor-owned shader artifacts before runtime construction.
+    /// @brief Prepares shader files before the runtime initializes its device.
     using prepare_function = std::expected<void, std::string> (*)();
-    /// @brief Loads one precompiled shader module for a variant key.
+    /// @brief Loads a precompiled shader module for the requested variant.
     using load_function = std::expected<shader_module_load, std::string> (*)(
         VkDevice device,
         const shader_variant_key& key,
@@ -492,22 +485,18 @@ struct runtime_shader_provider {
     load_function load_module = nullptr; ///< Optional module loader installed by the supervisor.
 };
 
-/// @brief Returns the process-owned optional shader-provider slot.
-/// @return Mutable reference to the process-owned provider pointer.
+/// @brief Returns the process-wide shader-provider pointer for reading or replacement.
 runtime_shader_provider*& runtime_shader_provider_slot() noexcept {
     static runtime_shader_provider* provider = nullptr;
     return provider;
 }
 
-/// @brief Installs the supervisor-provided shader module source.
-/// @param[in] provider Optional process-owned provider. Null removes the provider.
+/// @brief Sets the process-wide shader provider. Pass null to remove it.
 void install_runtime_shader_provider(runtime_shader_provider* provider) noexcept {
     runtime_shader_provider_slot() = provider;
 }
 
-/// @brief Validates the canonical lowercase hexadecimal runtime-cache digest.
-/// @param[in] digest Candidate cache digest.
-/// @return True only for a nonzero 16-character lowercase hexadecimal digest.
+/// @brief Checks for a 16-digit lowercase hexadecimal cache digest containing a nonzero digit.
 [[nodiscard]] inline bool is_runtime_cache_digest_valid(std::string_view digest) noexcept {
     return digest.size() == 16u &&
            std::all_of(digest.begin(),
