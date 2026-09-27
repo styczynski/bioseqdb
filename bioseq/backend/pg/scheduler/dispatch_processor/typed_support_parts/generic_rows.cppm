@@ -1,6 +1,6 @@
 /**
  * @file typed_support_parts/generic_rows.cppm
- * @brief Owns CPU/SIMD parallel admission and ordered generic row dispatch.
+ * @brief Runs CPU alignment for rows with flat or lazily loaded sequences.
  */
 module;
 
@@ -40,8 +40,9 @@ import bioseq.parallelism.concepts;
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
 /**
- * Runs the non-Vulkan row dispatcher, retaining worker ordering, cancellation
- * points, source accounting, and the scanner/in-memory generated identities.
+ * Aligns each row and collects its matches and execution statistics. Small flat
+ * targets can run in parallel. Rows that need PostgreSQL storage are processed
+ * on the backend thread, where the dispatcher also checks for cancellation.
  */
 template <class p_sequence,
           class p_pool,
@@ -153,11 +154,8 @@ void process_generic_rows(
     }
 
     for (size_t row_index = 0; row_index < batch_size; ++row_index) {
-        // Cancellation point at the per-row boundary. The
-        // native aligner itself is NO_POSTGRES and cannot call
-        // CHECK_FOR_INTERRUPTS; this lets a multi-row mmsearch honour
-        // pg_cancel_backend between rows, and (with the storage-layer
-        // check in fetch_payload) bounds how long a cancel waits.
+        // Check for cancellation between rows on the PostgreSQL thread.
+        // The native aligner cannot call CHECK_FOR_INTERRUPTS itself.
         bioseq::postgres::support::invoke_pg_as_cpp([] { CHECK_FOR_INTERRUPTS(); });
         if (row_index < parallel_done.size() && parallel_done[row_index] != 0) {
             const auto requested_source = requested_target_index_source(scanner_pg_ctx);
@@ -263,11 +261,8 @@ void process_generic_rows(
             }
         }
         const bioseq::pg_types::seq* target_hdr = target_hdrs[row_index];
-        // When use_scanner_pg=true and a locator was captured
-        // for this row (e.g. a stub whose materialised varlena would
-        // exceed MaxAllocSize, so hydration was skipped), we still have
-        // enough info to dispatch via scanner_pg's PG-backed mode. Only
-        // skip when NEITHER an inline target nor a locator is available.
+        // A target locator or expanded sequence can supply the row even when
+        // there is no flat target header.
         const bool has_locator_for_pg =
             use_scanner_pg && scanner_pg_ctx->target_locators[row_index].has_value();
         if (static_cast<unsigned>(target_hdr != nullptr) +
@@ -278,19 +273,14 @@ void process_generic_rows(
                 ERRCODE_DATA_CORRUPTED, "target recipe/locator/flat dispatch ownership overlaps");
         }
         if (target_hdr == nullptr && !has_locator_for_pg && !has_target_recipe) {
-            continue; // NULL seq column in this row → no match
+            continue; // No target value in this row.
         }
         if (target_hdr != nullptr &&
             (target_hdr->alphabet_code != alphabet_code ||
              target_hdr->storage_unit_byte_width != storage_unit_byte_width)) {
             /*
-             * PG's typmod coercion should have rejected the
-             * INSERT if the stored typmod didn't match the
-             * column typmod; getting here means someone
-             * wrote raw bytes via pg_catalog mischief or a
-             * future cross-typmod compare path. Skip rather
-             * than crash and let the tuple's mmsearch
-             * qualify as FALSE.
+             * A flat target with a different alphabet or storage width cannot use
+             * this typed aligner. Treat the row as having no matches.
              */
             bioseq_log<logging_level::debug>(
                 "[bioseq] pg: target row query_id={} has typmod ({},{}) mismatching context "
@@ -313,11 +303,8 @@ void process_generic_rows(
                                                      "target recipe metadata is invalid");
             }
         }
-        // Construct compact_sequence_range only when target_hdr is
-        // present. With a PG-backed locator we don't materialise the
-        // full payload — scanner_pg streams fragment-by-fragment. Use
-        // the locator's logical_length for the heuristic-relevant
-        // min_bp comparison.
+        // Read the target length from its header, expanded descriptor, or locator.
+        // A locator provides the length before any sequence fragments are loaded.
         const sequence_size_t target_bp_size =
             target_hdr != nullptr ? static_cast<sequence_size_t>(target_hdr->bp_size)
             : has_target_recipe
@@ -350,8 +337,8 @@ void process_generic_rows(
                     typename compact_sequence_range<p_sequence>::traits::alphabet_type;
                 using row_view = bioseq::storage::lazy_sequence_view<row_alphabet>;
                 /**
-                 * Runs scanner_row for one query lazy view and optional target
-                 * view, sharing cached query minimizers when the batch allows.
+                 * Runs the scanner for this query view, passing along any target
+                 * view and cached query minimizers.
                  */
                 auto execute_scanner = [target_hdr,
                                         row_index,
@@ -387,8 +374,8 @@ void process_generic_rows(
                                        active_session);
                 };
                 /**
-                 * Dispatches one row after binding the target from inline
-                 * storage, a PG locator, or an expanded target recipe owner.
+                 * Opens an expanded target in the query read session before
+                 * alignment. The scanner opens flat and locator targets itself.
                  */
                 auto execute_with_optional_target_recipe =
                     [has_target_recipe,
@@ -488,8 +475,8 @@ void process_generic_rows(
                     row_query_hdr, target_hdr, target_bp_size, execution_plan, chunked_scanner_forced);
             } else if (scanner_pg_ctx != nullptr &&
                        scanner_pg_ctx->target_locators[row_index].has_value()) {
-                // inmemory_forced=ON cannot satisfy its
-                // force-baseline semantic on > MaxAllocSize stubs; raise.
+                // The forced in-memory test path needs a flat target. Report a size error
+                // if this locator could not be materialized.
                 const int query_id = static_cast<int>(query_ids[row_index]);
                 bioseq::postgres::support::invoke_pg_as_cpp([query_id, target_bp_size] {
                     ereport(ERROR,
