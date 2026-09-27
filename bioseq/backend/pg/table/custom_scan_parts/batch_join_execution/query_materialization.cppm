@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Materializes batched join queries within the established PG boundary.
+ * @brief Buffer query rows for a sequence join within the available memory budget.
  */
 module;
 #include <new>
@@ -42,12 +42,12 @@ using namespace bioseq::postgres::support;
 
 export {
     /**
-     * @brief Materializes the query child once into slots owned by the query tuple context.
+     * @brief Read the query child once and save its non-null query rows.
      *
-     * Memory permits cover retained tuples, expanded objects, and dispatch references until
-     * the query tuple context is reset or deleted.
-     *
-     * @throws PostgreSQL ERROR when the child shape, sequence value, or admission bound is invalid.
+     * Reserve memory before copying each row. Keep expanded sequence wrappers
+     * and their sources alive without flattening them, so every target can reuse
+     * the same queries. The reservations last until the query context is cleared.
+     * @throws PostgreSQL ERROR for invalid row types or insufficient memory.
      */
     void batch_join_materialize_queries(batch_join_runtime& runtime) {
         if (runtime.queries_materialized) {
@@ -64,9 +64,8 @@ export {
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("BioseqBatchJoin query planner estimate is invalid")));
         }
-        /* Reserve the planner's rows*width envelope before asking the child for
-         * its first tuple.  Actual whole-MinimalTuple upper bounds below extend
-         * this reservation before detoast/copy whenever the estimate is low. */
+        /* Reserve the planner's estimated row storage before reading the child.
+         * Increase the reservation before copying a row if the estimate is low. */
         const double bounded_rows =
             std::min(runtime.query_planner_rows,
                      static_cast<double>((std::numeric_limits<std::uint64_t>::max)()));
@@ -85,10 +84,8 @@ export {
                         sizeof(Datum) + sizeof(bool) +
                         sizeof(batch_join_query_tuple::retained_expanded_attribute)))),
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
-        /* One reusable virtual staging slot and one per-row descriptor vector are
-         * allocated after the planner permit but before the row-specific extension.
-         * Admit their worst query-column-count shape once, even when the planner
-         * estimated zero rows/width. */
+        /* Reserve scratch space for the staging slot and attribute descriptions
+         * even when the planner expects no rows. */
         runtime.query_planner_admission_bytes = bioseq::common::saturating_add(
             bioseq::common::saturating_mul(planner_rows, planner_tuple_bytes),
             scratch_metadata_bytes);
@@ -259,10 +256,9 @@ export {
             std::uint64_t tuple_upper_bound = bioseq::common::saturating_add(
                 static_cast<std::uint64_t>(MAXALIGN(MINIMAL_TUPLE_DATA_OFFSET)),
                 static_cast<std::uint64_t>(source_tuple_data));
-            /* source_tuple_data includes the original (possibly external TOAST)
-             * sequence datum. Adding the raw size rather than subtracting that datum
-             * is deliberately conservative and covers the flat replacement without
-             * inspecting or allocating any pass-by-reference value. */
+            /* Add space for the full sequence even if the tuple estimate already
+             * includes a TOAST pointer. This safe upper bound avoids fetching the
+             * value before memory is reserved. */
             tuple_upper_bound =
                 bioseq::common::saturating_add(tuple_upper_bound, retained_expanded_bytes);
             tuple_upper_bound = bioseq::common::saturating_add(
@@ -306,8 +302,7 @@ export {
                 runtime.query_permits.push_back(std::move(*additional_permit));
                 runtime.query_reserved_admission_bytes = required_after_row;
             }
-            /* Every following operation may allocate; the complete tuple upper
-             * bound is owned before the first retain/detoast/copy. */
+            /* Reserve the full row size before saving sequence wrappers or copying values. */
             Datum retained_recipe = Datum{0};
             std::vector<batch_join_query_tuple::retained_expanded_attribute>
                 retained_expanded_attributes{};
@@ -382,10 +377,9 @@ export {
                     PointerGetDatum(flat);
                 flat_destination->tts_isnull[runtime.query_slot_seq_resno - 1] = false;
             }
-            /* The MinimalTuple and its owning slot are one retained query-row
-             * object.  Allocate both in the dedicated query context: execution may
-             * enter here with a transient expression context current, and retaining
-             * only the tuple there leaves the slot itself dangling before EndScan. */
+            /* Allocate both the saved tuple and its slot in the query context.
+             * The caller may be using a temporary expression context that is reset
+             * before the join has finished with these rows. */
             MemoryContext old = MemoryContextSwitchTo(runtime.query_tuple_context);
             MinimalTuple copy = nullptr;
             try {
