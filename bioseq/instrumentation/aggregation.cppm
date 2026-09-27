@@ -2,8 +2,8 @@
  * @file instrumentation/aggregation.cppm
  * @brief Per-thread storage for region and loop measurements.
  *
- * Each table has one producer thread. Summary reads occur after measured work
- * is quiescent, so aggregate fields remain non-atomic.
+ * Each table has one writer. Read summaries after that thread stops updating
+ * the table, because the measurements use ordinary, non-atomic fields.
  */
 module;
 
@@ -20,15 +20,15 @@ import bioseq.instrumentation.configuration;
 export namespace bioseq::instrumentation {
 
 /**
- * @brief Fixed 32-bucket base-two histogram of nanosecond durations.
+ * @brief Count durations in 32 buckets whose ranges double in size.
  *
- * Values above the represented range saturate in the final bucket. The
- * fixed layout is part of the in-process metrics boundary.
+ * Durations are nanoseconds. The last bucket also receives every value above
+ * its normal range.
  */
 struct duration_histogram {
     std::array<std::uint64_t, 32> buckets{};
 
-    /** @brief Add one nanosecond duration to its saturated base-two bucket. */
+    /** @brief Count a duration in its bucket, using the final bucket for large values. */
     [[gnu::always_inline]]
     inline void add(std::uint64_t value) noexcept {
         if (value == 0) {
@@ -57,7 +57,7 @@ struct alignas(64) region_aggregate {
 static_assert(sizeof(region_aggregate) == 384);
 static_assert(alignof(region_aggregate) == 64);
 
-/** @brief Reset a region aggregate while restoring its minimum sentinel. */
+/** @brief Clear region measurements and prepare the minimum for its first value. */
 [[gnu::always_inline]]
 inline void initialize_aggregate(region_aggregate& aggregate) noexcept {
     aggregate.total_ns = 0;
@@ -85,7 +85,7 @@ inline void record_region_duration(
     aggregate.duration_distribution.add(duration_ns);
 }
 
-/// Loop aggregate extends region aggregate with iteration / work fields.
+/// Region measurements with loop iteration and work counts.
 struct alignas(64) loop_aggregate : region_aggregate {
     std::uint64_t total_iterations;
     std::uint64_t total_work;
@@ -94,10 +94,8 @@ struct alignas(64) loop_aggregate : region_aggregate {
     std::uint64_t max_per_iter_ns;
     duration_histogram per_iteration_duration_distribution;
 };
-// duration_histogram's default member initializer makes the base non-POD for
-// layout, so Itanium ABI providers reuse region_aggregate's 56 bytes of tail
-// padding. The loop counters occupy bytes 328-367, the histogram ends at byte
-// 624, and 64-byte alignment rounds the complete object to ten cache lines.
+// The Itanium ABI reuses 56 bytes of padding at the end of region_aggregate.
+// This keeps loop_aggregate at 640 bytes with 64-byte alignment.
 static_assert(sizeof(loop_aggregate) == 640);
 static_assert(alignof(loop_aggregate) == 64);
 
@@ -138,8 +136,8 @@ inline void record_loop_duration(
     aggregate.per_iteration_duration_distribution.add(per_iteration_ns);
 }
 
-/// Per-thread aggregate table. It is direct id-indexed with 4096 blocks of 256
-/// aggregates. Each block is allocated lazily on first touch.
+/// Per-thread measurements indexed by descriptor ID.
+/// Allocate blocks on first use, with block size taken from the configuration.
 template<profiling_configuration p_configuration_type>
 struct region_aggregate_table {
     static constexpr std::uint32_t block_size = p_configuration_type::aggregate_block_size;
@@ -191,7 +189,7 @@ struct region_aggregate_table {
     }
 };
 
-/** @brief Lazily allocated descriptor-indexed storage for loop aggregates. */
+/** @brief Loop measurements indexed by descriptor ID, allocated in blocks on first use. */
 template<profiling_configuration p_configuration_type>
 struct loop_aggregate_table {
     static constexpr std::uint32_t block_size = p_configuration_type::aggregate_block_size;

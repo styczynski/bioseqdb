@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/configuration.cppm
- * @brief Compile-time feature configurations for instrumentation.
+ * @brief Compile-time switches for profiling features.
  *
- * Every hot-path entry point is constrained by profiling_configuration.
- * Its static feature fields let the compiler remove disabled instrumentation.
+ * Instrumentation templates use these flags to remove disabled measurements
+ * from the compiled code.
  */
 module;
 
@@ -15,10 +15,9 @@ export module bioseq.instrumentation.configuration;
 export namespace bioseq::instrumentation {
 
 /**
- * @brief Describe the compile-time controls required by instrumentation.
- *
- * @tparam p_configuration Candidate configuration with boolean feature gates
- * and unsigned trace and aggregation capacities.
+ * @brief Required flags and capacities for a profiling configuration.
+ * @tparam p_configuration Trivially default-constructible type with feature flags
+ * and unsigned-compatible trace and aggregation capacities.
  */
 template <class p_configuration>
 concept profiling_configuration = requires {
@@ -32,10 +31,10 @@ concept profiling_configuration = requires {
 } && std::is_trivially_default_constructible_v<p_configuration>;
 
 /**
- * @brief Disable every optional measurement path at compile time.
+ * @brief Disable optional profiling features.
  *
- * Zero trace capacity prevents storage use, while the aggregation block size
- * remains available to templates whose disabled branches are still parsed.
+ * Trace capacity is zero. A nonzero aggregate block size keeps the storage
+ * templates valid even when measurements are disabled.
  */
 struct profiling_disabled_configuration {
     static constexpr bool enable_profiling = false;
@@ -49,10 +48,9 @@ struct profiling_disabled_configuration {
 static_assert(profiling_configuration<profiling_disabled_configuration>);
 
 /**
- * @brief Enable every production instrumentation feature at compile time.
+ * @brief Enable all profiling features for production.
  *
- * Capacities count trace records and aggregate slots. They do not represent
- * bytes or allocate from a measurement path.
+ * Capacities count trace events and measurement slots.
  */
 struct production_profiling_configuration {
     static constexpr bool enable_profiling = true;
@@ -66,11 +64,10 @@ struct production_profiling_configuration {
 static_assert(profiling_configuration<production_profiling_configuration>);
 
 /**
- * @brief Benchmark-owned profiling configuration.
+ * @brief Profiling configuration with separate state for benchmarks.
  *
- * This remains a distinct type because its thread-local state is installed by
- * benchmark dispatch independently of production telemetry. Its current
- * feature set and capacities deliberately match production profiling.
+ * It enables the same features as production. Its distinct type lets benchmark
+ * code install its own thread-local profiler.
  */
 struct benchmark_profiling_configuration {
     static constexpr bool enable_profiling = true;

@@ -1,9 +1,9 @@
 /**
  * @file instrumentation/clock.cppm
- * @brief Portable wall-clock and cycle clock.
+ * @brief Monotonic timestamps and raw hardware-counter ticks.
  *
- * `now_ns()` returns monotonic nanoseconds. `now_cycles()` returns the native
- * cycle counter, or zero when the architecture has no supported counter.
+ * now_ns returns nanoseconds. now_cycles returns the architecture's counter
+ * ticks, or zero when no counter implementation is available.
  */
 module;
 
@@ -26,11 +26,10 @@ export namespace bioseq::instrumentation::clock {
 
 #if defined(__linux__)
 /**
- * @brief Clock selected for framework interval timestamps on Linux.
+ * @brief Choose the Linux clock used for timing.
  *
- * The dedicated E2E interval-evidence tree must share CLOCK_MONOTONIC's
- * physical rate with the immutable minimap2 helper receipt. Ordinary Linux
- * builds retain CLOCK_MONOTONIC_RAW.
+ * BIOSEQ_BENCHMARK_E2E_INTERVALS uses CLOCK_MONOTONIC so benchmark intervals
+ * can be compared with the minimap2 helper. Other builds use CLOCK_MONOTONIC_RAW.
  */
 inline constexpr clockid_t now_ns_clock_id =
 #if defined(BIOSEQ_BENCHMARK_E2E_INTERVALS)
@@ -41,15 +40,12 @@ inline constexpr clockid_t now_ns_clock_id =
 #endif
 
 /**
- * @brief Read the platform's monotonic clock in nanoseconds.
+ * @brief Read monotonic time in nanoseconds.
  *
- * Apple uses `mach_absolute_time`. Linux uses `CLOCK_MONOTONIC` only in the
- * dedicated E2E interval-evidence tree and otherwise retains
- * `CLOCK_MONOTONIC_RAW`. Other platforms use `std::chrono::steady_clock`.
- * The returned value is an absolute timestamp suitable only for same-clock
- * differences.
+ * Apple uses mach_absolute_time. Linux uses now_ns_clock_id, and other
+ * platforms use std::chrono::steady_clock. Compare timestamps from the same clock.
  *
- * @return Monotonic time in nanoseconds.
+ * @return Monotonic timestamp in nanoseconds.
  */
 [[nodiscard, gnu::always_inline]]
 inline std::uint64_t now_ns() noexcept {
@@ -73,13 +69,13 @@ inline std::uint64_t now_ns() noexcept {
 }
 
 /**
- * @brief Read the architecture's unscaled cycle or virtual-counter ticks.
+ * @brief Read raw hardware-counter ticks.
  *
- * The value is not converted to nanoseconds: x86 reads RDTSCP and AArch64
- * reads CNTVCT_EL0. Callers may subtract readings under the platform's
- * monotonic-counter assumptions, but must not mix them with `now_ns()`.
+ * x86 uses RDTSCP and AArch64 uses CNTVCT_EL0. Differences measure elapsed
+ * ticks when the platform counter is monotonic. Use readings from the same
+ * counter. These ticks have different units from now_ns.
  *
- * @return Raw counter ticks, or zero when the architecture has no backend.
+ * @return Counter ticks, or zero on an unsupported architecture.
  */
 [[nodiscard, gnu::always_inline]]
 inline std::uint64_t now_cycles() noexcept {
