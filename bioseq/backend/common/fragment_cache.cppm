@@ -1,11 +1,10 @@
 /**
  * @file fragment_cache.cppm
- * @brief Provides a fixed-capacity cache with observable slot generations.
+ * @brief Small fixed-size cache whose slot generations detect stale references.
  *
- * Slots live inline, lookup is a bounded linear scan, and eviction invokes a
- * caller-owned cleanup callback before clearing the slot. Each replacement
- * increments a 64-bit generation so cached slot references can detect
- * eviction or reuse. A cache instance is single-threaded.
+ * Lookup scans the slots. Eviction calls a cleanup callback before marking
+ * a slot empty, and insertion assigns a new generation. Use each cache
+ * from one thread.
  */
 module;
 
@@ -22,29 +21,22 @@ static_assert(__cplusplus >= 202302L, "fragment_cache requires C++23 or later");
 export namespace bioseq::common {
 
 /**
- * @brief Stores a bounded set of movable values in generation-tracked slots.
+ * @brief Keeps values in reusable slots with a generation for each insertion.
  *
- * The cache owns all values inline and performs no dynamic allocation. Calls
- * are not synchronized. One thread must own an instance. A slot reference is
- * valid only while `is_valid_at()` accepts its index/generation pair.
+ * The slot array is stored inside the cache. Check the saved index and
+ * generation with is_valid_at() before reusing a reference, since eviction
+ * or replacement invalidates it. Calls are unsynchronized.
  *
- * @tparam p_value_type Movable value stored in each slot.
- * @tparam p_capacity Positive number of inline slots.
- *
- * @code{.cpp}
- * bioseq::common::fragment_cache<int, 4> cache;
- * const auto [slot_index, generation] =
- *     cache.push(42, [](int&) noexcept {});
- * const bool is_resident = cache.is_valid_at(slot_index, generation);
- * @endcode
+ * @tparam p_value_type Value type that can be default-constructed and move-assigned.
+ * @tparam p_capacity Positive number of slots.
  */
 template <class p_value_type, std::size_t p_capacity>
 class fragment_cache {
 public:
-    /** @brief Unsigned type used to address an inline slot. */
+    /** @brief Slot index type. */
     using slot_index_type = std::size_t;
 
-    /** @brief Unsigned type used for replacement generations. */
+    /** @brief Counter type used to distinguish successive slot contents. */
     using generation_type = std::uint64_t;
 
     /** @brief Number of slots owned by each cache instance. */
@@ -70,17 +62,14 @@ public:
     }
 
     /**
-     * @brief Finds a resident value by a caller-defined key projection.
+     * @brief Finds a stored value by comparing its extracted key.
      *
-     * Lookup starts at the previous hit/insert hint and examines at most
-     * `k_capacity` slots. Updating the hint does not change cache contents.
+     * Lookup starts at the last hit or insertion and scans at most k_capacity
+     * slots. The extractor is called only for occupied slots.
      *
-     * @tparam p_key_type Lookup key type.
-     * @tparam p_key_extractor Callable returning the comparable key for a stored value.
-     * @param[in] key Key to locate.
-     * @param[in] key_extractor Projection invoked only for occupied slots.
-     * @return Slot index and generation on a hit, or `std::nullopt` on a miss.
-     * @warning `key_extractor` must not throw because lookup is `noexcept`.
+     * @param[in] key Key to find.
+     * @param[in] key_extractor Returns a stored value's key and must not throw.
+     * @return Slot index and generation, or std::nullopt when absent.
      */
     template <class p_key_type, class p_key_extractor>
     [[nodiscard]] [[gnu::always_inline]]
@@ -99,16 +88,16 @@ public:
     }
 
     /**
-     * @brief Inserts a value, evicting the oldest slot when the cache is full.
+     * @brief Inserts into an empty slot, or replaces the next slot in eviction order.
      *
-     * The callback observes the old value before it is replaced. Its reference
-     * is valid only for the callback duration.
+     * When full, the cache cycles through slots. Explicit evictions can leave
+     * holes, which later insertions fill before replacing occupied slots.
      *
-     * @tparam p_eviction_callback Callable accepting a mutable stored value.
      * @param[in] value Value moved into the selected slot.
-     * @param[in] on_evict Callback used only when insertion must replace a value.
-     * @return Selected slot index and its new generation.
-     * @warning `on_evict` must not throw because insertion is `noexcept`.
+     * @param[in] on_evict Cleans up a replaced value before assignment. It must
+     * not throw or keep a reference to that value.
+     * @return Slot index and new generation.
+     * @warning Moving the value into its slot must not throw.
      */
     template <class p_eviction_callback>
     [[gnu::always_inline]] std::pair<slot_index_type, generation_type>
@@ -136,10 +125,11 @@ public:
     }
 
     /**
-     * @brief Evicts the oldest occupied slot when one exists.
-     * @tparam p_eviction_callback Callable accepting a mutable stored value.
-     * @param[in] on_evict Callback invoked before the selected slot is cleared.
-     * @warning `on_evict` must not throw and may not retain its value reference.
+     * @brief Evicts the next occupied slot in the circular eviction order.
+     *
+     * Does nothing when empty.
+     * @param[in] on_evict Cleans up the value before its slot is marked empty.
+     * The callback must not throw or keep a reference to the value.
      */
     template <class p_eviction_callback>
     [[gnu::always_inline]] void evict_oldest(p_eviction_callback&& on_evict) noexcept {
@@ -164,7 +154,7 @@ public:
      * @tparam p_eviction_callback Callable accepting a mutable stored value.
      * @param[in] slot_index Slot to clear. Out-of-range and empty slots are ignored.
      * @param[in] on_evict Callback invoked before an occupied slot is cleared.
-     * @warning `on_evict` must not throw and may not retain its value reference.
+     * @warning `on_evict` must not throw or keep its value reference after returning.
      */
     template <class p_eviction_callback>
     [[gnu::always_inline]] void evict_at(
@@ -177,10 +167,9 @@ public:
     }
 
     /**
-     * @brief Tests whether a slot still contains the observed generation.
-     * @param[in] slot_index Candidate slot index.
-     * @param[in] generation Generation captured by the caller.
-     * @return `true` only when the same slot generation remains resident.
+     * @brief Checks that a slot still holds the saved generation.
+     *
+     * Returns false for an invalid index, an empty slot or a replaced value.
      */
     [[nodiscard]] [[gnu::always_inline]] bool
     is_valid_at(slot_index_type slot_index, generation_type generation) const noexcept {
@@ -212,11 +201,8 @@ public:
 
 private:
     /**
-     * @brief Invokes cleanup and marks a known occupied slot empty.
-     * @tparam p_eviction_callback Callable accepting a mutable stored value.
-     * @param[in] slot_index In-range occupied slot.
-     * @param[in] on_evict Callback invoked before the slot state changes.
-     * @pre `slot_index < k_capacity` and the slot is occupied.
+     * @brief Calls cleanup and marks an occupied slot empty.
+     * @pre slot_index is in range and occupied. The callback must not throw.
      */
     template <class p_eviction_callback>
     [[gnu::always_inline]] void evict_slot_unchecked(
@@ -231,9 +217,9 @@ private:
     std::array<bool, k_capacity> filled_{}; ///< Occupancy flag for each slot.
     std::array<generation_type, k_capacity> generations_{}; ///< Generation per slot.
     std::size_t valid_count_ = 0; ///< Number of occupied slots.
-    std::size_t oldest_index_ = 0; ///< Start position for the next age scan.
+    std::size_t oldest_index_ = 0; ///< Start slot for the next circular eviction scan.
     mutable std::size_t hint_index_ = 0; ///< Start position for the next lookup.
-    generation_type next_generation_ = 0; ///< Generation assigned by the next insert.
+    generation_type next_generation_ = 0; ///< Last assigned generation, incremented before the next insertion.
 };
 
 } // namespace bioseq::common

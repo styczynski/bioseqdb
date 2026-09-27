@@ -1,13 +1,11 @@
 /**
  * @file context.cppm
- * @brief Owns reusable memory arenas and their thread-local installation scope.
+ * @brief Memory arenas for pipeline work and their per-thread context.
  *
- * A `context::context` separates allocations by lifetime: scratch storage is
- * short lived, chain storage lasts through alignment, alignment storage is
- * reclaimed around individual alignment calls, and pooled result/hash storage
- * reduces allocator fragmentation across repeated work. Oversize stack
- * allocations use tracked aligned heap blocks with the same scope lifetime as
- * ordinary arena allocations.
+ * Scratch, chain and alignment arenas let callers free temporary allocations
+ * as a group when a scope ends. Result and hash pools reuse storage across
+ * operations. Arrays too large for a stack arena use separate heap blocks,
+ * which are freed with the same scope.
  */
 module;
 
@@ -45,7 +43,7 @@ using namespace memory::literals;
 
 export namespace context {
 
-/** @brief Move-only inline lifetime token supplied by an allocation hook. */
+/** @brief Owns an allocation hook's move-only reservation token. */
 class backing_allocation_lease {
 public:
     backing_allocation_lease() = default;
@@ -64,13 +62,14 @@ public:
         return *this;
     }
 
-    /** @brief Destroys the inline token, releasing its external authority. */
+    /** @brief Destroys the stored token, releasing its memory reservation. */
     ~backing_allocation_lease() noexcept { reset(); }
 
     /**
-     * @brief Stores a nothrow-movable lifetime token without heap allocation.
-     * @tparam p_value_type Concrete token type supplied by the hook owner.
-     * @param value Token transferred into this lease.
+     * @brief Moves a token into fixed storage inside this object.
+     *
+     * The token must fit and its move constructor and destructor must not throw.
+     * @param value Token to take ownership of.
      */
     template<class p_value_type>
     void emplace(p_value_type&& value) noexcept {
@@ -103,7 +102,7 @@ public:
         }
     }
 
-    /** @return Whether this lease contains an external lifetime token. */
+    /** @return Whether a token is stored here. */
     [[nodiscard]] explicit operator bool() const noexcept {
         return destroy_ != nullptr;
     }
@@ -127,24 +126,24 @@ private:
     move_function move_ = nullptr;
 };
 
-/** @brief Adjacent authorities returned by one physical-allocation transaction. */
+/** @brief Reservations for a new allocation and optional replacement storage. */
 struct backing_allocation_authority {
     backing_allocation_lease primary{};
     backing_allocation_lease replacement{};
 };
 
-/** @brief Permit adjustment view valid only inside one hook transaction. */
+/** @brief Adjusts reserved bytes while an allocation hook is running. */
 struct backing_allocation_reconciliation {
     void* state = nullptr;
     bool (*reconcile)(void*, std::uint64_t) noexcept = nullptr;
 
-    /** @return Whether the transaction now owns exactly `bytes`. */
+    /** @return True if the reservation was adjusted to exactly bytes. */
     [[nodiscard]] bool reconcile_to(std::uint64_t bytes) const noexcept {
         return reconcile != nullptr && reconcile(state, bytes);
     }
 };
 
-/** @brief Physical facts returned by one allocation callback. */
+/** @brief Measured allocation size and visibility, returned to the memory controller. */
 struct backing_allocation_materialization {
     std::uint64_t actual_allocation_bytes = 0u;
     std::uint64_t fully_touched_bytes = 0u;
@@ -155,7 +154,7 @@ struct backing_allocation_materialization {
     bool is_process_footprint_reflected = false;
 };
 
-/** @brief Selects aggregate context lifetime or adjacent replaceable leases. */
+/** @brief Keeps reservations until context destruction or beside individual allocations. */
 enum class backing_allocation_lifetime : std::uint8_t {
     context,
     adjacent,
@@ -174,26 +173,26 @@ using backing_allocation_transaction = backing_allocation_authority (*)(
     backing_allocation_cleanup);
 
 /**
- * @brief Non-owning, allocation-free hook for physical context allocations.
+ * @brief Calls the memory controller when a context needs a heap block.
  *
- * The state and transaction function must outlive the context. An all-null
- * hook preserves the ordinary allocator path.
+ * The hook borrows its state and function, which must outlive the context.
+ * Leave both null to use the allocator without memory admission checks.
  */
 struct backing_allocation_hook {
     void* state = nullptr;
     backing_allocation_transaction transaction = nullptr;
 
-    /** @return Whether physical allocations are admission controlled. */
+    /** @return Whether both hook fields are installed. */
     [[nodiscard]] constexpr bool is_installed() const noexcept {
         return state != nullptr && transaction != nullptr;
     }
 
-    /** @return Whether the two non-owning hook fields agree. */
+    /** @return Whether both hook fields are null or both are set. */
     [[nodiscard]] constexpr bool is_valid() const noexcept {
         return (state == nullptr) == (transaction == nullptr);
     }
 
-    /** @brief Runs one physical-allocation transaction through the owner. */
+    /** @brief Runs an allocation and its cleanup through the installed hook. */
     [[nodiscard]] backing_allocation_authority materialize(
         std::uint64_t requested_bytes,
         backing_allocation_lifetime lifetime,
@@ -210,18 +209,15 @@ struct backing_allocation_hook {
     }
 };
 
-// =====================================================================
-// Internal allocator aliases. Hidden behind `detail::` so the concrete
-// foonathan types can be swapped without touching call sites.
-// =====================================================================
+// Internal allocator types used by the public context and container aliases.
 namespace detail {
 
 /**
- * @brief Stateful foonathan raw allocator that admits whole backing blocks.
+ * @brief Supplies heap blocks to foonathan arenas under memory admission checks.
  *
- * The allocator receives the requested extent from foonathan's growing block
- * allocator. Instrumented blocks retain their measured native allocation,
- * including alignment padding. Covered suballocations never reach here.
+ * The hook reserves space for each whole block, including alignment padding.
+ * Allocations made inside an existing arena block need no separate reservation.
+ * Without a hook, requests go directly to the default allocator.
  */
 class context_block_allocator {
 public:
@@ -301,8 +297,8 @@ private:
             if (state.allocation == nullptr) {
                 throw std::bad_alloc{};
             }
-            // The prefix is within the admitted/touched allocation and avoids a
-            // separately allocating map from aligned pointers to malloc bases.
+            // Store the malloc base just before the aligned payload so freeing it
+            // needs no separate pointer map. This prefix is included in the reservation.
             std::memcpy(
                 static_cast<std::byte*>(state.allocation) - sizeof(void*),
                 std::addressof(state.base),
@@ -324,7 +320,7 @@ private:
         }
     }
 
-    /** @brief Releases a not-yet-adopted backing block before permit unwind. */
+    /** @brief Frees an unfinished allocation before its reservation is released. */
     static void cleanup_block(void* opaque_state) noexcept {
         auto& state = *static_cast<block_materialization_state*>(opaque_state);
         std::free(std::exchange(state.base, nullptr));
@@ -335,66 +331,64 @@ private:
     backing_allocation_hook hook_{};
 };
 
-/** @brief Stack allocator backing scratch-lifetime storage. */
+/** @brief Stack allocator for temporary scratch arrays. */
 using scratch_arena_type = memory::memory_stack<context_block_allocator>;
 
-/** @brief Stack allocator backing chain-lifetime storage. */
+/** @brief Stack allocator for data kept through chaining and alignment. */
 using chain_arena_type = memory::memory_stack<context_block_allocator>;
 
-/** @brief Stack allocator backing alignment-lifetime storage. */
+/** @brief Stack allocator for temporary alignment data. */
 using alignment_arena_type = memory::memory_stack<context_block_allocator>;
 
-/** @brief Bucketed pool allocator backing surviving results. */
+/** @brief Pool that reuses result allocations in size buckets. */
 using result_arena_type = memory::memory_pool_collection<
     memory::node_pool, memory::log2_buckets, context_block_allocator>;
 
-/** @brief Bucketed pool allocator backing hash-map nodes. */
+/** @brief Pool that reuses hash-map node allocations in size buckets. */
 using hash_arena_type = memory::memory_pool_collection<
     memory::node_pool, memory::log2_buckets, context_block_allocator>;
 
 } // namespace detail
 
-/** @brief Identifies a stack arena that can be unwound as a scope. */
+/** @brief Selects the stack arena that a scope restores. */
 enum class arena : std::uint8_t {
     scratch, ///< Short-lived working storage.
-    chain, ///< Storage retained through chaining and alignment.
+    chain, ///< Storage kept through chaining and alignment.
     alignment ///< Storage scoped to alignment work.
 };
 
-// =====================================================================
-// STL container aliases. These ARE part of the public surface.
-// =====================================================================
+// Public container aliases using context-owned allocators.
 
 /**
- * @brief Vector whose elements have scratch-arena lifetime.
+ * @brief Vector using a context's scratch arena.
  * @tparam p_value_type Stored element type.
  */
 template <class p_value_type>
 using scratch_vector = memory::vector<p_value_type, detail::scratch_arena_type>;
 
 /**
- * @brief Vector whose elements have chain-arena lifetime.
+ * @brief Vector using a context's chain arena.
  * @tparam p_value_type Stored element type.
  */
 template <class p_value_type>
 using chain_vector = memory::vector<p_value_type, detail::chain_arena_type>;
 
 /**
- * @brief Vector whose elements have alignment-arena lifetime.
+ * @brief Vector using a context's alignment arena.
  * @tparam p_value_type Stored element type.
  */
 template <class p_value_type>
 using align_vector = memory::vector<p_value_type, detail::alignment_arena_type>;
 
 /**
- * @brief Vector whose elements have result-pool lifetime.
+ * @brief Vector using a context's result pool.
  * @tparam p_value_type Stored element type.
  */
 template <class p_value_type>
 using result_vector = memory::vector<p_value_type, detail::result_arena_type>;
 
 /**
- * @brief Hash map whose nodes have context-owned hash-pool lifetime.
+ * @brief Hash map using a context's hash pool.
  * @tparam p_key_type Lookup key type.
  * @tparam p_value_type Mapped value type.
  */
@@ -402,16 +396,15 @@ template <class p_key_type, class p_value_type>
 using scratch_unordered_map =
     memory::unordered_map<p_key_type, p_value_type, detail::hash_arena_type>;
 
-// =====================================================================
-// context — the per-query allocator owner.
-// =====================================================================
+// Context ownership and allocation helpers.
 
 /**
- * @brief Owns allocator arenas used by one pipeline context.
+ * @brief Owns reusable memory for one pipeline worker.
  *
- * The owner is neither copyable nor movable because arena-backed containers
- * retain allocator identity. One instance may be installed per thread with
- * `installed_context_scope`. Callers must not share it concurrently.
+ * Containers borrow these allocators, so the context cannot move and must
+ * outlive them. Use installed_context_scope to make it available to calls
+ * on the current thread. Each thread needs its own context during concurrent
+ * work.
  *
  * @code{.cpp}
  * context::context memory;
@@ -446,21 +439,21 @@ public:
         std::size_t result_block = 64_KiB;
     };
 
-    /** @brief Constructs arenas with the default block-size budget. */
+    /** @brief Creates arenas with default initial sizes. */
     context() : context(arena_configuration{}, backing_allocation_hook{}) {}
 
     /**
-     * @brief Constructs arenas with an explicit block-size budget.
-     * @param[in] configuration Initial arena block sizes and pool node limits.
+     * @brief Creates arenas with selected initial sizes and pool node limits.
+     * @param[in] configuration Sizes used when constructing the arenas.
      */
     explicit context(const arena_configuration& configuration)
         : context(configuration, backing_allocation_hook{})
     {}
 
     /**
-     * @brief Constructs arenas with admission installed before every initial block.
-     * @param[in] configuration Initial arena block sizes and pool node limits.
-     * @param[in] hook Non-owning physical-allocation admission endpoints.
+     * @brief Installs the memory hook before allocating the arenas' first blocks.
+     * @param[in] configuration Initial block sizes and pool node limits.
+     * @param[in] hook Allocation hook whose state must outlive this context.
      */
     context(
         const arena_configuration& configuration,
@@ -490,21 +483,19 @@ public:
     context(context&&) = delete;
     context& operator=(context&&) = delete;
 
-    /** @return Whether this context admits every physical backing allocation. */
+    /** @return Whether heap block allocations use a memory admission hook. */
     [[nodiscard]] bool has_backing_allocation_hook() const noexcept {
         return backing_hook_.is_installed();
     }
 
     /**
-     * @brief Materializes one replaceable heap allocation through this context's hook.
+     * @brief Allocates replaceable heap storage through the memory hook.
      *
-     * This inline boundary belongs to the shared macro-neutral context module.
-     * Its result-container callers remain E2E/test-only; declaring the method
-     * adds no state or automatic work to ordinary contexts.
+     * Keep each returned reservation beside the allocation it covers and free
+     * the storage before releasing that reservation. Use this for separate heap
+     * allocations. Arena allocations already use their arena's hook.
      *
-     * The returned authorities must be stored beside the physical owners they
-     * cover. Arena suballocations must continue to use their arena allocator and
-     * therefore never call this boundary.
+     * @throws std::invalid_argument If the hook or required arguments are missing.
      */
     [[nodiscard]] backing_allocation_authority materialize_adjacent_allocation(
         std::uint64_t requested_bytes,
@@ -525,46 +516,40 @@ public:
     }
 
     /**
-     * @brief Accesses the scratch arena for allocator construction.
-     * @return Mutable scratch arena owned by this context.
+     * @brief Returns the scratch arena for constructing an allocator.
      */
     [[nodiscard]] detail::scratch_arena_type& scratch_arena() noexcept {
         return scratch_arena_;
     }
 
     /**
-     * @brief Accesses the chain arena for allocator construction.
-     * @return Mutable chain arena owned by this context.
+     * @brief Returns the chain arena for constructing an allocator.
      */
     [[nodiscard]] detail::chain_arena_type& chain_arena() noexcept { return chain_arena_; }
 
     /**
-     * @brief Accesses the alignment arena for allocator construction.
-     * @return Mutable alignment arena owned by this context.
+     * @brief Returns the alignment arena for constructing an allocator.
      */
     [[nodiscard]] detail::alignment_arena_type& align_arena() noexcept {
         return align_arena_;
     }
 
     /**
-     * @brief Accesses the result pool without changing context identity.
-     * @return Mutable result pool owned by this context.
+     * @brief Returns the mutable result pool, including through a const context.
      */
     [[nodiscard]] detail::result_arena_type& result_arena() const noexcept {
         return result_arena_;
     }
 
     /**
-     * @brief Accesses the hash pool for allocator construction.
-     * @return Mutable hash pool owned by this context.
+     * @brief Returns the hash pool for constructing an allocator.
      */
     [[nodiscard]] detail::hash_arena_type& hash_arena() noexcept { return hash_arena_; }
 
     /**
-     * @brief Creates an empty vector bound to the scratch arena.
-     * @tparam p_value_type Stored element type.
-     * @param[in] reserve_hint Optional initial element capacity.
-     * @return Scratch vector owned by this context.
+     * @brief Creates an empty vector using the scratch arena.
+     * @param[in] reserve_hint Optional number of elements to reserve.
+     * @pre Destroy the vector before unwinding its arena scope.
      */
     template <class p_value_type>
     [[nodiscard]] scratch_vector<p_value_type>
@@ -573,10 +558,9 @@ public:
     }
 
     /**
-     * @brief Creates an empty vector bound to the chain arena.
-     * @tparam p_value_type Stored element type.
-     * @param[in] reserve_hint Optional initial element capacity.
-     * @return Chain vector owned by this context.
+     * @brief Creates an empty vector using the chain arena.
+     * @param[in] reserve_hint Optional number of elements to reserve.
+     * @pre Destroy the vector before unwinding its arena scope.
      */
     template <class p_value_type>
     [[nodiscard]] chain_vector<p_value_type> make_chain_vector(std::size_t reserve_hint = 0) {
@@ -584,10 +568,9 @@ public:
     }
 
     /**
-     * @brief Creates an empty vector bound to the alignment arena.
-     * @tparam p_value_type Stored element type.
-     * @param[in] reserve_hint Optional initial element capacity.
-     * @return Alignment vector owned by this context.
+     * @brief Creates an empty vector using the alignment arena.
+     * @param[in] reserve_hint Optional number of elements to reserve.
+     * @pre Destroy the vector before unwinding its arena scope.
      */
     template <class p_value_type>
     [[nodiscard]] align_vector<p_value_type> make_align_vector(std::size_t reserve_hint = 0) {
@@ -595,10 +578,9 @@ public:
     }
 
     /**
-     * @brief Creates an empty vector bound to the result pool.
-     * @tparam p_value_type Stored element type.
-     * @param[in] reserve_hint Optional initial element capacity.
-     * @return Result vector owned by this context.
+     * @brief Creates an empty vector using the result pool.
+     * @param[in] reserve_hint Optional number of elements to reserve.
+     * @pre The context must outlive the vector.
      */
     template <class p_value_type>
     [[nodiscard]] result_vector<p_value_type>
@@ -607,11 +589,9 @@ public:
     }
 
     /**
-     * @brief Creates an empty hash map bound to the context hash pool.
-     * @tparam p_key_type Lookup key type.
-     * @tparam p_value_type Mapped value type.
+     * @brief Creates an empty hash map using the context's hash pool.
      * @param[in] bucket_hint Initial bucket count, or zero for the container default.
-     * @return Hash map owned by this context.
+     * @pre The context must outlive the map.
      */
     template <class p_key_type, class p_value_type>
     [[nodiscard]] scratch_unordered_map<p_key_type, p_value_type>
@@ -625,14 +605,16 @@ public:
     }
 
     /**
-     * @brief Allocates an uninitialized aligned array from alignment-lifetime storage.
+     * @brief Reserves aligned array storage until the alignment scope ends.
+     *
+     * The storage is uninitialized. The caller must construct and destroy any
+     * objects that need it.
      *
      * @tparam p_value_type Element type.
-     * @tparam p_alignment Requested byte alignment, clamped to the element alignment.
-     * @param[in] count Number of elements to allocate.
-     * @return Span owned by the arena until the alignment scope unwinds.
-     * @throws std::bad_array_new_length When the requested byte count overflows.
-     * @warning The returned storage is uninitialized. The caller owns object initialization.
+     * @tparam p_alignment Requested alignment, raised to the element alignment if needed.
+     * @param[in] count Number of elements.
+     * @return Span over context-owned storage.
+     * @throws std::bad_array_new_length If the byte count overflows.
      */
     template <class p_value_type, std::size_t p_alignment = alignof(p_value_type)>
     [[nodiscard]] std::span<p_value_type> alloc_align_array(std::size_t count) {
@@ -641,14 +623,16 @@ public:
     }
 
     /**
-     * @brief Allocates an uninitialized aligned array from chain-lifetime storage.
+     * @brief Reserves aligned array storage until the chain scope ends.
+     *
+     * The storage is uninitialized. The caller must construct and destroy any
+     * objects that need it.
      *
      * @tparam p_value_type Element type.
-     * @tparam p_alignment Requested byte alignment, clamped to the element alignment.
-     * @param[in] count Number of elements to allocate.
-     * @return Span owned by the arena until the chain scope unwinds.
-     * @throws std::bad_array_new_length When the requested byte count overflows.
-     * @warning The returned storage is uninitialized. The caller owns object initialization.
+     * @tparam p_alignment Requested alignment, raised to the element alignment if needed.
+     * @param[in] count Number of elements.
+     * @return Span over context-owned storage.
+     * @throws std::bad_array_new_length If the byte count overflows.
      */
     template <class p_value_type, std::size_t p_alignment = alignof(p_value_type)>
     [[nodiscard]] std::span<p_value_type> alloc_chain_array(std::size_t count) {
@@ -657,14 +641,16 @@ public:
     }
 
     /**
-     * @brief Allocates an uninitialized aligned array from scratch-lifetime storage.
+     * @brief Reserves aligned array storage until the scratch scope ends.
+     *
+     * The storage is uninitialized. The caller must construct and destroy any
+     * objects that need it.
      *
      * @tparam p_value_type Element type.
-     * @tparam p_alignment Requested byte alignment, clamped to the element alignment.
-     * @param[in] count Number of elements to allocate.
-     * @return Span owned by the arena until the scratch scope unwinds.
-     * @throws std::bad_array_new_length When the requested byte count overflows.
-     * @warning The returned storage is uninitialized. The caller owns object initialization.
+     * @tparam p_alignment Requested alignment, raised to the element alignment if needed.
+     * @param[in] count Number of elements.
+     * @return Span over context-owned storage.
+     * @throws std::bad_array_new_length If the byte count overflows.
      */
     template <class p_value_type, std::size_t p_alignment = alignof(p_value_type)>
     [[nodiscard]] std::span<p_value_type> alloc_scratch_array(std::size_t count) {
@@ -673,15 +659,17 @@ public:
     }
 
     /**
-     * @brief Restores one stack arena and its oversize allocations on destruction.
-     * @tparam p_arena arena category selected for the scope lifetime.
+     * @brief Frees allocations made in one stack arena during this scope.
+     *
+     * This also frees heap blocks used for large arrays. Objects must be
+     * destroyed before the scope ends.
      */
     template <arena p_arena>
     class scope {
     public:
         /**
-         * @brief Records the current arena and heap-tracker positions.
-         * @param[in] owner Context whose selected arena is scoped.
+         * @brief Saves the arena position and number of tracked heap blocks.
+         * @param[in] owner Context whose allocations this scope will release.
          */
         explicit scope(context& owner) noexcept
             : owner_(&owner)
@@ -694,7 +682,7 @@ public:
         scope(scope&&)                 = delete;
         scope& operator=(scope&&)      = delete;
 
-        /** @brief Unwinds arena and oversize allocations created inside the scope. */
+        /** @brief Restores the saved arena position and frees later heap blocks. */
         ~scope() noexcept {
             select_arena(*owner_).unwind(arena_marker_);
             auto& blocks = select_heap_blocks(*owner_).blocks;
@@ -705,9 +693,7 @@ public:
 
     private:
         /**
-         * @brief Selects the stack arena represented by the template argument.
-         * @param[in] owner Context containing the arena.
-         * @return Selected mutable arena.
+         * @brief Returns the stack arena selected by p_arena.
          */
         static auto& select_arena(context& owner) noexcept {
             if constexpr (p_arena == arena::scratch) {
@@ -720,9 +706,7 @@ public:
         }
 
         /**
-         * @brief Selects the oversize-allocation tracker paired with the arena.
-         * @param[in] owner Context containing the tracker.
-         * @return Selected mutable heap-block tracker.
+         * @brief Returns the large-array tracker paired with the selected arena.
          */
         static auto& select_heap_blocks(context& owner) noexcept {
             if constexpr (p_arena == arena::scratch) {
@@ -741,9 +725,8 @@ public:
     };
 
     /**
-     * @brief Opens a nested lifetime scope for one stack arena.
-     * @tparam p_arena arena category selected for unwinding.
-     * @return Non-movable scope guard bound to this context.
+     * @brief Starts a nested allocation scope for the selected stack arena.
+     * @return Object that releases later allocations when it is destroyed.
      */
     template <arena p_arena>
     [[nodiscard]] scope<p_arena> push() noexcept {
@@ -751,10 +734,10 @@ public:
     }
 
     /**
-     * @brief Resets pipeline stacks and releases all tracked oversize allocations.
+     * @brief Shrinks the stack arenas and frees all separately tracked heap blocks.
      *
-     * Stack arenas retain reusable backing capacity according to foonathan's
-     * `shrink_to_fit` contract. Aligned heap fallbacks are released immediately.
+     * Calls shrink_to_fit on each stack arena. Callers must unwind active
+     * scopes before resetting pipeline storage.
      */
     void reset_pipeline() noexcept {
         scratch_arena_.shrink_to_fit();
@@ -766,24 +749,21 @@ public:
     }
 
     /**
-     * @brief Reports remaining capacity in the scratch stack's active block.
-     * @return Remaining scratch bytes exposed by the allocator.
+     * @brief Returns unused bytes in the scratch arena's current block.
      */
     [[nodiscard]] std::size_t scratch_capacity() const noexcept {
         return scratch_arena_.capacity_left();
     }
 
     /**
-     * @brief Reports remaining capacity in the chain stack's active block.
-     * @return Remaining chain bytes exposed by the allocator.
+     * @brief Returns unused bytes in the chain arena's current block.
      */
     [[nodiscard]] std::size_t chain_capacity() const noexcept {
         return chain_arena_.capacity_left();
     }
 
     /**
-     * @brief Reports remaining capacity in the alignment stack's active block.
-     * @return Remaining alignment bytes exposed by the allocator.
+     * @brief Returns unused bytes in the alignment arena's current block.
      */
     [[nodiscard]] std::size_t align_capacity() const noexcept {
         return align_arena_.capacity_left();
@@ -826,10 +806,10 @@ private:
 
     /** @brief Records one aligned allocation that bypassed a stack arena. */
     struct heap_block {
-        /** @brief Exact unreflected authority released after the block is freed. */
+        /** @brief Memory reservation released after this block is freed. */
         backing_allocation_lease lease{};
 
-        /** @brief Address returned by `posix_memalign`. */
+        /** @brief Base address to pass to free, which may precede the aligned payload. */
         void* address = nullptr;
 
         /** @brief Allocation size in bytes. */
@@ -857,7 +837,7 @@ private:
             return *this;
         }
 
-        /** @brief Frees storage before releasing its adjacent permit. */
+        /** @brief Frees the block before releasing its memory reservation. */
         void release() noexcept {
             if (address != nullptr) {
                 std::free(address);
@@ -870,18 +850,18 @@ private:
         ~heap_block() noexcept { release(); }
     };
 
-    /** @brief Owns one replaceable tracker allocation and its live entries. */
+    /** @brief Tracks large arrays and the reservation for the tracker's own storage. */
     struct heap_block_tracker {
-        /** @brief Authority for the current vector capacity, before its owner. */
+        /** @brief Reservation declared before the vector so it is released after storage. */
         backing_allocation_lease capacity_lease{};
 
-        /** @brief Oversize blocks; entries carry their own adjacent permits. */
+        /** @brief Large arrays, each with its own memory reservation. */
         std::vector<heap_block> blocks{};
     };
 
     static_assert(std::is_nothrow_move_constructible_v<heap_block>);
 
-    /** @brief Rejects a half-installed non-owning hook before any arena exists. */
+    /** @brief Rejects a hook with only its state or function set. */
     [[nodiscard]] static backing_allocation_hook validate_backing_hook(
         backing_allocation_hook hook) {
         if (!hook.is_valid()) {
@@ -891,7 +871,7 @@ private:
         return hook;
     }
 
-    /** @brief Computes a byte product accepted by both size_t and permit APIs. */
+    /** @brief Converts an element count to bytes, checking size_t and uint64_t limits. */
     [[nodiscard]] static std::uint64_t checked_allocation_bytes(
         std::size_t count,
         std::size_t element_bytes) {
@@ -908,7 +888,7 @@ private:
         return static_cast<std::uint64_t>(bytes);
     }
 
-    /** @brief Computes the explicit next tracker capacity without overflow. */
+    /** @brief Chooses room for another tracker entry, checking for overflow. */
     [[nodiscard]] static std::size_t next_tracker_capacity(
         const std::vector<heap_block>& blocks) {
         if (blocks.size() == (std::numeric_limits<std::size_t>::max)()) {
@@ -941,7 +921,7 @@ private:
         std::vector<heap_block> replacement{};
     };
 
-    /** @brief Performs the allocation portion of one admitted heap transaction. */
+    /** @brief Allocates a large array and any needed tracker storage under one reservation. */
     [[nodiscard]] static backing_allocation_materialization
     materialize_heap_block(
         void* opaque_state,
@@ -964,9 +944,8 @@ private:
 
             std::uint64_t tracker_bytes = 0u;
             if (state.replace_tracker) {
-                // The supported libc++ reserve path forwards this exact count
-                // to std::allocator::allocate_at_least, which returns that count.
-                // Keep the replacement private through the hook's second sample.
+                // libc++ is expected to reserve exactly the requested capacity here.
+                // Keep the new vector separate until the hook finishes measuring memory.
                 state.replacement.reserve(state.planned_capacity);
                 if (state.replacement.capacity() != state.planned_capacity) {
                     throw std::logic_error("context tracker allocation count changed");
@@ -988,8 +967,8 @@ private:
 
             return {
                 .actual_allocation_bytes = block_bytes + tracker_bytes,
-                // The raw block is fully touched. Spare vector capacity is
-                // unconstructed and therefore deliberately excluded.
+                // All raw block bytes were written. Unconstructed spare vector slots
+                // have not been touched, so they are excluded from this count.
                 .fully_touched_bytes = block_bytes,
                 .primary_owner_bytes = block_bytes,
                 .replacement_owner_bytes = tracker_bytes,
@@ -1003,7 +982,7 @@ private:
         }
     }
 
-    /** @brief Frees a pending oversize block before local authority unwinds. */
+    /** @brief Frees unfinished array and tracker allocations before releasing reservations. */
     static void cleanup_heap_block(void* opaque_state) noexcept {
         auto& state = *static_cast<heap_materialization_state*>(opaque_state);
         if (state.pending_allocation != nullptr) {
@@ -1016,11 +995,11 @@ private:
     }
 
     /**
-     * @brief Allocates one oversize block and any tracker replacement atomically.
+     * @brief Adds a large array after the memory hook accepts its allocation.
      *
-     * The new block is allocated first. A replacement tracker is then prepared
-     * without disturbing the old owner. Entries move and the replacement is
-     * published only after reconciliation and the hook transaction complete.
+     * If the tracker must grow, build its replacement alongside the old vector.
+     * Only move entries and replace the tracker after the hook has accepted
+     * the measured size. Failure leaves existing entries in place.
      */
     [[nodiscard]] void* allocate_admitted_heap_block(
         heap_block_tracker& tracker,
@@ -1063,8 +1042,8 @@ private:
             throw;
         }
 
-        // The capacity is already materialized and heap_block moves cannot
-        // throw. Free old tracker storage before replacing its authority.
+        // Moving heap_block entries cannot throw. Free the old tracker storage
+        // before replacing the reservation that covers it.
         if (replace_tracker) {
             for (auto& block : tracker.blocks) {
                 state.replacement.emplace_back(std::move(block));
@@ -1082,20 +1061,17 @@ private:
         heap_block& admitted_block = tracker.blocks.back();
         admitted_block.lease = std::move(authority.primary);
         if (replace_tracker) {
-            // Moving an empty reflected lease also releases the old tracker
-            // authority after its replaced storage has been destroyed.
+            // Replacing the lease releases the old tracker reservation after its
+            // storage has been freed, even when the new lease is empty.
             tracker.capacity_lease = std::move(authority.replacement);
         }
         return state.payload;
     }
 
     /**
-     * @brief Constructs and optionally reserves any arena-backed vector.
-     * @tparam p_vector_type Concrete foonathan vector type.
-     * @tparam p_arena_type Allocator arena accepted by the vector constructor.
-     * @param[in] owner_arena arena category that owns the returned elements.
-     * @param[in] reserve_hint Optional initial element capacity.
-     * @return Empty vector bound to `owner_arena`.
+     * @brief Creates an empty vector using an arena and optionally reserves capacity.
+     * @param[in] owner_arena Allocator borrowed by the returned vector.
+     * @param[in] reserve_hint Optional number of elements to reserve.
      */
     template <class p_vector_type, class p_arena_type>
     [[nodiscard]] static p_vector_type make_arena_vector(
@@ -1109,22 +1085,18 @@ private:
     }
 
     /**
-     * @brief Allocates an aligned array from a stack arena or its heap fallback.
+     * @brief Allocates array storage from an arena, using the heap for large arrays.
      *
-     * Direct stack allocation intentionally bypasses allocator traits because
-     * scope unwinding, rather than node deallocation, owns these raw arrays.
-     * Oversize allocations are tracked so a nested scope releases only its tail.
+     * Scopes release these raw arrays as a group. Heap blocks are tracked
+     * separately so a nested scope can free only the arrays allocated inside it.
      *
-     * @tparam p_value_type Element type.
-     * @tparam p_alignment Requested byte alignment.
-     * @tparam p_arena_type Stack arena type.
-     * @param[in] owner_arena arena category used below the allocation threshold.
-     * @param[in,out] heap_tracker Oversize blocks paired with `owner_arena`.
-     * @param[in] count Number of elements to allocate.
-     * @return Span over uninitialized context-owned storage.
-     * @throws std::bad_array_new_length When `count * sizeof(p_value_type)` overflows.
-     * @warning Failure of an oversize aligned allocation logs and aborts. Failure to
-     *          extend the heap tracker releases the new block and propagates.
+     * @param[in] owner_arena Stack arena for arrays below the size threshold.
+     * @param[in,out] heap_tracker Large arrays paired with that arena.
+     * @param[in] count Number of elements.
+     * @return Uninitialized aligned storage owned by the context.
+     * @throws std::bad_array_new_length If the byte count overflows.
+     * @warning Without a hook, a failed heap allocation logs and aborts. Hook
+     * failures and tracker allocation failures propagate after cleanup.
      */
     template <class p_value_type, std::size_t p_alignment, class p_arena_type>
     [[nodiscard]] std::span<p_value_type> allocate_array(
@@ -1173,8 +1145,8 @@ private:
     }
 
     /**
-     * @brief Releases every aligned block in a tracker.
-     * @param[in,out] blocks Tracker cleared after all addresses are freed.
+     * @brief Frees all large arrays in a tracker.
+     * @param[in,out] tracker Entries to clear. The vector keeps its capacity.
      */
     static void free_heap_blocks(heap_block_tracker& tracker) noexcept {
         tracker.blocks.clear();
@@ -1197,16 +1169,15 @@ private:
         return total;
     }
 
-    backing_allocation_hook backing_hook_{}; ///< Non-owning physical-allocation hook.
+    backing_allocation_hook backing_hook_{}; ///< Borrowed hook for heap block allocations.
     detail::scratch_arena_type scratch_arena_; ///< Scratch-lifetime stack storage.
     detail::chain_arena_type chain_arena_; ///< Chain-lifetime stack storage.
     detail::alignment_arena_type align_arena_; ///< Alignment-lifetime stack storage.
     mutable detail::result_arena_type result_arena_; ///< Pooled result storage.
     detail::hash_arena_type hash_arena_; ///< Pooled hash-node storage.
 
-    // These sparse trackers deliberately use the system allocator: placing
-    // their bookkeeping in a scoped arena would make tracker lifetime depend
-    // on the allocation lifetime it controls.
+    // Trackers use the system allocator so unwinding an arena cannot
+    // invalidate the records needed to free its large arrays.
     heap_block_tracker large_align_blocks_; ///< Oversize alignment allocations.
     heap_block_tracker large_chain_blocks_; ///< Oversize chain allocations.
     heap_block_tracker large_scratch_blocks_; ///< Oversize scratch allocations.
@@ -1217,17 +1188,15 @@ inline thread_local context* tls_current = nullptr;
 } // namespace detail
 
 /**
- * @brief Retrieves the context installed on the calling thread when present.
- * @return Installed context pointer, or `nullptr` when the thread has no context.
+ * @brief Returns this thread's installed context, or nullptr if none is installed.
  */
 [[nodiscard]] inline context* current_or_null() noexcept {
     return detail::tls_current;
 }
 
 /**
- * @brief Retrieves the context installed on the calling thread.
- * @return Installed context reference.
- * @warning Aborts when no context is installed.
+ * @brief Returns this thread's installed context.
+ * @warning Logs and aborts if no context is installed.
  */
 [[nodiscard]] inline context& current() noexcept {
     context* installed_context = detail::tls_current;
@@ -1240,16 +1209,16 @@ inline thread_local context* tls_current = nullptr;
 }
 
 /**
- * @brief Installs a context for the current thread and restores the prior one.
+ * @brief Installs a context on this thread until the scope ends.
  *
- * Scopes may nest. Destruction restores the pointer observed by the constructor.
- * The guard is thread-affine and must not outlive the referenced context.
+ * Nested scopes restore the previous context. Create and destroy this object
+ * on the same thread, while the supplied context is still alive.
  */
 class installed_context_scope {
 public:
     /**
-     * @brief Installs a context until this guard is destroyed.
-     * @param[in] installed_context Context that must outlive the guard.
+     * @brief Installs a context until this object is destroyed.
+     * @param[in] installed_context Context that must outlive this object.
      */
     explicit installed_context_scope(context& installed_context) noexcept
         : previous_context_(detail::tls_current) {
@@ -1261,7 +1230,7 @@ public:
     installed_context_scope(installed_context_scope&&)                 = delete;
     installed_context_scope& operator=(installed_context_scope&&)      = delete;
 
-    /** @brief Restores the context that was installed before this guard. */
+    /** @brief Restores the context that was installed before this scope. */
     ~installed_context_scope() noexcept { detail::tls_current = previous_context_; }
 
 private:
