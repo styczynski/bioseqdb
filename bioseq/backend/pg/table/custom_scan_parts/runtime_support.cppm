@@ -1,10 +1,10 @@
 /**
  * @file
- * @brief Defines per-scan and join runtime state with query-context cleanup.
+ * @brief Provides base-scan runtime access and cleanup when query memory is reset.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
+// Include Highway here so its target-specific definitions share the same
+// translation-unit context across imported modules.
 extern "C" {
 #include "postgres.h"
 #include "nodes/execnodes.h"
@@ -38,15 +38,14 @@ import bioseq.postgres.types.compact_sequence;
 
 export {
 
-    /* These module imports provide the table access, row-number conversion, and
-     * storage-metadata contracts used by this executor partition. */
+    /* Keep C++ runtime cleanup tied to PostgreSQL's query lifetime. */
 
     /**
-     * @brief Return the sole runtime owned by a scan state.
+     * @brief Returns the scan's C++ runtime, allocating it on first access.
      *
-     * The concrete object is hidden behind `void*` to preserve the PostgreSQL-facing state
-     * layout. Calling this before normal callback registration creates a diagnostic fallback
-     * allocation that has no automatic query-context cleanup.
+     * The pointer is stored separately from PostgreSQL's scan-state layout. Call
+     * register_runtime_cleanup_callback to give the allocation query-context
+     * cleanup.
      */
     [[nodiscard]] bioseq_scan_runtime& bioseq_runtime(scan_state* state) {
         if (state->runtime_state == nullptr) {
@@ -59,11 +58,11 @@ export {
     }
 
     /**
-     * @brief Destroy scan-owned C++ state when the query memory context resets.
+     * @brief Destroys the scan's C++ runtime when query memory is reset.
      *
-     * The callback node is embedded in the runtime, so normal executor shutdown must leave
-     * the allocation alive until this callback is unlinked. During ERROR unwinding the
-     * callback avoids tuple-table operations whose ResourceOwner may already be tearing down.
+     * Normal executor shutdown leaves this allocation alive because the reset
+     * callback is stored inside it. Close any remaining sequence provider and
+     * release its trace attachment before deleting the runtime.
      */
     void bioseq_runtime_cleanup_callback(void* arg) {
         auto* state = static_cast<scan_state*>(arg);
@@ -93,9 +92,10 @@ export {
     }
 
     /**
-     * @brief Register the scan runtime's idempotent query-context cleanup callback.
-     * @param state Scan state that owns the embedded callback node.
-     * @param estate Executor state whose query context bounds the runtime lifetime.
+     * @brief Registers query-context cleanup for the scan's runtime.
+     *
+     * Allocate the runtime if needed and register its embedded callback once for
+     * this scan state. The callback will run when estate's query memory resets.
      */
     void register_runtime_cleanup_callback(scan_state* state, EState* estate) {
         if (state == nullptr || estate == nullptr) {
