@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Defines Vulkan sketch wire records and pure admission planners.
+ * @brief GPU minimizer records and helpers for planning tiles and memory use.
  */
 module;
 
@@ -20,7 +20,7 @@ enum class alphabet_kernel_kind : std::uint8_t {
     generic = 2,
 };
 
-/** @brief Selects the scalar storage width of one device minimizer. */
+/** @brief Selects the packed storage format of one GPU minimizer. */
 enum class minimizer_word_kind : std::uint8_t {
     u16 = 0,
     u32 = 1,
@@ -29,10 +29,11 @@ enum class minimizer_word_kind : std::uint8_t {
 };
 
 /**
- * @brief Maps alphabet ranks to forward and reverse-complement nt4 codes.
+ * @brief Maps alphabet ranks to forward and reverse-complement DNA codes.
  *
- * Codes greater than or equal to four represent ambiguity and reset rolling
- * k-mer state. The record is uploaded without transcoding.
+ * Codes 0 through 3 represent bases. Larger codes mark ambiguous symbols
+ * and restart the rolling k-mer calculation. The table is copied directly
+ * to the GPU.
  */
 struct vulkan_rank_lut {
     std::uint32_t rank_to_code[256]{};
@@ -67,14 +68,14 @@ inline constexpr std::uint32_t k_default_sketch_tile_bp = 256u;
 inline constexpr std::uint32_t k_sketch_local_size = 64u;
 /** @brief Maximum base span visible to one sketch tile including replay. */
 inline constexpr std::uint32_t k_max_sketch_tile_span_bp = 384u;
-/** @brief Selects the output and scratch shape of a sketch invocation. */
+/** @brief Selects minimizer output, sorted pairs, or target-index construction. */
 enum class gpu_sketch_purpose : std::uint8_t {
     minimizer_words,
     target_index_build,
     sorted_pairs,
 };
 
-/** @brief Mirrors one shader tile for ordered minimizer sketching. */
+/** @brief Sequence range, replay start, and output offset for one sketch tile. */
 struct gpu_sketch_tile_wire {
     std::uint32_t seq_word_offset = 0;
     std::uint32_t bp_count = 0;
@@ -85,7 +86,7 @@ struct gpu_sketch_tile_wire {
 };
 static_assert(sizeof(gpu_sketch_tile_wire) == 24);
 
-/** @brief Describes tile geometry and prefix-scan work for one sketch. */
+/** @brief Tile size and number of tiles and prefix-scan blocks for a sketch. */
 struct gpu_sketch_tile_plan {
     std::uint32_t tile_bp = 0;
     std::uint32_t tile_count = 0;
@@ -93,7 +94,7 @@ struct gpu_sketch_tile_plan {
     bool is_dispatchable = false;
 };
 
-/** @brief Accounts device, arena, and host memory required by one sketch. */
+/** @brief Planned GPU buffers and temporary CPU memory for a sketch. */
 struct gpu_sketch_memory_plan {
     gpu_sketch_tile_plan tiles{};
     std::uint64_t sequence_bytes = 0;
@@ -119,9 +120,9 @@ struct gpu_sketch_memory_plan {
     std::uint64_t target_index_bucket_peak_bytes = 0;
     std::uint64_t standalone_device_bytes = 0;
     std::uint64_t resident_output_bytes = 0;
-    // Target-index builds borrow contiguous packed input, write tile records
-    // directly into mapped arena storage, and release fragmented-input scratch
-    // after the sequence copy. The execution submit owns no host staging.
+    // Target-index builds borrow contiguous input and write tile records into
+    // mapped arena storage. Scratch for fragmented input is freed after copying
+    // the sequence, before the execution phase.
     std::uint64_t host_sequence_staging_bytes = 0;
     std::uint64_t host_tile_staging_bytes = 0;
     std::uint64_t count_submit_host_transient_bytes = 0;
@@ -132,10 +133,10 @@ struct gpu_sketch_memory_plan {
 };
 
 /**
- * @brief Accounts host scratch owned by one target-index invocation.
+ * @brief Temporary CPU storage needed while building a target index.
  *
- * Contiguous input is borrowed. Fragmented input reports exact owned capacity
- * so scratch can be released before execution admission.
+ * Contiguous input is borrowed. Fragmented input needs a scratch buffer whose
+ * capacity is recorded here and released before memory is reserved for execution.
  */
 struct gpu_target_index_host_scratch_plan {
     std::uint64_t owned_sequence_bytes = 0;
@@ -147,10 +148,10 @@ struct gpu_target_index_host_scratch_plan {
 };
 
 /**
- * @brief Computes the replay overlap required by adjacent sketch tiles.
- * @param[in] kmer_size K-mer length in base pairs.
- * @param[in] window_size Minimizer window length in k-mers.
- * @return Replay overlap in base pairs, clamped to the shader tile span.
+ * @brief Computes the bases replayed before each tile to restore minimizer state.
+ * @param[in] kmer_size K-mer length in bases.
+ * @param[in] window_size Window length in k-mers.
+ * @return Replay length, limited to leave room within the shader tile span.
  */
 [[nodiscard]] constexpr std::uint32_t sketch_replay_overlap_bp(std::uint32_t kmer_size,
                                                                std::uint32_t window_size) noexcept {
@@ -164,14 +165,11 @@ struct gpu_target_index_host_scratch_plan {
 }
 
 /**
- * @brief Computes the hard semantic upper bound on target minimizer count.
+ * @brief Bounds the number of minimizers a target sequence can emit.
  *
- * Each canonical k-mer end position emits at most once. Query gating only
- * removes emissions.
- *
- * @param[in] bp_count Target length in base pairs.
- * @param[in] kmer_size K-mer length in base pairs.
- * @return Maximum possible minimizer count.
+ * Each k-mer end position can be emitted at most once. Filtering by the query
+ * can only reduce the count. Returns zero for an invalid k-mer size or a
+ * sequence shorter than one k-mer.
  */
 [[nodiscard]] constexpr std::uint64_t
 target_minimizer_count_upper_bound(std::uint64_t bp_count, std::uint32_t kmer_size) noexcept {
@@ -182,11 +180,9 @@ target_minimizer_count_upper_bound(std::uint64_t bp_count, std::uint32_t kmer_si
 }
 
 /**
- * @brief Returns the additional ownership guard required by sketch tiling.
- * @param[in] kmer_size K-mer length in base pairs.
- * @param[in] window_size Minimizer window length in k-mers.
- * @param[in] letters_per_unit Packed sequence letters per storage unit.
- * @return Additional ownership guard in base pairs.
+ * @brief Returns zero extra boundary bases for the current sketch tiling scheme.
+ *
+ * Replay overlap supplies the context needed at tile boundaries.
  */
 [[nodiscard]] constexpr std::uint32_t sketch_ownership_guard_bp(
     std::uint32_t kmer_size, std::uint32_t window_size, std::uint32_t letters_per_unit) noexcept {
@@ -197,11 +193,10 @@ target_minimizer_count_upper_bound(std::uint64_t bp_count, std::uint32_t kmer_si
 }
 
 /**
- * @brief Adapts sketch tile size to the physical dispatch limit.
- * @param[in] base_pair_count Sequence length in base pairs.
- * @param[in] maximum_workgroup_count Device X-dimension workgroup limit.
- * @param[in] default_tile_base_pairs Preferred tile length in base pairs.
- * @return Dispatchable tile length in base pairs.
+ * @brief Chooses a tile size using the preferred length and workgroup limit.
+ *
+ * Tiles grow when needed to reduce their count, up to the shader span limit.
+ * The shader may still need to loop over several tiles per workgroup.
  */
 [[nodiscard]] constexpr std::uint32_t
 compute_adaptive_sketch_tile_bp(std::uint32_t base_pair_count,
@@ -222,13 +217,12 @@ compute_adaptive_sketch_tile_bp(std::uint32_t base_pair_count,
 }
 
 /**
- * @brief Computes a storage-unit-aligned sketch tile size when admissible.
- * @param[in] base_pair_count Sequence length in base pairs.
- * @param[in] maximum_workgroup_count Device X-dimension workgroup limit.
- * @param[in] default_tile_base_pairs Preferred tile length in base pairs.
- * @param[in] letters_per_unit Packed sequence letters per storage unit.
- * @param[in] context_base_pairs Required replay context in base pairs.
- * @return Dispatchable tile length, aligned when alignment preserves coverage.
+ * @brief Chooses a tile size that leaves room for replay context.
+ *
+ * It rounds down to a packed-unit boundary when that still fits the preferred
+ * workgroup count. Otherwise it keeps the unaligned tile length.
+ * @param[in] letters_per_unit Symbols stored in one packed unit.
+ * @param[in] context_base_pairs Replay context in bases.
  */
 [[nodiscard]] constexpr std::uint32_t
 compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
@@ -258,13 +252,11 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
 }
 
 /**
- * @brief Builds ordered-sketch tile and scan geometry.
- * @param[in] bp_count Sequence length in base pairs.
- * @param[in] kmer_size K-mer length in base pairs.
- * @param[in] window_size Minimizer window length in k-mers.
- * @param[in] letters_per_unit Packed sequence letters per storage unit.
- * @param[in] maximum_workgroup_count Device X-dimension workgroup limit.
- * @return A non-dispatchable plan when dimensions or limits are invalid.
+ * @brief Plans tiles and prefix-scan blocks for an ordered minimizer sketch.
+ *
+ * Each tile must fit together with its replay context. Zero sizes, a sequence
+ * longer than 32-bit coordinates allow, or an unusable tile span produce a
+ * plan with `is_dispatchable` set to false.
  */
 [[nodiscard]] constexpr gpu_sketch_tile_plan make_sketch_tile_plan(
     std::uint64_t bp_count,
@@ -291,8 +283,7 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
                                                                          letters_per_unit,
                                                                          context_span);
     const std::uint32_t tile_count = bioseq::common::ceil_div(base_pair_count, tile_bp);
-    // Grid striding lets a physical dispatch process more logical tiles than
-    // the device's X-dimension group limit.
+    // Workgroups loop over tiles, so the tile count can exceed the device group limit.
     const bool is_dispatchable =
         tile_bp != 0u && tile_count != 0u &&
         bioseq::common::saturating_add(tile_bp, context_span) <= k_max_sketch_tile_span_bp;
@@ -305,18 +296,16 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
 }
 
 /**
- * @brief Builds the complete memory-admission plan for one GPU sketch.
- * @param[in] bp_count Sequence length in base pairs.
- * @param[in] sequence_bytes Packed input extent in bytes.
- * @param[in] rank_lut_bytes Alphabet rank-table extent in bytes.
- * @param[in] output_capacity Maximum emitted record count.
- * @param[in] minimizer_output_bytes Minimizer-word output extent in bytes.
- * @param[in] purpose Sketch consumer and output ownership mode.
- * @param[in] kmer_size K-mer length in base pairs.
- * @param[in] window_size Minimizer window length in k-mers.
- * @param[in] letters_per_unit Packed sequence letters per storage unit.
- * @param[in] maximum_workgroup_count Device X-dimension workgroup limit.
- * @return Saturating byte accounting and dispatch validity.
+ * @brief Estimates the memory that must be reserved for one GPU sketch.
+ *
+ * The plan includes packed input, tile counts and prefix scans, output buffers,
+ * and temporary CPU storage. Target-index construction also needs radix-sort
+ * scratch and bucket storage, with reused buffers counted according to when
+ * they are live.
+ *
+ * `output_capacity` bounds emitted records. `purpose` chooses the output
+ * format and which scratch buffers are needed. Arithmetic overflow or invalid
+ * tile dimensions leave `is_valid` false.
  */
 [[nodiscard]] constexpr gpu_sketch_memory_plan make_gpu_sketch_memory_plan(
     std::uint64_t bp_count,
@@ -385,8 +374,8 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
             bioseq::common::saturating_add(scanned_offset, flag_bytes);
         plan.target_index_initial_key_bytes =
             std::max(plan.pair_key_bytes, plan.target_index_flag_scan_bytes);
-        // The non-result key ping-pong allocation is reused as the aligned
-        // flags/scanned allocation after the radix fence.
+        // After radix sorting finishes, reuse the unused key buffer for flags
+        // and their prefix sums.
         plan.target_index_key_scratch_bytes =
             std::max(plan.pair_key_bytes, plan.target_index_flag_scan_bytes);
         plan.target_index_value_scratch_bytes = plan.pair_value_bytes;
@@ -411,9 +400,9 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
             sort_peak, allocation_bytes(plan.target_index_histogram_bytes));
         plan.target_index_sort_peak_bytes = sort_peak;
 
-        // After the radix fence the unused value allocation and histogram are
-        // released. The non-result key allocation becomes flags+scanned;
-        // buckets are allocated at exact distinct-key count D (bounded by C).
+        // After radix sorting finishes, free the unused value buffer and histogram.
+        // Reuse the unused key buffer for flags and prefix sums. Allocate buckets
+        // for the distinct keys, whose count cannot exceed output capacity.
         std::uint64_t bucket_peak = 0u;
         bucket_peak = bioseq::common::saturating_add(
             bucket_peak, allocation_bytes(plan.target_index_initial_key_bytes));
@@ -441,12 +430,10 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
     const std::uint64_t conservative_host_staging_bytes = bioseq::common::saturating_add(
         plan.host_sequence_staging_bytes, plan.host_tile_staging_bytes);
     if (purpose == gpu_sketch_purpose::target_index_build) {
-        // This aggregate is the conservative full-owner count shape used by
-        // static planning.  Runtime refines it with
-        // `make_gpu_target_index_host_scratch_plan`: contiguous inputs borrow
-        // the sequence (zero owned bytes), while fragmented inputs report the
-        // exact scratch-vector capacity. Both forms release owned staging
-        // before execution admission.
+        // This estimate includes full input and tile staging. The runtime refines
+        // it with `make_gpu_target_index_host_scratch_plan`: contiguous input is
+        // borrowed, and fragmented input reports its scratch-buffer capacity.
+        // Owned staging is released before execution memory is reserved.
         plan.count_submit_host_transient_bytes = conservative_host_staging_bytes;
         plan.execution_submit_host_transient_bytes = 0u;
         plan.host_transient_released_before_execution_bytes = conservative_host_staging_bytes;
@@ -467,10 +454,13 @@ compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
 }
 
 /**
- * @brief Refines target-index host scratch for the actual input ownership.
- * @param[in] memory_plan Static sketch memory plan for the invocation.
- * @param[in] owned_sequence_bytes Fragmented input scratch capacity in bytes.
- * @return Host scratch lifetimes bound to the supplied sketch memory plan.
+ * @brief Refines temporary CPU memory using the owned input buffer size.
+ * @param[in] memory_plan Sketch memory estimate for this call.
+ * @param[in] owned_sequence_bytes Scratch-buffer capacity for fragmented input.
+ *
+ * Tile records are written directly into mapped GPU storage. Only owned
+ * sequence scratch needs a CPU reservation during the count phase, and it
+ * is released before execution.
  */
 [[nodiscard]] constexpr gpu_target_index_host_scratch_plan
 make_gpu_target_index_host_scratch_plan(const gpu_sketch_memory_plan& memory_plan,
@@ -479,10 +469,8 @@ make_gpu_target_index_host_scratch_plan(const gpu_sketch_memory_plan& memory_pla
         .owned_sequence_bytes = owned_sequence_bytes,
         .elided_tile_staging_bytes = memory_plan.host_tile_staging_bytes,
     };
-    // Tile records are written directly into the mapped arena; no O(tile_count)
-    // host allocation exists. The count submit owns only an optional
-    // fragmented-sequence scratch vector whose exact capacity is supplied by
-    // the caller.
+    // Tile records are written into the mapped arena. Only fragmented input
+    // needs a temporary CPU sequence buffer, whose capacity the caller supplies.
     plan.count_submit_bytes = plan.owned_sequence_bytes;
     plan.execution_submit_bytes = 0u;
     plan.released_before_execution_bytes =
@@ -501,9 +489,9 @@ struct window_minimum_wire {
 };
 
 /**
- * @brief Describes output ownership and carry storage for one sketch workgroup.
+ * @brief Window range and saved-state offsets for one sketch workgroup.
  *
- * A shader may read overlap bases but emits only within the owned window range.
+ * Overlap provides input context. Output belongs to the recorded window range.
  */
 struct sketch_tile_wire {
     std::uint64_t record_id;
@@ -537,7 +525,7 @@ struct gpu_minimizer_pair_wire {
     std::uint64_t hash;
     std::uint64_t pos_strand_encoded;
 };
-/** @brief Carries sketch, seed, sort, index, and chain runtime parameters. */
+/** @brief Settings for GPU minimizers, index construction, and chaining. */
 struct vulkan_sketch_seed_params {
     vulkan_sketch_params sketch;
     std::uint32_t max_occ;

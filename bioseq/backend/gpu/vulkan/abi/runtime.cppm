@@ -1,6 +1,6 @@
 /**
  * @file vulkan/abi/runtime.cppm
- * @brief Defines Vulkan runtime allocation and dispatch ABI contracts.
+ * @brief Shared Vulkan buffer alignment, dispatch limits, and pipeline counts.
  */
 module;
 
@@ -14,20 +14,21 @@ export namespace bioseq::gpu::vulkan {
 /** @brief Required byte alignment of suballocated device-buffer offsets. */
 inline constexpr std::uint32_t k_gpu_buffer_offset_alignment = 256u;
 /**
- * @brief Conservative device-memory allocation quantum used by peak planning.
+ * @brief Allocation rounding reserved when estimating peak GPU memory.
  *
- * Runtime allocation still verifies the allocator-reported byte total before
- * dispatch. This bound accounts for per-buffer padding instead of assuming
- * that a requested range equals its allocation size.
+ * A buffer may use extra memory for alignment. This allowance represents
+ * that padding when planning allocations.
  */
 inline constexpr std::uint32_t k_gpu_peak_allocation_alignment = 64u * 1024u;
 /**
- * @brief Computes physical X workgroups for a grid-striding compute dispatch.
- * @param[in] logical_items Number of logical work items to cover.
- * @param[in] local_size Shader invocations in one workgroup along X.
- * @param[in] max_workgroups Device limit for the X workgroup dimension.
- * @return A dispatch count capped by `max_workgroups`. Shaders advance with
- *         `id += gl_NumWorkGroups.x` so every logical item remains covered.
+ * @brief Calculates an X workgroup count within the device limit.
+ * @param[in] logical_items Number of items to process.
+ * @param[in] local_size Number of invocations per workgroup.
+ * @param[in] max_workgroups Device limit along X.
+ * @return Zero if any input is zero, otherwise the capped workgroup count.
+ *
+ * When the count is capped, the shader must loop over the remaining items
+ * using the total dispatched group or invocation count as its stride.
  */
 [[nodiscard]] constexpr std::uint32_t grid_stride_dispatch_group_count(
     std::uint64_t logical_items, std::uint32_t local_size, std::uint32_t max_workgroups) noexcept {
@@ -38,7 +39,7 @@ inline constexpr std::uint32_t k_gpu_peak_allocation_alignment = 64u * 1024u;
         bioseq::common::ceil_div(logical_items, local_size), max_workgroups));
 }
 /**
- * @brief Aggregates sketch, seed, anchor, and chain counts in the device ABI.
+ * @brief Counts records and overflows at stages of the GPU pipeline.
  */
 struct gpu_pipeline_counters {
     std::uint64_t query_minimizers;  ///< Query minimizer count.
@@ -48,7 +49,7 @@ struct gpu_pipeline_counters {
     std::uint64_t chain_ranges;      ///< Chain-range count.
     std::uint64_t sketch_overflows;  ///< Sketch-stage overflow count.
     std::uint64_t seed_overflows;    ///< Seed-stage overflow count.
-    std::uint64_t reserved;          ///< Reserved wire field for future ABI extensions.
+    std::uint64_t reserved;          ///< Reserved for future fields.
 };
 
 } // namespace bioseq::gpu::vulkan
